@@ -20,89 +20,90 @@ the spatial refactor at all (`sphPhaseCarrierTransferGpu.js` does not exist
 there). Discarding this branch would discard the chosen architecture, not a
 failed experiment.
 
-## Decision: preserve. The merge blockers are weaker than believed.
+## Current decision (2026-07-27): preserve, but do not merge
 
-Preserve — that was never in doubt once the branch turned out to be Slices 0-9
-rather than one slice. What changed on 2026-07-26 is the case for *withholding*
-the merge. Both stated blockers were re-measured and neither survived intact.
+The branch remains the correct architectural line, but it is **not
+merge-ready**. Current-HEAD evidence supersedes the former “presentation
+cleared” and “roughly 5%” verdicts below.
 
-### Blocker 1: production presentation — CLEARED
+Exact audited HEAD: `2d31a50`.
 
-`sol-critic.md` records "Production native surface | failed/blocking" on all
-seven scenarios, with **109 submissions referencing a destroyed indirect
-buffer**. Re-run on this branch (`merge-gate-02`, artifacts under
-`/home/cos/ulg-probe-artifacts/`):
+| gate | current status | evidence |
+| --- | --- | --- |
+| full unit suite | pass | 2,053 runnable tests passed, 30 intentional opt-in skips |
+| production build | pass | `npm run build` |
+| native Vulkan render / profiler / 2D dispatch / ActiveSource | pass | all focused native tests passed |
+| final committed render handoff | pass so far | no blank frames, flicker, destroyed-buffer submissions, or console faults in the seven-scenario run |
+| visual physics | **fail** | water steam does not rise or condense; iron/ice produces no credible meltwater or steam; H2 is born at the gas-J floor and does not rise; fluorine is effectively invisible and CsF stays near ambient |
+| 1,024-particle same-route SS-on throughput | **fail** | three AB/BA/AB pairs: candidate/baseline median `0.8952`, a 10.48% regression |
+| 9,826-particle same-route SS-on throughput | provisional pass only | one AB pair: 16.10 vs 16.62 steps/s, a 3.16% regression; this is not the required three-pair proof |
+| authoritative two-level scaling | **unproven** | the historical throughput harness forces a single-level route |
+| dormant-slot sparsity | **fail / implementation incomplete** | ActiveSourceView is correct, but directory, mechanics-field, and P2G candidate work still use physical capacity |
 
-| scenario | status | issues | destroyed-buffer submits |
-| --- | --- | --- | --- |
-| standard-water-cycle | good | [] | 0 |
-| standard-iron-ice-quench | good | [] | 0 |
-| standard-sodium-water | good | [] | 0 |
-| standard-cesium-fluorine | good | [] | 0 |
-| random-elements-ba-pb | good | [] | 0 |
-| random-elements-bk-lr | good | [] | 0 |
-| random-elements-fr-fe | good | [] | 0 |
+Artifacts:
 
-**7/7 good, zero issues, zero destroyed-buffer submissions.** Priority 0B is
-satisfied on this branch.
+- visual matrix:
+  `/home/cos/ulg-probe-artifacts/ss-final-audit-20260727-1218/ss-final-audit-20260727-1218/summary.json`
+- 1,024-particle three-pair A/B:
+  `/home/cos/ulg-probe-artifacts/ss-perf-2d31a50-7454ac9/throughput-1000.json`
+- 9,826-particle one-pair A/B:
+  `/home/cos/ulg-probe-artifacts/ss-perf-2d31a50-7454ac9/throughput-10000-one-pair.json`
 
-### Blocker 2: the ~4x regression — DOES NOT EXIST
+The timing shape agrees with the code audit. At 1,024 live particles both arms
+carry 4,608 physical slots; current HEAD performs 54 dispatches per substep
+against 53 on `7454ac9`. Median measured resident-kernel wall time is 199.6 ms
+against 189.0 ms (+5.6%), while complete-engine throughput regresses 10.5%.
+At 9,826 live particles both arms carry 44,216 physical slots; current HEAD
+again adds one dispatch (55 vs 54), and the single pair measures 737.4 ms
+resident-kernel wall time against 693.1 ms (+6.4%) even though complete-engine
+throughput is only 3.16% lower. This is the expected signature of adding the
+ActiveSource projection without yet consuming it downstream.
 
-Measured against `7454ac9` on the same device, nothing else holding the GPU,
-using the same benchmark script for both arms:
+### What Stage A actually accomplished
 
-| particles | baseline kernelsWallMs | branch kernelsWallMs | delta | gates |
-| --- | --- | --- | --- | --- |
-| 1,024 | 57.5 | 54.9 | **-4.5%** | both pass |
-| 9,826 | 75.7 | 78.0 | +3.0% | both pass |
-| 48,778 | 153.1 | 159.7 | **+4.3%** | both pass |
+`2d31a50` added a GPU-resident ActiveSourceView with stable
+active-ordinal-to-physical and physical-to-active maps, GPU-authored indirect
+rows, exact generation seals, and fail-closed lifecycle handling. The
+20,000-physical / 4,500-active native fixture proves that projection.
 
-`physicsStepsPerSecond` at 48,778: 15.65 baseline vs 14.68 branch (-6.2%).
+It does **not** prove or deliver production sparse scaling yet:
 
-The SS refactor costs roughly **5%**, not 4x. The original figures
-(kernelsWallMs 4348.8 vs 17424.2) are not reproducible at any particle count,
-and one arm of that campaign was already invalidated by the `/tmp` worktree
-defect recorded in the Slice 9 handoff.
+1. directory v1 still emits, sorts, and assembles `physicalSourceCount`;
+2. mechanics-node construction still marks `physicalSourceCount`;
+3. mechanics-field construction still emits and sorts
+   `physicalSourceCount * 27` candidates;
+4. P2G still clears and deposits physical candidate rows.
 
-Getting to this measurement required fixing three things that had nothing to do
-with the SS refactor and everything to do with why nobody could measure it:
+Stage A therefore adds one O(P) classify/scan/scatter today without removing
+the old P-sized downstream work. The next coherent gate is a level-assignment
+directory v2 plus active-count mechanics and P2G consumers, while preserving
+physical particle identity in public descriptors and CSR members.
 
-1. **The benchmark box did not follow its own geometry** (`df640d9`).
-   `boxx/boxy/boxz` were pinned at 5 m while `dropn`/`basen` scaled with the
-   target count, so above 12 particles per edge the drop block overflowed the
-   ceiling and the scenario was rejected. The sweep could never exceed ~3,456
-   particles.
-2. **A rejected scenario looked like a hang** (`f465c44`). `runTask` catches a
-   throw and reports an error artifact; `applyWorkerRebuildResult` saw no
-   `positionsM`, returned false, and recorded nothing. The demo then sat on
-   `initial-material-closure-pending` forever. It now records the reason.
-3. **Two unbounded array spreads** (`2aeb3a7`). `particles.push(...reservedLanes)`
-   pushes three entries per particle onto the call stack -- about 146k arguments
-   at 50k particles -- and threw "Maximum call stack size exceeded". Both are
-   loops now.
+### Claims that must not be reused
 
-Each fix exposed the next. The apparent "application scaling cliff at ~3.5k
-particles" recorded earlier in this file was the first of them.
+- “7/7 good” was a presentation-only reading of per-probe status. The
+  phase-aware matrix fails three scenarios, and personal PNG review also
+  rejects cesium/fluorine’s vacuous chemistry-only pass.
+- The former 4-5% table compared evidence that is not sufficient to prove the
+  current HEAD or the authoritative two-level route.
+- `gpu-timestamp-target` compares different SS configurations and is not a
+  historical same-route regression gate.
+- An SS-off arm, a single-level arm, or zero fallback counters without traversal
+  receipts cannot prove hierarchy performance.
 
-### Mechanisms that remain unaddressed
+### Remaining merge blockers
 
-None of these is fixed. The 50k measurement shows they cost about 5% today, not
-4x -- but they are real, and they set the memory ceiling rather than the current
-frame time.
-
-1. **No hierarchy in cost yet.** sol-critic P0: the active-node list "permits
-   one active row per particle". One node per particle is N with tree overhead
-   on top, not N log N. Unique-node compaction is Priority 3.
-2. **Worst-case candidate reservation.** 64 candidate rows x 64 bytes per queue
-   row = 4 KiB per active particle, ~4 GiB at 1M particles before useful state
-   (`schroederHierarchyGpu.js:4498`).
-3. **Cross-level work built and not consumed.** P1: cross-level candidates "can
-   remain observational/unconsumed", and the artifact chain is "rebuilt and
-   separately submitted each substep".
-4. **The unification has not happened.** One persistent multi-resolution
-   neighbor artifact shared by mechanics, thermal, reaction and contact
-   consumers. Until then consumers can still reach the exhaustive `N*N`
-   fallback.
+1. Build directory and mechanics work from the GPU-authored active count, with
+   physical IDs retained at the ABI boundary and no count readback.
+2. Publish a full post-closure successor assignment after any reaction or phase
+   activation; a position-only frozen refresh is legal only for topology-stable
+   mechanics microsteps.
+3. Repair product P2G pressure, gas free-volume EOS, conservative gas birth,
+   and gas transport/visibility.
+4. Replace demo-global thermal coefficients and infinite wall heat sinks with
+   material-derived reciprocal contact conductance and explicit wall physics.
+5. Re-run clean SS-on authoritative two-level latency and scaling campaigns,
+   the full native suite, and personal seven-scenario visual review.
 
 ### 5. Measured 2026-07-26: 77.8% of dispatched GPU threads do nothing
 

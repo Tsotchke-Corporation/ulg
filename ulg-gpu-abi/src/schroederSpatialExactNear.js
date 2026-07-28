@@ -1,4 +1,7 @@
-import { ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA } from './schroederSpatialEpoch.js';
+import {
+  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from './schroederSpatialEpoch.js';
 
 export const ULG_SCHROEDER_SPATIAL_SUPPORT_PROFILE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-support-profile.v1';
@@ -43,6 +46,10 @@ function supportProfile({
     artifactFamily,
     phase,
     directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+    directorySchemas: Object.freeze([
+      ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+      ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    ]),
     traversal: 'exact-signed-cell-key-sparse-prefix-csr-v1',
     sourcePositionAuthority: 'same-epoch-pre-integration-particle-state',
     radiusAuthority: 'consumer-uniform-f32',
@@ -157,6 +164,46 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_PAYLOAD_WORDS =
 export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_WORDS = 28;
 export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES =
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_WORDS
+    * Uint32Array.BYTES_PER_ELEMENT;
+
+// V2 intentionally retains the 112-byte expectation payload. The renamed
+// fields make the split between physical identity and active CSR span explicit;
+// activeSourceCount itself remains GPU-authored at directory header word 37.
+export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_LAYOUT = Object.freeze([
+  'physicalSourceCount:u32',
+  'derivationEnabled:u32',
+  'supportProfileId:u32',
+  'chartId:u32',
+  'levelCount:u32',
+  'expectedGenerationId:u32',
+  'expectedDeviceOrdinal:u32',
+  'expectedLaneOrdinal:u32',
+  'expectedLeaseToken:u32',
+  'expectedSourceFamilyId:u32',
+  'expectedStorageGeneration:u32',
+  'expectedPhysicsTick:u32',
+  'expectedPhysicsSubstep:u32',
+  'expectedPositionEpoch:u32',
+  'expectedTopologyEpoch:u32',
+  'expectedChartEpoch:u32',
+  'expectedLevelEpoch:u32',
+  'expectedSupportEpoch:u32',
+  'minLevel:i32',
+  'baseGridSpacingM:f32',
+  'expectedCellKeysOffsetWords:u32',
+  'expectedCellOffsetsOffsetWords:u32',
+  'expectedCellMembersOffsetWords:u32',
+  'expectedPhysicalToCellPlusOneOffsetWords:u32',
+  'expectedDirectoryCapacityWords:u32',
+  'expectedPhysicalSourceCapacity:u32',
+  'expectedCellCapacity:u32'
+]);
+export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_PAYLOAD_WORDS =
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_LAYOUT.length;
+export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_WORDS =
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_WORDS;
+export const SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES =
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_WORDS
     * Uint32Array.BYTES_PER_ELEMENT;
 
 function exactU32(value, label, { positive = false } = {}) {
@@ -285,6 +332,66 @@ export function createSchroederSpatialExactNearExpectationV1Data({
     }
   }
   return data;
+}
+
+export function createSchroederSpatialExactNearExpectationV2Data({
+  physicalSourceCount,
+  derivationEnabled = true,
+  supportProfileId,
+  chartId,
+  levelCount,
+  generationId,
+  deviceOrdinal,
+  laneOrdinal,
+  leaseToken,
+  sourceFamilyId,
+  storageGeneration,
+  physicsTick,
+  physicsSubstep,
+  positionEpoch,
+  topologyEpoch,
+  chartEpoch,
+  levelEpoch,
+  supportEpoch,
+  minLevel,
+  baseGridSpacingM,
+  cellKeysOffsetWords,
+  cellOffsetsOffsetWords,
+  cellMembersOffsetWords,
+  physicalToCellPlusOneOffsetWords,
+  directoryCapacityWords,
+  physicalSourceCapacity,
+  cellCapacity
+} = {}) {
+  return createSchroederSpatialExactNearExpectationV1Data({
+    sourceCount: physicalSourceCount,
+    derivationEnabled,
+    supportProfileId,
+    chartId,
+    levelCount,
+    generationId,
+    deviceOrdinal,
+    laneOrdinal,
+    leaseToken,
+    sourceFamilyId,
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
+    minLevel,
+    baseGridSpacingM,
+    cellKeysOffsetWords,
+    cellOffsetsOffsetWords,
+    cellMembersOffsetWords,
+    particleToCellOffsetWords: physicalToCellPlusOneOffsetWords,
+    directoryCapacityWords,
+    sourceCapacity: physicalSourceCapacity,
+    cellCapacity
+  });
 }
 
 export function resolveSchroederSpatialSupportProfileContract(supportProfileId) {

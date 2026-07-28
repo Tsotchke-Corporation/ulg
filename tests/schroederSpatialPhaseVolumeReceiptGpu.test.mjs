@@ -17,8 +17,17 @@ import {
   createSchroederSpatialPhaseVolumeReceiptWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceiptWgsl.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   createSchroederSpatialMechanicsFieldViewPlan
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
+import {
+  createSchroederSpatialActiveSourceViewLayout
+} from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   createSchroederSpatialPhaseVolumeMomentGpu
 } from '../src/runtime/sph/schroederSpatialPhaseVolumeMomentGpu.js';
@@ -132,7 +141,8 @@ function taggedBuffer(device, label, size) {
 function createAuthority(device, {
   sourceCount = 2,
   sourceCapacity = 4,
-  selectedLevel = 0
+  selectedLevel = 0,
+  directoryV2 = false
 } = {}) {
   const sourceBuffer = taggedBuffer(
     device,
@@ -147,6 +157,9 @@ function createAuthority(device, {
   const plan = createSchroederSpatialMechanicsFieldViewPlan({
     sourceCount,
     sourceCapacity,
+    sourceAuthorityVersion: directoryV2
+      ? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      : undefined,
     sourceRowLayoutId: 1,
     identityStrideWords: 1,
     selectedLevel,
@@ -177,7 +190,7 @@ function createAuthority(device, {
   const stableCandidateOrderBuffer = taggedBuffer(
     device,
     'phase-volume-receipt-stable-candidate-order',
-    plan.candidateCount * Uint32Array.BYTES_PER_ELEMENT
+    plan.candidateCapacity * Uint32Array.BYTES_PER_ELEMENT
   );
   const field = {
     ...plan,
@@ -189,8 +202,109 @@ function createAuthority(device, {
     indirectDispatchBuffer: fieldViewBuffer,
     indirectDispatchOffsetBytes: 240,
     stableCandidateOrderBuffer,
-    stableCandidateOrderCount: plan.candidateCount
+    stableCandidateOrderCount: plan.candidateCount,
+    directorySchema: null,
+    directoryAbiVersion: null,
+    spatialExecution: null,
+    directoryBuffer: null,
+    activeSourceView: null,
+    activeSourceViewBuffer: null,
+    activeSourceCountAuthority: null,
+    stableCandidateOrderCountAuthority: null
   };
+  if (directoryV2) {
+    const activeLayout = createSchroederSpatialActiveSourceViewLayout({
+      physicalSourceCapacity: sourceCapacity,
+      activeSourceCapacity: sourceCapacity
+    });
+    const activeSourceViewBuffer = taggedBuffer(
+      device,
+      'phase-volume-receipt-active-source-view',
+      activeLayout.byteLength
+    );
+    const directoryBuffer = taggedBuffer(
+      device,
+      'phase-volume-receipt-directory-v2',
+      4096
+    );
+    const activeSourceView = {
+      schema: 'peercompute.ulg.schroeder-spatial-active-source-view.v1',
+      status: 'schroeder-spatial-active-source-view-gpu-encoded',
+      ready: true,
+      selected: true,
+      released: false,
+      ...Object.fromEntries([
+        'generationId',
+        'deviceOrdinal',
+        'laneOrdinal',
+        'leaseToken',
+        'sourceFamilyId',
+        'storageGeneration',
+        'physicsTick',
+        'physicsSubstep',
+        'positionEpoch',
+        'topologyEpoch',
+        'chartEpoch',
+        'levelEpoch',
+        'supportEpoch'
+      ].map((key) => [key, plan[key]])),
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCapacity,
+      activeSourceCapacity: sourceCapacity,
+      sourceRowLayoutId: 1,
+      sourceRowStrideFloats: 16,
+      buildOrdinal: plan.completionOrdinal,
+      sourceBuffer,
+      activeSourceViewBuffer,
+      activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+      candidateDispatchOffsetBytes: activeLayout.candidateDispatchOffsetBytes,
+      physicalDispatchOffsetBytes: activeLayout.physicalDispatchOffsetBytes,
+      layout: activeLayout
+    };
+    Object.defineProperty(activeSourceView, 'ownerRuntime', {
+      value: {
+        ownsExecution: (candidate) => candidate === activeSourceView
+      },
+      enumerable: false
+    });
+    const activeSourceCountAuthority = Object.freeze({
+      schema: activeSourceView.schema,
+      activeSourceView,
+      buffer: activeSourceViewBuffer,
+      offsetWords: 18,
+      offsetBytes: 18 * Uint32Array.BYTES_PER_ELEMENT,
+      capacity: sourceCapacity,
+      residency: 'gpu-only'
+    });
+    const candidateCountAuthority = Object.freeze({
+      buffer: activeSourceViewBuffer,
+      offsetWords: 43,
+      sealOffsetWords: 30,
+      expectedSeal: plan.completionOrdinal
+    });
+    const spatialExecution = {
+      schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+      abiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+      reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCapacity,
+      sourceBuffer,
+      directoryBuffer,
+      activeSourceView,
+      activeSourceViewBuffer,
+      activeSourceCountAuthority
+    };
+    Object.assign(field, {
+      directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+      directoryAbiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+      spatialExecution,
+      directoryBuffer,
+      activeSourceView,
+      activeSourceViewBuffer,
+      activeSourceCountAuthority,
+      stableCandidateOrderCountAuthority: candidateCountAuthority
+    });
+  }
   Object.defineProperty(field, 'ownerRuntime', {
     value: { ownsExecution: (candidate) => candidate === field },
     enumerable: false
@@ -367,8 +481,9 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.equal(execution.diagnosticOnly, true);
   assert.equal(execution.stateMutationAllowed, false);
   assert.equal(execution.gpuBufferCreationCountDuringEncode, 0);
-  assert.equal(encoder.clears.length, 1);
+  assert.equal(encoder.clears.length, 2);
   assert.equal(encoder.clears[0], execution.controlBuffer);
+  assert.equal(encoder.clears[1], execution.partialBuffer);
   assert.equal(encoder.passes.length, 3);
   assert.deepEqual(encoder.passes[0].dispatch, [1, 1, 1]);
   assert.deepEqual(encoder.passes[1].indirect, {
@@ -396,6 +511,103 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.equal(phase.moment.released, false);
   assert.equal(authority.sourceMechanicsBuffer.destroyCount, 0);
   assert.equal(phase.moment.controlBuffer.destroyCount, 0);
+});
+
+test('S9-B v2 scans ActiveSource indirectly, retains physical rows, and never invents A', () => {
+  const fixture = createFakeDevice();
+  const authority = createAuthority(fixture.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const phase = buildS9aMoment(fixture.device, authority);
+  const runtime = createSchroederSpatialPhaseVolumeReceiptGpu(fixture.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1
+  });
+  const encoder = createFakeEncoder();
+  const receipt = runtime.encode(encoder, {
+    phaseVolumeMoment: phase.moment
+  });
+
+  assert.equal(receipt.sourceAuthorityVersion, 2);
+  assert.equal(receipt.sourceWorkIdentity, 'gpu-active-ordinal');
+  assert.equal(receipt.sourceCount, 64);
+  assert.equal(receipt.physicalSourceCount, 64);
+  assert.equal(receipt.globalScanSourceCount, null);
+  assert.equal(receipt.sourceGroupCount, null);
+  assert.equal(receipt.candidateCount, null);
+  assert.equal(receipt.globalScanCandidateCount, null);
+  assert.equal(
+    receipt.activeSourceCountAuthority,
+    phase.moment.activeSourceCountAuthority
+  );
+  assert.equal(receipt.candidateCountAuthority, phase.moment.candidateCountAuthority);
+  assert.deepEqual(encoder.passes[0].indirect, {
+    buffer: authority.field.activeSourceViewBuffer,
+    offset: 48 * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.deepEqual(encoder.passes[1].indirect, {
+    buffer: authority.field.fieldViewBuffer,
+    offset: 60 * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.deepEqual(encoder.passes[2].dispatch, [1, 1, 1]);
+  assert.ok(
+    fixture.bindGroups.slice(-3).every(({ descriptor }) => (
+      descriptor.entries.some(({ binding }) => binding === 8)
+    ))
+  );
+  assert.equal(receipt.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(receipt.readbackPerformed, false);
+  assert.equal(
+    validateSchroederSpatialPhaseVolumeReceiptDescriptor(receipt).admitted,
+    true
+  );
+
+  const v2Plan = createSchroederSpatialPhaseVolumeReceiptPlan({
+    sourceCount: 64,
+    sourceCapacity: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    selectedLevel: authority.plan.selectedLevel,
+    gridNodeCount: authority.plan.gridNodeCount,
+    gridSpacingM: authority.plan.gridSpacingM,
+    generationId: authority.plan.generationId,
+    deviceOrdinal: authority.plan.deviceOrdinal,
+    laneOrdinal: authority.plan.laneOrdinal,
+    leaseToken: authority.plan.leaseToken,
+    sourceFamilyId: authority.plan.sourceFamilyId,
+    storageGeneration: authority.plan.storageGeneration,
+    physicsTick: authority.plan.physicsTick,
+    physicsSubstep: authority.plan.physicsSubstep,
+    positionEpoch: authority.plan.positionEpoch,
+    topologyEpoch: authority.plan.topologyEpoch,
+    chartEpoch: authority.plan.chartEpoch,
+    levelEpoch: authority.plan.levelEpoch,
+    supportEpoch: authority.plan.supportEpoch,
+    completionOrdinal: authority.plan.completionOrdinal,
+    sourceAuthorityVersion: 2
+  });
+  assert.equal(v2Plan.globalScanSourceCount, null);
+  assert.equal(v2Plan.globalScanCandidateCount, null);
+  const v2Wgsl = createSchroederSpatialPhaseVolumeReceiptWgsl(
+    v2Plan.layout,
+    { sourceAuthorityVersion: 2 }
+  );
+  assert.match(v2Wgsl, /fn physical_source_for_active/);
+  assert.match(v2Wgsl, /active_source_linear_invocation/);
+  assert.match(v2Wgsl, /i32\(round\(level\)\) != params\.selected_level/);
+  assert.match(v2Wgsl, /selected_source_count >= 0u/);
+  assert.match(v2Wgsl, /volume >= 0\.0/);
+  assert.match(
+    v2Wgsl,
+    /if \(count == 0u\) \{[\s\S]*dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u/
+  );
+
+  runtime.releaseExecution(receipt, { discardedEncoder: true });
+  phase.runtime.releaseExecution(phase.moment, { discardedEncoder: true });
+  assert.equal(runtime.destroy(), true);
+  assert.equal(phase.runtime.destroy(), true);
 });
 
 test('S9-B receipt treats a partial active timestamp recorder as unavailable', () => {

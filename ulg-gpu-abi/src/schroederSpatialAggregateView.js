@@ -227,10 +227,12 @@ export const SCHROEDER_SPATIAL_AGGREGATE_VIEW_ABI = Object.freeze({
     SCHROEDER_SPATIAL_AGGREGATE_VIEW_TOPOLOGY_MODE_MORTON_PREFIX_BINARY,
   headerLayout: SCHROEDER_SPATIAL_AGGREGATE_VIEW_HEADER_LAYOUT,
   recordLayout: SCHROEDER_SPATIAL_AGGREGATE_VIEW_RECORD_LAYOUT,
-  sourceAuthority: 'immutable-ss-spatial-epoch-v1-cell-csr',
+  sourceAuthority:
+    'immutable-ss-spatial-epoch-v1-or-v2-cell-csr-with-exact-active-source-lineage',
   construction:
     'canonical-cell-derived-morton-permutation-compressed-prefix-tree-with-authenticated-ropes',
-  complexity: 'O(sourceCount*keyWords+cellCount*prefixDepth)-no-candidate-rows',
+  complexity:
+    'v1:O(sourceCount*keyWords+cellCount*prefixDepth);v2:O(activeCellCount*keyWords+activeSourceCount+activeCellCount*prefixDepth)-no-candidate-rows',
   traversal:
     'stackless-parent-child-escape-rope-opening-with-exact-near-aabb-exclusion',
   partition: 'each-leaf-covered-exactly-once-by-near-or-one-accepted-far-ancestor',
@@ -521,7 +523,8 @@ export function validateSchroederSpatialAggregateViewDescriptor(view, expected =
     'sourceCount',
     'sourceCapacity',
     'cellCapacity',
-    'sourceRowLayoutId'
+    'sourceRowLayoutId',
+    'directoryAbiVersion'
   ]) {
     if (Object.hasOwn(expected, field) && !Object.is(view[field], expected[field])) {
       return {
@@ -585,6 +588,22 @@ export function validateSchroederSpatialAggregateViewDescriptor(view, expected =
     || (
       Number.isFinite(Number(view.aggregateViewBuffer?.size))
       && Number(view.aggregateViewBuffer.size) < view.aggregatePhysicalByteLength
+    )
+    || ![1, 2].includes(view.directoryAbiVersion)
+    || (
+      view.directoryAbiVersion === 2
+      && (
+        view.sourceWorkIdentity !== 'gpu-active-ordinal'
+        || view.aggregateMemberCountSource
+          !== 'gpu-directory-active-source-count-word-37'
+        || !view.activeSourceView
+        || view.activeSourceViewBuffer
+          !== view.activeSourceView.activeSourceViewBuffer
+        || view.activeSourceCountAuthority
+          !== view.spatialExecution?.activeSourceCountAuthority
+        || view.activeSourceCountAuthority
+          !== view.spatialExecution?.logicalSourceCountAuthority
+      )
     )
   ) {
     return {

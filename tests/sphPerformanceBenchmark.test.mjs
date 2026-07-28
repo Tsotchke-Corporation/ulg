@@ -13,6 +13,7 @@ import {
   summarizePairedGpuTimestampRuns,
   summarizePairedSpatialArenaDepthThroughputRuns,
   summarizePairedPhysicsThroughputRuns,
+  summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns,
   summarizeResidentGpuStageTimestampEvidence,
   summarizeResidentGpuTimestampEvidence
 } from '../scripts/sph-performance-benchmark.mjs';
@@ -424,7 +425,8 @@ function pairedTimestampCampaignRuns({
 
 function pairedThroughputCampaignRuns({
   candidateScale = 0.96,
-  orders = ['AB', 'BA', 'AB']
+  orders = ['AB', 'BA', 'AB'],
+  authoritativeTwoLevel = false
 } = {}) {
   const commonConfigSignature = 'c'.repeat(64);
   const armConfigSignature = 'd'.repeat(64);
@@ -457,8 +459,26 @@ function pairedThroughputCampaignRuns({
     schroederSimulationConfiguredRequested: true,
     schroederSimulationActive: true,
     schroederTransactionCoverageComplete: true,
-    schroederTwoLevelMechanicsConfiguredRequested: false,
-    schroederTwoLevelMechanicsRequestedObserved: false,
+    scenarioUrl: authoritativeTwoLevel
+      ? 'https://benchmark.invalid/?ss=1&schroederLevel=0&schroederMaxLevel=1&schroederCrossLevelCoupling=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2'
+      : 'https://benchmark.invalid/?ss=1&schroederLevel=0&schroederMaxLevel=0&schroederCrossLevelCoupling=0',
+    schroederTwoLevelMechanicsConfiguredRequested: authoritativeTwoLevel,
+    schroederTwoLevelMechanicsRequestedObserved: authoritativeTwoLevel,
+    schroederTwoLevelMechanicsCoverageComplete:
+      authoritativeTwoLevel ? true : null,
+    schroederTwoLevelMechanicsAuthorityRequested:
+      authoritativeTwoLevel ? 'authoritative' : 'observation',
+    schroederTwoLevelMechanicsAuthorityObserved:
+      authoritativeTwoLevel ? 'authoritative' : null,
+    schroederTwoLevelFineSubstepCountRequested:
+      authoritativeTwoLevel ? 2 : null,
+    schroederTwoLevelFineSubstepCountObserved:
+      authoritativeTwoLevel ? 2 : null,
+    schroederTwoLevelMechanicsStepStatus: authoritativeTwoLevel
+      ? 'schroeder-two-level-authoritative-step-executed'
+      : null,
+    schroederTwoLevelAuthoritativeCommitVerified:
+      authoritativeTwoLevel ? true : null,
     probeIssues: []
   });
   return [100, 110, 90].map((baselineFps, index) => ({
@@ -2105,6 +2125,69 @@ test('paired historical physics throughput campaign fails closed on contaminatio
   assert.ok(evidence.blockers.includes(
     'independent-median-physics-throughput-regression-exceeds-threshold'
   ));
+});
+
+test('paired authoritative two-level historical throughput campaign accepts only the exact complete-engine route', () => {
+  const evidence = summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns({
+    runs: pairedThroughputCampaignRuns({
+      candidateScale: 0.96,
+      authoritativeTwoLevel: true
+    }),
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'pass');
+  assert.equal(
+    evidence.schema,
+    'peercompute.ulg.sph-paired-authoritative-two-level-physics-throughput-campaign.v0'
+  );
+  assert.equal(evidence.method.routeKind, 'authoritative-two-level');
+  assert.equal(evidence.method.requiredFineSubstepCount, 2);
+  assert.ok(evidence.runs.every((run) => (
+    run.baseline.twoLevelRoute.complete
+    && run.candidate.twoLevelRoute.complete
+  )));
+  assert.ok(Math.abs(evidence.paired.medianRatio - 0.96) < 1e-12);
+});
+
+test('paired authoritative two-level historical throughput campaign rejects observation, wrong depth, and incomplete authority', () => {
+  const runs = pairedThroughputCampaignRuns({
+    authoritativeTwoLevel: true
+  });
+  runs[0].candidate.scenario.schroederTwoLevelMechanicsAuthorityObserved =
+    'observation';
+  runs[1].baseline.scenario.scenarioUrl =
+    runs[1].baseline.scenario.scenarioUrl.replace(
+      'schroederMaxLevel=1',
+      'schroederMaxLevel=0'
+    );
+  runs[2].candidate.scenario
+    .schroederTwoLevelAuthoritativeCommitVerified = false;
+
+  const evidence = summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns({
+    runs,
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'baseline-throughput-evidence-incomplete'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'candidate-throughput-evidence-incomplete'
+  ));
+  assert.equal(
+    evidence.runs[0].candidate.twoLevelRoute.authorityObserved,
+    'observation'
+  );
+  assert.equal(
+    evidence.runs[1].baseline.twoLevelRoute.scenarioUrl.complete,
+    false
+  );
+  assert.equal(
+    evidence.runs[2].candidate.twoLevelRoute.authoritativeCommitVerified,
+    false
+  );
 });
 
 test('paired spatial arena-depth characterization proves same-source 3-versus-8 evidence', () => {

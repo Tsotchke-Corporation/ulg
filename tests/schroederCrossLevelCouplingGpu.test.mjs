@@ -313,11 +313,13 @@ function productionM3Fixture({
     assignmentBufferByteLength: assignmentBuffer.size,
     sourceStateBuffer: stateBuffer,
     sourceStateBufferBorrowed: true,
-    ...(phaseVolumeInterfaceTransportEnabled ? {
-      sourceMechanicsBuffer: mechanicsBuffer,
-      sourceMechanicsBufferBorrowed: true,
-      sourceMechanicsBufferByteLength: mechanicsBuffer.size
-    } : {}),
+    sourceStateBufferByteLength: stateBuffer.size,
+    sourceThermoBuffer: thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: thermoBuffer.size,
+    sourceMechanicsBuffer: mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: mechanicsBuffer.size,
     ...epochIdentity,
     minLevel: 0,
     maxLevel: 1,

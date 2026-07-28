@@ -2,17 +2,30 @@ import {
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
 } from './schroederSpatialMechanicsView.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  validateSchroederSpatialActiveSourceViewDescriptor
+} from './schroederSpatialActiveSourceView.js';
 
 export const ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch.v1';
 export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA =
   'peercompute.ulg.schroeder-spatial-exact-near-view.v1';
+export const ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-epoch.v2';
+export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-exact-near-view.v2';
 
 export const SCHROEDER_SPATIAL_EPOCH_MAGIC = 0x53534531;
 export const SCHROEDER_SPATIAL_EPOCH_VERSION = 1;
+export const SCHROEDER_SPATIAL_EPOCH_V2_VERSION = 2;
 export const SCHROEDER_SPATIAL_EPOCH_KEY_WORDS = 5;
+export const SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS = 6;
+export const SCHROEDER_SPATIAL_EPOCH_V2_PHYSICAL_SOURCE_WORD = 5;
 export const SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS = 48;
 export const SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS = 6;
+export const SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE = 1;
+export const SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD = 18;
 
 export const SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32 = 1;
 export const SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5 = 2;
@@ -78,6 +91,62 @@ export const SCHROEDER_SPATIAL_EPOCH_HEADER_LAYOUT = Object.freeze([
   'physicalAddressUpperBoundWords:u32'
 ]);
 
+/**
+ * Directory v2 deliberately preserves the v1 48-word footprint. Stable
+ * physical particle identity remains the public address space while word 37
+ * becomes the GPU-authored active input count used by the CSR member span.
+ */
+export const SCHROEDER_SPATIAL_EPOCH_V2_HEADER_LAYOUT = Object.freeze([
+  'magic:u32',
+  'abiVersion:u32',
+  'statusFlags:u32',
+  'generationId:u32',
+  'deviceOrdinal:u32',
+  'laneOrdinal:u32',
+  'leaseToken:u32',
+  'sourceFamilyId:u32',
+  'storageGeneration:u32',
+  'physicsTick:u32',
+  'physicsSubstep:u32',
+  'positionEpoch:u32',
+  'topologyEpoch:u32',
+  'chartEpoch:u32',
+  'levelEpoch:u32',
+  'supportEpoch:u32',
+  'physicalSourceCount:u32',
+  'physicalSourceCapacity:u32',
+  'cellCount:u32',
+  'cellCapacity:u32',
+  'logicalRequiredWords:u32',
+  'logicalAdmittedWords:u32',
+  'directoryCapacityWords:u32',
+  'invalidSourceCount:u32',
+  'overflowCount:u32',
+  'exactKeyWordCount:u32',
+  'sortKeyWordCount:u32',
+  'sortMode:u32',
+  'headerWords:u32',
+  'cellKeysOffsetWords:u32',
+  'cellOffsetsOffsetWords:u32',
+  'cellMembersOffsetWords:u32',
+  'physicalToCellPlusOneOffsetWords:u32',
+  'buildOrdinal:u32',
+  'sortUniqueOrdinal:u32',
+  'completionOrdinal:u32',
+  'uniqueGenerationId:u32',
+  'activeSourceCount:u32',
+  'primitiveUniqueCount:u32',
+  'primitiveAdmitted:u32',
+  'primitiveOverflowFlags:u32',
+  'primitiveStatus:u32',
+  'consumerDispatchX:u32',
+  'consumerDispatchY:u32',
+  'consumerDispatchZ:u32',
+  'clearedWords:u32',
+  'sourceAdapterId:u32',
+  'physicalAddressUpperBoundWords:u32'
+]);
+
 export const SCHROEDER_SPATIAL_EPOCH_KEY_LAYOUT = Object.freeze([
   'chartId:u32',
   'levelOrderKey:u32',
@@ -130,6 +199,55 @@ export const SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI = Object.freeze({
     'pressure-contact-exact-near-mounted-generation-owner-scope-diagnostic-only'
 });
 
+export const SCHROEDER_SPATIAL_EPOCH_V2_DIRECTORY_ABI = Object.freeze({
+  schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  version: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  magic: SCHROEDER_SPATIAL_EPOCH_MAGIC,
+  headerWords: SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
+  headerLayout: SCHROEDER_SPATIAL_EPOCH_V2_HEADER_LAYOUT,
+  keyLayout: SCHROEDER_SPATIAL_EPOCH_KEY_LAYOUT,
+  sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+  sourceWorkIdentity: 'gpu-active-ordinal',
+  publicMemberIdentity: 'stable-physical-source-slot-u32',
+  memberCountAuthorityWord: 37,
+  reverseMap: Object.freeze({
+    offsetWord: 32,
+    sourceIdentity: 'stable-physical-source-slot-u32',
+    encoding: 'cell-index-plus-one',
+    missingValue: 0,
+    encodingId: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+  }),
+  sourceKeyScratch: Object.freeze({
+    words: SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS,
+    structuralKeyWords: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    physicalSourceWord: SCHROEDER_SPATIAL_EPOCH_V2_PHYSICAL_SOURCE_WORD,
+    sortContract:
+      'sort-only-words-0-through-4-word-5-is-unsorted-physical-identity-payload'
+  }),
+  activeSourceCountAuthority: Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+    headerWord: SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+    byteOffset:
+      SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      * Uint32Array.BYTES_PER_ELEMENT,
+    capacityField: 'activeSourceCapacity',
+    residency: 'gpu-only-no-host-numeric-count-required'
+  }),
+  queryGeometryEvidence: Object.freeze({
+    adapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+    wordCount: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    capacityOffset: 'physicalToCellPlusOneOffsetWords+physicalSourceCapacity',
+    layout: SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI.queryGeometryEvidence.layout
+  }),
+  compatibility: Object.freeze({
+    levelAssignmentOnly: true,
+    activeNodeAndGasDirectoryVersion: 1,
+    dualDirectoryForOneLevelAssignmentGeneration: false
+  }),
+  overflowPolicy: 'fail-closed-zero-consumer-dispatch',
+  readbackPolicy: 'none-gpu-authored-active-count'
+});
+
 export const SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_ABI = Object.freeze({
   schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
   directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
@@ -146,6 +264,20 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_ABI = Object.freeze({
   fallbackPolicy: 'legacy-lookup-only-before-canonical-generation-selection',
   mountedInteractiveStatus:
     'mounted-same-device-pre-integration-generation-owner-scope-diagnostic-only-no-mechanics-authority'
+});
+
+export const SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_ABI = Object.freeze({
+  schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA,
+  directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  generationAdmission: 'gpu-validates-complete-v2-header-before-first-lookup',
+  lookup: 'exact-cell-key-binary-search-active-prefix-physical-member-csr',
+  reverseLookup:
+    'physical-source-slot-to-cell-index-plus-one-zero-means-dormant-or-missing',
+  memberSpanBound: 'directory.activeSourceCount',
+  memberIdentityBound: 'directory.physicalSourceCount',
+  candidateBudget: null,
+  candidateOverflowPolicy: 'not-applicable-no-materialized-candidate-buffer',
+  fallbackPolicy: 'none-after-level-assignment-v2-generation-selection'
 });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -413,6 +545,95 @@ export function createSchroederSpatialEpochLayout({
   });
 }
 
+export function createSchroederSpatialEpochV2Layout({
+  physicalSourceCapacity,
+  activeSourceCapacity = physicalSourceCapacity,
+  cellCapacity = activeSourceCapacity
+} = {}) {
+  const resolvedPhysicalSourceCapacity = positiveInteger(
+    physicalSourceCapacity,
+    'physicalSourceCapacity'
+  );
+  const resolvedActiveSourceCapacity = positiveInteger(
+    activeSourceCapacity,
+    'activeSourceCapacity',
+    resolvedPhysicalSourceCapacity
+  );
+  const resolvedCellCapacity = positiveInteger(
+    cellCapacity,
+    'cellCapacity',
+    resolvedActiveSourceCapacity
+  );
+  const headerOffsetWords = 0;
+  const cellKeysOffsetWords = SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS;
+  const cellKeyWords = checkedMultiply(
+    resolvedCellCapacity,
+    SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    'v2 cell key words'
+  );
+  const cellOffsetsOffsetWords = checkedAdd(
+    cellKeysOffsetWords,
+    cellKeyWords,
+    'v2 cell offsets offset'
+  );
+  const cellOffsetWords = checkedAdd(
+    resolvedCellCapacity,
+    1,
+    'v2 cell offset words'
+  );
+  const cellMembersOffsetWords = checkedAdd(
+    cellOffsetsOffsetWords,
+    cellOffsetWords,
+    'v2 cell members offset'
+  );
+  // Keep the retained member and reverse arenas physical-capacity sized. The
+  // active prefix is GPU-authored and bounded by header word 37; retained
+  // capacity never changes the amount of key/radix/assembly work.
+  const physicalToCellPlusOneOffsetWords = checkedAdd(
+    cellMembersOffsetWords,
+    resolvedPhysicalSourceCapacity,
+    'v2 physical reverse offset'
+  );
+  const queryEvidenceCapacityOffsetWords = checkedAdd(
+    physicalToCellPlusOneOffsetWords,
+    resolvedPhysicalSourceCapacity,
+    'v2 query evidence capacity offset'
+  );
+  const wordLength = checkedAdd(
+    queryEvidenceCapacityOffsetWords,
+    SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    'v2 directory word length'
+  );
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    version: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    headerOffsetWords,
+    headerWords: SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
+    cellKeysOffsetWords,
+    cellKeyWords,
+    cellOffsetsOffsetWords,
+    cellOffsetWords,
+    cellMembersOffsetWords,
+    cellMemberWords: resolvedPhysicalSourceCapacity,
+    activeCellMemberWords: resolvedActiveSourceCapacity,
+    physicalToCellPlusOneOffsetWords,
+    physicalToCellPlusOneWords: resolvedPhysicalSourceCapacity,
+    // Transitional aliases make the required runtime edits mechanical while
+    // the public v2 ABI names the reverse encoding truthfully.
+    particleToCellOffsetWords: physicalToCellPlusOneOffsetWords,
+    particleToCellWords: resolvedPhysicalSourceCapacity,
+    queryEvidenceCapacityOffsetWords,
+    queryEvidenceWordCapacity: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    physicalSourceCapacity: resolvedPhysicalSourceCapacity,
+    sourceCapacity: resolvedPhysicalSourceCapacity,
+    activeSourceCapacity: resolvedActiveSourceCapacity,
+    cellCapacity: resolvedCellCapacity,
+    reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+    wordLength,
+    byteLength: wordLength * Uint32Array.BYTES_PER_ELEMENT
+  });
+}
+
 export function createSchroederSpatialEpochBuildPlan({
   sourceCount,
   sourceCapacity,
@@ -526,6 +747,136 @@ export function createSchroederSpatialEpochBuildPlan({
   });
 }
 
+export function createSchroederSpatialEpochV2BuildPlan({
+  physicalSourceCount,
+  physicalSourceCapacity,
+  activeSourceCapacity = physicalSourceCapacity,
+  cellCapacity = activeSourceCapacity,
+  sortMode = 'lexicographic-u32x5',
+  generationId = 1,
+  positionEpoch = 0,
+  topologyEpoch = 0,
+  chartEpoch = 0,
+  levelEpoch = 0,
+  supportEpoch = 0,
+  leaseToken = 0,
+  deviceOrdinal = 0,
+  laneOrdinal = 0,
+  sourceFamilyId = 0,
+  storageGeneration = 0,
+  physicsTick = 0,
+  physicsSubstep = 0,
+  buildOrdinal = 1,
+  sortUniqueOrdinal = 1,
+  exactNearQueryProfile
+} = {}) {
+  const layout = createSchroederSpatialEpochV2Layout({
+    physicalSourceCapacity,
+    activeSourceCapacity,
+    cellCapacity
+  });
+  const resolvedPhysicalSourceCount = positiveInteger(
+    physicalSourceCount,
+    'physicalSourceCount',
+    layout.physicalSourceCapacity
+  );
+  if (
+    sortMode !== 'lexicographic-u32x5'
+    && sortMode !== SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5
+  ) {
+    throw new RangeError(
+      'level-assignment directory v2 requires exact lexicographic-u32x5 sorting'
+    );
+  }
+  if (exactNearQueryProfile == null) {
+    throw new TypeError(
+      'level-assignment directory v2 requires an authenticated exact-near query profile'
+    );
+  }
+  const queryGeometryEvidence = normalizeExactNearQueryProfile(
+    exactNearQueryProfile,
+    resolvedPhysicalSourceCount
+  );
+  if (
+    queryGeometryEvidence.sourceAdapterId
+      !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+  ) {
+    throw new TypeError('level-assignment directory v2 requires exact-near query geometry');
+  }
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    status: 'schroeder-spatial-epoch-v2-build-plan-ready',
+    abiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    physicalSourceCount: resolvedPhysicalSourceCount,
+    // Runtime transition alias only; v2 headers and validators use the
+    // explicit physicalSourceCount name.
+    sourceCount: resolvedPhysicalSourceCount,
+    physicalSourceCapacity: layout.physicalSourceCapacity,
+    sourceCapacity: layout.physicalSourceCapacity,
+    activeSourceCapacity: layout.activeSourceCapacity,
+    cellCapacity: layout.cellCapacity,
+    activeSourceCountAuthority:
+      'schroeder-spatial-active-source-view-v1-header-word-18',
+    activeSourceCountAuthorityWord:
+      SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+    activeSourceCountAuthorityByteOffset:
+      SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      * Uint32Array.BYTES_PER_ELEMENT,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    sourceRowStrideFloats: 16,
+    sourceWorkIdentity: 'gpu-active-ordinal',
+    exactSourceKeyWords: SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS,
+    structuralKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    physicalSourceKeyWord:
+      SCHROEDER_SPATIAL_EPOCH_V2_PHYSICAL_SOURCE_WORD,
+    sortKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    sortKeyStrideWords: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    sortMode: SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
+    sortModeName: 'lexicographic-u32x5',
+    sourceAdapterId: queryGeometryEvidence.sourceAdapterId,
+    queryGeometryMode: queryGeometryEvidence.mode,
+    queryGeometryModeName: queryGeometryEvidence.modeName,
+    queryChartId: queryGeometryEvidence.chartId,
+    queryMinLevel: queryGeometryEvidence.minLevel,
+    queryMaxLevel: queryGeometryEvidence.maxLevel,
+    queryLevelCount: queryGeometryEvidence.levelCount,
+    queryBaseGridSpacingM: queryGeometryEvidence.baseGridSpacingM,
+    queryBaseGridSpacingBits: queryGeometryEvidence.baseGridSpacingBits,
+    queryEvidenceOffsetWords: layout.queryEvidenceCapacityOffsetWords,
+    queryEvidenceWordCount: SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
+    queryGeometryEvidence,
+    exactNearQueryProfile: queryGeometryEvidence,
+    generationId: nonNegativeInteger(generationId, 'generationId'),
+    positionEpoch: nonNegativeInteger(positionEpoch, 'positionEpoch'),
+    topologyEpoch: nonNegativeInteger(topologyEpoch, 'topologyEpoch'),
+    chartEpoch: nonNegativeInteger(chartEpoch, 'chartEpoch'),
+    levelEpoch: nonNegativeInteger(levelEpoch, 'levelEpoch'),
+    supportEpoch: nonNegativeInteger(supportEpoch, 'supportEpoch'),
+    leaseToken: nonNegativeInteger(leaseToken, 'leaseToken'),
+    deviceOrdinal: nonNegativeInteger(deviceOrdinal, 'deviceOrdinal'),
+    laneOrdinal: nonNegativeInteger(laneOrdinal, 'laneOrdinal'),
+    sourceFamilyId: nonNegativeInteger(sourceFamilyId, 'sourceFamilyId'),
+    storageGeneration: nonNegativeInteger(
+      storageGeneration,
+      'storageGeneration'
+    ),
+    physicsTick: nonNegativeInteger(physicsTick, 'physicsTick'),
+    physicsSubstep: nonNegativeInteger(physicsSubstep, 'physicsSubstep'),
+    buildOrdinal: positiveInteger(buildOrdinal, 'buildOrdinal'),
+    sortUniqueOrdinal: positiveInteger(
+      sortUniqueOrdinal,
+      'sortUniqueOrdinal'
+    ),
+    reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+    layout,
+    requiredDirectoryCapacityWords: layout.wordLength,
+    requiredDirectoryCapacityBytes: layout.byteLength,
+    submissionOwnership: 'caller',
+    readbackRequired: false
+  });
+}
+
 export function validateSchroederSpatialEpochConsumerDescriptor(epoch, expected = {}) {
   if (!epoch || epoch.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA) {
     return { admitted: false, status: 'schroeder-spatial-epoch-rejected-schema' };
@@ -598,5 +949,231 @@ export function validateSchroederSpatialEpochConsumerDescriptor(epoch, expected 
     admitted: true,
     compatible: true,
     status: 'schroeder-spatial-epoch-consumer-admitted'
+  };
+}
+
+export function validateSchroederSpatialEpochV2ConsumerDescriptor(
+  epoch,
+  expected = {}
+) {
+  if (!epoch || epoch.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-schema'
+    };
+  }
+  if (
+    epoch.magic !== SCHROEDER_SPATIAL_EPOCH_MAGIC
+    || epoch.abiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-abi'
+    };
+  }
+  if (
+    epoch.sourceRowLayoutId
+      !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-source-layout'
+    };
+  }
+  const physicalSourceCount = Number(
+    epoch.physicalSourceCount ?? epoch.sourceCount
+  );
+  const physicalSourceCapacity = Number(
+    epoch.physicalSourceCapacity ?? epoch.sourceCapacity
+  );
+  if (
+    !Number.isInteger(physicalSourceCount)
+    || physicalSourceCount < 1
+    || !Number.isInteger(physicalSourceCapacity)
+    || physicalSourceCapacity < physicalSourceCount
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-count-contract'
+    };
+  }
+  if (
+    epoch.reverseEncoding
+      !== SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-reverse-encoding'
+    };
+  }
+  const activeSourceView = epoch.activeSourceView
+    ?? epoch.activeSourceCountAuthority?.activeSourceView;
+  const activeSourceExpected = {
+    physicalSourceCount,
+    physicalSourceCapacity,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+  };
+  for (const field of [
+    'generationId',
+    'deviceOrdinal',
+    'laneOrdinal',
+    'leaseToken',
+    'sourceFamilyId',
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ]) {
+    if (epoch[field] !== undefined) {
+      activeSourceExpected[field] = epoch[field];
+    }
+  }
+  const activeSourceViewAdmission =
+    validateSchroederSpatialActiveSourceViewDescriptor(
+      activeSourceView,
+      activeSourceExpected
+    );
+  if (!activeSourceViewAdmission.admitted) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-active-source-authority',
+      authorityStatus: activeSourceViewAdmission.status,
+      authorityField: activeSourceViewAdmission.field ?? null
+    };
+  }
+  const activeSourceCountAuthority = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+    activeSourceView,
+    buffer: activeSourceView.activeSourceViewBuffer,
+    offsetWords: SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+    offsetBytes:
+      SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      * Uint32Array.BYTES_PER_ELEMENT,
+    capacity: activeSourceView.activeSourceCapacity,
+    residency: 'gpu-only'
+  });
+  if (
+    (
+      epoch.activeSourceViewBuffer !== undefined
+      && epoch.activeSourceViewBuffer !== activeSourceCountAuthority.buffer
+    )
+    || (
+      epoch.activeSourceCountAuthorityOffsetWords !== undefined
+      && epoch.activeSourceCountAuthorityOffsetWords
+        !== activeSourceCountAuthority.offsetWords
+    )
+    || (
+      epoch.activeSourceCapacity !== undefined
+      && epoch.activeSourceCapacity !== activeSourceCountAuthority.capacity
+    )
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-active-source-authority-layout'
+    };
+  }
+  const hasObservedActiveSourceCount = Object.hasOwn(epoch, 'activeSourceCount')
+    && epoch.activeSourceCount !== null
+    && epoch.activeSourceCount !== undefined;
+  const observedActiveSourceCount = hasObservedActiveSourceCount
+    ? Number(epoch.activeSourceCount)
+    : null;
+  if (
+    hasObservedActiveSourceCount
+    && (
+      !Number.isInteger(observedActiveSourceCount)
+      || observedActiveSourceCount < 0
+      || observedActiveSourceCount > physicalSourceCount
+      || observedActiveSourceCount > activeSourceCountAuthority.capacity
+    )
+  ) {
+    return {
+      admitted: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-observed-active-count'
+    };
+  }
+  const checks = [
+    ['deviceId', expected.deviceId],
+    ['laneId', expected.laneId],
+    ['leaseToken', expected.leaseToken],
+    ['generationId', expected.generationId],
+    ['positionEpoch', expected.positionEpoch],
+    ['topologyEpoch', expected.topologyEpoch],
+    ['chartEpoch', expected.chartEpoch],
+    ['levelEpoch', expected.levelEpoch],
+    ['supportEpoch', expected.supportEpoch],
+    ['sourceFamily', expected.sourceFamily],
+    ['deviceOrdinal', expected.deviceOrdinal],
+    ['laneOrdinal', expected.laneOrdinal],
+    ['sourceFamilyId', expected.sourceFamilyId],
+    ['storageGeneration', expected.storageGeneration],
+    ['physicsTick', expected.physicsTick],
+    ['physicsSubstep', expected.physicsSubstep],
+    ['physicalSourceCount', expected.physicalSourceCount]
+  ];
+  for (const [field, value] of checks) {
+    if (value !== undefined && !Object.is(epoch[field], value)) {
+      return {
+        admitted: false,
+        status: `schroeder-spatial-epoch-v2-rejected-${field}`,
+        field,
+        expected: value,
+        actual: epoch[field]
+      };
+    }
+  }
+  if (
+    expected.activeSourceCount !== undefined
+    && (
+      !hasObservedActiveSourceCount
+      || observedActiveSourceCount !== expected.activeSourceCount
+    )
+  ) {
+    return {
+      admitted: false,
+      status: hasObservedActiveSourceCount
+        ? 'schroeder-spatial-epoch-v2-rejected-activeSourceCount'
+        : 'schroeder-spatial-epoch-v2-active-count-observation-unavailable',
+      field: 'activeSourceCount',
+      expected: expected.activeSourceCount,
+      actual: observedActiveSourceCount
+    };
+  }
+  if (!Number.isInteger(epoch.statusFlags) || epoch.gpuCompletionProven !== true) {
+    return {
+      admitted: false,
+      compatible: true,
+      hostAuthenticated: true,
+      status: 'schroeder-spatial-epoch-v2-gpu-admission-unproven',
+      activeSourceCountAuthority
+    };
+  }
+  const requiredStatus = SCHROEDER_SPATIAL_EPOCH_STATUS_READY
+    | SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED;
+  if (
+    epoch.failClosed === true
+    || (epoch.statusFlags & SCHROEDER_SPATIAL_EPOCH_STATUS_FAIL_CLOSED) !== 0
+    || (epoch.statusFlags & requiredStatus) !== requiredStatus
+  ) {
+    return {
+      admitted: false,
+      compatible: false,
+      status: 'schroeder-spatial-epoch-v2-rejected-not-admitted'
+    };
+  }
+  return {
+    admitted: true,
+    compatible: true,
+    status: 'schroeder-spatial-epoch-v2-consumer-admitted',
+    physicalSourceCount,
+    activeSourceCountAuthority,
+    ...(hasObservedActiveSourceCount
+      ? { observedActiveSourceCount }
+      : {})
   };
 }

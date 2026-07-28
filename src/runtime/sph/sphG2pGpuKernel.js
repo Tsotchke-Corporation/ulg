@@ -10,6 +10,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
@@ -129,6 +130,7 @@ export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
 const G2P_CANONICAL_PARAMS_BYTES = 144;
+const G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES = 176;
 const SEPARATION_PARAMS_BYTES = 48;
 const SEPARATION_BIN_MAX_CELLS = 262144;
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
@@ -2050,7 +2052,10 @@ function createSchroederSpatialAuthorityBinding({
     && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
   const schemaRejected = schroederSpatialEpochGeneration != null && (
     schroederSpatialEpochGeneration?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
-    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || (
+      execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      && execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    )
   );
   const overlayRejected =
     schroederSpatialEpochGeneration?.source?.phaseVolumeAssignmentOverlayEnabled === true;
@@ -2117,6 +2122,8 @@ function createSchroederSpatialAuthorityBinding({
     retainedDirectoryBuffer: true,
     oldLevelAssignmentLookupRemoved: true,
     authorityBindingMode: 'canonical-spatial-epoch',
+    directoryAbiVersion: execution.abiVersion ?? 1,
+    directorySchema: execution.schema,
     generationId: execution.generationId,
     storageGeneration: execution.storageGeneration,
     positionEpoch: execution.positionEpoch,
@@ -2310,9 +2317,15 @@ function createParamsArray({
 function createCanonicalParamsArray({
   schroederSpatialDirectory,
   spatialEvidenceEnabled = false,
+  activeSourceBinding = null,
   ...baseParams
 }) {
-  const buffer = new ArrayBuffer(G2P_CANONICAL_PARAMS_BYTES);
+  const activeSourceV2 = activeSourceBinding?.activeSourceP2gEnabled === true;
+  const buffer = new ArrayBuffer(
+    activeSourceV2
+      ? G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES
+      : G2P_CANONICAL_PARAMS_BYTES
+  );
   new Uint8Array(buffer).set(new Uint8Array(createParamsArray(baseParams)));
   const view = new DataView(buffer);
   view.setUint32(76, 1, true);
@@ -2374,6 +2387,24 @@ function createCanonicalParamsArray({
     baseParams.gridUpdate?.mechanicsFieldMutationOutputOrdinal,
     0
   ))), true);
+  if (activeSourceV2) {
+    view.setUint32(144, activeSourceBinding.activeSourcePhysicalCapacity, true);
+    view.setUint32(148, activeSourceBinding.activeSourceActiveCapacity, true);
+    view.setUint32(152, activeSourceBinding.activeSourceViewWordLength, true);
+    view.setUint32(
+      156,
+      activeSourceBinding.activeSourceActiveToPhysicalOffsetWords,
+      true
+    );
+    view.setUint32(
+      160,
+      activeSourceBinding.activeSourcePhysicalToActiveOffsetWords,
+      true
+    );
+    view.setUint32(164, activeSourceBinding.activeSourceFingerprint, true);
+    view.setUint32(168, activeSourceBinding.activeSourceDispatchXLimit, true);
+    view.setUint32(172, activeSourceBinding.completionOrdinal, true);
+  }
   return buffer;
 }
 
@@ -2793,6 +2824,17 @@ export async function runMlsMpmG2pWebGpu({
   const canonicalSpatialAuthority = schroederSpatialAuthority.enabled === true;
   const mechanicsFieldRequired =
     mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
+  if (
+    canonicalSpatialAuthority
+    && schroederSpatialAuthority.directorySchema
+      === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    && !mechanicsFieldRequired
+  ) {
+    throw canonicalSpatialExecutionError(
+      'canonical-spatial-v2-mechanics-field-required',
+      'Canonical spatial v2 G2P requires the mechanics-field ActiveSource route'
+    );
+  }
   if (mechanicsFieldRequired && !canonicalSpatialAuthority) {
     throw canonicalSpatialExecutionError(
       'mechanics-field-canonical-generation-required',
@@ -3003,6 +3045,7 @@ export async function runMlsMpmG2pWebGpu({
   let mechanicsFieldBinding = null;
   let mechanicsFieldViewBuffer = null;
   let parentFieldWorkspace = null;
+  let activeSourceV2G2pEnabled = false;
   if (mechanicsFieldRequired) {
     mechanicsFieldKernelBundle = await import('./sphMlsMpmGpuStep.js');
     if (!fusedInputsRemainAdmitted()) {
@@ -3027,6 +3070,8 @@ export async function runMlsMpmG2pWebGpu({
         particleIdentityBuffer: sphParticleUpload?.identityBuffer ?? null,
         labelPrefix: 'ulg-mls-mpm-staged-g2p'
       });
+    activeSourceV2G2pEnabled =
+      mechanicsFieldBinding.activeSourceP2gEnabled === true;
     mechanicsFieldViewBuffer = gridUpdate.mechanicsFieldViewBuffer ?? null;
     const fieldExecution = gridUpdate.mechanicsFieldViewExecution ?? null;
     const fieldRuntime = fieldExecution?.ownerRuntime ?? null;
@@ -3192,7 +3237,9 @@ export async function runMlsMpmG2pWebGpu({
       }))
     : ownAllocation(device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
-        size: G2P_CANONICAL_PARAMS_BYTES,
+        size: activeSourceV2G2pEnabled
+          ? G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES
+          : G2P_CANONICAL_PARAMS_BYTES,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       }));
   const borrowedAssignmentBuffer = canonicalSpatialAuthority
@@ -3212,7 +3259,9 @@ export async function runMlsMpmG2pWebGpu({
   const ownsSchroederAuthorityBuffer = !canonicalSpatialAuthority
     && !borrowedAssignmentBuffer;
   const schroederAuthorityBuffer = canonicalSpatialAuthority
-    ? schroederSpatialAuthority.evidenceBuffer
+    ? (mechanicsFieldRequired
+        ? mechanicsFieldBinding.evidenceBuffer
+        : schroederSpatialAuthority.evidenceBuffer)
     : (borrowedAssignmentBuffer || ownAllocation(writeStorageBuffer(
         device,
         schroederActiveNodeFilterEnabled
@@ -3281,6 +3330,9 @@ export async function runMlsMpmG2pWebGpu({
         ? Math.round(Number(schroederSelectedLevel))
         : -1,
       schroederSpatialDirectory: schroederSpatialAuthority,
+      activeSourceBinding: activeSourceV2G2pEnabled
+        ? mechanicsFieldBinding
+        : null,
       spatialEvidenceEnabled: canonicalSpatialAuthority
         && observeCanonicalSpatialAuthority === true
     };
@@ -3298,18 +3350,26 @@ export async function runMlsMpmG2pWebGpu({
     const g2pShader = canonicalSpatialAuthority
       ? (observeCanonicalSpatialAuthority === true
           ? (mechanicsFieldRequired
-              ? mechanicsFieldKernelBundle
-                .mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl
+              ? (activeSourceV2G2pEnabled
+                  ? mechanicsFieldKernelBundle
+                    .mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl
+                  : mechanicsFieldKernelBundle
+                    .mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl)
               : mlsMpmG2pReconstructCanonicalSpatialWgsl)
           : (mechanicsFieldRequired
-              ? mechanicsFieldKernelBundle
-                .mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
+              ? (activeSourceV2G2pEnabled
+                  ? mechanicsFieldKernelBundle
+                    .mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl
+                  : mechanicsFieldKernelBundle
+                    .mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl)
               : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl))
       : mlsMpmG2pReconstructWgsl;
     const g2pVariant = canonicalSpatialAuthority
       ? `canonical-spatial-epoch.${mechanicsFieldRequired ? 'field.v3-reflux' : 'v7'}.${observeCanonicalSpatialAuthority === true
           ? 'observed'
-          : 'unobserved'}`
+          : 'unobserved'}${activeSourceV2G2pEnabled
+          ? '.active-source-v2'
+          : ''}`
       : 'precanonical-level-assignment.v5';
     const g2pBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -3323,7 +3383,12 @@ export async function runMlsMpmG2pWebGpu({
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'storage'),
       computeBufferBinding(6, 'uniform'),
-      computeBufferBinding(7, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      computeBufferBinding(
+        7,
+        canonicalSpatialAuthority && !mechanicsFieldRequired
+          ? 'storage'
+          : 'read-only-storage'
+      ),
       ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : [])
     ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
@@ -3369,7 +3434,9 @@ export async function runMlsMpmG2pWebGpu({
       { binding: 6, resource: { buffer: paramsBuffer } },
       { binding: 7, resource: { buffer: schroederAuthorityBuffer } },
       ...(canonicalSpatialAuthority
-        ? [{ binding: 8, resource: { buffer: schroederSpatialAuthority.directoryBuffer } }]
+        ? [{ binding: 8, resource: { buffer: activeSourceV2G2pEnabled
+          ? mechanicsFieldBinding.activeSourceBuffer
+          : schroederSpatialAuthority.directoryBuffer } }]
         : [])
     ];
     const bindGroup = device.createBindGroup({

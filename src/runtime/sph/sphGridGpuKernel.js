@@ -12,7 +12,8 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmP2gGridProjectionWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
@@ -93,6 +94,7 @@ const EMPTY_PRODUCT_EVENT_STORAGE_ROWS = new Float32Array(SPH_GPU_REACTION_PRODU
 const P2G_ACCUMULATOR_COMPONENTS = 4;
 const P2G_PARAMS_BYTES = 144;
 const MECHANICS_FIELD_P2G_PARAMS_BYTES = 160;
+const ACTIVE_SOURCE_V2_MECHANICS_FIELD_P2G_PARAMS_BYTES = 192;
 const SPH_PARTICLE_STATE_STRIDE_BYTES =
   SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
 const SPH_PARTICLE_THERMO_STRIDE_BYTES =
@@ -1342,7 +1344,10 @@ function createSchroederSpatialDirectoryBinding({
     schroederSpatialEpochGeneration?.source?.phaseVolumeAssignmentOverlayEnabled === true;
   const schemaRejected = Boolean(schroederSpatialEpochGeneration) && (
     schroederSpatialEpochGeneration?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
-    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || (
+      execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      && execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    )
   );
   const released = execution?.released === true;
   const queryProfileRejected = schroederSpatialEpochGeneration != null && (
@@ -1372,6 +1377,8 @@ function createSchroederSpatialDirectoryBinding({
       ownsBuffer: false,
       retainedBuffer: true,
       generationId: execution.generationId,
+      directoryAbiVersion: execution.abiVersion ?? 1,
+      directorySchema: execution.schema,
       storageGeneration: execution.storageGeneration,
       positionEpoch: execution.positionEpoch,
       topologyEpoch: execution.topologyEpoch,
@@ -1424,6 +1431,8 @@ function createSchroederSpatialDirectoryBinding({
     ownsBuffer: false,
     retainedBuffer: false,
     generationId: null,
+    directoryAbiVersion: 1,
+    directorySchema: SCHROEDER_SPATIAL_EPOCH_SCHEMA,
     storageGeneration: 0,
     positionEpoch: 0,
     topologyEpoch: 0,
@@ -1456,6 +1465,8 @@ function schroederSpatialDirectoryMetadata(binding = null) {
     required: binding?.required === true,
     retainedBuffer: binding?.retainedBuffer === true,
     generationId: binding?.generationId ?? null,
+    directoryAbiVersion: binding?.directoryAbiVersion ?? null,
+    directorySchema: binding?.directorySchema ?? null,
     storageGeneration: binding?.storageGeneration ?? null,
     positionEpoch: binding?.positionEpoch ?? null,
     topologyEpoch: binding?.topologyEpoch ?? null,
@@ -1812,6 +1823,18 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     canonicalSpatialRequired
   });
   const canonicalSpatialAuthority = schroederSpatialDirectory.enabled === true;
+  if (
+    canonicalSpatialAuthority
+    && schroederSpatialDirectory.directorySchema
+      === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    && mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  ) {
+    const error = new Error(
+      'Canonical spatial v2 P2G requires the mechanics-field ActiveSource route'
+    );
+    error.code = 'ERR_CANONICAL_SPATIAL_V2_MECHANICS_FIELD_REQUIRED';
+    throw error;
+  }
   let mechanicsFieldKernelBundle = null;
   let mechanicsFieldBinding = null;
   if (mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED) {
@@ -1848,11 +1871,27 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   const mechanicsFieldExecution = mechanicsFieldViewEnabled
     ? mechanicsFieldBinding.mechanicsFieldViewExecution
     : null;
+  const activeSourceV2P2gEnabled = mechanicsFieldViewEnabled
+    && mechanicsFieldBinding?.activeSourceP2gEnabled === true;
   let mechanicsFieldParticleFamilyAdmitted = !mechanicsFieldViewEnabled;
   if (mechanicsFieldViewEnabled) {
     const particleCount = sphParticleState.particleCount;
     const expectedCandidateCount = particleCount
       * mechanicsFieldKernelBundle.MECHANICS_FIELD_P2G_STENCIL_SIZE;
+    const candidateAuthorityAdmitted = activeSourceV2P2gEnabled
+      ? (
+          mechanicsFieldExecution?.candidateCount == null
+          && mechanicsFieldExecution?.stableCandidateOrderCount == null
+          && mechanicsFieldExecution?.stableCandidateOrderCountAuthority?.buffer
+            === mechanicsFieldBinding.activeSourceBuffer
+          && mechanicsFieldExecution?.stableCandidateOrderCountAuthority?.offsetWords
+            === 43
+        )
+      : (
+          mechanicsFieldExecution?.candidateCount === expectedCandidateCount
+          && mechanicsFieldExecution?.stableCandidateOrderCount
+            === expectedCandidateCount
+        );
     mechanicsFieldParticleFamilyAdmitted = Boolean(
       Number.isSafeInteger(expectedCandidateCount)
       && expectedCandidateCount >= 0
@@ -1865,9 +1904,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         particleCount
       )
       && mechanicsFieldExecution?.sourceCount === particleCount
-      && mechanicsFieldExecution?.candidateCount === expectedCandidateCount
-      && mechanicsFieldExecution?.stableCandidateOrderCount
-        === expectedCandidateCount
+      && candidateAuthorityAdmitted
     );
     if (!mechanicsFieldParticleFamilyAdmitted && fusedTransaction == null) {
       const error = new TypeError(
@@ -2047,7 +2084,9 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   if (accumulatorBuffer) trackOwnedBuffer(accumulatorBuffer);
   const paramsBuffer = device.createBuffer(mechanicsFieldViewEnabled ? {
     label: 'ulg-mls-mpm-p2g-mechanics-field-params',
-    size: MECHANICS_FIELD_P2G_PARAMS_BYTES,
+    size: activeSourceV2P2gEnabled
+      ? ACTIVE_SOURCE_V2_MECHANICS_FIELD_P2G_PARAMS_BYTES
+      : MECHANICS_FIELD_P2G_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   } : {
     label: 'ulg-mls-mpm-p2g-params',
@@ -2257,15 +2296,26 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(4, 'uniform'),
       computeBufferBinding(5, mechanicsFieldViewEnabled ? 'storage' : 'read-only-storage'),
       computeBufferBinding(6, mechanicsFieldViewEnabled ? 'read-only-storage' : 'storage'),
-      computeBufferBinding(7, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      computeBufferBinding(
+        7,
+        canonicalSpatialAuthority && !mechanicsFieldViewEnabled
+          ? 'storage'
+          : 'read-only-storage'
+      ),
       computeBufferBinding(8, 'read-only-storage')
     ];
     const p2gShader = mechanicsFieldViewEnabled
       ? (observeCanonicalSpatialAuthority === true
-          ? mechanicsFieldKernelBundle
-            .mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl
-          : mechanicsFieldKernelBundle
-            .mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl)
+          ? (activeSourceV2P2gEnabled
+              ? mechanicsFieldKernelBundle
+                .mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl
+              : mechanicsFieldKernelBundle
+                .mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl)
+          : (activeSourceV2P2gEnabled
+              ? mechanicsFieldKernelBundle
+                .mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+              : mechanicsFieldKernelBundle
+                .mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl))
       : canonicalSpatialAuthority
       ? (observeCanonicalSpatialAuthority === true
           ? mlsMpmP2gGridProjectionCanonicalSpatialWgsl
@@ -2273,7 +2323,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       : mlsMpmP2gGridProjectionWgsl;
     const p2gVariant = mechanicsFieldViewEnabled
       ? `canonical-spatial-mechanics-field-deterministic-reduction.v4.${
-        observeCanonicalSpatialAuthority === true ? 'observed' : 'unobserved'}`
+        observeCanonicalSpatialAuthority === true ? 'observed' : 'unobserved'}${
+        activeSourceV2P2gEnabled ? '.active-source-v2' : ''}`
       : canonicalSpatialAuthority
       ? `canonical-spatial-epoch.v10.${observeCanonicalSpatialAuthority === true
           ? 'observed'
@@ -2373,8 +2424,10 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           ? mechanicsFieldExecution.stableCandidateOrderBuffer
           : gridBuffer } },
         { binding: 7, resource: { buffer: schroederAuthorityBuffer } },
-        { binding: 8, resource: { buffer: mechanicsFieldBinding?.activeNodeBuffer
-          ?? schroederSpatialDirectory.buffer } }
+        { binding: 8, resource: { buffer: activeSourceV2P2gEnabled
+          ? mechanicsFieldBinding.activeSourceBuffer
+          : (mechanicsFieldBinding?.activeNodeBuffer
+            ?? schroederSpatialDirectory.buffer) } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
     const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });
@@ -2416,7 +2469,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         })
       : null;
     const encoder = device.createCommandEncoder();
-    if (canonicalSpatialAuthority) {
+    if (canonicalSpatialAuthority && !mechanicsFieldViewEnabled) {
       const evidenceOffsetBytes =
         SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_OFFSET_WORDS
         * Uint32Array.BYTES_PER_ELEMENT;
@@ -2497,7 +2550,21 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
+    if (activeSourceV2P2gEnabled) {
+      if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+        throw new Error(
+          'ActiveSource-v2 staged P2G requires GPU-authored indirect dispatch'
+        );
+      }
+      pass.dispatchWorkgroupsIndirect(
+        mechanicsFieldBinding.activeSourceBuffer,
+        mechanicsFieldBinding.activeSourceActiveDispatchOffsetBytes
+      );
+    } else {
+      pass.dispatchWorkgroups(
+        Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
+      );
+    }
     pass.end();
     if (productEventCount > 0) {
       const productPass = encoder.beginComputePass();
@@ -2651,6 +2718,20 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     projection.mechanicsFieldP2gReductionMode = mechanicsFieldViewEnabled
       ? 'stable-radix-ordered-field-reduction'
       : null;
+    projection.kernelScope = activeSourceV2P2gEnabled
+      ? 'active-source-ordinal-parallel-p2g-stress-momentum-projection'
+      : GRID_SCOPE;
+    projection.activeSourceP2gEnabled = activeSourceV2P2gEnabled;
+    projection.activeSourceP2gDispatchMode = activeSourceV2P2gEnabled
+      ? 'gpu-authored-active-source-indirect'
+      : null;
+    projection.activeSourceP2gWorkIdentity = activeSourceV2P2gEnabled
+      ? 'gpu-active-ordinal-to-physical'
+      : null;
+    projection.activeSourceP2gPhysicalCount = activeSourceV2P2gEnabled
+      ? sphParticleState.particleCount
+      : null;
+    projection.activeSourceP2gActiveCountHostKnown = false;
     if (fusedTransaction != null) {
       const transactionProperty = fusedFineSubstep
         ? 'fusedFineSubstepTransaction'
@@ -2952,7 +3033,7 @@ function executionFromProjection(projection, {
     projectionSchema: projection?.schema || ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
     backend: projection?.backend || 'cpu-reference',
     status: projection?.status || 'projected',
-    kernelScope: GRID_SCOPE,
+    kernelScope: projection?.kernelScope || GRID_SCOPE,
     particleCount: projection?.particleCount ?? 0,
     dt: projection?.dt ?? 0,
     gridSpacingM: projection?.gridSpacingM ?? 0,
@@ -3027,6 +3108,16 @@ function executionFromProjection(projection, {
       projection?.mechanicsFieldP2gReductionMode ?? null,
     mechanicsFieldP2gReductionOrder:
       projection?.mechanicsFieldP2gReductionOrder ?? null,
+    activeSourceP2gEnabled:
+      projection?.activeSourceP2gEnabled === true,
+    activeSourceP2gDispatchMode:
+      projection?.activeSourceP2gDispatchMode ?? null,
+    activeSourceP2gWorkIdentity:
+      projection?.activeSourceP2gWorkIdentity ?? null,
+    activeSourceP2gPhysicalCount:
+      projection?.activeSourceP2gPhysicalCount ?? null,
+    activeSourceP2gActiveCountHostKnown:
+      projection?.activeSourceP2gActiveCountHostKnown === true,
     readbackMode: projection?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: projection?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: projection?.normalHotLoopReadbackFree ?? false,

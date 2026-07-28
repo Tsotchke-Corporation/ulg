@@ -2628,12 +2628,116 @@ export function summarizePairedGpuStageProducerRuns({
   };
 }
 
+function authoritativeTwoLevelThroughputScenarioUrlEvidence(
+  scenario,
+  requiredFineSubstepCount
+) {
+  let params = null;
+  try {
+    params = new URL(
+      String(scenario?.scenarioUrl || ''),
+      'https://benchmark.invalid'
+    ).searchParams;
+  } catch {
+    params = null;
+  }
+  const expectedParams = {
+    ss: '1',
+    schroederLevel: '0',
+    schroederMaxLevel: '1',
+    schroederCrossLevelCoupling: '1',
+    schroederTwoLevel: '1',
+    schroederTwoLevelAuthority: 'authoritative',
+    schroederTwoLevelSubsteps: String(requiredFineSubstepCount)
+  };
+  const observedParams = Object.fromEntries(Object.keys(expectedParams).map(
+    (key) => [key, params?.get(key) ?? null]
+  ));
+  return {
+    complete: Boolean(
+      params
+      && Object.entries(expectedParams).every(
+        ([key, expected]) => params.get(key) === expected
+      )
+    ),
+    expectedParams,
+    observedParams
+  };
+}
+
+function authoritativeTwoLevelThroughputRouteEvidence(
+  scenario,
+  requiredFineSubstepCount
+) {
+  const scenarioUrl = authoritativeTwoLevelThroughputScenarioUrlEvidence(
+    scenario,
+    requiredFineSubstepCount
+  );
+  const complete = Boolean(
+    scenario?.schroederTwoLevelMechanicsConfiguredRequested === true
+    && scenario?.schroederTwoLevelMechanicsRequestedObserved === true
+    && scenario?.schroederTwoLevelMechanicsCoverageComplete === true
+    && scenario?.schroederTwoLevelMechanicsAuthorityRequested
+      === 'authoritative'
+    && scenario?.schroederTwoLevelMechanicsAuthorityObserved
+      === 'authoritative'
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountRequested
+    ) === requiredFineSubstepCount
+    && exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountObserved
+    ) === requiredFineSubstepCount
+    && scenario?.schroederTwoLevelMechanicsStepStatus
+      === 'schroeder-two-level-authoritative-step-executed'
+    && scenario?.schroederTwoLevelAuthoritativeCommitVerified === true
+    && scenarioUrl.complete
+  );
+  return {
+    complete,
+    configuredRequested:
+      scenario?.schroederTwoLevelMechanicsConfiguredRequested ?? null,
+    requestedObserved:
+      scenario?.schroederTwoLevelMechanicsRequestedObserved ?? null,
+    coverageComplete:
+      scenario?.schroederTwoLevelMechanicsCoverageComplete ?? null,
+    authorityRequested:
+      scenario?.schroederTwoLevelMechanicsAuthorityRequested ?? null,
+    authorityObserved:
+      scenario?.schroederTwoLevelMechanicsAuthorityObserved ?? null,
+    fineSubstepCountRequested: exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountRequested
+    ),
+    fineSubstepCountObserved: exactNonNegativeIntegerOrNull(
+      scenario?.schroederTwoLevelFineSubstepCountObserved
+    ),
+    stepStatus: scenario?.schroederTwoLevelMechanicsStepStatus ?? null,
+    authoritativeCommitVerified:
+      scenario?.schroederTwoLevelAuthoritativeCommitVerified ?? null,
+    scenarioUrl
+  };
+}
+
 function pairedThroughputArmEvidence(arm, {
   requiredBatchCount,
   requiredBatchStepCount,
-  historicalBaseline = false
+  historicalBaseline = false,
+  routeKind = 'single-level',
+  requiredFineSubstepCount = 2
 }) {
   const scenario = arm?.scenario ?? null;
+  const authoritativeTwoLevel = routeKind === 'authoritative-two-level';
+  const twoLevelRoute = authoritativeTwoLevel
+    ? authoritativeTwoLevelThroughputRouteEvidence(
+        scenario,
+        requiredFineSubstepCount
+      )
+    : null;
+  const routeComplete = authoritativeTwoLevel
+    ? twoLevelRoute.complete
+    : Boolean(
+      scenario?.schroederTwoLevelMechanicsConfiguredRequested === false
+      && scenario?.schroederTwoLevelMechanicsRequestedObserved !== true
+    );
   const physicsStepsPerSecond = finitePositiveNumberOrNull(
     scenario?.physicsStepsPerSecond
   );
@@ -2729,11 +2833,12 @@ function pairedThroughputArmEvidence(arm, {
       === requiredBatchStepCount
     && scenario?.schroederSimulationConfiguredRequested === true
     && scenario?.schroederSimulationActive === true
-    && scenario?.schroederTwoLevelMechanicsConfiguredRequested === false
-    && scenario?.schroederTwoLevelMechanicsRequestedObserved !== true
+    && routeComplete
   );
   return {
     complete,
+    routeKind,
+    routeComplete,
     processExitCode: arm?.process?.exitCode ?? null,
     reportStatus: arm?.reportStatus ?? null,
     reportPerformanceGateStatus:
@@ -2757,6 +2862,7 @@ function pairedThroughputArmEvidence(arm, {
     historicalInstrumentationCompatibilityGate,
     schroederTwoLevelMechanicsConfiguredRequested:
       scenario?.schroederTwoLevelMechanicsConfiguredRequested ?? null,
+    twoLevelRoute,
     probeIssues: Array.isArray(scenario?.probeIssues)
       ? [...scenario.probeIssues]
       : []
@@ -2776,8 +2882,20 @@ export function summarizePairedPhysicsThroughputRuns({
   requiredMeasuredBatchCount = 1,
   requiredBatchStepCount = 16,
   expectedBaselineGitHead = null,
-  maxRegressionPercent = 5
+  maxRegressionPercent = 5,
+  routeKind = 'single-level',
+  requiredFineSubstepCount = 2
 } = {}) {
+  if (
+    routeKind !== 'single-level'
+    && routeKind !== 'authoritative-two-level'
+  ) {
+    throw new RangeError(`Unsupported throughput route kind ${routeKind}`);
+  }
+  const normalizedFineSubstepCount = Math.max(
+    1,
+    Math.round(Number(requiredFineSubstepCount) || 2)
+  );
   const normalizedRequiredRunCount = Math.max(
     1,
     Math.round(Number(requiredRunCount) || 3)
@@ -2812,12 +2930,16 @@ export function summarizePairedPhysicsThroughputRuns({
       const baseline = pairedThroughputArmEvidence(run?.baseline, {
         requiredBatchCount: normalizedBatchCount,
         requiredBatchStepCount: normalizedBatchStepCount,
-        historicalBaseline: true
+        historicalBaseline: true,
+        routeKind,
+        requiredFineSubstepCount: normalizedFineSubstepCount
       });
       const candidate = pairedThroughputArmEvidence(run?.candidate, {
         requiredBatchCount: normalizedBatchCount,
         requiredBatchStepCount: normalizedBatchStepCount,
-        historicalBaseline: false
+        historicalBaseline: false,
+        routeKind,
+        requiredFineSubstepCount: normalizedFineSubstepCount
       });
       const baselineProvenance = pairedThroughputProvenanceEvidence(
         run?.baseline
@@ -2890,7 +3012,11 @@ export function summarizePairedPhysicsThroughputRuns({
     run.candidateProvenance.armConfigSignature
   ]).filter(Boolean));
   if (armConfigSignatures.size !== 1) {
-    blockers.push('non-target-route-signature-mismatch');
+    blockers.push(
+      routeKind === 'authoritative-two-level'
+        ? 'authoritative-two-level-route-signature-mismatch'
+        : 'non-target-route-signature-mismatch'
+    );
   }
   const baselineSourceIdentities = new Set(normalizedRuns.map((run) => (
     `${run.baselineProvenance.gitHead}:`
@@ -2966,7 +3092,9 @@ export function summarizePairedPhysicsThroughputRuns({
     );
   }
   return {
-    schema: 'peercompute.ulg.sph-paired-physics-throughput-campaign.v0',
+    schema: routeKind === 'authoritative-two-level'
+      ? 'peercompute.ulg.sph-paired-authoritative-two-level-physics-throughput-campaign.v0'
+      : 'peercompute.ulg.sph-paired-physics-throughput-campaign.v0',
     status: blockers.length === 0 ? 'pass' : 'fail',
     blockers,
     method: {
@@ -2978,6 +3106,10 @@ export function summarizePairedPhysicsThroughputRuns({
       metric: 'physicsStepsPerSecond',
       metricSource: 'complete-engine-batch',
       direction: 'higher-is-better',
+      routeKind,
+      requiredFineSubstepCount: routeKind === 'authoritative-two-level'
+        ? normalizedFineSubstepCount
+        : null,
       pairedAggregation:
         'median-of-within-run-candidate-over-historical-ratios',
       independentMedianCrossCheckRequired: true,
@@ -3004,6 +3136,20 @@ export function summarizePairedPhysicsThroughputRuns({
       withinThreshold: independentMedianWithinThreshold
     }
   };
+}
+
+/**
+ * Compare a historical and candidate worktree on the identical complete-engine
+ * authoritative two-level SS route. This deliberately cannot admit the
+ * single-level throughput fixture or a two-level observation/control arm.
+ */
+export function summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns(
+  options = {}
+) {
+  return summarizePairedPhysicsThroughputRuns({
+    ...options,
+    routeKind: 'authoritative-two-level'
+  });
 }
 
 function spatialArenaDepthScenarioUrlEvidence(scenario, expectedArenaCount) {

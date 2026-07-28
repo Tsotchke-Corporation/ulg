@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  createWebGpuRadixGpuCountControlLayout,
   createWebGpuRadixUniquePlan,
   createWebGpuStableRadixScanUnique,
   createWebGpuU32ExclusiveScan,
@@ -10,17 +11,34 @@ import {
   WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES,
   WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT,
   webGpuDispatchShapeId,
+  webGpuRadixGpuCountPrepareWgsl,
+  webGpuRadixGpuCountScanWgsl,
+  webGpuRadixGpuCountUniqueWgsl,
+  webGpuRadixGpuCountWgsl,
   webGpuSerialRadixHistogramScanWgsl,
   webGpuStableRadixWgsl,
   webGpuU32ExclusiveScanWgsl,
   webGpuSortedUniqueWgsl
 } from '../src/runtime/webgpuRadixScanUnique.js';
 import {
+  ULG_WEBGPU_RADIX_GPU_COUNT_ABI,
   ULG_WEBGPU_RADIX_UNIQUE_ABI,
   ULG_WEBGPU_U32_SCAN_ABI,
   WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_READY,
+  WEBGPU_RADIX_GPU_COUNT_CONTROL_HEADER_LAYOUT,
   WEBGPU_RADIX_UNIQUE_EVIDENCE_ROW_LAYOUT
 } from '../ulg-gpu-abi/src/index.js';
+
+const RUN_NATIVE_GPU_COUNT =
+  process.env.ULG_RUN_NATIVE_WEBGPU_RADIX_COUNT === '1';
+const NATIVE_GPU_COUNT_BASE_URL =
+  process.env.ULG_WEBGPU_RADIX_COUNT_BASE_URL
+  || 'https://127.0.0.1:5174/';
 
 function createFakeDevice() {
   const buffers = [];
@@ -34,7 +52,14 @@ function createFakeDevice() {
     writes,
     queue: {
       writeBuffer(buffer, offset, data) {
-        writes.push({ buffer, offset, byteLength: data.byteLength });
+        const byteOffset = data.byteOffset ?? 0;
+        const wordLength = Math.min(32, Math.floor(data.byteLength / 4));
+        writes.push({
+          buffer,
+          offset,
+          byteLength: data.byteLength,
+          words: Array.from(new Uint32Array(data.buffer, byteOffset, wordLength))
+        });
       }
     },
     createBuffer(descriptor) {
@@ -125,6 +150,415 @@ test('parallel primitive ABI fixes u32 evidence, CSR, and indirect-dispatch owne
   assert.equal(ULG_WEBGPU_RADIX_UNIQUE_ABI.submissionOwnership, 'caller');
   assert.equal(WEBGPU_RADIX_UNIQUE_EVIDENCE_ROW_LAYOUT.length, 8);
   assert.equal(WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT.length, 3);
+});
+
+test('GPU-count ABI seals authority publication and fixes a zero-dispatch control topology', () => {
+  assert.equal(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.countOwnership,
+    'authenticated-gpu-authority-buffer');
+  assert.equal(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.inactiveDispatchPolicy,
+    'zero-workgroup-indirect-row');
+  assert.equal(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.overflowPolicy,
+    'fail-closed-zero-dispatch');
+  assert.equal(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.resourcePreparation,
+    'explicit-prewarm-outside-encode');
+  assert.equal(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.executionConcurrency,
+    'single-flight-per-runtime-until-discard-or-submission-fence');
+  assert.match(ULG_WEBGPU_RADIX_GPU_COUNT_ABI.authorityPublication,
+    /writes-count-before-generation-seal/);
+  assert.equal(WEBGPU_RADIX_GPU_COUNT_CONTROL_HEADER_LAYOUT.length, 32);
+  assert.ok(WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL
+    > WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED);
+  assert.ok(WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW
+    > WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL);
+
+  const layout = createWebGpuRadixGpuCountControlLayout({
+    maxElementCount: 1024
+  });
+  assert.deepEqual(layout, {
+    headerWordCount: 32,
+    histogramScanLevelCount: 1,
+    headScanLevelCount: 2,
+    histogramScanCountOffsetWords: 32,
+    headScanCountOffsetWords: 33,
+    radixDispatchOffsetWords: 35,
+    radixDispatchOffsetBytes: 140,
+    histogramScanDispatchOffsetWords: 38,
+    headScanDispatchOffsetWords: 44,
+    indirectRowCount: 7,
+    controlWordCount: 56,
+    controlByteLength: 224,
+    dispatchRowWordCount: 3
+  });
+});
+
+test('GPU-count shaders authenticate and recheck the authority while bounding every stage', () => {
+  assert.match(
+    webGpuRadixGpuCountPrepareWgsl,
+    /observed_count[\s\S]*observed_seal[\s\S]*expected_generation_seal/
+  );
+  assert.match(
+    webGpuRadixGpuCountPrepareWgsl,
+    /STATUS_FAIL_CLOSED \| STATUS_INVALID_SEAL/
+  );
+  assert.match(
+    webGpuRadixGpuCountPrepareWgsl,
+    /STATUS_FAIL_CLOSED \| STATUS_COUNT_OVERFLOW/
+  );
+  assert.match(
+    webGpuRadixGpuCountPrepareWgsl,
+    /gpu_count_control\[offset\] = 0u;[\s\S]*offset \+ 2u\] = 0u/
+  );
+  assert.match(
+    webGpuRadixGpuCountPrepareWgsl,
+    /prepare_scan\([\s\S]*histogram_scan_level_count[\s\S]*prepare_scan\(/
+  );
+  assert.match(
+    webGpuRadixGpuCountScanWgsl,
+    /fn sealed_count\(\)[\s\S]*CONTROL_COMPLETION_SEAL/
+  );
+  assert.match(
+    webGpuRadixGpuCountScanWgsl,
+    /first < count[\s\S]*second < count/
+  );
+  assert.match(
+    webGpuRadixGpuCountWgsl,
+    /fn sealed_count\(\)[\s\S]*min\([\s\S]*CONTROL_LIVE_COUNT/
+  );
+  assert.match(
+    webGpuRadixGpuCountWgsl,
+    /linear_group < gpu_count_control\[CONTROL_RADIX_GROUP_COUNT\][\s\S]*index < count/
+  );
+  assert.match(
+    webGpuRadixGpuCountUniqueWgsl,
+    /authority_count == gpu_count_control\[CONTROL_LIVE_COUNT\]/
+  );
+  assert.match(
+    webGpuRadixGpuCountUniqueWgsl,
+    /preflight_admitted && !authority_stable[\s\S]*STATUS_FAIL_CLOSED/
+  );
+});
+
+test('sealed GPU-authored count encodes one fixed maximum indirect topology without a count write', () => {
+  const device = createFakeDevice();
+  const encoder = createFakeEncoder();
+  const authorityBuffer = device.createBuffer({
+    label: 'active-source-authority',
+    size: 256,
+    usage: 128
+  });
+  const keyBuffer = device.createBuffer({
+    label: 'gpu-count-keys',
+    size: 1024 * 2 * 4,
+    usage: 128
+  });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 1024,
+    maxKeyWordCount: 2,
+    label: 'sealed-radix'
+  });
+  assert.equal(runtime.pipelineCount, 12);
+  assert.equal(runtime.gpuCountPipelineCount, 0);
+  assert.equal(runtime.totalPipelineCount, 12);
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      keyBuffer,
+      authorityBuffer,
+      generationSeal: 77,
+      maxElementCount: 700,
+      keyWordCount: 2,
+      keyStrideWords: 2
+    }),
+    (error) => error?.code === 'ERR_WEBGPU_RADIX_GPU_COUNT_NOT_PREPARED'
+  );
+  const bufferCountBeforePrewarm = device.buffers.length;
+  const prepared = runtime.prepareGpuCountResources();
+  assert.equal(prepared.status, 'webgpu-radix-gpu-count-resources-prepared');
+  assert.equal(prepared.configSlotCount, 1);
+  assert.equal(prepared.executionConcurrency, 'single-flight-per-runtime');
+  assert.equal(runtime.gpuCountPipelineCount, 9);
+  assert.equal(runtime.totalPipelineCount, 21);
+  assert.ok(device.buffers.length > bufferCountBeforePrewarm);
+  const bufferCountAfterPrewarm = device.buffers.length;
+  assert.equal(
+    runtime.prepareGpuCountResources().controlBuffer,
+    prepared.controlBuffer
+  );
+  assert.equal(device.buffers.length, bufferCountAfterPrewarm);
+  const bufferCountBeforeEncode = device.buffers.length;
+  const timestampBegins = [];
+  const timestampEnds = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(timestampEncoder, descriptor) {
+      const token = { timestampEncoder, descriptor };
+      timestampBegins.push(token);
+      return token;
+    },
+    endEncoderSpan(timestampEncoder, token) {
+      timestampEnds.push({ timestampEncoder, token });
+    }
+  };
+  const result = runtime.encodeSortUniqueGpuCount(encoder, {
+    keyBuffer,
+    authorityBuffer,
+    authorityCountByteOffset: 8,
+    generationSeal: { byteOffset: 40, expected: 77 },
+    maxElementCount: 700,
+    keyWordCount: 2,
+    keyStrideWords: 2,
+    generationId: 19,
+    consumerWorkgroupSize: 64,
+    gpuTimestampRecorder,
+    timestampProducerId: 'test-gpu-count-radix',
+    timestampMetadata: { parentProducerId: 'test-parent' }
+  });
+
+  assert.equal(runtime.pipelineCount, 12);
+  assert.equal(device.buffers.length, bufferCountBeforeEncode);
+  assert.equal(result.status,
+    'webgpu-stable-radix-sort-unique-gpu-count-encoded');
+  assert.equal(result.elementCount, null);
+  assert.equal(result.elementCountSource, 'authenticated-gpu-authority');
+  assert.equal(result.readbackPerformed, false);
+  assert.equal(result.fixedMaximumTopology, true);
+  assert.equal(result.radixPassCount, 16);
+  assert.equal(result.encodedIndirectDispatchCount, 54);
+  assert.equal(result.encodedDispatchCount, 56);
+  assert.equal(result.encodedComputePassCount, 2);
+  assert.equal(result.authorityCountByteOffset, 8);
+  assert.equal(result.authoritySealByteOffset, 40);
+  assert.equal(result.generationSeal, 77);
+  assert.equal(result.gpuCountControlLayout.controlWordCount, 56);
+  assert.equal(result.gpuCountControlBuffer.usage & 256, 256);
+  assert.equal(result.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(result.paramsBufferCreationCount, 0);
+  assert.equal(result.paramsSlotIndex, 0);
+  assert.equal(result.paramsBufferResidency,
+    'retained-gpu-count-config-arena');
+  assert.equal(result.timestampProducerId, 'test-gpu-count-radix');
+  assert.deepEqual(result.transientBuffers, []);
+  assert.deepEqual(
+    timestampBegins.map(({ timestampEncoder, descriptor }) => ({
+      sameEncoder: timestampEncoder === encoder,
+      ...descriptor
+    })),
+    [{
+      sameEncoder: true,
+      producerId: 'test-gpu-count-radix',
+      stage: 'gpu-count-radix-sort-unique',
+      spanClass: 'same-grouped-production-compute-pass',
+      parentProducerId: 'test-parent',
+      elementCount: null,
+      elementCountSource: 'authenticated-gpu-authority',
+      maxElementCount: 700,
+      keyWordCount: 2
+    }]
+  );
+  assert.equal(timestampEnds.length, 1);
+  assert.equal(timestampEnds[0].timestampEncoder, encoder);
+  assert.equal(timestampEnds[0].token, timestampBegins[0]);
+
+  const passes = computePasses(encoder);
+  const commands = computeCommands(encoder);
+  assert.deepEqual(
+    passes.map(({ descriptor }) => descriptor.label),
+    ['sealed-radixGpuCountPrepare', 'sealed-radixGroupedGpuCountRadixUnique']
+  );
+  assert.equal(commands.length, 56);
+  assert.deepEqual(commands[0].dispatch, [1, 1, 1]);
+  assert.equal(commands[0].pipeline, 'sealed-radix-gpu-count-prepare');
+  assert.equal(commands.at(-1).pipeline,
+    'sealed-radix-gpu-count-finalize-unique');
+  assert.deepEqual(commands.at(-1).dispatch, [1, 1, 1]);
+  assert.equal(
+    commands.slice(1, -1).every(({ dispatchIndirect }) => (
+      dispatchIndirect?.label === 'sealed-radix-gpu-count-control'
+      && dispatchIndirect.byteOffset % 12 === 8
+    )),
+    true
+  );
+  assert.equal(
+    commands.filter(({ pipeline }) => (
+      pipeline === 'sealed-radix-gpu-count-scan-blocks'
+    )).length,
+    18
+  );
+  assert.equal(
+    commands.filter(({ pipeline }) => (
+      pipeline === 'sealed-radix-gpu-count-scan-add'
+    )).length,
+    1
+  );
+  assert.equal(
+    encoder.events.filter(({ kind }) => kind === 'clear').length,
+    4
+  );
+
+  const configWrite = device.writes.find(
+    ({ buffer, offset }) => (
+      buffer.label === 'sealed-radix-gpu-count-config-retained-arena'
+      && offset === 0
+    )
+  );
+  assert.deepEqual(configWrite.words.slice(0, 19), [
+    2, 10, 77, 700, 2, 2, 64, 19, 65535,
+    32, 33, 35, 38, 44, 1, 2, 7, 56, 1024
+  ]);
+  assert.equal(
+    device.writes.some(({ buffer, words }) => (
+      buffer.label === 'sealed-radix-gpu-count-config-retained-arena'
+      && words.includes(0xdead_beef)
+    )),
+    false
+  );
+
+  const configArena = runtime.allocationEntries().find(
+    ({ role }) => role === 'radix-gpu-count-config-retained-arena'
+  ).buffer;
+  assert.equal(configArena.destroyed, false);
+  runtime.releaseExecution(result, { discardedEncoder: true });
+  assert.equal(configArena.destroyed, false);
+  assert.equal(result.gpuCountControlBuffer.destroyed, false);
+  runtime.destroy();
+  assert.equal(configArena.destroyed, true);
+  assert.equal(result.gpuCountControlBuffer.destroyed, true);
+});
+
+test('GPU-authored count API rejects ambiguous or unsafe host-side capacity contracts', () => {
+  const device = createFakeDevice();
+  const authorityBuffer = device.createBuffer({
+    label: 'contract-authority',
+    size: 64,
+    usage: 128
+  });
+  const keyBuffer = device.createBuffer({
+    label: 'contract-keys',
+    size: 64 * 4,
+    usage: 128
+  });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 64,
+    maxKeyWordCount: 1,
+    label: 'contract-radix'
+  });
+  const base = {
+    keyBuffer,
+    authorityBuffer,
+    generationSeal: 9,
+    maxElementCount: 64,
+    keyWordCount: 1
+  };
+  const bufferCountBeforeRejectedEncodes = device.buffers.length;
+
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      ...base,
+      generationSeal: 0
+    }),
+    /generationSeal/
+  );
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      ...base,
+      authorityCountByteOffset: 2
+    }),
+    /u32 aligned/
+  );
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      ...base,
+      authoritySealByteOffset: 0
+    }),
+    /distinct u32 words/
+  );
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      ...base,
+      maxElementCount: 65
+    }),
+    /maxElementCount/
+  );
+  assert.throws(
+    () => runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      ...base,
+      keyStrideWords: 2
+    }),
+    /keyBuffer must cover/
+  );
+  assert.equal(device.buffers.length, bufferCountBeforeRejectedEncodes);
+  runtime.destroy();
+});
+
+test('GPU-count config lease keeps zero-count encodes allocation-free and rejects concurrent scratch aliasing', async () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({
+    label: 'leased-gpu-count-keys',
+    size: 64 * 4,
+    usage: 128
+  });
+  const zeroCountAuthority = device.createBuffer({
+    label: 'zero-count-authority-count-0-seal-41',
+    size: 16,
+    usage: 128
+  });
+  const liveCountAuthority = device.createBuffer({
+    label: 'live-count-authority',
+    size: 16,
+    usage: 128
+  });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 64,
+    maxKeyWordCount: 1,
+    label: 'leased-gpu-count'
+  });
+  const prepared = runtime.prepareGpuCountResources();
+  assert.equal(prepared.configSlotCount, 1);
+  const bufferCountAfterRuntimeCreation = device.buffers.length;
+  const encode = (authorityBuffer, generationSeal) => (
+    runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+      keyBuffer,
+      authorityBuffer,
+      generationSeal,
+      maxElementCount: 64,
+      keyWordCount: 1
+    })
+  );
+
+  const zero = encode(zeroCountAuthority, 41);
+  assert.equal(device.buffers.length, bufferCountAfterRuntimeCreation);
+  assert.equal(zero.paramsSlotIndex, 0);
+  assert.equal(zero.elementCount, null);
+  assert.equal(zero.elementCountSource, 'authenticated-gpu-authority');
+  assert.equal(zero.encodedDispatchCount, 30);
+  assert.equal(zero.encodedIndirectDispatchCount, 28);
+  assert.equal(zero.gpuBufferCreationCountDuringEncode, 0);
+  assert.throws(
+    () => encode(liveCountAuthority, 42),
+    (error) => (
+      error?.code === 'ERR_WEBGPU_RADIX_GPU_COUNT_EXECUTION_IN_FLIGHT'
+      && error.slotCapacity === 1
+    )
+  );
+  assert.equal(device.buffers.length, bufferCountAfterRuntimeCreation);
+  assert.throws(
+    () => runtime.releaseExecution(zero),
+    /discarded encoder.*releaseExecutionAfter/
+  );
+  await assert.rejects(
+    runtime.releaseExecutionAfter(zero, null),
+    /submission-fence thenable/
+  );
+
+  assert.equal(await runtime.releaseExecutionAfter(zero, Promise.resolve()), true);
+  assert.equal(await runtime.releaseExecutionAfter(zero, Promise.resolve()), false);
+  const live = encode(liveCountAuthority, 42);
+  assert.equal(live.paramsSlotIndex, 0);
+  assert.equal(device.buffers.length, bufferCountAfterRuntimeCreation);
+  runtime.releaseExecution(live, { discardedEncoder: true });
+  const replacement = encode(zeroCountAuthority, 43);
+  assert.equal(replacement.paramsSlotIndex, 0);
+  runtime.releaseExecution(replacement, { discardedEncoder: true });
+  runtime.destroy();
 });
 
 test('multiword radix plan is stable lexicographic and scans one flattened histogram', () => {
@@ -1196,4 +1630,272 @@ test('radix runtime validates the scatter entrypoint 16 KiB workgroup-storage re
   });
   assert.equal(runtime.status, 'webgpu-stable-radix-scan-unique-ready');
   runtime.destroy();
+});
+
+test('native sealed GPU count sorts, uniques, admits zero, and fails closed on seal or overflow', {
+  skip: RUN_NATIVE_GPU_COUNT
+    ? false
+    : 'set ULG_RUN_NATIVE_WEBGPU_RADIX_COUNT=1 for native Vulkan WebGPU',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_WEBGPU_RADIX_COUNT_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_GPU_COUNT_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const runtimeModule = await import(
+        `/src/runtime/webgpuRadixScanUnique.js?nativeGpuCount=${Date.now()}`
+      );
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      device.pushErrorScope('internal');
+      device.pushErrorScope('out-of-memory');
+
+      const runtime = runtimeModule.createWebGpuStableRadixScanUnique(device, {
+        maxElementCount: 16,
+        maxKeyWordCount: 1,
+        label: 'native-sealed-radix'
+      });
+      runtime.prepareGpuCountResources();
+      const keys = new Uint32Array([
+        2, 1, 2, 0, 1, 3, 0, 2,
+        99, 99, 99, 99, 99, 99, 99, 99
+      ]);
+      const keyBuffer = device.createBuffer({
+        label: 'native-sealed-radix-keys',
+        size: keys.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      const authorityBuffer = device.createBuffer({
+        label: 'native-sealed-radix-authority',
+        size: 8,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      device.queue.writeBuffer(keyBuffer, 0, keys);
+
+      const run = async ({
+        count,
+        authoritySeal,
+        expectedSeal,
+        maximum
+      }) => {
+        device.queue.writeBuffer(
+          authorityBuffer,
+          0,
+          new Uint32Array([count, authoritySeal])
+        );
+        const encoder = device.createCommandEncoder();
+        const execution = runtime.encodeSortUniqueGpuCount(encoder, {
+          keyBuffer,
+          authorityBuffer,
+          generationSeal: expectedSeal,
+          maxElementCount: maximum,
+          keyWordCount: 1,
+          consumerWorkgroupSize: 4
+        });
+        const regions = {
+          control: {
+            offset: 0,
+            size: execution.gpuCountControlLayout.controlByteLength
+          }
+        };
+        regions.evidence = {
+          offset: regions.control.offset + regions.control.size,
+          size: 8 * 4
+        };
+        regions.dispatch = {
+          offset: regions.evidence.offset + regions.evidence.size,
+          size: 3 * 4
+        };
+        regions.sorted = {
+          offset: regions.dispatch.offset + regions.dispatch.size,
+          size: 16 * 4
+        };
+        regions.uniqueKeys = {
+          offset: regions.sorted.offset + regions.sorted.size,
+          size: 16 * 4
+        };
+        regions.uniqueOffsets = {
+          offset: regions.uniqueKeys.offset + regions.uniqueKeys.size,
+          size: 17 * 4
+        };
+        const readbackSize =
+          regions.uniqueOffsets.offset + regions.uniqueOffsets.size;
+        const readback = device.createBuffer({
+          size: readbackSize,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        const copy = (source, region) => encoder.copyBufferToBuffer(
+          source,
+          0,
+          readback,
+          region.offset,
+          region.size
+        );
+        copy(execution.gpuCountControlBuffer, regions.control);
+        copy(execution.uniqueEvidenceBuffer, regions.evidence);
+        copy(execution.uniqueDispatchIndirectBuffer, regions.dispatch);
+        copy(execution.sortedIndicesBuffer, regions.sorted);
+        copy(execution.uniqueKeysBuffer, regions.uniqueKeys);
+        copy(execution.uniqueOffsetsBuffer, regions.uniqueOffsets);
+        device.queue.submit([encoder.finish()]);
+        const fence = device.queue.onSubmittedWorkDone();
+        await readback.mapAsync(GPUMapMode.READ);
+        const mapped = readback.getMappedRange();
+        const readWords = (region) => Array.from(new Uint32Array(
+          mapped,
+          region.offset,
+          region.size / 4
+        ));
+        const result = {
+          control: readWords(regions.control),
+          evidence: readWords(regions.evidence),
+          dispatch: readWords(regions.dispatch),
+          sorted: readWords(regions.sorted),
+          uniqueKeys: readWords(regions.uniqueKeys),
+          uniqueOffsets: readWords(regions.uniqueOffsets)
+        };
+        readback.unmap();
+        await runtime.releaseExecutionAfter(execution, fence);
+        readback.destroy();
+        return result;
+      };
+
+      const valid = await run({
+        count: 8,
+        authoritySeal: 7,
+        expectedSeal: 7,
+        maximum: 8
+      });
+      const zero = await run({
+        count: 0,
+        authoritySeal: 8,
+        expectedSeal: 8,
+        maximum: 8
+      });
+      const invalidSeal = await run({
+        count: 8,
+        authoritySeal: 8,
+        expectedSeal: 9,
+        maximum: 8
+      });
+      const overflow = await run({
+        count: 9,
+        authoritySeal: 10,
+        expectedSeal: 10,
+        maximum: 8
+      });
+
+      runtime.destroy();
+      keyBuffer.destroy();
+      authorityBuffer.destroy();
+      const outOfMemoryError = await device.popErrorScope();
+      const internalError = await device.popErrorScope();
+      const validationError = await device.popErrorScope();
+      device.destroy();
+      return {
+        status: 'ok',
+        valid,
+        zero,
+        invalidSeal,
+        overflow,
+        errors: [
+          outOfMemoryError?.message,
+          internalError?.message,
+          validationError?.message,
+          ...uncapturedErrors
+        ].filter(Boolean)
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+
+  if (native.status === 'unsupported') assert.fail(native.reason);
+  assert.deepEqual(native.errors, []);
+  assert.deepEqual(native.valid.evidence, [7, 8, 4, 1, 0, 1, 1, 3]);
+  assert.deepEqual(native.valid.dispatch, [1, 1, 1]);
+  assert.deepEqual(native.valid.sorted.slice(0, 8), [3, 6, 1, 4, 0, 2, 7, 5]);
+  assert.deepEqual(native.valid.uniqueKeys.slice(0, 4), [0, 1, 2, 3]);
+  assert.deepEqual(native.valid.uniqueOffsets.slice(0, 5), [0, 2, 4, 7, 8]);
+
+  assert.deepEqual(native.zero.evidence, [8, 0, 0, 1, 0, 1, 1, 3]);
+  assert.deepEqual(native.zero.dispatch, [0, 0, 0]);
+  assert.deepEqual(native.zero.uniqueOffsets.slice(0, 1), [0]);
+  const nativeControlLayout = createWebGpuRadixGpuCountControlLayout({
+    maxElementCount: 16
+  });
+  assert.equal(native.zero.control[2],
+    WEBGPU_PARALLEL_PRIMITIVE_STATUS_READY
+      | WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED);
+  assert.equal(native.zero.control[5], 0);
+  assert.equal(
+    native.zero.control
+      .slice(nativeControlLayout.radixDispatchOffsetWords)
+      .every((word) => word === 0),
+    true
+  );
+
+  assert.equal(
+    native.invalidSeal.evidence[7]
+      & (
+        WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED
+        | WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL
+      ),
+    WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED
+      | WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL
+  );
+  assert.equal(native.invalidSeal.evidence[3], 0);
+  assert.equal(native.invalidSeal.evidence[2], 0);
+  assert.deepEqual(native.invalidSeal.dispatch, [0, 0, 0]);
+  assert.equal(
+    native.invalidSeal.control
+      .slice(nativeControlLayout.radixDispatchOffsetWords)
+      .every((word) => word === 0),
+    true
+  );
+
+  assert.equal(
+    native.overflow.evidence[7]
+      & (
+        WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED
+        | WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW
+      ),
+    WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED
+      | WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW
+  );
+  assert.equal(native.overflow.evidence[3], 0);
+  assert.equal(native.overflow.evidence[4], 1);
+  assert.deepEqual(native.overflow.dispatch, [0, 0, 0]);
+  assert.equal(
+    native.overflow.control
+      .slice(nativeControlLayout.radixDispatchOffsetWords)
+      .every((word) => word === 0),
+    true
+  );
 });

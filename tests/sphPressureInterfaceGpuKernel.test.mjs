@@ -3,14 +3,23 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   createSchroederSpatialEpochLayout,
+  createSchroederSpatialEpochV2Layout,
+  createSchroederSpatialActiveSourceFingerprint,
+  createSchroederSpatialActiveSourceViewLayout,
   SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
   SCHROEDER_SPATIAL_EPOCH_MAGIC,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_ABI,
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA,
   SPH_INTERFACE_CONTACT_KINEMATICS_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
@@ -21,6 +30,7 @@ import {
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl,
   sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialExactNearWgsl.js';
 import {
@@ -469,16 +479,24 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
   executionOverrides = {},
   queryProfileOverrides = {},
   sourceRowLayoutId = SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
+  directoryVersion = 1,
   sourceFamily = sourceRowLayoutId
     === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
     ? 'schroeder-level-assignment-particles'
     : 'schroeder-active-node-particles'
 } = {}) {
   const sourceCount = activeNodeList.activeCandidateCount;
-  const layout = createSchroederSpatialEpochLayout({
-    sourceCapacity: sourceCount,
-    cellCapacity: sourceCount
-  });
+  assert.ok(directoryVersion === 1 || directoryVersion === 2);
+  const layout = directoryVersion === 2
+    ? createSchroederSpatialEpochV2Layout({
+        physicalSourceCapacity: sourceCount,
+        activeSourceCapacity: sourceCount,
+        cellCapacity: sourceCount
+      })
+    : createSchroederSpatialEpochLayout({
+        sourceCapacity: sourceCount,
+        cellCapacity: sourceCount
+      });
   const directoryBuffer = device.createBuffer({
     label: 'test-caller-owned-shared-spatial-directory',
     size: layout.byteLength,
@@ -529,29 +547,104 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     ...epochs,
     ...sourceOverrides
   };
-  const releaseCalls = [];
-  const execution = {
-    schema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
-    status: 'schroeder-spatial-epoch-gpu-build-submitted',
-    magic: SCHROEDER_SPATIAL_EPOCH_MAGIC,
-    abiVersion: SCHROEDER_SPATIAL_EPOCH_VERSION,
-    exactKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
-    sortKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
-    sortMode: SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
-    sourceCount,
-    sourceCapacity: sourceCount,
-    cellCapacity: sourceCount,
+  const executionIdentity = {
     generationId: 41,
     deviceOrdinal: 17,
     laneOrdinal: 19,
     leaseToken: 41,
     sourceFamilyId: 23,
+    buildOrdinal: 41
+  };
+  let activeSourceView = null;
+  let activeSourceViewBuffer = null;
+  if (directoryVersion === 2) {
+    const activeLayout = createSchroederSpatialActiveSourceViewLayout({
+      physicalSourceCapacity: sourceCount,
+      activeSourceCapacity: sourceCount
+    });
+    activeSourceViewBuffer = device.createBuffer({
+      label: 'test-caller-owned-shared-active-source-view',
+      size: activeLayout.byteLength,
+      usage: 128 | 256
+    });
+    const sourceFingerprint = createSchroederSpatialActiveSourceFingerprint({
+      ...executionIdentity,
+      ...epochs,
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCount,
+      activeSourceCapacity: sourceCount,
+      sourceRowLayoutId,
+      sourceRowStrideFloats: 16,
+      queryGeometryMode: 1,
+      queryChartId: exactNearQueryProfile.chartId,
+      queryMinLevel: exactNearQueryProfile.minLevel,
+      queryMaxLevel: exactNearQueryProfile.maxLevel,
+      queryBaseGridSpacingM: exactNearQueryProfile.baseGridSpacingM
+    });
+    const activeOwnerRuntime = {
+      ownsExecution(candidate) {
+        return candidate === activeSourceView;
+      }
+    };
+    activeSourceView = {
+      schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+      status: 'schroeder-spatial-active-source-view-gpu-encoded',
+      ready: true,
+      selected: true,
+      sourceBuffer: activeNodeList.activeNodeBuffer,
+      activeSourceViewBuffer,
+      layout: activeLayout,
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCount,
+      activeSourceCapacity: sourceCount,
+      sourceRowLayoutId,
+      sourceRowStrideFloats: 16,
+      ...executionIdentity,
+      ...epochs,
+      sourceFingerprint,
+      activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+      candidateDispatchOffsetBytes: activeLayout.candidateDispatchOffsetBytes,
+      physicalDispatchOffsetBytes: activeLayout.physicalDispatchOffsetBytes,
+      ownerRuntime: activeOwnerRuntime
+    };
+  }
+  const releaseCalls = [];
+  const execution = {
+    schema: directoryVersion === 2
+      ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+    status: directoryVersion === 2
+      ? 'schroeder-spatial-epoch-v2-gpu-build-submitted'
+      : 'schroeder-spatial-epoch-gpu-build-submitted',
+    magic: SCHROEDER_SPATIAL_EPOCH_MAGIC,
+    abiVersion: directoryVersion === 2
+      ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      : SCHROEDER_SPATIAL_EPOCH_VERSION,
+    exactKeyWordCount: directoryVersion === 2
+      ? SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS
+      : SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    sortKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    sortMode: SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
+    sourceCount,
+    sourceCapacity: sourceCount,
+    ...(directoryVersion === 2
+      ? {
+          physicalSourceCount: sourceCount,
+          physicalSourceCapacity: sourceCount,
+          activeSourceCapacity: sourceCount,
+          reverseEncoding:
+            SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+          activeSourceView,
+          activeSourceViewBuffer
+        }
+      : {}),
+    cellCapacity: sourceCount,
+    ...executionIdentity,
     sourceFamily,
     sourceRowLayoutId,
     sourceAdapterId: SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
     exactNearQueryProfile,
     queryGeometryEvidence: exactNearQueryProfile,
-    buildOrdinal: 41,
     sortUniqueOrdinal: 41,
     layout,
     directoryBuffer,
@@ -575,7 +668,11 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     isExecutionSubmitted(candidate) {
       return candidate === execution
         && candidate.submitPerformed === true
-        && candidate.status === 'schroeder-spatial-epoch-gpu-build-submitted';
+        && candidate.status === (
+          directoryVersion === 2
+            ? 'schroeder-spatial-epoch-v2-gpu-build-submitted'
+            : 'schroeder-spatial-epoch-gpu-build-submitted'
+        );
     },
     releaseExecutionAfter(...args) {
       releaseCalls.push(args);
@@ -603,7 +700,15 @@ function sharedSpatialGenerationFixture(device, activeNodeList, {
     releaseStatus: 'spatial-epoch-generation-retained-for-consumers',
     ...generationOverrides
   };
-  return { generation, source, execution, exactNearQueryProfile, releaseCalls };
+  return {
+    generation,
+    source,
+    execution,
+    exactNearQueryProfile,
+    activeSourceView,
+    activeSourceViewBuffer,
+    releaseCalls
+  };
 }
 
 test('pressure/interface WebGPU producer packs material interface element rows', () => {
@@ -1963,6 +2068,134 @@ test('pressure/interface admits a caller-owned level-assignment spatial generati
     'interface-contact-kinematics-spatial-exact-near-submitted'
   );
   assert.equal(shared.releaseCalls.length, 0);
+});
+
+test('pressure/interface consumes directory v2 with physical identity and no fallback lookup', async () => {
+  const device = fakePressureDevice();
+  const args = canonicalPressureRunFixture(device);
+  const shared = sharedSpatialGenerationFixture(
+    device,
+    args.schroederActiveNodeList,
+    {
+      directoryVersion: 2,
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    }
+  );
+  args.schroederSpatialEpochGeneration = shared.generation;
+  args.sharedSpatialFenceAuthority = 'generation-owner';
+
+  const result = await runSphPressureInterfaceForceRowsWebGpu(args);
+  const solver = result.pressureInterfaceForceSolver;
+
+  assert.equal(shared.execution.schema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(
+    solver.schroederSpatialExactNearViewSchema,
+    ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA
+  );
+  assert.equal(solver.schroederSpatialExactNearSelected, true);
+  assert.equal(
+    solver.schroederSpatialExactNearHostAdmissionStatus,
+    'schroeder-spatial-exact-near-shared-generation-selected'
+  );
+  assert.equal(
+    solver.schroederSpatialExactNearLookupMode,
+    'exact-cell-key-binary-search-active-prefix-physical-member-csr-range'
+  );
+  assert.equal(solver.schroederSpatialExactNearDirectoryBuildCount, 0);
+  assert.equal(solver.schroederSpatialExactNearPrivateParticleBinBuildCount, 0);
+  assert.equal(solver.interfaceContactKinematicsParticleBinGridEnabled, false);
+  assert.equal(
+    device.shaderModules.some(
+      (module) => (
+        module.code
+          === sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl
+      )
+    ),
+    true
+  );
+  assert.equal(
+    device.shaderModules.some(
+      (module) => (
+        module.code === sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
+      )
+    ),
+    false
+  );
+  const paramsWrite = device.writes.find(
+    (entry) => (
+      entry.label === 'ulg-sph-pressure-interface-spatial-exact-near-params'
+    )
+  );
+  assert.ok(paramsWrite);
+  const paramsView = new DataView(paramsWrite.snapshot);
+  assert.equal(
+    paramsView.getUint32(108, true),
+    shared.execution.layout.physicalToCellPlusOneOffsetWords
+  );
+  assert.equal(
+    paramsView.getUint32(116, true),
+    shared.execution.physicalSourceCapacity
+  );
+  const exactBindGroup = device.bindGroups.find((group) => (
+    group.entries.length === 8
+    && group.entries[6]?.resource?.buffer === shared.execution.directoryBuffer
+  ));
+  assert.ok(exactBindGroup);
+  assert.equal(shared.releaseCalls.length, 0);
+});
+
+test('pressure/interface rejects a directory-v2 descriptor detached from its ActiveSource buffer', () => {
+  const device = fakePressureDevice();
+  const args = canonicalPressureRunFixture(device);
+  const shared = sharedSpatialGenerationFixture(
+    device,
+    args.schroederActiveNodeList,
+    {
+      directoryVersion: 2,
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    }
+  );
+  const spatialSource = resolveSchroederPressureInterfaceSpatialEpochSource(
+    args.schroederActiveNodeList,
+    { device, particleCount: args.sphParticleUpload.particleCount }
+  );
+  const particleSource = {
+    ...args.sphParticleUpload,
+    ready: true,
+    identityReady: true
+  };
+  const spatialProvenance =
+    resolveSchroederPressureInterfaceSpatialEpochProvenance({
+      spatialSource,
+      materialInterfaceField: args.materialInterfaceField,
+      particleSource,
+      particleCount: particleSource.particleCount,
+      requireCompleteBufferFamily: true
+    });
+  shared.execution.activeSourceViewBuffer = device.createBuffer({
+    label: 'test-detached-pressure-v2-active-source',
+    size: shared.activeSourceViewBuffer.size,
+    usage: 128 | 256
+  });
+
+  const admission = resolveSchroederPressureInterfaceSpatialEpochGeneration(
+    shared.generation,
+    {
+      device,
+      spatialSource,
+      spatialProvenance,
+      particleSource,
+      particleCount: particleSource.particleCount
+    }
+  );
+  assert.equal(admission.selected, false);
+  assert.equal(
+    admission.status,
+    'schroeder-spatial-exact-near-shared-generation-rejected-v2-authority'
+  );
+  assert.equal(admission.directoryBuildCount, 0);
 });
 
 test('pressure/interface full-readback shared generation summarizes authoritative GPU force rows', async () => {

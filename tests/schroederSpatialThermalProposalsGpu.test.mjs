@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA
@@ -11,6 +12,7 @@ import {
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_ADMITTED,
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_REJECTED,
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK,
+  SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE,
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE,
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL,
   SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE,
@@ -37,6 +39,7 @@ import {
   SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
   SCHROEDER_SPATIAL_THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD,
   SCHROEDER_SPATIAL_THERMAL_EVIDENCE_LAYOUT,
+  SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD,
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
@@ -61,6 +64,7 @@ import {
   evaluateSchroederSpatialThermalPairProposal,
   runSchroederSpatialThermalProposalWebGpu,
   schroederSpatialThermalDerivedPrepassWgsl,
+  schroederSpatialThermalProposalV2Wgsl,
   schroederSpatialThermalProposalWgsl
 } from '../src/runtime/sph/schroederSpatialThermalProposalsGpu.js';
 import {
@@ -293,10 +297,10 @@ function liveFixture(particleCount = 2, sharedDevice = null) {
   };
 }
 
-function liveActiveRankFixture(particleCount = 2) {
+function liveDirectoryV2Fixture(particleCount = 2) {
   const fixture = liveFixture(particleCount);
   const assignmentBuffer = tagWebGpuBufferDevice(fixture.device.createBuffer({
-    label: 'thermal-active-rank-level-assignment-source',
+    label: 'thermal-directory-v2-level-assignment-source',
     size: particleCount * 16 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   }), fixture.device);
@@ -328,11 +332,17 @@ function liveActiveRankFixture(particleCount = 2) {
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device: fixture.device,
     levelAssignment,
-    particleCount
+    particleCount,
+    directoryAbiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION
   });
   assert.equal(generation.selected, true, generation.reason);
   assert.equal(generation.aggregateView, null);
-  assert.ok(generation.activeRankView);
+  assert.equal(generation.activeRankView, null);
+  assert.ok(generation.activeSourceView);
+  assert.equal(
+    generation.execution.activeSourceView,
+    generation.activeSourceView
+  );
   const schroederSpatialEpochTransaction = createSchroederSpatialEpochTransaction({
     device: fixture.device,
     generation,
@@ -402,7 +412,7 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES, 104);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL, 1);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_EVIDENCE_LAYOUT.length, 16);
-  assert.equal(SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS, 9);
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS, 10);
   assert.equal(
     SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_ADMISSION_WORD,
     5
@@ -415,6 +425,10 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
   assert.equal(
     SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK,
     3
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE,
+    4
   );
   assert.equal(
     SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT[5],
@@ -434,6 +448,14 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
   assert.equal(
     SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT[8],
     'materializedActiveSourceRankCount:atomic<u32>'
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD,
+    9
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT[9],
+    'physicalTopologyMismatchCount:atomic<u32>'
   );
 });
 
@@ -516,11 +538,67 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /thermal_bulk_dormant_projection_evidence[\s\S]*thermal_active_source_rank_sidecar_word/
+    /thermal_publish_dormant_projection_rows[\s\S]*thermal_active_source_rank_sidecar_word/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*thermal_active_rank_view_source_at_ordinal\(global_id\.x, false\)/
+    /THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*thermal_active_rank_view_source_at_ordinal\([\s\S]*source_ordinal,[\s\S]*false/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn thermal_prepass_active_source_view_admitted\(\) -> bool[\s\S]*THERMAL_PREFLIGHT_ACTIVE_SOURCE_STATUS_EXACT[\s\S]*thermal_prepass_active_source_seal/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE[\s\S]*thermal_prepass_active_source_at_ordinal\(source_rank\)/
+  );
+  assert.match(
+    schroederSpatialThermalProposalV2Wgsl,
+    /SchroederSpatialExactNearExpectationV2/
+  );
+  assert.doesNotMatch(
+    schroederSpatialThermalProposalV2Wgsl,
+    /SchroederSpatialExactNearExpectationV1/
+  );
+  assert.doesNotMatch(
+    schroederSpatialThermalProposalV2Wgsl,
+    /conduction_expectation\.source_count/
+  );
+  assert.match(
+    schroederSpatialThermalProposalV2Wgsl,
+    /THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE[\s\S]*thermal_active_source_view_source_at_ordinal\(source_ordinal\)[\s\S]*thermal_traverse_particle\(lookup\.source_index/
+  );
+  assert.match(
+    schroederSpatialThermalProposalV2Wgsl,
+    /fn finalize_zero_active_projection\([\s\S]*thermal_publish_dormant_projection_rows\(0u, false\)/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn preflight_physical_topology\([\s\S]*thermal_prepass_physical_topology_row_admitted\(physical_index\)[\s\S]*THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn thermal_prepass_physical_topology_row_admitted\([\s\S]*cell_offsets_offset = preflight_spatial_directory\[30u\][\s\S]*member_begin[\s\S]*member_end[\s\S]*cell_members_offset \+ member_ordinal[\s\S]*== physical_index/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn preflight_physical_topology\([\s\S]*source_state\[physical_index \* 2u\]\.w <= 0\.0[\s\S]*row_offset \+ 4u\], bitcast<u32>\(1\.0\)[\s\S]*row_offset \+ 5u\], bitcast<u32>\(1\.0\)/
+  );
+  assert.match(
+    deriveEntryPoint,
+    /if \(!active_source_projection\) \{[\s\S]*THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn finalize_active_topology\([\s\S]*THERMAL_PREFLIGHT_PHYSICAL_TOPOLOGY_MISMATCH_WORD[\s\S]*THERMAL_PREFLIGHT_ACTIVE_MEMBER_REJECTED/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /fn resolve_budget\([\s\S]*active_source_projection[\s\S]*THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD[\s\S]*!= THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED[\s\S]*\{ return; \}/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn thermal_fail_active_projection_global_seal\(\)[\s\S]*atomicMax\(&thermal_proposals\[6u\], 1u\)[\s\S]*atomicStore\(&thermal_proposals\[7u\], 1u\)[\s\S]*thermal_evidence_add\(5u, 1u, true\)/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -624,9 +702,9 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   assert.match(schroederSpatialThermalProposalWgsl,
     /fn thermal_traverse_exact_source_rank[\s\S]*active_rank_prevalidated: bool[\s\S]*ss_exact_near_source_at_member\([\s\S]*source_rank[\s\S]*thermal_traverse_particle\([\s\S]*lookup\.source_index,[\s\S]*budget_mode,[\s\S]*0u,[\s\S]*active_rank_prevalidated/);
   assert.match(schroederSpatialThermalProposalWgsl,
-    /thermal_traverse_exact_source_rank\(global_id\.x, true, false\)/);
+    /thermal_traverse_exact_source_rank\(source_ordinal, true, false\)/);
   assert.match(schroederSpatialThermalProposalWgsl,
-    /thermal_traverse_exact_source_rank\(global_id\.x, false, false\)/);
+    /thermal_traverse_exact_source_rank\(source_ordinal, false, false\)/);
   assert.match(schroederSpatialThermalProposalWgsl,
     /thermal_traverse_particle\(global_id\.x, true, 1u, false\)/);
   assert.match(schroederSpatialThermalProposalWgsl,
@@ -705,7 +783,7 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     /global_max_temperature_bits == global_min_temperature_bits/);
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /fn thermal_uniform_completion_admitted\(\) -> bool[\s\S]*current_active_count == 0u[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE[\s\S]*expected_active_count == particle_count[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*current_active_count == expected_active_count[\s\S]*return false/
+    /fn thermal_uniform_completion_admitted\(\) -> bool[\s\S]*current_active_count == 0u[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE[\s\S]*expected_active_count == particle_count[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE[\s\S]*current_active_count == expected_active_count[\s\S]*return false/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -713,7 +791,7 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /fn thermal_record_uniform_completion\(budget_mode: bool\)[\s\S]*thermal_evidence_add\(0u, source_count, true\)[\s\S]*thermal_csr_mark_route\(THERMAL_CSR_ROUTE_UNIFORM_COMPLETION\)[\s\S]*atomicAdd\(&thermal_proposals\[15u\], source_count\)/
+    /fn thermal_record_uniform_completion\(budget_mode: bool\)[\s\S]*source_invocation_count = atomicLoad\([\s\S]*THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD[\s\S]*thermal_evidence_add\(0u, source_invocation_count, true\)[\s\S]*thermal_csr_mark_route\(THERMAL_CSR_ROUTE_UNIFORM_COMPLETION\)[\s\S]*atomicAdd\(&thermal_proposals\[15u\], source_count\)/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -729,7 +807,7 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /fn propose\([\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD[\s\S]*thermal_publish_uniform_completion_active_ordinal\(global_id\.x\)/
+    /fn propose\([\s\S]*THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK[\s\S]*THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD[\s\S]*thermal_publish_uniform_completion_active_ordinal\(source_ordinal\)/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -1026,25 +1104,61 @@ test('manufactured microscopic steam and hot-iron proposal is bounded and conser
   ) < 1e-12);
 });
 
-test('thermal proposal selects the authenticated base active-rank epoch view', async () => {
-  const fixture = liveActiveRankFixture(2);
+test('thermal proposal selects the authenticated directory-v2 ActiveSource view', async () => {
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /if \(active_source_projection\) \{\s+derive_source_count = atomicLoad\(\s+&thermal_derived\[\s+THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD\s+\]\s+\);\s+\}\s+if \(source_rank >= derive_source_count\) \{ return; \}/
+  );
+  assert.match(
+    schroederSpatialThermalProposalV2Wgsl,
+    /thermal_publish_dormant_projection_rows\(0u, true\);\s+thermal_publish_dormant_projection_rows\(0u, false\);/
+  );
+  const fixture = liveDirectoryV2Fixture(2);
   const result = runSchroederSpatialThermalProposalWebGpu({
     ...fixture,
     dtS: 0.001
   });
   assert.equal(
     result.activeSourceProjectionMode,
-    SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+    SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
   );
-  assert.equal(result.activeRankView, fixture.generation.activeRankView);
+  assert.equal(result.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+  assert.equal(result.sourceWorkIdentity, 'gpu-active-ordinal');
+  assert.equal(result.activeRankView, null);
   assert.equal(
-    result.activeRankViewAdmissionStatus,
-    'schroeder-spatial-active-rank-view-admitted-host-descriptor'
+    result.activeSourceView,
+    fixture.generation.activeSourceView
+  );
+  assert.equal(
+    result.activeSourceCountAuthority,
+    fixture.generation.execution.activeSourceCountAuthority
+  );
+  assert.equal(
+    result.activeSourceViewAdmissionStatus,
+    'schroeder-spatial-active-source-view-admitted-host-descriptor'
   );
   assert.equal(
     result.activeProjectionViewBuffer,
-    fixture.generation.activeRankView.activeRankViewBuffer
+    fixture.generation.activeSourceView.activeSourceViewBuffer
   );
+  assert.equal(
+    result.sourceWorkIndirectBuffer,
+    fixture.generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    result.sourceWorkIndirectOffsetBytes,
+    fixture.generation.activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(result.physicalTopologyWorkIdentity, 'gpu-physical-source-slot');
+  assert.equal(
+    result.physicalTopologyWorkIndirectBuffer,
+    fixture.generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    result.physicalTopologyWorkIndirectOffsetBytes,
+    fixture.generation.activeSourceView.physicalDispatchOffsetBytes
+  );
+  assert.equal(result.physicalTopologyReadbackPerformed, false);
   assert.equal(result.hierarchyTraversalCount, 2);
   assert.equal(result.preferredHierarchyTraversalCount, 1);
   assert.equal(
@@ -1086,6 +1200,14 @@ test('thermal proposal selects the authenticated base active-rank epoch view', a
   );
   assert.equal(result.thermalCandidateCsr.rowStride,
     SCHROEDER_SPATIAL_THERMAL_CSR_DEFAULT_ROW_STRIDE);
+  assert.throws(
+    () => armSchroederSpatialThermalTreeShadowForNativeTest({
+      device: fixture.device,
+      schroederSpatialThermalProposal: result
+    }),
+    /directory-v1-only/
+  );
+  const bufferCountBeforeStage = fixture.device.buffers.length;
   const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
     device: fixture.device,
     currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
@@ -1094,28 +1216,78 @@ test('thermal proposal selects the authenticated base active-rank epoch view', a
     ...result.preparedLawConfig,
     schroederSpatialThermalProposal: result
   });
+  assert.equal(fixture.device.buffers.length, bufferCountBeforeStage);
+  assert.equal(stage.proposalDispatchCount, 10);
   const encoder = fixture.device.createCommandEncoder({
-    label: 'thermal-active-rank-unit-encoder'
+    label: 'thermal-directory-v2-active-source-unit-encoder'
   });
   stage.encode(encoder);
+  assert.equal(fixture.device.buffers.length, bufferCountBeforeStage);
+  assert.equal(
+    fixture.device.buffers.some(({ usage = 0 }) => (usage & 1) !== 0),
+    false,
+    'matched-time thermal preparation and encode must not allocate MAP_READ buffers'
+  );
   fixture.device.queue.submit([encoder.finish()]);
   assert.equal(stage.markSubmittedWork(), true);
   const thermalEncoder = fixture.device.encoders.at(-1);
   const passes = thermalEncoder.passes;
   assert.deepEqual(passes.map((pass) => pass.descriptor.label), [
+    'ulg-schroeder-spatial-thermal-active-source-preflight',
+    'ulg-schroeder-spatial-thermal-physical-topology-preflight',
+    'ulg-schroeder-spatial-thermal-active-topology-finalize',
     'ulg-schroeder-spatial-thermal-derived-prepass',
     'ulg-schroeder-spatial-thermal-directional-budget',
     'ulg-schroeder-spatial-thermal-csr-validate-rows',
     'ulg-schroeder-spatial-thermal-csr-seal',
     'ulg-schroeder-spatial-thermal-budget-resolve',
-    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal'
+    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal',
+    'ulg-schroeder-spatial-thermal-zero-active-finalize'
   ]);
-  for (const index of [1, 5]) {
+  assert.deepEqual(passes[1].commands[0].dispatchIndirect, {
+    buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
+    offset: fixture.generation.activeSourceView.physicalDispatchOffsetBytes
+  });
+  const physicalPreflightEntries =
+    passes[1].bindGroup.bindGroup.entries;
+  assert.equal(
+    physicalPreflightEntries.find(({ binding }) => binding === 0)
+      ?.resource.buffer,
+    fixture.sphParticleUpload.stateBuffer
+  );
+  assert.equal(
+    physicalPreflightEntries.find(({ binding }) => binding === 8)
+      ?.resource.buffer,
+    stage.frozenDirectoryStateBuffer
+  );
+  assert.equal(
+    physicalPreflightEntries.find(({ binding }) => binding === 9)
+      ?.resource.buffer,
+    fixture.generation.execution.directoryBuffer
+  );
+  assert.equal(
+    physicalPreflightEntries.find(({ binding }) => binding === 10)
+      ?.resource.buffer,
+    fixture.generation.activeSourceView.activeSourceViewBuffer
+  );
+  for (const index of [3, 4, 7, 8]) {
     assert.deepEqual(passes[index].commands[0].dispatchIndirect, {
-      buffer: result.activeDispatchBuffer,
-      offset: 0
+      buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
+      offset: fixture.generation.activeSourceView.activeDispatchOffsetBytes
     });
   }
+  assert.deepEqual(passes[0].commands[0].dispatch, [1, 1, 1]);
+  assert.deepEqual(passes[2].commands[0].dispatch, [1, 1, 1]);
+  assert.deepEqual(passes[9].commands[0].dispatch, [1, 1, 1]);
+  const thermalV2Modules = fixture.device.shaderModules.filter(
+    ({ label }) => label?.startsWith('ulg-schroeder-spatial-thermal-')
+  );
+  assert.ok(thermalV2Modules.some(
+    ({ code }) => code.includes('SchroederSpatialExactNearExpectationV2')
+  ));
+  assert.ok(thermalV2Modules.some(
+    ({ code }) => code.includes('finalize_zero_active_projection')
+  ));
   assert.deepEqual(thermalEncoder.copies, []);
   assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
   await fixture.device.queue.onSubmittedWorkDone();
@@ -1530,6 +1702,92 @@ test('native-only source-cell tree arming is atomic and rejects unbounded storag
   assert.equal(stage.markSubmittedWork(), true);
   assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
   await fixture.device.queue.onSubmittedWorkDone();
+});
+
+test('canonical thermal generation lease spans prepare, bind, encode, and submit', async () => {
+  for (const retirementPoint of ['prepared', 'bound', 'encoded']) {
+    const fixture = liveDirectoryV2Fixture(2);
+    const result = runSchroederSpatialThermalProposalWebGpu({
+      ...fixture,
+      dtS: 0.001
+    });
+    let stage = null;
+    let encoder = null;
+    if (retirementPoint !== 'prepared') {
+      stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+        device: fixture.device,
+        currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+        currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+        thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+        ...result.preparedLawConfig,
+        schroederSpatialThermalProposal: result
+      });
+    }
+    if (retirementPoint === 'encoded') {
+      encoder = fixture.device.createCommandEncoder({
+        label: `thermal-generation-lease-${retirementPoint}`
+      });
+      stage.encode(encoder);
+    }
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(
+        fixture.generation,
+        fixture.device
+      ),
+      true
+    );
+    const pendingGenerationRelease = fixture.generation.releasePromise;
+    await Promise.resolve();
+    assert.equal(
+      fixture.generation.execution.released,
+      false,
+      `${retirementPoint}: generation retired while thermal lease was active`
+    );
+    if (!stage) {
+      stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+        device: fixture.device,
+        currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+        currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+        thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+        ...result.preparedLawConfig,
+        schroederSpatialThermalProposal: result
+      });
+    }
+    if (!encoder) {
+      encoder = fixture.device.createCommandEncoder({
+        label: `thermal-generation-lease-${retirementPoint}`
+      });
+      assert.doesNotThrow(() => stage.encode(encoder));
+    }
+    fixture.device.queue.submit([encoder.finish()]);
+    assert.equal(stage.markSubmittedWork(), true);
+    assert.equal(await pendingGenerationRelease, true);
+    assert.equal(fixture.generation.execution.released, true);
+    assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+    await fixture.device.queue.onSubmittedWorkDone();
+  }
+
+  const fixture = liveDirectoryV2Fixture(2);
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    dtS: 0.001
+  });
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      fixture.generation,
+      fixture.device
+    ),
+    true
+  );
+  const pendingGenerationRelease = fixture.generation.releasePromise;
+  await Promise.resolve();
+  assert.equal(fixture.generation.execution.released, false);
+  assert.equal(
+    result.abandonPreparedWork('prepared-generation-lease-abandonment'),
+    true
+  );
+  assert.equal(await pendingGenerationRelease, true);
+  assert.equal(fixture.generation.execution.released, true);
 });
 
 test('native-only source-cell tree lease spans bind, encode, submission, and arena release', async () => {
@@ -2184,8 +2442,8 @@ test('thermal proposal preparation defers matched-time work and returns resident
   );
   assert.ok(result.thermalCandidateCsr?.candidateCapacity >= result.particleCount);
   assert.equal(result.fullParticleReadbackPerformed, false);
-  assert.equal(result.derivedHeaderWords, 9);
-  assert.equal(result.activeDerivedByteLength, (9 + 2 * 8 + 2) * 4);
+  assert.equal(result.derivedHeaderWords, 10);
+  assert.equal(result.activeDerivedByteLength, (10 + 2 * 8 + 2) * 4);
   assert.equal(result.activeDispatchBuffer.size, 12);
   assert.equal(result.activeDispatchBuffer.usage, 396);
   assert.equal(

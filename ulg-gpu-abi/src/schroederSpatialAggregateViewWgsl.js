@@ -36,10 +36,10 @@ struct AggregateParams {
   active_member_offset_words: u32,
   active_member_capacity: u32,
   physical_capacity_words: u32,
-  pad03: u32,
-  pad04: u32,
-  pad05: u32,
-  pad06: u32,
+  directory_abi_version: u32,
+  reverse_encoding: u32,
+  active_count_authority_word: u32,
+  active_source_capacity: u32,
   pad07: u32,
   pad08: u32,
   pad09: u32,
@@ -100,7 +100,8 @@ struct AggregateRecord {
 @group(0) @binding(9) var<storage, read> sorted_indices: array<u32>;
 
 const SPATIAL_MAGIC: u32 = 0x53534531u;
-const SPATIAL_VERSION: u32 = 1u;
+const SPATIAL_VERSION_V1: u32 = 1u;
+const SPATIAL_VERSION_V2: u32 = 2u;
 const SPATIAL_STATUS_READY: u32 = 1u;
 const SPATIAL_STATUS_ADMITTED: u32 = 2u;
 const SPATIAL_STATUS_FAIL_CLOSED: u32 = 4u;
@@ -112,6 +113,7 @@ const SPATIAL_HEADER_WORDS: u32 = 48u;
 const SPATIAL_KEY_WORDS: u32 = 5u;
 const SPATIAL_SORT_BOUNDED_ATLAS_U32: u32 = 1u;
 const SPATIAL_SORT_LEXICOGRAPHIC_U32X5: u32 = 2u;
+const SPATIAL_REVERSE_CELL_PLUS_ONE: u32 = 1u;
 const SOURCE_LAYOUT_LEVEL_ASSIGNMENT: u32 = 1u;
 const SOURCE_LAYOUT_ACTIVE_NODE: u32 = 2u;
 
@@ -280,10 +282,12 @@ fn zero_dispatches() {
   dispatch_store(DISPATCH_SLOT_RECORDS, 0u);
 }
 
-fn directory_admitted() -> bool {
+fn directory_v1_admitted() -> bool {
   let bound_words = arrayLength(&spatial_directory);
   if (
     bound_words < SPATIAL_HEADER_WORDS
+    || params.directory_abi_version != SPATIAL_VERSION_V1
+    || params.reverse_encoding != 0u
     || arrayLength(&aggregate_view) < 112u
     || params.header_words != 112u
     || params.record_words != 44u
@@ -358,7 +362,7 @@ fn directory_admitted() -> bool {
     return false;
   }
   return spatial_directory[0u] == SPATIAL_MAGIC
-    && spatial_directory[1u] == SPATIAL_VERSION
+    && spatial_directory[1u] == SPATIAL_VERSION_V1
     && (flags & (SPATIAL_STATUS_READY | SPATIAL_STATUS_ADMITTED))
       == (SPATIAL_STATUS_READY | SPATIAL_STATUS_ADMITTED)
     && (flags & rejected_flags) == 0u
@@ -403,6 +407,200 @@ fn directory_admitted() -> bool {
     && arrayLength(&particle_state) >= source_count * params.state_stride_floats
     && arrayLength(&particle_thermo) >= source_count * params.thermo_stride_floats
     && arrayLength(&particle_identity) >= source_count * params.identity_stride_words;
+}
+
+fn directory_v2_admitted() -> bool {
+  let bound_words = arrayLength(&spatial_directory);
+  if (
+    bound_words < SPATIAL_HEADER_WORDS
+    || params.directory_abi_version != SPATIAL_VERSION_V2
+    || params.reverse_encoding != SPATIAL_REVERSE_CELL_PLUS_ONE
+    || params.active_count_authority_word != 18u
+    || params.source_row_layout_id != SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+    || arrayLength(&aggregate_view) < 112u
+    || params.header_words != 112u
+    || params.record_words != 44u
+    || params.tree_arity != TREE_ARITY
+    || params.workgroup_size != 64u
+    || params.prefix_bit_count != PREFIX_BIT_COUNT
+    || params.dispatch_words != 9u
+    || params.topology_mode != TOPOLOGY_MODE
+    || params.state_stride_floats != 8u
+    || params.thermo_stride_floats != 12u
+    || params.identity_stride_words != 1u
+    || params.active_member_offset_words != params.view_capacity_words
+    || params.active_member_capacity != params.source_capacity
+    || params.physical_capacity_words
+      != params.active_member_offset_words + params.active_member_capacity
+    || params.physical_capacity_words > arrayLength(&aggregate_view)
+    || arrayLength(&aggregate_dispatch) < params.dispatch_words
+  ) {
+    return false;
+  }
+  let flags = spatial_directory[2u];
+  let rejected_flags = SPATIAL_STATUS_FAIL_CLOSED
+    | SPATIAL_STATUS_INVALID_SOURCE
+    | SPATIAL_STATUS_CAPACITY_OVERFLOW;
+  let physical_count = spatial_directory[16u];
+  let physical_capacity = spatial_directory[17u];
+  let cell_count = spatial_directory[18u];
+  let cell_capacity = spatial_directory[19u];
+  let logical_required_words = spatial_directory[20u];
+  let logical_admitted_words = spatial_directory[21u];
+  let directory_capacity_words = spatial_directory[22u];
+  let cell_keys_offset_words = spatial_directory[29u];
+  let cell_offsets_offset_words = spatial_directory[30u];
+  let cell_members_offset_words = spatial_directory[31u];
+  let physical_to_cell_plus_one_offset_words = spatial_directory[32u];
+  let build_ordinal = spatial_directory[33u];
+  let active_count = spatial_directory[37u];
+  let physical_upper_bound_words = spatial_directory[47u];
+  let consumer_group_count = (cell_count + 63u) / 64u;
+  let consumer_dispatch_x = spatial_directory[42u];
+  let consumer_dispatch_y = spatial_directory[43u];
+  let consumer_dispatch_z = spatial_directory[44u];
+  let empty_dispatch = cell_count == 0u
+    && consumer_dispatch_x == 0u
+    && consumer_dispatch_y == 0u
+    && consumer_dispatch_z == 0u;
+  let live_dispatch = cell_count > 0u
+    && consumer_dispatch_x > 0u
+    && consumer_dispatch_y > 0u
+    && consumer_dispatch_z == 1u
+    && consumer_dispatch_x * consumer_dispatch_y >= consumer_group_count
+    && (consumer_dispatch_y - 1u) * consumer_dispatch_x
+      < consumer_group_count;
+  if (
+    directory_capacity_words > bound_words
+    || directory_capacity_words != params.directory_capacity_words
+    || physical_upper_bound_words < SPATIAL_HEADER_WORDS
+    || physical_upper_bound_words > directory_capacity_words
+    || logical_required_words < SPATIAL_HEADER_WORDS
+    || logical_admitted_words != logical_required_words
+    || logical_required_words > physical_upper_bound_words
+    || physical_capacity != params.source_capacity
+    || cell_capacity != params.directory_cell_capacity
+    || cell_capacity != params.cell_capacity
+    || params.active_source_capacity > physical_capacity
+    || cell_keys_offset_words != SPATIAL_HEADER_WORDS
+    || cell_capacity
+      > (directory_capacity_words - cell_keys_offset_words)
+        / SPATIAL_KEY_WORDS
+    || cell_offsets_offset_words
+      != cell_keys_offset_words + cell_capacity * SPATIAL_KEY_WORDS
+    || !range_within(
+      cell_offsets_offset_words,
+      cell_capacity + 1u,
+      directory_capacity_words
+    )
+    || cell_members_offset_words
+      != cell_offsets_offset_words + cell_capacity + 1u
+    || !range_within(
+      cell_members_offset_words,
+      physical_capacity,
+      directory_capacity_words
+    )
+    || physical_to_cell_plus_one_offset_words
+      != cell_members_offset_words + physical_capacity
+    || !range_within(
+      physical_to_cell_plus_one_offset_words,
+      physical_capacity,
+      directory_capacity_words
+    )
+    || !range_within(
+      cell_keys_offset_words,
+      cell_count * SPATIAL_KEY_WORDS,
+      physical_upper_bound_words
+    )
+    || !range_within(
+      cell_offsets_offset_words,
+      cell_count + 1u,
+      physical_upper_bound_words
+    )
+    || !range_within(
+      cell_members_offset_words,
+      active_count,
+      physical_upper_bound_words
+    )
+    || !range_within(
+      physical_to_cell_plus_one_offset_words,
+      physical_count,
+      physical_upper_bound_words
+    )
+  ) {
+    return false;
+  }
+  return spatial_directory[0u] == SPATIAL_MAGIC
+    && spatial_directory[1u] == SPATIAL_VERSION_V2
+    && (flags & (SPATIAL_STATUS_READY | SPATIAL_STATUS_ADMITTED))
+      == (SPATIAL_STATUS_READY | SPATIAL_STATUS_ADMITTED)
+    && (flags & rejected_flags) == 0u
+    && spatial_directory[3u] == params.generation_id
+    && spatial_directory[4u] == params.device_ordinal
+    && spatial_directory[5u] == params.lane_ordinal
+    && spatial_directory[6u] == params.lease_token
+    && spatial_directory[7u] == params.source_family_id
+    && spatial_directory[8u] == params.storage_generation
+    && spatial_directory[9u] == params.physics_tick
+    && spatial_directory[10u] == params.physics_substep
+    && spatial_directory[11u] == params.position_epoch
+    && spatial_directory[12u] == params.topology_epoch
+    && spatial_directory[13u] == params.chart_epoch
+    && spatial_directory[14u] == params.level_epoch
+    && spatial_directory[15u] == params.support_epoch
+    && physical_count == params.source_count
+    && physical_count > 0u
+    && physical_count <= physical_capacity
+    && active_count <= physical_count
+    && active_count <= params.active_source_capacity
+    && cell_count <= active_count
+    && (active_count == 0u) == (cell_count == 0u)
+    && cell_count <= cell_capacity
+    && cell_count <= 0x3fffffffu
+    && spatial_directory[23u] == 0u
+    && spatial_directory[24u] == 0u
+    && spatial_directory[25u] == SPATIAL_KEY_WORDS
+    && spatial_directory[26u] == SPATIAL_KEY_WORDS
+    && spatial_directory[27u] == SPATIAL_SORT_LEXICOGRAPHIC_U32X5
+    && spatial_directory[28u] == SPATIAL_HEADER_WORDS
+    && build_ordinal == params.completion_ordinal
+    && spatial_directory[34u] == build_ordinal
+    && spatial_directory[35u] == params.completion_ordinal
+    && spatial_directory[36u] == params.generation_id
+    && spatial_directory[38u] == cell_count
+    && spatial_directory[39u] != 0u
+    && spatial_directory[40u] == 0u
+    && (spatial_directory[41u] & SPATIAL_PRIMITIVE_STATUS_READY) != 0u
+    && (spatial_directory[41u] & SPATIAL_PRIMITIVE_STATUS_FAIL_CLOSED) == 0u
+    && spatial_directory[45u] == 67u
+    && spatial_directory[46u] == params.source_adapter_id
+    && spatial_directory[cell_offsets_offset_words + cell_count] == active_count
+    && (empty_dispatch || live_dispatch)
+    && arrayLength(&spatial_source_rows) >= physical_count * 16u
+    && arrayLength(&particle_state)
+      >= physical_count * params.state_stride_floats
+    && arrayLength(&particle_thermo)
+      >= physical_count * params.thermo_stride_floats
+    && arrayLength(&particle_identity)
+      >= physical_count * params.identity_stride_words;
+}
+
+fn directory_admitted() -> bool {
+  if (params.directory_abi_version == SPATIAL_VERSION_V1) {
+    return directory_v1_admitted();
+  }
+  if (params.directory_abi_version == SPATIAL_VERSION_V2) {
+    return directory_v2_admitted();
+  }
+  return false;
+}
+
+fn directory_member_count() -> u32 {
+  return select(
+    params.source_count,
+    spatial_directory[37u],
+    params.directory_abi_version == SPATIAL_VERSION_V2
+  );
 }
 
 fn replay_guard_token(cell_count: u32) -> u32 {
@@ -458,9 +656,14 @@ fn initialize_aggregate_view() {
     return;
   }
   let cell_count = spatial_directory[18u];
-  let internal_count = cell_count - 1u;
+  let internal_count = select(cell_count - 1u, 0u, cell_count == 0u);
   let record_count = cell_count + internal_count;
-  let root_record_index = select(cell_count, 0u, cell_count == 1u);
+  var root_record_index = INVALID_U32;
+  if (cell_count == 1u) {
+    root_record_index = 0u;
+  } else if (cell_count > 1u) {
+    root_record_index = cell_count;
+  }
   let record_capacity = (params.view_capacity_words - params.header_words)
     / params.record_words;
   let required_words = params.header_words + record_count * params.record_words;
@@ -513,7 +716,10 @@ fn initialize_aggregate_view() {
   store_word(H_INTERNAL_OFFSET, record_base(cell_count));
   store_word(H_INTERNAL_CAPACITY, record_capacity - params.cell_capacity);
   store_word(H_INTERNAL_COUNT, internal_count);
-  store_word(H_ROOT_OFFSET, record_base(root_record_index));
+  store_word(
+    H_ROOT_OFFSET,
+    select(0u, record_base(root_record_index), cell_count > 0u)
+  );
   store_word(H_NODE_COUNT, record_count);
   store_word(H_REQUIRED_WORDS, required_words);
   store_word(H_CAPACITY_WORDS, params.view_capacity_words);
@@ -628,8 +834,18 @@ fn morton96(cell_order: vec3<u32>) -> vec3<u32> {
 }
 
 @compute @workgroup_size(64)
-fn emit_aggregate_morton_keys(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let element_index = global_id.x;
+fn emit_aggregate_morton_keys(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let v2_group_index = workgroup_id.x
+    + workgroup_id.y * spatial_directory[42u];
+  let element_index = select(
+    global_id.x,
+    v2_group_index * params.workgroup_size + local_id.x,
+    params.directory_abi_version == SPATIAL_VERSION_V2
+  );
   if (
     load_word(H_STATUS) != 0u
     || element_index >= params.source_count
@@ -937,7 +1153,7 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_to_cell = spatial_directory[32u];
   let begin = spatial_directory[cell_offsets + cell_index];
   let end = spatial_directory[cell_offsets + cell_index + 1u];
-  if (begin >= end || end > params.source_count) {
+  if (begin >= end || end > directory_member_count()) {
     atomicAdd(&aggregate_view[H_INVALID_SOURCE_COUNT], 1u);
     return;
   }
@@ -952,9 +1168,18 @@ fn reduce_cell_leaves(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var identity_mismatch = false;
   for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
     let particle_index = spatial_directory[cell_members + cursor];
+    var reverse_matches = false;
+    if (particle_index < params.source_count) {
+      let reverse_value = spatial_directory[particle_to_cell + particle_index];
+      reverse_matches = select(
+        reverse_value == cell_index,
+        reverse_value == cell_index + 1u,
+        params.directory_abi_version == SPATIAL_VERSION_V2
+      );
+    }
     if (
       particle_index >= params.source_count
-      || spatial_directory[particle_to_cell + particle_index] != cell_index
+      || !reverse_matches
       || source_row_particle_index(particle_index) != particle_index
     ) {
       identity_mismatch = true;
@@ -1702,6 +1927,69 @@ fn authenticate_aggregate_topology(
   }
 }
 
+fn active_projection_header_complete(
+  cell_count: u32,
+  active_member_count: u32
+) -> bool {
+  return load_word(H_ACTIVE_MEMBER_MAGIC) == ACTIVE_MEMBER_MAGIC
+    && load_word(H_ACTIVE_MEMBER_VERSION) == ACTIVE_MEMBER_VERSION
+    && load_word(H_ACTIVE_MEMBER_STATUS) == 0u
+    && load_word(H_ACTIVE_MEMBER_OFFSET) == params.active_member_offset_words
+    && load_word(H_ACTIVE_MEMBER_CAPACITY) == params.active_member_capacity
+    && load_word(H_ACTIVE_MEMBER_SOURCE_COUNT) == params.source_count
+    && load_word(H_ACTIVE_MEMBER_CELL_COUNT) == cell_count
+    && load_word(H_ACTIVE_MEMBER_GENERATION_ID) == params.generation_id
+    && load_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL) == 0u
+    && load_word(H_ACTIVE_MEMBER_REPLAY_TOKEN)
+      == load_word(H_REPLAY_GUARD_TOKEN)
+    && load_word(H_ACTIVE_MEMBER_SOURCE_ADAPTER_ID) == params.source_adapter_id
+    && load_word(H_ACTIVE_MEMBER_DIRECTORY_OFFSET) == spatial_directory[31u]
+    && load_word(H_ACTIVE_MEMBER_REDUCED_CELL_COUNT) == cell_count
+    && load_word(H_ACTIVE_MEMBER_INVALID_COUNT) == 0u
+    && load_word(H_ACTIVE_MEMBER_CONSTRUCTION_MODE)
+      == ACTIVE_MEMBER_CONSTRUCTION_CELL_PREFIX
+    && load_word(H_ACTIVE_MEMBER_PHYSICAL_CAPACITY)
+      == params.physical_capacity_words
+    && load_word(H_ACTIVE_MEMBER_SOURCE_LAYOUT) == params.source_row_layout_id
+    && load_word(H_ACTIVE_MEMBER_STORAGE_GENERATION)
+      == params.storage_generation
+    && load_word(H_ACTIVE_MEMBER_FINGERPRINT) == 0u
+    && active_member_count <= params.source_count;
+}
+
+fn publish_aggregate_success(active_member_count: u32) {
+  var sealed_topology_fingerprint = fold_fingerprint(
+    load_word(H_TOPOLOGY_FINGERPRINT),
+    TOPOLOGY_FINGERPRINT_DOMAIN
+  );
+  if (sealed_topology_fingerprint == 0u) {
+    sealed_topology_fingerprint = TOPOLOGY_FINGERPRINT_DOMAIN;
+  }
+  store_word(H_TOPOLOGY_FINGERPRINT, sealed_topology_fingerprint);
+  store_word(H_COMPLETION_ORDINAL, params.completion_ordinal);
+  store_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL, params.completion_ordinal);
+  store_word(
+    H_ACTIVE_MEMBER_FINGERPRINT,
+    active_member_projection_fingerprint(active_member_count)
+  );
+  store_word(
+    H_ACTIVE_MEMBER_STATUS,
+    ACTIVE_MEMBER_STATUS_READY | ACTIVE_MEMBER_STATUS_ADMITTED
+  );
+  store_word(
+    H_TRAVERSAL_STATUS,
+    AGGREGATE_STATUS_READY
+      | AGGREGATE_STATUS_ADMITTED
+      | AGGREGATE_STATUS_TRAVERSAL_READY
+  );
+  store_word(
+    H_STATUS,
+    AGGREGATE_STATUS_READY
+      | AGGREGATE_STATUS_ADMITTED
+      | AGGREGATE_STATUS_TRAVERSAL_READY
+  );
+}
+
 @compute @workgroup_size(1)
 fn finalize_aggregate_view() {
   if (load_word(0u) != AGGREGATE_MAGIC || load_word(1u) != AGGREGATE_VERSION) {
@@ -1733,42 +2021,63 @@ fn finalize_aggregate_view() {
   let cell_count = load_word(H_CELL_COUNT);
   let internal_count = load_word(H_INTERNAL_COUNT);
   let total_record_count = load_word(H_TOTAL_RECORD_COUNT);
+  let expected_member_count = directory_member_count();
+  let active_member_count = load_word(H_ACTIVE_MEMBER_COUNT);
+  let active_projection_header_admitted = active_projection_header_complete(
+    cell_count,
+    active_member_count
+  );
+  if (cell_count == 0u) {
+    if (
+      params.directory_abi_version != SPATIAL_VERSION_V2
+      || expected_member_count != 0u
+      || load_word(H_LEAF_COUNT) != 0u
+      || internal_count != 0u
+      || total_record_count != 0u
+      || load_word(H_ROOT_RECORD_INDEX) != INVALID_U32
+      || load_word(H_EMITTED_KEY_COUNT) != 0u
+      || load_word(H_INITIALIZED_RECORD_COUNT) != 0u
+      || load_word(H_ATTEMPTED_SOURCE_COUNT) != 0u
+      || load_word(H_REDUCED_SOURCE_COUNT) != 0u
+      || load_word(H_REDUCED_LEAF_COUNT) != 0u
+      || load_word(H_BUILT_INTERNAL_COUNT) != 0u
+      || load_word(H_PARENT_ASSIGNMENT_COUNT) != 0u
+      || load_word(H_ROPE_COUNT) != 0u
+      || load_word(H_REDUCED_INTERNAL_COUNT) != 0u
+      || load_word(H_AUTHENTICATED_RECORD_COUNT) != 0u
+      || load_word(H_AUTHENTICATED_ROOT_COUNT) != 0u
+      || load_word(H_TRAVERSAL_LEAF_COVERAGE) != 0u
+      || active_member_count != 0u
+      || !active_projection_header_admitted
+    ) {
+      failure = failure | AGGREGATE_STATUS_INVALID_SOURCE;
+    }
+    if (failure != 0u) {
+      store_word(H_ACTIVE_MEMBER_STATUS, ACTIVE_MEMBER_STATUS_FAIL_CLOSED);
+      store_word(H_ACTIVE_MEMBER_FINGERPRINT, 0u);
+      store_word(H_STATUS, failure | AGGREGATE_STATUS_FAIL_CLOSED);
+      store_word(H_TRAVERSAL_STATUS, AGGREGATE_STATUS_FAIL_CLOSED);
+      zero_dispatches();
+      return;
+    }
+    publish_aggregate_success(0u);
+    return;
+  }
   let root_index = load_word(H_ROOT_RECORD_INDEX);
   let root_status = load_word(record_base(root_index) + 27u);
   let root_source_member_count = load_word(record_base(root_index) + 43u);
   let root_active_member_count = load_word(record_base(root_index) + 19u);
-  let active_member_count = load_word(H_ACTIVE_MEMBER_COUNT);
-  let active_projection_complete =
-    load_word(H_ACTIVE_MEMBER_MAGIC) == ACTIVE_MEMBER_MAGIC
-    && load_word(H_ACTIVE_MEMBER_VERSION) == ACTIVE_MEMBER_VERSION
-    && load_word(H_ACTIVE_MEMBER_STATUS) == 0u
-    && load_word(H_ACTIVE_MEMBER_OFFSET) == params.active_member_offset_words
-    && load_word(H_ACTIVE_MEMBER_CAPACITY) == params.active_member_capacity
-    && load_word(H_ACTIVE_MEMBER_SOURCE_COUNT) == params.source_count
-    && load_word(H_ACTIVE_MEMBER_CELL_COUNT) == cell_count
-    && load_word(H_ACTIVE_MEMBER_GENERATION_ID) == params.generation_id
-    && load_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL) == 0u
-    && load_word(H_ACTIVE_MEMBER_REPLAY_TOKEN)
-      == load_word(H_REPLAY_GUARD_TOKEN)
-    && load_word(H_ACTIVE_MEMBER_SOURCE_ADAPTER_ID) == params.source_adapter_id
-    && load_word(H_ACTIVE_MEMBER_DIRECTORY_OFFSET) == spatial_directory[31u]
-    && load_word(H_ACTIVE_MEMBER_REDUCED_CELL_COUNT) == cell_count
-    && load_word(H_ACTIVE_MEMBER_INVALID_COUNT) == 0u
-    && load_word(H_ACTIVE_MEMBER_CONSTRUCTION_MODE)
-      == ACTIVE_MEMBER_CONSTRUCTION_CELL_PREFIX
-    && load_word(H_ACTIVE_MEMBER_PHYSICAL_CAPACITY)
-      == params.physical_capacity_words
-    && load_word(H_ACTIVE_MEMBER_SOURCE_LAYOUT) == params.source_row_layout_id
-    && load_word(H_ACTIVE_MEMBER_STORAGE_GENERATION)
-      == params.storage_generation
-    && load_word(H_ACTIVE_MEMBER_FINGERPRINT) == 0u
+  let active_projection_complete = active_projection_header_admitted
     && active_member_count == root_active_member_count
-    && active_member_count <= params.source_count;
+    && (
+      params.directory_abi_version == SPATIAL_VERSION_V1
+      || active_member_count == expected_member_count
+    );
   if (
     load_word(H_EMITTED_KEY_COUNT) != cell_count
     || load_word(H_INITIALIZED_RECORD_COUNT) != total_record_count
-    || load_word(H_ATTEMPTED_SOURCE_COUNT) != params.source_count
-    || load_word(H_REDUCED_SOURCE_COUNT) != params.source_count
+    || load_word(H_ATTEMPTED_SOURCE_COUNT) != expected_member_count
+    || load_word(H_REDUCED_SOURCE_COUNT) != expected_member_count
     || load_word(H_REDUCED_LEAF_COUNT) != cell_count
     || load_word(H_BUILT_INTERNAL_COUNT) != internal_count
     || load_word(H_PARENT_ASSIGNMENT_COUNT) != internal_count * 2u
@@ -1777,7 +2086,7 @@ fn finalize_aggregate_view() {
     || load_word(H_AUTHENTICATED_RECORD_COUNT) != total_record_count
     || load_word(H_AUTHENTICATED_ROOT_COUNT) != 1u
     || load_word(H_TRAVERSAL_LEAF_COVERAGE) != cell_count
-    || root_source_member_count != params.source_count
+    || root_source_member_count != expected_member_count
     || !active_projection_complete
     || (root_status & (
       RECORD_STATUS_VALID
@@ -1801,36 +2110,7 @@ fn finalize_aggregate_view() {
     zero_dispatches();
     return;
   }
-  var sealed_topology_fingerprint = fold_fingerprint(
-    load_word(H_TOPOLOGY_FINGERPRINT),
-    TOPOLOGY_FINGERPRINT_DOMAIN
-  );
-  if (sealed_topology_fingerprint == 0u) {
-    sealed_topology_fingerprint = TOPOLOGY_FINGERPRINT_DOMAIN;
-  }
-  store_word(H_TOPOLOGY_FINGERPRINT, sealed_topology_fingerprint);
-  store_word(H_COMPLETION_ORDINAL, params.completion_ordinal);
-  store_word(H_ACTIVE_MEMBER_COMPLETION_ORDINAL, params.completion_ordinal);
-  store_word(
-    H_ACTIVE_MEMBER_FINGERPRINT,
-    active_member_projection_fingerprint(active_member_count)
-  );
-  store_word(
-    H_ACTIVE_MEMBER_STATUS,
-    ACTIVE_MEMBER_STATUS_READY | ACTIVE_MEMBER_STATUS_ADMITTED
-  );
-  store_word(
-    H_TRAVERSAL_STATUS,
-    AGGREGATE_STATUS_READY
-      | AGGREGATE_STATUS_ADMITTED
-      | AGGREGATE_STATUS_TRAVERSAL_READY
-  );
-  store_word(
-    H_STATUS,
-    AGGREGATE_STATUS_READY
-      | AGGREGATE_STATUS_ADMITTED
-      | AGGREGATE_STATUS_TRAVERSAL_READY
-  );
+  publish_aggregate_success(active_member_count);
 }
 `;
 
@@ -1870,15 +2150,16 @@ struct AggregateTraversalParams {
   near_field_support_scale: f32,
   opening_theta: f32,
   expected_source_count: u32,
-  pad04: u32,
-  pad05: u32,
-  pad06: u32,
+  query_work_identity: u32,
+  active_member_offset_words: u32,
+  active_member_capacity: u32,
 };
 
 @group(0) @binding(0) var<storage, read> aggregate_view: array<u32>;
 @group(0) @binding(1) var<storage, read> traversal_queries: array<f32>;
 @group(0) @binding(2) var<storage, read_write> traversal_summaries: array<u32>;
 @group(0) @binding(3) var<uniform> params: AggregateTraversalParams;
+@group(0) @binding(4) var<storage, read> active_source_view: array<u32>;
 
 const AGGREGATE_MAGIC: u32 = 0x53414731u;
 const AGGREGATE_VERSION: u32 = 2u;
@@ -1896,6 +2177,8 @@ const TRAVERSAL_TOPOLOGY_MISMATCH: u32 = 16u;
 const TRAVERSAL_INCOMPLETE_PARTITION: u32 = 32u;
 const QUERY_SOURCE_PACKED_V0: u32 = 0u;
 const QUERY_SOURCE_LEVEL_ASSIGNMENT_V0: u32 = 1u;
+const QUERY_WORK_PHYSICAL_INDEX: u32 = 0u;
+const QUERY_WORK_ACTIVE_ORDINAL: u32 = 1u;
 const PACKED_QUERY_FLOATS: u32 = 8u;
 const LEVEL_ASSIGNMENT_QUERY_FLOATS: u32 = 16u;
 const HEADER_WORDS: u32 = 112u;
@@ -1905,6 +2188,15 @@ const PREFIX_BIT_COUNT: u32 = 160u;
 const TOPOLOGY_MODE: u32 = 2u;
 const INVALID_U32: u32 = 0xffffffffu;
 const MAX_F32: f32 = 3.402823e38;
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_READY_ADMITTED: u32 = 3u;
+const ACTIVE_SOURCE_REJECTED_MASK: u32 = 252u;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = 64u;
+const ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD: u32 = 48u;
+const ACTIVE_MEMBER_MAGIC: u32 = 0x53414d31u;
+const ACTIVE_MEMBER_VERSION: u32 = 1u;
+const ACTIVE_MEMBER_READY_ADMITTED: u32 = 3u;
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= MAX_F32;
@@ -1992,13 +2284,17 @@ fn fail_summary(base: u32, query_index: u32, status: u32) {
 }
 
 fn aggregate_admitted() -> bool {
+  if (
+    arrayLength(&aggregate_view) < HEADER_WORDS
+    || params.aggregate_capacity_words > arrayLength(&aggregate_view)
+  ) {
+    return false;
+  }
   let total_record_count = aggregate_view[54u];
   let root_record_index = aggregate_view[53u];
-  let root_record_base = record_base(root_record_index);
+  let leaf_count = aggregate_view[23u];
   let replay_token = replay_guard_token(aggregate_view[18u]);
-  return arrayLength(&aggregate_view) >= HEADER_WORDS
-    && params.aggregate_capacity_words <= arrayLength(&aggregate_view)
-    && aggregate_view[0u] == AGGREGATE_MAGIC
+  let common_admitted = aggregate_view[0u] == AGGREGATE_MAGIC
     && aggregate_view[1u] == AGGREGATE_VERSION
     && (aggregate_view[2u] & AGGREGATE_READY_ADMITTED_TRAVERSAL)
       == AGGREGATE_READY_ADMITTED_TRAVERSAL
@@ -2024,11 +2320,7 @@ fn aggregate_admitted() -> bool {
     && aggregate_view[40u] == params.completion_ordinal
     && aggregate_view[51u] == TOPOLOGY_MODE
     && aggregate_view[52u] == PREFIX_BIT_COUNT
-    && root_record_index < total_record_count
-    && root_record_base + 43u < params.aggregate_capacity_words
-    && aggregate_view[root_record_base + 43u] == params.expected_source_count
-    && aggregate_view[root_record_base + 19u] <= params.expected_source_count
-    && aggregate_view[55u] + aggregate_view[23u] == total_record_count
+    && aggregate_view[55u] + leaf_count == total_record_count
     && (
       params.expected_topology_fingerprint == 0u
       || aggregate_view[56u] == params.expected_topology_fingerprint
@@ -2053,6 +2345,148 @@ fn aggregate_admitted() -> bool {
       params.expected_replay_guard_token == 0u
       || aggregate_view[62u] == params.expected_replay_guard_token
     );
+  if (!common_admitted) {
+    return false;
+  }
+  if (leaf_count == 0u) {
+    return params.query_work_identity == QUERY_WORK_ACTIVE_ORDINAL
+      && aggregate_view[18u] == 0u
+      && aggregate_view[27u] == 0u
+      && total_record_count == 0u
+      && root_record_index == INVALID_U32
+      && aggregate_view[28u] == 0u
+      && aggregate_view[29u] == 0u
+      && aggregate_view[36u] == 0u
+      && aggregate_view[37u] == 0u
+      && aggregate_view[38u] == 0u
+      && aggregate_view[39u] == 0u
+      && aggregate_view[58u] == 0u
+      && aggregate_view[96u] == 0u
+      && aggregate_view[97u] == params.expected_source_count;
+  }
+  if (
+    root_record_index >= total_record_count
+    || record_base(root_record_index) + 43u
+      >= params.aggregate_capacity_words
+  ) {
+    return false;
+  }
+  let root_record_base = record_base(root_record_index);
+  let expected_member_count = select(
+    params.expected_source_count,
+    aggregate_view[96u],
+    params.query_work_identity == QUERY_WORK_ACTIVE_ORDINAL
+  );
+  return expected_member_count > 0u
+    && aggregate_view[root_record_base + 43u] == expected_member_count
+    && aggregate_view[root_record_base + 19u] <= expected_member_count;
+}
+
+fn active_source_view_admitted() -> bool {
+  if (
+    params.query_work_identity != QUERY_WORK_ACTIVE_ORDINAL
+    || arrayLength(&active_source_view) < ACTIVE_SOURCE_HEADER_WORDS
+  ) {
+    return false;
+  }
+  let status = active_source_view[2u];
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  let dispatch_x = active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD];
+  let dispatch_y =
+    active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD + 1u];
+  let dispatch_z =
+    active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD + 2u];
+  let group_count = (active_count + 63u) / 64u;
+  var dispatch_admitted = active_count == 0u
+    && dispatch_x == 0u
+    && dispatch_y == 1u
+    && dispatch_z == 1u;
+  if (active_count > 0u) {
+    dispatch_admitted = dispatch_x > 0u
+      && dispatch_y > 0u
+      && dispatch_z == 1u
+      && dispatch_x * dispatch_y >= group_count
+      && (dispatch_y - 1u) * dispatch_x < group_count;
+  }
+  return active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_READY_ADMITTED)
+      == ACTIVE_SOURCE_READY_ADMITTED
+    && (status & ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && physical_count == params.expected_source_count
+    && physical_count > 0u
+    && physical_capacity == aggregate_view[17u]
+    && active_count <= physical_count
+    && active_count <= active_capacity
+    && active_capacity <= physical_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u] == QUERY_SOURCE_LEVEL_ASSIGNMENT_V0
+    && active_source_view[24u] == LEVEL_ASSIGNMENT_QUERY_FLOATS
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= arrayLength(&active_source_view)
+    && active_source_view[29u] == params.completion_ordinal
+    && active_source_view[30u] == params.completion_ordinal
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[37u] == 64u
+    && active_source_view[40u] == ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD
+    && active_source_view[47u] != 0u
+    && dispatch_admitted
+    && aggregate_view[91u] == ACTIVE_MEMBER_MAGIC
+    && aggregate_view[92u] == ACTIVE_MEMBER_VERSION
+    && aggregate_view[93u] == ACTIVE_MEMBER_READY_ADMITTED
+    && aggregate_view[94u] == params.active_member_offset_words
+    && aggregate_view[95u] == params.active_member_capacity
+    && aggregate_view[96u] == active_count
+    && aggregate_view[97u] == physical_count
+    && aggregate_view[99u] == params.generation_id
+    && aggregate_view[100u] == params.completion_ordinal
+    && aggregate_view[107u] == params.aggregate_capacity_words
+      + params.active_member_capacity
+    && aggregate_view[109u] == params.storage_generation
+    && aggregate_view[110u] != 0u
+    && params.active_member_offset_words == params.aggregate_capacity_words
+    && params.active_member_capacity == physical_capacity
+    && params.active_member_offset_words + params.active_member_capacity
+      <= arrayLength(&aggregate_view);
+}
+
+fn active_source_contains_physical(physical_source: u32) -> bool {
+  if (physical_source >= params.expected_source_count) {
+    return false;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let authority_active_ordinal =
+    active_source_view[physical_to_active + physical_source];
+  return authority_active_ordinal < active_source_view[18u]
+    && active_source_view[active_to_physical + authority_active_ordinal]
+      == physical_source;
 }
 
 fn squared_distance_to_aabb(
@@ -2065,8 +2499,42 @@ fn squared_distance_to_aabb(
 }
 
 @compute @workgroup_size(64)
-fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let query_index = global_id.x;
+fn traverse_aggregate_view(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  var query_index = global_id.x;
+  if (params.query_work_identity == QUERY_WORK_ACTIVE_ORDINAL) {
+    if (!active_source_view_admitted()) {
+      return;
+    }
+    let linear_group = workgroup_id.x
+      + workgroup_id.y
+        * active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD];
+    let active_ordinal = linear_group * 64u + local_id.x;
+    if (active_ordinal >= active_source_view[18u]) {
+      return;
+    }
+    let projected_physical_source =
+      aggregate_view[params.active_member_offset_words + active_ordinal];
+    if (!active_source_contains_physical(projected_physical_source)) {
+      let authority_physical_source = active_source_view[
+        active_source_view[25u] + active_ordinal
+      ];
+      if (authority_physical_source < params.query_count) {
+        fail_summary(
+          authority_physical_source * params.summary_stride_words,
+          authority_physical_source,
+          TRAVERSAL_IDENTITY_MISMATCH
+        );
+      }
+      return;
+    }
+    query_index = projected_physical_source;
+  } else if (params.query_work_identity != QUERY_WORK_PHYSICAL_INDEX) {
+    return;
+  }
   if (query_index >= params.query_count) {
     return;
   }
@@ -2128,6 +2596,11 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
   }
   let total_record_count = aggregate_view[54u];
   let leaf_count = aggregate_view[23u];
+  let aggregate_member_count = select(
+    params.expected_source_count,
+    aggregate_view[96u],
+    params.query_work_identity == QUERY_WORK_ACTIVE_ORDINAL
+  );
   var record_index = aggregate_view[53u];
   var visited_count = 0u;
   var accepted_far_count = 0u;
@@ -2172,7 +2645,7 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       || rank_begin >= rank_end
       || rank_end > leaf_count
       || source_member_count == 0u
-      || source_member_count > params.expected_source_count
+      || source_member_count > aggregate_member_count
       || particle_count > source_member_count
       || aggregate_view[base + 41u] != topology_fingerprint(record_index)
       || (escape_index != INVALID_U32 && escape_index >= total_record_count)
@@ -2185,6 +2658,7 @@ fn traverse_aggregate_view(@builtin(global_invocation_id) global_id: vec3<u32>) 
       let source_end = aggregate_view[base + 34u];
       if (
         source_begin >= source_end
+        || source_end > aggregate_member_count
         || source_member_count != source_end - source_begin
       ) {
         malformed = true;

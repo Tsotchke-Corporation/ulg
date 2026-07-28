@@ -1,19 +1,25 @@
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_WORKGROUP_SIZE,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA,
   createSchroederSpatialExactNearCellTreeLayout,
-  createSchroederSpatialExactNearCellTreePlan
+  createSchroederSpatialExactNearCellTreePlan,
+  createSchroederSpatialExactNearCellTreeV2Plan
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearCellTree.js';
 import {
+  schroederSpatialExactNearCellTreeV2Wgsl,
   schroederSpatialExactNearCellTreeWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearCellTreeWgsl.js';
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
-  createSchroederSpatialExactNearExpectationV1Data
+  createSchroederSpatialExactNearExpectationV1Data,
+  createSchroederSpatialExactNearExpectationV2Data
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import {
-  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  validateSchroederSpatialEpochV2ConsumerDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   tagWebGpuBufferDevice,
@@ -79,6 +85,22 @@ function checkBufferLimit(device, byteLength, label) {
   }
 }
 
+function spatialExecutionVersion(spatialExecution) {
+  if (spatialExecution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA) {
+    return 1;
+  }
+  if (spatialExecution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA) {
+    return 2;
+  }
+  return 0;
+}
+
+function cellTreeSchemaForSpatialExecution(spatialExecution) {
+  return spatialExecutionVersion(spatialExecution) === 2
+    ? ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA
+    : ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA;
+}
+
 function assertOwnedSpatialExecution(spatialExecution, device, maxSourceCount, cellCapacity) {
   let owned = false;
   try {
@@ -86,26 +108,114 @@ function assertOwnedSpatialExecution(spatialExecution, device, maxSourceCount, c
   } catch {
     owned = false;
   }
-  if (
-    spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
-    || spatialExecution?.released === true
-    || !owned
-    || ![
-      'schroeder-spatial-epoch-gpu-encoded',
-      'schroeder-spatial-epoch-gpu-build-submitted'
-    ].includes(spatialExecution.status)
-    || spatialExecution.sourceCapacity !== maxSourceCount
-    || spatialExecution.layout?.cellCapacity !== cellCapacity
-    || !spatialExecution.directoryBuffer
-    || !webGpuBufferMatchesDevice(spatialExecution.directoryBuffer, device)
-  ) {
+  const version = spatialExecutionVersion(spatialExecution);
+  const physicalSourceCapacity = version === 2
+    ? (
+        spatialExecution?.physicalSourceCapacity
+          ?? spatialExecution?.sourceCapacity
+      )
+    : spatialExecution?.sourceCapacity;
+  const admittedStatuses = [
+    'schroeder-spatial-epoch-gpu-encoded',
+    'schroeder-spatial-epoch-gpu-build-submitted',
+    'schroeder-spatial-epoch-v2-gpu-encoded',
+    'schroeder-spatial-epoch-v2-gpu-build-submitted'
+  ];
+  const rejectionReasons = [
+    ...(version === 0 ? ['schema'] : []),
+    ...(spatialExecution?.released === true ? ['released'] : []),
+    ...(!owned ? ['ownership'] : []),
+    ...(!admittedStatuses.includes(spatialExecution?.status)
+      ? [`status:${spatialExecution?.status ?? 'missing'}`]
+      : []),
+    ...(physicalSourceCapacity !== maxSourceCount
+      ? [`physical-capacity:${physicalSourceCapacity}/${maxSourceCount}`]
+      : []),
+    ...(spatialExecution?.layout?.cellCapacity !== cellCapacity
+      ? [
+          `cell-capacity:${spatialExecution?.layout?.cellCapacity}`
+            + `/${cellCapacity}`
+        ]
+      : []),
+    ...(!spatialExecution?.directoryBuffer ? ['directory-buffer'] : []),
+    ...(
+      spatialExecution?.directoryBuffer
+      && !webGpuBufferMatchesDevice(spatialExecution.directoryBuffer, device)
+        ? ['directory-device']
+        : []
+    )
+  ];
+  if (rejectionReasons.length > 0) {
     throw new TypeError(
       'exact-near cell tree requires one exact live canonical spatial execution'
+        + ` (${rejectionReasons.join(', ')})`
     );
   }
+  if (version === 2) {
+    const admission = validateSchroederSpatialEpochV2ConsumerDescriptor(
+      spatialExecution,
+      { deviceId: webGpuDeviceId(device) }
+    );
+    if (
+      admission.admitted !== true
+      && !(
+        admission.compatible === true
+        && admission.hostAuthenticated === true
+        && admission.status
+          === 'schroeder-spatial-epoch-v2-gpu-admission-unproven'
+      )
+    ) {
+      throw new TypeError(
+        `exact-near cell tree rejected spatial v2 authority: ${admission.status}`
+      );
+    }
+    if (
+      spatialExecution.activeSourceViewBuffer
+        !== admission.activeSourceCountAuthority?.buffer
+      || !webGpuBufferMatchesDevice(
+        admission.activeSourceCountAuthority?.buffer,
+        device
+      )
+    ) {
+      throw new TypeError(
+        'exact-near cell tree requires the exact same-device v2 ActiveSource authority'
+      );
+    }
+  }
+  return version;
 }
 
 function planForSpatialExecution(spatialExecution) {
+  if (spatialExecutionVersion(spatialExecution) === 2) {
+    return createSchroederSpatialExactNearCellTreeV2Plan({
+      physicalSourceCount:
+        spatialExecution.physicalSourceCount ?? spatialExecution.sourceCount,
+      physicalSourceCapacity:
+        spatialExecution.physicalSourceCapacity
+          ?? spatialExecution.sourceCapacity,
+      cellCapacity: spatialExecution.layout.cellCapacity,
+      generationId: spatialExecution.generationId,
+      deviceOrdinal: spatialExecution.deviceOrdinal,
+      laneOrdinal: spatialExecution.laneOrdinal,
+      leaseToken: spatialExecution.leaseToken,
+      sourceFamilyId: spatialExecution.sourceFamilyId,
+      storageGeneration: spatialExecution.storageGeneration,
+      physicsTick: spatialExecution.physicsTick,
+      physicsSubstep: spatialExecution.physicsSubstep,
+      positionEpoch: spatialExecution.positionEpoch,
+      topologyEpoch: spatialExecution.topologyEpoch,
+      chartEpoch: spatialExecution.chartEpoch,
+      levelEpoch: spatialExecution.levelEpoch,
+      supportEpoch: spatialExecution.supportEpoch,
+      directoryCapacityWords: spatialExecution.layout.wordLength,
+      cellKeysOffsetWords: spatialExecution.layout.cellKeysOffsetWords,
+      cellOffsetsOffsetWords: spatialExecution.layout.cellOffsetsOffsetWords,
+      cellMembersOffsetWords: spatialExecution.layout.cellMembersOffsetWords,
+      physicalToCellPlusOneOffsetWords:
+        spatialExecution.layout.physicalToCellPlusOneOffsetWords,
+      completionOrdinal: spatialExecution.buildOrdinal
+    });
+  }
   return createSchroederSpatialExactNearCellTreePlan({
     sourceCount: spatialExecution.sourceCount,
     sourceCapacity: spatialExecution.sourceCapacity,
@@ -144,8 +254,7 @@ function expectationDataForSpatialExecution(spatialExecution, supportProfileId) 
       'exact-near cell tree requires the canonical execution query-geometry profile'
     );
   }
-  return createSchroederSpatialExactNearExpectationV1Data({
-    sourceCount: spatialExecution.sourceCount,
+  const common = {
     derivationEnabled: true,
     supportProfileId,
     chartId: spatialExecution.queryChartId,
@@ -168,10 +277,26 @@ function expectationDataForSpatialExecution(spatialExecution, supportProfileId) 
     cellKeysOffsetWords: spatialExecution.layout.cellKeysOffsetWords,
     cellOffsetsOffsetWords: spatialExecution.layout.cellOffsetsOffsetWords,
     cellMembersOffsetWords: spatialExecution.layout.cellMembersOffsetWords,
-    particleToCellOffsetWords: spatialExecution.layout.particleToCellOffsetWords,
     directoryCapacityWords: spatialExecution.layout.wordLength,
-    sourceCapacity: spatialExecution.sourceCapacity,
     cellCapacity: spatialExecution.layout.cellCapacity
+  };
+  if (spatialExecutionVersion(spatialExecution) === 2) {
+    return createSchroederSpatialExactNearExpectationV2Data({
+      ...common,
+      physicalSourceCount:
+        spatialExecution.physicalSourceCount ?? spatialExecution.sourceCount,
+      physicalToCellPlusOneOffsetWords:
+        spatialExecution.layout.physicalToCellPlusOneOffsetWords,
+      physicalSourceCapacity:
+        spatialExecution.physicalSourceCapacity
+          ?? spatialExecution.sourceCapacity
+    });
+  }
+  return createSchroederSpatialExactNearExpectationV1Data({
+    ...common,
+    sourceCount: spatialExecution.sourceCount,
+    particleToCellOffsetWords: spatialExecution.layout.particleToCellOffsetWords,
+    sourceCapacity: spatialExecution.sourceCapacity
   });
 }
 
@@ -238,31 +363,37 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     throw new RangeError('exact-near cell tree leaf dispatch exceeds the WebGPU limit');
   }
 
-  const module = device.createShaderModule({
-    label: `${label}-shader`,
-    code: schroederSpatialExactNearCellTreeWgsl
-  });
-  const pipelines = Object.freeze({
-    initialize: device.createComputePipeline({
-      label: `${label}-initialize-pipeline`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'initialize_exact_near_cell_tree' }
-    }),
-    leaves: device.createComputePipeline({
-      label: `${label}-leaves-pipeline`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'build_exact_near_cell_tree_leaves' }
-    }),
-    reduce: device.createComputePipeline({
-      label: `${label}-reduce-pipeline`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'reduce_exact_near_cell_tree_level' }
-    }),
-    finalize: device.createComputePipeline({
-      label: `${label}-finalize-pipeline`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'finalize_exact_near_cell_tree' }
-    })
+  function createPipelines(version, code) {
+    const module = device.createShaderModule({
+      label: `${label}-v${version}-shader`,
+      code
+    });
+    return Object.freeze({
+      initialize: device.createComputePipeline({
+        label: `${label}-v${version}-initialize-pipeline`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'initialize_exact_near_cell_tree' }
+      }),
+      leaves: device.createComputePipeline({
+        label: `${label}-v${version}-leaves-pipeline`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'build_exact_near_cell_tree_leaves' }
+      }),
+      reduce: device.createComputePipeline({
+        label: `${label}-v${version}-reduce-pipeline`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'reduce_exact_near_cell_tree_level' }
+      }),
+      finalize: device.createComputePipeline({
+        label: `${label}-v${version}-finalize-pipeline`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'finalize_exact_near_cell_tree' }
+      })
+    });
+  }
+  const pipelineSets = Object.freeze({
+    1: createPipelines(1, schroederSpatialExactNearCellTreeWgsl),
+    2: createPipelines(2, schroederSpatialExactNearCellTreeV2Wgsl)
   });
 
   const deviceId = webGpuDeviceId(device);
@@ -350,7 +481,10 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
       || ownership.runtime !== runtime
       || ownership.arena.inUse !== true
       || ownership.arena.token !== ownership.token
-      || execution?.schema !== ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA
+      || ![
+        ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA,
+        ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA
+      ].includes(execution?.schema)
       || execution?.ownerRuntime !== runtime
       || execution?.deviceId !== deviceId
       || execution?.arenaIndex !== ownership.arena.arenaIndex
@@ -648,12 +782,13 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     supportProfileId = SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1
   } = {}) {
     assertEncoder(encoder);
-    assertOwnedSpatialExecution(
+    const spatialVersion = assertOwnedSpatialExecution(
       spatialExecution,
       device,
       resolvedMaxSourceCount,
       resolvedCellCapacity
     );
+    const pipelines = pipelineSets[spatialVersion];
     const plan = planForSpatialExecution(spatialExecution);
     const expectationData = expectationDataForSpatialExecution(
       spatialExecution,
@@ -748,7 +883,7 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
       );
       const execution = {
         ...plan,
-        schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA,
+        schema: cellTreeSchemaForSpatialExecution(spatialExecution),
         status: 'schroeder-spatial-exact-near-cell-tree-encoded',
         ready: true,
         backend: 'webgpu',
@@ -885,7 +1020,7 @@ export function resolveSchroederSpatialExactNearCellTreeForConsumer(
   if (
     !owned
     || !submitted
-    || cellTree?.schema !== ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA
+    || cellTree?.schema !== cellTreeSchemaForSpatialExecution(spatialExecution)
     || cellTree?.status !== 'schroeder-spatial-exact-near-cell-tree-build-submitted'
     || cellTree?.released === true
     || (consumerLease != null && !leased)

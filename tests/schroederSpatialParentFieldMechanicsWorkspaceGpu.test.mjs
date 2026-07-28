@@ -1384,6 +1384,54 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           floats: new Float32Array(bytes)
         };
       };
+      const preP2gDirectoryRead = await readWords(
+        generation.execution.directoryBuffer,
+        Math.min(
+          generation.execution.directoryBuffer.size,
+          96 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-directory-readback'
+      );
+      const preP2gActiveSourceRead = await readWords(
+        generation.execution.activeSourceView.activeSourceViewBuffer,
+        Math.min(
+          generation.execution.activeSourceView.activeSourceViewBuffer.size,
+          96 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-active-source-readback'
+      );
+      const preP2gFineMechanicsRead = await readWords(
+        generation.mechanicsLevelViews[0].mechanicsView.mechanicsViewBuffer,
+        Math.min(
+          generation.mechanicsLevelViews[0].mechanicsView.mechanicsViewBuffer.size,
+          96 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-fine-mechanics-readback'
+      );
+      const preP2gCoarseMechanicsRead = await readWords(
+        generation.mechanicsLevelViews[1].mechanicsView.mechanicsViewBuffer,
+        Math.min(
+          generation.mechanicsLevelViews[1].mechanicsView.mechanicsViewBuffer.size,
+          96 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-coarse-mechanics-readback'
+      );
+      const preP2gFineFieldRead = await readWords(
+        generation.parentFieldView.fineFieldView.fieldViewBuffer,
+        Math.min(
+          generation.parentFieldView.fineFieldView.fieldViewBuffer.size,
+          80 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-fine-field-readback'
+      );
+      const preP2gCoarseFieldRead = await readWords(
+        generation.parentFieldView.coarseFieldView.fieldViewBuffer,
+        Math.min(
+          generation.parentFieldView.coarseFieldView.fieldViewBuffer.size,
+          80 * Uint32Array.BYTES_PER_ELEMENT
+        ),
+        'native-parent-mechanics-pre-p2g-coarse-field-readback'
+      );
       const phaseVolumeInterfaceProposalRead = m0Only
         ? await readWords(
             phaseVolumeInterfaceProposal.controlBuffer,
@@ -1562,6 +1610,14 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           phaseVolumeReceipts: {
             fineHeader: Array.from(finePhaseVolumeReceiptRead.words),
             coarseHeader: Array.from(coarsePhaseVolumeReceiptRead.words)
+          },
+          preP2g: {
+            directory: Array.from(preP2gDirectoryRead.words),
+            activeSource: Array.from(preP2gActiveSourceRead.words),
+            fineMechanics: Array.from(preP2gFineMechanicsRead.words),
+            coarseMechanics: Array.from(preP2gCoarseMechanicsRead.words),
+            fineField: Array.from(preP2gFineFieldRead.words),
+            coarseField: Array.from(preP2gCoarseFieldRead.words)
           },
           malformed,
           validationError: validationError?.message || null,
@@ -2619,6 +2675,14 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         coarseUpdateInPlace: coarseUpdate.fieldStateUpdatedInPlace,
         coarseUpdateSubmittedInPlace:
           coarseUpdate.fieldStateUpdateSubmittedInPlace,
+        preP2g: {
+          directory: Array.from(preP2gDirectoryRead.words),
+          activeSource: Array.from(preP2gActiveSourceRead.words),
+          fineMechanics: Array.from(preP2gFineMechanicsRead.words),
+          coarseMechanics: Array.from(preP2gCoarseMechanicsRead.words),
+          fineField: Array.from(preP2gFineFieldRead.words),
+          coarseField: Array.from(preP2gCoarseFieldRead.words)
+        },
         p2gAllocationEvidence,
         validationError: validationError?.message || null,
         errors
@@ -2766,7 +2830,10 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
     assert.equal(interfaceProposal.header[55], 64, JSON.stringify(native));
     const expectedMasks = {
       fineActiveEnd: { fineMask: 1 << 12, coarseMask: 0 },
-      coarseCapacityEnd: { fineMask: 0, coarseMask: 1 << 13 },
+      coarseCapacityEnd: {
+        fineMask: 0,
+        coarseMask: (1 << 13) | (1 << 14)
+      },
       fineKeyOffset: {
         fineMask: (1 << 9) | (1 << 10),
         coarseMask: 0

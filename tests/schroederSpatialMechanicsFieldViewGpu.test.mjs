@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
@@ -14,8 +15,26 @@ import {
   validateSchroederSpatialMechanicsFieldViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  schroederSpatialMechanicsFieldViewV2Wgsl,
   schroederSpatialMechanicsFieldViewWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldViewWgsl.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  createSchroederSpatialActiveSourceViewLayout
+} from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  createSchroederSpatialEpochV2Layout
+} from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+  ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA,
+  createSchroederSpatialMechanicsViewPlan
+} from '../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
 import {
   createSchroederSpatialMechanicsFieldViewGpu
 } from '../src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js';
@@ -23,8 +42,13 @@ import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  tagWebGpuBufferDevice
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_MECHANICS_FIELD_VIEW === '1';
+const RUN_NATIVE_V2_COMPILE =
+  process.env.ULG_RUN_NATIVE_MECHANICS_FIELD_V2_COMPILE === '1';
 const NATIVE_BASE_URL = process.env.ULG_MECHANICS_FIELD_VIEW_BASE_URL
   || 'https://127.0.0.1:5174/';
 
@@ -143,6 +167,197 @@ function createFakeDevice({
     }
   };
   return device;
+}
+
+function createOwnedTestBuffer(device, descriptor) {
+  return tagWebGpuBufferDevice(device.createBuffer(descriptor), device);
+}
+
+function createDirectoryV2MechanicsParent(device, {
+  physicalSourceCount = 4,
+  physicalSourceCapacity = physicalSourceCount,
+  buildOrdinal = 17
+} = {}) {
+  const sourceBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-source',
+    size: physicalSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const identityBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-identity',
+    size: physicalSourceCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const identity = Object.freeze({
+    generationId: 41,
+    deviceOrdinal: 2,
+    laneOrdinal: 3,
+    leaseToken: 5,
+    sourceFamilyId: 7,
+    storageGeneration: 11,
+    physicsTick: 13,
+    physicsSubstep: 0,
+    positionEpoch: 17,
+    topologyEpoch: 19,
+    chartEpoch: 23,
+    levelEpoch: 29,
+    supportEpoch: 31
+  });
+  const activeLayout = createSchroederSpatialActiveSourceViewLayout({
+    physicalSourceCapacity,
+    activeSourceCapacity: physicalSourceCapacity
+  });
+  const activeSourceViewBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-active-source-view',
+    size: activeLayout.byteLength,
+    usage: 128 | 256
+  });
+  let activeSourceView;
+  const activeOwner = {
+    ownsExecution(execution) {
+      return execution === activeSourceView;
+    }
+  };
+  activeSourceView = {
+    schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+    status: 'schroeder-spatial-active-source-view-gpu-encoded',
+    ready: true,
+    selected: true,
+    submitPerformed: false,
+    sourceBuffer,
+    activeSourceViewBuffer,
+    layout: activeLayout,
+    physicalSourceCount,
+    physicalSourceCapacity,
+    activeSourceCapacity: physicalSourceCapacity,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    sourceRowStrideFloats: 16,
+    ...identity,
+    buildOrdinal,
+    sourceFingerprint: 0x1234_5678,
+    activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+    candidateDispatchOffsetBytes: activeLayout.candidateDispatchOffsetBytes,
+    physicalDispatchOffsetBytes: activeLayout.physicalDispatchOffsetBytes,
+    ownerRuntime: activeOwner
+  };
+  const activeSourceCountAuthority = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+    activeSourceView,
+    buffer: activeSourceViewBuffer,
+    offsetWords: 18,
+    offsetBytes: 18 * Uint32Array.BYTES_PER_ELEMENT,
+    capacity: activeSourceView.activeSourceCapacity,
+    residency: 'gpu-only'
+  });
+  const directoryLayout = createSchroederSpatialEpochV2Layout({
+    physicalSourceCapacity,
+    activeSourceCapacity: physicalSourceCapacity,
+    cellCapacity: physicalSourceCapacity
+  });
+  const directoryBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-directory',
+    size: directoryLayout.byteLength,
+    usage: 128
+  });
+  let spatialExecution;
+  const spatialOwner = {
+    ownsExecution(execution) {
+      return execution === spatialExecution;
+    }
+  };
+  spatialExecution = {
+    schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    status: 'schroeder-spatial-epoch-v2-gpu-encoded',
+    abiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+    submitPerformed: false,
+    sourceBuffer,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    sourceRowStrideFloats: 16,
+    physicalSourceCount,
+    physicalSourceCapacity,
+    activeSourceCapacity: physicalSourceCapacity,
+    ...identity,
+    buildOrdinal,
+    layout: directoryLayout,
+    directoryBuffer,
+    activeSourceView,
+    activeSourceViewBuffer,
+    activeSourceCountAuthority,
+    ownerRuntime: spatialOwner
+  };
+  const parentPlan = createSchroederSpatialMechanicsViewPlan({
+    sourceCount: physicalSourceCount,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    directoryAbiVersion:
+      SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+    selectedLevel: 0,
+    gridNodeCount: 8,
+    gridDims: [2, 2, 2],
+    gridShift: 1,
+    gridSpacingM: 0.25,
+    ...identity,
+    completionOrdinal: buildOrdinal
+  });
+  const mechanicsViewBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-parent-mechanics-view',
+    size: parentPlan.layout.byteLength,
+    usage: 128 | 256
+  });
+  let parentMechanicsView;
+  let parentSubmitted = false;
+  const parentOwner = {
+    ownsExecution(execution) {
+      return execution === parentMechanicsView;
+    },
+    isExecutionSubmitted(execution) {
+      return execution === parentMechanicsView && parentSubmitted;
+    }
+  };
+  parentMechanicsView = {
+    ...parentPlan,
+    schema: ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA,
+    status: 'schroeder-spatial-mechanics-view-gpu-encoded',
+    submitPerformed: false,
+    released: false,
+    sourceBuffer,
+    sourceAuthorityVersion:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
+    directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    directoryAbiVersion:
+      SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+    sourceWorkIdentity:
+      SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+    physicalSourceCount,
+    spatialExecution,
+    directoryBuffer,
+    activeSourceView,
+    activeSourceViewBuffer,
+    activeSourceCountAuthority,
+    activeSourceDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+    mechanicsViewBuffer,
+    indirectDispatchBuffer: mechanicsViewBuffer,
+    indirectDispatchOffsetBytes: parentPlan.layout.dispatchOffsetWords
+      * Uint32Array.BYTES_PER_ELEMENT,
+    ownerRuntime: parentOwner
+  };
+  return {
+    sourceBuffer,
+    identityBuffer,
+    activeSourceView,
+    activeSourceCountAuthority,
+    spatialExecution,
+    parentMechanicsView,
+    markParentSubmitted() {
+      parentSubmitted = true;
+      parentMechanicsView.status =
+        'schroeder-spatial-mechanics-view-gpu-build-submitted';
+      parentMechanicsView.submitPerformed = true;
+    }
+  };
 }
 
 function deferred() {
@@ -355,7 +570,359 @@ test('mechanics-field direct kernels flatten authenticated two-dimensional dispa
   );
 });
 
-test('mechanics-field runtime partitions direct work and publishes x/y evidence under a small device limit', async () => {
+test('directory-v2 mechanics-field WGSL maps active work to stable physical identity and authenticates exact CSR lineage', () => {
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /@group\(0\) @binding\(10\) var<storage, read> spatial_directory/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /@group\(0\) @binding\(11\) var<storage, read> active_source_view/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /ACTIVE_SOURCE_COUNT_WORD: u32 = 18u[\s\S]*ACTIVE_SOURCE_CANDIDATE_COUNT_WORD: u32 = 43u[\s\S]*ACTIVE_SOURCE_COMPLETION_WORD: u32 = 30u[\s\S]*ACTIVE_SOURCE_SEAL_WORD: u32 = 47u/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /active_source_view\[29u\] == params\.completion_ordinal[\s\S]*active_source_view\[ACTIVE_SOURCE_COMPLETION_WORD\][\s\S]*== params\.completion_ordinal[\s\S]*active_source_view\[ACTIVE_SOURCE_SEAL_WORD\] != 0u/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /let physical_source = active_source_view\[active_to_physical \+ active_ordinal\][\s\S]*active_source_view\[physical_to_active \+ physical_source\][\s\S]*!= active_ordinal/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /let cell_plus_one = spatial_directory\[reverse \+ physical_source\][\s\S]*let begin = spatial_directory\[cell_offsets \+ cell_index\][\s\S]*let end = spatial_directory\[cell_offsets \+ cell_index \+ 1u\][\s\S]*begin >= end \|\| end > active_count/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /let cell_i32_min = -2147483520\.0[\s\S]*let cell_i32_max = 2147483520\.0[\s\S]*spatial_directory\[key \+ 4u\][\s\S]*field_signed_order_key\(i32\(cell_f\.z\)\)/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /fn emit_field_candidates_v2[\s\S]*let source_index = field_physical_source_for_active\(active_ordinal\)[\s\S]*active_ordinal \* 27u \+ candidate_ordinal/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /fn materialize_stencil_field_indices_v2[\s\S]*let active_ordinal = candidate_index \/ 27u[\s\S]*let source_index = field_physical_source_for_active\(active_ordinal\)[\s\S]*source_index \* FIELD_DESCRIPTOR_WORDS/
+  );
+  assert.doesNotMatch(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /spatial_directory\[\s*cell_members\s*\+\s*active_ordinal\s*\]/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /source_dispatch_y[\s\S]*== select\([\s\S]*1u,[\s\S]*field_dispatch_y\([\s\S]*field_active_source_count\(\) > 0u[\s\S]*source_dispatch_z == 1u[\s\S]*candidate_dispatch_y[\s\S]*== select\([\s\S]*1u,[\s\S]*field_dispatch_y\([\s\S]*field_active_candidate_count\(\) > 0u[\s\S]*candidate_dispatch_z == 1u/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /params\.candidate_count == params\.source_count \* 27u/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /let consumer_group_count = \(cell_count \+ 63u\) \/ 64u[\s\S]*let consumer_dispatch_x = spatial_directory\[42u\][\s\S]*consumer_dispatch_x <= consumer_group_count[\s\S]*field_dispatch_y\(consumer_group_count, consumer_dispatch_x\)/
+  );
+  assert.doesNotMatch(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /spatial_directory\[42u\] == active_dispatch_x/
+  );
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /unique_evidence\[7u\] == 3u/
+  );
+});
+
+test('directory-v2 mechanics field treats valid inactive and other-level rows as non-selected work', () => {
+  const classifyActiveRow = ({
+    mass,
+    level,
+    spacing
+  }, {
+    selectedLevel,
+    gridSpacing
+  }) => {
+    if (!(mass > 0) || level !== selectedLevel) {
+      return 'non-selected';
+    }
+    if (
+      Math.fround(spacing) !== Math.fround(gridSpacing)
+    ) {
+      return 'invalid';
+    }
+    return 'selected';
+  };
+  const generationGlobalActiveRows = [
+    { physicalSource: 1, mass: 1, level: 0, spacing: 0.25 },
+    { physicalSource: 2, mass: 0, level: 0, spacing: 0.25 },
+    { physicalSource: 3, mass: 1, level: 1, spacing: 0.5 }
+  ];
+  assert.deepEqual(
+    generationGlobalActiveRows.map((row) => classifyActiveRow(row, {
+      selectedLevel: 0,
+      gridSpacing: 0.25
+    })),
+    ['selected', 'non-selected', 'non-selected']
+  );
+  assert.deepEqual(
+    generationGlobalActiveRows.map((row) => classifyActiveRow(row, {
+      selectedLevel: 1,
+      gridSpacing: 0.5
+    })),
+    ['non-selected', 'non-selected', 'selected']
+  );
+  assert.equal(
+    classifyActiveRow({
+      physicalSource: 1,
+      mass: 1,
+      level: 0,
+      spacing: 0.5
+    }, {
+      selectedLevel: 0,
+      gridSpacing: 0.25
+    }),
+    'invalid'
+  );
+
+  const emitStart =
+    schroederSpatialMechanicsFieldViewV2Wgsl.indexOf(
+      'fn emit_field_candidates_v2('
+    );
+  const emitEnd =
+    schroederSpatialMechanicsFieldViewV2Wgsl.indexOf(
+      'fn materialize_stencil_field_indices_v2(',
+      emitStart
+    );
+  assert.notEqual(emitStart, -1);
+  assert.notEqual(emitEnd, -1);
+  const emitKernel = schroederSpatialMechanicsFieldViewV2Wgsl.slice(
+    emitStart,
+    emitEnd
+  );
+  const nonSelectedStart = emitKernel.indexOf(
+    '// ActiveSource is generation-global'
+  );
+  const spacingMismatchStart = emitKernel.indexOf(
+    'bitcast<u32>(source_rows[row + 1u])',
+    nonSelectedStart
+  );
+  const selectedStart = emitKernel.indexOf(
+    'let mechanical_family_id',
+    spacingMismatchStart
+  );
+  assert.notEqual(nonSelectedStart, -1);
+  assert.notEqual(spacingMismatchStart, -1);
+  assert.notEqual(selectedStart, -1);
+
+  const malformedInputBlock = emitKernel.slice(0, nonSelectedStart);
+  const nonSelectedBlock = emitKernel.slice(
+    nonSelectedStart,
+    spacingMismatchStart
+  );
+  const spacingMismatchBlock = emitKernel.slice(
+    spacingMismatchStart,
+    selectedStart
+  );
+  assert.match(
+    nonSelectedBlock,
+    /!\(source_rows\[row \+ 6u\] > 0\.0\)[\s\S]*level != params\.selected_level/
+  );
+  assert.match(
+    nonSelectedBlock,
+    /field_store\(descriptor \+ 3u, 0u\)[\s\S]*active_ordinal \* 27u \+ candidate_ordinal/
+  );
+  assert.doesNotMatch(nonSelectedBlock, /field_record_invalid_source\(\)/);
+  assert.match(
+    spacingMismatchBlock,
+    /field_record_invalid_source\(\)[\s\S]*active_ordinal \* 27u \+ candidate_ordinal/
+  );
+  assert.ok(
+    (malformedInputBlock.match(/field_record_invalid_source\(\)/g) ?? [])
+      .length >= 2
+  );
+});
+
+test('directory-v2 mechanics-field encode uses GPU-only A authority with zero hot-path allocations', async () => {
+  const device = createFakeDevice();
+  const fixture = createDirectoryV2MechanicsParent(device, {
+    physicalSourceCount: 4,
+    physicalSourceCapacity: 8,
+    buildOrdinal: 37
+  });
+  const runtime = createSchroederSpatialMechanicsFieldViewGpu(device, {
+    maxSourceCount: 8,
+    gridNodeCount: 8,
+    gridDims: [2, 2, 2],
+    gridShift: 1,
+    gridSpacingM: 0.25,
+    arenaCount: 1,
+    enableDirectoryV2: true
+  });
+  assert.equal(runtime.directoryV2Prepared, true);
+  assert.ok(runtime.sourceAuthorityVersions.includes(
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+  ));
+  assert.ok(runtime.allocationEntries().some(({ role }) => (
+    role.endsWith('radix-gpu-count-control')
+  )));
+
+  const exactAuthority = fixture.parentMechanicsView.activeSourceCountAuthority;
+  fixture.parentMechanicsView.activeSourceCountAuthority = {
+    ...exactAuthority
+  };
+  assert.throws(
+    () => runtime.encode(device.createCommandEncoder(), {
+      sourceBuffer: fixture.sourceBuffer,
+      identityBuffer: fixture.identityBuffer,
+      sourceCount: 4,
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+      identityStrideWords: 1,
+      selectedLevel: 0,
+      parentMechanicsView: fixture.parentMechanicsView
+    }),
+    /exact active-source and spatial lineage/
+  );
+  fixture.parentMechanicsView.activeSourceCountAuthority = exactAuthority;
+
+  const bufferCountBeforeEncode = device.buffers.length;
+  const encoder = device.createCommandEncoder();
+  const field = runtime.encode(encoder, {
+    sourceBuffer: fixture.sourceBuffer,
+    identityBuffer: fixture.identityBuffer,
+    sourceCount: 4,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    identityStrideWords: 1,
+    selectedLevel: 0,
+    parentMechanicsView: fixture.parentMechanicsView
+  });
+  assert.equal(device.buffers.length, bufferCountBeforeEncode);
+  assert.equal(field.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(field.bufferAllocationCountDuringEncode, 0);
+  assert.equal(
+    field.sourceAuthorityVersion,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+  );
+  assert.equal(field.sourceCount, 4);
+  assert.equal(field.physicalSourceCount, 4);
+  assert.equal(field.candidateCount, null);
+  assert.equal(field.candidateCapacity, 108);
+  assert.equal(field.layout.candidateCapacity, 216);
+  assert.equal(Object.hasOwn(field, 'activeSourceCount'), false);
+  assert.equal(
+    field.constructionRoutePolicy,
+    'gpu-authenticated-directory-v2-indirect-gpu-count-radix'
+  );
+  assert.equal(field.retainedMemoryScaling, 'physical-source-capacity');
+  assert.equal(
+    field.computeDispatchScaling,
+    'gpu-active-source-count-and-occupied-field-count'
+  );
+  assert.equal(field.readbackPerformed, false);
+  assert.equal(
+    field.sourceDispatchIndirectBuffer,
+    fixture.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    field.sourceDispatchIndirectOffsetBytes,
+    fixture.activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(
+    field.candidateDispatchIndirectOffsetBytes,
+    fixture.activeSourceView.candidateDispatchOffsetBytes
+  );
+  assert.deepEqual(field.constructionDispatchEvidence, {
+    workgroupSize: 64,
+    linearization: 'linearGroup=workgroup.x+workgroup.y*dispatchX',
+    sourceWorkIdentity: 'gpu-active-ordinal',
+    sourceInvocationCountAuthority: {
+      buffer: fixture.activeSourceView.activeSourceViewBuffer,
+      offsetWords: 18
+    },
+    candidateInvocationCountAuthority: {
+      buffer: fixture.activeSourceView.activeSourceViewBuffer,
+      offsetWords: 43
+    },
+    generationSealAuthority: {
+      buffer: fixture.activeSourceView.activeSourceViewBuffer,
+      offsetWords: 30,
+      expected: 37
+    },
+    maxComputeWorkgroupsPerDimension: 65535,
+    authenticatedByGpuFinalizer: true,
+    hostActiveCountReadbackRequired: false
+  });
+
+  const fieldPasses = encoder.events.filter(({ kind }) => kind === 'pass');
+  const sourcePass = fieldPasses.find(({ descriptor }) => (
+    descriptor.label?.endsWith('EmitCandidatesV2')
+  ));
+  const stencilPass = fieldPasses.find(({ descriptor }) => (
+    descriptor.label?.endsWith('MaterializeStencilMapV2')
+  ));
+  const assemblePass = fieldPasses.find(({ descriptor }) => (
+    descriptor.label?.endsWith('AssembleKeysV2')
+  ));
+  assert.deepEqual(sourcePass.commands.at(-1).dispatchIndirect, {
+    buffer: fixture.activeSourceView.activeSourceViewBuffer,
+    byteOffset: fixture.activeSourceView.activeDispatchOffsetBytes
+  });
+  for (const pass of [stencilPass, assemblePass]) {
+    assert.deepEqual(pass.commands.at(-1).dispatchIndirect, {
+      buffer: fixture.activeSourceView.activeSourceViewBuffer,
+      byteOffset: fixture.activeSourceView.candidateDispatchOffsetBytes
+    });
+  }
+  const gpuCountBinding = device.bindGroups.find(({ label }) => (
+    label?.endsWith('gpu-count-prepare-bind-group')
+  ));
+  assert.equal(
+    gpuCountBinding.entries.find(({ binding }) => binding === 0).resource.buffer,
+    fixture.activeSourceView.activeSourceViewBuffer
+  );
+  const gpuCountConfig = gpuCountBinding.entries.find(
+    ({ binding }) => binding === 2
+  ).resource.buffer;
+  const gpuCountConfigWrite = device.writes.find(({ buffer }) => (
+    buffer === gpuCountConfig
+  ));
+  assert.ok(gpuCountConfigWrite);
+  const gpuCountWords = new Uint32Array(
+    gpuCountConfigWrite.data.buffer,
+    gpuCountConfigWrite.data.byteOffset,
+    gpuCountConfigWrite.data.byteLength / Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.deepEqual(Array.from(gpuCountWords.slice(0, 8)), [
+    43,
+    30,
+    37,
+    108,
+    3,
+    3,
+    64,
+    41
+  ]);
+
+  fixture.markParentSubmitted();
+  runtime.markExecutionSubmitted(field);
+  assert.equal(
+    validateSchroederSpatialMechanicsFieldViewDescriptor(field).admitted,
+    true
+  );
+  const originalFieldAuthority = field.activeSourceCountAuthority;
+  field.activeSourceCountAuthority = { ...originalFieldAuthority };
+  assert.equal(
+    validateSchroederSpatialMechanicsFieldViewDescriptor(field).status,
+    'schroeder-spatial-mechanics-field-view-rejected-v2-source-authority'
+  );
+  field.activeSourceCountAuthority = originalFieldAuthority;
+
+  assert.equal(await runtime.releaseExecutionAfter(field), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('mechanics-field runtime publishes GPU-authored sparse work evidence under a small device limit', async () => {
   const device = createFakeDevice({
     limits: { maxComputeWorkgroupsPerDimension: 4 }
   });
@@ -383,8 +950,24 @@ test('mechanics-field runtime partitions direct work and publishes x/y evidence 
 
   assert.equal(generation.ready, true, generation.reason);
   const field = generation.mechanicsFieldView;
-  assert.deepEqual(field.sourceDispatchWorkgroups, [1, 1, 1]);
-  assert.deepEqual(field.candidateDispatchWorkgroups, [4, 2, 1]);
+  assert.equal(field.sourceDispatchWorkgroups, null);
+  assert.equal(field.candidateDispatchWorkgroups, null);
+  assert.equal(
+    field.sourceDispatchIndirectBuffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    field.candidateDispatchIndirectBuffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    field.sourceDispatchIndirectOffsetBytes,
+    generation.activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(
+    field.candidateDispatchIndirectOffsetBytes,
+    generation.activeSourceView.candidateDispatchOffsetBytes
+  );
   assert.equal(field.maxComputeWorkgroupsPerDimension, 4);
   assert.equal(
     field.directDispatchLinearization,
@@ -396,16 +979,43 @@ test('mechanics-field runtime partitions direct work and publishes x/y evidence 
     field.consumerDispatchLinearization,
     'linearGroup=workgroup.x+workgroup.y*dispatchX'
   );
-  assert.deepEqual(field.constructionDispatchEvidence, {
-    workgroupSize: 64,
-    linearization: 'linearGroup=workgroup.x+workgroup.y*dispatchX',
-    maxComputeWorkgroupsPerDimension: 4,
-    sourceInvocationCount: particleCount,
-    sourceWorkgroups: field.sourceDispatchWorkgroups,
-    candidateInvocationCount: particleCount * 27,
-    candidateWorkgroups: field.candidateDispatchWorkgroups,
-    authenticatedByGpuFinalizer: true
-  });
+  assert.equal(field.constructionDispatchEvidence.workgroupSize, 64);
+  assert.equal(
+    field.constructionDispatchEvidence.linearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.sourceWorkIdentity,
+    'gpu-active-ordinal'
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.sourceInvocationCountAuthority.buffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.sourceInvocationCountAuthority.offsetWords,
+    18
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.candidateInvocationCountAuthority.offsetWords,
+    43
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.generationSealAuthority.expected,
+    generation.activeSourceView.buildOrdinal
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.maxComputeWorkgroupsPerDimension,
+    4
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.authenticatedByGpuFinalizer,
+    true
+  );
+  assert.equal(
+    field.constructionDispatchEvidence.hostActiveCountReadbackRequired,
+    false
+  );
   assert.equal(
     validateSchroederSpatialMechanicsFieldViewDescriptor(field).admitted,
     true
@@ -442,24 +1052,26 @@ test('mechanics-field runtime partitions direct work and publishes x/y evidence 
       kind === 'pass' && descriptor.label?.includes('mechanics-field-view')
     ))
   ));
-  const directDispatchBySuffix = Object.fromEntries(
+  const indirectDispatchBySuffix = Object.fromEntries(
     fieldPasses
       .filter(({ descriptor }) => (
-        /(?:EmitCandidates|MaterializeStencilMap|AssembleKeys)$/.test(
+        /(?:EmitCandidatesV2|MaterializeStencilMapV2|AssembleKeysV2)$/.test(
           descriptor.label
         )
       ))
       .map(({ descriptor, commands }) => [
-        ['EmitCandidates', 'MaterializeStencilMap', 'AssembleKeys'].find(
+        ['EmitCandidatesV2', 'MaterializeStencilMapV2', 'AssembleKeysV2'].find(
           (suffix) => descriptor.label.endsWith(suffix)
         ),
-        commands.at(-1)?.dispatch
+        commands.at(-1)?.dispatchIndirect?.byteOffset
       ])
   );
-  assert.deepEqual(directDispatchBySuffix, {
-    EmitCandidates: [1, 1, 1],
-    MaterializeStencilMap: [4, 2, 1],
-    AssembleKeys: [4, 2, 1]
+  assert.deepEqual(indirectDispatchBySuffix, {
+    EmitCandidatesV2: generation.activeSourceView.activeDispatchOffsetBytes,
+    MaterializeStencilMapV2:
+      generation.activeSourceView.candidateDispatchOffsetBytes,
+    AssembleKeysV2:
+      generation.activeSourceView.candidateDispatchOffsetBytes
   });
 
   const paramsBuffer = field.ownerRuntime.allocationEntries().find(
@@ -475,7 +1087,7 @@ test('mechanics-field runtime partitions direct work and publishes x/y evidence 
   );
   assert.deepEqual(
     Array.from(paramsWords.slice(42, 48)),
-    [1, 4, 4, 1, 2, 0]
+    [0, 0, 4, 0, 0, 2]
   );
 
   assert.equal(
@@ -532,12 +1144,19 @@ test('mechanics-field stencil-map runtime binds unique evidence with the exclusi
       && !label.includes('-uniform-stencil-map-bindings')
   ));
   assert.ok(stencilMap, 'expected a mechanics-field stencil-map bind group');
-  assert.deepEqual(stencilMap.entries.map(({ binding }) => binding), [2, 3, 5, 7, 8, 9]);
+  assert.deepEqual(
+    stencilMap.entries.map(({ binding }) => binding),
+    [2, 3, 5, 7, 8, 9, 11]
+  );
   const uniqueEvidence = stencilMap.entries.find(({ binding }) => binding === 5);
   const exclusivePrefix = stencilMap.entries.find(({ binding }) => binding === 9);
   assert.match(uniqueEvidence.resource.buffer.label, /radix-evidence$/);
   assert.match(exclusivePrefix.resource.buffer.label, /radix-head-offsets$/);
   assert.notEqual(uniqueEvidence.resource.buffer, exclusivePrefix.resource.buffer);
+  assert.equal(
+    stencilMap.entries.find(({ binding }) => binding === 11).resource.buffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
 
   const field = generation.mechanicsFieldView;
   const fieldRuntime = field.ownerRuntime;
@@ -794,7 +1413,7 @@ test('submitted single-stage mechanics-field mutations quarantine until exact re
   assert.equal(runtime.usableArenaCount(), initialUsable - 1);
 });
 
-test('mechanics-field construction is one exact direct packed-radix topology', async () => {
+test('mechanics-field construction is one exact GPU-count packed-radix topology', async () => {
   const device = createFakeDevice();
   const levelAssignment = createLevelAssignment(device, 4_608);
   const identityBuffer = device.createBuffer({
@@ -823,8 +1442,15 @@ test('mechanics-field construction is one exact direct packed-radix topology', a
   assert.equal(field.routeControlWordLength, 0);
   assert.equal(field.radixGateCount, 0);
   assert.equal(field.radixSortKeyWordCount, 3);
-  assert.equal(field.radixHistogramScanMode, 'serial-small');
-  assert.equal(field.stableCandidateOrderCount, field.candidateCount);
+  assert.equal(field.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
+  assert.equal(field.candidateCount, null);
+  assert.equal(field.stableCandidateOrderCount, null);
+  assert.equal(
+    field.stableCandidateOrderCountAuthority.buffer,
+    generation.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(field.stableCandidateOrderCountAuthority.offsetWords, 43);
+  assert.equal(field.stableCandidateOrderCountAuthority.sealOffsetWords, 30);
   assert.equal(
     field.stableCandidateOrderPolicy,
     'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
@@ -849,12 +1475,15 @@ test('mechanics-field construction is one exact direct packed-radix topology', a
   field.stableCandidateOrderBuffer = stableOrderBuffer;
   assert.equal(field.ownerRuntime.ownsExecution(field), true);
   substitutedStableOrderBuffer.destroy();
-  assert.equal(field.constructionRoutePolicy, 'gpu-authenticated-direct-exact-radix');
-  assert.equal(field.encodedDispatchCount, 83);
+  assert.equal(
+    field.constructionRoutePolicy,
+    'gpu-authenticated-directory-v2-indirect-gpu-count-radix'
+  );
+  assert.ok(field.encodedDispatchCount > 0);
   assert.equal(field.encodedComputePassCount, 6);
   assert.equal(
     field.ownerRuntime.pipelineCount,
-    4 + field.ownerRuntime.arenaCount * 13
+    8 + field.ownerRuntime.arenaCount * 22
   );
   assert.equal(field.ownerRuntime.allocationEntries().some(({ role }) => (
     role === 'mechanics-field-route-control'
@@ -869,32 +1498,32 @@ test('mechanics-field construction is one exact direct packed-radix topology', a
   const fieldCommands = fieldPasses.flatMap(({ commands }) => commands);
   assert.equal(fieldPasses.length, 6);
   assert.equal(fieldCommands.length, field.encodedDispatchCount);
-  assert.equal(fieldCommands.every(({ dispatch, dispatchIndirect }) => (
-    Array.isArray(dispatch) && dispatchIndirect === undefined
+  assert.equal(fieldCommands.some(({ dispatchIndirect }) => (
+    dispatchIndirect !== undefined
   )), true);
   assert.deepEqual(
     fieldPasses.map(({ descriptor }) => (
       [
-        'EmitCandidates',
-        'GroupedRadixSort',
-        'GroupedUnique',
-        'MaterializeStencilMap',
-        'AssembleKeys',
+        'EmitCandidatesV2',
+        'GpuCountPrepare',
+        'GroupedGpuCountRadixUnique',
+        'MaterializeStencilMapV2',
+        'AssembleKeysV2',
         'Finalize'
       ].find((suffix) => descriptor.label.endsWith(suffix))
     )),
     [
-      'EmitCandidates',
-      'GroupedRadixSort',
-      'GroupedUnique',
-      'MaterializeStencilMap',
-      'AssembleKeys',
+      'EmitCandidatesV2',
+      'GpuCountPrepare',
+      'GroupedGpuCountRadixUnique',
+      'MaterializeStencilMapV2',
+      'AssembleKeysV2',
       'Finalize'
     ]
   );
   assert.equal(fieldCommands.filter(({ pipeline }) => (
     pipeline.label.endsWith('-serial-histogram-scan')
-  )).length, 24);
+  )).length, 0);
   assert.equal(fieldCommands.some(({ pipeline }) => (
     /uniform|route|classify/i.test(pipeline.label)
   )), false);
@@ -910,7 +1539,7 @@ test('mechanics-field construction is one exact direct packed-radix topology', a
   );
   assert.deepEqual(
     Array.from(paramsWords.slice(42, 48)),
-    [72, 1944, 65535, 1, 1, 0]
+    [0, 0, 65535, 0, 0, 2]
   );
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
@@ -969,17 +1598,14 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
       'schroeder-spatial-active-source-view-build',
       'schroeder-spatial-directory-prepare',
       'schroeder-spatial-key-emission',
-      'webgpu-stable-radix-sort',
-      'webgpu-sorted-unique',
+      'schroeder-spatial-directory-gpu-count-radix-sort-unique',
       'schroeder-spatial-directory-assemble-finalize',
-      'schroeder-spatial-active-rank-view-build',
       'schroeder-spatial-exact-near-cell-tree-build',
       'schroeder-spatial-derived-view-build',
       'schroeder-spatial-mechanics-view-build',
       'schroeder-spatial-mechanics-field-view-build',
       'schroeder-spatial-mechanics-field-candidate-emission',
-      'schroeder-spatial-mechanics-field-radix-sort',
-      'schroeder-spatial-mechanics-field-radix-unique',
+      'schroeder-spatial-mechanics-field-radix-sort-unique-gpu-count',
       'schroeder-spatial-mechanics-field-stencil-map',
       'schroeder-spatial-mechanics-field-key-assembly',
       'schroeder-spatial-mechanics-field-finalize'
@@ -999,8 +1625,7 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
     fieldSubstages.map(({ producerId }) => producerId),
     [
       'schroeder-spatial-mechanics-field-candidate-emission',
-      'schroeder-spatial-mechanics-field-radix-sort',
-      'schroeder-spatial-mechanics-field-radix-unique',
+      'schroeder-spatial-mechanics-field-radix-sort-unique-gpu-count',
       'schroeder-spatial-mechanics-field-stencil-map',
       'schroeder-spatial-mechanics-field-key-assembly',
       'schroeder-spatial-mechanics-field-finalize'
@@ -1013,7 +1638,10 @@ test('mechanics-field build publishes complete nested GPU timestamp substage spa
     sourceCount === levelAssignment.particleCount
   )));
   assert.ok(fieldSubstages.every(({ candidateCount }) => (
-    candidateCount === levelAssignment.particleCount * 27
+    candidateCount === null
+  )));
+  assert.ok(fieldSubstages.every(({ candidateCountSource }) => (
+    candidateCountSource === 'active-source-view-word-43'
   )));
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
@@ -1382,6 +2010,894 @@ test('device-loss retirement retries only the owned mechanics-field buffer whose
   }
   assert.equal(runtime.retiredArenaCount(), 1);
   assert.equal(runtime.activeExecutionCount(), 0);
+});
+
+test('native WebGPU compiles the retained directory-v2 mechanics-field pipeline family', {
+  skip: RUN_NATIVE_V2_COMPILE
+    ? false
+    : 'set ULG_RUN_NATIVE_MECHANICS_FIELD_V2_COMPILE=1 for native compilation',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_MECHANICS_FIELD_VIEW_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  let result;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    result = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return {
+          status: 'unsupported',
+          reason: 'WebGPU adapter unavailable'
+        };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      const nonce = Date.now();
+      const module = await import(
+        `/src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js`
+          + `?nativeDirectoryV2Compile=${nonce}`
+      );
+      let runtime = null;
+      let creationError = null;
+      try {
+        runtime = module.createSchroederSpatialMechanicsFieldViewGpu(device, {
+          maxSourceCount: 4,
+          gridNodeCount: 8,
+          gridDims: [2, 2, 2],
+          gridShift: 1,
+          gridSpacingM: 0.25,
+          arenaCount: 1,
+          enableDirectoryV2: true
+        });
+        await device.queue.onSubmittedWorkDone();
+      } catch (error) {
+        creationError = error?.message || String(error);
+      }
+      const validationError = await device.popErrorScope();
+      try {
+        runtime?.destroy();
+      } catch (error) {
+        creationError ??= error?.message || String(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.destroy?.();
+      return {
+        status: 'complete',
+        creationError,
+        validationError: validationError?.message || null,
+        uncapturedErrors
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+  assert.equal(result.status, 'complete', result.reason);
+  assert.equal(result.creationError, null);
+  assert.equal(result.validationError, null);
+  assert.deepEqual(result.uncapturedErrors, []);
+});
+
+test('native directory-v2 mechanics field admits all-dormant A=0 and preserves sparse physical descriptors', {
+  skip: RUN_NATIVE_V2_COMPILE
+    ? false
+    : 'set ULG_RUN_NATIVE_MECHANICS_FIELD_V2_COMPILE=1 for native execution',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_MECHANICS_FIELD_VIEW_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  let result;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    result = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return {
+          status: 'unsupported',
+          reason: 'WebGPU adapter unavailable'
+        };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      const nonce = Date.now();
+      const [
+        runtimeModule,
+        fieldAbi,
+        activeAbi,
+        epochAbi,
+        mechanicsAbi
+      ] = await Promise.all([
+        import(
+          `/src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js`
+            + `?nativeDirectoryV2Execute=${nonce}`
+        ),
+        import(
+          `/ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js`
+            + `?nativeDirectoryV2Execute=${nonce}`
+        ),
+        import(
+          `/ulg-gpu-abi/src/schroederSpatialActiveSourceView.js`
+            + `?nativeDirectoryV2Execute=${nonce}`
+        ),
+        import(
+          `/ulg-gpu-abi/src/schroederSpatialEpoch.js`
+            + `?nativeDirectoryV2Execute=${nonce}`
+        ),
+        import(
+          `/ulg-gpu-abi/src/schroederSpatialMechanicsView.js`
+            + `?nativeDirectoryV2Execute=${nonce}`
+        )
+      ]);
+      const physicalSourceCount = 4;
+      const physicalSourceCapacity = 8;
+      const buildOrdinal = 37;
+      const gridNodeCount = 125;
+      const identity = {
+        generationId: 41,
+        deviceOrdinal: 2,
+        laneOrdinal: 3,
+        leaseToken: 5,
+        sourceFamilyId: 7,
+        storageGeneration: 11,
+        physicsTick: 13,
+        physicsSubstep: 0,
+        positionEpoch: 17,
+        topologyEpoch: 19,
+        chartEpoch: 23,
+        levelEpoch: 29,
+        supportEpoch: 31
+      };
+      const runtimes = new Map();
+      const runtimeFor = (gridSpacingM) => {
+        const key = Math.fround(gridSpacingM);
+        let runtime = runtimes.get(key);
+        if (!runtime) {
+          runtime =
+            runtimeModule.createSchroederSpatialMechanicsFieldViewGpu(
+              device,
+              {
+                maxSourceCount: physicalSourceCapacity,
+                gridNodeCount,
+                gridDims: [5, 5, 5],
+                gridShift: 1,
+                gridSpacingM,
+                arenaCount: 1,
+                enableDirectoryV2: true
+              }
+            );
+          runtimes.set(key, runtime);
+        }
+        return runtime;
+      };
+      const makeBuffer = (label, size, usage) => device.createBuffer({
+        label,
+        size,
+        usage
+      });
+      const f32Bits = (value) => {
+        const words = new Uint32Array(1);
+        new Float32Array(words.buffer)[0] = Math.fround(value);
+        return words[0];
+      };
+      const signedOrderKey = (value) => (
+        ((value | 0) ^ 0x8000_0000) >>> 0
+      );
+      const readWords = async (buffer, byteLength, label) => {
+        const readback = makeBuffer(
+          label,
+          byteLength,
+          GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        );
+        const encoder = device.createCommandEncoder();
+        encoder.copyBufferToBuffer(buffer, 0, readback, 0, byteLength);
+        device.queue.submit([encoder.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        const words = new Uint32Array(readback.getMappedRange()).slice();
+        readback.unmap();
+        readback.destroy();
+        return words;
+      };
+
+      const runCase = async ({
+        label,
+        activePhysicalSources,
+        tamperCompletion = false,
+        selectedLevel = 0,
+        gridSpacingM = 0.25,
+        sourceLevels = [0, 0, 0, 0],
+        sourceSpacings = [0.25, 0.25, 0.25, 0.25],
+        sourceMasses = null
+      }) => {
+        const activeCount = activePhysicalSources.length;
+        const candidateCount = activeCount * 27;
+        const activePhysicalSet = new Set(activePhysicalSources);
+        const sourceRows = new Float32Array(physicalSourceCount * 16);
+        for (let physical = 0; physical < physicalSourceCount; physical += 1) {
+          const row = physical * 16;
+          sourceRows[row] = sourceLevels[physical];
+          sourceRows[row + 1] = sourceSpacings[physical];
+          sourceRows[row + 6] = sourceMasses
+            ? sourceMasses[physical]
+            : (activePhysicalSet.has(physical) ? 1 : 0);
+          sourceRows[row + 8] = 2;
+          sourceRows[row + 9] = 1;
+          sourceRows[row + 10] = 1;
+          sourceRows[row + 12] = 0.5;
+          sourceRows[row + 13] = 0.5;
+          sourceRows[row + 14] = 0.5;
+          sourceRows[row + 15] = 0;
+        }
+        const sourceBuffer = makeBuffer(
+          `${label}-source`,
+          sourceRows.byteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const identityWords = new Uint32Array([101, 103, 107, 109]);
+        const identityBuffer = makeBuffer(
+          `${label}-identity`,
+          identityWords.byteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        device.queue.writeBuffer(sourceBuffer, 0, sourceRows);
+        device.queue.writeBuffer(identityBuffer, 0, identityWords);
+
+        const activeLayout =
+          activeAbi.createSchroederSpatialActiveSourceViewLayout({
+            physicalSourceCapacity,
+            activeSourceCapacity: physicalSourceCapacity
+          });
+        const activeWords = new Uint32Array(activeLayout.wordLength);
+        activeWords.fill(0xffff_ffff, activeLayout.activeToPhysicalOffsetWords);
+        activeWords[0] = activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC;
+        activeWords[1] = activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION;
+        activeWords[2] =
+          activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+          | activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED;
+        [
+          identity.generationId,
+          identity.deviceOrdinal,
+          identity.laneOrdinal,
+          identity.leaseToken,
+          identity.sourceFamilyId,
+          identity.storageGeneration,
+          identity.physicsTick,
+          identity.physicsSubstep,
+          identity.positionEpoch,
+          identity.topologyEpoch,
+          identity.chartEpoch,
+          identity.levelEpoch,
+          identity.supportEpoch
+        ].forEach((word, index) => {
+          activeWords[3 + index] = word;
+        });
+        activeWords[16] = physicalSourceCount;
+        activeWords[17] = physicalSourceCapacity;
+        activeWords[18] = activeCount;
+        activeWords[19] = physicalSourceCapacity;
+        activeWords[20] = physicalSourceCount - activeCount;
+        activeWords[23] =
+          mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0;
+        activeWords[24] = 16;
+        activeWords[25] = activeLayout.activeToPhysicalOffsetWords;
+        activeWords[26] = activeLayout.physicalToActiveOffsetWords;
+        activeWords[27] = activeLayout.wordLength;
+        activeWords[28] = activeLayout.wordLength;
+        activeWords[29] = buildOrdinal;
+        activeWords[30] = tamperCompletion
+          ? buildOrdinal + 1
+          : buildOrdinal;
+        activeWords[31] = 0x1234_5678;
+        activeWords[32] = physicalSourceCount;
+        activeWords[33] = activeCount;
+        activeWords[34] = activeCount;
+        activeWords[35] = activeCount;
+        activeWords[36] = activeCount === 0
+          ? 0
+          : Math.max(...activePhysicalSources) + 1;
+        activeWords[37] = 64;
+        activeWords[38] = device.limits.maxComputeWorkgroupsPerDimension;
+        activeWords[39] = activeLayout.wordLength;
+        activeWords[40] = activeLayout.activeDispatchOffsetWords;
+        activeWords[41] = activeLayout.candidateDispatchOffsetWords;
+        activeWords[42] = activeLayout.physicalDispatchOffsetWords;
+        activeWords[43] = candidateCount;
+        activeWords[44] = activeLayout.activeCandidateCapacity;
+        activeWords[47] = 0x51ea_1ed1;
+        const activeGroupCount = Math.ceil(activeCount / 64);
+        const candidateGroupCount = Math.ceil(candidateCount / 64);
+        activeWords[48] = activeGroupCount;
+        activeWords[49] = 1;
+        activeWords[50] = 1;
+        activeWords[51] = candidateGroupCount;
+        activeWords[52] = 1;
+        activeWords[53] = 1;
+        activeWords[54] = 1;
+        activeWords[55] = 1;
+        activeWords[56] = 1;
+        activePhysicalSources.forEach((physical, activeOrdinal) => {
+          activeWords[
+            activeLayout.activeToPhysicalOffsetWords + activeOrdinal
+          ] = physical;
+          activeWords[
+            activeLayout.physicalToActiveOffsetWords + physical
+          ] = activeOrdinal;
+        });
+        const activeSourceViewBuffer = makeBuffer(
+          `${label}-active-source`,
+          activeWords.byteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.INDIRECT
+            | GPUBufferUsage.COPY_DST
+        );
+        device.queue.writeBuffer(activeSourceViewBuffer, 0, activeWords);
+        let activeSourceView;
+        const activeOwner = {
+          ownsExecution(execution) {
+            return execution === activeSourceView;
+          }
+        };
+        activeSourceView = {
+          schema: activeAbi.ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+          status: 'schroeder-spatial-active-source-view-gpu-encoded',
+          ready: true,
+          selected: true,
+          submitPerformed: false,
+          sourceBuffer,
+          activeSourceViewBuffer,
+          layout: activeLayout,
+          physicalSourceCount,
+          physicalSourceCapacity,
+          activeSourceCapacity: physicalSourceCapacity,
+          sourceRowLayoutId:
+            mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          sourceRowStrideFloats: 16,
+          ...identity,
+          buildOrdinal,
+          sourceFingerprint: 0x1234_5678,
+          activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+          candidateDispatchOffsetBytes:
+            activeLayout.candidateDispatchOffsetBytes,
+          physicalDispatchOffsetBytes:
+            activeLayout.physicalDispatchOffsetBytes,
+          ownerRuntime: activeOwner
+        };
+        const activeSourceCountAuthority = Object.freeze({
+          schema: activeAbi.ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+          activeSourceView,
+          buffer: activeSourceViewBuffer,
+          offsetWords: 18,
+          offsetBytes: 18 * Uint32Array.BYTES_PER_ELEMENT,
+          capacity: physicalSourceCapacity,
+          residency: 'gpu-only'
+        });
+
+        const directoryLayout = epochAbi.createSchroederSpatialEpochV2Layout({
+          physicalSourceCapacity,
+          activeSourceCapacity: physicalSourceCapacity,
+          cellCapacity: physicalSourceCapacity
+        });
+        const cellsByKey = new Map();
+        for (const physical of activePhysicalSources) {
+          const level = Math.round(sourceLevels[physical]);
+          const spacing = sourceSpacings[physical];
+          const cellCoordinate = Math.floor(0.5 / spacing);
+          const key = [
+            0,
+            signedOrderKey(level),
+            signedOrderKey(cellCoordinate),
+            signedOrderKey(cellCoordinate),
+            signedOrderKey(cellCoordinate)
+          ];
+          const signature = key.join(':');
+          let cell = cellsByKey.get(signature);
+          if (!cell) {
+            cell = { key, physicalSources: [] };
+            cellsByKey.set(signature, cell);
+          }
+          cell.physicalSources.push(physical);
+        }
+        const cells = Array.from(cellsByKey.values()).sort((left, right) => {
+          for (let index = 0; index < left.key.length; index += 1) {
+            const difference = left.key[index] - right.key[index];
+            if (difference !== 0) return difference;
+          }
+          return 0;
+        });
+        const directoryWords = new Uint32Array(directoryLayout.wordLength);
+        directoryWords[0] = epochAbi.SCHROEDER_SPATIAL_EPOCH_MAGIC;
+        directoryWords[1] = epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+        directoryWords[2] =
+          epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_READY
+          | epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED;
+        [
+          identity.generationId,
+          identity.deviceOrdinal,
+          identity.laneOrdinal,
+          identity.leaseToken,
+          identity.sourceFamilyId,
+          identity.storageGeneration,
+          identity.physicsTick,
+          identity.physicsSubstep,
+          identity.positionEpoch,
+          identity.topologyEpoch,
+          identity.chartEpoch,
+          identity.levelEpoch,
+          identity.supportEpoch
+        ].forEach((word, index) => {
+          directoryWords[3 + index] = word;
+        });
+        const cellCount = cells.length;
+        directoryWords[16] = physicalSourceCount;
+        directoryWords[17] = physicalSourceCapacity;
+        directoryWords[18] = cellCount;
+        directoryWords[19] = physicalSourceCapacity;
+        directoryWords[20] = directoryLayout.wordLength;
+        directoryWords[21] = directoryLayout.wordLength;
+        directoryWords[22] = directoryLayout.wordLength;
+        directoryWords[25] = 5;
+        directoryWords[26] = 5;
+        directoryWords[27] =
+          epochAbi.SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5;
+        directoryWords[28] = 48;
+        directoryWords[29] = directoryLayout.cellKeysOffsetWords;
+        directoryWords[30] = directoryLayout.cellOffsetsOffsetWords;
+        directoryWords[31] = directoryLayout.cellMembersOffsetWords;
+        directoryWords[32] =
+          directoryLayout.physicalToCellPlusOneOffsetWords;
+        directoryWords[33] = buildOrdinal;
+        directoryWords[34] = buildOrdinal;
+        directoryWords[35] = buildOrdinal;
+        directoryWords[36] = identity.generationId;
+        directoryWords[37] = activeCount;
+        directoryWords[38] = cellCount;
+        directoryWords[39] = 1;
+        directoryWords[41] = 1;
+        directoryWords[42] = Math.ceil(cellCount / 64);
+        directoryWords[43] = cellCount === 0 ? 0 : 1;
+        directoryWords[44] = cellCount === 0 ? 0 : 1;
+        directoryWords[46] = 2;
+        directoryWords[47] = directoryLayout.wordLength;
+        let memberOrdinal = 0;
+        cells.forEach((cell, cellIndex) => {
+          const keyOffset =
+            directoryLayout.cellKeysOffsetWords + cellIndex * 5;
+          cell.key.forEach((word, keyWord) => {
+            directoryWords[keyOffset + keyWord] = word;
+          });
+          directoryWords[
+            directoryLayout.cellOffsetsOffsetWords + cellIndex
+          ] = memberOrdinal;
+          cell.physicalSources.forEach((physical) => {
+            directoryWords[
+              directoryLayout.cellMembersOffsetWords + memberOrdinal
+            ] = physical;
+            directoryWords[
+              directoryLayout.physicalToCellPlusOneOffsetWords + physical
+            ] = cellIndex + 1;
+            memberOrdinal += 1;
+          });
+          directoryWords[
+            directoryLayout.cellOffsetsOffsetWords + cellIndex + 1
+          ] = memberOrdinal;
+        });
+        const directoryBuffer = makeBuffer(
+          `${label}-directory`,
+          directoryWords.byteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        device.queue.writeBuffer(directoryBuffer, 0, directoryWords);
+        let spatialExecution;
+        const spatialOwner = {
+          ownsExecution(execution) {
+            return execution === spatialExecution;
+          }
+        };
+        spatialExecution = {
+          schema: epochAbi.ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+          status: 'schroeder-spatial-epoch-v2-gpu-encoded',
+          abiVersion: epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+          reverseEncoding:
+            epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+          submitPerformed: false,
+          sourceBuffer,
+          sourceRowLayoutId:
+            mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          sourceRowStrideFloats: 16,
+          physicalSourceCount,
+          physicalSourceCapacity,
+          activeSourceCapacity: physicalSourceCapacity,
+          ...identity,
+          buildOrdinal,
+          layout: directoryLayout,
+          directoryBuffer,
+          activeSourceView,
+          activeSourceViewBuffer,
+          activeSourceCountAuthority,
+          ownerRuntime: spatialOwner
+        };
+
+        const parentPlan = mechanicsAbi.createSchroederSpatialMechanicsViewPlan({
+          sourceCount: physicalSourceCount,
+          sourceRowLayoutId:
+            mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          directoryAbiVersion:
+            mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+          selectedLevel,
+          gridNodeCount,
+          gridDims: [5, 5, 5],
+          gridShift: 1,
+          gridSpacingM,
+          ...identity,
+          completionOrdinal: buildOrdinal
+        });
+        const nodeCount = activeCount === 0 ? 0 : gridNodeCount;
+        const parentWords = new Uint32Array(parentPlan.layout.wordLength);
+        parentWords[20] = mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_MAGIC;
+        parentWords[21] = mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_VERSION;
+        parentWords[22] =
+          mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY
+          | mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED;
+        [
+          identity.generationId,
+          identity.deviceOrdinal,
+          identity.laneOrdinal,
+          identity.leaseToken,
+          identity.sourceFamilyId,
+          identity.storageGeneration,
+          identity.physicsTick,
+          identity.physicsSubstep,
+          identity.positionEpoch,
+          identity.topologyEpoch,
+          identity.chartEpoch,
+          identity.levelEpoch,
+          identity.supportEpoch
+        ].forEach((word, index) => {
+          parentWords[23 + index] = word;
+        });
+        parentWords[36] = physicalSourceCount;
+        parentWords[37] = selectedLevel >>> 0;
+        parentWords[38] = gridNodeCount;
+        parentWords[39] = 5;
+        parentWords[40] = 5;
+        parentWords[41] = 5;
+        parentWords[42] = 1;
+        parentWords[43] = f32Bits(gridSpacingM);
+        parentWords[44] = parentPlan.occupancyWordCount;
+        parentWords[45] = gridNodeCount;
+        parentWords[46] = nodeCount;
+        parentWords[49] = activeCount;
+        parentWords[50] = activeCount;
+        parentWords[51] = candidateCount;
+        parentWords[52] = buildOrdinal;
+        parentWords[53] = parentPlan.layout.nodeOffsetWords;
+        parentWords[54] = parentPlan.layout.nodeOffsetWords + nodeCount;
+        parentWords[55] = parentPlan.layout.wordLength;
+        parentWords[56] =
+          mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0;
+        parentWords[57] = Math.ceil(nodeCount / 64);
+        parentWords[58] = parentPlan.layout.wordLength;
+        parentWords[59] = identity.generationId;
+        parentWords[60] = parentWords[57];
+        parentWords[61] = nodeCount === 0 ? 0 : 1;
+        parentWords[62] = parentWords[61];
+        for (let node = 0; node < nodeCount; node += 1) {
+          parentWords[parentPlan.layout.nodeOffsetWords + node] = node;
+        }
+        const mechanicsViewBuffer = makeBuffer(
+          `${label}-parent`,
+          parentWords.byteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.INDIRECT
+            | GPUBufferUsage.COPY_DST
+        );
+        device.queue.writeBuffer(mechanicsViewBuffer, 0, parentWords);
+        let parentMechanicsView;
+        let parentSubmitted = false;
+        const parentOwner = {
+          ownsExecution(execution) {
+            return execution === parentMechanicsView;
+          },
+          isExecutionSubmitted(execution) {
+            return execution === parentMechanicsView && parentSubmitted;
+          }
+        };
+        parentMechanicsView = {
+          ...parentPlan,
+          schema: mechanicsAbi.ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA,
+          status: 'schroeder-spatial-mechanics-view-gpu-encoded',
+          submitPerformed: false,
+          released: false,
+          sourceBuffer,
+          sourceAuthorityVersion:
+            fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
+          directorySchema: epochAbi.ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+          directoryAbiVersion:
+            mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+          sourceWorkIdentity:
+            mechanicsAbi.SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+          physicalSourceCount,
+          spatialExecution,
+          directoryBuffer,
+          activeSourceView,
+          activeSourceViewBuffer,
+          activeSourceCountAuthority,
+          activeSourceDispatchOffsetBytes:
+            activeLayout.activeDispatchOffsetBytes,
+          mechanicsViewBuffer,
+          indirectDispatchBuffer: mechanicsViewBuffer,
+          indirectDispatchOffsetBytes:
+            parentPlan.layout.dispatchOffsetWords
+              * Uint32Array.BYTES_PER_ELEMENT,
+          ownerRuntime: parentOwner
+        };
+
+        const runtime = runtimeFor(gridSpacingM);
+        const encoder = device.createCommandEncoder();
+        const field = runtime.encode(encoder, {
+          sourceBuffer,
+          identityBuffer,
+          sourceCount: physicalSourceCount,
+          sourceRowLayoutId:
+            mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          identityStrideWords: 1,
+          selectedLevel,
+          parentMechanicsView
+        });
+        device.queue.submit([encoder.finish()]);
+        runtime.markExecutionSubmitted(field);
+        parentSubmitted = true;
+        parentMechanicsView.status =
+          'schroeder-spatial-mechanics-view-gpu-build-submitted';
+        parentMechanicsView.submitPerformed = true;
+        await device.queue.onSubmittedWorkDone();
+        const words = await readWords(
+          field.fieldViewBuffer,
+          field.layout.byteLength,
+          `${label}-readback`
+        );
+        const hostAdmission =
+          fieldAbi.validateSchroederSpatialMechanicsFieldViewDescriptor(field);
+        const descriptorStatuses = Array.from(
+          { length: physicalSourceCount },
+          (_, physical) => (
+            words[
+              field.layout.descriptorOffsetWords
+                + physical * field.layout.descriptorWords
+                + 3
+            ]
+          )
+        );
+        const stencilRowsMatch = activePhysicalSources.length < 2
+          ? null
+          : Array.from({ length: 27 }, (_, stencil) => (
+              words[
+                field.layout.descriptorOffsetWords
+                  + activePhysicalSources[0] * field.layout.descriptorWords
+                  + 4
+                  + stencil
+              ] === words[
+                field.layout.descriptorOffsetWords
+                  + activePhysicalSources[1] * field.layout.descriptorWords
+                  + 4
+                  + stencil
+              ]
+            )).every(Boolean);
+        const summary = {
+          label,
+          activeCount,
+          tamperCompletion,
+          hostAdmitted: hostAdmission.admitted,
+          flags: words[2],
+          sourceCount: words[16],
+          candidateCount: words[33],
+          fieldCount: words[34],
+          invalidSourceCount: words[35],
+          uniqueElementCount: words[51],
+          dispatch: Array.from(words.slice(60, 63)),
+          descriptorStatuses,
+          stencilRowsMatch
+        };
+        await runtime.releaseExecutionAfter(field);
+        for (const buffer of [
+          sourceBuffer,
+          identityBuffer,
+          activeSourceViewBuffer,
+          directoryBuffer,
+          mechanicsViewBuffer
+        ]) {
+          buffer.destroy();
+        }
+        return summary;
+      };
+
+      let cases;
+      let executionError = null;
+      try {
+        cases = [];
+        cases.push(await runCase({
+          label: 'directory-v2-a0',
+          activePhysicalSources: []
+        }));
+        cases.push(await runCase({
+          label: 'directory-v2-sparse-active',
+          activePhysicalSources: [1, 3]
+        }));
+        cases.push(await runCase({
+          label: 'directory-v2-two-level-selected-0',
+          activePhysicalSources: [1, 2, 3],
+          selectedLevel: 0,
+          gridSpacingM: 0.25,
+          sourceLevels: [0, 0, 0, 1],
+          sourceSpacings: [0.25, 0.25, 0.25, 0.5],
+          sourceMasses: [0, 1, 0, 1]
+        }));
+        cases.push(await runCase({
+          label: 'directory-v2-two-level-selected-1',
+          activePhysicalSources: [1, 2, 3],
+          selectedLevel: 1,
+          gridSpacingM: 0.5,
+          sourceLevels: [0, 0, 0, 1],
+          sourceSpacings: [0.25, 0.25, 0.25, 0.5],
+          sourceMasses: [0, 1, 0, 1]
+        }));
+        cases.push(await runCase({
+          label: 'directory-v2-stale-completion',
+          activePhysicalSources: [1, 3],
+          tamperCompletion: true
+        }));
+      } catch (error) {
+        executionError = error?.message || String(error);
+      }
+      for (const runtime of runtimes.values()) {
+        try {
+          runtime.destroy();
+        } catch (error) {
+          executionError ??= error?.message || String(error);
+        }
+      }
+      const validationError = await device.popErrorScope();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.destroy?.();
+      return {
+        status: 'complete',
+        executionError,
+        validationError: validationError?.message || null,
+        uncapturedErrors,
+        cases
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+  assert.equal(result.status, 'complete', result.reason);
+  assert.equal(result.executionError, null);
+  assert.equal(result.validationError, null);
+  assert.deepEqual(result.uncapturedErrors, []);
+  assert.deepEqual(result.cases, [
+    {
+      label: 'directory-v2-a0',
+      activeCount: 0,
+      tamperCompletion: false,
+      hostAdmitted: true,
+      flags:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+      sourceCount: 4,
+      candidateCount: 0,
+      fieldCount: 0,
+      invalidSourceCount: 0,
+      uniqueElementCount: 0,
+      dispatch: [0, 0, 0],
+      descriptorStatuses: [0, 0, 0, 0],
+      stencilRowsMatch: null
+    },
+    {
+      label: 'directory-v2-sparse-active',
+      activeCount: 2,
+      tamperCompletion: false,
+      hostAdmitted: true,
+      flags:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+      sourceCount: 4,
+      candidateCount: 54,
+      fieldCount: 27,
+      invalidSourceCount: 0,
+      uniqueElementCount: 54,
+      dispatch: [1, 1, 1],
+      descriptorStatuses: [0, 1, 0, 1],
+      stencilRowsMatch: true
+    },
+    {
+      label: 'directory-v2-two-level-selected-0',
+      activeCount: 3,
+      tamperCompletion: false,
+      hostAdmitted: true,
+      flags:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+      sourceCount: 4,
+      candidateCount: 81,
+      fieldCount: 27,
+      invalidSourceCount: 0,
+      uniqueElementCount: 81,
+      dispatch: [1, 1, 1],
+      descriptorStatuses: [0, 1, 0, 0],
+      stencilRowsMatch: false
+    },
+    {
+      label: 'directory-v2-two-level-selected-1',
+      activeCount: 3,
+      tamperCompletion: false,
+      hostAdmitted: true,
+      flags:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+      sourceCount: 4,
+      candidateCount: 81,
+      fieldCount: 27,
+      invalidSourceCount: 0,
+      uniqueElementCount: 81,
+      dispatch: [1, 1, 1],
+      descriptorStatuses: [0, 0, 0, 1],
+      stencilRowsMatch: true
+    },
+    {
+      label: 'directory-v2-stale-completion',
+      activeCount: 2,
+      tamperCompletion: true,
+      hostAdmitted: true,
+      flags: 4,
+      sourceCount: 0,
+      candidateCount: 0,
+      fieldCount: 0,
+      invalidSourceCount: 0,
+      uniqueElementCount: 0,
+      dispatch: [0, 0, 0],
+      descriptorStatuses: [0, 0, 0, 0],
+      stencilRowsMatch: true
+    }
+  ]);
 });
 
 test('native mechanics field applies gravity across duplicate stencils and copies an inactive carrier', {
@@ -1955,14 +3471,17 @@ test('native mechanics field applies gravity across duplicate stencils and copie
   assert.equal(native.fieldCount, 27);
   assert.deepEqual(native.uniqueEvidence, [
     1,
-    135,
-    28,
+    108,
+    27,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_UNIQUE_STATUS_READY
   ]);
   assert.deepEqual(native.dispatch, [1, 1, 1]);
   assert.equal(native.radixSortKeyWordCount, 3);
-  assert.equal(native.radixHistogramScanMode, 'parallel-scan');
-  assert.equal(native.constructionRoutePolicy, 'gpu-authenticated-direct-exact-radix');
+  assert.equal(native.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
+  assert.equal(
+    native.constructionRoutePolicy,
+    'gpu-authenticated-directory-v2-indirect-gpu-count-radix'
+  );
   assert.equal(native.routeControlAbsent, true);
   assert.equal(native.mixedSolid.flags, native.flags);
   assert.equal(native.mixedSolid.fieldCount, 54);
@@ -1984,7 +3503,7 @@ test('native mechanics field applies gravity across duplicate stencils and copie
     );
   }
   assert.deepEqual(native.inactiveDescriptor.slice(0, 4), [0, 0, 0, 0]);
-  assert.deepEqual(native.inactiveDescriptor.slice(4, 31), new Array(27).fill(0xffff_ffff));
+  assert.deepEqual(native.inactiveDescriptor.slice(4, 31), new Array(27).fill(0));
   assert.equal(native.validationError, null);
   assert.deepEqual(native.uncapturedErrors, []);
   const contactCases = Object.fromEntries(
@@ -2360,7 +3879,7 @@ test('native staged mechanics-field P2G is bitwise deterministic across fresh ex
     native.stateEncoding,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
   );
-  assert.equal(native.radixHistogramScanMode, 'serial-small');
+  assert.equal(native.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
   assert.equal(new Set(native.hashes).size, 1);
   assert.deepEqual(native.contributionCounts, new Array(27).fill(320));
   assert.ok(native.massMin > 0);

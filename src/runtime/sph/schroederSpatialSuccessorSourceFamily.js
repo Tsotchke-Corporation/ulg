@@ -5,6 +5,15 @@ import {
   validateSchroederSpatialEpochTransactionCommit
 } from './schroederSpatialEpochTransaction.js';
 import {
+  admitSchroederPostClosureLevelAssignment,
+  validateSchroederPostClosureLevelAssignment
+} from './schroederFrozenLevelAssignmentRefreshGpu.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipeline
+} from '../webgpuComputeLayout.js';
+import {
+  tagWebGpuBufferDevice,
   webGpuBufferDevice,
   webGpuBufferMatchesDevice,
   webGpuDeviceId
@@ -26,6 +35,19 @@ export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_PUBLICATION_RECEIPT_SCHEMA =
   'peercompute.ulg.schroeder-successor-source-family-publication-receipt.v1';
 export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_RETIREMENT_RECEIPT_SCHEMA =
   'peercompute.ulg.schroeder-successor-source-family-retirement-receipt.v1';
+export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_SEAL_SCHEMA =
+  'peercompute.ulg.schroeder-successor-level-assignment-seal.v1';
+export const ULG_SCHROEDER_SPATIAL_POSITION_TRANSITION_RECEIPT_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-position-transition-receipt.v1';
+
+export const SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC = 0x53535058;
+export const SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION = 1;
+export const SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL = 0x504f5349;
+export const SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS = Object.freeze({
+  INCOMPLETE: 0,
+  COMPLETE: 1,
+  EPOCH_EXHAUSTED: 2
+});
 
 const EPOCH_FIELDS = Object.freeze([
   'storageGeneration',
@@ -47,6 +69,147 @@ const bufferFamilyAllocationRecords = new WeakMap();
 const successorPublicationPlanRecords = new WeakMap();
 const preparedSuccessorPublicationPlans = new WeakSet();
 const successorPublicationReceiptRecords = new WeakMap();
+const successorLevelAssignmentSealRecords = new WeakMap();
+const positionTransitionReceiptRecords = new WeakMap();
+const finalizedPositionTransitionReceipts = new WeakSet();
+let nextPositionTransitionSubmissionNonce = 0;
+
+const POSITION_TRANSITION_WORKGROUP_SIZE = 64;
+const POSITION_TRANSITION_PARAM_WORDS = 8;
+const POSITION_TRANSITION_RECEIPT_WORDS = 20;
+const POSITION_TRANSITION_RECEIPT_BYTES =
+  POSITION_TRANSITION_RECEIPT_WORDS * Uint32Array.BYTES_PER_ELEMENT;
+const POSITION_TRANSITION_STATE_STRIDE_WORDS = 8;
+const POSITION_TRANSITION_GPU_BUFFER_USAGE = Object.freeze({
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
+  COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
+  UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
+});
+const POSITION_TRANSITION_GPU_MAP_MODE = Object.freeze({
+  READ: globalThis.GPUMapMode?.READ ?? 1
+});
+
+const schroederSpatialPositionTransitionWgsl = /* wgsl */ `
+struct PositionTransitionParams {
+  source_count: u32,
+  successor_count: u32,
+  generation_id: u32,
+  submission_nonce: u32,
+  source_position_epoch: u32,
+  version: u32,
+  magic: u32,
+  reserved: u32,
+};
+
+@group(0) @binding(0)
+var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1)
+var<storage, read> successor_state: array<vec4<f32>>;
+@group(0) @binding(2)
+var<uniform> params: PositionTransitionParams;
+@group(0) @binding(3)
+var<storage, read_write> receipt: array<atomic<u32>>;
+
+const F32_MAX: f32 = 3.4028234663852886e38;
+
+fn finite_vec3(value: vec3<f32>) -> bool {
+  return all(abs(value) <= vec3<f32>(F32_MAX));
+}
+
+@compute @workgroup_size(${POSITION_TRANSITION_WORKGROUP_SIZE})
+fn compare_position(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let particle_index = gid.x;
+  let comparison_count = max(params.source_count, params.successor_count);
+  if (particle_index >= comparison_count) {
+    return;
+  }
+  atomicAdd(&receipt[8], 1u);
+  if (
+    particle_index >= params.source_count
+    || particle_index >= params.successor_count
+  ) {
+    return;
+  }
+  let source_row0 = source_state[particle_index * 2u];
+  let successor_row0 = successor_state[particle_index * 2u];
+  let source_active =
+    source_row0.w > 0.0 && source_row0.w <= F32_MAX;
+  let successor_active =
+    successor_row0.w > 0.0 && successor_row0.w <= F32_MAX;
+  if (!source_active || !successor_active) {
+    return;
+  }
+  atomicAdd(&receipt[9], 1u);
+  let source_position = source_row0.xyz;
+  let successor_position = successor_row0.xyz;
+  if (!finite_vec3(source_position)) {
+    atomicAdd(&receipt[11], 1u);
+    return;
+  }
+  if (!finite_vec3(successor_position)) {
+    atomicAdd(&receipt[12], 1u);
+    return;
+  }
+  if (any(source_position != successor_position)) {
+    atomicAdd(&receipt[10], 1u);
+  }
+}
+
+@compute @workgroup_size(1)
+fn seal_position() {
+  let prior_seal_count = atomicAdd(&receipt[13], 1u);
+  let comparison_count = max(params.source_count, params.successor_count);
+  atomicStore(&receipt[0], params.magic);
+  atomicStore(&receipt[1], params.version);
+  atomicStore(&receipt[2], params.generation_id);
+  atomicStore(&receipt[3], params.submission_nonce);
+  atomicStore(&receipt[4], params.source_position_epoch);
+  atomicStore(&receipt[5], params.source_count);
+  atomicStore(&receipt[6], params.successor_count);
+  atomicStore(&receipt[7], comparison_count);
+  let visited_count = atomicLoad(&receipt[8]);
+  let moved_count = atomicLoad(&receipt[10]);
+  let invalid_source_count = atomicLoad(&receipt[11]);
+  let invalid_successor_count = atomicLoad(&receipt[12]);
+  let position_changed = moved_count > 0u;
+  atomicStore(&receipt[14], select(0u, 1u, position_changed));
+  atomicStore(&receipt[15], params.source_position_epoch);
+  atomicStore(
+    &receipt[16],
+    ${SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.INCOMPLETE}u
+  );
+  atomicStore(&receipt[19], 0u);
+  if (
+    prior_seal_count != 0u
+    || visited_count != comparison_count
+    || invalid_source_count != 0u
+    || invalid_successor_count != 0u
+  ) {
+    return;
+  }
+  if (position_changed && params.source_position_epoch == 0xffffffffu) {
+    atomicStore(
+      &receipt[16],
+      ${SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.EPOCH_EXHAUSTED}u
+    );
+    return;
+  }
+  atomicStore(
+    &receipt[15],
+    params.source_position_epoch + select(0u, 1u, position_changed)
+  );
+  atomicStore(
+    &receipt[16],
+    ${SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.COMPLETE}u
+  );
+  atomicStore(
+    &receipt[19],
+    ${SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL}u
+  );
+}
+`;
 
 function sourceFamilyError(message, suffix = 'IDENTITY') {
   const error = new Error(message);
@@ -77,6 +240,440 @@ function incrementExactU32(value, label, { positive = false } = {}) {
     );
   }
   return current + 1;
+}
+
+function nextPositionTransitionNonce() {
+  nextPositionTransitionSubmissionNonce =
+    (nextPositionTransitionSubmissionNonce % 0xffff_fffe) + 1;
+  return nextPositionTransitionSubmissionNonce;
+}
+
+function createPositionTransitionBuffer(device, label, size, usage) {
+  return tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage }),
+    device
+  );
+}
+
+function positionTransitionPipelinePair(device) {
+  const bindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'uniform'),
+    computeBufferBinding(3, 'storage')
+  ];
+  const compare = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'schroeder-spatial-position-transition-v1-layout-v1',
+    label: 'ulg-schroeder-spatial-position-transition-compare',
+    code: schroederSpatialPositionTransitionWgsl,
+    entryPoint: 'compare_position',
+    bindings
+  });
+  const seal = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'schroeder-spatial-position-transition-v1-layout-v1',
+    label: 'ulg-schroeder-spatial-position-transition-seal',
+    code: schroederSpatialPositionTransitionWgsl,
+    entryPoint: 'seal_position',
+    bindings
+  });
+  return { compare, seal };
+}
+
+async function mapPositionReceiptOrDeviceLoss(device, readbackBuffer) {
+  const mapPromise = readbackBuffer.mapAsync(
+    POSITION_TRANSITION_GPU_MAP_MODE.READ
+  );
+  if (!device?.lost?.then) {
+    await mapPromise;
+    return;
+  }
+  await Promise.race([
+    mapPromise,
+    Promise.resolve(device.lost).then((info) => {
+      throw sourceFamilyError(
+        `device lost before position receipt observation${
+          info?.message ? `: ${info.message}` : ''
+        }`,
+        'POSITION_TRANSITION_DEVICE_LOST'
+      );
+    })
+  ]);
+}
+
+/**
+ * Observe actual resident position mutation with a fixed-size GPU receipt.
+ * Mapping this receipt is also the terminal outcome for every same-queue
+ * mechanics/closure submission that produced the exact successor state.
+ */
+export async function runSchroederSpatialPositionTransitionWebGpu({
+  device,
+  generation,
+  sourceStateBuffer = generation?.source?.sourceStateBuffer,
+  sourceParticleCount = generation?.source?.sourceCount,
+  sourceStateStrideBytes =
+    POSITION_TRANSITION_STATE_STRIDE_WORDS * Float32Array.BYTES_PER_ELEMENT,
+  successorStateBuffer,
+  successorParticleCount,
+  successorStateStrideBytes =
+    POSITION_TRANSITION_STATE_STRIDE_WORDS * Float32Array.BYTES_PER_ELEMENT,
+  sourcePositionEpoch = generation?.execution?.positionEpoch
+} = {}) {
+  if (
+    !device?.createBuffer
+    || !device?.createCommandEncoder
+    || !device?.createBindGroup
+    || !device?.queue?.writeBuffer
+    || !device?.queue?.submit
+  ) {
+    throw new TypeError(
+      'position transition requires a WebGPU-like device and queue'
+    );
+  }
+  if (
+    generation?.selected !== true
+    || generation?.ready !== true
+    || generation?.execution?.released === true
+    || generation?.releaseScheduled === true
+  ) {
+    throw sourceFamilyError(
+      'position transition requires one live selected canonical generation',
+      'POSITION_TRANSITION_GENERATION'
+    );
+  }
+  const generationId = exactU32(
+    generation?.execution?.generationId,
+    'generation.execution.generationId',
+    { positive: true }
+  );
+  const resolvedSourceCount = exactU32(
+    sourceParticleCount,
+    'sourceParticleCount',
+    { positive: true }
+  );
+  const resolvedSuccessorCount = exactU32(
+    successorParticleCount,
+    'successorParticleCount',
+    { positive: true }
+  );
+  const resolvedSourceEpoch = exactU32(
+    sourcePositionEpoch,
+    'sourcePositionEpoch'
+  );
+  const requiredStateStrideBytes =
+    POSITION_TRANSITION_STATE_STRIDE_WORDS * Float32Array.BYTES_PER_ELEMENT;
+  if (
+    exactU32(sourceStateStrideBytes, 'sourceStateStrideBytes', {
+      positive: true
+    }) !== requiredStateStrideBytes
+    || exactU32(successorStateStrideBytes, 'successorStateStrideBytes', {
+      positive: true
+    }) !== requiredStateStrideBytes
+  ) {
+    throw sourceFamilyError(
+      `position transition requires the exact ${requiredStateStrideBytes}-byte state ABI`,
+      'POSITION_TRANSITION_LAYOUT'
+    );
+  }
+  if (
+    generation.source?.sourceCount !== resolvedSourceCount
+    || generation.execution?.sourceCount !== resolvedSourceCount
+    || generation.execution?.positionEpoch !== resolvedSourceEpoch
+  ) {
+    throw sourceFamilyError(
+      'position transition count or epoch does not match the canonical generation',
+      'POSITION_TRANSITION_IDENTITY'
+    );
+  }
+  const canonicalSourceStateBuffer = exactBuffer(
+    device,
+    generation.source?.sourceStateBuffer,
+    'canonical E* position source state'
+  );
+  if (sourceStateBuffer !== canonicalSourceStateBuffer) {
+    throw sourceFamilyError(
+      'position transition source state is not the exact canonical E* state',
+      'POSITION_TRANSITION_IDENTITY'
+    );
+  }
+  const resolvedSuccessorStateBuffer = exactBuffer(
+    device,
+    successorStateBuffer,
+    'final successor position state'
+  );
+  requireCapacity(
+    canonicalSourceStateBuffer,
+    resolvedSourceCount,
+    requiredStateStrideBytes,
+    'canonical position source state'
+  );
+  requireCapacity(
+    resolvedSuccessorStateBuffer,
+    resolvedSuccessorCount,
+    requiredStateStrideBytes,
+    'successor position state'
+  );
+  const comparisonParticleCount = Math.max(
+    resolvedSourceCount,
+    resolvedSuccessorCount
+  );
+  const workgroupCount = Math.ceil(
+    comparisonParticleCount / POSITION_TRANSITION_WORKGROUP_SIZE
+  );
+  const maxWorkgroups = Number(device?.limits?.maxComputeWorkgroupsPerDimension);
+  if (
+    Number.isFinite(maxWorkgroups)
+    && maxWorkgroups > 0
+    && workgroupCount > maxWorkgroups
+  ) {
+    throw sourceFamilyError(
+      `position comparison needs ${workgroupCount} workgroups; device limit is ${maxWorkgroups}`,
+      'POSITION_TRANSITION_DISPATCH_LIMIT'
+    );
+  }
+  const submissionNonce = nextPositionTransitionNonce();
+  const paramsBuffer = createPositionTransitionBuffer(
+    device,
+    'ulg-schroeder-spatial-position-transition-params',
+    POSITION_TRANSITION_PARAM_WORDS * Uint32Array.BYTES_PER_ELEMENT,
+    POSITION_TRANSITION_GPU_BUFFER_USAGE.UNIFORM
+      | POSITION_TRANSITION_GPU_BUFFER_USAGE.COPY_DST
+  );
+  const receiptBuffer = createPositionTransitionBuffer(
+    device,
+    'ulg-schroeder-spatial-position-transition-receipt',
+    POSITION_TRANSITION_RECEIPT_BYTES,
+    POSITION_TRANSITION_GPU_BUFFER_USAGE.STORAGE
+      | POSITION_TRANSITION_GPU_BUFFER_USAGE.COPY_SRC
+      | POSITION_TRANSITION_GPU_BUFFER_USAGE.COPY_DST
+  );
+  const readbackBuffer = createPositionTransitionBuffer(
+    device,
+    'ulg-schroeder-spatial-position-transition-compact-readback',
+    POSITION_TRANSITION_RECEIPT_BYTES,
+    POSITION_TRANSITION_GPU_BUFFER_USAGE.MAP_READ
+      | POSITION_TRANSITION_GPU_BUFFER_USAGE.COPY_DST
+  );
+  let mapped = false;
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([
+      resolvedSourceCount,
+      resolvedSuccessorCount,
+      generationId,
+      submissionNonce,
+      resolvedSourceEpoch,
+      SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
+      SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC,
+      0
+    ]));
+    device.queue.writeBuffer(
+      receiptBuffer,
+      0,
+      new Uint32Array(POSITION_TRANSITION_RECEIPT_WORDS)
+    );
+    const pipelines = positionTransitionPipelinePair(device);
+    const bindGroup = device.createBindGroup({
+      label: 'ulg-schroeder-spatial-position-transition-bind-group',
+      layout: pipelines.compare.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: canonicalSourceStateBuffer } },
+        { binding: 1, resource: { buffer: resolvedSuccessorStateBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        { binding: 3, resource: { buffer: receiptBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-schroeder-spatial-position-transition-encoder'
+    });
+    const comparePass = encoder.beginComputePass({
+      label: 'ulg-schroeder-spatial-position-transition-compare-pass'
+    });
+    comparePass.setPipeline(pipelines.compare.pipeline);
+    comparePass.setBindGroup(0, bindGroup);
+    comparePass.dispatchWorkgroups(workgroupCount);
+    comparePass.end();
+    const sealPass = encoder.beginComputePass({
+      label: 'ulg-schroeder-spatial-position-transition-seal-pass'
+    });
+    sealPass.setPipeline(pipelines.seal.pipeline);
+    sealPass.setBindGroup(0, bindGroup);
+    sealPass.dispatchWorkgroups(1);
+    sealPass.end();
+    encoder.copyBufferToBuffer(
+      receiptBuffer,
+      0,
+      readbackBuffer,
+      0,
+      POSITION_TRANSITION_RECEIPT_BYTES
+    );
+    device.queue.submit([encoder.finish()]);
+    await mapPositionReceiptOrDeviceLoss(device, readbackBuffer);
+    mapped = true;
+    const words = new Uint32Array(
+      readbackBuffer.getMappedRange(),
+      0,
+      POSITION_TRANSITION_RECEIPT_WORDS
+    ).slice();
+    const [
+      magic,
+      version,
+      observedGenerationId,
+      observedNonce,
+      observedSourceEpoch,
+      observedSourceCount,
+      observedSuccessorCount,
+      observedComparisonCount,
+      visitedCount,
+      comparedActiveCount,
+      movedParticleCount,
+      invalidSourcePositionCount,
+      invalidSuccessorPositionCount,
+      sealPassCount,
+      positionChangedWord,
+      nextPositionEpoch,
+      status,
+      ,
+      ,
+      finalSeal
+    ] = words;
+    const expectedChanged = movedParticleCount > 0;
+    const expectedNextPositionEpoch = expectedChanged
+      ? resolvedSourceEpoch + 1
+      : resolvedSourceEpoch;
+    if (
+      status
+        === SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.EPOCH_EXHAUSTED
+    ) {
+      throw sourceFamilyError(
+        'position changed at UINT_MAX; positionEpoch cannot advance without wraparound',
+        'POSITION_TRANSITION_EPOCH_EXHAUSTED'
+      );
+    }
+    if (
+      magic !== SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC
+      || version !== SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION
+      || observedGenerationId !== generationId
+      || observedNonce !== submissionNonce
+      || observedSourceEpoch !== resolvedSourceEpoch
+      || observedSourceCount !== resolvedSourceCount
+      || observedSuccessorCount !== resolvedSuccessorCount
+      || observedComparisonCount !== comparisonParticleCount
+      || visitedCount !== comparisonParticleCount
+      || comparedActiveCount > Math.min(
+        resolvedSourceCount,
+        resolvedSuccessorCount
+      )
+      || movedParticleCount > comparedActiveCount
+      || invalidSourcePositionCount !== 0
+      || invalidSuccessorPositionCount !== 0
+      || sealPassCount !== 1
+      || positionChangedWord !== (expectedChanged ? 1 : 0)
+      || nextPositionEpoch !== expectedNextPositionEpoch
+      || status !== SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.COMPLETE
+      || finalSeal !== SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL
+    ) {
+      throw sourceFamilyError(
+        'GPU position transition receipt is missing, rejected, or internally inconsistent',
+        'POSITION_TRANSITION_OBSERVATION'
+      );
+    }
+    const receipt = Object.freeze({
+      schema: ULG_SCHROEDER_SPATIAL_POSITION_TRANSITION_RECEIPT_SCHEMA,
+      status: 'schroeder-spatial-position-transition-observed',
+      ready: true,
+      admitted: true,
+      gpuAuthenticated: true,
+      deviceId: webGpuDeviceId(device),
+      generationId,
+      submissionNonce,
+      sourcePositionEpoch: resolvedSourceEpoch,
+      nextPositionEpoch,
+      sourceParticleCount: resolvedSourceCount,
+      successorParticleCount: resolvedSuccessorCount,
+      comparisonParticleCount,
+      comparedActiveCount,
+      movedParticleCount,
+      invalidSourcePositionCount,
+      invalidSuccessorPositionCount,
+      positionChanged: expectedChanged,
+      comparePassCount: 1,
+      sealPassCount,
+      visitedCount,
+      compactReadbackByteLength: POSITION_TRANSITION_RECEIPT_BYTES,
+      fullParticleReadbackPerformed: false,
+      terminalQueueOutcomeObserved: true
+    });
+    positionTransitionReceiptRecords.set(receipt, Object.freeze({
+      device,
+      generation,
+      sourceStateBuffer: canonicalSourceStateBuffer,
+      successorStateBuffer: resolvedSuccessorStateBuffer,
+      sourceParticleCount: resolvedSourceCount,
+      successorParticleCount: resolvedSuccessorCount,
+      sourcePositionEpoch: resolvedSourceEpoch,
+      nextPositionEpoch
+    }));
+    finalizedPositionTransitionReceipts.add(receipt);
+    return receipt;
+  } finally {
+    if (mapped) readbackBuffer.unmap?.();
+    readbackBuffer.destroy?.();
+    receiptBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+  }
+}
+
+export function applySchroederSpatialPositionTransitionReceipt(
+  nextParticleUploads,
+  receipt,
+  { generation = null } = {}
+) {
+  const record = positionTransitionReceiptRecords.get(receipt);
+  const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
+  const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  if (
+    !record
+    || !finalizedPositionTransitionReceipts.has(receipt)
+    || (generation != null && record.generation !== generation)
+    || !sphUpload
+    || !mlsUpload
+    || sphUpload.stateBuffer !== record.successorStateBuffer
+    || sphUpload.particleCount !== record.successorParticleCount
+    || mlsUpload.particleCount !== record.successorParticleCount
+  ) {
+    throw sourceFamilyError(
+      'position receipt does not identify the exact successor upload family',
+      'POSITION_TRANSITION_SUCCESSOR_IDENTITY'
+    );
+  }
+  sphUpload.positionEpoch = record.nextPositionEpoch;
+  mlsUpload.positionEpoch = record.nextPositionEpoch;
+  sphUpload.positionTransitionStatus = receipt.status;
+  mlsUpload.positionTransitionStatus = receipt.status;
+  nextParticleUploads.schroederSpatialPositionTransitionReceipt = receipt;
+  return nextParticleUploads;
+}
+
+export function validateSchroederSpatialPositionTransitionReceipt(
+  receipt,
+  { generation, nextParticleUploads } = {}
+) {
+  const record = positionTransitionReceiptRecords.get(receipt);
+  const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
+  const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  return Boolean(
+    record
+    && finalizedPositionTransitionReceipts.has(receipt)
+    && record.generation === generation
+    && nextParticleUploads?.schroederSpatialPositionTransitionReceipt
+      === receipt
+    && sphUpload
+    && mlsUpload
+    && sphUpload.stateBuffer === record.successorStateBuffer
+    && sphUpload.particleCount === record.successorParticleCount
+    && mlsUpload.particleCount === record.successorParticleCount
+    && sphUpload.positionEpoch === record.nextPositionEpoch
+    && mlsUpload.positionEpoch === record.nextPositionEpoch
+  );
 }
 
 function requireDevice(device) {
@@ -390,13 +987,27 @@ function sourceFamilyLivenessSummary(sourceFamily, record) {
         && record.retirementFenceSettled !== true)
     ),
     ownsBuffers: false,
+    ownsSuccessorLevelAssignment: record.ownsSuccessorLevelAssignment === true,
+    successorLevelAssignmentDestroyed:
+      record.successorLevelAssignmentDestroyed === true,
     sourceGenerationId: sourceFamily.sourceGenerationId,
     deviceId: sourceFamily.deviceId
   });
 }
 
+function destroyOwnedSuccessorLevelAssignment(record) {
+  if (
+    record.ownsSuccessorLevelAssignment !== true
+    || record.successorLevelAssignmentDestroyed === true
+  ) return false;
+  record.successorLevelAssignment.destroyAssignmentBuffer?.();
+  record.successorLevelAssignmentDestroyed = true;
+  return true;
+}
+
 function requireActiveSourceFamily(record) {
   if (record.deviceLost) {
+    destroyOwnedSuccessorLevelAssignment(record);
     throw sourceFamilyError(
       `successor source family is quarantined after device loss: ${record.reason}`,
       'DEVICE_LOST'
@@ -451,6 +1062,7 @@ function settleRequestedRetirement(sourceFamily, record) {
   if (!record.retirementFenceSettled || record.leaseCount > 0) return false;
   record.active = false;
   record.retired = true;
+  destroyOwnedSuccessorLevelAssignment(record);
   record.retirementSettled = true;
   record.resolveRetirement?.(retirementReceipt(
     sourceFamily,
@@ -464,6 +1076,7 @@ function quarantineSourceFamilyAfterDeviceLoss(sourceFamily, record, info) {
   record.active = false;
   record.deviceLost = true;
   record.reason = normalizedReason(info, 'WebGPU device lost');
+  destroyOwnedSuccessorLevelAssignment(record);
   settleRequestedRetirement(sourceFamily, record);
 }
 
@@ -503,27 +1116,31 @@ function reserveSuccessorPublicationSlot(nextParticleUploads) {
   if (!nextParticleUploads || typeof nextParticleUploads !== 'object') {
     throw sourceFamilyError('successor publication requires a mutable upload envelope');
   }
-  const key = 'schroederSpatialSuccessorSourceFamily';
-  const existing = Object.getOwnPropertyDescriptor(nextParticleUploads, key);
-  if (existing) {
-    if (
-      !('value' in existing)
-      || existing.value != null
-      || existing.writable !== true
-    ) {
-      throw sourceFamilyError(
-        'successor publication slot is already occupied or not writable',
-        'PUBLICATION_SLOT'
-      );
+  for (const key of [
+    'schroederSpatialSuccessorSourceFamily',
+    'schroederSpatialSuccessorLevelAssignment'
+  ]) {
+    const existing = Object.getOwnPropertyDescriptor(nextParticleUploads, key);
+    if (existing) {
+      if (
+        !('value' in existing)
+        || existing.value != null
+        || existing.writable !== true
+      ) {
+        throw sourceFamilyError(
+          `successor publication slot ${key} is already occupied or not writable`,
+          'PUBLICATION_SLOT'
+        );
+      }
+      continue;
     }
-    return;
+    Object.defineProperty(nextParticleUploads, key, {
+      value: null,
+      writable: true,
+      configurable: true,
+      enumerable: true
+    });
   }
-  Object.defineProperty(nextParticleUploads, key, {
-    value: null,
-    writable: true,
-    configurable: true,
-    enumerable: true
-  });
 }
 
 function stampSuccessorEpochIdentity(sphUpload, mlsUpload, identity) {
@@ -540,7 +1157,8 @@ function stampSuccessorEpochIdentity(sphUpload, mlsUpload, identity) {
 function preparedUploadFamilyPreserved(
   nextParticleUploads,
   sourceFamily,
-  buffers
+  buffers,
+  successorLevelAssignment
 ) {
   const sphUpload = nextParticleUploads?.sphParticleUpload;
   const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload;
@@ -559,6 +1177,10 @@ function preparedUploadFamilyPreserved(
     ))
     && sphUpload.bufferFamilyGeneration === sourceFamily.storageGeneration
     && mlsUpload.bufferFamilyGeneration === sourceFamily.storageGeneration
+    && validateSchroederPostClosureLevelAssignment(
+      successorLevelAssignment,
+      { nextParticleUploads }
+    )
   );
 }
 
@@ -569,10 +1191,13 @@ function newSourceFamilyRecord({
   generation,
   nextParticleUploads,
   topologyTransitionReceipt,
+  positionTransitionReceipt = null,
   positionEpochFloorReceipt = null,
   sphUpload,
   mlsUpload,
   buffers,
+  successorLevelAssignment = null,
+  successorLevelAssignmentSeal = null,
   storageAllocation = null
 }) {
   return {
@@ -582,11 +1207,18 @@ function newSourceFamilyRecord({
     generation,
     nextParticleUploads,
     topologyTransitionReceipt,
+    positionTransitionReceipt,
     positionEpochFloorReceipt,
     storageAllocation,
     sphUpload,
     mlsUpload,
     buffers,
+    successorLevelAssignment,
+    successorLevelAssignmentSeal,
+    ownsSuccessorLevelAssignment:
+      typeof successorLevelAssignment?.destroyAssignmentBuffer === 'function',
+    successorLevelAssignmentRetirementScheduled: false,
+    successorLevelAssignmentDestroyed: false,
     active: true,
     retired: false,
     deviceLost: false,
@@ -621,6 +1253,31 @@ function publicationReceipt({
   return receipt;
 }
 
+function retireUnpublishedSuccessorLevelAssignment(record) {
+  if (
+    !record
+    || record.successorLevelAssignmentDestroyed === true
+    || record.successorLevelAssignmentRetirementScheduled === true
+  ) return;
+  record.successorLevelAssignmentRetirementScheduled = true;
+  let fence = null;
+  try {
+    fence = record.device?.queue?.onSubmittedWorkDone?.();
+  } catch {
+    fence = null;
+  }
+  const retire = () => {
+    try {
+      destroyOwnedSuccessorLevelAssignment(record);
+    } catch {
+      // Publication failure remains authoritative. A failed destroy keeps the
+      // exact record quarantined rather than manufacturing a successful receipt.
+    }
+  };
+  if (fence?.then) Promise.resolve(fence).then(retire, retire);
+  else retire();
+}
+
 /**
  * Complete all fallible successor identity checks and reserve the upload
  * attachment before the physics transaction commits. No public family is
@@ -629,8 +1286,12 @@ function publicationReceipt({
 export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
   transaction,
   generation,
+  lookupLevelAssignment,
   nextParticleUploads,
+  successorLevelAssignmentRunner,
   topologyTransitionReceipt = null,
+  positionTransitionReceipt =
+    nextParticleUploads?.schroederSpatialPositionTransitionReceipt ?? null,
   conservativeTopologyAdvance = false,
   placementPositionEpochFloorReceipt =
     nextParticleUploads?.schroederSpatialReactionPlacementPositionEpochFloorReceipt
@@ -652,6 +1313,15 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       'successor preflight requires exact transaction and source generation'
     );
   }
+  if (
+    !lookupLevelAssignment
+    || typeof successorLevelAssignmentRunner !== 'function'
+  ) {
+    throw sourceFamilyError(
+      'successor preflight requires the exact lookup assignment and one post-closure full classifier',
+      'LEVEL_ASSIGNMENT'
+    );
+  }
   const sourceEpochIdentity = exactSourceEpochIdentity(generation);
   const observedTopologyTransition = topologyTransitionReceipt != null;
   if (
@@ -670,6 +1340,19 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     throw sourceFamilyError(
       'successor preflight requires observed topology authority or conservative advance',
       'TOPOLOGY_TRANSITION'
+    );
+  }
+  const observedPositionTransition = positionTransitionReceipt != null;
+  if (
+    observedPositionTransition
+    && !validateSchroederSpatialPositionTransitionReceipt(
+        positionTransitionReceipt,
+        { generation, nextParticleUploads }
+      )
+  ) {
+    throw sourceFamilyError(
+      'successor preflight rejected a non-terminal or foreign GPU position transition receipt',
+      'POSITION_TRANSITION'
     );
   }
   const topologyAuthority = observedTopologyTransition
@@ -701,7 +1384,20 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
         deactivatedCount: null
       });
   const observedUploadIdentity = exactEpochPair(sphUpload, mlsUpload);
-  const positionTransitionAuthenticated = false;
+  if (
+    observedUploadIdentity.positionEpoch
+      < sourceEpochIdentity.positionEpoch
+  ) {
+    throw sourceFamilyError(
+      'successor upload position epoch regressed behind its lookup generation',
+      'POSITION_TRANSITION'
+    );
+  }
+  const positionTransitionAuthenticated = Boolean(
+    observedPositionTransition
+    && positionTransitionReceipt.positionChanged === true
+    && positionTransitionReceipt.terminalQueueOutcomeObserved === true
+  );
   let positionEpochFloorAuthenticated = false;
   let positionEpochFloor = sourceEpochIdentity.positionEpoch;
   if (placementPositionEpochFloorReceipt) {
@@ -733,7 +1429,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     positionEpochFloorAuthenticated = true;
   }
   const positionChanged = Boolean(
-    forcePositionAdvance
+    positionTransitionAuthenticated
+    || forcePositionAdvance
     || topologyAuthority.topologyChanged === true
     || positionEpochFloorAuthenticated
   );
@@ -744,7 +1441,10 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       )
     : sourceEpochIdentity.positionEpoch;
   const nextPositionEpoch = positionEpochFloorAuthenticated
-    ? Math.max(conservativelyAdvancedPositionEpoch, positionEpochFloor)
+    ? Math.max(
+        conservativelyAdvancedPositionEpoch,
+        positionEpochFloor
+      )
     : conservativelyAdvancedPositionEpoch;
   const allocation = allocateSchroederSpatialSuccessorBufferFamilyIdentity({
     device,
@@ -765,8 +1465,20 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       'successor topology epoch'
     ),
     chartEpoch: observedUploadIdentity.chartEpoch,
-    levelEpoch: observedUploadIdentity.levelEpoch,
-    supportEpoch: observedUploadIdentity.supportEpoch
+    levelEpoch: incrementExactU32(
+      Math.max(
+        sourceEpochIdentity.levelEpoch,
+        observedUploadIdentity.levelEpoch
+      ),
+      'successor level epoch'
+    ),
+    supportEpoch: incrementExactU32(
+      Math.max(
+        sourceEpochIdentity.supportEpoch,
+        observedUploadIdentity.supportEpoch
+      ),
+      'successor support epoch'
+    )
   });
   const ownerStages = normalizeComponentOwnerStages(componentOwnerStages);
   const queryGeometry = exactQueryGeometry(generation);
@@ -784,6 +1496,56 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       'TOPOLOGY_TRANSITION'
     );
   }
+  let rawSuccessorLevelAssignment = null;
+  let successorLevelAssignment = null;
+  try {
+    rawSuccessorLevelAssignment = await successorLevelAssignmentRunner({
+      device,
+      transaction,
+      lookupGeneration: generation,
+      lookupLevelAssignment,
+      nextParticleUploads,
+      sphParticleUpload: sphUpload,
+      mlsMpmParticleUpload: mlsUpload,
+      successorEpochIdentity
+    });
+    successorLevelAssignment = admitSchroederPostClosureLevelAssignment({
+      device,
+      lookupLevelAssignment,
+      nextParticleUploads,
+      postClosureLevelAssignment: rawSuccessorLevelAssignment,
+      maxParticleCount: particleCount
+    });
+  } catch (error) {
+    rawSuccessorLevelAssignment?.destroyAssignmentBuffer?.();
+    throw error;
+  }
+  const successorLevelAssignmentSeal = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_SEAL_SCHEMA,
+    status: 'schroeder-successor-level-assignment-exact-lineage-sealed',
+    ready: true,
+    authenticated: true,
+    lookupGenerationId: exactU32(
+      generation.execution?.generationId,
+      'generation.execution.generationId',
+      { positive: true }
+    ),
+    successorLevelAssignmentGenerationId:
+      successorEpochIdentity.storageGeneration,
+    particleCount,
+    levelClassificationMode:
+      successorLevelAssignment.levelClassificationMode,
+    assignmentBufferByteLength:
+      successorLevelAssignment.assignmentBufferByteLength,
+    successorEpochIdentity
+  });
+  successorLevelAssignmentSealRecords.set(successorLevelAssignmentSeal, {
+    device,
+    generation,
+    lookupLevelAssignment,
+    nextParticleUploads,
+    successorLevelAssignment
+  });
   const sourceFamily = Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_SCHEMA,
     status: 'schroeder-committed-successor-source-family-authenticated',
@@ -796,14 +1558,23 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     coordinateAuthority: 'final-successor-particle-state',
     positionAuthority: positionEpochFloorAuthenticated
         ? 'authenticated-transactional-placement-epoch-floor-with-conservative-final-family'
-        : (forcePositionAdvance
-        ? 'authenticated-mechanics-integration-transition'
-        : 'authenticated-topology-or-invariant-transition'),
+        : (positionTransitionAuthenticated
+          ? 'authenticated-terminal-gpu-position-transition'
+          : (forcePositionAdvance
+            ? 'conservative-mechanics-integration-transition'
+            : 'authenticated-topology-or-invariant-transition')),
     publicationAuthority: 'spatial-epoch-transaction-preflight-and-commit',
     exactBufferFamilyAuthenticated: true,
     storageAllocationAuthenticated: true,
     topologyTransitionAuthenticated: true,
     positionTransitionAuthenticated,
+    positionTransitionTerminalOutcomeObserved:
+      observedPositionTransition
+      && positionTransitionReceipt.terminalQueueOutcomeObserved === true,
+    positionTransitionStatus:
+      positionTransitionReceipt?.status ?? null,
+    movedParticleCount:
+      positionTransitionReceipt?.movedParticleCount ?? null,
     positionEpochFloorAuthenticated,
     positionEpochFloor: positionEpochFloorAuthenticated
       ? positionEpochFloor
@@ -812,8 +1583,15 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     spatialQueryAuthority: false,
     spatialDirectoryReady: false,
     canonicalSpatialGenerationAvailable: false,
-    canonicalSpatialGenerationStatus: 'not-built',
+    canonicalSpatialGenerationStatus:
+      'exact-successor-level-assignment-ready-directory-not-built',
     spatialDirectoryGenerationId: null,
+    canonicalSpatialLevelAssignmentAvailable: true,
+    canonicalSpatialLevelAssignmentStatus:
+      'schroeder-successor-level-assignment-exact-lineage-sealed',
+    successorLevelAssignmentGenerationId:
+      successorEpochIdentity.storageGeneration,
+    successorLevelAssignmentSeal,
     sourceGenerationId: topologyAuthority.generationId,
     ancestorSpatialGenerationId: topologyAuthority.generationId,
     deviceId: webGpuDeviceId(device),
@@ -841,6 +1619,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     deviceId: webGpuDeviceId(device),
     particleCount,
     sourceGenerationId: sourceFamily.sourceGenerationId,
+    successorLevelAssignmentGenerationId:
+      sourceFamily.successorLevelAssignmentGenerationId,
     storageGeneration: successorEpochIdentity.storageGeneration,
     positionEpoch: successorEpochIdentity.positionEpoch,
     topologyEpoch: successorEpochIdentity.topologyEpoch
@@ -851,11 +1631,14 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     generation,
     nextParticleUploads,
     topologyTransitionReceipt,
+    positionTransitionReceipt,
     topologyAuthority,
     positionEpochFloorReceipt: placementPositionEpochFloorReceipt,
     sphUpload,
     mlsUpload,
     buffers,
+    successorLevelAssignment,
+    successorLevelAssignmentSeal,
     storageAllocation: allocation
   });
   successorPublicationPlanRecords.set(plan, {
@@ -863,13 +1646,94 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     generation,
     nextParticleUploads,
     topologyTransitionReceipt,
+    positionTransitionReceipt,
     topologyAuthority,
     sourceFamily,
+    successorLevelAssignment,
+    successorLevelAssignmentSeal,
     sourceFamilyRecord,
     attempted: false
   });
   preparedSuccessorPublicationPlans.add(plan);
   return plan;
+}
+
+/**
+ * Retire the classifier output held by a prepared plan that cannot reach
+ * publication. This is the failure-side ownership handoff for callers that
+ * prepare before committing their spatial transaction.
+ */
+export function abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(
+  plan,
+  { reason = 'prepared successor publication abandoned' } = {}
+) {
+  const prepared = successorPublicationPlanRecords.get(plan);
+  if (
+    !prepared
+    || !preparedSuccessorPublicationPlans.has(plan)
+    || sourceFamilyRecords.has(prepared.sourceFamily)
+    || prepared.attempted === true
+  ) {
+    return false;
+  }
+  prepared.attempted = true;
+  prepared.sourceFamilyRecord.reason = normalizedReason(
+    reason,
+    'prepared successor publication abandoned'
+  );
+  retireUnpublishedSuccessorLevelAssignment(prepared.sourceFamilyRecord);
+  return true;
+}
+
+export function validateSchroederSpatialSuccessorLevelAssignmentSeal(
+  seal,
+  {
+    device = null,
+    generation = null,
+    lookupLevelAssignment = null,
+    nextParticleUploads = null,
+    successorLevelAssignment = null
+  } = {}
+) {
+  const record = successorLevelAssignmentSealRecords.get(seal);
+  return Boolean(
+    record
+    && seal?.schema
+      === ULG_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_SEAL_SCHEMA
+    && seal.status
+      === 'schroeder-successor-level-assignment-exact-lineage-sealed'
+    && seal.ready === true
+    && seal.authenticated === true
+    && Object.isFrozen(seal)
+    && (device == null || record.device === device)
+    && (generation == null || record.generation === generation)
+    && (
+      lookupLevelAssignment == null
+      || record.lookupLevelAssignment === lookupLevelAssignment
+    )
+    && (
+      nextParticleUploads == null
+      || record.nextParticleUploads === nextParticleUploads
+    )
+    && (
+      successorLevelAssignment == null
+      || record.successorLevelAssignment === successorLevelAssignment
+    )
+    && validateSchroederPostClosureLevelAssignment(
+      record.successorLevelAssignment,
+      {
+        device: record.device,
+        lookupLevelAssignment: record.lookupLevelAssignment,
+        nextParticleUploads: record.nextParticleUploads
+      }
+    )
+    && EPOCH_FIELDS.every((field) => (
+      seal.successorEpochIdentity[field]
+        === record.nextParticleUploads.sphParticleUpload[field]
+      && seal.successorEpochIdentity[field]
+        === record.nextParticleUploads.mlsMpmParticleUpload[field]
+    ))
+  );
 }
 
 /**
@@ -881,6 +1745,7 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
   plan,
   { commitReceipt } = {}
 ) {
+  let preparedForFailure = null;
   try {
     const prepared = successorPublicationPlanRecords.get(plan);
     if (
@@ -896,6 +1761,7 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         reason: 'publication plan is foreign, invalid, or already consumed'
       });
     }
+    preparedForFailure = prepared;
     prepared.attempted = true;
     const {
       transaction,
@@ -904,6 +1770,8 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       topologyTransitionReceipt,
       topologyAuthority,
       sourceFamily,
+      successorLevelAssignment,
+      successorLevelAssignmentSeal,
       sourceFamilyRecord
     } = prepared;
     if (
@@ -924,9 +1792,27 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       || !preparedUploadFamilyPreserved(
         nextParticleUploads,
         sourceFamily,
-        sourceFamilyRecord.buffers
+        sourceFamilyRecord.buffers,
+        successorLevelAssignment
+      )
+      || !validateSchroederSpatialSuccessorLevelAssignmentSeal(
+        successorLevelAssignmentSeal,
+        {
+          device: sourceFamilyRecord.device,
+          generation,
+          nextParticleUploads,
+          successorLevelAssignment
+        }
       )
       || nextParticleUploads.schroederSpatialSuccessorSourceFamily !== null
+      || nextParticleUploads.schroederSpatialSuccessorLevelAssignment !== null
+      || !Reflect.set(
+        nextParticleUploads,
+        'schroederSpatialSuccessorLevelAssignment',
+        successorLevelAssignment
+      )
+      || nextParticleUploads.schroederSpatialSuccessorLevelAssignment
+        !== successorLevelAssignment
       || !Reflect.set(
         nextParticleUploads,
         'schroederSpatialSuccessorSourceFamily',
@@ -934,6 +1820,27 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       )
       || nextParticleUploads.schroederSpatialSuccessorSourceFamily !== sourceFamily
     ) {
+      if (
+        nextParticleUploads.schroederSpatialSuccessorSourceFamily
+          === sourceFamily
+      ) {
+        Reflect.set(
+          nextParticleUploads,
+          'schroederSpatialSuccessorSourceFamily',
+          null
+        );
+      }
+      if (
+        nextParticleUploads.schroederSpatialSuccessorLevelAssignment
+          === successorLevelAssignment
+      ) {
+        Reflect.set(
+          nextParticleUploads,
+          'schroederSpatialSuccessorLevelAssignment',
+          null
+        );
+      }
+      retireUnpublishedSuccessorLevelAssignment(sourceFamilyRecord);
       return publicationReceipt({
         status: 'schroeder-successor-source-family-publication-rejected',
         published: false,
@@ -955,7 +1862,9 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         transaction,
         generation,
         nextParticleUploads,
-        sourceFamily
+        sourceFamily,
+        successorLevelAssignment,
+        successorLevelAssignmentSeal
       }
     });
   } catch (error) {
@@ -964,6 +1873,15 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       published: false,
       reason: error instanceof Error ? error.message : String(error)
     });
+  } finally {
+    if (
+      preparedForFailure?.attempted === true
+      && !sourceFamilyRecords.has(preparedForFailure.sourceFamily)
+    ) {
+      retireUnpublishedSuccessorLevelAssignment(
+        preparedForFailure.sourceFamilyRecord
+      );
+    }
   }
 }
 
@@ -1002,6 +1920,18 @@ export function validateSchroederSpatialSuccessorPublicationReceipt(
     && familyRecord.nextParticleUploads === record.nextParticleUploads
     && record.nextParticleUploads?.schroederSpatialSuccessorSourceFamily
       === family
+    && record.nextParticleUploads?.schroederSpatialSuccessorLevelAssignment
+      === record.successorLevelAssignment
+    && family.successorLevelAssignmentSeal
+      === record.successorLevelAssignmentSeal
+    && validateSchroederSpatialSuccessorLevelAssignmentSeal(
+      record.successorLevelAssignmentSeal,
+      {
+        generation: record.generation,
+        nextParticleUploads: record.nextParticleUploads,
+        successorLevelAssignment: record.successorLevelAssignment
+      }
+    )
     && (plan == null || record.plan === plan)
     && (commitReceipt == null || record.commitReceipt === commitReceipt)
     && (
@@ -1427,6 +2357,7 @@ export function retireSchroederSpatialSuccessorSourceFamily(
   record.retirementFenceSettled = true;
   record.retirementSettled = true;
   record.reason = normalizedReason(reason, 'successor source family retired');
+  destroyOwnedSuccessorLevelAssignment(record);
   return sourceFamilyLivenessSummary(sourceFamily, record);
 }
 
@@ -1539,6 +2470,21 @@ export function resolveSchroederSpatialSuccessorSourceFamily(
   if (
     sourceFamily.particleCount !== particleCount
     || suppliedMismatch
+    || (
+      sourceFamily.canonicalSpatialLevelAssignmentAvailable === true
+      && (
+        record.successorLevelAssignment?.assignmentBuffer?.destroyed === true
+        || !validateSchroederSpatialSuccessorLevelAssignmentSeal(
+          record.successorLevelAssignmentSeal,
+          {
+            device,
+            generation: record.generation,
+            nextParticleUploads: record.nextParticleUploads,
+            successorLevelAssignment: record.successorLevelAssignment
+          }
+        )
+      )
+    )
     || Object.values(record.buffers).some((buffer) => (
       webGpuBufferDevice(buffer) !== device
       || !webGpuBufferMatchesDevice(buffer, device)
@@ -1553,6 +2499,8 @@ export function resolveSchroederSpatialSuccessorSourceFamily(
     sourceFamily,
     sourceFamilyRole: sourceFamily.sourceFamilyRole,
     sourceGenerationId: sourceFamily.sourceGenerationId,
-    epochIdentity: sourceFamily.successorEpochIdentity
+    epochIdentity: sourceFamily.successorEpochIdentity,
+    levelAssignment: record.successorLevelAssignment ?? null,
+    levelAssignmentSeal: record.successorLevelAssignmentSeal ?? null
   });
 }

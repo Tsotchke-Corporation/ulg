@@ -824,7 +824,10 @@ fn coarse_pressure_receipt_seal() -> u32 {
     ^ coarse_load(38u);
 }
 
-fn fine_pressure_receipt_admitted(cross_claimed: bool) -> bool {
+fn fine_pressure_receipt_admitted(
+  cross_required: bool,
+  cross_claimed: bool
+) -> bool {
   if (fine_load(30u) < FIELD_RECEIPT_WORDS) { return false; }
   let receipt = fine_receipt_offset();
   let required = fine_load(receipt + 32u);
@@ -845,9 +848,11 @@ fn fine_pressure_receipt_admitted(cross_claimed: bool) -> bool {
     && (required & (
       FIELD_PRESSURE_CONSUMER_LOCAL
         | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-    )) == (
+    )) == select(
+      FIELD_PRESSURE_CONSUMER_LOCAL,
       FIELD_PRESSURE_CONSUMER_LOCAL
-        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+        | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL,
+      cross_required
     )
     && (claimed & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u
     && (consumed & FIELD_PRESSURE_CONSUMER_LOCAL) != 0u
@@ -2108,7 +2113,7 @@ fn evaluate_cross_level_phase_route(
     0.0,
     0.0
   );
-  if (!fine_pressure_receipt_admitted(true)
+  if (!fine_pressure_receipt_admitted(true, true)
       || !coarse_pressure_receipt_admitted(true)
       || !fine_pressure_row_valid(fine_field)) {
     return invalid;
@@ -2378,7 +2383,7 @@ fn admit_cross_level_phase_volume() {
     ws_reject(STATUS_INVALID_REGISTRY, 87u);
     return;
   }
-  if (!fine_pressure_receipt_admitted(false)
+  if (!fine_pressure_receipt_admitted(true, false)
       || !coarse_pressure_receipt_admitted(true)) {
     reject_pressure_authority();
     ws_reject(STATUS_INVALID_SOURCE, 87u);
@@ -2442,7 +2447,7 @@ fn admit_cross_level_phase_volume() {
     &coarse_view[coarse_receipt + 33u],
     FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
   );
-  if (!fine_pressure_receipt_admitted(true)
+  if (!fine_pressure_receipt_admitted(true, true)
       || !coarse_pressure_receipt_admitted(true)
       || (
         coarse_load(coarse_receipt + 33u)
@@ -4498,7 +4503,10 @@ fn finalize_fine_velocity_correction() {
     ) || !reflux_accumulating()
       || reflux_load(8u) != params.fine_substep_ordinal + 1u
       || reflux_load(15u) != params.fine_substep_ordinal
-      || !fine_pressure_receipt_admitted(true)) { return; }
+      || !fine_pressure_receipt_admitted(
+        params.transport_enabled != 0u,
+        params.transport_enabled != 0u
+      )) { return; }
   let receipt = fine_receipt_offset();
   fine_store(receipt + 4u, params.fine_substep_ordinal);
   fine_store(receipt + 6u, fine_load(34u));
@@ -4529,24 +4537,26 @@ fn finalize_fine_velocity_correction() {
   ws_store(36u, PHASE_FINE_COMPLETE);
   ws_store(58u, FIELD_VELOCITY);
   ws_store(70u, params.completion_ordinal);
-  let prior_pressure_consumed = atomicOr(
-    &fine_view[receipt + 34u],
-    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-  );
-  if ((prior_pressure_consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u
-      || (
-        fine_load(receipt + 34u)
-          & (
-            FIELD_PRESSURE_CONSUMER_LOCAL
-              | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-          )
-      ) != (
-        FIELD_PRESSURE_CONSUMER_LOCAL
-          | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-      )) {
-    reject_pressure_authority();
-    ws_reject(STATUS_INVALID_SOURCE, 87u);
-    return;
+  if (params.transport_enabled != 0u) {
+    let prior_pressure_consumed = atomicOr(
+      &fine_view[receipt + 34u],
+      FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+    );
+    if ((prior_pressure_consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u
+        || (
+          fine_load(receipt + 34u)
+            & (
+              FIELD_PRESSURE_CONSUMER_LOCAL
+                | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+            )
+        ) != (
+          FIELD_PRESSURE_CONSUMER_LOCAL
+            | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
+        )) {
+      reject_pressure_authority();
+      ws_reject(STATUS_INVALID_SOURCE, 87u);
+      return;
+    }
   }
   // Receipt phase is the field-side publication commit word and is last.
   fine_store(receipt + 3u, FIELD_RECEIPT_ENERGY_READY);
@@ -5723,45 +5733,10 @@ fn finalize_coarse_velocity_publish() {
   // Captured operation count commits after row, field, and header stores.
   reflux_store(97u, params.fine_substep_count + 1u);
   reflux_store(59u, REFLUX_PHASE_ENERGY_READY);
-  // Terminal publication is the coarse field's cross-level consumer: it folds
-  // the reflux correction into the coarse velocities. Claim that consumer here
-  // before consuming it, mirroring the fine side where admission claims and
-  // finalization consumes. Without the claim the receipt would carry
-  // consumed bits its claimed mask never authorized and G2P would fail closed.
-  let prior_pressure_claimed = atomicOr(
-    &coarse_view[receipt + 33u],
-    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-  );
-  if ((prior_pressure_claimed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u) {
-    coarse_store(receipt + 26u, FIELD_PRESSURE_FAIL_CLOSED);
-    coarse_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
-    coarse_store(60u, 0u);
-    coarse_store(61u, 0u);
-    coarse_store(62u, 0u);
-    return;
-  }
-  let prior_pressure_consumed = atomicOr(
-    &coarse_view[receipt + 34u],
-    FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-  );
-  if ((prior_pressure_consumed & FIELD_PRESSURE_CONSUMER_CROSS_LEVEL) != 0u
-      || (
-        coarse_load(receipt + 34u)
-          & (
-            FIELD_PRESSURE_CONSUMER_LOCAL
-              | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-          )
-      ) != (
-        FIELD_PRESSURE_CONSUMER_LOCAL
-          | FIELD_PRESSURE_CONSUMER_CROSS_LEVEL
-      )) {
-    coarse_store(receipt + 26u, FIELD_PRESSURE_FAIL_CLOSED);
-    coarse_store(2u, READY_ADMITTED | STATUS_FAIL_CLOSED);
-    coarse_store(60u, 0u);
-    coarse_store(61u, 0u);
-    coarse_store(62u, 0u);
-    return;
-  }
+  // The terminal field declares LOCAL as its sole pressure consumer. Its
+  // coarse grid update has already claimed and consumed the immutable P2G
+  // pressure receipt; terminal reflux publishes velocity/energy without
+  // inventing a cross-level pressure consumer.
   // The field receipt phase is the globally last terminal publication word.
   coarse_store(receipt + 3u, FIELD_RECEIPT_ENERGY_READY);
 }

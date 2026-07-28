@@ -1,11 +1,22 @@
 import {
+  ULG_WEBGPU_RADIX_GPU_COUNT_SCHEMA,
   ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
   ULG_WEBGPU_U32_SCAN_SCHEMA,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_TOPOLOGY,
+  WEBGPU_PARALLEL_PRIMITIVE_STATUS_READY,
+  WEBGPU_RADIX_GPU_COUNT_ABI_VERSION,
+  WEBGPU_RADIX_GPU_COUNT_CONTROL_HEADER_WORDS,
+  WEBGPU_RADIX_GPU_COUNT_MAGIC,
   WEBGPU_RADIX_UNIQUE_EVIDENCE_ROW_LAYOUT,
   WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT
 } from '../../ulg-gpu-abi/src/parallelPrimitives.js';
 
 export {
+  ULG_WEBGPU_RADIX_GPU_COUNT_SCHEMA,
   ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
   ULG_WEBGPU_U32_SCAN_SCHEMA
 };
@@ -91,6 +102,20 @@ function radixGroupCountFor(elementCount) {
   return Math.ceil(elementCount / WEBGPU_SCAN_WORKGROUP_SIZE);
 }
 
+function scanLevelCountForMaximum(elementCount) {
+  let count = positiveInteger(elementCount, 'scan maximum element count', {
+    max: 0xffffffff
+  });
+  let levelCount = 0;
+  while (count > 0) {
+    levelCount += 1;
+    const groups = groupCountFor(count);
+    if (groups <= 1) break;
+    count = groups;
+  }
+  return levelCount;
+}
+
 function dispatchShapeFor(groupCount, maxComputeWorkgroupsPerDimension = 65535) {
   const maxDimension = positiveInteger(
     maxComputeWorkgroupsPerDimension,
@@ -105,6 +130,99 @@ function dispatchShapeFor(groupCount, maxComputeWorkgroupsPerDimension = 65535) 
     );
   }
   return [x, y, 1];
+}
+
+export const WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD = Object.freeze({
+  MAGIC: 0,
+  ABI_VERSION: 1,
+  STATUS_FLAGS: 2,
+  EXPECTED_GENERATION_SEAL: 3,
+  OBSERVED_GENERATION_SEAL: 4,
+  LIVE_ELEMENT_COUNT: 5,
+  MAXIMUM_ELEMENT_COUNT: 6,
+  OVERFLOW_COUNT: 7,
+  KEY_WORD_COUNT: 8,
+  KEY_STRIDE_WORDS: 9,
+  RADIX_WORKGROUP_COUNT: 10,
+  HISTOGRAM_ELEMENT_COUNT: 11,
+  CONSUMER_WORKGROUP_SIZE: 12,
+  GENERATION_ID: 13,
+  HISTOGRAM_SCAN_LEVEL_COUNT: 14,
+  HEAD_SCAN_LEVEL_COUNT: 15,
+  AUTHORITY_COUNT_OFFSET_WORDS: 16,
+  AUTHORITY_SEAL_OFFSET_WORDS: 17,
+  INDIRECT_ROW_COUNT: 18,
+  COMPLETION_GENERATION_SEAL: 19,
+  RADIX_DISPATCH_OFFSET_WORDS: 20,
+  HISTOGRAM_SCAN_COUNT_OFFSET_WORDS: 21,
+  HEAD_SCAN_COUNT_OFFSET_WORDS: 22,
+  HISTOGRAM_SCAN_DISPATCH_OFFSET_WORDS: 23,
+  HEAD_SCAN_DISPATCH_OFFSET_WORDS: 24,
+  CONTROL_WORD_COUNT: 25,
+  DISPATCH_X_LIMIT: 26
+});
+
+export function createWebGpuRadixGpuCountControlLayout({
+  maxElementCount,
+  maxComputeWorkgroupsPerDimension = 65535
+} = {}) {
+  const maximum = positiveInteger(maxElementCount, 'maxElementCount', {
+    max: 0xffffffff
+  });
+  const maxRadixWorkgroups = radixGroupCountFor(maximum);
+  const maxHistogramElementCount = maxRadixWorkgroups * WEBGPU_RADIX_BUCKET_COUNT;
+  if (!Number.isSafeInteger(maxHistogramElementCount)
+    || maxHistogramElementCount > 0xffffffff) {
+    throw new RangeError('maximum radix histogram exceeds the u32-addressable range');
+  }
+  const histogramScanLevelCount = scanLevelCountForMaximum(maxHistogramElementCount);
+  const headScanLevelCount = scanLevelCountForMaximum(maximum);
+  const histogramScanCountOffsetWords = WEBGPU_RADIX_GPU_COUNT_CONTROL_HEADER_WORDS;
+  const headScanCountOffsetWords =
+    histogramScanCountOffsetWords + histogramScanLevelCount;
+  const radixDispatchOffsetWords =
+    headScanCountOffsetWords + headScanLevelCount;
+  const histogramScanDispatchOffsetWords =
+    radixDispatchOffsetWords + WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT.length;
+  const headScanDispatchOffsetWords = histogramScanDispatchOffsetWords
+    + histogramScanLevelCount * 2 * WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT.length;
+  const controlWordCount = headScanDispatchOffsetWords
+    + headScanLevelCount * 2 * WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT.length;
+  const indirectRowCount = 1
+    + histogramScanLevelCount * 2
+    + headScanLevelCount * 2;
+
+  // Validate every possible fixed-topology dispatch shape up front. Dynamic
+  // live counts can only produce equal or smaller shapes.
+  let scanCount = maxHistogramElementCount;
+  dispatchShapeFor(maxRadixWorkgroups, maxComputeWorkgroupsPerDimension);
+  for (let level = 0; level < histogramScanLevelCount; level += 1) {
+    const groups = groupCountFor(scanCount);
+    dispatchShapeFor(groups, maxComputeWorkgroupsPerDimension);
+    scanCount = groups;
+  }
+  scanCount = maximum;
+  for (let level = 0; level < headScanLevelCount; level += 1) {
+    const groups = groupCountFor(scanCount);
+    dispatchShapeFor(groups, maxComputeWorkgroupsPerDimension);
+    scanCount = groups;
+  }
+
+  return Object.freeze({
+    headerWordCount: WEBGPU_RADIX_GPU_COUNT_CONTROL_HEADER_WORDS,
+    histogramScanLevelCount,
+    headScanLevelCount,
+    histogramScanCountOffsetWords,
+    headScanCountOffsetWords,
+    radixDispatchOffsetWords,
+    radixDispatchOffsetBytes: radixDispatchOffsetWords * UINT32_BYTES,
+    histogramScanDispatchOffsetWords,
+    headScanDispatchOffsetWords,
+    indirectRowCount,
+    controlWordCount,
+    controlByteLength: controlWordCount * UINT32_BYTES,
+    dispatchRowWordCount: WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT.length
+  });
 }
 
 function assertDevice(device) {
@@ -638,6 +756,759 @@ fn finalize_unique() {
     / unique_params.consumer_workgroup_size;
   unique_dispatch[1] = 1u;
   unique_dispatch[2] = 1u;
+}
+`;
+
+export const webGpuRadixGpuCountPrepareWgsl = /* wgsl */ `
+struct GpuCountConfig {
+  authority_count_word: u32,
+  authority_seal_word: u32,
+  expected_generation_seal: u32,
+  maximum_element_count: u32,
+  key_word_count: u32,
+  key_stride_words: u32,
+  consumer_workgroup_size: u32,
+  generation_id: u32,
+  dispatch_x_limit: u32,
+  histogram_scan_count_word: u32,
+  head_scan_count_word: u32,
+  radix_dispatch_word: u32,
+  histogram_scan_dispatch_word: u32,
+  head_scan_dispatch_word: u32,
+  histogram_scan_level_count: u32,
+  head_scan_level_count: u32,
+  indirect_row_count: u32,
+  control_word_count: u32,
+  runtime_maximum_element_count: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> gpu_count_authority: array<u32>;
+@group(0) @binding(1) var<storage, read_write> gpu_count_control: array<u32>;
+@group(0) @binding(2) var<uniform> gpu_count_config: GpuCountConfig;
+
+const CONTROL_MAGIC: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.MAGIC}u;
+const CONTROL_ABI_VERSION: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.ABI_VERSION}u;
+const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
+const CONTROL_EXPECTED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.EXPECTED_GENERATION_SEAL}u;
+const CONTROL_OBSERVED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.OBSERVED_GENERATION_SEAL}u;
+const CONTROL_LIVE_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.LIVE_ELEMENT_COUNT}u;
+const CONTROL_MAX_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.MAXIMUM_ELEMENT_COUNT}u;
+const CONTROL_OVERFLOW_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.OVERFLOW_COUNT}u;
+const CONTROL_KEY_WORD_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_WORD_COUNT}u;
+const CONTROL_KEY_STRIDE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_STRIDE_WORDS}u;
+const CONTROL_RADIX_GROUP_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_WORKGROUP_COUNT}u;
+const CONTROL_HISTOGRAM_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HISTOGRAM_ELEMENT_COUNT}u;
+const CONTROL_CONSUMER_WORKGROUP_SIZE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.CONSUMER_WORKGROUP_SIZE}u;
+const CONTROL_GENERATION_ID: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.GENERATION_ID}u;
+const CONTROL_HISTOGRAM_LEVEL_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HISTOGRAM_SCAN_LEVEL_COUNT}u;
+const CONTROL_HEAD_LEVEL_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HEAD_SCAN_LEVEL_COUNT}u;
+const CONTROL_AUTHORITY_COUNT_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.AUTHORITY_COUNT_OFFSET_WORDS}u;
+const CONTROL_AUTHORITY_SEAL_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.AUTHORITY_SEAL_OFFSET_WORDS}u;
+const CONTROL_INDIRECT_ROW_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.INDIRECT_ROW_COUNT}u;
+const CONTROL_COMPLETION_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.COMPLETION_GENERATION_SEAL}u;
+const CONTROL_RADIX_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_DISPATCH_OFFSET_WORDS}u;
+const CONTROL_HISTOGRAM_COUNT_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HISTOGRAM_SCAN_COUNT_OFFSET_WORDS}u;
+const CONTROL_HEAD_COUNT_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HEAD_SCAN_COUNT_OFFSET_WORDS}u;
+const CONTROL_HISTOGRAM_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HISTOGRAM_SCAN_DISPATCH_OFFSET_WORDS}u;
+const CONTROL_HEAD_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.HEAD_SCAN_DISPATCH_OFFSET_WORDS}u;
+const CONTROL_WORD_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.CONTROL_WORD_COUNT}u;
+const CONTROL_DISPATCH_X_LIMIT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.DISPATCH_X_LIMIT}u;
+
+const GPU_COUNT_MAGIC: u32 = ${WEBGPU_RADIX_GPU_COUNT_MAGIC}u;
+const GPU_COUNT_ABI_VERSION: u32 = ${WEBGPU_RADIX_GPU_COUNT_ABI_VERSION}u;
+const STATUS_READY: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_READY}u;
+const STATUS_ADMITTED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED}u;
+const STATUS_FAIL_CLOSED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED}u;
+const STATUS_INVALID_SEAL: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL}u;
+const STATUS_COUNT_OVERFLOW: u32 =
+  ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW}u;
+const STATUS_INVALID_TOPOLOGY: u32 =
+  ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_TOPOLOGY}u;
+
+fn ceil_groups(value: u32, width: u32) -> u32 {
+  return value / width + select(0u, 1u, value % width != 0u);
+}
+
+fn write_dispatch(offset: u32, group_count: u32, enabled: bool) {
+  if (!enabled || group_count == 0u) {
+    gpu_count_control[offset] = 0u;
+    gpu_count_control[offset + 1u] = 0u;
+    gpu_count_control[offset + 2u] = 0u;
+    return;
+  }
+  let dispatch_x = min(group_count, gpu_count_config.dispatch_x_limit);
+  let dispatch_y = ceil_groups(group_count, dispatch_x);
+  let shape_admitted = dispatch_y <= gpu_count_config.dispatch_x_limit;
+  gpu_count_control[offset] = select(0u, dispatch_x, shape_admitted);
+  gpu_count_control[offset + 1u] = select(0u, dispatch_y, shape_admitted);
+  gpu_count_control[offset + 2u] = select(0u, 1u, shape_admitted);
+}
+
+fn prepare_scan(
+  count_word: u32,
+  dispatch_word: u32,
+  level_count: u32,
+  initial_count: u32,
+  admitted: bool
+) {
+  var count = initial_count;
+  for (var level = 0u; level < level_count; level = level + 1u) {
+    let level_admitted = admitted && count > 0u;
+    let group_count = select(0u, ceil_groups(count, 512u), level_admitted);
+    gpu_count_control[count_word + level] = select(0u, count, level_admitted);
+    let block_dispatch_word = dispatch_word + level * 6u;
+    write_dispatch(block_dispatch_word, group_count, level_admitted);
+    let parent_admitted =
+      level_admitted && group_count > 1u && level + 1u < level_count;
+    write_dispatch(block_dispatch_word + 3u, group_count, parent_admitted);
+    count = select(0u, group_count, parent_admitted);
+  }
+}
+
+@compute @workgroup_size(1)
+fn prepare_gpu_count() {
+  let observed_count =
+    gpu_count_authority[gpu_count_config.authority_count_word];
+  let observed_seal =
+    gpu_count_authority[gpu_count_config.authority_seal_word];
+  let topology_valid =
+    gpu_count_config.maximum_element_count > 0u
+    && gpu_count_config.maximum_element_count
+      <= gpu_count_config.runtime_maximum_element_count
+    && gpu_count_config.key_word_count > 0u
+    && gpu_count_config.key_stride_words >= gpu_count_config.key_word_count
+    && gpu_count_config.consumer_workgroup_size > 0u
+    && gpu_count_config.dispatch_x_limit > 0u
+    && gpu_count_config.histogram_scan_level_count > 0u
+    && gpu_count_config.head_scan_level_count > 0u;
+  let seal_valid =
+    gpu_count_config.expected_generation_seal != 0u
+    && observed_seal == gpu_count_config.expected_generation_seal;
+  let overflowed =
+    topology_valid && seal_valid
+    && observed_count > gpu_count_config.maximum_element_count;
+  let admitted = topology_valid && seal_valid && !overflowed;
+
+  var status = STATUS_READY;
+  if (!topology_valid) {
+    status = status | STATUS_FAIL_CLOSED | STATUS_INVALID_TOPOLOGY;
+  } else if (!seal_valid) {
+    status = status | STATUS_FAIL_CLOSED | STATUS_INVALID_SEAL;
+  } else if (overflowed) {
+    status = status | STATUS_FAIL_CLOSED | STATUS_COUNT_OVERFLOW;
+  } else {
+    status = status | STATUS_ADMITTED;
+  }
+
+  let live_count = select(0u, observed_count, admitted);
+  let radix_group_count = select(
+    0u,
+    ceil_groups(live_count, 256u),
+    admitted && live_count > 0u
+  );
+  let histogram_count = radix_group_count * 16u;
+
+  gpu_count_control[CONTROL_MAGIC] = GPU_COUNT_MAGIC;
+  gpu_count_control[CONTROL_ABI_VERSION] = GPU_COUNT_ABI_VERSION;
+  gpu_count_control[CONTROL_STATUS] = status;
+  gpu_count_control[CONTROL_EXPECTED_SEAL] =
+    gpu_count_config.expected_generation_seal;
+  gpu_count_control[CONTROL_OBSERVED_SEAL] = observed_seal;
+  gpu_count_control[CONTROL_LIVE_COUNT] = live_count;
+  gpu_count_control[CONTROL_MAX_COUNT] =
+    gpu_count_config.maximum_element_count;
+  gpu_count_control[CONTROL_OVERFLOW_COUNT] = select(
+    0u,
+    observed_count - gpu_count_config.maximum_element_count,
+    overflowed
+  );
+  gpu_count_control[CONTROL_KEY_WORD_COUNT] =
+    gpu_count_config.key_word_count;
+  gpu_count_control[CONTROL_KEY_STRIDE] =
+    gpu_count_config.key_stride_words;
+  gpu_count_control[CONTROL_RADIX_GROUP_COUNT] = radix_group_count;
+  gpu_count_control[CONTROL_HISTOGRAM_COUNT] = histogram_count;
+  gpu_count_control[CONTROL_CONSUMER_WORKGROUP_SIZE] =
+    gpu_count_config.consumer_workgroup_size;
+  gpu_count_control[CONTROL_GENERATION_ID] =
+    gpu_count_config.generation_id;
+  gpu_count_control[CONTROL_HISTOGRAM_LEVEL_COUNT] =
+    gpu_count_config.histogram_scan_level_count;
+  gpu_count_control[CONTROL_HEAD_LEVEL_COUNT] =
+    gpu_count_config.head_scan_level_count;
+  gpu_count_control[CONTROL_AUTHORITY_COUNT_WORD] =
+    gpu_count_config.authority_count_word;
+  gpu_count_control[CONTROL_AUTHORITY_SEAL_WORD] =
+    gpu_count_config.authority_seal_word;
+  gpu_count_control[CONTROL_INDIRECT_ROW_COUNT] =
+    gpu_count_config.indirect_row_count;
+  gpu_count_control[CONTROL_COMPLETION_SEAL] = select(
+    0u,
+    gpu_count_config.expected_generation_seal,
+    admitted
+  );
+  gpu_count_control[CONTROL_RADIX_DISPATCH_WORD] =
+    gpu_count_config.radix_dispatch_word;
+  gpu_count_control[CONTROL_HISTOGRAM_COUNT_WORD] =
+    gpu_count_config.histogram_scan_count_word;
+  gpu_count_control[CONTROL_HEAD_COUNT_WORD] =
+    gpu_count_config.head_scan_count_word;
+  gpu_count_control[CONTROL_HISTOGRAM_DISPATCH_WORD] =
+    gpu_count_config.histogram_scan_dispatch_word;
+  gpu_count_control[CONTROL_HEAD_DISPATCH_WORD] =
+    gpu_count_config.head_scan_dispatch_word;
+  gpu_count_control[CONTROL_WORD_COUNT] =
+    gpu_count_config.control_word_count;
+  gpu_count_control[CONTROL_DISPATCH_X_LIMIT] =
+    gpu_count_config.dispatch_x_limit;
+
+  write_dispatch(
+    gpu_count_config.radix_dispatch_word,
+    radix_group_count,
+    admitted && live_count > 0u
+  );
+  prepare_scan(
+    gpu_count_config.histogram_scan_count_word,
+    gpu_count_config.histogram_scan_dispatch_word,
+    gpu_count_config.histogram_scan_level_count,
+    histogram_count,
+    admitted
+  );
+  prepare_scan(
+    gpu_count_config.head_scan_count_word,
+    gpu_count_config.head_scan_dispatch_word,
+    gpu_count_config.head_scan_level_count,
+    live_count,
+    admitted
+  );
+}
+`;
+
+export const webGpuRadixGpuCountScanWgsl = /* wgsl */ `
+struct GpuCountScanStatic {
+  count_word: u32,
+  block_dispatch_word: u32,
+  add_dispatch_word: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> scan_input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> scan_output: array<u32>;
+@group(0) @binding(2) var<storage, read_write> scan_block_sums: array<u32>;
+@group(0) @binding(3) var<storage, read> scan_parent_offsets: array<u32>;
+@group(0) @binding(4) var<storage, read> gpu_count_control: array<u32>;
+@group(0) @binding(5) var<uniform> scan_static: GpuCountScanStatic;
+
+const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
+const CONTROL_EXPECTED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.EXPECTED_GENERATION_SEAL}u;
+const CONTROL_COMPLETION_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.COMPLETION_GENERATION_SEAL}u;
+const STATUS_ADMITTED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED}u;
+const STATUS_FAIL_CLOSED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED}u;
+
+var<workgroup> scan_values: array<u32, 512>;
+
+fn sealed_count() -> u32 {
+  let status = gpu_count_control[CONTROL_STATUS];
+  let sealed =
+    (status & STATUS_ADMITTED) != 0u
+    && (status & STATUS_FAIL_CLOSED) == 0u
+    && gpu_count_control[CONTROL_COMPLETION_SEAL]
+      == gpu_count_control[CONTROL_EXPECTED_SEAL];
+  return select(0u, gpu_count_control[scan_static.count_word], sealed);
+}
+
+@compute @workgroup_size(256)
+fn scan_gpu_count_blocks(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let dispatch_x = gpu_count_control[scan_static.block_dispatch_word];
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  let scan_group_count =
+    count / 512u + select(0u, 1u, count % 512u != 0u);
+  let group_valid = linear_group < scan_group_count;
+  let block_base = linear_group * 512u;
+  let first = block_base + local_id.x * 2u;
+  let second = first + 1u;
+  var first_value = 0u;
+  var second_value = 0u;
+  if (group_valid && first < count) {
+    first_value = scan_input[first];
+  }
+  if (group_valid && second < count) {
+    second_value = scan_input[second];
+  }
+  scan_values[local_id.x * 2u] = first_value;
+  scan_values[local_id.x * 2u + 1u] = second_value;
+
+  var offset = 1u;
+  for (var width = 256u; width > 0u; width = width >> 1u) {
+    workgroupBarrier();
+    if (local_id.x < width) {
+      let left = offset * (2u * local_id.x + 1u) - 1u;
+      let right = offset * (2u * local_id.x + 2u) - 1u;
+      scan_values[right] = scan_values[right] + scan_values[left];
+    }
+    offset = offset << 1u;
+  }
+
+  if (group_valid && local_id.x == 0u) {
+    scan_block_sums[linear_group] = scan_values[511u];
+    scan_values[511u] = 0u;
+  }
+
+  for (var width = 1u; width < 512u; width = width << 1u) {
+    offset = offset >> 1u;
+    workgroupBarrier();
+    if (local_id.x < width) {
+      let left = offset * (2u * local_id.x + 1u) - 1u;
+      let right = offset * (2u * local_id.x + 2u) - 1u;
+      let prior = scan_values[left];
+      scan_values[left] = scan_values[right];
+      scan_values[right] = scan_values[right] + prior;
+    }
+  }
+
+  workgroupBarrier();
+  if (group_valid && first < count) {
+    scan_output[first] = scan_values[local_id.x * 2u];
+  }
+  if (group_valid && second < count) {
+    scan_output[second] = scan_values[local_id.x * 2u + 1u];
+  }
+}
+
+@compute @workgroup_size(256)
+fn add_gpu_count_block_offsets(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let dispatch_x = gpu_count_control[scan_static.add_dispatch_word];
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  let first = linear_group * 512u + local_id.x * 2u;
+  let second = first + 1u;
+  if (first >= count) {
+    return;
+  }
+  let block_offset = scan_parent_offsets[linear_group];
+  scan_output[first] = scan_output[first] + block_offset;
+  if (second < count) {
+    scan_output[second] = scan_output[second] + block_offset;
+  }
+}
+`;
+
+export const webGpuRadixGpuCountWgsl = /* wgsl */ `
+struct DigitStatic {
+  key_word_index: u32,
+  bit_offset: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> radix_keys: array<u32>;
+@group(0) @binding(1) var<storage, read> radix_indices_in: array<u32>;
+@group(0) @binding(2) var<storage, read_write> radix_indices_out: array<u32>;
+@group(0) @binding(3) var<storage, read_write> radix_histograms: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read> radix_histogram_offsets: array<u32>;
+@group(0) @binding(5) var<storage, read> gpu_count_control: array<u32>;
+@group(0) @binding(6) var<uniform> digit_static: DigitStatic;
+
+const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
+const CONTROL_EXPECTED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.EXPECTED_GENERATION_SEAL}u;
+const CONTROL_LIVE_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.LIVE_ELEMENT_COUNT}u;
+const CONTROL_MAX_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.MAXIMUM_ELEMENT_COUNT}u;
+const CONTROL_KEY_STRIDE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_STRIDE_WORDS}u;
+const CONTROL_RADIX_GROUP_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_WORKGROUP_COUNT}u;
+const CONTROL_COMPLETION_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.COMPLETION_GENERATION_SEAL}u;
+const CONTROL_RADIX_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_DISPATCH_OFFSET_WORDS}u;
+const STATUS_ADMITTED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED}u;
+const STATUS_FAIL_CLOSED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED}u;
+
+var<workgroup> local_histogram: array<atomic<u32>, 16>;
+var<workgroup> digit_prefix: array<vec4<u32>, 1024>;
+
+fn sealed_count() -> u32 {
+  let status = gpu_count_control[CONTROL_STATUS];
+  let sealed =
+    (status & STATUS_ADMITTED) != 0u
+    && (status & STATUS_FAIL_CLOSED) == 0u
+    && gpu_count_control[CONTROL_COMPLETION_SEAL]
+      == gpu_count_control[CONTROL_EXPECTED_SEAL];
+  return select(
+    0u,
+    min(
+      gpu_count_control[CONTROL_LIVE_COUNT],
+      gpu_count_control[CONTROL_MAX_COUNT]
+    ),
+    sealed
+  );
+}
+
+fn radix_dispatch_x() -> u32 {
+  return gpu_count_control[
+    gpu_count_control[CONTROL_RADIX_DISPATCH_WORD]
+  ];
+}
+
+fn record_digit(record_index: u32) -> u32 {
+  let key_index =
+    record_index * gpu_count_control[CONTROL_KEY_STRIDE]
+    + digit_static.key_word_index;
+  return (radix_keys[key_index] >> digit_static.bit_offset) & 15u;
+}
+
+@compute @workgroup_size(256)
+fn initialize_gpu_count_indices(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * radix_dispatch_x();
+  let index = linear_group * 256u + local_id.x;
+  if (linear_group < gpu_count_control[CONTROL_RADIX_GROUP_COUNT]
+    && index < count) {
+    radix_indices_out[index] = index;
+  }
+}
+
+@compute @workgroup_size(256)
+fn histogram_gpu_count(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (local_id.x < 16u) {
+    atomicStore(&local_histogram[local_id.x], 0u);
+  }
+  workgroupBarrier();
+  let count = sealed_count();
+  let workgroup_count =
+    gpu_count_control[CONTROL_RADIX_GROUP_COUNT];
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * radix_dispatch_x();
+  let index = linear_group * 256u + local_id.x;
+  let group_valid = linear_group < workgroup_count;
+  if (group_valid && index < count) {
+    let record_index = radix_indices_in[index];
+    atomicAdd(&local_histogram[record_digit(record_index)], 1u);
+  }
+  workgroupBarrier();
+  if (group_valid && local_id.x < 16u) {
+    let destination =
+      local_id.x * workgroup_count + linear_group;
+    atomicStore(
+      &radix_histograms[destination],
+      atomicLoad(&local_histogram[local_id.x])
+    );
+  }
+}
+
+fn one_hot_quad(digit: u32, quad: u32) -> vec4<u32> {
+  var row = vec4<u32>(0u);
+  if (digit / 4u == quad) {
+    row[digit & 3u] = 1u;
+  }
+  return row;
+}
+
+@compute @workgroup_size(256)
+fn scatter_gpu_count(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let workgroup_count =
+    gpu_count_control[CONTROL_RADIX_GROUP_COUNT];
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * radix_dispatch_x();
+  let index = linear_group * 256u + local_id.x;
+  let valid = linear_group < workgroup_count && index < count;
+  var record_index = 0u;
+  var digit = 0u;
+  if (valid) {
+    record_index = radix_indices_in[index];
+    digit = record_digit(record_index);
+  }
+  let prefix_base = local_id.x * 4u;
+  for (var quad = 0u; quad < 4u; quad = quad + 1u) {
+    digit_prefix[prefix_base + quad] =
+      select(vec4<u32>(0u), one_hot_quad(digit, quad), valid);
+  }
+  workgroupBarrier();
+
+  for (var offset = 1u; offset < 256u; offset = offset << 1u) {
+    var add0 = vec4<u32>(0u);
+    var add1 = vec4<u32>(0u);
+    var add2 = vec4<u32>(0u);
+    var add3 = vec4<u32>(0u);
+    if (local_id.x >= offset) {
+      let prior_base = (local_id.x - offset) * 4u;
+      add0 = digit_prefix[prior_base];
+      add1 = digit_prefix[prior_base + 1u];
+      add2 = digit_prefix[prior_base + 2u];
+      add3 = digit_prefix[prior_base + 3u];
+    }
+    workgroupBarrier();
+    digit_prefix[prefix_base] = digit_prefix[prefix_base] + add0;
+    digit_prefix[prefix_base + 1u] =
+      digit_prefix[prefix_base + 1u] + add1;
+    digit_prefix[prefix_base + 2u] =
+      digit_prefix[prefix_base + 2u] + add2;
+    digit_prefix[prefix_base + 3u] =
+      digit_prefix[prefix_base + 3u] + add3;
+    workgroupBarrier();
+  }
+
+  if (valid) {
+    let inclusive_rank =
+      digit_prefix[prefix_base + digit / 4u][digit & 3u];
+    let group_base = radix_histogram_offsets[
+      digit * workgroup_count + linear_group
+    ];
+    radix_indices_out[group_base + inclusive_rank - 1u] =
+      record_index;
+  }
+}
+`;
+
+export const webGpuRadixGpuCountUniqueWgsl = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> unique_source_keys: array<u32>;
+@group(0) @binding(1) var<storage, read> unique_sorted_indices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> unique_head_flags: array<u32>;
+@group(0) @binding(3) var<storage, read> unique_head_offsets: array<u32>;
+@group(0) @binding(4) var<storage, read_write> unique_output_keys: array<u32>;
+@group(0) @binding(5) var<storage, read_write> unique_output_offsets: array<u32>;
+@group(0) @binding(6) var<storage, read_write> unique_evidence: array<u32>;
+@group(0) @binding(7) var<storage, read_write> unique_dispatch: array<u32>;
+@group(0) @binding(8) var<storage, read> gpu_count_control: array<u32>;
+@group(0) @binding(9) var<storage, read> gpu_count_authority: array<u32>;
+
+const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
+const CONTROL_EXPECTED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.EXPECTED_GENERATION_SEAL}u;
+const CONTROL_LIVE_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.LIVE_ELEMENT_COUNT}u;
+const CONTROL_KEY_WORD_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_WORD_COUNT}u;
+const CONTROL_KEY_STRIDE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_STRIDE_WORDS}u;
+const CONTROL_CONSUMER_WORKGROUP_SIZE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.CONSUMER_WORKGROUP_SIZE}u;
+const CONTROL_GENERATION_ID: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.GENERATION_ID}u;
+const CONTROL_AUTHORITY_COUNT_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.AUTHORITY_COUNT_OFFSET_WORDS}u;
+const CONTROL_AUTHORITY_SEAL_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.AUTHORITY_SEAL_OFFSET_WORDS}u;
+const CONTROL_COMPLETION_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.COMPLETION_GENERATION_SEAL}u;
+const CONTROL_RADIX_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_DISPATCH_OFFSET_WORDS}u;
+const CONTROL_DISPATCH_X_LIMIT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.DISPATCH_X_LIMIT}u;
+const STATUS_ADMITTED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED}u;
+const STATUS_FAIL_CLOSED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED}u;
+const STATUS_INVALID_SEAL: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_INVALID_SEAL}u;
+const STATUS_COUNT_OVERFLOW: u32 =
+  ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW}u;
+
+fn sealed_count() -> u32 {
+  let status = gpu_count_control[CONTROL_STATUS];
+  let sealed =
+    (status & STATUS_ADMITTED) != 0u
+    && (status & STATUS_FAIL_CLOSED) == 0u
+    && gpu_count_control[CONTROL_COMPLETION_SEAL]
+      == gpu_count_control[CONTROL_EXPECTED_SEAL];
+  return select(0u, gpu_count_control[CONTROL_LIVE_COUNT], sealed);
+}
+
+fn radix_dispatch_x() -> u32 {
+  return gpu_count_control[
+    gpu_count_control[CONTROL_RADIX_DISPATCH_WORD]
+  ];
+}
+
+fn keys_equal(left_record: u32, right_record: u32) -> bool {
+  let stride = gpu_count_control[CONTROL_KEY_STRIDE];
+  let left_base = left_record * stride;
+  let right_base = right_record * stride;
+  for (
+    var word = 0u;
+    word < gpu_count_control[CONTROL_KEY_WORD_COUNT];
+    word = word + 1u
+  ) {
+    if (unique_source_keys[left_base + word]
+      != unique_source_keys[right_base + word]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+@compute @workgroup_size(256)
+fn mark_gpu_count_heads(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * radix_dispatch_x();
+  let index = linear_group * 256u + local_id.x;
+  if (index >= count) {
+    return;
+  }
+  if (index == 0u) {
+    unique_head_flags[index] = 1u;
+    return;
+  }
+  let current = unique_sorted_indices[index];
+  let previous = unique_sorted_indices[index - 1u];
+  unique_head_flags[index] =
+    select(1u, 0u, keys_equal(current, previous));
+}
+
+@compute @workgroup_size(256)
+fn scatter_gpu_count_unique(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let linear_group =
+    workgroup_id.x + workgroup_id.y * radix_dispatch_x();
+  let sorted_position = linear_group * 256u + local_id.x;
+  if (sorted_position >= count
+    || unique_head_flags[sorted_position] == 0u) {
+    return;
+  }
+  let unique_index = unique_head_offsets[sorted_position];
+  let source_record = unique_sorted_indices[sorted_position];
+  let key_word_count =
+    gpu_count_control[CONTROL_KEY_WORD_COUNT];
+  let source_base =
+    source_record * gpu_count_control[CONTROL_KEY_STRIDE];
+  let output_base = unique_index * key_word_count;
+  for (var word = 0u; word < key_word_count; word = word + 1u) {
+    unique_output_keys[output_base + word] =
+      unique_source_keys[source_base + word];
+  }
+  unique_output_offsets[unique_index] = sorted_position;
+}
+
+fn write_consumer_dispatch(unique_count: u32, admitted: bool) {
+  if (!admitted || unique_count == 0u) {
+    unique_dispatch[0u] = 0u;
+    unique_dispatch[1u] = 0u;
+    unique_dispatch[2u] = 0u;
+    return;
+  }
+  let consumer_width =
+    gpu_count_control[CONTROL_CONSUMER_WORKGROUP_SIZE];
+  let group_count =
+    unique_count / consumer_width
+    + select(0u, 1u, unique_count % consumer_width != 0u);
+  let dispatch_limit =
+    gpu_count_control[CONTROL_DISPATCH_X_LIMIT];
+  let dispatch_x = min(group_count, dispatch_limit);
+  let dispatch_y =
+    group_count / dispatch_x
+    + select(0u, 1u, group_count % dispatch_x != 0u);
+  let shape_admitted = dispatch_y <= dispatch_limit;
+  unique_dispatch[0u] = select(0u, dispatch_x, shape_admitted);
+  unique_dispatch[1u] = select(0u, dispatch_y, shape_admitted);
+  unique_dispatch[2u] = select(0u, 1u, shape_admitted);
+}
+
+@compute @workgroup_size(1)
+fn finalize_gpu_count_unique() {
+  let expected_seal =
+    gpu_count_control[CONTROL_EXPECTED_SEAL];
+  let authority_count = gpu_count_authority[
+    gpu_count_control[CONTROL_AUTHORITY_COUNT_WORD]
+  ];
+  let authority_seal = gpu_count_authority[
+    gpu_count_control[CONTROL_AUTHORITY_SEAL_WORD]
+  ];
+  var status = gpu_count_control[CONTROL_STATUS];
+  let preflight_admitted =
+    (status & STATUS_ADMITTED) != 0u
+    && (status & STATUS_FAIL_CLOSED) == 0u;
+  let authority_stable =
+    authority_seal == expected_seal
+    && authority_count == gpu_count_control[CONTROL_LIVE_COUNT]
+    && gpu_count_control[CONTROL_COMPLETION_SEAL] == expected_seal;
+  let admitted = preflight_admitted && authority_stable;
+  if (preflight_admitted && !authority_stable) {
+    status =
+      (status & (~STATUS_ADMITTED))
+      | STATUS_FAIL_CLOSED
+      | STATUS_INVALID_SEAL;
+  }
+
+  let count = select(
+    0u,
+    gpu_count_control[CONTROL_LIVE_COUNT],
+    admitted
+  );
+  var unique_count = 0u;
+  if (count > 0u) {
+    let last = count - 1u;
+    unique_count =
+      unique_head_offsets[last] + unique_head_flags[last];
+  }
+  unique_output_offsets[unique_count] = count;
+  unique_evidence[0u] =
+    gpu_count_control[CONTROL_GENERATION_ID];
+  unique_evidence[1u] = select(authority_count, count, admitted);
+  unique_evidence[2u] = unique_count;
+  unique_evidence[3u] = select(0u, 1u, admitted);
+  unique_evidence[4u] = select(
+    0u,
+    1u,
+    (status & STATUS_COUNT_OVERFLOW) != 0u
+  );
+  unique_evidence[5u] =
+    gpu_count_control[CONTROL_KEY_WORD_COUNT];
+  unique_evidence[6u] =
+    gpu_count_control[CONTROL_KEY_STRIDE];
+  unique_evidence[7u] = status;
+  write_consumer_dispatch(unique_count, admitted);
 }
 `;
 
@@ -1341,6 +2212,53 @@ function createRadixPipelines(device, label, { serialHistogramScanEnabled = fals
   };
 }
 
+function createRadixGpuCountPipelines(device, label) {
+  const prepareModule = device.createShaderModule({
+    label: `${label}-gpu-count-prepare-shader`,
+    code: webGpuRadixGpuCountPrepareWgsl
+  });
+  const scanModule = device.createShaderModule({
+    label: `${label}-gpu-count-scan-shader`,
+    code: webGpuRadixGpuCountScanWgsl
+  });
+  const radixModule = device.createShaderModule({
+    label: `${label}-gpu-count-radix-shader`,
+    code: webGpuRadixGpuCountWgsl
+  });
+  const uniqueModule = device.createShaderModule({
+    label: `${label}-gpu-count-unique-shader`,
+    code: webGpuRadixGpuCountUniqueWgsl
+  });
+  const pipeline = (suffix, module, entryPoint) => device.createComputePipeline({
+    label: `${label}-gpu-count-${suffix}`,
+    layout: 'auto',
+    compute: { module, entryPoint }
+  });
+  return {
+    prepare: pipeline('prepare', prepareModule, 'prepare_gpu_count'),
+    scanBlocks: pipeline('scan-blocks', scanModule, 'scan_gpu_count_blocks'),
+    scanAdd: pipeline('scan-add', scanModule, 'add_gpu_count_block_offsets'),
+    initialize: pipeline(
+      'initialize',
+      radixModule,
+      'initialize_gpu_count_indices'
+    ),
+    histogram: pipeline('histogram', radixModule, 'histogram_gpu_count'),
+    scatter: pipeline('scatter', radixModule, 'scatter_gpu_count'),
+    markHeads: pipeline('mark-heads', uniqueModule, 'mark_gpu_count_heads'),
+    scatterUnique: pipeline(
+      'scatter-unique',
+      uniqueModule,
+      'scatter_gpu_count_unique'
+    ),
+    finalizeUnique: pipeline(
+      'finalize-unique',
+      uniqueModule,
+      'finalize_gpu_count_unique'
+    )
+  };
+}
+
 export function createWebGpuStableRadixScanUnique(device, {
   maxElementCount,
   maxKeyWordCount = WEBGPU_RADIX_MAX_KEY_WORDS,
@@ -1417,6 +2335,10 @@ export function createWebGpuStableRadixScanUnique(device, {
   };
   const maxWorkgroups = radixGroupCountFor(resolvedMaxElementCount);
   const maxHistogramElements = maxWorkgroups * WEBGPU_RADIX_BUCKET_COUNT;
+  const gpuCountControlLayout = createWebGpuRadixGpuCountControlLayout({
+    maxElementCount: resolvedMaxElementCount,
+    maxComputeWorkgroupsPerDimension
+  });
   const pipelines = createRadixPipelines(device, label, {
     serialHistogramScanEnabled: resolvedSerialHistogramScanMaxElementCount > 0
   });
@@ -1501,7 +2423,271 @@ export function createWebGpuStableRadixScanUnique(device, {
   );
   const retainedParamsLeaseByExecution = new WeakMap();
   const ownedExecutions = new WeakSet();
+  let gpuCountResources = null;
   let destroyed = false;
+
+  function ensureGpuCountResources() {
+    if (gpuCountResources) return gpuCountResources;
+    if (destroyed) throw new Error(`${label} is destroyed`);
+    const gpuCountPipelines = createRadixGpuCountPipelines(device, label);
+    const controlBuffer = createBuffer(
+      device,
+      `${label}-gpu-count-control`,
+      gpuCountControlLayout.controlWordCount,
+      GPU_BUFFER_USAGE.INDIRECT
+    );
+    // The radix output, histograms, scan scratch, evidence, and control row are
+    // shared. One retained config row therefore deliberately enforces the
+    // primitive's single-flight ownership contract.
+    const gpuCountConfigSlotCount = 1;
+    const gpuCountConfigArenaByteLength =
+      gpuCountConfigSlotCount * paramsOffsetAlignment;
+    if (!Number.isSafeInteger(gpuCountConfigArenaByteLength)
+      || gpuCountConfigArenaByteLength > maxBufferSize) {
+      throw new RangeError(
+        `${label} GPU-count config arena requires `
+        + `${gpuCountConfigArenaByteLength} bytes beyond device capacity`
+      );
+    }
+    const configArena = device.createBuffer({
+      label: `${label}-gpu-count-config-retained-arena`,
+      size: gpuCountConfigArenaByteLength,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const configSlots = Array.from(
+      { length: gpuCountConfigSlotCount },
+      (_, slotIndex) => ({
+        slotIndex,
+        byteOffset: slotIndex * paramsOffsetAlignment,
+        inUse: false
+      })
+    );
+    const digitStaticBuffer = device.createBuffer({
+      label: `${label}-gpu-count-digit-static`,
+      size: maxRadixPassCount * paramsOffsetAlignment,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const digitStaticData = new Uint32Array(
+      maxRadixPassCount * paramsOffsetAlignment / UINT32_BYTES
+    );
+    let digitRow = 0;
+    for (let word = resolvedMaxKeyWordCount - 1; word >= 0; word -= 1) {
+      for (let shift = 0; shift < 32; shift += WEBGPU_RADIX_BITS_PER_PASS) {
+        const base = digitRow * paramsOffsetAlignment / UINT32_BYTES;
+        digitStaticData[base] = word;
+        digitStaticData[base + 1] = shift;
+        digitRow += 1;
+      }
+    }
+    device.queue.writeBuffer(digitStaticBuffer, 0, digitStaticData);
+
+    const totalScanStaticRows =
+      gpuCountControlLayout.histogramScanLevelCount
+      + gpuCountControlLayout.headScanLevelCount;
+    const scanStaticBuffer = device.createBuffer({
+      label: `${label}-gpu-count-scan-static`,
+      size: totalScanStaticRows * paramsOffsetAlignment,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const scanStaticData = new Uint32Array(
+      totalScanStaticRows * paramsOffsetAlignment / UINT32_BYTES
+    );
+    let scanStaticRow = 0;
+    const writeScanStaticRows = (
+      countOffsetWords,
+      dispatchOffsetWords,
+      levelCount
+    ) => {
+      const firstRow = scanStaticRow;
+      for (let level = 0; level < levelCount; level += 1) {
+        const base = scanStaticRow * paramsOffsetAlignment / UINT32_BYTES;
+        scanStaticData[base] = countOffsetWords + level;
+        scanStaticData[base + 1] = dispatchOffsetWords + level * 6;
+        scanStaticData[base + 2] = dispatchOffsetWords + level * 6 + 3;
+        scanStaticRow += 1;
+      }
+      return firstRow;
+    };
+    const histogramStaticFirstRow = writeScanStaticRows(
+      gpuCountControlLayout.histogramScanCountOffsetWords,
+      gpuCountControlLayout.histogramScanDispatchOffsetWords,
+      gpuCountControlLayout.histogramScanLevelCount
+    );
+    const headStaticFirstRow = writeScanStaticRows(
+      gpuCountControlLayout.headScanCountOffsetWords,
+      gpuCountControlLayout.headScanDispatchOffsetWords,
+      gpuCountControlLayout.headScanLevelCount
+    );
+    device.queue.writeBuffer(scanStaticBuffer, 0, scanStaticData);
+
+    const allocationEntries = [
+      { role: 'radix-gpu-count-control', buffer: controlBuffer },
+      { role: 'radix-gpu-count-config-retained-arena', buffer: configArena },
+      { role: 'radix-gpu-count-digit-static', buffer: digitStaticBuffer },
+      { role: 'radix-gpu-count-scan-static', buffer: scanStaticBuffer }
+    ];
+    const createScanPopulation = ({
+      prefix,
+      maximumElementCount,
+      levelCount,
+      countOffsetWords,
+      dispatchOffsetWords,
+      firstStaticRow,
+      sourceInputBuffer,
+      sourceOutputBuffer
+    }) => {
+      const sums = [];
+      const offsets = [];
+      let count = maximumElementCount;
+      for (let level = 0; level < levelCount; level += 1) {
+        const groupCount = groupCountFor(count);
+        const sumsBuffer = createBuffer(
+          device,
+          `${label}-gpu-count-${prefix}-level-${level}-sums`,
+          groupCount
+        );
+        const offsetsBuffer = createBuffer(
+          device,
+          `${label}-gpu-count-${prefix}-level-${level}-offsets`,
+          groupCount
+        );
+        sums.push(sumsBuffer);
+        offsets.push(offsetsBuffer);
+        allocationEntries.push(
+          { role: `radix-gpu-count-${prefix}-scan-sums`, buffer: sumsBuffer },
+          { role: `radix-gpu-count-${prefix}-scan-offsets`, buffer: offsetsBuffer }
+        );
+        count = groupCount;
+      }
+      const levels = [];
+      for (let level = 0; level < levelCount; level += 1) {
+        const inputBuffer = level === 0 ? sourceInputBuffer : sums[level - 1];
+        const outputBuffer = level === 0 ? sourceOutputBuffer : offsets[level - 1];
+        const staticOffset =
+          (firstStaticRow + level) * paramsOffsetAlignment;
+        const blockBindGroup = device.createBindGroup({
+          label: `${label}-gpu-count-${prefix}-scan-block-${level}`,
+          layout: gpuCountPipelines.scanBlocks.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: inputBuffer } },
+            { binding: 1, resource: { buffer: outputBuffer } },
+            { binding: 2, resource: { buffer: sums[level] } },
+            { binding: 4, resource: { buffer: controlBuffer } },
+            {
+              binding: 5,
+              resource: {
+                buffer: scanStaticBuffer,
+                offset: staticOffset,
+                size: 16
+              }
+            }
+          ]
+        });
+        const addBindGroup = device.createBindGroup({
+          label: `${label}-gpu-count-${prefix}-scan-add-${level}`,
+          layout: gpuCountPipelines.scanAdd.getBindGroupLayout(0),
+          entries: [
+            { binding: 1, resource: { buffer: outputBuffer } },
+            { binding: 3, resource: { buffer: offsets[level] } },
+            { binding: 4, resource: { buffer: controlBuffer } },
+            {
+              binding: 5,
+              resource: {
+                buffer: scanStaticBuffer,
+                offset: staticOffset,
+                size: 16
+              }
+            }
+          ]
+        });
+        levels.push(Object.freeze({
+          level,
+          countOffsetWords: countOffsetWords + level,
+          blockDispatchOffsetWords: dispatchOffsetWords + level * 6,
+          blockDispatchOffsetBytes:
+            (dispatchOffsetWords + level * 6) * UINT32_BYTES,
+          addDispatchOffsetWords: dispatchOffsetWords + level * 6 + 3,
+          addDispatchOffsetBytes:
+            (dispatchOffsetWords + level * 6 + 3) * UINT32_BYTES,
+          blockBindGroup,
+          addBindGroup
+        }));
+      }
+      return Object.freeze({ levels });
+    };
+
+    const histogramScanPopulation = createScanPopulation({
+      prefix: 'histogram',
+      maximumElementCount: maxHistogramElements,
+      levelCount: gpuCountControlLayout.histogramScanLevelCount,
+      countOffsetWords: gpuCountControlLayout.histogramScanCountOffsetWords,
+      dispatchOffsetWords:
+        gpuCountControlLayout.histogramScanDispatchOffsetWords,
+      firstStaticRow: histogramStaticFirstRow,
+      sourceInputBuffer: histogramBuffer,
+      sourceOutputBuffer: histogramOffsetsBuffer
+    });
+    const headScanPopulation = createScanPopulation({
+      prefix: 'head',
+      maximumElementCount: resolvedMaxElementCount,
+      levelCount: gpuCountControlLayout.headScanLevelCount,
+      countOffsetWords: gpuCountControlLayout.headScanCountOffsetWords,
+      dispatchOffsetWords: gpuCountControlLayout.headScanDispatchOffsetWords,
+      firstStaticRow: headStaticFirstRow,
+      sourceInputBuffer: headFlagsBuffer,
+      sourceOutputBuffer: headOffsetsBuffer
+    });
+
+    gpuCountResources = {
+      pipelines: gpuCountPipelines,
+      controlBuffer,
+      configArena,
+      configSlotCount: gpuCountConfigSlotCount,
+      digitStaticBuffer,
+      scanStaticBuffer,
+      histogramScanPopulation,
+      headScanPopulation,
+      allocationEntries,
+      acquireConfigSlot(requestedSlotIndex = null) {
+        let slot = null;
+        if (requestedSlotIndex !== null && requestedSlotIndex !== undefined) {
+          const slotIndex = nonNegativeInteger(
+            requestedSlotIndex,
+            'retainedParamsSlotIndex',
+            { max: gpuCountConfigSlotCount - 1 }
+          );
+          slot = configSlots[slotIndex];
+        } else {
+          slot = configSlots.find((candidate) => !candidate.inUse) ?? null;
+        }
+        if (!slot || slot.inUse) {
+          const error = new Error(
+            `${label} already has a GPU-count execution in flight`
+          );
+          error.code = 'ERR_WEBGPU_RADIX_GPU_COUNT_EXECUTION_IN_FLIGHT';
+          error.slotCapacity = gpuCountConfigSlotCount;
+          error.requestedSlotIndex = requestedSlotIndex ?? null;
+          throw error;
+        }
+        slot.inUse = true;
+        let released = false;
+        return {
+          slot,
+          release() {
+            if (released) return false;
+            released = true;
+            slot.inUse = false;
+            return true;
+          }
+        };
+      },
+      destroy() {
+        for (const { buffer } of allocationEntries) buffer.destroy?.();
+        for (const slot of configSlots) slot.inUse = false;
+      }
+    };
+    return gpuCountResources;
+  }
 
   function attachRetainedParamsLease(execution, lease) {
     ownedExecutions.add(execution);
@@ -2193,6 +3379,417 @@ export function createWebGpuStableRadixScanUnique(device, {
     }, retainedParamsLease);
   }
 
+  function encodeSortUniqueGpuCount(encoder, args = {}) {
+    if (!encoder?.beginComputePass || !encoder?.clearBuffer) {
+      throw new TypeError(
+        'GPU-authored count radix encoding requires a GPUCommandEncoder-like object'
+      );
+    }
+    const keyBuffer = args.keyBuffer;
+    const authorityBuffer =
+      args.authorityBuffer ?? args.countAuthorityBuffer;
+    if (!keyBuffer || !authorityBuffer) {
+      throw new TypeError(
+        'GPU-authored count radix encoding requires keyBuffer and authorityBuffer'
+      );
+    }
+    const maximum = positiveInteger(
+      args.maxElementCount,
+      'maxElementCount',
+      { max: resolvedMaxElementCount }
+    );
+    const words = positiveInteger(args.keyWordCount, 'keyWordCount', {
+      max: resolvedMaxKeyWordCount
+    });
+    const stride = positiveInteger(
+      args.keyStrideWords ?? words,
+      'keyStrideWords',
+      { max: 0xffff }
+    );
+    if (stride < words) {
+      throw new RangeError('keyStrideWords must cover keyWordCount');
+    }
+    const consumerWidth = positiveInteger(
+      args.consumerWorkgroupSize ?? 64,
+      'consumerWorkgroupSize',
+      { max: 1024 }
+    );
+    const countByteOffset = nonNegativeInteger(
+      args.authorityCountByteOffset ?? args.countByteOffset ?? 0,
+      'authorityCountByteOffset',
+      { max: 0xffff_fffc }
+    );
+    if (countByteOffset % UINT32_BYTES !== 0) {
+      throw new RangeError('authorityCountByteOffset must be u32 aligned');
+    }
+
+    const sealDescriptor =
+      args.generationSeal && typeof args.generationSeal === 'object'
+        ? args.generationSeal
+        : null;
+    const expectedSeal = positiveInteger(
+      sealDescriptor?.expected
+        ?? sealDescriptor?.value
+        ?? args.generationSeal,
+      'generationSeal',
+      { max: 0xffff_ffff }
+    );
+    const sealByteOffset = nonNegativeInteger(
+      sealDescriptor?.byteOffset
+        ?? args.authoritySealByteOffset
+        ?? (countByteOffset + UINT32_BYTES),
+      'authoritySealByteOffset',
+      { max: 0xffff_fffc }
+    );
+    if (sealByteOffset % UINT32_BYTES !== 0) {
+      throw new RangeError('authoritySealByteOffset must be u32 aligned');
+    }
+    if (sealByteOffset === countByteOffset) {
+      throw new RangeError(
+        'authority count and generation seal require distinct u32 words'
+      );
+    }
+    if (Number.isFinite(Number(authorityBuffer.size))) {
+      const authoritySize = Number(authorityBuffer.size);
+      if (countByteOffset + UINT32_BYTES > authoritySize
+        || sealByteOffset + UINT32_BYTES > authoritySize) {
+        throw new RangeError(
+          'authority count and generation seal offsets must be inside authorityBuffer'
+        );
+      }
+    }
+    if (Number.isFinite(Number(keyBuffer.size))) {
+      const requiredKeyBytes = maximum * stride * UINT32_BYTES;
+      if (!Number.isSafeInteger(requiredKeyBytes)
+        || requiredKeyBytes > Number(keyBuffer.size)) {
+        throw new RangeError(
+          `keyBuffer must cover maxElementCount * keyStrideWords (${requiredKeyBytes} bytes)`
+        );
+      }
+    }
+    const generation = nonNegativeInteger(
+      args.generationId ?? expectedSeal,
+      'generationId',
+      { max: 0xffff_ffff }
+    );
+    if (!gpuCountResources) {
+      const error = new Error(
+        `${label} GPU-count resources are not prepared; `
+        + 'call prepareGpuCountResources() outside the encode hot loop'
+      );
+      error.code = 'ERR_WEBGPU_RADIX_GPU_COUNT_NOT_PREPARED';
+      throw error;
+    }
+    const resources = gpuCountResources;
+    const {
+      pipelines: gpuCountPipelines,
+      controlBuffer,
+      configArena,
+      digitStaticBuffer,
+      histogramScanPopulation,
+      headScanPopulation
+    } = resources;
+    const configLease = resources.acquireConfigSlot(
+      args.retainedParamsSlotIndex
+    );
+    const configOffset = configLease.slot.byteOffset;
+    const configData = new Uint32Array(paramsOffsetAlignment / UINT32_BYTES);
+    configData[0] = countByteOffset / UINT32_BYTES;
+    configData[1] = sealByteOffset / UINT32_BYTES;
+    configData[2] = expectedSeal;
+    configData[3] = maximum;
+    configData[4] = words;
+    configData[5] = stride;
+    configData[6] = consumerWidth;
+    configData[7] = generation;
+    configData[8] = maxComputeWorkgroupsPerDimension;
+    configData[9] = gpuCountControlLayout.histogramScanCountOffsetWords;
+    configData[10] = gpuCountControlLayout.headScanCountOffsetWords;
+    configData[11] = gpuCountControlLayout.radixDispatchOffsetWords;
+    configData[12] =
+      gpuCountControlLayout.histogramScanDispatchOffsetWords;
+    configData[13] = gpuCountControlLayout.headScanDispatchOffsetWords;
+    configData[14] = gpuCountControlLayout.histogramScanLevelCount;
+    configData[15] = gpuCountControlLayout.headScanLevelCount;
+    configData[16] = gpuCountControlLayout.indirectRowCount;
+    configData[17] = gpuCountControlLayout.controlWordCount;
+    configData[18] = resolvedMaxElementCount;
+    device.queue.writeBuffer(configArena, configOffset, configData);
+
+    try {
+      const prepareBindGroup = device.createBindGroup({
+        label: `${label}-gpu-count-prepare-bind-group`,
+        layout: gpuCountPipelines.prepare.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: authorityBuffer } },
+          { binding: 1, resource: { buffer: controlBuffer } },
+          {
+            binding: 2,
+            resource: {
+              buffer: configArena,
+              offset: configOffset,
+              size: 80
+            }
+          }
+        ]
+      });
+      const initializeBindGroup = device.createBindGroup({
+        label: `${label}-gpu-count-initialize-bind-group`,
+        layout: gpuCountPipelines.initialize.getBindGroupLayout(0),
+        entries: [
+          { binding: 2, resource: { buffer: sortedIndicesA } },
+          { binding: 5, resource: { buffer: controlBuffer } }
+        ]
+      });
+      const skipDigitRows =
+        (resolvedMaxKeyWordCount - words) * WEBGPU_RADIX_PASSES_PER_WORD;
+      let input = sortedIndicesA;
+      let output = sortedIndicesB;
+      const digitCommands = [];
+      for (let passIndex = 0;
+        passIndex < words * WEBGPU_RADIX_PASSES_PER_WORD;
+        passIndex += 1) {
+        const digitOffset =
+          (skipDigitRows + passIndex) * paramsOffsetAlignment;
+        const digitResource = {
+          buffer: digitStaticBuffer,
+          offset: digitOffset,
+          size: 16
+        };
+        const histogramBindGroup = device.createBindGroup({
+          label: `${label}-gpu-count-histogram-${passIndex}`,
+          layout: gpuCountPipelines.histogram.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: keyBuffer } },
+            { binding: 1, resource: { buffer: input } },
+            { binding: 3, resource: { buffer: histogramBuffer } },
+            { binding: 5, resource: { buffer: controlBuffer } },
+            { binding: 6, resource: digitResource }
+          ]
+        });
+        const scatterBindGroup = device.createBindGroup({
+          label: `${label}-gpu-count-scatter-${passIndex}`,
+          layout: gpuCountPipelines.scatter.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: keyBuffer } },
+            { binding: 1, resource: { buffer: input } },
+            { binding: 2, resource: { buffer: output } },
+            { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
+            { binding: 5, resource: { buffer: controlBuffer } },
+            { binding: 6, resource: digitResource }
+          ]
+        });
+        digitCommands.push({ histogramBindGroup, scatterBindGroup });
+        [input, output] = [output, input];
+      }
+      const sortedIndicesBuffer = input;
+      const markBindGroup = device.createBindGroup({
+        label: `${label}-gpu-count-mark-heads-bind-group`,
+        layout: gpuCountPipelines.markHeads.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: keyBuffer } },
+          { binding: 1, resource: { buffer: sortedIndicesBuffer } },
+          { binding: 2, resource: { buffer: headFlagsBuffer } },
+          { binding: 8, resource: { buffer: controlBuffer } }
+        ]
+      });
+      const scatterUniqueBindGroup = device.createBindGroup({
+        label: `${label}-gpu-count-scatter-unique-bind-group`,
+        layout: gpuCountPipelines.scatterUnique.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: keyBuffer } },
+          { binding: 1, resource: { buffer: sortedIndicesBuffer } },
+          { binding: 2, resource: { buffer: headFlagsBuffer } },
+          { binding: 3, resource: { buffer: headOffsetsBuffer } },
+          { binding: 4, resource: { buffer: uniqueKeysBuffer } },
+          { binding: 5, resource: { buffer: uniqueOffsetsBuffer } },
+          { binding: 8, resource: { buffer: controlBuffer } }
+        ]
+      });
+      const finalizeBindGroup = device.createBindGroup({
+        label: `${label}-gpu-count-finalize-unique-bind-group`,
+        layout: gpuCountPipelines.finalizeUnique.getBindGroupLayout(0),
+        entries: [
+          { binding: 2, resource: { buffer: headFlagsBuffer } },
+          { binding: 3, resource: { buffer: headOffsetsBuffer } },
+          { binding: 5, resource: { buffer: uniqueOffsetsBuffer } },
+          { binding: 6, resource: { buffer: evidenceBuffer } },
+          { binding: 7, resource: { buffer: dispatchIndirectBuffer } },
+          { binding: 8, resource: { buffer: controlBuffer } },
+          { binding: 9, resource: { buffer: authorityBuffer } }
+        ]
+      });
+      const gpuTimestampRecorder = args.gpuTimestampRecorder ?? null;
+      const timestampProducerId =
+        typeof args.timestampProducerId === 'string'
+          && args.timestampProducerId.trim()
+          ? args.timestampProducerId.trim()
+          : 'webgpu-gpu-count-radix-sort-unique';
+      const timestampSpan = gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+        ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+            producerId: timestampProducerId,
+            stage: 'gpu-count-radix-sort-unique',
+            spanClass: 'same-grouped-production-compute-pass',
+            ...(args.timestampMetadata || {}),
+            elementCount: null,
+            elementCountSource: 'authenticated-gpu-authority',
+            maxElementCount: maximum,
+            keyWordCount: words
+          })
+        : null;
+
+      encoder.clearBuffer(controlBuffer);
+      encoder.clearBuffer(evidenceBuffer);
+      encoder.clearBuffer(dispatchIndirectBuffer);
+      encoder.clearBuffer(uniqueOffsetsBuffer, 0, UINT32_BYTES);
+
+      const preparePass = encoder.beginComputePass({
+        label: `${label}GpuCountPrepare`
+      });
+      preparePass.setPipeline(gpuCountPipelines.prepare);
+      preparePass.setBindGroup(0, prepareBindGroup);
+      preparePass.dispatchWorkgroups(1, 1, 1);
+      preparePass.end();
+
+      const productionPass = encoder.beginComputePass({
+        label: `${label}GroupedGpuCountRadixUnique`
+      });
+      const encodeIndirect = (pipeline, bindGroup, byteOffset) => {
+        productionPass.setPipeline(pipeline);
+        productionPass.setBindGroup(0, bindGroup);
+        if (typeof productionPass.dispatchWorkgroupsIndirect !== 'function') {
+          throw new TypeError(
+            'GPU-authored count radix encoding requires dispatchWorkgroupsIndirect'
+          );
+        }
+        productionPass.dispatchWorkgroupsIndirect(controlBuffer, byteOffset);
+      };
+      const encodeScan = (population) => {
+        for (const level of population.levels) {
+          encodeIndirect(
+            gpuCountPipelines.scanBlocks,
+            level.blockBindGroup,
+            level.blockDispatchOffsetBytes
+          );
+        }
+        // The top scanned level has no parent offset to add. Lower levels are
+        // still encoded at their fixed maximum depth and GPU-gated to zero
+        // whenever the authored live count does not reach that recursion.
+        for (let level = population.levels.length - 2; level >= 0; level -= 1) {
+          const entry = population.levels[level];
+          encodeIndirect(
+            gpuCountPipelines.scanAdd,
+            entry.addBindGroup,
+            entry.addDispatchOffsetBytes
+          );
+        }
+      };
+
+      encodeIndirect(
+        gpuCountPipelines.initialize,
+        initializeBindGroup,
+        gpuCountControlLayout.radixDispatchOffsetBytes
+      );
+      for (const command of digitCommands) {
+        encodeIndirect(
+          gpuCountPipelines.histogram,
+          command.histogramBindGroup,
+          gpuCountControlLayout.radixDispatchOffsetBytes
+        );
+        encodeScan(histogramScanPopulation);
+        encodeIndirect(
+          gpuCountPipelines.scatter,
+          command.scatterBindGroup,
+          gpuCountControlLayout.radixDispatchOffsetBytes
+        );
+      }
+      encodeIndirect(
+        gpuCountPipelines.markHeads,
+        markBindGroup,
+        gpuCountControlLayout.radixDispatchOffsetBytes
+      );
+      encodeScan(headScanPopulation);
+      encodeIndirect(
+        gpuCountPipelines.scatterUnique,
+        scatterUniqueBindGroup,
+        gpuCountControlLayout.radixDispatchOffsetBytes
+      );
+      productionPass.setPipeline(gpuCountPipelines.finalizeUnique);
+      productionPass.setBindGroup(0, finalizeBindGroup);
+      productionPass.dispatchWorkgroups(1, 1, 1);
+      productionPass.end();
+      if (timestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(encoder, timestampSpan);
+      }
+
+      const radixPassCount = digitCommands.length;
+      const indirectDispatchCount =
+        1
+        + radixPassCount * (
+          2
+          + gpuCountControlLayout.histogramScanLevelCount
+          + Math.max(
+            0,
+            gpuCountControlLayout.histogramScanLevelCount - 1
+          )
+        )
+        + 1
+        + gpuCountControlLayout.headScanLevelCount
+        + Math.max(0, gpuCountControlLayout.headScanLevelCount - 1)
+        + 1;
+      return attachRetainedParamsLease({
+        schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
+        countAuthoritySchema: ULG_WEBGPU_RADIX_GPU_COUNT_SCHEMA,
+        status: 'webgpu-stable-radix-sort-unique-gpu-count-encoded',
+        elementCount: null,
+        elementCountSource: 'authenticated-gpu-authority',
+        maxElementCount: maximum,
+        runtimeMaxElementCount: resolvedMaxElementCount,
+        generationId: generation,
+        generationSeal: expectedSeal,
+        authorityBuffer,
+        authorityCountByteOffset: countByteOffset,
+        authoritySealByteOffset: sealByteOffset,
+        keyWordCount: words,
+        keyStrideWords: stride,
+        radixPassCount,
+        sortedIndicesBuffer,
+        uniqueHeadFlagsBuffer: headFlagsBuffer,
+        uniqueGroupIndexBySortedPositionBuffer: headOffsetsBuffer,
+        uniqueKeysBuffer,
+        uniqueOffsetsBuffer,
+        uniqueEvidenceBuffer: evidenceBuffer,
+        uniqueDispatchIndirectBuffer: dispatchIndirectBuffer,
+        uniqueKeyCapacity: resolvedMaxElementCount,
+        uniqueOffsetCapacity: resolvedMaxElementCount + 1,
+        gpuCountControlBuffer: controlBuffer,
+        gpuCountControlLayout,
+        histogramScanMode: 'gpu-count-fixed-hierarchical',
+        encodedDispatchCount: indirectDispatchCount + 2,
+        encodedIndirectDispatchCount: indirectDispatchCount,
+        encodedComputePassCount: 2,
+        fixedMaximumTopology: true,
+        timestampProducerId,
+        executionConcurrency: 'single-flight-per-runtime',
+        inactiveDispatchPolicy: 'zero-workgroup-indirect-row',
+        paramsBufferCreationCount: 0,
+        gpuBufferCreationCountDuringEncode: 0,
+        paramsWriteCount: 1,
+        paramsSlotIndex: configLease.slot.slotIndex,
+        paramsBufferResidency: 'retained-gpu-count-config-arena',
+        clearedWordCount: WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT,
+        gpuCountControlClearedWordCount:
+          gpuCountControlLayout.controlWordCount,
+        readbackPerformed: false,
+        transientBuffers: []
+      }, configLease);
+    } catch (error) {
+      configLease.release();
+      throw error;
+    }
+  }
+
   const releasedExecutions = new WeakSet();
 
   function assertOwnedExecution(value) {
@@ -2245,18 +3842,45 @@ export function createWebGpuStableRadixScanUnique(device, {
   return {
     schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
     status: 'webgpu-stable-radix-scan-unique-ready',
-    pipelineCount:
-      Object.keys(pipelines).length
-      + histogramScan.pipelineCount
-      + headScan.pipelineCount,
+    get pipelineCount() {
+      return Object.keys(pipelines).length
+        + histogramScan.pipelineCount
+        + headScan.pipelineCount;
+    },
+    get gpuCountPipelineCount() {
+      return gpuCountResources
+        ? Object.keys(gpuCountResources.pipelines).length
+        : 0;
+    },
+    get totalPipelineCount() {
+      return Object.keys(pipelines).length
+        + histogramScan.pipelineCount
+        + headScan.pipelineCount
+        + (gpuCountResources
+          ? Object.keys(gpuCountResources.pipelines).length
+          : 0);
+    },
     maxElementCount: resolvedMaxElementCount,
     maxKeyWordCount: resolvedMaxKeyWordCount,
+    gpuCountControlLayout,
     serialHistogramScanMaxElementCount: resolvedSerialHistogramScanMaxElementCount,
     retainedParamsSlotCount: resolvedRetainedParamsSlotCount,
     variableRetainedScanCounts: retainControlParams && retainVariableScanParamsBuffers === true,
     paramsOffsetAlignment,
     radixParamsSlotStrideBytes: retainControlParams ? radixParamsSlotStrideBytes : 0,
     uniqueParamsSlotStrideBytes: retainControlParams ? uniqueParamsSlotStrideBytes : 0,
+    prepareGpuCountResources() {
+      const resources = ensureGpuCountResources();
+      return Object.freeze({
+        status: 'webgpu-radix-gpu-count-resources-prepared',
+        pipelineCount: Object.keys(resources.pipelines).length,
+        configSlotCount: resources.configSlotCount,
+        executionConcurrency: 'single-flight-per-runtime',
+        gpuBufferCreationCountDuringEncode: 0,
+        controlBuffer: resources.controlBuffer,
+        controlLayout: gpuCountControlLayout
+      });
+    },
     encodeSort(encoder, args = {}) {
       if (!retainControlParams || Number(args.elementCount) === 0) {
         return encodeSortInternal(encoder, args);
@@ -2353,6 +3977,7 @@ export function createWebGpuStableRadixScanUnique(device, {
         throw error;
       }
     },
+    encodeSortUniqueGpuCount,
     releaseExecution,
     releaseExecutionAfter,
     allocationEntries() {
@@ -2373,6 +3998,7 @@ export function createWebGpuStableRadixScanUnique(device, {
         ...(uniqueParamsArena
           ? [{ role: 'unique-params-retained-arena', buffer: uniqueParamsArena }]
           : []),
+        ...(gpuCountResources?.allocationEntries ?? []),
         ...histogramScan.allocationEntries(),
         ...headScan.allocationEntries(),
         ...[...transients].map((buffer) => ({ role: 'radix-unique-params-transient', buffer }))
@@ -2397,6 +4023,8 @@ export function createWebGpuStableRadixScanUnique(device, {
       ]) buffer?.destroy?.();
       histogramScan.destroy();
       headScan.destroy();
+      gpuCountResources?.destroy();
+      gpuCountResources = null;
       for (const buffer of transients) buffer.destroy?.();
       transients.clear();
       for (const slot of retainedParamsSlots) {

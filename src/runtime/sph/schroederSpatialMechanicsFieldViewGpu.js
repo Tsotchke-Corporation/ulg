@@ -1,4 +1,6 @@
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS,
@@ -8,11 +10,22 @@ import {
   createSchroederSpatialMechanicsFieldViewPlan
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  schroederSpatialMechanicsFieldViewV2Wgsl,
   schroederSpatialMechanicsFieldViewWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldViewWgsl.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
   ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
+import {
+  validateSchroederSpatialActiveSourceViewDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   createWebGpuStableRadixScanUnique
 } from '../webgpuRadixScanUnique.js';
@@ -96,7 +109,9 @@ function createOwnedBuffer(device, label, size, usage) {
 function fieldParamsData(plan, parentExecution, {
   sourceDispatchWorkgroups,
   candidateDispatchWorkgroups,
-  dispatchXLimit
+  dispatchXLimit,
+  sourceAuthorityVersion =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
 }) {
   const data = new ArrayBuffer(SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PARAMS_BYTES);
   const view = new DataView(data);
@@ -114,7 +129,7 @@ function fieldParamsData(plan, parentExecution, {
   u32(32, plan.gridDims[1]);
   u32(36, plan.gridDims[2]);
   u32(40, plan.gridShift);
-  u32(44, plan.candidateCount);
+  u32(44, plan.candidateCapacity);
   u32(48, plan.fieldCapacity);
   u32(52, plan.generationId);
   u32(56, plan.deviceOrdinal);
@@ -152,7 +167,15 @@ function fieldParamsData(plan, parentExecution, {
   u32(176, dispatchXLimit);
   u32(180, sourceDispatchWorkgroups[1]);
   u32(184, candidateDispatchWorkgroups[1]);
-  u32(188, 0);
+  // Keep the legacy reserved word bitwise zero. Directory-v2 is the first
+  // producer that authenticates this private parameter slot.
+  u32(
+    188,
+    sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      ? sourceAuthorityVersion
+      : 0
+  );
   return data;
 }
 
@@ -222,6 +245,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
   gridSpacingM,
   identityStrideWords = 1,
   arenaCount = 2,
+  enableDirectoryV2 = false,
   label = 'ulg-schroeder-spatial-mechanics-field-view'
 } = {}) {
   assertDevice(device);
@@ -299,6 +323,9 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     maxComputeWorkgroupsPerDimension,
     'mechanics field candidate'
   );
+  if (typeof enableDirectoryV2 !== 'boolean') {
+    throw new TypeError('enableDirectoryV2 must be a boolean');
+  }
   const module = device.createShaderModule({
     label: `${label}-shader`,
     code: schroederSpatialMechanicsFieldViewWgsl
@@ -325,6 +352,39 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       compute: { module, entryPoint: 'finalize_field_view' }
     })
   });
+  const v2Pipelines = enableDirectoryV2
+    ? (() => {
+        const v2Module = device.createShaderModule({
+          label: `${label}-directory-v2-shader`,
+          code: schroederSpatialMechanicsFieldViewV2Wgsl
+        });
+        return Object.freeze({
+          emit: device.createComputePipeline({
+            label: `${label}-directory-v2-emit-pipeline`,
+            layout: 'auto',
+            compute: { module: v2Module, entryPoint: 'emit_field_candidates_v2' }
+          }),
+          assemble: device.createComputePipeline({
+            label: `${label}-directory-v2-assemble-pipeline`,
+            layout: 'auto',
+            compute: { module: v2Module, entryPoint: 'assemble_field_keys_v2' }
+          }),
+          materializeStencilMap: device.createComputePipeline({
+            label: `${label}-directory-v2-materialize-stencil-map-pipeline`,
+            layout: 'auto',
+            compute: {
+              module: v2Module,
+              entryPoint: 'materialize_stencil_field_indices_v2'
+            }
+          }),
+          finalize: device.createComputePipeline({
+            label: `${label}-directory-v2-finalize-pipeline`,
+            layout: 'auto',
+            compute: { module: v2Module, entryPoint: 'finalize_field_view' }
+          })
+        });
+      })()
+    : null;
   const deviceId = webGpuDeviceId(device);
   let destroyed = false;
   let deviceLossObserved = false;
@@ -344,6 +404,20 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
 
   const arenas = Array.from({ length: resolvedArenaCount }, (_, arenaIndex) => {
     const arenaLabel = `${label}-arena-${arenaIndex}`;
+    const radix = createWebGpuStableRadixScanUnique(device, {
+      maxElementCount: template.layout.candidateCapacity,
+      maxKeyWordCount: FIELD_RADIX_KEY_WORDS,
+      label: `${arenaLabel}-radix`,
+      maxComputeWorkgroupsPerDimension,
+      retainConstantScanParamsBuffers: true,
+      retainVariableScanParamsBuffers: true,
+      serialHistogramScanMaxElementCount:
+        FIELD_SERIAL_HISTOGRAM_SCAN_MAX_ELEMENT_COUNT,
+      retainedParamsSlotCount: 1
+    });
+    if (enableDirectoryV2) {
+      radix.prepareGpuCountResources();
+    }
     return {
       arenaIndex,
       inUse: false,
@@ -373,17 +447,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
           | GPU_BUFFER_USAGE.COPY_SRC
           | GPU_BUFFER_USAGE.COPY_DST
       ),
-      radix: createWebGpuStableRadixScanUnique(device, {
-        maxElementCount: template.layout.candidateCapacity,
-        maxKeyWordCount: FIELD_RADIX_KEY_WORDS,
-        label: `${arenaLabel}-radix`,
-        maxComputeWorkgroupsPerDimension,
-        retainConstantScanParamsBuffers: true,
-        retainVariableScanParamsBuffers: true,
-        serialHistogramScanMaxElementCount:
-          FIELD_SERIAL_HISTOGRAM_SCAN_MAX_ELEMENT_COUNT,
-        retainedParamsSlotCount: 1
-      })
+      radix
     };
   });
 
@@ -541,6 +605,47 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     if (typeof forceRadixFallback !== 'boolean') {
       throw new TypeError('forceRadixFallback must be a boolean');
     }
+    const sourceAuthorityVersion = parentMechanicsView?.sourceAuthorityVersion
+      ?? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1;
+    const parentDirectoryAbiVersion =
+      parentMechanicsView?.directoryAbiVersion
+        ?? SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1;
+    const directoryV2 =
+      sourceAuthorityVersion
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      && parentDirectoryAbiVersion
+        === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2;
+    if (
+      (
+        sourceAuthorityVersion
+          !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+        && sourceAuthorityVersion
+          !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      )
+      || (
+        parentDirectoryAbiVersion
+          !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1
+        && parentDirectoryAbiVersion
+          !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      )
+      || sourceAuthorityVersion !== parentDirectoryAbiVersion
+    ) {
+      throw new TypeError(
+        'mechanics field parent source and directory authorities must agree'
+      );
+    }
+    if (directoryV2 && !enableDirectoryV2) {
+      const error = new Error(
+        'mechanics field directory-v2 resources were not prepared at runtime creation'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_V2_NOT_PREPARED';
+      throw error;
+    }
+    if (directoryV2 && forceRadixFallback) {
+      throw new TypeError(
+        'mechanics field directory-v2 requires authenticated GPU-count radix'
+      );
+    }
     let parentOwned = false;
     try {
       parentOwned = parentMechanicsView?.ownerRuntime?.ownsExecution?.(
@@ -549,28 +654,137 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     } catch {
       parentOwned = false;
     }
-    if (
-      parentMechanicsView?.schema !== ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
-      || parentMechanicsView.status !== 'schroeder-spatial-mechanics-view-gpu-encoded'
-      || parentMechanicsView.submitPerformed !== false
-      || parentMechanicsView.released === true
-      || !parentOwned
-      || parentMechanicsView.sourceBuffer !== sourceBuffer
-      || parentMechanicsView.sourceCount !== resolvedSourceCount
-      || parentMechanicsView.sourceRowLayoutId !== sourceRowLayoutId
-      || parentMechanicsView.selectedLevel !== selectedLevel
-      || parentMechanicsView.gridNodeCount !== template.gridNodeCount
-      || parentMechanicsView.gridShift !== template.gridShift
-      || !Object.is(parentMechanicsView.gridSpacingM, template.gridSpacingM)
-      || Array.from(parentMechanicsView.gridDims || []).length !== 3
-      || Array.from(parentMechanicsView.gridDims || []).some(
-        (value, axis) => value !== template.gridDims[axis]
+    const commonParentAdmitted =
+      parentMechanicsView?.schema === ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
+      && parentMechanicsView.status === 'schroeder-spatial-mechanics-view-gpu-encoded'
+      && parentMechanicsView.submitPerformed === false
+      && parentMechanicsView.released !== true
+      && parentOwned
+      && parentMechanicsView.sourceBuffer === sourceBuffer
+      && parentMechanicsView.sourceCount === resolvedSourceCount
+      && parentMechanicsView.sourceRowLayoutId === sourceRowLayoutId
+      && parentMechanicsView.selectedLevel === selectedLevel
+      && parentMechanicsView.gridNodeCount === template.gridNodeCount
+      && parentMechanicsView.gridShift === template.gridShift
+      && Object.is(parentMechanicsView.gridSpacingM, template.gridSpacingM)
+      && Array.from(parentMechanicsView.gridDims || []).length === 3
+      && Array.from(parentMechanicsView.gridDims || []).every(
+        (value, axis) => value === template.gridDims[axis]
       )
-      || !webGpuBufferMatchesDevice(parentMechanicsView.mechanicsViewBuffer, device)
-    ) {
+      && webGpuBufferMatchesDevice(parentMechanicsView.mechanicsViewBuffer, device);
+    if (!commonParentAdmitted) {
       throw new TypeError(
         'mechanics field view requires the exact live encoded compact mechanics parent'
       );
+    }
+    let spatialExecution = null;
+    let activeSourceView = null;
+    let activeSourceCountAuthority = null;
+    if (directoryV2) {
+      spatialExecution = parentMechanicsView.spatialExecution;
+      activeSourceView = parentMechanicsView.activeSourceView;
+      activeSourceCountAuthority = parentMechanicsView.activeSourceCountAuthority;
+      let activeAdmission = { admitted: false };
+      let spatialOwned = false;
+      try {
+        activeAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
+          activeSourceView,
+          {
+            sourceBuffer,
+            activeSourceViewBuffer: parentMechanicsView.activeSourceViewBuffer,
+            physicalSourceCount: resolvedSourceCount,
+            physicalSourceCapacity: resolvedMaxSourceCount,
+            generationId: parentMechanicsView.generationId,
+            deviceOrdinal: parentMechanicsView.deviceOrdinal,
+            laneOrdinal: parentMechanicsView.laneOrdinal,
+            leaseToken: parentMechanicsView.leaseToken,
+            sourceFamilyId: parentMechanicsView.sourceFamilyId,
+            storageGeneration: parentMechanicsView.storageGeneration,
+            physicsTick: parentMechanicsView.physicsTick,
+            physicsSubstep: parentMechanicsView.physicsSubstep,
+            positionEpoch: parentMechanicsView.positionEpoch,
+            topologyEpoch: parentMechanicsView.topologyEpoch,
+            chartEpoch: parentMechanicsView.chartEpoch,
+            levelEpoch: parentMechanicsView.levelEpoch,
+            supportEpoch: parentMechanicsView.supportEpoch,
+            buildOrdinal: parentMechanicsView.completionOrdinal
+          }
+        );
+        spatialOwned = spatialExecution?.ownerRuntime?.ownsExecution?.(
+          spatialExecution
+        ) === true;
+      } catch {
+        activeAdmission = { admitted: false };
+        spatialOwned = false;
+      }
+      const spatialLineageMatchesParent = [
+        'generationId',
+        'deviceOrdinal',
+        'laneOrdinal',
+        'leaseToken',
+        'sourceFamilyId',
+        'storageGeneration',
+        'physicsTick',
+        'physicsSubstep',
+        'positionEpoch',
+        'topologyEpoch',
+        'chartEpoch',
+        'levelEpoch',
+        'supportEpoch'
+      ].every((field) => (
+        Object.is(spatialExecution?.[field], parentMechanicsView[field])
+      ));
+      if (
+        parentMechanicsView.directorySchema
+          !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+        || parentMechanicsView.directoryAbiVersion
+          !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        || parentMechanicsView.sourceWorkIdentity !== 'gpu-active-ordinal'
+        || parentMechanicsView.physicalSourceCount !== resolvedSourceCount
+        || spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+        || spatialExecution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        || spatialExecution.layout?.schema
+          !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+        || spatialExecution.reverseEncoding
+          !== SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+        || spatialExecution.physicalSourceCount !== resolvedSourceCount
+        || spatialExecution.physicalSourceCapacity !== resolvedMaxSourceCount
+        || spatialExecution.sourceBuffer !== sourceBuffer
+        || spatialExecution.buildOrdinal
+          !== parentMechanicsView.completionOrdinal
+        || !spatialLineageMatchesParent
+        || spatialExecution.directoryBuffer
+          !== parentMechanicsView.directoryBuffer
+        || spatialExecution.activeSourceView !== activeSourceView
+        || spatialExecution.activeSourceCountAuthority
+          !== activeSourceCountAuthority
+        || spatialExecution.activeSourceViewBuffer
+          !== activeSourceView.activeSourceViewBuffer
+        || !spatialOwned
+        || activeAdmission.admitted !== true
+        || activeSourceView.activeSourceViewBuffer
+          !== parentMechanicsView.activeSourceViewBuffer
+        || activeSourceView.buildOrdinal
+          !== parentMechanicsView.completionOrdinal
+        || activeSourceCountAuthority?.activeSourceView !== activeSourceView
+        || activeSourceCountAuthority?.buffer
+          !== activeSourceView.activeSourceViewBuffer
+        || activeSourceCountAuthority?.offsetWords !== 18
+        || activeSourceCountAuthority?.offsetBytes !== 18 * UINT32_BYTES
+        || activeSourceCountAuthority?.capacity
+          !== activeSourceView.activeSourceCapacity
+        || parentMechanicsView.activeSourceDispatchOffsetBytes
+          !== activeSourceView.activeDispatchOffsetBytes
+        || !webGpuBufferMatchesDevice(spatialExecution.directoryBuffer, device)
+        || !webGpuBufferMatchesDevice(
+          activeSourceView.activeSourceViewBuffer,
+          device
+        )
+      ) {
+        throw new TypeError(
+          'mechanics field directory-v2 requires exact active-source and spatial lineage'
+        );
+      }
     }
     const requiredSourceBytes = resolvedSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT;
     const requiredIdentityBytes = resolvedSourceCount * resolvedStride * UINT32_BYTES;
@@ -583,6 +797,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     const plan = createSchroederSpatialMechanicsFieldViewPlan({
       sourceCount: resolvedSourceCount,
       sourceCapacity: resolvedMaxSourceCount,
+      sourceAuthorityVersion,
       sourceRowLayoutId,
       identityStrideWords: resolvedStride,
       selectedLevel,
@@ -613,20 +828,28 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         generationId: plan.generationId,
         selectedLevel: plan.selectedLevel,
         sourceCount: plan.sourceCount,
-        candidateCount: plan.candidateCount
+        candidateCount: plan.candidateCount,
+        candidateCountSource: directoryV2
+          ? 'active-source-view-word-43'
+          : 'host-physical-source-count-times-27'
       };
-      const sourceDispatchWorkgroups = dispatchShapeForInvocationCount(
-        plan.sourceCount,
-        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
-        maxComputeWorkgroupsPerDimension,
-        'mechanics field source'
-      );
-      const candidateDispatchWorkgroups = dispatchShapeForInvocationCount(
-        plan.candidateCount,
-        SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
-        maxComputeWorkgroupsPerDimension,
-        'mechanics field candidate'
-      );
+      const selectedPipelines = directoryV2 ? v2Pipelines : pipelines;
+      const sourceDispatchWorkgroups = directoryV2
+        ? null
+        : dispatchShapeForInvocationCount(
+            plan.sourceCount,
+            SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+            maxComputeWorkgroupsPerDimension,
+            'mechanics field source'
+          );
+      const candidateDispatchWorkgroups = directoryV2
+        ? null
+        : dispatchShapeForInvocationCount(
+            plan.candidateCount,
+            SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+            maxComputeWorkgroupsPerDimension,
+            'mechanics field candidate'
+          );
       encoder.clearBuffer(
         arena.fieldViewBuffer,
         0,
@@ -638,44 +861,98 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         [2, { buffer: arena.candidateKeyBuffer }],
         [3, { buffer: arena.fieldViewBuffer }],
         [6, { buffer: parentMechanicsView.mechanicsViewBuffer }],
-        [7, { buffer: arena.paramsBuffer }]
+        [7, { buffer: arena.paramsBuffer }],
+        ...(directoryV2
+          ? [
+              [10, {
+                buffer: spatialExecution.directoryBuffer,
+                offset: 0,
+                size: spatialExecution.layout.byteLength
+              }],
+              [11, {
+                buffer: activeSourceView.activeSourceViewBuffer,
+                offset: 0,
+                size: activeSourceView.layout.byteLength
+              }]
+            ]
+          : [])
       ]);
       const emitBindGroup = createBindings(
-        pipelines.emit,
+        selectedPipelines.emit,
         commonResources,
-        [0, 1, 2, 3, 6, 7],
+        directoryV2
+          ? [0, 1, 2, 3, 6, 7, 10, 11]
+          : [0, 1, 2, 3, 6, 7],
         `${label}-arena-${arena.arenaIndex}-emit-bindings`
       );
-      let encodedDispatchCount = encodePass(
-        encoder,
-        pipelines.emit,
-        emitBindGroup,
-        sourceDispatchWorkgroups,
-        `${label}EmitCandidates`,
-        gpuTimestampRecorder,
-        {
-          producerId: 'schroeder-spatial-mechanics-field-candidate-emission',
-          stage: 'candidate-emission',
-          spanClass: 'same-production-command-encoder',
-          ...stageTimestampMetadata
-        }
-      );
-      radixUnique = arena.radix.encodeSortUnique(encoder, {
-        keyBuffer: arena.candidateKeyBuffer,
-        elementCount: plan.candidateCount,
-        keyWordCount: FIELD_RADIX_KEY_WORDS,
-        keyStrideWords: FIELD_RADIX_KEY_WORDS,
-        generationId: plan.generationId,
-        consumerWorkgroupSize: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
-        retainedParamsSlotIndex: 0,
-        gpuTimestampRecorder,
-        sortTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-sort',
-        uniqueTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-unique',
-        timestampMetadata: {
-          parentProducerId: 'schroeder-spatial-mechanics-field-view-build',
-          ...stageTimestampMetadata
-        }
-      });
+      const emissionTimestamp = {
+        producerId: 'schroeder-spatial-mechanics-field-candidate-emission',
+        stage: 'candidate-emission',
+        spanClass: 'same-production-command-encoder',
+        ...stageTimestampMetadata
+      };
+      let encodedDispatchCount = directoryV2
+        ? encodeIndirectPass(
+            encoder,
+            selectedPipelines.emit,
+            emitBindGroup,
+            activeSourceView.activeSourceViewBuffer,
+            activeSourceView.activeDispatchOffsetBytes,
+            `${label}EmitCandidatesV2`,
+            gpuTimestampRecorder,
+            emissionTimestamp
+          )
+        : encodePass(
+            encoder,
+            selectedPipelines.emit,
+            emitBindGroup,
+            sourceDispatchWorkgroups,
+            `${label}EmitCandidates`,
+            gpuTimestampRecorder,
+            emissionTimestamp
+          );
+      radixUnique = directoryV2
+        ? arena.radix.encodeSortUniqueGpuCount(encoder, {
+            keyBuffer: arena.candidateKeyBuffer,
+            authorityBuffer: activeSourceView.activeSourceViewBuffer,
+            authorityCountByteOffset: 43 * UINT32_BYTES,
+            generationSeal: {
+              expected: activeSourceView.buildOrdinal,
+              byteOffset: 30 * UINT32_BYTES
+            },
+            maxElementCount: plan.candidateCapacity,
+            keyWordCount: FIELD_RADIX_KEY_WORDS,
+            keyStrideWords: FIELD_RADIX_KEY_WORDS,
+            generationId: plan.generationId,
+            consumerWorkgroupSize:
+              SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+            retainedParamsSlotIndex: 0,
+            gpuTimestampRecorder,
+            timestampProducerId:
+              'schroeder-spatial-mechanics-field-radix-sort-unique-gpu-count',
+            timestampMetadata: {
+              parentProducerId:
+                'schroeder-spatial-mechanics-field-view-build',
+              ...stageTimestampMetadata
+            }
+          })
+        : arena.radix.encodeSortUnique(encoder, {
+            keyBuffer: arena.candidateKeyBuffer,
+            elementCount: plan.candidateCount,
+            keyWordCount: FIELD_RADIX_KEY_WORDS,
+            keyStrideWords: FIELD_RADIX_KEY_WORDS,
+            generationId: plan.generationId,
+            consumerWorkgroupSize:
+              SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+            retainedParamsSlotIndex: 0,
+            gpuTimestampRecorder,
+            sortTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-sort',
+            uniqueTimestampProducerId: 'schroeder-spatial-mechanics-field-radix-unique',
+            timestampMetadata: {
+              parentProducerId: 'schroeder-spatial-mechanics-field-view-build',
+              ...stageTimestampMetadata
+            }
+          });
       encodedDispatchCount += radixUnique.encodedDispatchCount;
       const finalResources = new Map([
         ...commonResources,
@@ -685,30 +962,60 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         [9, { buffer: radixUnique.uniqueGroupIndexBySortedPositionBuffer }]
       ]);
       const stencilMapBindGroup = createBindings(
-        pipelines.materializeStencilMap,
+        selectedPipelines.materializeStencilMap,
         finalResources,
-        [2, 3, 5, 7, 8, 9],
+        directoryV2
+          ? [2, 3, 5, 7, 8, 9, 11]
+          : [2, 3, 5, 7, 8, 9],
         `${label}-arena-${arena.arenaIndex}-stencil-map-bindings`
       );
       const assembleBindGroup = createBindings(
-        pipelines.assemble,
+        selectedPipelines.assemble,
         finalResources,
-        [3, 4, 5, 6, 7],
+        directoryV2
+          ? [3, 4, 5, 6, 7, 11]
+          : [3, 4, 5, 6, 7],
         `${label}-arena-${arena.arenaIndex}-assemble-bindings`
       );
       const finalizeBindGroup = createBindings(
-        pipelines.finalize,
+        selectedPipelines.finalize,
         finalResources,
-        [3, 4, 5, 6, 7],
+        directoryV2
+          ? [3, 4, 5, 6, 7, 10, 11]
+          : [3, 4, 5, 6, 7],
         `${label}-arena-${arena.arenaIndex}-finalize-bindings`
       );
-      encodedDispatchCount += encodePass(
-        encoder,
-        pipelines.materializeStencilMap,
+      const encodeCandidateStage = (
+        pipeline,
+        bindGroup,
+        passLabel,
+        timestampDescriptor
+      ) => (
+        directoryV2
+          ? encodeIndirectPass(
+              encoder,
+              pipeline,
+              bindGroup,
+              activeSourceView.activeSourceViewBuffer,
+              activeSourceView.candidateDispatchOffsetBytes,
+              passLabel,
+              gpuTimestampRecorder,
+              timestampDescriptor
+            )
+          : encodePass(
+              encoder,
+              pipeline,
+              bindGroup,
+              candidateDispatchWorkgroups,
+              passLabel,
+              gpuTimestampRecorder,
+              timestampDescriptor
+            )
+      );
+      encodedDispatchCount += encodeCandidateStage(
+        selectedPipelines.materializeStencilMap,
         stencilMapBindGroup,
-        candidateDispatchWorkgroups,
-        `${label}MaterializeStencilMap`,
-        gpuTimestampRecorder,
+        `${label}MaterializeStencilMap${directoryV2 ? 'V2' : ''}`,
         {
           producerId: 'schroeder-spatial-mechanics-field-stencil-map',
           stage: 'stencil-map',
@@ -716,13 +1023,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
           ...stageTimestampMetadata
         }
       );
-      encodedDispatchCount += encodePass(
-        encoder,
-        pipelines.assemble,
+      encodedDispatchCount += encodeCandidateStage(
+        selectedPipelines.assemble,
         assembleBindGroup,
-        candidateDispatchWorkgroups,
-        `${label}AssembleKeys`,
-        gpuTimestampRecorder,
+        `${label}AssembleKeys${directoryV2 ? 'V2' : ''}`,
         {
           producerId: 'schroeder-spatial-mechanics-field-key-assembly',
           stage: 'key-assembly',
@@ -732,7 +1036,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       );
       encodedDispatchCount += encodePass(
         encoder,
-        pipelines.finalize,
+        selectedPipelines.finalize,
         finalizeBindGroup,
         [1, 1, 1],
         `${label}Finalize`,
@@ -748,9 +1052,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         arena.paramsBuffer,
         0,
         fieldParamsData(plan, parentMechanicsView, {
-          sourceDispatchWorkgroups,
-          candidateDispatchWorkgroups,
-          dispatchXLimit: maxComputeWorkgroupsPerDimension
+          sourceDispatchWorkgroups: sourceDispatchWorkgroups ?? [0, 0, 0],
+          candidateDispatchWorkgroups: candidateDispatchWorkgroups ?? [0, 0, 0],
+          dispatchXLimit: maxComputeWorkgroupsPerDimension,
+          sourceAuthorityVersion
         })
       );
       const execution = {
@@ -763,9 +1068,31 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         sourceBuffer,
         identityBuffer,
         parentMechanicsView,
+        sourceAuthorityVersion,
+        physicalSourceCount: plan.sourceCount,
+        directorySchema: directoryV2
+          ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+          : null,
+        directoryAbiVersion: directoryV2
+          ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+          : null,
+        spatialExecution,
+        directoryBuffer: spatialExecution?.directoryBuffer ?? null,
+        activeSourceView,
+        activeSourceViewBuffer:
+          activeSourceView?.activeSourceViewBuffer ?? null,
+        activeSourceCountAuthority,
         candidateKeyBuffer: arena.candidateKeyBuffer,
         stableCandidateOrderBuffer: radixUnique.sortedIndicesBuffer,
-        stableCandidateOrderCount: plan.candidateCount,
+        stableCandidateOrderCount: directoryV2 ? null : plan.candidateCount,
+        stableCandidateOrderCountAuthority: directoryV2
+          ? Object.freeze({
+              buffer: activeSourceView.activeSourceViewBuffer,
+              offsetWords: 43,
+              sealOffsetWords: 30,
+              expectedSeal: activeSourceView.buildOrdinal
+            })
+          : null,
         stableCandidateOrderPolicy:
           'stable-radix-equal-key-preserves-particle-stencil-candidate-order',
         ownsStableCandidateOrderBuffer: false,
@@ -777,24 +1104,62 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         radixGateOffsetWords: 0,
         radixGateCount: 0,
         forceRadixFallbackRequested: forceRadixFallback,
-        constructionRoutePolicy: 'gpu-authenticated-direct-exact-radix',
+        constructionRoutePolicy: directoryV2
+          ? 'gpu-authenticated-directory-v2-indirect-gpu-count-radix'
+          : 'gpu-authenticated-direct-exact-radix',
         directDispatchLinearization:
           'linearGroup=workgroup.x+workgroup.y*dispatchX',
         sourceDispatchWorkgroups,
         candidateDispatchWorkgroups,
+        sourceDispatchIndirectBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        sourceDispatchIndirectOffsetBytes: directoryV2
+          ? activeSourceView.activeDispatchOffsetBytes
+          : null,
+        candidateDispatchIndirectBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        candidateDispatchIndirectOffsetBytes: directoryV2
+          ? activeSourceView.candidateDispatchOffsetBytes
+          : null,
         maxComputeWorkgroupsPerDimension,
-        constructionDispatchEvidence: Object.freeze({
-          workgroupSize:
-            SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
-          linearization:
-            'linearGroup=workgroup.x+workgroup.y*dispatchX',
-          maxComputeWorkgroupsPerDimension,
-          sourceInvocationCount: plan.sourceCount,
-          sourceWorkgroups: sourceDispatchWorkgroups,
-          candidateInvocationCount: plan.candidateCount,
-          candidateWorkgroups: candidateDispatchWorkgroups,
-          authenticatedByGpuFinalizer: true
-        }),
+        constructionDispatchEvidence: directoryV2
+          ? Object.freeze({
+              workgroupSize:
+                SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+              linearization:
+                'linearGroup=workgroup.x+workgroup.y*dispatchX',
+              sourceWorkIdentity: 'gpu-active-ordinal',
+              sourceInvocationCountAuthority: Object.freeze({
+                buffer: activeSourceView.activeSourceViewBuffer,
+                offsetWords: 18
+              }),
+              candidateInvocationCountAuthority: Object.freeze({
+                buffer: activeSourceView.activeSourceViewBuffer,
+                offsetWords: 43
+              }),
+              generationSealAuthority: Object.freeze({
+                buffer: activeSourceView.activeSourceViewBuffer,
+                offsetWords: 30,
+                expected: activeSourceView.buildOrdinal
+              }),
+              maxComputeWorkgroupsPerDimension,
+              authenticatedByGpuFinalizer: true,
+              hostActiveCountReadbackRequired: false
+            })
+          : Object.freeze({
+              workgroupSize:
+                SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+              linearization:
+                'linearGroup=workgroup.x+workgroup.y*dispatchX',
+              maxComputeWorkgroupsPerDimension,
+              sourceInvocationCount: plan.sourceCount,
+              sourceWorkgroups: sourceDispatchWorkgroups,
+              candidateInvocationCount: plan.candidateCount,
+              candidateWorkgroups: candidateDispatchWorkgroups,
+              authenticatedByGpuFinalizer: true
+            }),
         consumerDispatchWorkgroupSize:
           SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
         consumerDispatchDimensions: 2,
@@ -809,6 +1174,10 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         encodedDispatchCount,
         encodedComputePassCount: 4 + radixUnique.encodedComputePassCount,
         retainedGpuBufferBytes,
+        retainedMemoryScaling: 'physical-source-capacity',
+        computeDispatchScaling: directoryV2
+          ? 'gpu-active-source-count-and-occupied-field-count'
+          : 'physical-source-count-and-occupied-field-count',
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
         readbackPerformed: false,
@@ -831,12 +1200,18 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         token,
         radixUnique,
         stableCandidateOrderBuffer: radixUnique.sortedIndicesBuffer,
-        stableCandidateOrderCount: plan.candidateCount,
+        stableCandidateOrderCount: directoryV2 ? null : plan.candidateCount,
+        stableCandidateOrderCountAuthority: directoryV2
+          ? execution.stableCandidateOrderCountAuthority
+          : null,
         stableCandidateOrderPolicy:
           'stable-radix-equal-key-preserves-particle-stencil-candidate-order',
         sourceBuffer,
         identityBuffer,
         parentMechanicsView,
+        spatialExecution,
+        activeSourceView,
+        activeSourceCountAuthority,
         stateMutation: {
           ordinal: 0,
           encoding: 0,
@@ -904,12 +1279,22 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         !== ownership.stableCandidateOrderBuffer
       || execution.stableCandidateOrderCount
         !== ownership.stableCandidateOrderCount
+      || execution.stableCandidateOrderCountAuthority
+        !== ownership.stableCandidateOrderCountAuthority
       || execution.stableCandidateOrderPolicy
         !== ownership.stableCandidateOrderPolicy
       || execution.ownsStableCandidateOrderBuffer !== false
       || execution.sourceBuffer !== ownership.sourceBuffer
       || execution.identityBuffer !== ownership.identityBuffer
       || execution.parentMechanicsView !== ownership.parentMechanicsView
+      || execution.spatialExecution !== ownership.spatialExecution
+      || execution.activeSourceView !== ownership.activeSourceView
+      || execution.activeSourceCountAuthority
+        !== ownership.activeSourceCountAuthority
+      || execution.directoryBuffer
+        !== (ownership.spatialExecution?.directoryBuffer ?? null)
+      || execution.activeSourceViewBuffer
+        !== (ownership.activeSourceView?.activeSourceViewBuffer ?? null)
     ) {
       const error = new Error('mechanics field view execution is not owned by this runtime');
       error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_FOREIGN_EXECUTION';
@@ -2080,9 +2465,27 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     gridSpacingM: template.gridSpacingM,
     maxComputeWorkgroupsPerDimension,
     arenaCount: resolvedArenaCount,
+    directoryV2Prepared: enableDirectoryV2,
+    sourceAuthorityVersions: enableDirectoryV2
+      ? Object.freeze([
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+        ])
+      : Object.freeze([
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+        ]),
     layout: template.layout,
     releaseFencePolicy: 'runtime-owned-current-queue-at-invocation',
-    pipelineCount: 4 + arenas.reduce((sum, arena) => sum + arena.radix.pipelineCount, 0),
+    pipelineCount: 4
+      + (v2Pipelines ? 4 : 0)
+      + arenas.reduce(
+        (sum, arena) => sum + (
+          enableDirectoryV2
+            ? arena.radix.totalPipelineCount
+            : arena.radix.pipelineCount
+        ),
+        0
+      ),
     retainedGpuBufferBytes,
     encode,
     ownsExecution,
@@ -2142,5 +2545,6 @@ export {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
   ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
+  schroederSpatialMechanicsFieldViewV2Wgsl,
   schroederSpatialMechanicsFieldViewWgsl
 };

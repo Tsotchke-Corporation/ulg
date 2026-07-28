@@ -1,9 +1,13 @@
 import {
   createSchroederSpatialEpochLayout,
+  createSchroederSpatialEpochV2Layout,
   SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
   SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
   SCHROEDER_SPATIAL_EPOCH_MAGIC,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
@@ -19,15 +23,21 @@ import {
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
   ULG_SPH_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl,
   sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearWgsl.js';
+import {
+  validateSchroederSpatialEpochV2ConsumerDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   sphPressureInterfaceContactKinematicsWgsl,
   sphPressureInterfaceParticleBinsWgsl,
@@ -1631,6 +1641,18 @@ function spatialSize(value, fallback = 0) {
     : fallback;
 }
 
+function schroederSpatialDirectoryVersion(execution) {
+  if (execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA) return 1;
+  if (execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA) return 2;
+  return 0;
+}
+
+function schroederSpatialExactNearViewSchema(execution) {
+  return schroederSpatialDirectoryVersion(execution) === 2
+    ? ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_V2_SCHEMA
+    : ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA;
+}
+
 function unavailableSchroederSpatialSource(source, device, status, reason, extra = {}) {
   return {
     schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
@@ -2118,9 +2140,13 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
     );
   }
   const execution = generation.execution || null;
+  const directoryVersion = schroederSpatialDirectoryVersion(execution);
   if (
-    execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
-    || execution.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    directoryVersion === 0
+    || ![
+      'schroeder-spatial-epoch-gpu-build-submitted',
+      'schroeder-spatial-epoch-v2-gpu-build-submitted'
+    ].includes(execution.status)
     || execution.submitPerformed !== true
     || execution.released === true
     || !execution.directoryBuffer
@@ -2146,6 +2172,53 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
       'Caller-owned spatial directory belongs to another WebGPU device',
       mismatch
     );
+  }
+  if (directoryVersion === 2) {
+    const v2Admission = validateSchroederSpatialEpochV2ConsumerDescriptor(
+      execution,
+      { deviceId: mismatch.consumerDeviceId }
+    );
+    if (
+      v2Admission.admitted !== true
+      && !(
+        v2Admission.compatible === true
+        && v2Admission.hostAuthenticated === true
+        && v2Admission.status
+          === 'schroeder-spatial-epoch-v2-gpu-admission-unproven'
+      )
+    ) {
+      return rejectedBorrowedSchroederPressureSpatialGeneration(
+        generation,
+        device,
+        'schroeder-spatial-exact-near-shared-generation-rejected-v2-authority',
+        `Caller-owned spatial v2 authority was rejected: ${v2Admission.status}`,
+        {
+          authorityStatus: v2Admission.status,
+          authorityField: v2Admission.field
+            ?? v2Admission.authorityField
+            ?? null
+        }
+      );
+    }
+    const activeAuthorityBuffer =
+      v2Admission.activeSourceCountAuthority?.buffer;
+    const activeMismatch = webGpuDeviceMismatchInfo({
+      buffer: activeAuthorityBuffer,
+      device
+    });
+    if (
+      !activeAuthorityBuffer
+      || execution.activeSourceViewBuffer !== activeAuthorityBuffer
+      || activeMismatch.mismatch
+    ) {
+      return rejectedBorrowedSchroederPressureSpatialGeneration(
+        generation,
+        device,
+        'schroeder-spatial-exact-near-shared-generation-rejected-v2-authority',
+        'Caller-owned spatial v2 generation does not retain its exact same-device ActiveSource authority',
+        activeMismatch
+      );
+    }
   }
   const ownerRuntime = generation.runtime || null;
   let ownerRuntimeOwnsExecution = false;
@@ -2225,6 +2298,11 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
     || generationSource.sourceRowLayoutId !== sourceRowLayoutId
     || execution.sourceRowLayoutId !== sourceRowLayoutId
     || expectedSourceFamily == null
+    || (
+      directoryVersion === 2
+      && sourceRowLayoutId
+        !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+    )
     || generationSource.phaseVolumeAssignmentOverlayEnabled === true
   ) {
     return rejectedBorrowedSchroederPressureSpatialGeneration(
@@ -2348,42 +2426,94 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
       'Borrowed directory execution lacks complete device/lane/lease/source/build identity'
     );
   }
-  const sourceCapacity = spatialU32(execution.sourceCapacity, Number.NaN);
+  const physicalSourceCount = spatialU32(
+    directoryVersion === 2
+      ? (execution.physicalSourceCount ?? execution.sourceCount)
+      : execution.sourceCount,
+    Number.NaN
+  );
+  const sourceCapacity = spatialU32(
+    directoryVersion === 2
+      ? (execution.physicalSourceCapacity ?? execution.sourceCapacity)
+      : execution.sourceCapacity,
+    Number.NaN
+  );
+  const activeSourceCapacity = spatialU32(
+    directoryVersion === 2
+      ? execution.activeSourceCapacity
+      : sourceCapacity,
+    Number.NaN
+  );
   const cellCapacity = spatialU32(execution.cellCapacity, Number.NaN);
   let expectedLayout = null;
   if (
     Number.isInteger(sourceCapacity)
     && sourceCapacity >= expectedParticleCount
     && Number.isInteger(cellCapacity)
-    && cellCapacity >= expectedParticleCount
+    && cellCapacity > 0
+    && (
+      directoryVersion === 2
+      || cellCapacity >= expectedParticleCount
+    )
   ) {
     try {
-      expectedLayout = createSchroederSpatialEpochLayout({
-        sourceCapacity,
-        cellCapacity
-      });
+      expectedLayout = directoryVersion === 2
+        ? createSchroederSpatialEpochV2Layout({
+            physicalSourceCapacity: sourceCapacity,
+            activeSourceCapacity,
+            cellCapacity
+          })
+        : createSchroederSpatialEpochLayout({
+            sourceCapacity,
+            cellCapacity
+          });
     } catch {
       expectedLayout = null;
     }
   }
   const layout = execution.layout || null;
-  const layoutFields = [
-    'schema',
-    'headerOffsetWords',
-    'headerWords',
-    'cellKeysOffsetWords',
-    'cellKeyWords',
-    'cellOffsetsOffsetWords',
-    'cellOffsetWords',
-    'cellMembersOffsetWords',
-    'cellMemberWords',
-    'particleToCellOffsetWords',
-    'particleToCellWords',
-    'sourceCapacity',
-    'cellCapacity',
-    'wordLength',
-    'byteLength'
-  ];
+  const layoutFields = directoryVersion === 2
+    ? [
+        'schema',
+        'version',
+        'headerOffsetWords',
+        'headerWords',
+        'cellKeysOffsetWords',
+        'cellKeyWords',
+        'cellOffsetsOffsetWords',
+        'cellOffsetWords',
+        'cellMembersOffsetWords',
+        'cellMemberWords',
+        'activeCellMemberWords',
+        'physicalToCellPlusOneOffsetWords',
+        'physicalToCellPlusOneWords',
+        'queryEvidenceCapacityOffsetWords',
+        'queryEvidenceWordCapacity',
+        'physicalSourceCapacity',
+        'sourceCapacity',
+        'activeSourceCapacity',
+        'cellCapacity',
+        'reverseEncoding',
+        'wordLength',
+        'byteLength'
+      ]
+    : [
+        'schema',
+        'headerOffsetWords',
+        'headerWords',
+        'cellKeysOffsetWords',
+        'cellKeyWords',
+        'cellOffsetsOffsetWords',
+        'cellOffsetWords',
+        'cellMembersOffsetWords',
+        'cellMemberWords',
+        'particleToCellOffsetWords',
+        'particleToCellWords',
+        'sourceCapacity',
+        'cellCapacity',
+        'wordLength',
+        'byteLength'
+      ];
   const layoutReady = expectedLayout != null && layoutFields.every((field) => (
     layout?.[field] === expectedLayout[field]
   ));
@@ -2394,11 +2524,24 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
   );
   if (
     execution.magic !== SCHROEDER_SPATIAL_EPOCH_MAGIC
-    || execution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
-    || execution.exactKeyWordCount !== SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+    || execution.abiVersion !== (
+      directoryVersion === 2
+        ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        : SCHROEDER_SPATIAL_EPOCH_VERSION
+    )
+    || execution.exactKeyWordCount !== (
+      directoryVersion === 2
+        ? SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS
+        : SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+    )
     || execution.sortKeyWordCount !== SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
     || execution.sortMode !== SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5
-    || execution.sourceCount !== expectedParticleCount
+    || physicalSourceCount !== expectedParticleCount
+    || (
+      directoryVersion === 2
+      && execution.reverseEncoding
+        !== SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+    )
     || !layoutReady
     || !directoryBufferSizeReady
   ) {
@@ -2434,6 +2577,8 @@ export function resolveSchroederPressureInterfaceSpatialEpochGeneration(
     source: spatialSource,
     generation,
     execution,
+    directoryVersion,
+    spatialViewSchema: schroederSpatialExactNearViewSchema(execution),
     runtime: null,
     runtimeCapacity: generation.runtimeCapacity ?? execution.sourceCapacity,
     runtimeCacheHit: generation.runtimeCacheHit === true,
@@ -2466,6 +2611,7 @@ export function createPressureInterfaceSpatialExactNearParamsArray({
   const execution = spatialBuild?.execution || null;
   const source = spatialBuild?.source || null;
   const layout = execution?.layout || {};
+  const directoryVersion = schroederSpatialDirectoryVersion(execution);
   const buffer = new ArrayBuffer(128);
   const view = new DataView(buffer);
   view.setUint32(0, spatialU32(elementCount), true);
@@ -2495,9 +2641,25 @@ export function createPressureInterfaceSpatialExactNearParamsArray({
   view.setUint32(96, spatialU32(layout.cellKeysOffsetWords), true);
   view.setUint32(100, spatialU32(layout.cellOffsetsOffsetWords), true);
   view.setUint32(104, spatialU32(layout.cellMembersOffsetWords), true);
-  view.setUint32(108, spatialU32(layout.particleToCellOffsetWords), true);
+  view.setUint32(
+    108,
+    spatialU32(
+      directoryVersion === 2
+        ? layout.physicalToCellPlusOneOffsetWords
+        : layout.particleToCellOffsetWords
+    ),
+    true
+  );
   view.setUint32(112, spatialU32(layout.wordLength), true);
-  view.setUint32(116, spatialU32(execution?.sourceCapacity), true);
+  view.setUint32(
+    116,
+    spatialU32(
+      directoryVersion === 2
+        ? (execution?.physicalSourceCapacity ?? execution?.sourceCapacity)
+        : execution?.sourceCapacity
+    ),
+    true
+  );
   view.setUint32(120, spatialU32(execution?.cellCapacity), true);
   view.setUint32(124, 0, true);
   return buffer;
@@ -3580,6 +3742,9 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
       'runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu requires a WebGPU-like device'
     );
   }
+  const directoryVersion = schroederSpatialDirectoryVersion(
+    spatialBuild?.execution
+  );
   if (
     !packedInterfaceElements?.rows
     || !packedContactPolicy?.rows
@@ -3599,8 +3764,11 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
     || spatialBuild.generation?.selected !== true
     || spatialBuild.generation?.releaseScheduled === true
     || spatialBuild.generation?.execution !== spatialBuild.execution
-    || spatialBuild.execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
-    || spatialBuild.execution?.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    || directoryVersion === 0
+    || ![
+      'schroeder-spatial-epoch-gpu-build-submitted',
+      'schroeder-spatial-epoch-v2-gpu-build-submitted'
+    ].includes(spatialBuild.execution?.status)
     || spatialBuild.execution?.submitPerformed !== true
     || spatialBuild.execution?.released === true
     || spatialBuild.execution?.sourceAdapterId
@@ -3652,10 +3820,17 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
     gapFloorM,
     spatialBuild
   }));
+  const spatialExactNearWgsl = directoryVersion === 2
+    ? sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl
+    : sphPressureInterfaceSpatialExactNearContactKinematicsWgsl;
   const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics.v4',
-    label: 'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics',
-    code: sphPressureInterfaceSpatialExactNearContactKinematicsWgsl,
+    cacheKey:
+      `ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics.v4`
+      + `:directory-v${directoryVersion}`,
+    label:
+      'ulg-sph-pressure-interface-spatial-exact-near-contact-kinematics'
+      + `-directory-v${directoryVersion}`,
+    code: spatialExactNearWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -3694,7 +3869,9 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
   device.queue.submit([encoder.finish()]);
   return {
     schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
-    spatialViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    spatialViewSchema: schroederSpatialExactNearViewSchema(
+      spatialBuild.execution
+    ),
     status: 'interface-contact-kinematics-spatial-exact-near-submitted',
     buffer: outputBuffer,
     bufferByteLength: outputByteLength,
@@ -3718,6 +3895,7 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
     spatialExactNearBorrowedGeneration: true,
     spatialExactNearConsumerReleaseAuthority: 'generation-owner',
     spatialExactNearGenerationId: spatialBuild.execution.generationId,
+    spatialExactNearDirectoryVersion: directoryVersion,
     spatialExactNearArenaIndex: spatialBuild.execution.arenaIndex,
     spatialExactNearRuntimeCapacity: spatialBuild.runtimeCapacity,
     spatialExactNearRuntimeCacheHit: spatialBuild.runtimeCacheHit === true,
@@ -3725,7 +3903,9 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
     spatialExactNearSharedGenerationDirectoryBuildCount:
       spatialBuild.sharedGenerationDirectoryBuildCount ?? 0,
     spatialExactNearDirectoryLookupMode:
-      'exact-cell-key-binary-search-sparse-prefix-csr-range',
+      directoryVersion === 2
+        ? 'exact-cell-key-binary-search-active-prefix-physical-member-csr-range'
+        : 'exact-cell-key-binary-search-sparse-prefix-csr-range',
     spatialExactNearCandidateBudget: null,
     spatialExactNearPrivateParticleBinBuildSuppressed: true,
     spatialExactNearPrivateParticleBinBuildCount: 0,
@@ -3742,7 +3922,8 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
       'shader-validates-at-dispatch-no-host-readback',
     spatialExactNearGpuFallbackObserved: null,
     pressureInterfaceSpatialIndexStatus: 'pressure-interface-canonical-spatial-epoch-selected',
-    pressureInterfaceSpatialIndexMode: 'ss-spatial-epoch-v1-exact-near-csr',
+    pressureInterfaceSpatialIndexMode:
+      `ss-spatial-epoch-v${directoryVersion}-exact-near-csr`,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
     pipelineCacheStatus: cacheStatus,
@@ -3777,7 +3958,10 @@ function createFailClosedBorrowedSpatialContactKinematicsWebGpu({
   );
   return {
     schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
-    spatialViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+    spatialViewSchema: schroederSpatialExactNearViewSchema(
+      spatialAdmission?.generation?.execution
+        ?? spatialAdmission?.execution
+    ),
     status: 'interface-contact-kinematics-spatial-exact-near-fail-closed',
     reason: spatialAdmission?.reason || 'Caller-owned spatial generation was rejected',
     buffer,
@@ -4868,7 +5052,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
           'schroeder-pressure-interface-source-spans-bypassed-canonical-spatial-epoch',
         pressureInterfaceSpatialIndexStatus:
           'pressure-interface-canonical-spatial-epoch-selected',
-        pressureInterfaceSpatialIndexMode: 'ss-spatial-epoch-v1-exact-near-csr',
+        pressureInterfaceSpatialIndexMode:
+          `ss-spatial-epoch-v${schroederSpatialDirectoryVersion(
+            contactKinematicsSpatialBuild.execution
+          )}-exact-near-csr`,
         broadCandidateScanFallback: false
       });
       const exactNearProgress = {
@@ -5440,7 +5627,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         ?? 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
-      schroederSpatialExactNearViewSchema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
+      schroederSpatialExactNearViewSchema:
+        contactKinematicsGpuDerivation?.spatialViewSchema
+        ?? contactKinematicsSpatialBuild?.spatialViewSchema
+        ?? ULG_SCHROEDER_SPATIAL_EXACT_NEAR_VIEW_SCHEMA,
       schroederSpatialExactNearSourceStatus: schroederPressureInterfaceSpatialSource.status,
       schroederSpatialExactNearSourceReason: schroederPressureInterfaceSpatialSource.reason,
       schroederSpatialExactNearSourceReady:

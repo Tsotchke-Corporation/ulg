@@ -326,7 +326,12 @@ test('Schroeder Morton-prefix aggregate and stackless traversal match their JS A
     schroederSpatialAggregateStacklessTraversalWgsl
   );
   assert.equal(new Set(traversalBindings).size, traversalBindings.length);
-  assert.equal(traversalBindings.length, 3);
+  assert.equal(traversalBindings.length, 4);
+  assert.equal(
+    traversalBindings.includes(4),
+    true,
+    'aggregate traversal must bind the exact ActiveSource authority'
+  );
   const runtimeSource = readRepoText(
     'src/runtime/sph/schroederSpatialAggregateViewGpu.js'
   );

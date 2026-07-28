@@ -120,6 +120,9 @@ function paramsData(plan) {
   f32(26, plan.nearFieldSupportScale);
   f32(27, plan.openingTheta);
   u32(28, plan.aggregateView.sourceCount);
+  u32(29, plan.aggregateView.directoryAbiVersion === 2 ? 1 : 0);
+  u32(30, plan.aggregateView.activeMemberOffsetWords);
+  u32(31, plan.aggregateView.activeMemberCapacity);
   return data;
 }
 
@@ -271,6 +274,24 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
       || execution.aggregateView !== record.aggregateView
       || execution.queryBuffer !== record.queryBuffer
       || execution.publicEpochIdentity !== record.publicEpochIdentity
+      || execution.directoryAbiVersion
+        !== (record.directoryV2 ? 2 : record.aggregateView.directoryAbiVersion)
+      || execution.activeSourceView !== record.activeSourceView
+      || execution.activeSourceCountAuthority
+        !== record.activeSourceCountAuthority
+      || (
+        record.directoryV2
+        && (
+          execution.activeSourceViewBuffer
+            !== record.activeSourceView.activeSourceViewBuffer
+          || execution.indirectDispatchBuffer
+            !== record.activeSourceView.activeSourceViewBuffer
+          || execution.indirectDispatchOffsetBytes
+            !== record.activeSourceView.activeDispatchOffsetBytes
+          || record.spatialExecution
+            !== record.aggregateView.spatialExecution
+        )
+      )
       || execution.topologyFingerprintCheckEncoded !== true
       || execution.globalTopologySealRequiredEncoded !== true
       || execution.visitedTopologyFingerprintRecomputeEncoded !== true
@@ -336,6 +357,62 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
       if (!admission.admitted) {
         throw new TypeError(`aggregate traversal rejected view: ${admission.status}`);
       }
+      const directoryV2 = aggregateView.directoryAbiVersion === 2;
+      const spatialExecution = aggregateView.spatialExecution;
+      const activeSourceView = aggregateView.activeSourceView;
+      const activeSourceCountAuthority =
+        aggregateView.activeSourceCountAuthority;
+      let v2LineageAdmitted = !directoryV2;
+      if (directoryV2) {
+        let spatialOwned = false;
+        let activeSourceOwned = false;
+        try {
+          spatialOwned =
+            spatialExecution?.ownerRuntime?.ownsExecution?.(spatialExecution)
+              === true;
+          activeSourceOwned =
+            activeSourceView?.ownerRuntime?.ownsExecution?.(activeSourceView)
+              === true;
+        } catch {
+          spatialOwned = false;
+          activeSourceOwned = false;
+        }
+        v2LineageAdmitted = Boolean(
+          spatialOwned
+          && activeSourceOwned
+          && aggregateView.directorySchema === spatialExecution?.schema
+          && aggregateView.sourceWorkIdentity === 'gpu-active-ordinal'
+          && aggregateView.activeSourceView === spatialExecution.activeSourceView
+          && aggregateView.activeSourceViewBuffer
+            === spatialExecution.activeSourceViewBuffer
+          && activeSourceView.activeSourceViewBuffer
+            === aggregateView.activeSourceViewBuffer
+          && activeSourceView.sourceBuffer === aggregateView.spatialSource?.sourceBuffer
+          && activeSourceView.physicalSourceCount === aggregateView.sourceCount
+          && activeSourceView.physicalSourceCapacity
+            === aggregateView.sourceCapacity
+          && activeSourceCountAuthority
+            === spatialExecution.activeSourceCountAuthority
+          && activeSourceCountAuthority
+            === spatialExecution.logicalSourceCountAuthority
+          && activeSourceCountAuthority.activeSourceView === activeSourceView
+          && activeSourceCountAuthority.buffer
+            === activeSourceView.activeSourceViewBuffer
+          && activeSourceCountAuthority.offsetWords === 18
+          && activeSourceCountAuthority.offsetBytes === 18 * UINT32_BYTES
+          && activeSourceCountAuthority.capacity
+            === activeSourceView.activeSourceCapacity
+          && activeSourceView.activeDispatchOffsetBytes
+            === activeSourceView.layout?.activeDispatchOffsetBytes
+          && Number.isInteger(activeSourceView.activeDispatchOffsetBytes)
+        );
+        if (!v2LineageAdmitted) {
+          throw traversalError(
+            'aggregate traversal requires the exact canonical v2 spatial and ActiveSource lineage',
+            'ERR_SCHROEDER_AGGREGATE_TRAVERSAL_ACTIVE_SOURCE_LINEAGE'
+          );
+        }
+      }
       if (
         aggregateView.deviceId !== deviceId
         || !webGpuBufferMatchesDevice(aggregateView.aggregateViewBuffer, device)
@@ -352,6 +429,12 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
         );
       }
       const count = positiveInteger(queryCount, 'queryCount', resolvedMaxQueryCount);
+      if (directoryV2 && count !== aggregateView.sourceCount) {
+        throw traversalError(
+          'v2 aggregate traversal requires the complete physical query family',
+          'ERR_SCHROEDER_AGGREGATE_TRAVERSAL_QUERY_PROVENANCE'
+        );
+      }
       const stride = positiveInteger(
         queryStrideFloats,
         'queryStrideFloats',
@@ -413,7 +496,9 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
       const arena = acquireArena();
       try {
         device.queue.writeBuffer(arena.paramsBuffer, 0, paramsData(plan));
-        device.queue.writeBuffer(arena.dispatchBuffer, 0, dispatchData(count));
+        if (!directoryV2) {
+          device.queue.writeBuffer(arena.dispatchBuffer, 0, dispatchData(count));
+        }
         encoder.clearBuffer(arena.summaryBuffer);
         const bindGroup = device.createBindGroup({
           label: `${label}-bind-group-${arena.arenaIndex}-${arena.generation}`,
@@ -422,7 +507,15 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
             { binding: 0, resource: { buffer: aggregateView.aggregateViewBuffer } },
             { binding: 1, resource: { buffer: queryBuffer } },
             { binding: 2, resource: { buffer: arena.summaryBuffer } },
-            { binding: 3, resource: { buffer: arena.paramsBuffer } }
+            { binding: 3, resource: { buffer: arena.paramsBuffer } },
+            {
+              binding: 4,
+              resource: {
+                buffer: directoryV2
+                  ? activeSourceView.activeSourceViewBuffer
+                  : aggregateView.aggregateViewBuffer
+              }
+            }
           ]
         });
         const pass = encoder.beginComputePass({
@@ -430,7 +523,12 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
         });
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.dispatchWorkgroupsIndirect(arena.dispatchBuffer, 0);
+        pass.dispatchWorkgroupsIndirect(
+          directoryV2
+            ? activeSourceView.activeSourceViewBuffer
+            : arena.dispatchBuffer,
+          directoryV2 ? activeSourceView.activeDispatchOffsetBytes : 0
+        );
         pass.end();
         let resolveCompletion;
         const completionPromise = new Promise((resolve) => {
@@ -446,10 +544,32 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
           aggregateView,
           aggregateViewBuffer: aggregateView.aggregateViewBuffer,
           queryBuffer,
+          directoryAbiVersion: aggregateView.directoryAbiVersion,
+          queryWorkIdentity: directoryV2
+            ? 'gpu-active-ordinal-mapped-to-stable-physical-source'
+            : 'stable-physical-query-index',
+          activeSourceView: directoryV2 ? activeSourceView : null,
+          activeSourceViewBuffer: directoryV2
+            ? activeSourceView.activeSourceViewBuffer
+            : null,
+          activeSourceCountAuthority: directoryV2
+            ? activeSourceCountAuthority
+            : null,
           publicEpochIdentity: epochIdentity,
           traversalSummaryBuffer: arena.summaryBuffer,
-          indirectDispatchBuffer: arena.dispatchBuffer,
-          indirectDispatchOffsetBytes: 0,
+          indirectDispatchBuffer: directoryV2
+            ? activeSourceView.activeSourceViewBuffer
+            : arena.dispatchBuffer,
+          indirectDispatchOffsetBytes: directoryV2
+            ? activeSourceView.activeDispatchOffsetBytes
+            : 0,
+          summaryDestinationIdentity: directoryV2
+            ? 'stable-physical-source-slot'
+            : 'query-index',
+          activeSourceDispatchLinearization: directoryV2
+            ? 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+            : null,
+          activeSourceCountReadbackPerformed: false,
           submitPerformed: false,
           releaseScheduled: false,
           readbackPerformed: false,
@@ -497,6 +617,12 @@ export function createSchroederSpatialAggregateTraversalGpu(device, {
           aggregateView,
           queryBuffer,
           publicEpochIdentity: epochIdentity,
+          directoryV2,
+          spatialExecution,
+          activeSourceView: directoryV2 ? activeSourceView : null,
+          activeSourceCountAuthority: directoryV2
+            ? activeSourceCountAuthority
+            : null,
           completionPromise,
           resolveCompletion,
           completed: false,

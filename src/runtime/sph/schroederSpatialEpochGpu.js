@@ -3,19 +3,33 @@ import {
   SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
   SCHROEDER_SPATIAL_EPOCH_MAGIC,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
   SCHROEDER_SPATIAL_QUERY_GEOMETRY_SINGLE_CHART_POW2,
   SCHROEDER_SPATIAL_SORT_BOUNDED_ATLAS_U32,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   createSchroederSpatialEpochBuildPlan,
-  createSchroederSpatialEpochLayout
+  createSchroederSpatialEpochLayout,
+  createSchroederSpatialEpochV2BuildPlan,
+  createSchroederSpatialEpochV2Layout
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   schroederSpatialEpochAssembleWgsl,
-  schroederSpatialEpochKeyWgsl
+  schroederSpatialEpochKeyWgsl,
+  schroederSpatialEpochV2AssembleWgsl,
+  schroederSpatialEpochV2KeyWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpochWgsl.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  createSchroederSpatialActiveSourceFingerprint,
+  validateSchroederSpatialActiveSourceViewDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import {
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAX_SOURCE_COUNT,
@@ -35,12 +49,14 @@ import {
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
   ULG_SCHROEDER_SPATIAL_CONSUMER_AUTHENTICATION_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_CONSUMER_RECEIPT_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_SCHEMA,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
   createSchroederSpatialExactNearExpectationV1Data,
+  createSchroederSpatialExactNearExpectationV2Data,
   resolveSchroederSpatialSupportProfileContract
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { createWebGpuStableRadixScanUnique } from '../webgpuRadixScanUnique.js';
@@ -78,13 +94,20 @@ import {
 import {
   createSchroederSpatialActiveSourceViewGpu
 } from './schroederSpatialActiveSourceViewGpu.js';
+import {
+  validateSchroederFrozenFineSubstepAuthorityProof,
+  validateSchroederPostClosureLevelAssignment
+} from './schroederFrozenLevelAssignmentRefreshGpu.js';
 
 export {
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   schroederSpatialEpochAssembleWgsl,
-  schroederSpatialEpochKeyWgsl
+  schroederSpatialEpochKeyWgsl,
+  schroederSpatialEpochV2AssembleWgsl,
+  schroederSpatialEpochV2KeyWgsl
 };
 
 export const SCHROEDER_SPATIAL_EPOCH_WORKGROUP_SIZE = 64;
@@ -120,6 +143,8 @@ const spatialEpochGenerationConsumerLeases = new WeakMap();
 const spatialEpochGenerationConsumerLeaseOwnership = new WeakMap();
 const spatialEpochGenerationConsumerDrainWaiters = new WeakMap();
 let spatialEpochGenerationConsumerLeaseSerial = 0;
+const nativeTestLegacyLevelAssignmentDirectoryV1ArmRecords = new WeakMap();
+let nativeTestLegacyLevelAssignmentDirectoryV1ArmSerial = 0;
 const deviceLossTerminalizedSpatialRuntimes = new WeakSet();
 const spatialEpochLostDevices = new WeakSet();
 const GPU_BUFFER_USAGE = {
@@ -144,6 +169,24 @@ function directSpatialEpochArenaCount(value = DIRECT_SPATIAL_EPOCH_ARENA_COUNT) 
     'directArenaCount',
     DIRECT_SPATIAL_EPOCH_ARENA_COUNT_MAX
   );
+}
+
+function spatialDirectoryAbiVersion(value = SCHROEDER_SPATIAL_EPOCH_VERSION) {
+  const version = positiveInteger(
+    value,
+    'directoryAbiVersion',
+    SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  );
+  if (
+    version !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    && version !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  ) {
+    throw new RangeError(
+      `directoryAbiVersion must be ${SCHROEDER_SPATIAL_EPOCH_VERSION}`
+      + ` or ${SCHROEDER_SPATIAL_EPOCH_V2_VERSION}`
+    );
+  }
+  return version;
 }
 
 function nonNegativeInteger(value, label, max = 0xffff_ffff) {
@@ -554,7 +597,55 @@ export function resolveSchroederSpatialDirectoryLevelAssignmentSource(
   // V0*J lineage. A fresh macro-boundary classifier remains admissible.
   const frozenFineRefresh = source.refreshMode === 'frozen-fine-substep'
     || source.levelClassificationMode === 'frozen-macro-step-no-reclassification';
+  const frozenFineRefreshAuthorityProved = frozenFineRefresh === true
+    && validateSchroederFrozenFineSubstepAuthorityProof(
+      source.frozenFineSubstepAuthorityProof
+    )
+    && source.frozenFineSubstepAuthorityProof.currentStateBuffer
+      === sourceStateBuffer
+    && source.frozenFineSubstepAuthorityProof.currentMechanicsBuffer
+      === sourceMechanicsCandidate
+    && source.frozenFineSubstepAuthorityProof.storageGeneration
+      === source.storageGeneration
+    && source.frozenFineSubstepAuthorityProof.physicsTick
+      === source.physicsTick
+    && source.frozenFineSubstepAuthorityProof.physicsSubstep
+      === source.physicsSubstep
+    && source.frozenFineSubstepAuthorityProof.positionEpoch
+      === source.positionEpoch
+    && source.frozenFineSubstepAuthorityProof.topologyEpoch
+      === source.topologyEpoch
+    && source.frozenFineSubstepAuthorityProof.chartEpoch
+      === source.chartEpoch
+    && source.frozenFineSubstepAuthorityProof.levelEpoch
+      === source.levelEpoch
+    && source.frozenFineSubstepAuthorityProof.supportEpoch
+      === source.supportEpoch;
+  if (frozenFineRefresh && !frozenFineRefreshAuthorityProved) {
+    return unavailableSpatialDirectorySource(
+      source,
+      device,
+      'schroeder-spatial-directory-source-rejected-frozen-refresh-authority',
+      'Frozen fine refresh lacks its exact controller-issued topology/generation proof'
+    );
+  }
+  const postClosureFullReclassification = source.refreshMode
+      === 'post-closure-full-reclassification'
+    || source.levelClassificationMode
+      === 'post-closure-full-reclassification';
+  if (
+    postClosureFullReclassification
+    && !validateSchroederPostClosureLevelAssignment(source)
+  ) {
+    return unavailableSpatialDirectorySource(
+      source,
+      device,
+      'schroeder-spatial-directory-source-rejected-post-closure-lineage',
+      'Post-closure assignment lacks its exact state/thermo/mechanics lineage seal'
+    );
+  }
   const frozenFineRefreshMechanicsReproved = frozenFineRefresh === true
+    && frozenFineRefreshAuthorityProved
     && source.sourceMechanicsProvenanceStatus
       === 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-ready';
   const sourceCount = exactU32OrNull(source.particleCount);
@@ -787,6 +878,41 @@ function encodeComputeDispatch(
   return 1;
 }
 
+function encodeComputeIndirectDispatch(
+  encoder,
+  pipeline,
+  bindGroup,
+  indirectBuffer,
+  indirectOffsetBytes,
+  label,
+  timestampProfiler,
+  timestampMetadata
+) {
+  if (!indirectBuffer) {
+    throw new TypeError(`${label} requires an indirect dispatch buffer`);
+  }
+  const offset = nonNegativeInteger(
+    indirectOffsetBytes,
+    `${label}.indirectOffsetBytes`,
+    0xffff_fffc
+  );
+  if (offset % UINT32_BYTES !== 0) {
+    throw new RangeError(`${label}.indirectOffsetBytes must be u32 aligned`);
+  }
+  const pass = encoder.beginComputePass(
+    timestampPassDescriptor(timestampProfiler, label, timestampMetadata)
+  );
+  if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+    pass.end?.();
+    throw new TypeError(`${label} requires dispatchWorkgroupsIndirect`);
+  }
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroupsIndirect(indirectBuffer, offset);
+  pass.end();
+  return 1;
+}
+
 function paramsDataForPlan(plan, {
   keyDispatchX,
   assembleDispatchX,
@@ -863,9 +989,14 @@ function paramsDataForPlan(plan, {
   f32(plan.queryBaseGridSpacingM);
   u32(plan.sourceRowLayoutId);
   u32(logicalSourceCountGpuAuthored ? 1 : 0);
-  // Preserve the host-authenticated physical radix input count when word zero
-  // is replaced by a GPU-authored logical live count before key emission.
-  u32(plan.sourceCount);
+  // V1 sorts the physical input count. Directory v2 sorts only the retained
+  // ActiveSource capacity while preserving physical source_count separately.
+  u32(
+    logicalSourceCountGpuAuthored
+      && Number.isSafeInteger(plan.activeSourceCapacity)
+      ? plan.activeSourceCapacity
+      : plan.sourceCount
+  );
   if (offset !== SCHROEDER_SPATIAL_EPOCH_PARAMS_BYTES) {
     throw new Error(
       `spatial epoch params ABI packed ${offset} bytes, expected ${SCHROEDER_SPATIAL_EPOCH_PARAMS_BYTES}`
@@ -874,8 +1005,22 @@ function paramsDataForPlan(plan, {
   return new Uint8Array(buffer);
 }
 
-function bindGroupForKey(device, arena, pipeline, activeNodeBuffer, activeNodeBindingSize) {
-  const cached = arena.keyBindGroups.get(activeNodeBuffer);
+function bindGroupForKey(
+  device,
+  arena,
+  pipeline,
+  activeNodeBuffer,
+  activeNodeBindingSize,
+  {
+    activeSourceViewBuffer = null,
+    activeSourceViewBindingSize = null
+  } = {}
+) {
+  let cache = arena.keyBindGroups.get(activeNodeBuffer);
+  const directoryV2 = activeSourceViewBuffer != null;
+  const cached = directoryV2
+    ? cache?.get(activeSourceViewBuffer)
+    : cache;
   if (cached) {
     arena.bindGroupReuseCount += 1;
     return cached;
@@ -898,10 +1043,28 @@ function bindGroupForKey(device, arena, pipeline, activeNodeBuffer, activeNodeBi
           offset: 0,
           size: SCHROEDER_SPATIAL_EPOCH_PARAMS_BYTES
         }
-      }
+      },
+      ...(directoryV2
+        ? [{
+            binding: 5,
+            resource: {
+              buffer: activeSourceViewBuffer,
+              offset: 0,
+              size: activeSourceViewBindingSize
+            }
+          }]
+        : [])
     ]
   });
-  arena.keyBindGroups.set(activeNodeBuffer, bindGroup);
+  if (directoryV2) {
+    if (!(cache instanceof WeakMap)) {
+      cache = new WeakMap();
+      arena.keyBindGroups.set(activeNodeBuffer, cache);
+    }
+    cache.set(activeSourceViewBuffer, bindGroup);
+  } else {
+    arena.keyBindGroups.set(activeNodeBuffer, bindGroup);
+  }
   arena.bindGroupCreationCount += 1;
   return bindGroup;
 }
@@ -1008,6 +1171,8 @@ function bindGroupForActiveRankView(
 export function createSchroederSpatialEpochGpu(device, {
   maxSourceCount,
   cellCapacity = maxSourceCount,
+  activeSourceCapacity = maxSourceCount,
+  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_VERSION,
   arenaCount = SCHROEDER_SPATIAL_EPOCH_ARENA_COUNT_DEFAULT,
   label = 'ulg-schroeder-spatial-epoch'
 } = {}) {
@@ -1022,17 +1187,35 @@ export function createSchroederSpatialEpochGpu(device, {
     'maxSourceCount',
     MAX_EXACT_F32_INTEGER + 1
   );
+  const resolvedDirectoryAbiVersion = spatialDirectoryAbiVersion(
+    directoryAbiVersion
+  );
+  const directoryV2 =
+    resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  const resolvedActiveSourceCapacity = directoryV2
+    ? positiveInteger(
+        activeSourceCapacity,
+        'activeSourceCapacity',
+        resolvedMaxSourceCount
+      )
+    : resolvedMaxSourceCount;
   const resolvedCellCapacity = positiveInteger(
     cellCapacity,
     'cellCapacity',
-    resolvedMaxSourceCount
+    directoryV2 ? resolvedActiveSourceCapacity : resolvedMaxSourceCount
   );
   const resolvedArenaCount = positiveInteger(arenaCount, 'arenaCount', 8);
-  const layout = createSchroederSpatialEpochLayout({
-    sourceCapacity: resolvedMaxSourceCount,
-    cellCapacity: resolvedCellCapacity
-  });
-  const activeRankViewLayout = resolvedMaxSourceCount
+  const layout = directoryV2
+    ? createSchroederSpatialEpochV2Layout({
+        physicalSourceCapacity: resolvedMaxSourceCount,
+        activeSourceCapacity: resolvedActiveSourceCapacity,
+        cellCapacity: resolvedCellCapacity
+      })
+    : createSchroederSpatialEpochLayout({
+        sourceCapacity: resolvedMaxSourceCount,
+        cellCapacity: resolvedCellCapacity
+      });
+  const activeRankViewLayout = !directoryV2 && resolvedMaxSourceCount
     <= SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAX_SOURCE_COUNT
     ? createSchroederSpatialActiveRankViewLayout({
         sourceCapacity: resolvedMaxSourceCount
@@ -1074,13 +1257,23 @@ export function createSchroederSpatialEpochGpu(device, {
     'active-node source'
   );
   const keyByteLength = checkedBytes(
-    resolvedMaxSourceCount * SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    resolvedMaxSourceCount * (
+      directoryV2
+        ? SCHROEDER_SPATIAL_EPOCH_V2_SOURCE_KEY_WORDS
+        : SCHROEDER_SPATIAL_EPOCH_KEY_WORDS
+    ),
     UINT32_BYTES,
     'spatial key'
+  );
+  const sortKeyByteLength = checkedBytes(
+    resolvedActiveSourceCapacity * SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+    UINT32_BYTES,
+    'spatial sort key'
   );
   for (const [role, byteLength] of [
     ['active-node source', activeNodeByteLength],
     ['spatial key', keyByteLength],
+    ['spatial sort key', sortKeyByteLength],
     ['spatial directory', layout.byteLength],
     ...(activeRankViewLayout
       ? [['spatial active-rank view', activeRankViewLayout.byteLength]]
@@ -1098,11 +1291,15 @@ export function createSchroederSpatialEpochGpu(device, {
 
   const keyModule = device.createShaderModule({
     label: `${label}-key-shader`,
-    code: schroederSpatialEpochKeyWgsl
+    code: directoryV2
+      ? schroederSpatialEpochV2KeyWgsl
+      : schroederSpatialEpochKeyWgsl
   });
   const assembleModule = device.createShaderModule({
     label: `${label}-assemble-shader`,
-    code: schroederSpatialEpochAssembleWgsl
+    code: directoryV2
+      ? schroederSpatialEpochV2AssembleWgsl
+      : schroederSpatialEpochAssembleWgsl
   });
   const activeRankViewModule = activeRankViewLayout
     ? device.createShaderModule({
@@ -1154,6 +1351,18 @@ export function createSchroederSpatialEpochGpu(device, {
   );
   const arenas = Array.from({ length: resolvedArenaCount }, (_, arenaIndex) => {
     const arenaLabel = `${label}-arena-${arenaIndex}`;
+    const radix = createWebGpuStableRadixScanUnique(device, {
+      maxElementCount: resolvedActiveSourceCapacity,
+      maxKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+      label: `${arenaLabel}-radix`,
+      maxComputeWorkgroupsPerDimension,
+      retainConstantScanParamsBuffers: true,
+      retainVariableScanParamsBuffers: true,
+      retainedParamsSlotCount: 1
+    });
+    const gpuCountPreparation = directoryV2
+      ? radix.prepareGpuCountResources()
+      : null;
     return {
       arenaIndex,
       label: arenaLabel,
@@ -1174,7 +1383,7 @@ export function createSchroederSpatialEpochGpu(device, {
       ),
       sortKeyBuffer: createOwnedBuffer(
         `${arenaLabel}-sort-keys`,
-        keyByteLength,
+        sortKeyByteLength,
         GPU_BUFFER_USAGE.STORAGE
       ),
       evidenceBuffer: createOwnedBuffer(
@@ -1205,15 +1414,8 @@ export function createSchroederSpatialEpochGpu(device, {
               | GPU_BUFFER_USAGE.INDIRECT
           )
         : null,
-      radix: createWebGpuStableRadixScanUnique(device, {
-        maxElementCount: resolvedMaxSourceCount,
-        maxKeyWordCount: SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
-        label: `${arenaLabel}-radix`,
-        maxComputeWorkgroupsPerDimension,
-        retainConstantScanParamsBuffers: true,
-        retainVariableScanParamsBuffers: true,
-        retainedParamsSlotCount: 1
-      }),
+      radix,
+      gpuCountPreparation,
       keyBindGroups: new WeakMap(),
       assembleBindGroups: new WeakMap(),
       activeRankViewBindGroups: activeRankViewLayout ? new WeakMap() : null,
@@ -1390,7 +1592,8 @@ export function createSchroederSpatialEpochGpu(device, {
     timestampMetadata = {},
     gpuTimestampRecorder = null,
     dispatchIndirectProvider = null,
-    logicalSourceCountAuthority = null
+    logicalSourceCountAuthority = null,
+    activeSourceView = null
   } = {}) {
     assertEncoder(encoder);
     if (sourceBuffer && activeNodeBuffer && sourceBuffer !== activeNodeBuffer) {
@@ -1412,8 +1615,19 @@ export function createSchroederSpatialEpochGpu(device, {
       'sourceCount',
       resolvedMaxSourceCount
     );
-    const logicalSourceCountGpuAuthored = logicalSourceCountAuthority != null;
-    if (logicalSourceCountGpuAuthored) {
+    if (directoryV2 && resolvedSourceCount === 0) {
+      throw new RangeError(
+        'directory v2 requires a retained physical source family; A=0 is represented by an all-dormant ActiveSource view'
+      );
+    }
+    if (directoryV2 && logicalSourceCountAuthority != null) {
+      throw new TypeError(
+        'directory v2 uses only its exact ActiveSource view as GPU count authority'
+      );
+    }
+    const logicalSourceCountGpuAuthored =
+      directoryV2 || logicalSourceCountAuthority != null;
+    if (!directoryV2 && logicalSourceCountGpuAuthored) {
       const logicalCountBuffer = logicalSourceCountAuthority.buffer || null;
       const logicalCountByteOffset = nonNegativeInteger(
         logicalSourceCountAuthority.byteOffset ?? 0,
@@ -1473,38 +1687,187 @@ export function createSchroederSpatialEpochGpu(device, {
     const resolvedSourceFamilyId = sourceFamilyId == null
       ? fnv1a32(sourceFamily)
       : sourceFamilyId;
-    const plan = createSchroederSpatialEpochBuildPlan({
-      sourceCount: resolvedSourceCount,
-      sourceCapacity: resolvedMaxSourceCount,
-      sourceRowLayoutId,
-      cellCapacity: resolvedCellCapacity,
-      sortMode,
-      atlas,
-      generationId,
-      deviceOrdinal,
-      laneOrdinal,
-      sourceFamilyId: resolvedSourceFamilyId,
-      storageGeneration,
-      physicsTick,
-      physicsSubstep,
-      positionEpoch,
-      topologyEpoch,
-      chartEpoch,
-      levelEpoch,
-      supportEpoch,
-      leaseToken,
-      buildOrdinal,
-      sortUniqueOrdinal,
-      exactNearQueryProfile
-    });
-    const keyDispatch = dispatchShapeForInvocationCount(
-      resolvedSourceCount,
-      maxComputeWorkgroupsPerDimension
-    );
-    const assembleDispatch = dispatchShapeForInvocationCount(
-      resolvedSourceCount + 1,
-      maxComputeWorkgroupsPerDimension
-    );
+    const plan = directoryV2
+      ? createSchroederSpatialEpochV2BuildPlan({
+          physicalSourceCount: resolvedSourceCount,
+          physicalSourceCapacity: resolvedMaxSourceCount,
+          activeSourceCapacity: resolvedActiveSourceCapacity,
+          cellCapacity: resolvedCellCapacity,
+          sortMode,
+          generationId,
+          deviceOrdinal,
+          laneOrdinal,
+          sourceFamilyId: resolvedSourceFamilyId,
+          storageGeneration,
+          physicsTick,
+          physicsSubstep,
+          positionEpoch,
+          topologyEpoch,
+          chartEpoch,
+          levelEpoch,
+          supportEpoch,
+          leaseToken,
+          buildOrdinal,
+          sortUniqueOrdinal,
+          exactNearQueryProfile
+        })
+      : createSchroederSpatialEpochBuildPlan({
+          sourceCount: resolvedSourceCount,
+          sourceCapacity: resolvedMaxSourceCount,
+          sourceRowLayoutId,
+          cellCapacity: resolvedCellCapacity,
+          sortMode,
+          atlas,
+          generationId,
+          deviceOrdinal,
+          laneOrdinal,
+          sourceFamilyId: resolvedSourceFamilyId,
+          storageGeneration,
+          physicsTick,
+          physicsSubstep,
+          positionEpoch,
+          topologyEpoch,
+          chartEpoch,
+          levelEpoch,
+          supportEpoch,
+          leaseToken,
+          buildOrdinal,
+          sortUniqueOrdinal,
+          exactNearQueryProfile
+        });
+    let activeSourceAdmission = null;
+    let activeSourceCountAuthority = null;
+    if (directoryV2) {
+      const expectedSourceFingerprint =
+        createSchroederSpatialActiveSourceFingerprint({
+          generationId: plan.generationId,
+          deviceOrdinal: plan.deviceOrdinal,
+          laneOrdinal: plan.laneOrdinal,
+          leaseToken: plan.leaseToken,
+          sourceFamilyId: plan.sourceFamilyId,
+          storageGeneration: plan.storageGeneration,
+          physicsTick: plan.physicsTick,
+          physicsSubstep: plan.physicsSubstep,
+          positionEpoch: plan.positionEpoch,
+          topologyEpoch: plan.topologyEpoch,
+          chartEpoch: plan.chartEpoch,
+          levelEpoch: plan.levelEpoch,
+          supportEpoch: plan.supportEpoch,
+          physicalSourceCount: plan.physicalSourceCount,
+          physicalSourceCapacity: plan.physicalSourceCapacity,
+          activeSourceCapacity: plan.activeSourceCapacity,
+          sourceRowLayoutId: plan.sourceRowLayoutId,
+          sourceRowStrideFloats: plan.sourceRowStrideFloats,
+          buildOrdinal: plan.buildOrdinal,
+          queryGeometryMode: plan.queryGeometryMode,
+          queryChartId: plan.queryChartId,
+          queryMinLevel: plan.queryMinLevel,
+          queryMaxLevel: plan.queryMaxLevel,
+          queryBaseGridSpacingM: plan.queryBaseGridSpacingM
+        });
+      activeSourceAdmission =
+        validateSchroederSpatialActiveSourceViewDescriptor(
+          activeSourceView,
+          {
+            sourceBuffer: resolvedSourceBuffer,
+            physicalSourceCount: plan.physicalSourceCount,
+            physicalSourceCapacity: plan.physicalSourceCapacity,
+            activeSourceCapacity: plan.activeSourceCapacity,
+            sourceRowLayoutId: plan.sourceRowLayoutId,
+            sourceRowStrideFloats: plan.sourceRowStrideFloats,
+            generationId: plan.generationId,
+            deviceOrdinal: plan.deviceOrdinal,
+            laneOrdinal: plan.laneOrdinal,
+            leaseToken: plan.leaseToken,
+            sourceFamilyId: plan.sourceFamilyId,
+            storageGeneration: plan.storageGeneration,
+            physicsTick: plan.physicsTick,
+            physicsSubstep: plan.physicsSubstep,
+            positionEpoch: plan.positionEpoch,
+            topologyEpoch: plan.topologyEpoch,
+            chartEpoch: plan.chartEpoch,
+            levelEpoch: plan.levelEpoch,
+            supportEpoch: plan.supportEpoch,
+            buildOrdinal: plan.buildOrdinal,
+            sourceFingerprint: expectedSourceFingerprint
+          }
+        );
+      if (
+        activeSourceAdmission.admitted !== true
+        || activeSourceView.submitPerformed !== false
+        || activeSourceView.released === true
+        || activeSourceView.sourceBuffer !== resolvedSourceBuffer
+        || !webGpuBufferMatchesDevice(
+          activeSourceView.activeSourceViewBuffer,
+          device
+        )
+        || activeSourceView.queryGeometryMode !== plan.queryGeometryMode
+        || activeSourceView.queryChartId !== plan.queryChartId
+        || activeSourceView.queryMinLevel !== plan.queryMinLevel
+        || activeSourceView.queryMaxLevel !== plan.queryMaxLevel
+        || !Object.is(
+          activeSourceView.queryBaseGridSpacingM,
+          plan.queryBaseGridSpacingM
+        )
+      ) {
+        const error = new TypeError(
+          'directory v2 requires the exact live same-generation ActiveSource view'
+        );
+        error.code = 'ERR_SCHROEDER_SPATIAL_V2_ACTIVE_SOURCE_AUTHORITY';
+        error.activeSourceStatus = activeSourceAdmission.status;
+        error.activeSourceField = activeSourceAdmission.field ?? null;
+        throw error;
+      }
+      activeSourceCountAuthority = Object.freeze({
+        schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+        activeSourceView,
+        buffer: activeSourceView.activeSourceViewBuffer,
+        offsetWords: SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+        offsetBytes:
+          SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD * UINT32_BYTES,
+        capacity: activeSourceView.activeSourceCapacity,
+        residency: 'gpu-only'
+      });
+    }
+    const activeSourceViewBindingSize = directoryV2
+      ? Number(activeSourceView.layout?.byteLength)
+      : null;
+    if (
+      directoryV2
+      && (
+        !Number.isSafeInteger(activeSourceViewBindingSize)
+        || activeSourceViewBindingSize < UINT32_BYTES
+        || activeSourceViewBindingSize > maxStorageBufferBindingSize
+        || (
+          Number.isFinite(Number(activeSourceView.activeSourceViewBuffer.size))
+          && Number(activeSourceView.activeSourceViewBuffer.size)
+            < activeSourceViewBindingSize
+        )
+        || (
+          Number.isFinite(Number(activeSourceView.activeSourceViewBuffer.usage))
+          && (
+            Number(activeSourceView.activeSourceViewBuffer.usage)
+              & (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT)
+          ) !== (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT)
+        )
+      )
+    ) {
+      throw new RangeError(
+        'directory v2 ActiveSource buffer lacks its exact storage/indirect binding capacity'
+      );
+    }
+    const keyDispatch = directoryV2
+      ? null
+      : dispatchShapeForInvocationCount(
+          resolvedSourceCount,
+          maxComputeWorkgroupsPerDimension
+        );
+    const assembleDispatch = directoryV2
+      ? null
+      : dispatchShapeForInvocationCount(
+          resolvedSourceCount + 1,
+          maxComputeWorkgroupsPerDimension
+        );
     const activeRankViewEnabled = Boolean(
       activeRankViewLayout
       && activeRankViewPipeline
@@ -1527,8 +1890,12 @@ export function createSchroederSpatialEpochGpu(device, {
     let radixUnique = null;
     try {
       device.queue.writeBuffer(arena.paramsBuffer, 0, paramsDataForPlan(plan, {
-        keyDispatchX: Math.max(keyDispatch[0], 1),
-        assembleDispatchX: Math.max(assembleDispatch[0], 1),
+        keyDispatchX: directoryV2
+          ? maxComputeWorkgroupsPerDimension
+          : Math.max(keyDispatch[0], 1),
+        assembleDispatchX: directoryV2
+          ? maxComputeWorkgroupsPerDimension
+          : Math.max(assembleDispatch[0], 1),
         consumerDispatchXLimit: maxComputeWorkgroupsPerDimension,
         logicalSourceCountGpuAuthored
       }));
@@ -1548,6 +1915,13 @@ export function createSchroederSpatialEpochGpu(device, {
         0,
         SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS * UINT32_BYTES
       );
+      if (directoryV2) {
+        encoder.clearBuffer(
+          arena.directoryBuffer,
+          plan.layout.physicalToCellPlusOneOffsetWords * UINT32_BYTES,
+          plan.layout.physicalToCellPlusOneWords * UINT32_BYTES
+        );
+      }
       encoder.clearBuffer(arena.consumerDispatchBuffer);
       if (activeRankViewEnabled) {
         encoder.clearBuffer(
@@ -1556,7 +1930,7 @@ export function createSchroederSpatialEpochGpu(device, {
           SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS * UINT32_BYTES
         );
       }
-      if (logicalSourceCountGpuAuthored) {
+      if (!directoryV2 && logicalSourceCountGpuAuthored) {
         encoder.copyBufferToBuffer(
           logicalSourceCountAuthority.buffer,
           logicalSourceCountAuthority.byteOffset ?? 0,
@@ -1575,7 +1949,13 @@ export function createSchroederSpatialEpochGpu(device, {
             arena,
             keyPipeline,
             resolvedSourceBuffer,
-            sourceBindingSize
+            sourceBindingSize,
+            {
+              activeSourceViewBuffer: directoryV2
+                ? activeSourceView.activeSourceViewBuffer
+                : null,
+              activeSourceViewBindingSize
+            }
           )
         : null;
       const keyTimestampSpan = timestampSpansActive
@@ -1586,31 +1966,64 @@ export function createSchroederSpatialEpochGpu(device, {
             ...metadata
           })
         : null;
-      const keyDispatchCount = encodeComputeDispatch(
-        encoder,
-        keyPipeline,
-        keyBindGroup,
-        keyDispatch,
-        `${label}KeyEmission`,
-        timestampProfiler,
-        metadata
-      );
+      const keyDispatchCount = directoryV2
+        ? encodeComputeIndirectDispatch(
+            encoder,
+            keyPipeline,
+            keyBindGroup,
+            activeSourceView.activeSourceViewBuffer,
+            activeSourceView.activeDispatchOffsetBytes,
+            `${label}KeyEmissionV2`,
+            timestampProfiler,
+            metadata
+          )
+        : encodeComputeDispatch(
+            encoder,
+            keyPipeline,
+            keyBindGroup,
+            keyDispatch,
+            `${label}KeyEmission`,
+            timestampProfiler,
+            metadata
+          );
       if (keyTimestampSpan) {
         gpuTimestampRecorder.endEncoderSpan(encoder, keyTimestampSpan);
       }
-      radixUnique = arena.radix.encodeSortUnique(encoder, {
-        keyBuffer: arena.sortKeyBuffer,
-        elementCount: plan.sourceCount,
-        keyWordCount: plan.sortKeyWordCount,
-        keyStrideWords: plan.sortKeyWordCount,
-        generationId: plan.generationId,
-        consumerWorkgroupSize: SCHROEDER_SPATIAL_EPOCH_WORKGROUP_SIZE,
-        retainedParamsSlotIndex: 0,
-        timestampProfiler,
-        timestampMetadata: metadata,
-        gpuTimestampRecorder,
-        dispatchIndirectProvider
-      });
+      radixUnique = directoryV2
+        ? arena.radix.encodeSortUniqueGpuCount(encoder, {
+            keyBuffer: arena.sortKeyBuffer,
+            authorityBuffer: activeSourceView.activeSourceViewBuffer,
+            authorityCountByteOffset:
+              SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+              * UINT32_BYTES,
+            generationSeal: {
+              expected: activeSourceView.buildOrdinal,
+              byteOffset: 30 * UINT32_BYTES
+            },
+            maxElementCount: plan.activeSourceCapacity,
+            keyWordCount: plan.sortKeyWordCount,
+            keyStrideWords: plan.sortKeyStrideWords,
+            generationId: plan.generationId,
+            consumerWorkgroupSize: SCHROEDER_SPATIAL_EPOCH_WORKGROUP_SIZE,
+            retainedParamsSlotIndex: 0,
+            gpuTimestampRecorder,
+            timestampProducerId:
+              'schroeder-spatial-directory-gpu-count-radix-sort-unique',
+            timestampMetadata: metadata
+          })
+        : arena.radix.encodeSortUnique(encoder, {
+            keyBuffer: arena.sortKeyBuffer,
+            elementCount: plan.sourceCount,
+            keyWordCount: plan.sortKeyWordCount,
+            keyStrideWords: plan.sortKeyWordCount,
+            generationId: plan.generationId,
+            consumerWorkgroupSize: SCHROEDER_SPATIAL_EPOCH_WORKGROUP_SIZE,
+            retainedParamsSlotIndex: 0,
+            timestampProfiler,
+            timestampMetadata: metadata,
+            gpuTimestampRecorder,
+            dispatchIndirectProvider
+          });
       const assembleBindGroup = bindGroupForAssembly(
         device,
         arena,
@@ -1633,15 +2046,26 @@ export function createSchroederSpatialEpochGpu(device, {
             ...metadata
           })
         : null;
-      const assembleDispatchCount = encodeComputeDispatch(
-        encoder,
-        assemblePipeline,
-        assembleBindGroup,
-        assembleDispatch,
-        `${label}AssembleDirectory`,
-        timestampProfiler,
-        metadata
-      );
+      const assembleDispatchCount = directoryV2
+        ? encodeComputeIndirectDispatch(
+            encoder,
+            assemblePipeline,
+            assembleBindGroup,
+            activeSourceView.activeSourceViewBuffer,
+            activeSourceView.activeDispatchOffsetBytes,
+            `${label}AssembleDirectoryV2`,
+            timestampProfiler,
+            metadata
+          )
+        : encodeComputeDispatch(
+            encoder,
+            assemblePipeline,
+            assembleBindGroup,
+            assembleDispatch,
+            `${label}AssembleDirectory`,
+            timestampProfiler,
+            metadata
+          );
       const finalizeDispatchCount = encodeComputeDispatch(
         encoder,
         finalizePipeline,
@@ -1690,19 +2114,51 @@ export function createSchroederSpatialEpochGpu(device, {
       }
       const execution = {
         ...plan,
-        schema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+        schema: directoryV2
+          ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+          : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
         magic: SCHROEDER_SPATIAL_EPOCH_MAGIC,
-        abiVersion: SCHROEDER_SPATIAL_EPOCH_VERSION,
-        status: 'schroeder-spatial-epoch-gpu-encoded',
+        abiVersion: resolvedDirectoryAbiVersion,
+        status: directoryV2
+          ? 'schroeder-spatial-epoch-v2-gpu-encoded'
+          : 'schroeder-spatial-epoch-gpu-encoded',
         statusFlags: null,
         gpuCompletionProven: false,
         gpuAdmissionAuthority: 'directory-header-and-zeroed-indirect-dispatch',
         logicalSourceCountGpuAuthored,
-        logicalSourceCountAuthority,
+        logicalSourceCountAuthority: directoryV2
+          ? activeSourceCountAuthority
+          : logicalSourceCountAuthority,
+        directoryAbiVersion: resolvedDirectoryAbiVersion,
+        directorySchema: directoryV2
+          ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+          : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
         physicalSourceCount: plan.sourceCount,
-        physicalRadixCount: plan.sourceCount,
+        physicalRadixCount: directoryV2
+          ? null
+          : plan.sourceCount,
         runtimeSourceCapacity: plan.sourceCapacity,
-        physicalSourceCapacity: resolvedSourceCount,
+        physicalSourceCapacity: directoryV2
+          ? resolvedMaxSourceCount
+          : resolvedSourceCount,
+        activeSourceCount: null,
+        activeSourceCapacity: directoryV2
+          ? plan.activeSourceCapacity
+          : null,
+        activeSourceView: directoryV2 ? activeSourceView : null,
+        activeSourceViewBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        activeSourceCountAuthority,
+        activeSourceCountAuthorityOffsetWords: directoryV2
+          ? SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+          : null,
+        sourceWorkIdentity: directoryV2
+          ? 'gpu-active-ordinal'
+          : 'stable-physical-source-index',
+        reverseEncoding: directoryV2
+          ? SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+          : 0,
         deviceId,
         laneId,
         sourceFamily,
@@ -1735,8 +2191,31 @@ export function createSchroederSpatialEpochGpu(device, {
           + assembleDispatchCount
           + finalizeDispatchCount
           + activeRankViewDispatchCount,
-        keyDispatchWorkgroups: Object.freeze([...keyDispatch]),
-        assembleDispatchWorkgroups: Object.freeze([...assembleDispatch]),
+        keyDispatchWorkgroups: directoryV2
+          ? null
+          : Object.freeze([...keyDispatch]),
+        assembleDispatchWorkgroups: directoryV2
+          ? null
+          : Object.freeze([...assembleDispatch]),
+        keyDispatchIndirectBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        keyDispatchIndirectOffsetBytes: directoryV2
+          ? activeSourceView.activeDispatchOffsetBytes
+          : null,
+        assembleDispatchIndirectBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        assembleDispatchIndirectOffsetBytes: directoryV2
+          ? activeSourceView.activeDispatchOffsetBytes
+          : null,
+        activeSourceGenerationSeal: directoryV2
+          ? Object.freeze({
+              buffer: activeSourceView.activeSourceViewBuffer,
+              offsetWords: 30,
+              expected: activeSourceView.buildOrdinal
+            })
+          : null,
         radixPassCount: radixUnique.radixPassCount,
         radixDigitPassCount: radixUnique.radixPassCount,
         paramsWriteCount: 1 + radixUnique.paramsWriteCount,
@@ -1746,13 +2225,18 @@ export function createSchroederSpatialEpochGpu(device, {
         clearedWordCount: SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS
           + SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_WORDS
           + 3
+          + (directoryV2 ? plan.layout.physicalToCellPlusOneWords : 0)
           + (activeRankViewEnabled
             ? SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS
             : 0)
           + (radixUnique.clearedWordCount ?? 0),
         physicalDirectoryHighWaterWordsUpperBound: Math.max(
           plan.layout.cellOffsetsOffsetWords + 1,
-          plan.layout.particleToCellOffsetWords + plan.sourceCount,
+          plan.layout.particleToCellOffsetWords + (
+            directoryV2
+              ? plan.physicalSourceCount
+              : plan.sourceCount
+          ),
           plan.queryGeometryMode === SCHROEDER_SPATIAL_QUERY_GEOMETRY_SINGLE_CHART_POW2
             ? plan.queryEvidenceOffsetWords + SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS
             : 0
@@ -1765,6 +2249,7 @@ export function createSchroederSpatialEpochGpu(device, {
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
         readbackPerformed: false,
+        activeSourceCountReadbackPerformed: false,
         submitPerformed: false,
         submissionOwnership: 'caller',
         releaseRequirement: 'after-caller-submission-fence-or-discarded-encoder',
@@ -1869,6 +2354,11 @@ export function createSchroederSpatialEpochGpu(device, {
         sortedIndicesBuffer: radixUnique.sortedIndicesBuffer,
         radixUnique,
         sourceBuffer: resolvedSourceBuffer,
+        activeSourceView: directoryV2 ? activeSourceView : null,
+        activeSourceViewBuffer: directoryV2
+          ? activeSourceView.activeSourceViewBuffer
+          : null,
+        activeSourceCountAuthority,
         sourceAdapterId: plan.sourceAdapterId,
         exactNearQueryProfile: plan.exactNearQueryProfile,
         queryGeometryEvidence: plan.queryGeometryEvidence
@@ -1899,13 +2389,17 @@ export function createSchroederSpatialEpochGpu(device, {
       && execution.sortKeyBuffer === ownership.sortKeyBuffer
       && execution.sortedIndicesBuffer === ownership.sortedIndicesBuffer
       && execution.sourceBuffer === ownership.sourceBuffer
+      && execution.activeSourceView === ownership.activeSourceView
+      && execution.activeSourceViewBuffer === ownership.activeSourceViewBuffer
+      && execution.activeSourceCountAuthority
+        === ownership.activeSourceCountAuthority
       && execution.sourceAdapterId === ownership.sourceAdapterId
       && execution.exactNearQueryProfile === ownership.exactNearQueryProfile
       && execution.queryGeometryEvidence === ownership.queryGeometryEvidence;
   }
 
   function rawOwnedExecutionRecord(execution) {
-    if (!execution || execution.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA) {
+    if (!execution || execution.schema !== runtimeApi.schema) {
       throw new TypeError('releaseExecution requires a Schroeder spatial epoch execution');
     }
     if (releasedExecutions.has(execution)) return null;
@@ -1973,7 +2467,7 @@ export function createSchroederSpatialEpochGpu(device, {
     const ownership = executionOwnership.get(execution);
     return Boolean(
       ownership
-      && execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      && execution?.schema === runtimeApi.schema
       && publicExecutionMatchesOwnership(execution, ownership)
       && ownership.arena === arenas[ownership.arenaIndex]
       && ownership.arena.inUse === true
@@ -1984,6 +2478,10 @@ export function createSchroederSpatialEpochGpu(device, {
         || webGpuBufferMatchesDevice(ownership.activeRankViewBuffer, device)
       )
       && webGpuBufferMatchesDevice(ownership.sourceBuffer, device)
+      && (
+        !ownership.activeSourceViewBuffer
+        || webGpuBufferMatchesDevice(ownership.activeSourceViewBuffer, device)
+      )
     );
   }
 
@@ -1999,7 +2497,9 @@ export function createSchroederSpatialEpochGpu(device, {
       configurable: false
     });
     Object.defineProperty(execution, 'status', {
-      value: 'schroeder-spatial-epoch-gpu-build-submitted',
+      value: directoryV2
+        ? 'schroeder-spatial-epoch-v2-gpu-build-submitted'
+        : 'schroeder-spatial-epoch-gpu-build-submitted',
       enumerable: true,
       writable: false,
       configurable: false
@@ -2011,7 +2511,11 @@ export function createSchroederSpatialEpochGpu(device, {
     return submittedExecutions.has(execution)
       && ownsExecution(execution)
       && execution.submitPerformed === true
-      && execution.status === 'schroeder-spatial-epoch-gpu-build-submitted';
+      && execution.status === (
+        directoryV2
+          ? 'schroeder-spatial-epoch-v2-gpu-build-submitted'
+          : 'schroeder-spatial-epoch-gpu-build-submitted'
+      );
   }
 
   function releaseExecution(execution, { discardedEncoder = false } = {}) {
@@ -2230,10 +2734,19 @@ export function createSchroederSpatialEpochGpu(device, {
   }
 
   runtimeApi = {
-    schema: ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
-    status: 'schroeder-spatial-epoch-gpu-runtime-ready',
+    schema: directoryV2
+      ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+    status: directoryV2
+      ? 'schroeder-spatial-epoch-v2-gpu-runtime-ready'
+      : 'schroeder-spatial-epoch-gpu-runtime-ready',
+    directoryAbiVersion: resolvedDirectoryAbiVersion,
     deviceId,
     maxSourceCount: resolvedMaxSourceCount,
+    physicalSourceCapacity: resolvedMaxSourceCount,
+    activeSourceCapacity: directoryV2
+      ? resolvedActiveSourceCapacity
+      : null,
     cellCapacity: resolvedCellCapacity,
     arenaCount: resolvedArenaCount,
     layout,
@@ -2243,9 +2756,22 @@ export function createSchroederSpatialEpochGpu(device, {
     retainedGpuBufferBytes,
     pipelineCount: 3
       + (activeRankViewPipeline ? 1 : 0)
-      + arenas.reduce((sum, arena) => sum + arena.radix.pipelineCount, 0),
+      + arenas.reduce(
+        (sum, arena) => sum + (
+          directoryV2
+            ? arena.radix.totalPipelineCount
+            : arena.radix.pipelineCount
+        ),
+        0
+      ),
+    gpuCountRadixPrepared: directoryV2,
+    gpuCountPreparation: directoryV2
+      ? Object.freeze(arenas.map((arena) => arena.gpuCountPreparation))
+      : null,
     submissionOwnership: 'caller',
-    readbackPolicy: 'fixed-evidence-or-explicit-probe-only',
+    readbackPolicy: directoryV2
+      ? 'none-gpu-authored-active-count'
+      : 'fixed-evidence-or-explicit-probe-only',
     encode,
     ownsExecution,
     markExecutionSubmitted,
@@ -2263,11 +2789,23 @@ export function createSchroederSpatialEpochGpu(device, {
 function directSpatialEpochRuntime(
   device,
   sourceCount,
+  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_VERSION,
   directArenaCount = DIRECT_SPATIAL_EPOCH_ARENA_COUNT
 ) {
   const capacity = positivePowerOfTwoCapacity(sourceCount);
+  const resolvedDirectoryAbiVersion = spatialDirectoryAbiVersion(
+    directoryAbiVersion
+  );
+  const activeSourceCapacity = capacity;
+  const cellCapacity = activeSourceCapacity;
   const resolvedDirectArenaCount = directSpatialEpochArenaCount(directArenaCount);
-  const cacheKey = `${capacity}:${resolvedDirectArenaCount}`;
+  const cacheKey = [
+    `v${resolvedDirectoryAbiVersion}`,
+    `p${capacity}`,
+    `a${activeSourceCapacity}`,
+    `c${cellCapacity}`,
+    `r${resolvedDirectArenaCount}`
+  ].join(':');
   let runtimes = directSpatialEpochRuntimeCache.get(device);
   if (!runtimes) {
     runtimes = new Map();
@@ -2277,9 +2815,14 @@ function directSpatialEpochRuntime(
   if (entry) return { entry, cacheHit: true };
   const runtime = createSchroederSpatialEpochGpu(device, {
     maxSourceCount: capacity,
-    cellCapacity: capacity,
+    activeSourceCapacity,
+    cellCapacity,
+    directoryAbiVersion: resolvedDirectoryAbiVersion,
     arenaCount: resolvedDirectArenaCount,
-    label: `ulg-schroeder-direct-spatial-epoch-${capacity}-arenas-${resolvedDirectArenaCount}`
+    label:
+      `ulg-schroeder-direct-spatial-epoch-v${resolvedDirectoryAbiVersion}`
+      + `-p${capacity}-a${activeSourceCapacity}-c${cellCapacity}`
+      + `-arenas-${resolvedDirectArenaCount}`
   });
   entry = {
     runtime,
@@ -2295,6 +2838,10 @@ function directSpatialEpochRuntime(
     aggregateViewRuntime: null,
     exactNearCellTreeRuntime: null,
     capacity,
+    activeSourceCapacity,
+    cellCapacity,
+    directoryAbiVersion: resolvedDirectoryAbiVersion,
+    directorySchema: runtime.schema,
     directArenaCount: resolvedDirectArenaCount,
     runtimeCacheKey: cacheKey,
     mechanicsFieldViewDrainingRuntimeLimit: resolvedDirectArenaCount * 2,
@@ -2307,13 +2854,18 @@ function directSpatialEpochRuntime(
 }
 
 function directActiveSourceViewRuntime(device, entry) {
+  if (entry.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION) {
+    throw new TypeError(
+      'ActiveSource runtime is reserved for level-assignment directory v2'
+    );
+  }
   if (!entry.activeSourceViewRuntime) {
     entry.activeSourceViewRuntime = createSchroederSpatialActiveSourceViewGpu(device, {
       maxPhysicalSourceCount: entry.capacity,
       // Stage A deliberately retains the physical tier. A later directory-v2
       // slice may supply a smaller monotonic live-capacity tier without
       // changing this projection ABI.
-      activeSourceCapacity: entry.capacity,
+      activeSourceCapacity: entry.activeSourceCapacity,
       arenaCount: entry.directArenaCount,
       label:
         `ulg-schroeder-direct-active-source-view-${entry.capacity}`
@@ -2474,8 +3026,13 @@ function createDirectMechanicsFieldViewRuntime(
     gridShift: mechanicsGrid.gridShift,
     gridSpacingM: mechanicsGrid.gridSpacingM,
     identityStrideWords,
+    enableDirectoryV2:
+      entry.directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
     arenaCount: entry.directArenaCount,
-    label: `ulg-schroeder-direct-mechanics-field-view-${entry.capacity}-${dims.join('x')}-arenas-${entry.directArenaCount}`
+    label:
+      `ulg-schroeder-direct-mechanics-field-view-v${entry.directoryAbiVersion}`
+      + `-${entry.capacity}-${dims.join('x')}`
+      + `-arenas-${entry.directArenaCount}`
   });
 }
 
@@ -2484,6 +3041,7 @@ function directMechanicsFieldViewRuntime(device, entry, mechanicsGrid, identityS
   reapDirectMechanicsFieldViewDrainingRuntimes(entry);
   const dims = Array.from(mechanicsGrid.gridDims || []);
   const key = [
+    `v${entry.directoryAbiVersion}`,
     mechanicsGrid.gridNodeCount,
     dims[0],
     dims[1],
@@ -2715,6 +3273,7 @@ function directMechanicsViewRuntime(device, entry, mechanicsGrid) {
   if (!mechanicsGrid) return null;
   const dims = Array.from(mechanicsGrid.gridDims || []);
   const key = [
+    `v${entry.directoryAbiVersion}`,
     mechanicsGrid.gridNodeCount,
     dims[0],
     dims[1],
@@ -2753,7 +3312,10 @@ function directMechanicsViewRuntime(device, entry, mechanicsGrid) {
       gridShift: mechanicsGrid.gridShift,
       gridSpacingM: mechanicsGrid.gridSpacingM,
       arenaCount: entry.directArenaCount,
-      label: `ulg-schroeder-direct-mechanics-view-${entry.capacity}-${dims.join('x')}-arenas-${entry.directArenaCount}`
+      label:
+        `ulg-schroeder-direct-mechanics-view-v${entry.directoryAbiVersion}`
+        + `-${entry.capacity}-${dims.join('x')}`
+        + `-arenas-${entry.directArenaCount}`
     });
     entry.mechanicsViewRuntimes.set(key, runtime);
   }
@@ -2957,6 +3519,82 @@ function generationMechanicsLevelViews(generation) {
 }
 
 /**
+ * Mint a one-shot capability for the native directory-v1 ActiveRank
+ * compatibility fixture. Production callers cannot select the legacy ABI by
+ * passing a boolean to the generation builder.
+ */
+export function armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+  device,
+  levelAssignment
+} = {}) {
+  if (!device?.createCommandEncoder || !device?.queue?.submit) {
+    throw new TypeError(
+      'Native-test legacy directory-v1 arming requires a WebGPU-like device'
+    );
+  }
+  if (
+    !levelAssignment
+    || typeof levelAssignment !== 'object'
+    || !webGpuBufferMatchesDevice(levelAssignment.assignmentBuffer, device)
+  ) {
+    throw new TypeError(
+      'Native-test legacy directory-v1 arming requires one exact same-device level assignment'
+    );
+  }
+  const record = {
+    device,
+    levelAssignment,
+    consumed: false
+  };
+  const arm = {
+    schema:
+      'peercompute.ulg.native-test.legacy-level-assignment-directory-v1-arm.v0',
+    nativeTestOnly: true,
+    serial: ++nativeTestLegacyLevelAssignmentDirectoryV1ArmSerial,
+    get status() {
+      return record.consumed
+        ? 'native-test-legacy-directory-v1-arm-consumed'
+        : 'native-test-legacy-directory-v1-arm-ready';
+    },
+    get consumed() { return record.consumed; }
+  };
+  nativeTestLegacyLevelAssignmentDirectoryV1ArmRecords.set(arm, record);
+  return Object.freeze(arm);
+}
+
+function consumeNativeTestLegacyLevelAssignmentDirectoryV1Arm(
+  arm,
+  { device, levelAssignment }
+) {
+  if (arm == null) return false;
+  const record =
+    nativeTestLegacyLevelAssignmentDirectoryV1ArmRecords.get(arm);
+  if (
+    !record
+    || arm?.nativeTestOnly !== true
+    || record.device !== device
+    || record.levelAssignment !== levelAssignment
+  ) {
+    const error = new TypeError(
+      'Legacy directory-v1 generation requires the exact runtime-issued native-test arm'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_NATIVE_TEST_LEGACY_DIRECTORY_V1_ARM';
+    throw error;
+  }
+  if (record.consumed) {
+    const error = new Error(
+      'Native-test legacy directory-v1 arm is one-shot'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_NATIVE_TEST_LEGACY_DIRECTORY_V1_ARM_CONSUMED';
+    throw error;
+  }
+  record.consumed = true;
+  return true;
+}
+
+/**
  * Build one retained, same-device directory generation for a direct SS step.
  * Submission happens here so every later queue submission observes the
  * completed directory in WebGPU queue order.  The caller must schedule release
@@ -2982,6 +3620,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   // deliberately diagnostic-only: it exists solely to take same-source GPU
   // timestamp A/B evidence while preserving the preceding S9-A sidecar.
   phaseVolumeReceiptEnabled = true,
+  // Native compatibility tests still execute the retained directory-v1
+  // ActiveRank consumer. Production level-assignment generations always use
+  // directory v2. The old public boolean is rejected; only a one-shot,
+  // exact-source arm minted by the native-test helper can select v1.
+  nativeTestLegacyLevelAssignmentDirectoryV1 = undefined,
+  nativeTestLegacyLevelAssignmentDirectoryV1Arm = null,
   // S9-C remains an immutable topology artifact. Authoritative two-level
   // mechanics enables it so transaction-authenticated grid/workspace stages
   // can consume its sealed local heads and reflux routes; this builder itself
@@ -2999,6 +3643,17 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       'phaseVolumeReceiptEnabled must be a boolean when collecting diagnostic A/B evidence'
     );
   }
+  if (nativeTestLegacyLevelAssignmentDirectoryV1 !== undefined) {
+    throw new TypeError(
+      'nativeTestLegacyLevelAssignmentDirectoryV1 boolean selection is forbidden; '
+      + 'use an exact runtime-issued native-test arm'
+    );
+  }
+  const nativeTestLegacyLevelAssignmentDirectoryV1Armed =
+    consumeNativeTestLegacyLevelAssignmentDirectoryV1Arm(
+      nativeTestLegacyLevelAssignmentDirectoryV1Arm,
+      { device, levelAssignment }
+    );
   if (typeof phaseVolumeInterfaceProposalEnabled !== 'boolean') {
     throw new TypeError(
       'phaseVolumeInterfaceProposalEnabled must be a boolean for the read-only S9-C topology mount'
@@ -3180,6 +3835,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   let generationId = 0;
   let postSubmitCleanupGeneration = null;
   let postSubmitCleanupError = null;
+  const directoryAbiVersion =
+    !nativeTestLegacyLevelAssignmentDirectoryV1Armed
+      && source.sourceRowLayoutId
+      === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+      ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      : SCHROEDER_SPATIAL_EPOCH_VERSION;
   const markSubmittedOrConfirm = (ownerRuntime, ownedExecution) => {
     if (!ownedExecution) return true;
     try {
@@ -3197,6 +3858,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     cache = directSpatialEpochRuntime(
       device,
       source.sourceCount,
+      directoryAbiVersion,
       directArenaCount
     );
     const { entry, cacheHit } = cache;
@@ -3225,7 +3887,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       })
       : null;
     if (
-      source.sourceRowLayoutId
+      directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      && source.sourceRowLayoutId
         === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
     ) {
       activeSourceViewRuntime = directActiveSourceViewRuntime(device, entry);
@@ -3290,25 +3953,25 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       exactNearQueryProfile: source.exactNearQueryProfile?.ready === true
         ? source.exactNearQueryProfile
         : null,
-      logicalSourceCountAuthority: source.logicalSourceCountAuthority,
+      logicalSourceCountAuthority:
+        directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_VERSION
+          ? source.logicalSourceCountAuthority
+          : null,
+      activeSourceView: activeSourceViewExecution,
       laneId,
       gpuTimestampRecorder
     });
-    if (activeSourceViewExecution) {
-      Object.defineProperties(execution, {
-        activeSourceView: {
-          value: activeSourceViewExecution,
-          enumerable: true,
-          writable: false,
-          configurable: false
-        },
-        activeSourceViewBuffer: {
-          value: activeSourceViewExecution.activeSourceViewBuffer,
-          enumerable: true,
-          writable: false,
-          configurable: false
-        }
-      });
+    if (
+      activeSourceViewExecution
+      && (
+        execution.activeSourceView !== activeSourceViewExecution
+        || execution.activeSourceViewBuffer
+          !== activeSourceViewExecution.activeSourceViewBuffer
+      )
+    ) {
+      throw new Error(
+        'directory v2 did not retain its exact encoded ActiveSource authority'
+      );
     }
     // The exact cell hierarchy is intentionally independent of mechanics,
     // rendering, and aggregate-tree admission.  It is derived once from the
@@ -3437,7 +4100,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           identityStrideWords: particleIdentityStrideWords,
           selectedLevel: levelSpec.selectedLevel,
           parentMechanicsView: levelMechanicsViewExecution,
-          forceRadixFallback: mechanicsFieldForceRadixFallback,
+          forceRadixFallback:
+            directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+              ? false
+              : mechanicsFieldForceRadixFallback,
           gpuTimestampRecorder,
           timestampMetadata: {
             laneId,
@@ -3721,6 +4387,11 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       aggregateViewRuntime,
       exactNearCellTree: exactNearCellTreeExecution,
       exactNearCellTreeRuntime,
+      directoryAbiVersion,
+      nativeTestLegacyLevelAssignmentDirectoryV1:
+        nativeTestLegacyLevelAssignmentDirectoryV1Armed,
+      directorySchema: execution.schema,
+      directoryRuntimeCacheKey: entry.runtimeCacheKey,
       runtimeCapacity: entry.capacity,
       directArenaCount: entry.directArenaCount,
       arenaCapacity: entry.runtime.arenaCount,
@@ -3855,6 +4526,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           aggregateViewRuntime,
           exactNearCellTree: exactNearCellTreeExecution,
           exactNearCellTreeRuntime,
+          directoryAbiVersion,
+          directorySchema: execution.schema,
+          directoryRuntimeCacheKey: cache.entry.runtimeCacheKey,
           releaseScheduled: false,
           releaseStatus: 'spatial-epoch-post-submit-cleanup-awaiting-fence'
         };
@@ -4099,7 +4773,8 @@ function exactNearIdentityMatches(left, right) {
 /**
  * Resolve one law consumer onto the exact retained generation that owns its
  * directory and source buffer. This authenticates host-side binding identity;
- * the reusable WGSL module still validates the completed v1 directory header
+ * the reusable WGSL module still validates the completed versioned directory
+ * header
  * on-device before the first traversal.
  */
 export function resolveSchroederSpatialExactNearConsumerGeneration(
@@ -4165,11 +4840,25 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
   const execution = generation.execution;
   const ownerRuntime = runtime ?? generation.runtime ?? null;
   const source = generation.source;
+  const directoryV2 =
+    execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA;
+  const expectedExecutionSchema = directoryV2
+    ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA;
+  const expectedExecutionVersion = directoryV2
+    ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    : SCHROEDER_SPATIAL_EPOCH_VERSION;
+  const expectedSubmittedStatus = directoryV2
+    ? 'schroeder-spatial-epoch-v2-gpu-build-submitted'
+    : 'schroeder-spatial-epoch-gpu-build-submitted';
+  const expectedRuntimeStatus = directoryV2
+    ? 'schroeder-spatial-epoch-v2-gpu-runtime-ready'
+    : 'schroeder-spatial-epoch-gpu-runtime-ready';
   if (
-    execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    execution?.schema !== expectedExecutionSchema
     || execution.magic !== SCHROEDER_SPATIAL_EPOCH_MAGIC
-    || execution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
-    || execution.status !== 'schroeder-spatial-epoch-gpu-build-submitted'
+    || execution.abiVersion !== expectedExecutionVersion
+    || execution.status !== expectedSubmittedStatus
     || execution.submitPerformed !== true
     || execution.released === true
     || generation.releaseScheduled === true
@@ -4190,8 +4879,8 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
   if (
     ownerRuntime !== generation.runtime
     || ownerRuntime !== execution.ownerRuntime
-    || ownerRuntime?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
-    || ownerRuntime.status !== 'schroeder-spatial-epoch-gpu-runtime-ready'
+    || ownerRuntime?.schema !== expectedExecutionSchema
+    || ownerRuntime.status !== expectedRuntimeStatus
     || ownerRuntime.deviceId !== consumerDeviceId
   ) {
     return reject(
@@ -4213,6 +4902,70 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
       'schroeder-spatial-consumer-authentication-rejected-runtime-ownership',
       'runtime cannot prove ownership and submission of the exact execution'
     );
+  }
+  if (directoryV2) {
+    const activeSourceView = execution.activeSourceView;
+    const activeSourceCountAuthority = execution.activeSourceCountAuthority;
+    const activeAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
+      activeSourceView,
+      {
+        sourceBuffer: execution.sourceBuffer,
+        activeSourceViewBuffer: execution.activeSourceViewBuffer,
+        physicalSourceCount: execution.physicalSourceCount,
+        physicalSourceCapacity: execution.physicalSourceCapacity,
+        activeSourceCapacity: execution.activeSourceCapacity,
+        sourceRowLayoutId: execution.sourceRowLayoutId,
+        generationId: execution.generationId,
+        deviceOrdinal: execution.deviceOrdinal,
+        laneOrdinal: execution.laneOrdinal,
+        leaseToken: execution.leaseToken,
+        sourceFamilyId: execution.sourceFamilyId,
+        storageGeneration: execution.storageGeneration,
+        physicsTick: execution.physicsTick,
+        physicsSubstep: execution.physicsSubstep,
+        positionEpoch: execution.positionEpoch,
+        topologyEpoch: execution.topologyEpoch,
+        chartEpoch: execution.chartEpoch,
+        levelEpoch: execution.levelEpoch,
+        supportEpoch: execution.supportEpoch,
+        buildOrdinal: execution.buildOrdinal
+      }
+    );
+    let activeSourceSubmitted = false;
+    try {
+      activeSourceSubmitted =
+        generation.activeSourceView === activeSourceView
+        && generation.activeSourceViewRuntime
+          === activeSourceView?.ownerRuntime
+        && generation.activeSourceViewRuntime?.isExecutionSubmitted?.(
+          activeSourceView
+        ) === true;
+    } catch {
+      activeSourceSubmitted = false;
+    }
+    if (
+      activeAdmission.admitted !== true
+      || !activeSourceSubmitted
+      || activeSourceCountAuthority?.activeSourceView !== activeSourceView
+      || activeSourceCountAuthority?.buffer
+        !== activeSourceView.activeSourceViewBuffer
+      || activeSourceCountAuthority?.offsetWords
+        !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      || activeSourceCountAuthority?.offsetBytes
+        !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+          * UINT32_BYTES
+      || activeSourceCountAuthority?.capacity
+        !== activeSourceView.activeSourceCapacity
+    ) {
+      return reject(
+        'schroeder-spatial-consumer-authentication-rejected-active-source',
+        'directory v2 lost its exact submitted ActiveSource authority',
+        {
+          field: activeAdmission.field ?? 'activeSourceView',
+          actual: activeAdmission.status
+        }
+      );
+    }
   }
   const retainedSourceBuffer = source?.sourceBuffer ?? source?.activeNodeBuffer ?? null;
   const expectedSourceBuffer = sourceBuffer ?? retainedSourceBuffer;
@@ -4306,8 +5059,7 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
   }
   let expectationData;
   try {
-    expectationData = createSchroederSpatialExactNearExpectationV1Data({
-      sourceCount: execution.sourceCount,
+    const commonExpectation = {
       derivationEnabled: true,
       supportProfileId,
       chartId: execution.queryChartId,
@@ -4330,11 +5082,23 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
       cellKeysOffsetWords: execution.layout.cellKeysOffsetWords,
       cellOffsetsOffsetWords: execution.layout.cellOffsetsOffsetWords,
       cellMembersOffsetWords: execution.layout.cellMembersOffsetWords,
-      particleToCellOffsetWords: execution.layout.particleToCellOffsetWords,
       directoryCapacityWords: execution.layout.wordLength,
-      sourceCapacity: execution.sourceCapacity,
       cellCapacity: execution.cellCapacity
-    });
+    };
+    expectationData = directoryV2
+      ? createSchroederSpatialExactNearExpectationV2Data({
+          ...commonExpectation,
+          physicalSourceCount: execution.physicalSourceCount,
+          physicalToCellPlusOneOffsetWords:
+            execution.layout.physicalToCellPlusOneOffsetWords,
+          physicalSourceCapacity: execution.physicalSourceCapacity
+        })
+      : createSchroederSpatialExactNearExpectationV1Data({
+          ...commonExpectation,
+          sourceCount: execution.sourceCount,
+          particleToCellOffsetWords: execution.layout.particleToCellOffsetWords,
+          sourceCapacity: execution.sourceCapacity
+        });
   } catch (error) {
     return reject(
       'schroeder-spatial-consumer-authentication-rejected-expectation',
@@ -4393,12 +5157,23 @@ export function resolveSchroederSpatialExactNearConsumerGeneration(
     sourceFamilyId: execution.sourceFamilyId,
     sourceAdapterId: execution.sourceAdapterId,
     sourceCount: execution.sourceCount,
+    physicalSourceCount: execution.physicalSourceCount,
+    directorySchema: execution.schema,
+    directoryAbiVersion: execution.abiVersion,
+    activeSourceView: directoryV2 ? execution.activeSourceView : null,
+    activeSourceCountAuthority: directoryV2
+      ? execution.activeSourceCountAuthority
+      : null,
     sourceBuffer: retainedSourceBuffer,
     directoryBuffer: execution.directoryBuffer,
     expectationData,
-    expectationUniformBytes: SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+    expectationUniformBytes: directoryV2
+      ? SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+      : SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
     gpuDirectoryAdmissionRequired: true,
-    gpuDirectoryAdmissionMode: 'consumer-wgsl-v1-fail-closed',
+    gpuDirectoryAdmissionMode: directoryV2
+      ? 'consumer-wgsl-v2-fail-closed'
+      : 'consumer-wgsl-v1-fail-closed',
     receipt,
     generation,
     execution,
@@ -4687,6 +5462,9 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
     const { entry } = directSpatialEpochRuntime(
       options.device,
       sourceCount,
+      options.levelAssignment
+        ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        : SCHROEDER_SPATIAL_EPOCH_VERSION,
       options.directArenaCount
     );
     const scheduledReleases = entry.liveGenerations
@@ -5586,10 +6364,18 @@ function releaseStructurallyOwnedSpatialEpochGenerationAfterQueue(
   generation,
   device
 ) {
+  const directoryV2 =
+    generation?.execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA;
+  const directorySchema = directoryV2
+    ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA;
+  const directoryRuntimeStatus = directoryV2
+    ? 'schroeder-spatial-epoch-v2-gpu-runtime-ready'
+    : 'schroeder-spatial-epoch-gpu-runtime-ready';
   if (
     generation?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
     || generation.selected !== true
-    || generation.execution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || generation.execution?.schema !== directorySchema
     || generation.execution.submitPerformed !== true
     || generation.releaseScheduled === true
   ) return false;
@@ -5614,9 +6400,9 @@ function releaseStructurallyOwnedSpatialEpochGenerationAfterQueue(
       if (artifact.execution?.released === true) continue;
       if (
         (artifact.role === 'spatial-directory' && (
-          artifact.runtime?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+          artifact.runtime?.schema !== directorySchema
           || artifact.runtime?.status
-            !== 'schroeder-spatial-epoch-gpu-runtime-ready'
+            !== directoryRuntimeStatus
         ))
         || artifact.runtime !== artifact.execution?.ownerRuntime
         || artifact.runtime?.deviceId !== releaseDeviceId

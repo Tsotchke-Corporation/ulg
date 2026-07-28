@@ -55,6 +55,9 @@ import {
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import {
+  createSchroederFrozenLevelAssignmentRefreshGpu
+} from '../src/runtime/sph/schroederFrozenLevelAssignmentRefreshGpu.js';
+import {
   runMlsMpmGridUpdateWebGpu,
   validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate,
   validateSubmittedMlsMpmMechanicsFieldGridUpdate
@@ -497,6 +500,12 @@ function fusedP2gProducerFixture({
     assignmentBufferByteLength: assignmentBuffer.size,
     sourceStateBuffer: stateBuffer,
     sourceStateBufferBorrowed: true,
+    sourceThermoBuffer: thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: thermoBuffer.size,
+    sourceMechanicsBuffer: mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: mechanicsBuffer.size,
     storageGeneration: 11,
     physicsTick: 13,
     physicsSubstep: 0,
@@ -549,7 +558,18 @@ function fusedP2gProducerFixture({
     identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
     stateBufferByteLength: stateBuffer.size,
     thermoBufferByteLength: thermoBuffer.size,
-    identityBufferByteLength: identityBuffer.size
+    identityBufferByteLength: identityBuffer.size,
+    storageGeneration: levelAssignment.storageGeneration,
+    bufferFamilyGeneration: levelAssignment.storageGeneration,
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    physicsTick: levelAssignment.physicsTick,
+    physicsSubstep: levelAssignment.physicsSubstep,
+    positionEpoch: levelAssignment.positionEpoch,
+    topologyEpoch: levelAssignment.topologyEpoch,
+    chartEpoch: levelAssignment.chartEpoch,
+    levelEpoch: levelAssignment.levelEpoch,
+    supportEpoch: levelAssignment.supportEpoch
   };
   const mlsMpmParticleUpload = {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -559,7 +579,18 @@ function fusedP2gProducerFixture({
     mechanicsStrideBytes:
       MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
       * Float32Array.BYTES_PER_ELEMENT,
-    mechanicsBufferByteLength: mechanicsBuffer.size
+    mechanicsBufferByteLength: mechanicsBuffer.size,
+    storageGeneration: levelAssignment.storageGeneration,
+    bufferFamilyGeneration: levelAssignment.storageGeneration,
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    physicsTick: levelAssignment.physicsTick,
+    physicsSubstep: levelAssignment.physicsSubstep,
+    positionEpoch: levelAssignment.positionEpoch,
+    topologyEpoch: levelAssignment.topologyEpoch,
+    chartEpoch: levelAssignment.chartEpoch,
+    levelEpoch: levelAssignment.levelEpoch,
+    supportEpoch: levelAssignment.supportEpoch
   };
   const canonicalEpoch = {
     generation,
@@ -822,18 +853,63 @@ function runFusedG2pProducer(fixture, correction, overrides = {}) {
 }
 
 function nextParticleUploads(fixture, g2p) {
+  const storageGeneration = fixture.levelAssignment.storageGeneration + 1;
+  const physicsSubstep = fixture.levelAssignment.physicsSubstep + 1;
+  const positionEpoch = fixture.levelAssignment.positionEpoch + 1;
+  const identity = {
+    storageGeneration,
+    bufferFamilyGeneration: storageGeneration,
+    bufferFamilyGenerationStatus:
+      'resident-particle-buffer-family-generation-advanced',
+    physicsTick: fixture.levelAssignment.physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch: fixture.levelAssignment.topologyEpoch,
+    chartEpoch: fixture.levelAssignment.chartEpoch,
+    levelEpoch: fixture.levelAssignment.levelEpoch,
+    supportEpoch: fixture.levelAssignment.supportEpoch
+  };
   return {
     sphParticleUpload: {
       ...fixture.sphParticleUpload,
+      ...identity,
       stateBuffer: g2p.stateBuffer,
       stateBufferByteLength: g2p.stateBufferByteLength
     },
     mlsMpmParticleUpload: {
       ...fixture.mlsMpmParticleUpload,
+      ...identity,
       mechanicsBuffer: g2p.mechanicsBuffer,
       mechanicsBufferByteLength: g2p.mechanicsBufferByteLength
     }
   };
+}
+
+function frozenSuccessorLevelAssignment(fixture, uploads) {
+  const runtime = createSchroederFrozenLevelAssignmentRefreshGpu(
+    fixture.device,
+    {
+      maxParticleCount: fixture.levelAssignment.particleCount,
+      arenaCount: 1
+    }
+  );
+  const options = {
+    priorLevelAssignment: fixture.levelAssignment,
+    currentSphParticleUpload: uploads.sphParticleUpload,
+    currentMlsMpmParticleUpload: uploads.mlsMpmParticleUpload,
+    physicsTick: uploads.sphParticleUpload.physicsTick,
+    physicsSubstep: uploads.sphParticleUpload.physicsSubstep
+  };
+  const frozenFineSubstepAuthorityProof =
+    runtime.proveFineSubstepAuthority(options);
+  const encoder = fixture.device.createCommandEncoder();
+  const levelAssignment = runtime.encode(encoder, {
+    ...options,
+    frozenFineSubstepAuthorityProof
+  });
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(runtime.markExecutionSubmitted(levelAssignment), true);
+  return { levelAssignment, runtime };
 }
 
 async function releaseFusedG2pFixture(fixture, chain, reason) {
@@ -867,23 +943,10 @@ async function fusedCoarseTerminalP2gFixture() {
     sourceTransaction: fixture.transaction,
     g2pReconstruction: g2p
   });
-  const successorAssignmentBuffer = fixture.device.createBuffer({
-    label: 'terminal-p2g-successor-assignment',
-    size: fixture.levelAssignment.assignmentBufferByteLength,
-    usage: 128
-  });
-  tagWebGpuBufferDevice(successorAssignmentBuffer, fixture.device);
-  const successorLevelAssignment = {
-    ...fixture.levelAssignment,
-    assignmentBuffer: successorAssignmentBuffer,
-    assignmentBufferByteLength: successorAssignmentBuffer.size,
-    sourceStateBuffer: g2p.stateBuffer,
-    sourceAssignmentBuffer: fixture.levelAssignment.assignmentBuffer,
-    physicsSubstep: fixture.levelAssignment.physicsSubstep + 1,
-    positionEpoch: fixture.levelAssignment.positionEpoch + 1,
-    levelClassificationMode: 'frozen-macro-step-no-reclassification',
-    levelReclassificationPerformed: false
-  };
+  const {
+    levelAssignment: successorLevelAssignment,
+    runtime: successorAssignmentRuntime
+  } = frozenSuccessorLevelAssignment(fixture, uploads);
   const successorGeneration = runSchroederSpatialEpochGenerationWebGpu({
     device: fixture.device,
     levelAssignment: successorLevelAssignment,
@@ -895,7 +958,11 @@ async function fusedCoarseTerminalP2gFixture() {
       { selectedLevel: 1, mechanicsGrid: fixture.coarseGrid }
     ]
   });
-  assert.equal(successorGeneration.ready, true);
+  assert.equal(
+    successorGeneration.ready,
+    true,
+    successorGeneration.reason ?? successorGeneration.status
+  );
   const successorCanonicalEpoch = {
     generation: successorGeneration,
     ...uploads
@@ -926,6 +993,8 @@ async function fusedCoarseTerminalP2gFixture() {
     uploads,
     continuation,
     successorGeneration,
+    successorLevelAssignment,
+    successorAssignmentRuntime,
     successorCanonicalEpoch,
     successorMicroepoch,
     terminalTransaction
@@ -1360,8 +1429,30 @@ test('non-transaction mechanics-field P2G rejects particle-family drift before a
 
   fixture.sphParticleState.particleCount = 1;
   fixture.mlsMpmParticleState.particleCount = 1;
+  const successfulAllocationsBefore = fixture.device.createdBuffers.length;
+  const successfulDispatchesBefore = fixture.device.dispatches.length;
   const projection = await runCoarseP2gProducer(fixture);
   assert.equal(projection.mechanicsFieldViewExecution, field);
+  assert.equal(projection.activeSourceP2gEnabled, true);
+  assert.ok(
+    fixture.device.dispatches
+      .slice(successfulDispatchesBefore)
+      .some((dispatch) => (
+        dispatch[0] === 'indirect'
+        && dispatch[1]
+          === fixture.generation.activeSourceView.activeSourceViewBuffer
+        && dispatch[2]
+          === fixture.generation.activeSourceView.activeDispatchOffsetBytes
+      )),
+    'staged P2G must dispatch through the GPU-authored ActiveSource row'
+  );
+  assert.equal(
+    fixture.device.createdBuffers
+      .slice(successfulAllocationsBefore)
+      .some((buffer) => (buffer.usage & 1) !== 0),
+    false,
+    'staged ActiveSource-v2 P2G must not allocate MAP_READ buffers'
+  );
   assert.equal(projection.mechanicsFieldIndirectDispatchDimensions, 2);
   assert.equal(
     projection.mechanicsFieldIndirectDispatchLinearization,
@@ -4271,23 +4362,9 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
     assert.equal(g2p.destroyOutputParticleBuffers(), false);
     assert.equal(g2p.stateBuffer.destroyed, false);
     assert.equal(g2p.mechanicsBuffer.destroyed, false);
-    const successorAssignmentBuffer = fixture.device.createBuffer({
-      label: 'fused-g2p-successor-assignment',
-      size: fixture.levelAssignment.assignmentBufferByteLength,
-      usage: 128
-    });
-    tagWebGpuBufferDevice(successorAssignmentBuffer, fixture.device);
-    const successorLevelAssignment = {
-      ...fixture.levelAssignment,
-      assignmentBuffer: successorAssignmentBuffer,
-      assignmentBufferByteLength: successorAssignmentBuffer.size,
-      sourceStateBuffer: g2p.stateBuffer,
-      sourceAssignmentBuffer: fixture.levelAssignment.assignmentBuffer,
-      physicsSubstep: fixture.levelAssignment.physicsSubstep + 1,
-      positionEpoch: fixture.levelAssignment.positionEpoch + 1,
-      levelClassificationMode: 'frozen-macro-step-no-reclassification',
-      levelReclassificationPerformed: false
-    };
+    const {
+      levelAssignment: successorLevelAssignment
+    } = frozenSuccessorLevelAssignment(fixture, uploads);
     const successorGeneration = runSchroederSpatialEpochGenerationWebGpu({
       device: fixture.device,
       levelAssignment: successorLevelAssignment,
@@ -4299,7 +4376,11 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
         { selectedLevel: 1, mechanicsGrid: fixture.coarseGrid }
       ]
     });
-    assert.equal(successorGeneration.ready, true);
+    assert.equal(
+      successorGeneration.ready,
+      true,
+      successorGeneration.reason ?? successorGeneration.status
+    );
     const successorCanonicalEpoch = {
       generation: successorGeneration,
       ...uploads

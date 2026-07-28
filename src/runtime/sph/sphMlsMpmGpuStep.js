@@ -15,6 +15,9 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_INVALID_SOURCE,
   SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY,
   SCHROEDER_SPATIAL_MECHANICS_VIEW_VERSION,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
@@ -27,6 +30,8 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_ADMITTED,
@@ -68,6 +73,26 @@ import {
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE,
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
@@ -96,7 +121,8 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
   validateSchroederSpatialMechanicsViewDescriptor,
-  validateSchroederSpatialMechanicsFieldViewDescriptor
+  validateSchroederSpatialMechanicsFieldViewDescriptor,
+  validateSchroederSpatialActiveSourceViewDescriptor
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   mlsMpmG2pReconstructWgsl,
@@ -630,8 +656,10 @@ const GPU_MAP_MODE = {
 };
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
 const FUSED_P2G_PARAMS_BYTES = 160;
+const FUSED_ACTIVE_SOURCE_V2_P2G_PARAMS_BYTES = 192;
 const FUSED_ACTIVE_P2G_PARAMS_BYTES = 176;
 const FUSED_CANONICAL_G2P_PARAMS_BYTES = 144;
+const FUSED_ACTIVE_SOURCE_V2_G2P_PARAMS_BYTES = 176;
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
@@ -4089,8 +4117,65 @@ function createActiveGridUpdateWgsl() {
 }
 
 function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
-  const withPreflightGate = replaceRequiredWgsl(
+  const withReadOnlyMechanicsView = replaceRequiredWgsl(
     sourceWgsl,
+    '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
+    '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;',
+    'compact mechanics immutable authority binding'
+  );
+  const withOwnedRejectionEvidence = replaceRequiredWgslRange(
+    withReadOnlyMechanicsView,
+    'fn p2g_spatial_evidence_add(word: u32, value: u32) {',
+    '\nfn p2g_authenticate_spatial_header',
+    `fn p2g_spatial_evidence_add(word: u32, value: u32) {
+  let evidence_word = compact_mechanics_evidence_word(word);
+  if (params.schroeder_spatial_evidence_enabled != 0u
+      && evidence_word < arrayLength(&grid_accumulators)) {
+    atomicAdd(&grid_accumulators[evidence_word], bitcast<i32>(value));
+  }
+}
+
+fn compact_mechanics_evidence_word(word: u32) -> u32 {
+  return params.grid_node_count * 4u + word;
+}
+
+fn compact_mechanics_view_reject() {
+  let rejection_word = compact_mechanics_evidence_word(14u);
+  if (rejection_word < arrayLength(&grid_accumulators)) {
+    atomicStore(&grid_accumulators[rejection_word], 1);
+  }
+}
+
+fn p2g_spatial_reject(word: u32) {
+  compact_mechanics_view_reject();
+}
+
+fn p2g_spatial_authority_rejected() -> bool {
+  let rejection_word = compact_mechanics_evidence_word(14u);
+  let structural_rejection_word = compact_mechanics_evidence_word(15u);
+  return structural_rejection_word >= arrayLength(&grid_accumulators)
+    || atomicLoad(&grid_accumulators[rejection_word]) != 0
+    || atomicLoad(&grid_accumulators[structural_rejection_word]) != 0;
+}
+
+fn p2g_spatial_evidence_identity(particle_index: u32) {
+  if (params.schroeder_spatial_evidence_enabled == 0u || particle_index != 0u) {
+    return;
+  }
+  atomicStore(
+    &grid_accumulators[compact_mechanics_evidence_word(4u)],
+    bitcast<i32>(0x4d534131u)
+  );
+  atomicStore(
+    &grid_accumulators[compact_mechanics_evidence_word(5u)],
+    bitcast<i32>(params.schroeder_spatial_generation_id)
+  );
+}
+`,
+    'compact mechanics owned rejection evidence'
+  );
+  const withPreflightGate = replaceRequiredWgsl(
+    withOwnedRejectionEvidence,
     `fn p2g_particle_enabled(particle_index: u32) -> bool {
   p2g_authenticate_spatial_header(particle_index);`,
     `fn p2g_particle_enabled(particle_index: u32) -> bool {
@@ -4116,8 +4201,8 @@ function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
   if (bound_words <= 53u) {
     return params.grid_node_count;
   }
-  let node_count = atomicLoad(&schroeder_spatial_authority_evidence[46u]);
-  let node_offset_words = atomicLoad(&schroeder_spatial_authority_evidence[53u]);
+  let node_count = schroeder_spatial_authority_evidence[46u];
+  let node_offset_words = schroeder_spatial_authority_evidence[53u];
   if (
     global_index >= node_count
     || node_offset_words > bound_words
@@ -4125,9 +4210,8 @@ function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
   ) {
     return params.grid_node_count;
   }
-  let node_index = atomicLoad(
-    &schroeder_spatial_authority_evidence[node_offset_words + global_index]
-  );
+  let node_index =
+    schroeder_spatial_authority_evidence[node_offset_words + global_index];
   return select(node_index, params.grid_node_count, node_index >= params.grid_node_count);
 }`,
     'compact mechanics P2G node index mapping'
@@ -4138,33 +4222,7 @@ function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
   return `${withCompactNodeMapping}
 
 fn compact_mechanics_view_word(index: u32) -> u32 {
-  return atomicLoad(&schroeder_spatial_authority_evidence[index]);
-}
-
-fn compact_mechanics_view_reject() {
-  let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
-  if (bound_words > 14u) {
-    atomicStore(&schroeder_spatial_authority_evidence[4u], 0x4d534131u);
-    atomicStore(
-      &schroeder_spatial_authority_evidence[5u],
-      params.schroeder_spatial_generation_id
-    );
-    atomicStore(&schroeder_spatial_authority_evidence[14u], 1u);
-  }
-  if (bound_words > ${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 2}u) {
-    atomicStore(
-      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS}u],
-      0u
-    );
-    atomicStore(
-      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 1}u],
-      0u
-    );
-    atomicStore(
-      &schroeder_spatial_authority_evidence[${SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS + 2}u],
-      0u
-    );
-  }
+  return schroeder_spatial_authority_evidence[index];
 }
 
 @compute @workgroup_size(1)
@@ -4494,8 +4552,68 @@ function createMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
 @group(0) @binding(6) var<storage, read> p2g_field_sorted_candidate_indices: array<u32>;`,
     'mechanics field deterministic reduction bindings'
   );
-  const withFieldHelpers = replaceRequiredWgsl(
+  const withFieldOwnedRejectionEvidence = replaceRequiredWgslRange(
     withFieldReductionBindings,
+    'fn compact_mechanics_evidence_word(word: u32) -> u32 {',
+    '\nfn p2g_authenticate_spatial_header',
+    `fn compact_mechanics_rejection_word() -> u32 {
+  return 2u;
+}
+
+fn compact_mechanics_view_reject() {
+  if (arrayLength(&grid_accumulators)
+      >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    atomicOr(
+      &grid_accumulators[2u],
+      bitcast<i32>(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE}u)
+    );
+    atomicStore(&grid_accumulators[34u], 0);
+    atomicStore(&grid_accumulators[44u], 0);
+    atomicStore(&grid_accumulators[45u], 0);
+    atomicStore(&grid_accumulators[46u], 0);
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+      ],
+      0
+    );
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u
+      ],
+      0
+    );
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u
+      ],
+      0
+    );
+  }
+}
+
+fn p2g_spatial_reject(word: u32) {
+  compact_mechanics_view_reject();
+}
+
+fn p2g_spatial_authority_rejected() -> bool {
+  if (arrayLength(&grid_accumulators)
+      < ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    return true;
+  }
+  let status = bitcast<u32>(atomicLoad(&grid_accumulators[2u]));
+  return (status & ${rejectedFlags}u) != 0u;
+}
+
+fn p2g_spatial_evidence_identity(particle_index: u32) {
+  // The borrowed mechanics-view header is immutable to every consumer.
+}
+`,
+    'mechanics field owned rejection evidence'
+  );
+  const withFieldHelpers = replaceRequiredWgsl(
+    withFieldOwnedRejectionEvidence,
     `fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
   let base = node_index * 4u;
   atomicAdd(&grid_accumulators[base], p2g_quantize(mass));
@@ -5361,6 +5479,446 @@ function createSingleLevelMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
   );
 }
 
+function createActiveSourceV2MechanicsFieldP2gWgsl(sourceWgsl) {
+  const withParams = replaceRequiredWgsl(
+    sourceWgsl,
+    `  pressure_required_consumer_mask: u32,
+};`,
+    `  pressure_required_consumer_mask: u32,
+  active_source_physical_capacity: u32,
+  active_source_active_capacity: u32,
+  active_source_view_capacity_words: u32,
+  active_source_active_to_physical_offset_words: u32,
+  active_source_physical_to_active_offset_words: u32,
+  active_source_fingerprint: u32,
+  active_source_dispatch_x_limit: u32,
+  active_source_header_words: u32,
+};`,
+    'ActiveSource-v2 P2G parameter fields'
+  );
+  const withBinding = replaceRequiredWgsl(
+    withParams,
+    '@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;',
+    '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;',
+    'ActiveSource-v2 exact authority binding'
+  );
+  const rejectedStatusMask =
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
+  const withAuthority = replaceRequiredWgslRange(
+    withBinding,
+    'const SCHROEDER_SPATIAL_MAGIC: u32',
+    '\nfn p2g_finalize_node_index',
+    `const ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
+const ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
+const ACTIVE_SOURCE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED
+}u;
+const ACTIVE_SOURCE_REJECTED_MASK: u32 = ${rejectedStatusMask}u;
+const ACTIVE_SOURCE_MISSING: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL}u;
+const ACTIVE_SOURCE_ACTIVE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS
+}u;
+const ACTIVE_SOURCE_CANDIDATE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS
+}u;
+const ACTIVE_SOURCE_PHYSICAL_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS
+}u;
+
+fn p2g_active_source_fold(value: u32, word: u32) -> u32 {
+  return (value ^ word) * 0x01000193u;
+}
+
+fn p2g_active_source_projection_seal() -> u32 {
+  var value = p2g_active_source_fold(
+    active_source_view[31u],
+    active_source_view[25u]
+  );
+  value = p2g_active_source_fold(value, active_source_view[26u]);
+  value = p2g_active_source_fold(value, active_source_view[27u]);
+  value = p2g_active_source_fold(value, active_source_view[18u]);
+  value = p2g_active_source_fold(value, active_source_view[20u]);
+  return p2g_active_source_fold(value, active_source_view[30u]);
+}
+
+fn p2g_active_source_dispatch_admitted(
+  invocation_count: u32,
+  offset: u32
+) -> bool {
+  let group_count = invocation_count / 64u
+    + select(0u, 1u, invocation_count % 64u != 0u);
+  let x = active_source_view[offset];
+  let y = active_source_view[offset + 1u];
+  let z = active_source_view[offset + 2u];
+  if (invocation_count == 0u) {
+    return x == 0u && y == 1u && z == 1u;
+  }
+  let expected_x = min(group_count, params.active_source_dispatch_x_limit);
+  let expected_y = group_count / expected_x
+    + select(0u, 1u, group_count % expected_x != 0u);
+  return x == expected_x && y == expected_y && z == 1u;
+}
+
+fn p2g_spatial_directory_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ACTIVE_SOURCE_HEADER_WORDS) {
+    return false;
+  }
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  let active_candidate_count = active_source_view[43u];
+  return params.schroeder_spatial_directory_enabled != 0u
+    && params.active_source_dispatch_x_limit > 0u
+    && params.active_source_header_words == ACTIVE_SOURCE_HEADER_WORDS
+    && active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (active_source_view[2u] & ACTIVE_SOURCE_READY_ADMITTED)
+      == ACTIVE_SOURCE_READY_ADMITTED
+    && (active_source_view[2u] & ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.schroeder_spatial_generation_id
+    && params.schroeder_spatial_generation_id > 0u
+    && active_source_view[4u] == params.schroeder_spatial_device_ordinal
+    && active_source_view[5u] == params.schroeder_spatial_lane_ordinal
+    && active_source_view[6u] == params.schroeder_spatial_lease_token
+    && active_source_view[7u] == params.schroeder_spatial_source_family_id
+    && active_source_view[8u] == params.schroeder_spatial_storage_generation
+    && active_source_view[9u] == params.schroeder_spatial_physics_tick
+    && active_source_view[10u] == params.schroeder_spatial_physics_substep
+    && active_source_view[11u] == params.schroeder_spatial_position_epoch
+    && active_source_view[12u] == params.schroeder_spatial_topology_epoch
+    && active_source_view[13u] == params.schroeder_spatial_chart_epoch
+    && active_source_view[14u] == params.schroeder_spatial_level_epoch
+    && active_source_view[15u] == params.schroeder_spatial_support_epoch
+    && physical_count == params.particle_count
+    && physical_count <= physical_capacity
+    && physical_capacity == params.active_source_physical_capacity
+    && active_count <= physical_count
+    && active_count <= active_capacity
+    && active_capacity == params.active_source_active_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u]
+      == ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0}u
+    && active_source_view[24u]
+      == ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS}u
+    && active_to_physical
+      == params.active_source_active_to_physical_offset_words
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active
+      == params.active_source_physical_to_active_offset_words
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == params.active_source_view_capacity_words
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[28u] <= capacity_words
+    && active_source_view[29u] == params.schroeder_spatial_pad2
+    && active_source_view[30u] == params.schroeder_spatial_pad2
+    && active_source_view[31u] == params.active_source_fingerprint
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[37u] == 64u
+    && active_source_view[38u] == params.active_source_dispatch_x_limit
+    && active_source_view[40u] == ACTIVE_SOURCE_ACTIVE_DISPATCH
+    && active_source_view[41u] == ACTIVE_SOURCE_CANDIDATE_DISPATCH
+    && active_source_view[42u] == ACTIVE_SOURCE_PHYSICAL_DISPATCH
+    && active_count <= 0xffffffffu / 27u
+    && active_candidate_count == active_count * 27u
+    && active_source_view[44u] == active_capacity * 27u
+    && active_source_view[47u] == p2g_active_source_projection_seal()
+    && p2g_active_source_dispatch_admitted(
+      active_count,
+      ACTIVE_SOURCE_ACTIVE_DISPATCH
+    )
+    && p2g_active_source_dispatch_admitted(
+      active_candidate_count,
+      ACTIVE_SOURCE_CANDIDATE_DISPATCH
+    )
+    && p2g_active_source_dispatch_admitted(
+      physical_count,
+      ACTIVE_SOURCE_PHYSICAL_DISPATCH
+    );
+}
+
+fn p2g_canonical_query_geometry_admitted() -> bool {
+  // Query geometry is folded into the exact host-authenticated fingerprint.
+  return p2g_spatial_directory_admitted();
+}
+
+fn p2g_spatial_evidence_add(word: u32, value: u32) {
+  // The producer-owned ActiveSource and mechanics view are immutable.
+}
+
+fn compact_mechanics_view_reject() {
+  if (arrayLength(&grid_accumulators)
+      >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    atomicOr(
+      &grid_accumulators[2u],
+      bitcast<i32>(${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE}u)
+    );
+    atomicStore(&grid_accumulators[34u], 0);
+    atomicStore(&grid_accumulators[44u], 0);
+    atomicStore(&grid_accumulators[45u], 0);
+    atomicStore(&grid_accumulators[46u], 0);
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+      ],
+      0
+    );
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u
+      ],
+      0
+    );
+    atomicStore(
+      &grid_accumulators[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u
+      ],
+      0
+    );
+  }
+}
+
+fn p2g_spatial_reject(word: u32) {
+  compact_mechanics_view_reject();
+}
+
+fn p2g_spatial_authority_rejected() -> bool {
+  if (arrayLength(&grid_accumulators)
+      < ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    return true;
+  }
+  let status = bitcast<u32>(atomicLoad(&grid_accumulators[2u]));
+  return (status & ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW
+}u) != 0u;
+}
+
+fn p2g_spatial_evidence_identity(particle_index: u32) {}
+
+fn p2g_authenticate_spatial_header(particle_index: u32) {
+  if (!p2g_spatial_directory_admitted()) {
+    p2g_spatial_reject(14u);
+  }
+}
+
+fn p2g_physical_for_active(active_ordinal: u32) -> u32 {
+  if (active_ordinal >= active_source_view[18u]) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let physical = active_source_view[
+    active_source_view[25u] + active_ordinal
+  ];
+  if (physical >= params.particle_count
+      || active_source_view[active_source_view[26u] + physical]
+        != active_ordinal) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return physical;
+}
+
+fn p2g_active_for_physical(physical: u32) -> u32 {
+  if (physical >= params.particle_count) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let active_ordinal =
+    active_source_view[active_source_view[26u] + physical];
+  if (active_ordinal == ACTIVE_SOURCE_MISSING) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  if (active_ordinal >= active_source_view[18u]
+      || active_source_view[active_source_view[25u] + active_ordinal]
+        != physical) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return active_ordinal;
+}
+
+fn p2g_particle_enabled(particle_index: u32) -> bool {
+  if (p2g_spatial_authority_rejected()
+      || p2g_active_for_physical(particle_index) == ACTIVE_SOURCE_MISSING) {
+    return false;
+  }
+  let descriptor_base = bitcast<u32>(atomicLoad(&grid_accumulators[24u]))
+    + particle_index * 32u;
+  return descriptor_base + 3u < arrayLength(&grid_accumulators)
+    && bitcast<u32>(atomicLoad(&grid_accumulators[descriptor_base + 3u]))
+      == 1u;
+}
+`,
+    'ActiveSource-v2 P2G authority'
+  );
+  let result = replaceRequiredWgsl(
+    withAuthority,
+    `    && p2g_field_word(33u) % P2G_FIELD_STENCIL_SIZE == 0u
+    && p2g_field_word(33u) / P2G_FIELD_STENCIL_SIZE == params.particle_count`,
+    `    && p2g_field_word(33u) == active_source_view[43u]
+    && p2g_field_word(33u) % P2G_FIELD_STENCIL_SIZE == 0u
+    && p2g_field_word(33u) / P2G_FIELD_STENCIL_SIZE
+      == active_source_view[18u]`,
+    'ActiveSource-v2 field candidate cardinality'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    'fn p2g_field_clear_particle_contributions(particle_index: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = particle_index * P2G_FIELD_STENCIL_SIZE;',
+    'fn p2g_field_clear_particle_contributions(active_ordinal: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = active_ordinal * P2G_FIELD_STENCIL_SIZE;',
+    'ActiveSource-v2 contribution clear identity'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `fn p2g_field_store_contribution(
+  particle_index: u32,
+  stencil_ordinal: u32,`,
+    `fn p2g_field_store_contribution(
+  active_ordinal: u32,
+  particle_index: u32,
+  stencil_ordinal: u32,`,
+    'ActiveSource-v2 contribution store signature'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `  let candidate_index = particle_index * P2G_FIELD_STENCIL_SIZE
+    + stencil_ordinal;`,
+    `  let candidate_index = active_ordinal * P2G_FIELD_STENCIL_SIZE
+    + stencil_ordinal;`,
+    'ActiveSource-v2 contribution candidate identity'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `        p2g_field_store_contribution(
+          particle_index,`,
+    `        p2g_field_store_contribution(
+          active_ordinal,
+          particle_index,`,
+    'ActiveSource-v2 contribution call identity'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `  let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
+  let stencil_ordinal = candidate_index
+    - particle_index * P2G_FIELD_STENCIL_SIZE;
+  if (particle_index >= params.particle_count
+      || stencil_ordinal >= P2G_FIELD_STENCIL_SIZE) {
+    return P2G_FIELD_INVALID_INDEX;
+  }
+  let descriptor_base = p2g_field_word(24u)
+    + particle_index * P2G_FIELD_DESCRIPTOR_WORDS;`,
+    `  let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
+  let stencil_ordinal = candidate_index
+    - active_ordinal * P2G_FIELD_STENCIL_SIZE;
+  let particle_index = p2g_physical_for_active(active_ordinal);
+  if (particle_index == ACTIVE_SOURCE_MISSING
+      || stencil_ordinal >= P2G_FIELD_STENCIL_SIZE) {
+    return P2G_FIELD_INVALID_INDEX;
+  }
+  let descriptor_base = p2g_field_word(24u)
+    + particle_index * P2G_FIELD_DESCRIPTOR_WORDS;`,
+    'ActiveSource-v2 sorted candidate projection'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `    let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
+    let stencil_ordinal = candidate_index
+      - particle_index * P2G_FIELD_STENCIL_SIZE;
+    if (p2g_field_find(particle_index, stencil_ordinal, node_index)
+        != field_index) {`,
+    `    let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
+    let particle_index = p2g_physical_for_active(active_ordinal);
+    let stencil_ordinal = candidate_index
+      - active_ordinal * P2G_FIELD_STENCIL_SIZE;
+    if (particle_index == ACTIVE_SOURCE_MISSING
+        || p2g_field_find(particle_index, stencil_ordinal, node_index)
+          != field_index) {`,
+    'ActiveSource-v2 final reduction projection'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  p2g_field_clear_particle_contributions(particle_index);
+  if (!p2g_particle_enabled(particle_index)) {
+    return;
+  }
+  if (!p2g_field_mutation_current()) {
+    return;
+  }
+  if (!p2g_field_view_admitted()) {
+    p2g_field_reject();
+    return;
+  }`,
+    `@compute @workgroup_size(64)
+fn main(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let dispatch_x = max(
+    active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH],
+    1u
+  );
+  let active_ordinal =
+    (workgroup_id.x + workgroup_id.y * dispatch_x) * 64u + local_id.x;
+  if (active_ordinal >= active_source_view[18u]) {
+    return;
+  }
+  let particle_index = p2g_physical_for_active(active_ordinal);
+  if (particle_index == ACTIVE_SOURCE_MISSING) {
+    p2g_field_reject();
+    return;
+  }
+  p2g_field_clear_particle_contributions(active_ordinal);
+  if (!p2g_field_mutation_current()) {
+    return;
+  }
+  if (!p2g_field_view_admitted()) {
+    p2g_field_reject();
+    return;
+  }
+  if (!p2g_particle_enabled(particle_index)) {
+    return;
+  }`,
+    'ActiveSource-v2 indirect P2G entry point'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    '    || compact_mechanics_view_word(49u) != params.particle_count\n    || selected_source_count > params.particle_count',
+    '    || compact_mechanics_view_word(49u) != active_source_view[18u]\n    || selected_source_count > active_source_view[18u]',
+    'ActiveSource-v2 compact source counts'
+  );
+  result = replaceRequiredWgsl(
+    result,
+    `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
+    || schroeder_spatial_directory[33u] != params.schroeder_spatial_pad2`,
+    `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
+    || active_source_view[30u] != params.schroeder_spatial_pad2`,
+    'ActiveSource-v2 completion lineage'
+  );
+  return result;
+}
+
 function createMechanicsFieldG2pWgsl(sourceWgsl) {
   const withRefluxBinding = replaceRequiredWgsl(
     sourceWgsl,
@@ -5380,8 +5938,86 @@ function createMechanicsFieldG2pWgsl(sourceWgsl) {
     '@group(0) @binding(3) var<storage, read_write> mechanics_field_view: array<atomic<u32>>;',
     'mechanics field G2P binding'
   );
-  const withFieldHelpers = replaceRequiredWgsl(
+  const withReadOnlyAuthorityBinding = replaceRequiredWgsl(
     withFieldBinding,
+    '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
+    '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;',
+    'mechanics field G2P immutable mechanics-view binding'
+  );
+  const withoutBorrowedSuccessEvidence = replaceRequiredWgslRange(
+    withReadOnlyAuthorityBinding,
+    'fn g2p_spatial_evidence_add(word: u32, value: u32) {',
+    '\nfn g2p_canonical_query_geometry_admitted',
+    `fn g2p_spatial_evidence_add(word: u32, value: u32) {
+  // The producer-owned compact mechanics view is immutable.
+}
+`,
+    'mechanics field G2P borrowed success evidence removal'
+  );
+  const withFieldOwnedAuthorityRejection = replaceRequiredWgslRange(
+    withoutBorrowedSuccessEvidence,
+    'fn g2p_spatial_reject(word: u32) {',
+    '\nfn g2p_authenticate_spatial_header',
+    `fn g2p_spatial_reject(word: u32) {
+  if (arrayLength(&mechanics_field_view)
+      >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    atomicOr(
+      &mechanics_field_view[2u],
+      ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE}u
+    );
+    atomicStore(&mechanics_field_view[34u], 0u);
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+      ],
+      0u
+    );
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u
+      ],
+      0u
+    );
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u
+      ],
+      0u
+    );
+  }
+}
+
+fn g2p_p2g_authority_rejected() -> bool {
+  if (arrayLength(&mechanics_field_view)
+      < ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    return true;
+  }
+  let status = atomicLoad(&mechanics_field_view[2u]);
+  return (status & ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW
+}u) != 0u;
+}
+
+fn g2p_spatial_authority_rejected() -> bool {
+  return g2p_p2g_authority_rejected();
+}
+
+fn g2p_spatial_evidence_identity(particle_index: u32) {
+  // The producer-owned compact mechanics view is immutable.
+}
+`,
+    'mechanics field G2P owned rejection evidence'
+  );
+  const withoutBorrowedUpstreamNormalization =
+    withFieldOwnedAuthorityRejection.replace(
+      '    atomicStore(&schroeder_spatial_authority_evidence[14u], 1u);',
+      '    g2p_spatial_reject(16u);'
+    );
+  const withFieldHelpers = replaceRequiredWgsl(
+    withoutBorrowedUpstreamNormalization,
     'fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {',
     `const G2P_FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
 const G2P_FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
@@ -7553,6 +8189,278 @@ fn seal_velocity_state() {
 }
 `;
 
+function createActiveSourceV2MechanicsFieldG2pWgsl(sourceWgsl) {
+  const withParams = replaceRequiredWgsl(
+    sourceWgsl,
+    `  schroeder_spatial_pad0: u32,
+};`,
+    `  schroeder_spatial_pad0: u32,
+  active_source_physical_capacity: u32,
+  active_source_active_capacity: u32,
+  active_source_view_capacity_words: u32,
+  active_source_active_to_physical_offset_words: u32,
+  active_source_physical_to_active_offset_words: u32,
+  active_source_fingerprint: u32,
+  active_source_dispatch_x_limit: u32,
+  active_source_completion_ordinal: u32,
+};`,
+    'ActiveSource-v2 G2P parameter fields'
+  );
+  const withBindings = replaceRequiredWgsl(
+    withParams,
+    `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
+@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;`,
+    `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
+@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;`,
+    'ActiveSource-v2 G2P immutable authority bindings'
+  );
+  const rejectedStatusMask =
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
+  const withAuthority = replaceRequiredWgslRange(
+    withBindings,
+    'const G2P_SCHROEDER_SPATIAL_MAGIC: u32',
+    '\nfn g2p_particle_enabled',
+    `const G2P_ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
+const G2P_ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
+const G2P_ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
+const G2P_ACTIVE_SOURCE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED
+}u;
+const G2P_ACTIVE_SOURCE_REJECTED_MASK: u32 = ${rejectedStatusMask}u;
+const G2P_ACTIVE_SOURCE_MISSING: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL}u;
+const G2P_ACTIVE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS
+}u;
+const G2P_CANDIDATE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS
+}u;
+const G2P_PHYSICAL_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS
+}u;
+
+fn g2p_active_source_fold(value: u32, word: u32) -> u32 {
+  return (value ^ word) * 0x01000193u;
+}
+
+fn g2p_active_source_projection_seal() -> u32 {
+  var value = g2p_active_source_fold(
+    active_source_view[31u],
+    active_source_view[25u]
+  );
+  value = g2p_active_source_fold(value, active_source_view[26u]);
+  value = g2p_active_source_fold(value, active_source_view[27u]);
+  value = g2p_active_source_fold(value, active_source_view[18u]);
+  value = g2p_active_source_fold(value, active_source_view[20u]);
+  return g2p_active_source_fold(value, active_source_view[30u]);
+}
+
+fn g2p_active_source_dispatch_admitted(
+  invocation_count: u32,
+  offset: u32
+) -> bool {
+  let groups = invocation_count / 64u
+    + select(0u, 1u, invocation_count % 64u != 0u);
+  let x = active_source_view[offset];
+  let y = active_source_view[offset + 1u];
+  let z = active_source_view[offset + 2u];
+  if (invocation_count == 0u) {
+    return x == 0u && y == 1u && z == 1u;
+  }
+  let expected_x = min(groups, params.active_source_dispatch_x_limit);
+  let expected_y = groups / expected_x
+    + select(0u, 1u, groups % expected_x != 0u);
+  return x == expected_x && y == expected_y && z == 1u;
+}
+
+fn g2p_spatial_directory_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < G2P_ACTIVE_SOURCE_HEADER_WORDS) {
+    return false;
+  }
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  let candidates = active_source_view[43u];
+  return params.schroeder_spatial_directory_enabled != 0u
+    && params.active_source_dispatch_x_limit > 0u
+    && active_source_view[0u] == G2P_ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == G2P_ACTIVE_SOURCE_VERSION
+    && (active_source_view[2u] & G2P_ACTIVE_SOURCE_READY_ADMITTED)
+      == G2P_ACTIVE_SOURCE_READY_ADMITTED
+    && (active_source_view[2u] & G2P_ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.schroeder_spatial_generation_id
+    && params.schroeder_spatial_generation_id > 0u
+    && active_source_view[4u] == params.schroeder_spatial_device_ordinal
+    && active_source_view[5u] == params.schroeder_spatial_lane_ordinal
+    && active_source_view[6u] == params.schroeder_spatial_lease_token
+    && active_source_view[7u] == params.schroeder_spatial_source_family_id
+    && active_source_view[8u] == params.schroeder_spatial_storage_generation
+    && active_source_view[9u] == params.schroeder_spatial_physics_tick
+    && active_source_view[10u] == params.schroeder_spatial_physics_substep
+    && active_source_view[11u] == params.schroeder_spatial_position_epoch
+    && active_source_view[12u] == params.schroeder_spatial_topology_epoch
+    && active_source_view[13u] == params.schroeder_spatial_chart_epoch
+    && active_source_view[14u] == params.schroeder_spatial_level_epoch
+    && active_source_view[15u] == params.schroeder_spatial_support_epoch
+    && physical_count == params.particle_count
+    && physical_count <= physical_capacity
+    && physical_capacity == params.active_source_physical_capacity
+    && active_count <= physical_count
+    && active_count <= active_capacity
+    && active_capacity == params.active_source_active_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u]
+      == ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0}u
+    && active_source_view[24u]
+      == ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS}u
+    && active_to_physical
+      == params.active_source_active_to_physical_offset_words
+    && active_to_physical == G2P_ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active
+      == params.active_source_physical_to_active_offset_words
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == params.active_source_view_capacity_words
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[29u]
+      == params.active_source_completion_ordinal
+    && active_source_view[30u]
+      == params.active_source_completion_ordinal
+    && active_source_view[31u] == params.active_source_fingerprint
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[37u] == 64u
+    && active_source_view[38u] == params.active_source_dispatch_x_limit
+    && active_source_view[40u] == G2P_ACTIVE_DISPATCH
+    && active_source_view[41u] == G2P_CANDIDATE_DISPATCH
+    && active_source_view[42u] == G2P_PHYSICAL_DISPATCH
+    && active_count <= 0xffffffffu / 27u
+    && candidates == active_count * 27u
+    && active_source_view[44u] == active_capacity * 27u
+    && active_source_view[47u] == g2p_active_source_projection_seal()
+    && g2p_active_source_dispatch_admitted(
+      active_count,
+      G2P_ACTIVE_DISPATCH
+    )
+    && g2p_active_source_dispatch_admitted(
+      candidates,
+      G2P_CANDIDATE_DISPATCH
+    )
+    && g2p_active_source_dispatch_admitted(
+      physical_count,
+      G2P_PHYSICAL_DISPATCH
+    );
+}
+
+fn g2p_canonical_query_geometry_admitted() -> bool {
+  return g2p_spatial_directory_admitted();
+}
+
+fn g2p_spatial_evidence_add(word: u32, value: u32) {}
+
+fn g2p_spatial_reject(word: u32) {
+  if (arrayLength(&mechanics_field_view)
+      >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    atomicOr(
+      &mechanics_field_view[2u],
+      ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+        | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE}u
+    );
+    atomicStore(&mechanics_field_view[34u], 0u);
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS}u
+      ],
+      0u
+    );
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 1}u
+      ],
+      0u
+    );
+    atomicStore(
+      &mechanics_field_view[
+        ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS + 2}u
+      ],
+      0u
+    );
+  }
+}
+
+fn g2p_p2g_authority_rejected() -> bool {
+  if (arrayLength(&mechanics_field_view)
+      < ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
+    return true;
+  }
+  let status = atomicLoad(&mechanics_field_view[2u]);
+  return (status & ${
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW
+}u) != 0u;
+}
+
+fn g2p_spatial_authority_rejected() -> bool {
+  return g2p_p2g_authority_rejected();
+}
+
+fn g2p_spatial_evidence_identity(particle_index: u32) {}
+
+fn g2p_authenticate_spatial_header(particle_index: u32) {
+  if (particle_index == 0u && !g2p_spatial_directory_admitted()) {
+    g2p_spatial_reject(16u);
+  }
+}
+`,
+    'ActiveSource-v2 G2P authority'
+  );
+  return replaceRequiredWgslRange(
+    withAuthority,
+    'fn g2p_particle_enabled(particle_index: u32) -> bool {',
+    '\nfn g2p_copy_input_particle',
+    `fn g2p_particle_enabled(particle_index: u32) -> bool {
+  g2p_authenticate_spatial_header(particle_index);
+  if (g2p_spatial_authority_rejected()
+      || particle_index >= params.particle_count) {
+    return false;
+  }
+  let active_ordinal = active_source_view[
+    active_source_view[26u] + particle_index
+  ];
+  if (active_ordinal == G2P_ACTIVE_SOURCE_MISSING) {
+    return false;
+  }
+  if (active_ordinal >= active_source_view[18u]
+      || active_source_view[active_source_view[25u] + active_ordinal]
+        != particle_index) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  let descriptor_base = g2p_field_load(24u)
+    + particle_index * G2P_FIELD_DESCRIPTOR_WORDS;
+  return descriptor_base + 3u < arrayLength(&mechanics_field_view)
+    && g2p_field_load(descriptor_base + 3u) == 1u;
+}
+`,
+    'ActiveSource-v2 physical G2P admission'
+  );
+}
+
 const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl();
 const mlsMpmP2gGridProjectionCanonicalSpatialActiveGridWgsl =
   createActiveGridP2gProjectionWgsl(mlsMpmP2gGridProjectionCanonicalSpatialWgsl);
@@ -7584,11 +8492,27 @@ export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechani
   createSingleLevelMechanicsFieldP2gProjectionWgsl(
     mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl
   );
+export const mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldP2gWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl
+  );
+export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldP2gWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+  );
 export const mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl =
   createMechanicsFieldG2pWgsl(mlsMpmG2pReconstructCanonicalSpatialWgsl);
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl =
   createMechanicsFieldG2pWgsl(
     mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
   );
 export const mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldG2pWgsl(
@@ -7597,6 +8521,14 @@ export const mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl =
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldG2pWgsl(
     mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl =
+  createActiveSourceV2MechanicsFieldG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
   );
 // Spatial (grid-measured) density term for the liquid EOS. DISABLED: with
 // particle lattices coarser than the grid, the estimator aliases above rest
@@ -7624,7 +8556,11 @@ export function createFusedP2gParamsArray(
 ) {
   const filterEnabled = schroederLevelFilter?.enabled === true;
   const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
-  const buffer = new ArrayBuffer(FUSED_P2G_PARAMS_BYTES);
+  const activeSourceV2 =
+    schroederActiveNodeFilter?.activeSourceP2gEnabled === true;
+  const buffer = new ArrayBuffer(activeSourceV2
+    ? FUSED_ACTIVE_SOURCE_V2_P2G_PARAMS_BYTES
+    : FUSED_P2G_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridSpec.gridNodeCount, true);
@@ -7732,6 +8668,24 @@ export function createFusedP2gParamsArray(
     pressureRequiredConsumerMask,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL
   ))), true);
+  if (activeSourceV2) {
+    view.setUint32(160, schroederActiveNodeFilter.activeSourcePhysicalCapacity, true);
+    view.setUint32(164, schroederActiveNodeFilter.activeSourceActiveCapacity, true);
+    view.setUint32(168, schroederActiveNodeFilter.activeSourceViewWordLength, true);
+    view.setUint32(
+      172,
+      schroederActiveNodeFilter.activeSourceActiveToPhysicalOffsetWords,
+      true
+    );
+    view.setUint32(
+      176,
+      schroederActiveNodeFilter.activeSourcePhysicalToActiveOffsetWords,
+      true
+    );
+    view.setUint32(180, schroederActiveNodeFilter.activeSourceFingerprint, true);
+    view.setUint32(184, schroederActiveNodeFilter.activeSourceDispatchXLimit, true);
+    view.setUint32(188, SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS, true);
+  }
   return buffer;
 }
 
@@ -7797,6 +8751,13 @@ function assertCanonicalSpatialMechanicalProposalGeneration({
     );
   }
   const execution = generation?.execution || null;
+  const directoryV2 = execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    && execution?.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    && execution?.reverseEncoding
+      === SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE;
+  const activeSourceView = directoryV2
+    ? (generation?.activeSourceView ?? execution?.activeSourceView ?? null)
+    : null;
   const directoryBuffer = execution?.directoryBuffer || null;
   const evidenceBuffer = execution?.evidenceBuffer || null;
   const directoryMismatch = directoryBuffer
@@ -7808,8 +8769,52 @@ function assertCanonicalSpatialMechanicalProposalGeneration({
   const evidenceBufferTooSmall = Number.isFinite(Number(evidenceBuffer?.size))
     && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
   const overlayRejected = generation?.source?.phaseVolumeAssignmentOverlayEnabled === true;
-  const schemaRejected = generation?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
-    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA;
+  let activeSourceRejected = false;
+  if (directoryV2) {
+    let activeSourceAdmission = { admitted: false };
+    try {
+      activeSourceAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
+        activeSourceView,
+        {
+          physicalSourceCount: execution?.physicalSourceCount,
+          physicalSourceCapacity: execution?.physicalSourceCapacity,
+          activeSourceCapacity: execution?.activeSourceCapacity,
+          sourceBuffer: execution?.sourceBuffer,
+          activeSourceViewBuffer: execution?.activeSourceViewBuffer,
+          generationId: execution?.generationId,
+          deviceOrdinal: execution?.deviceOrdinal,
+          laneOrdinal: execution?.laneOrdinal,
+          leaseToken: execution?.leaseToken,
+          sourceFamilyId: execution?.sourceFamilyId,
+          storageGeneration: execution?.storageGeneration,
+          physicsTick: execution?.physicsTick,
+          physicsSubstep: execution?.physicsSubstep,
+          positionEpoch: execution?.positionEpoch,
+          topologyEpoch: execution?.topologyEpoch,
+          chartEpoch: execution?.chartEpoch,
+          levelEpoch: execution?.levelEpoch,
+          supportEpoch: execution?.supportEpoch,
+          buildOrdinal: execution?.buildOrdinal
+        }
+      );
+    } catch {
+      activeSourceAdmission = { admitted: false };
+    }
+    activeSourceRejected = activeSourceAdmission.admitted !== true
+      || generation?.activeSourceViewRuntime !== activeSourceView?.ownerRuntime
+      || activeSourceView?.ownerRuntime?.isExecutionSubmitted?.(activeSourceView)
+        !== true
+      || execution?.activeSourceView !== activeSourceView
+      || execution?.activeSourceViewBuffer
+        !== activeSourceView?.activeSourceViewBuffer;
+  }
+  const schemaRejected = generation?.schema
+      !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
+    || (
+      execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      && !directoryV2
+    )
+    || activeSourceRejected;
   const queryProfileRejected = execution?.sourceAdapterId
       !== SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
     || execution?.exactNearQueryProfile?.ready !== true
@@ -8076,8 +9081,20 @@ export function createFusedSchroederActiveNodeBinding({
   labelPrefix = 'ulg-mls-mpm-fused'
 } = {}) {
   const execution = schroederSpatialEpochGeneration?.execution || null;
+  const directoryV2 = execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    && execution?.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    && execution?.reverseEncoding
+      === SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE;
+  const activeSourceView = directoryV2
+    ? (
+        schroederSpatialEpochGeneration?.activeSourceView
+        ?? execution?.activeSourceView
+        ?? null
+      )
+    : null;
   const directoryBuffer = execution?.directoryBuffer || null;
   const evidenceBuffer = execution?.evidenceBuffer || null;
+  const activeSourceBuffer = activeSourceView?.activeSourceViewBuffer ?? null;
   const mechanicsLevelView = resolveFusedSchroederMechanicsLevelView(
     schroederSpatialEpochGeneration,
     selectedLevel
@@ -8096,9 +9113,14 @@ export function createFusedSchroederActiveNodeBinding({
   const evidenceDeviceMismatch = evidenceBuffer
     ? webGpuDeviceMismatchInfo({ buffer: evidenceBuffer, device })
     : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
+  const activeSourceDeviceMismatch = activeSourceBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: activeSourceBuffer, device })
+    : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
   const deviceMismatch = directoryDeviceMismatch.mismatch
     ? directoryDeviceMismatch
-    : evidenceDeviceMismatch;
+    : (evidenceDeviceMismatch.mismatch
+        ? evidenceDeviceMismatch
+        : activeSourceDeviceMismatch);
   const evidenceBufferTooSmall = Number.isFinite(Number(evidenceBuffer?.size))
     && Number(evidenceBuffer.size) < SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES;
   const continuationStateAdmitted = canonicalParticleContinuation != null
@@ -8125,6 +9147,48 @@ export function createFusedSchroederActiveNodeBinding({
   };
   let mechanicsFieldViewOwnerAdmitted = false;
   let mechanicsFieldViewShapeAdmitted = false;
+  let activeSourceAdmission = null;
+  let activeSourceOwnerAdmitted = !directoryV2;
+  if (directoryV2) {
+    try {
+      activeSourceAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
+        activeSourceView,
+        {
+          physicalSourceCount: execution?.physicalSourceCount,
+          physicalSourceCapacity: execution?.physicalSourceCapacity,
+          activeSourceCapacity: execution?.activeSourceCapacity,
+          sourceBuffer: execution?.sourceBuffer,
+          activeSourceViewBuffer: execution?.activeSourceViewBuffer,
+          generationId: execution?.generationId,
+          deviceOrdinal: execution?.deviceOrdinal,
+          laneOrdinal: execution?.laneOrdinal,
+          leaseToken: execution?.leaseToken,
+          sourceFamilyId: execution?.sourceFamilyId,
+          storageGeneration: execution?.storageGeneration,
+          physicsTick: execution?.physicsTick,
+          physicsSubstep: execution?.physicsSubstep,
+          positionEpoch: execution?.positionEpoch,
+          topologyEpoch: execution?.topologyEpoch,
+          chartEpoch: execution?.chartEpoch,
+          levelEpoch: execution?.levelEpoch,
+          supportEpoch: execution?.supportEpoch,
+          buildOrdinal: execution?.buildOrdinal
+        }
+      );
+      activeSourceOwnerAdmitted =
+        schroederSpatialEpochGeneration?.activeSourceViewRuntime
+          === activeSourceView?.ownerRuntime
+        && activeSourceView?.ownerRuntime?.ownsExecution?.(activeSourceView)
+          === true
+        && activeSourceView?.ownerRuntime?.isExecutionSubmitted?.(
+          activeSourceView
+        ) === true
+        && execution?.activeSourceView === activeSourceView
+        && execution?.activeSourceViewBuffer === activeSourceBuffer;
+    } catch {
+      activeSourceOwnerAdmitted = false;
+    }
+  }
   if (mechanicsViewPublished) {
     mechanicsViewDeviceMismatch = mechanicsView?.mechanicsViewBuffer
       ? webGpuDeviceMismatchInfo({ buffer: mechanicsView.mechanicsViewBuffer, device })
@@ -8146,7 +9210,18 @@ export function createFusedSchroederActiveNodeBinding({
         levelEpoch: execution?.levelEpoch,
         supportEpoch: execution?.supportEpoch,
         sourceCount: execution?.sourceCount,
+        physicalSourceCount: execution?.physicalSourceCount
+          ?? execution?.sourceCount,
         sourceRowLayoutId: execution?.sourceRowLayoutId,
+        ...(directoryV2 ? {
+          directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+          directoryAbiVersion:
+            SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+          sourceAuthorityVersion:
+            SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+          sourceWorkIdentity:
+            SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+        } : {}),
         selectedLevel,
         gridNodeCount: gridSpec?.gridNodeCount,
         gridDims: gridSpec?.gridDims,
@@ -8177,6 +9252,13 @@ export function createFusedSchroederActiveNodeBinding({
         || continuationStateAdmitted
       )
       && mechanicsView?.directoryBuffer === directoryBuffer
+      && (!directoryV2 || (
+        mechanicsView?.spatialExecution === execution
+        && mechanicsView?.activeSourceView === activeSourceView
+        && mechanicsView?.activeSourceViewBuffer === activeSourceBuffer
+        && mechanicsView?.activeSourceCountAuthority
+          === execution?.activeSourceCountAuthority
+      ))
       && mechanicsView?.mechanicsViewBuffer === mechanicsView?.indirectDispatchBuffer
       && mechanicsView?.indirectDispatchOffsetBytes
         === SCHROEDER_SPATIAL_MECHANICS_VIEW_DISPATCH_OFFSET_WORDS * Uint32Array.BYTES_PER_ELEMENT
@@ -8229,6 +9311,8 @@ export function createFusedSchroederActiveNodeBinding({
         supportEpoch: execution?.supportEpoch,
         completionOrdinal: execution?.buildOrdinal,
         sourceCount: execution?.sourceCount,
+        physicalSourceCount: execution?.physicalSourceCount
+          ?? execution?.sourceCount,
         sourceRowLayoutId: execution?.sourceRowLayoutId,
         identityStrideWords: SPH_GPU_PARTICLE_IDENTITY_UINTS,
         selectedLevel,
@@ -8254,6 +9338,22 @@ export function createFusedSchroederActiveNodeBinding({
       && mechanicsFieldView?.sourceBuffer === execution?.sourceBuffer
       && mechanicsFieldView?.identityBuffer === particleIdentityBuffer
       && mechanicsFieldView?.parentMechanicsView === mechanicsView
+      && (!directoryV2 || (
+        mechanicsFieldView?.sourceAuthorityVersion
+          === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+        && mechanicsFieldView?.spatialExecution === execution
+        && mechanicsFieldView?.directoryBuffer === directoryBuffer
+        && mechanicsFieldView?.activeSourceView === activeSourceView
+        && mechanicsFieldView?.activeSourceViewBuffer === activeSourceBuffer
+        && mechanicsFieldView?.activeSourceCountAuthority
+          === execution?.activeSourceCountAuthority
+        && mechanicsFieldView?.candidateCount === null
+        && mechanicsFieldView?.stableCandidateOrderCount === null
+        && mechanicsFieldView?.stableCandidateOrderCountAuthority?.buffer
+          === activeSourceBuffer
+        && mechanicsFieldView?.stableCandidateOrderCountAuthority?.offsetWords
+          === 43
+      ))
       && mechanicsFieldView?.fieldViewBuffer === mechanicsFieldView?.indirectDispatchBuffer
       && mechanicsFieldView?.indirectDispatchOffsetBytes
         === SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
@@ -8289,9 +9389,18 @@ export function createFusedSchroederActiveNodeBinding({
     || !mechanicsFieldViewOwnerAdmitted
     || !mechanicsFieldViewShapeAdmitted
   );
+  const activeSourceRejected = directoryV2 && (
+    activeSourceAdmission?.admitted !== true
+    || !activeSourceOwnerAdmitted
+    || activeSourceDeviceMismatch.mismatch
+    || !activeSourceBuffer
+  );
   const schemaRejected = schroederSpatialEpochGeneration != null && (
     schroederSpatialEpochGeneration?.schema !== SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
-    || execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+    || (
+      execution?.schema !== SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      && !directoryV2
+    )
   );
   const overlayRejected =
     schroederSpatialEpochGeneration?.source?.phaseVolumeAssignmentOverlayEnabled === true;
@@ -8312,6 +9421,7 @@ export function createFusedSchroederActiveNodeBinding({
     && !deviceMismatch.mismatch
     && !evidenceBufferTooSmall
     && !schemaRejected
+    && !activeSourceRejected
     && !queryProfileRejected
     && !mechanicsViewRejected
     && !mechanicsFieldViewRejected
@@ -8320,6 +9430,10 @@ export function createFusedSchroederActiveNodeBinding({
     const rejectionStatus = (() => {
       if (deviceMismatch.mismatch) {
         return 'canonical-spatial-directory-rejected-device';
+      }
+      if (activeSourceRejected) {
+        return activeSourceAdmission?.status
+          ?? 'canonical-spatial-active-source-rejected-owner';
       }
       if (mechanicsViewRejected) {
         if (mechanicsViewDeviceMismatch.mismatch) {
@@ -8388,6 +9502,11 @@ export function createFusedSchroederActiveNodeBinding({
       levelEpoch: 0,
       supportEpoch: 0,
       activeNodeBuffer: buffer,
+      directoryAbiVersion: SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+      activeSourceP2gEnabled: false,
+      activeSourceView: null,
+      activeSourceBuffer: null,
+      activeSourceActiveDispatchOffsetBytes: 0,
       evidenceBuffer: null,
       mechanicsViewEnabled: false,
       mechanicsViewBuffer: null,
@@ -8447,6 +9566,45 @@ export function createFusedSchroederActiveNodeBinding({
     supportEpoch: execution.supportEpoch,
     generationId: execution.generationId,
     activeNodeBuffer: directoryBuffer,
+    directoryAbiVersion: directoryV2
+      ? SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      : SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+    activeSourceP2gEnabled: directoryV2 && mechanicsFieldViewEnabled,
+    activeSourceView: directoryV2 ? activeSourceView : null,
+    activeSourceBuffer: directoryV2 ? activeSourceBuffer : null,
+    activeSourceActiveDispatchOffsetBytes: directoryV2
+      ? activeSourceView.activeDispatchOffsetBytes
+      : 0,
+    activeSourceCandidateDispatchOffsetBytes: directoryV2
+      ? activeSourceView.candidateDispatchOffsetBytes
+      : 0,
+    activeSourcePhysicalDispatchOffsetBytes: directoryV2
+      ? activeSourceView.physicalDispatchOffsetBytes
+      : 0,
+    activeSourcePhysicalCapacity: directoryV2
+      ? activeSourceView.physicalSourceCapacity
+      : 0,
+    activeSourceActiveCapacity: directoryV2
+      ? activeSourceView.activeSourceCapacity
+      : 0,
+    activeSourceViewWordLength: directoryV2
+      ? activeSourceView.layout.wordLength
+      : 0,
+    activeSourceActiveToPhysicalOffsetWords: directoryV2
+      ? activeSourceView.layout.activeToPhysicalOffsetWords
+      : 0,
+    activeSourcePhysicalToActiveOffsetWords: directoryV2
+      ? activeSourceView.layout.physicalToActiveOffsetWords
+      : 0,
+    activeSourceFingerprint: directoryV2
+      ? activeSourceView.sourceFingerprint
+      : 0,
+    activeSourceDispatchXLimit: directoryV2
+      ? activeSourceView.layout?.dispatchXLimit
+        ?? activeSourceView.dispatchXLimit
+        ?? device?.limits?.maxComputeWorkgroupsPerDimension
+        ?? 65535
+      : 0,
     evidenceBuffer: authorityEvidenceBuffer,
     mechanicsViewEnabled,
     mechanicsViewExecution: mechanicsViewEnabled ? mechanicsView : null,
@@ -8549,6 +9707,18 @@ function fusedSchroederActiveNodeFilterMetadata(filter = null) {
     directoryBufferSource: filter?.activeNodeBufferSource ?? null,
     evidenceBufferByteLength: filter?.evidenceBufferByteLength ?? 0,
     evidenceBufferSource: filter?.evidenceBufferSource ?? null,
+    directoryAbiVersion: filter?.directoryAbiVersion ?? null,
+    activeSourceP2gEnabled: filter?.activeSourceP2gEnabled === true,
+    activeSourceDispatchMode: filter?.activeSourceP2gEnabled === true
+      ? 'gpu-authored-active-source-indirect'
+      : null,
+    activeSourceActiveDispatchOffsetBytes:
+      filter?.activeSourceActiveDispatchOffsetBytes ?? 0,
+    activeSourcePhysicalCapacity: filter?.activeSourcePhysicalCapacity ?? 0,
+    activeSourceActiveCapacity: filter?.activeSourceActiveCapacity ?? 0,
+    activeSourceWorkIdentity: filter?.activeSourceP2gEnabled === true
+      ? 'gpu-active-ordinal-to-physical'
+      : null,
     mechanicsViewEnabled: filter?.mechanicsViewEnabled === true,
     mechanicsViewNodeCapacity: filter?.mechanicsViewNodeCapacity ?? 0,
     mechanicsViewByteLength: filter?.mechanicsViewByteLength ?? 0,
@@ -8717,8 +9887,12 @@ function createFusedG2pParamsArray({
   // P2G. Pre-canonical mode remains an explicit assignment-row pipeline.
   const levelFilterEnabled = schroederLevelFilter?.enabled === true;
   const canonicalSpatialAuthority = schroederSpatialDirectory?.enabled === true;
+  const activeSourceV2 =
+    schroederSpatialDirectory?.activeSourceP2gEnabled === true;
   const buffer = new ArrayBuffer(
-    canonicalSpatialAuthority ? FUSED_CANONICAL_G2P_PARAMS_BYTES : 80
+    activeSourceV2
+      ? FUSED_ACTIVE_SOURCE_V2_G2P_PARAMS_BYTES
+      : (canonicalSpatialAuthority ? FUSED_CANONICAL_G2P_PARAMS_BYTES : 80)
   );
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
@@ -8803,6 +9977,24 @@ function createFusedG2pParamsArray({
       mechanicsFieldMutationOrdinal,
       0
     ))), true);
+    if (activeSourceV2) {
+      view.setUint32(144, schroederSpatialDirectory.activeSourcePhysicalCapacity, true);
+      view.setUint32(148, schroederSpatialDirectory.activeSourceActiveCapacity, true);
+      view.setUint32(152, schroederSpatialDirectory.activeSourceViewWordLength, true);
+      view.setUint32(
+        156,
+        schroederSpatialDirectory.activeSourceActiveToPhysicalOffsetWords,
+        true
+      );
+      view.setUint32(
+        160,
+        schroederSpatialDirectory.activeSourcePhysicalToActiveOffsetWords,
+        true
+      );
+      view.setUint32(164, schroederSpatialDirectory.activeSourceFingerprint, true);
+      view.setUint32(168, schroederSpatialDirectory.activeSourceDispatchXLimit, true);
+      view.setUint32(172, schroederSpatialDirectory.completionOrdinal, true);
+    }
   }
   return buffer;
 }
@@ -9159,7 +10351,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const gridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
   const gridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const p2gAccumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
-  const p2gAccumulatorByteLength = p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
+  const p2gAccumulatorBaseByteLength =
+    p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
   const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   // Never size GPU output buffers from the CPU arrays alone: under
   // GPU-resident continuation the CPU copies can be stale or detached
@@ -9190,6 +10383,14 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     && schroederActiveNodeFilter.mechanicsViewEnabled === true;
   const mechanicsFieldViewEnabled = compactMechanicsViewEnabled
     && schroederActiveNodeFilter.mechanicsFieldViewEnabled === true;
+  const activeSourceV2P2gEnabled = mechanicsFieldViewEnabled
+    && schroederActiveNodeFilter.activeSourceP2gEnabled === true;
+  const compactMechanicsOwnedEvidenceEnabled =
+    compactMechanicsViewEnabled && !mechanicsFieldViewEnabled;
+  const p2gAccumulatorByteLength = p2gAccumulatorBaseByteLength
+    + (compactMechanicsOwnedEvidenceEnabled
+      ? SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+      : 0);
   const mechanicsFieldExecution = mechanicsFieldViewEnabled
     ? schroederActiveNodeFilter.mechanicsFieldViewExecution
     : null;
@@ -9299,6 +10500,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     mechanicsFieldViewEnabled,
     p2gBackend
   });
+  if (activeSourceV2P2gEnabled) {
+    Object.assign(dispatchTopology.p2g, {
+      topology: 'active-source-ordinal-parallel-field-contribution-emission',
+      dispatchAxis: 'gpu-active-source-ordinal',
+      dispatchWorkgroupsPerSubstep: null,
+      dispatchWorkgroupsPerSubstepExact: false,
+      gpuAuthoredDispatchExact: true,
+      dispatchSubmissionMode: 'dispatchWorkgroupsIndirect',
+      invocationLimitPerSubstep: null,
+      invocationLimitPerSubstepUpperBound: particleCount,
+      activeSourceCountHostKnown: false,
+      physicalParticleCount: particleCount,
+      workIdentity: 'gpu-active-ordinal-to-physical'
+    });
+  }
   const gridBuffer = mechanicsFieldViewEnabled
     ? null
     : device.createBuffer({
@@ -9311,8 +10527,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       ? 'ulg-mls-mpm-fused-p2g-deterministic-field-contributions'
       : 'ulg-mls-mpm-fused-p2g-grid-accumulators',
     size: Math.max(4, p2gScratchByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.COPY_DST
+      | (compactMechanicsOwnedEvidenceEnabled ? GPU_BUFFER_USAGE.COPY_SRC : 0)
   });
+  const compactMechanicsG2pEvidenceBuffer =
+    compactMechanicsOwnedEvidenceEnabled
+      ? device.createBuffer({
+          label: 'ulg-mls-mpm-fused-compact-mechanics-g2p-owned-evidence',
+          size: SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES,
+          usage: GPU_BUFFER_USAGE.STORAGE
+            | GPU_BUFFER_USAGE.COPY_DST
+            | GPU_BUFFER_USAGE.COPY_SRC
+        })
+      : null;
   const updatedGridBuffer = mechanicsFieldViewEnabled
     ? null
     : tagWebGpuBufferDevice(device.createBuffer({
@@ -9436,6 +10664,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     p2gParamsBuffer,
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
+    ...[compactMechanicsG2pEvidenceBuffer].filter(Boolean),
     // productEventBuffer and pressureRowsBuffer are shared per device and
     // deliberately absent here: destroying them would break later substeps.
     ...[spatialAuthorityEvidenceReadbackBuffer].filter(Boolean),
@@ -9475,8 +10704,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     }
     const p2gCode = mechanicsFieldViewEnabled
       ? (observeCanonicalSpatialAuthority === true
-          ? mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl
-          : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl)
+          ? (activeSourceV2P2gEnabled
+              ? mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl
+              : mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl)
+          : (activeSourceV2P2gEnabled
+              ? mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+              : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl))
       : (compactMechanicsViewEnabled
         ? (observeCanonicalSpatialAuthority === true
             ? mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl
@@ -9496,7 +10729,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       ? `canonical-spatial.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}${mechanicsFieldViewEnabled
-            ? '.mechanics-field.single-level-deterministic-reduction-finalize-heat-clear'
+            ? `.mechanics-field.single-level-deterministic-reduction-finalize-heat-clear${
+              activeSourceV2P2gEnabled ? '.active-source-v2' : ''
+            }`
             : (compactMechanicsViewEnabled ? '.compact-mechanics' : '')}`
       : 'precanonical-assignment';
     const p2gBindings = [
@@ -9511,7 +10746,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(6, mechanicsFieldViewEnabled
         ? 'read-only-storage'
         : 'storage'),
-      computeBufferBinding(7, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      computeBufferBinding(
+        7,
+        canonicalSpatialAuthority && !compactMechanicsViewEnabled
+          ? 'storage'
+          : 'read-only-storage'
+      ),
       computeBufferBinding(8, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
@@ -9631,7 +10871,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           ? mechanicsFieldExecution.stableCandidateOrderBuffer
           : gridBuffer } },
         { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } },
-        { binding: 8, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } }
+        { binding: 8, resource: { buffer: activeSourceV2P2gEnabled
+          ? schroederActiveNodeFilter.activeSourceBuffer
+          : schroederActiveNodeFilter.activeNodeBuffer } }
       ];
     const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
     const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
@@ -9847,22 +11089,35 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'storage'),
       computeBufferBinding(6, 'uniform'),
-      computeBufferBinding(7, canonicalSpatialAuthority ? 'storage' : 'read-only-storage'),
+      computeBufferBinding(
+        7,
+        canonicalSpatialAuthority && !mechanicsFieldViewEnabled
+          ? 'storage'
+          : 'read-only-storage'
+      ),
       ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : [])
     ];
     const g2pCode = canonicalSpatialAuthority
       ? (observeCanonicalSpatialAuthority === true
           ? (mechanicsFieldViewEnabled
-              ? mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl
+              ? (activeSourceV2P2gEnabled
+                  ? mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl
+                  : mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl)
               : mlsMpmG2pReconstructCanonicalSpatialWgsl)
           : (mechanicsFieldViewEnabled
-              ? mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+              ? (activeSourceV2P2gEnabled
+                  ? mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+                  : mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl)
               : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl))
       : mlsMpmG2pReconstructWgsl;
     const g2pVariant = canonicalSpatialAuthority
       ? `canonical-spatial.${observeCanonicalSpatialAuthority === true
           ? 'observed'
-          : 'unobserved'}${mechanicsFieldViewEnabled ? '.mechanics-field' : ''}`
+          : 'unobserved'}${mechanicsFieldViewEnabled
+            ? `.mechanics-field${activeSourceV2P2gEnabled
+              ? '.active-source-v2'
+              : ''}`
+            : ''}`
       : 'precanonical-assignment';
     const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: canonicalSpatialAuthority
@@ -9904,9 +11159,13 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       { binding: 4, resource: { buffer: outStateBuffer } },
       { binding: 5, resource: { buffer: outMechanicsBuffer } },
       { binding: 6, resource: { buffer: g2pParamsBuffer } },
-      { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } },
+      { binding: 7, resource: { buffer:
+        compactMechanicsG2pEvidenceBuffer
+          ?? schroederLevelFilter.assignmentBuffer } },
       ...(canonicalSpatialAuthority
-        ? [{ binding: 8, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } }]
+        ? [{ binding: 8, resource: { buffer: activeSourceV2P2gEnabled
+          ? schroederActiveNodeFilter.activeSourceBuffer
+          : schroederActiveNodeFilter.activeNodeBuffer } }]
         : [])
     ];
     const g2pBindGroup = device.createBindGroup({
@@ -9930,7 +11189,19 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
-    if (canonicalSpatialAuthority) {
+    if (compactMechanicsOwnedEvidenceEnabled) {
+      encoder.clearBuffer(
+        p2gAccumulatorBuffer,
+        p2gAccumulatorBaseByteLength,
+        SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+      );
+      encoder.clearBuffer(
+        compactMechanicsG2pEvidenceBuffer,
+        0,
+        SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+      );
+    }
+    if (canonicalSpatialAuthority && !compactMechanicsViewEnabled) {
       encoder.clearBuffer(
         schroederLevelFilter.assignmentBuffer,
         SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_OFFSET_WORDS * Uint32Array.BYTES_PER_ELEMENT,
@@ -10037,7 +11308,19 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gPass = mechanicsFieldProductionPass || encoder.beginComputePass();
     p2gPass.setPipeline(p2gPipeline);
     p2gPass.setBindGroup(0, p2gBindGroup);
-    p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+    if (activeSourceV2P2gEnabled) {
+      if (typeof p2gPass.dispatchWorkgroupsIndirect !== 'function') {
+        throw new Error(
+          'ActiveSource-v2 P2G requires GPU-authored indirect dispatch'
+        );
+      }
+      p2gPass.dispatchWorkgroupsIndirect(
+        schroederActiveNodeFilter.activeSourceBuffer,
+        schroederActiveNodeFilter.activeSourceActiveDispatchOffsetBytes
+      );
+    } else {
+      p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+    }
     if (!mechanicsFieldProductionPass) p2gPass.end();
     const p2gFinalizePass = mechanicsFieldProductionPass
       || encoder.beginComputePass();
@@ -10129,6 +11412,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       );
       claimEnergyReceiptPass.dispatchWorkgroups(1);
     }
+    if (compactMechanicsOwnedEvidenceEnabled) {
+      if (typeof encoder.copyBufferToBuffer !== 'function') {
+        throw new Error(
+          'Compact mechanics G2P requires GPU-owned authority evidence transfer'
+        );
+      }
+      encoder.copyBufferToBuffer(
+        p2gAccumulatorBuffer,
+        p2gAccumulatorBaseByteLength,
+        compactMechanicsG2pEvidenceBuffer,
+        0,
+        SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+      );
+    }
     const g2pPass = mechanicsFieldProductionPass || encoder.beginComputePass();
     g2pPass.setPipeline(g2pPipeline);
     g2pPass.setBindGroup(0, g2pBindGroup);
@@ -10140,7 +11437,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         throw new Error('Canonical spatial authority evidence requires GPUCommandEncoder.copyBufferToBuffer');
       }
       encoder.copyBufferToBuffer(
-        schroederLevelFilter.assignmentBuffer,
+        compactMechanicsG2pEvidenceBuffer
+          ?? schroederLevelFilter.assignmentBuffer,
         0,
         spatialAuthorityEvidenceReadbackBuffer,
         0,
@@ -10282,7 +11580,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       projectionSchema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
       backend: 'webgpu',
       status: webgpuStatus.status,
-      kernelScope: 'particle-parallel-scatter-p2g-stress-momentum-projection',
+      kernelScope: activeSourceV2P2gEnabled
+        ? 'active-source-ordinal-parallel-p2g-stress-momentum-projection'
+        : 'particle-parallel-scatter-p2g-stress-momentum-projection',
       particleCount,
       gridSpacingM: gridSpec.gridSpacingM,
       gridDims: [...gridSpec.gridDims],
@@ -10344,6 +11644,17 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         ? MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
         : MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
       mechanicsFieldViewEnabled,
+      activeSourceP2gEnabled: activeSourceV2P2gEnabled,
+      activeSourceP2gDispatchMode: activeSourceV2P2gEnabled
+        ? 'gpu-authored-active-source-indirect'
+        : null,
+      activeSourceP2gWorkIdentity: activeSourceV2P2gEnabled
+        ? 'gpu-active-ordinal-to-physical'
+        : null,
+      activeSourceP2gPhysicalCount: activeSourceV2P2gEnabled
+        ? particleCount
+        : null,
+      activeSourceP2gActiveCountHostKnown: false,
       mechanicsFieldViewExecution: mechanicsFieldExecution,
       mechanicsFieldViewBuffer: mechanicsFieldViewEnabled
         ? schroederActiveNodeFilter.mechanicsFieldViewBuffer

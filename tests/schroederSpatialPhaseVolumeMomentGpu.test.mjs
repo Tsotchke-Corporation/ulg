@@ -16,8 +16,17 @@ import {
   createSchroederSpatialPhaseVolumeMomentWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeMomentWgsl.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   createSchroederSpatialMechanicsFieldViewPlan
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
+import {
+  createSchroederSpatialActiveSourceViewLayout
+} from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   createSchroederSpatialPhaseVolumeMomentGpu
 } from '../src/runtime/sph/schroederSpatialPhaseVolumeMomentGpu.js';
@@ -141,7 +150,8 @@ function taggedBuffer(device, label, size) {
 function createMechanicsFieldAuthority(device, {
   sourceCount = 2,
   sourceCapacity = 4,
-  selectedLevel = 0
+  selectedLevel = 0,
+  directoryV2 = false
 } = {}) {
   const sourceBuffer = taggedBuffer(
     device,
@@ -156,6 +166,9 @@ function createMechanicsFieldAuthority(device, {
   const plan = createSchroederSpatialMechanicsFieldViewPlan({
     sourceCount,
     sourceCapacity,
+    sourceAuthorityVersion: directoryV2
+      ? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      : undefined,
     sourceRowLayoutId: 1,
     identityStrideWords: 1,
     selectedLevel,
@@ -186,7 +199,7 @@ function createMechanicsFieldAuthority(device, {
   const stableCandidateOrderBuffer = taggedBuffer(
     device,
     'phase-volume-stable-candidate-order',
-    plan.candidateCount * Uint32Array.BYTES_PER_ELEMENT
+    plan.candidateCapacity * Uint32Array.BYTES_PER_ELEMENT
   );
   const field = {
     ...plan,
@@ -198,8 +211,109 @@ function createMechanicsFieldAuthority(device, {
     indirectDispatchBuffer: fieldViewBuffer,
     indirectDispatchOffsetBytes: 240,
     stableCandidateOrderBuffer,
-    stableCandidateOrderCount: plan.candidateCount
+    stableCandidateOrderCount: plan.candidateCount,
+    directorySchema: null,
+    directoryAbiVersion: null,
+    spatialExecution: null,
+    directoryBuffer: null,
+    activeSourceView: null,
+    activeSourceViewBuffer: null,
+    activeSourceCountAuthority: null,
+    stableCandidateOrderCountAuthority: null
   };
+  if (directoryV2) {
+    const activeLayout = createSchroederSpatialActiveSourceViewLayout({
+      physicalSourceCapacity: sourceCapacity,
+      activeSourceCapacity: sourceCapacity
+    });
+    const activeSourceViewBuffer = taggedBuffer(
+      device,
+      'phase-volume-active-source-view',
+      activeLayout.byteLength
+    );
+    const directoryBuffer = taggedBuffer(
+      device,
+      'phase-volume-directory-v2',
+      4096
+    );
+    const activeSourceView = {
+      schema: 'peercompute.ulg.schroeder-spatial-active-source-view.v1',
+      status: 'schroeder-spatial-active-source-view-gpu-encoded',
+      ready: true,
+      selected: true,
+      released: false,
+      ...Object.fromEntries([
+        'generationId',
+        'deviceOrdinal',
+        'laneOrdinal',
+        'leaseToken',
+        'sourceFamilyId',
+        'storageGeneration',
+        'physicsTick',
+        'physicsSubstep',
+        'positionEpoch',
+        'topologyEpoch',
+        'chartEpoch',
+        'levelEpoch',
+        'supportEpoch'
+      ].map((key) => [key, plan[key]])),
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCapacity,
+      activeSourceCapacity: sourceCapacity,
+      sourceRowLayoutId: 1,
+      sourceRowStrideFloats: 16,
+      buildOrdinal: plan.completionOrdinal,
+      sourceBuffer,
+      activeSourceViewBuffer,
+      activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+      candidateDispatchOffsetBytes: activeLayout.candidateDispatchOffsetBytes,
+      physicalDispatchOffsetBytes: activeLayout.physicalDispatchOffsetBytes,
+      layout: activeLayout
+    };
+    Object.defineProperty(activeSourceView, 'ownerRuntime', {
+      value: {
+        ownsExecution: (candidate) => candidate === activeSourceView
+      },
+      enumerable: false
+    });
+    const activeSourceCountAuthority = Object.freeze({
+      schema: activeSourceView.schema,
+      activeSourceView,
+      buffer: activeSourceViewBuffer,
+      offsetWords: 18,
+      offsetBytes: 18 * Uint32Array.BYTES_PER_ELEMENT,
+      capacity: sourceCapacity,
+      residency: 'gpu-only'
+    });
+    const candidateCountAuthority = Object.freeze({
+      buffer: activeSourceViewBuffer,
+      offsetWords: 43,
+      sealOffsetWords: 30,
+      expectedSeal: plan.completionOrdinal
+    });
+    const spatialExecution = {
+      schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+      abiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+      reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+      physicalSourceCount: sourceCount,
+      physicalSourceCapacity: sourceCapacity,
+      sourceBuffer,
+      directoryBuffer,
+      activeSourceView,
+      activeSourceViewBuffer,
+      activeSourceCountAuthority
+    };
+    Object.assign(field, {
+      directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+      directoryAbiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+      spatialExecution,
+      directoryBuffer,
+      activeSourceView,
+      activeSourceViewBuffer,
+      activeSourceCountAuthority,
+      stableCandidateOrderCountAuthority: candidateCountAuthority
+    });
+  }
   Object.defineProperty(field, 'ownerRuntime', {
     value: { ownsExecution: (candidate) => candidate === field },
     enumerable: false
@@ -327,7 +441,7 @@ test('phase-volume moment runtime preserves exact field provenance and caller-ow
     arenaCount: 2
   });
   assert.equal(runtime.schema, ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_SCHEMA);
-  assert.equal(runtime.pipelineCount, 4);
+  assert.equal(runtime.pipelineCount, 8);
   const createdBeforeEncode = tracker.createdBuffers.length;
   const encoder = createFakeEncoder();
   const execution = runtime.encode(encoder, {
@@ -367,6 +481,86 @@ test('phase-volume moment runtime preserves exact field provenance and caller-ow
   assert.equal(await runtime.releaseExecutionAfter(execution, Promise.resolve()), true);
   assert.equal(runtime.activeExecutionCount(), 0);
   assert.equal(authority.sourceMechanicsBuffer.destroyCount, 0);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves physical identities', () => {
+  const tracker = createFakeDevice();
+  const authority = createMechanicsFieldAuthority(tracker.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const runtime = createSchroederSpatialPhaseVolumeMomentGpu(tracker.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1
+  });
+  const encoder = createFakeEncoder();
+  const execution = runtime.encode(encoder, {
+    sourceBuffer: authority.sourceBuffer,
+    sourceMechanicsBuffer: authority.sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    mechanicsFieldView: authority.field
+  });
+
+  assert.equal(execution.sourceAuthorityVersion, 2);
+  assert.equal(execution.sourceWorkIdentity, 'gpu-active-ordinal');
+  assert.equal(execution.physicalSourceCount, 64);
+  assert.equal(execution.candidateCount, null);
+  assert.equal(
+    execution.candidateCountAuthority,
+    authority.field.stableCandidateOrderCountAuthority
+  );
+  assert.equal(execution.spatialExecution, authority.field.spatialExecution);
+  assert.equal(execution.activeSourceView, authority.field.activeSourceView);
+  assert.equal(execution.activeSourceCountAuthority.offsetWords, 18);
+  assert.equal(execution.candidateCountAuthority.offsetWords, 43);
+  assert.equal(execution.candidateCountAuthority.sealOffsetWords, 30);
+  assert.deepEqual(encoder.passes[0].indirect, {
+    buffer: authority.field.activeSourceViewBuffer,
+    offset: 51 * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.deepEqual(encoder.passes[1].indirect, {
+    buffer: authority.field.activeSourceViewBuffer,
+    offset: 51 * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.deepEqual(encoder.passes[2].indirect, {
+    buffer: authority.field.fieldViewBuffer,
+    offset: 60 * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.deepEqual(encoder.passes[3].dispatch, [1, 1, 1]);
+  assert.ok(
+    tracker.bindGroups.every(({ descriptor }) => (
+      descriptor.entries.some(({ binding }) => binding === 9)
+    ))
+  );
+  assert.equal(
+    validateSchroederSpatialPhaseVolumeMomentDescriptor(execution).admitted,
+    true
+  );
+
+  const v2Wgsl = createSchroederSpatialPhaseVolumeMomentWgsl(
+    execution.layout,
+    { sourceAuthorityVersion: 2 }
+  );
+  assert.match(v2Wgsl, /fn physical_source_for_active/);
+  assert.match(
+    v2Wgsl,
+    /let work_source = candidate_index \/ FIELD_STENCIL_SIZE[\s\S]*physical_source_for_active\(work_source\)/
+  );
+  assert.match(v2Wgsl, /i32\(round\(level\)\) != params\.selected_level/);
+  assert.match(v2Wgsl, /!\(sum\.x >= 0\.0\)/);
+  assert.match(
+    v2Wgsl,
+    /if \(count == 0u\) \{[\s\S]*dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u/
+  );
+  assert.doesNotMatch(
+    v2Wgsl,
+    /dispatchWorkgroups|mapAsync|readBuffer/
+  );
+
+  runtime.releaseExecution(execution, { discardedEncoder: true });
   assert.equal(runtime.destroy(), true);
 });
 

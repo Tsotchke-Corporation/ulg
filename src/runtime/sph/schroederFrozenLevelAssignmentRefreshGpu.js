@@ -2,6 +2,7 @@ import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
@@ -27,16 +28,19 @@ export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_STATUS_SUBMITTED =
   'schroeder-level-assignment-submitted';
 export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE = Object.freeze({
   FINE_SUBSTEP: 'frozen-fine-substep',
-  MACRO_BOUNDARY: 'macro-boundary-full-reclassification'
+  MACRO_BOUNDARY: 'macro-boundary-full-reclassification',
+  POST_CLOSURE: 'post-closure-full-reclassification'
 });
 
 const U32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const ASSIGNMENT_STRIDE_WORDS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const STATE_STRIDE_WORDS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
+const THERMO_STRIDE_WORDS = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
 const MECHANICS_STRIDE_WORDS =
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
 const ASSIGNMENT_STRIDE_BYTES = ASSIGNMENT_STRIDE_WORDS * U32_BYTES;
 const STATE_STRIDE_BYTES = STATE_STRIDE_WORDS * U32_BYTES;
+const THERMO_STRIDE_BYTES = THERMO_STRIDE_WORDS * U32_BYTES;
 const MECHANICS_STRIDE_BYTES = MECHANICS_STRIDE_WORDS * U32_BYTES;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
 const GPU_BUFFER_USAGE = {
@@ -45,6 +49,8 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+const frozenFineSubstepAuthorityProofs = new WeakMap();
+const admittedPostClosureLevelAssignments = new WeakMap();
 
 function refreshError(message, code, ErrorType = Error) {
   const error = new ErrorType(message);
@@ -457,11 +463,224 @@ function validateCurrentMechanics({
       'ERR_SCHROEDER_FROZEN_REFRESH_MECHANICS_PROVENANCE'
     );
   }
+  for (const field of [
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch'
+  ]) {
+    if (
+      exactU32(current[field], `currentMlsMpmParticleUpload.${field}`)
+      !== currentState[field]
+    ) {
+      throw refreshError(
+        `current SPH and MLS-MPM uploads disagree on ${field}`,
+        'ERR_SCHROEDER_FROZEN_REFRESH_MECHANICS_PROVENANCE'
+      );
+    }
+  }
   return {
     storageGeneration,
     mechanicsBuffer: current.mechanicsBuffer,
     mechanicsBufferByteLength: requiredMechanicsBytes
   };
+}
+
+function validateFrozenFineSubstepDescriptorAuthority({
+  priorLevelAssignment,
+  currentSphParticleUpload,
+  currentMlsMpmParticleUpload,
+  device,
+  particleCount,
+  priorIdentity,
+  currentState,
+  currentMechanics
+}) {
+  const requiredThermoBytes = checkedByteLength(
+    particleCount,
+    THERMO_STRIDE_BYTES,
+    'current thermo'
+  );
+  const sourceThermoBuffer = requireLiveSameDeviceBuffer(
+    priorLevelAssignment.sourceThermoBuffer,
+    device,
+    'priorLevelAssignment.sourceThermoBuffer',
+    requiredThermoBytes
+  );
+  if (
+    priorLevelAssignment.sourceThermoBufferBorrowed !== true
+    || currentSphParticleUpload.thermoBuffer !== sourceThermoBuffer
+    || currentSphParticleUpload.thermoStrideBytes !== THERMO_STRIDE_BYTES
+    || (
+      Number.isInteger(currentSphParticleUpload.thermoBufferByteLength)
+      && currentSphParticleUpload.thermoBufferByteLength < requiredThermoBytes
+    )
+  ) {
+    throw refreshError(
+      'frozen fine refresh requires the exact unchanged borrowed thermo descriptor source',
+      'ERR_SCHROEDER_FROZEN_REFRESH_DESCRIPTOR_AUTHORITY'
+    );
+  }
+  requireLiveSameDeviceBuffer(
+    currentSphParticleUpload.thermoBuffer,
+    device,
+    'currentSphParticleUpload.thermoBuffer',
+    requiredThermoBytes
+  );
+  if (
+    currentMechanics == null
+    || currentMlsMpmParticleUpload == null
+    || priorLevelAssignment.sourceMechanicsBufferBorrowed !== true
+    || !priorLevelAssignment.sourceMechanicsBuffer
+  ) {
+    throw refreshError(
+      'frozen fine refresh requires exact prior and current mechanics-generation authority',
+      'ERR_SCHROEDER_FROZEN_REFRESH_DESCRIPTOR_AUTHORITY'
+    );
+  }
+  requireLiveSameDeviceBuffer(
+    priorLevelAssignment.sourceMechanicsBuffer,
+    device,
+    'priorLevelAssignment.sourceMechanicsBuffer',
+    checkedByteLength(particleCount, MECHANICS_STRIDE_BYTES, 'prior mechanics')
+  );
+  for (const field of ['levelEpoch', 'supportEpoch']) {
+    const sphValue = exactU32(
+      currentSphParticleUpload[field],
+      `currentSphParticleUpload.${field}`
+    );
+    const mlsValue = exactU32(
+      currentMlsMpmParticleUpload[field],
+      `currentMlsMpmParticleUpload.${field}`
+    );
+    if (sphValue !== priorIdentity[field] || mlsValue !== sphValue) {
+      throw refreshError(
+        `frozen fine refresh cannot cross ${field}`,
+        'ERR_SCHROEDER_FROZEN_REFRESH_DESCRIPTOR_AUTHORITY'
+      );
+    }
+  }
+  return {
+    sourceThermoBuffer,
+    sourceThermoBufferByteLength: requiredThermoBytes,
+    currentMechanicsBuffer: currentMechanics.mechanicsBuffer,
+    currentMechanicsBufferByteLength: currentMechanics.mechanicsBufferByteLength,
+    storageGeneration: currentState.storageGeneration
+  };
+}
+
+function exactFrozenFineSubstepAuthorityProof(
+  proof,
+  {
+    runtime = null,
+    priorLevelAssignment = null,
+    currentSphParticleUpload = null,
+    currentMlsMpmParticleUpload = null
+  } = {}
+) {
+  const record = frozenFineSubstepAuthorityProofs.get(proof);
+  return Boolean(
+    record
+    && proof?.schema
+      === 'peercompute.ulg.schroeder-frozen-fine-substep-authority.v1'
+    && proof.status
+      === 'schroeder-frozen-fine-substep-authority-ready'
+    && Object.isFrozen(proof)
+    && (runtime == null || record.runtime === runtime)
+    && (
+      priorLevelAssignment == null
+      || record.priorLevelAssignment === priorLevelAssignment
+    )
+    && (
+      currentSphParticleUpload == null
+      || record.currentSphParticleUpload === currentSphParticleUpload
+    )
+    && (
+      currentMlsMpmParticleUpload == null
+      || record.currentMlsMpmParticleUpload === currentMlsMpmParticleUpload
+    )
+    && record.priorLevelAssignment?.assignmentBuffer
+      === proof.sourceAssignmentBuffer
+    && record.currentSphParticleUpload?.stateBuffer
+      === proof.currentStateBuffer
+    && record.currentSphParticleUpload?.thermoBuffer
+      === proof.frozenThermoBuffer
+    && record.currentMlsMpmParticleUpload?.mechanicsBuffer
+      === proof.currentMechanicsBuffer
+  );
+}
+
+export function validateSchroederFrozenFineSubstepAuthorityProof(
+  proof,
+  expected = {}
+) {
+  return exactFrozenFineSubstepAuthorityProof(proof, expected);
+}
+
+function exactPostClosureLevelAssignmentRecord(
+  levelAssignment,
+  {
+    device = null,
+    lookupLevelAssignment = null,
+    nextParticleUploads = null
+  } = {}
+) {
+  const record = admittedPostClosureLevelAssignments.get(levelAssignment);
+  return record
+    && (device == null || record.device === device)
+    && (
+      lookupLevelAssignment == null
+      || record.lookupLevelAssignment === lookupLevelAssignment
+    )
+    && (
+      nextParticleUploads == null
+      || record.nextParticleUploads === nextParticleUploads
+    )
+    ? record
+    : null;
+}
+
+export function validateSchroederPostClosureLevelAssignment(
+  levelAssignment,
+  expected = {}
+) {
+  const record = exactPostClosureLevelAssignmentRecord(
+    levelAssignment,
+    expected
+  );
+  if (!record) return false;
+  const { nextParticleUploads } = record;
+  const sph = nextParticleUploads.sphParticleUpload;
+  const mls = nextParticleUploads.mlsMpmParticleUpload;
+  return Boolean(
+    levelAssignment?.refreshMode
+      === SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE.POST_CLOSURE
+    && levelAssignment.levelClassificationMode
+      === 'post-closure-full-reclassification'
+    && levelAssignment.levelReclassificationPerformed === true
+    && levelAssignment.postClosureExactDescriptorSource === true
+    && levelAssignment.assignmentBuffer === record.assignmentBuffer
+    && levelAssignment.sourceStateBuffer === sph.stateBuffer
+    && levelAssignment.sourceThermoBuffer === sph.thermoBuffer
+    && levelAssignment.sourceMechanicsBuffer === mls.mechanicsBuffer
+    && levelAssignment.sourceLookupAssignmentBuffer
+      === record.lookupLevelAssignment.assignmentBuffer
+    && levelAssignment.particleCount === sph.particleCount
+    && [
+      'storageGeneration',
+      'physicsTick',
+      'physicsSubstep',
+      'positionEpoch',
+      'topologyEpoch',
+      'chartEpoch',
+      'levelEpoch',
+      'supportEpoch'
+    ].every((field) => (
+      levelAssignment[field] === sph[field]
+      && levelAssignment[field] === mls[field]
+    ))
+  );
 }
 
 function createParamsData(particleCount) {
@@ -673,6 +892,182 @@ export function admitSchroederMacroBoundaryLevelAssignment({
   return macroBoundaryLevelAssignment;
 }
 
+/**
+ * Admit the one full classifier run over the exact state/thermo/mechanics
+ * family produced by thermal -> reaction -> phase transfer. The earlier E*
+ * assignment remains the lookup authority for those laws; this output is the
+ * only assignment that may describe and publish their final continuation.
+ */
+export function admitSchroederPostClosureLevelAssignment({
+  device,
+  lookupLevelAssignment,
+  nextParticleUploads,
+  postClosureLevelAssignment,
+  maxParticleCount = nextParticleUploads?.sphParticleUpload?.particleCount
+} = {}) {
+  if (!device || (typeof device !== 'object' && typeof device !== 'function')) {
+    throw refreshError(
+      'post-closure classification admission requires one WebGPU device identity',
+      'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_DEVICE',
+      TypeError
+    );
+  }
+  const resolvedMaxParticleCount = positiveInteger(
+    maxParticleCount,
+    'maxParticleCount'
+  );
+  const lookup = validatePriorLevelAssignment(
+    lookupLevelAssignment,
+    device,
+    resolvedMaxParticleCount
+  );
+  const sph = nextParticleUploads?.sphParticleUpload ?? null;
+  const mls = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  if (
+    sph?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    || sph.status !== 'webgpu-uploaded'
+    || mls?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    || mls.status !== 'webgpu-uploaded'
+    || sph.particleCount !== lookup.particleCount
+    || mls.particleCount !== lookup.particleCount
+    || sph.stateStrideBytes !== STATE_STRIDE_BYTES
+    || sph.thermoStrideBytes !== THERMO_STRIDE_BYTES
+    || mls.mechanicsStrideBytes !== MECHANICS_STRIDE_BYTES
+  ) {
+    throw refreshError(
+      'post-closure classification requires one exact retained SPH/MLS-MPM family',
+      'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_SOURCE',
+      TypeError
+    );
+  }
+  const requiredStateBytes = checkedByteLength(
+    lookup.particleCount,
+    STATE_STRIDE_BYTES,
+    'post-closure state'
+  );
+  const requiredThermoBytes = checkedByteLength(
+    lookup.particleCount,
+    THERMO_STRIDE_BYTES,
+    'post-closure thermo'
+  );
+  const requiredMechanicsBytes = checkedByteLength(
+    lookup.particleCount,
+    MECHANICS_STRIDE_BYTES,
+    'post-closure mechanics'
+  );
+  requireLiveSameDeviceBuffer(
+    sph.stateBuffer,
+    device,
+    'nextParticleUploads.sphParticleUpload.stateBuffer',
+    requiredStateBytes
+  );
+  requireLiveSameDeviceBuffer(
+    sph.thermoBuffer,
+    device,
+    'nextParticleUploads.sphParticleUpload.thermoBuffer',
+    requiredThermoBytes
+  );
+  requireLiveSameDeviceBuffer(
+    mls.mechanicsBuffer,
+    device,
+    'nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer',
+    requiredMechanicsBytes
+  );
+  const currentIdentity = {};
+  for (const field of [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ]) {
+    const sphValue = exactU32(
+      sph[field],
+      `nextParticleUploads.sphParticleUpload.${field}`,
+      { positive: field === 'storageGeneration' }
+    );
+    const mlsValue = exactU32(
+      mls[field],
+      `nextParticleUploads.mlsMpmParticleUpload.${field}`,
+      { positive: field === 'storageGeneration' }
+    );
+    if (sphValue !== mlsValue) {
+      throw refreshError(
+        `post-closure SPH/MLS-MPM ${field} authority differs`,
+        'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+      );
+    }
+    currentIdentity[field] = sphValue;
+  }
+  if (
+    currentIdentity.physicsTick !== lookup.identity.physicsTick
+    || currentIdentity.physicsSubstep !== lookup.identity.physicsSubstep
+    || currentIdentity.positionEpoch < lookup.identity.positionEpoch
+    || currentIdentity.topologyEpoch < lookup.identity.topologyEpoch
+    || currentIdentity.chartEpoch !== lookup.identity.chartEpoch
+    || currentIdentity.levelEpoch <= lookup.identity.levelEpoch
+    || currentIdentity.supportEpoch <= lookup.identity.supportEpoch
+  ) {
+    throw refreshError(
+      'post-closure assignment must publish a fresh descriptor generation in the same lookup tick',
+      'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    );
+  }
+  const classified = validatePriorLevelAssignment(
+    postClosureLevelAssignment,
+    device,
+    resolvedMaxParticleCount
+  );
+  if (
+    postClosureLevelAssignment === lookupLevelAssignment
+    || postClosureLevelAssignment.assignmentBuffer
+      === lookupLevelAssignment.assignmentBuffer
+    || postClosureLevelAssignment.kernelScope
+      !== 'schroeder-gpu-level-assignment'
+    || postClosureLevelAssignment.fullParticleReadbackPerformed !== false
+    || postClosureLevelAssignment.sourceStateBuffer !== sph.stateBuffer
+    || postClosureLevelAssignment.sourceStateBufferBorrowed !== true
+    || postClosureLevelAssignment.sourceThermoBuffer !== sph.thermoBuffer
+    || postClosureLevelAssignment.sourceThermoBufferBorrowed !== true
+    || postClosureLevelAssignment.sourceMechanicsBuffer !== mls.mechanicsBuffer
+    || postClosureLevelAssignment.sourceMechanicsBufferBorrowed !== true
+    || classified.particleCount !== lookup.particleCount
+    || Object.entries(currentIdentity).some(
+      ([field, value]) => classified.identity[field] !== value
+    )
+  ) {
+    throw refreshError(
+      'post-closure assignment is not the fresh full classifier output for the exact continuation family',
+      'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_PROVENANCE'
+    );
+  }
+  Object.assign(postClosureLevelAssignment, {
+    refreshSchema: ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA,
+    refreshStatus: SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_STATUS_SUBMITTED,
+    refreshMode:
+      SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE.POST_CLOSURE,
+    levelClassificationMode: 'post-closure-full-reclassification',
+    levelReclassificationPerformed: true,
+    postClosureExactDescriptorSource: true,
+    sourceLookupAssignmentBuffer: lookupLevelAssignment.assignmentBuffer,
+    sourceLookupStorageGeneration: lookup.identity.storageGeneration,
+    sourceLookupTopologyEpoch: lookup.identity.topologyEpoch,
+    sourceLookupLevelEpoch: lookup.identity.levelEpoch,
+    sourceLookupSupportEpoch: lookup.identity.supportEpoch,
+    fullParticleReadbackPerformed: false
+  });
+  admittedPostClosureLevelAssignments.set(postClosureLevelAssignment, {
+    device,
+    lookupLevelAssignment,
+    nextParticleUploads,
+    assignmentBuffer: postClosureLevelAssignment.assignmentBuffer
+  });
+  return postClosureLevelAssignment;
+}
+
 export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
   maxParticleCount,
   arenaCount = 2,
@@ -879,6 +1274,78 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
     outputByteLength,
     normalHotLoopReadbackFree: true,
 
+    proveFineSubstepAuthority({
+      priorLevelAssignment,
+      currentSphParticleUpload,
+      currentMlsMpmParticleUpload,
+      physicsTick = priorLevelAssignment?.physicsTick,
+      physicsSubstep
+    } = {}) {
+      if (destroyed) {
+        throw refreshError(
+          'frozen level-assignment refresh runtime is destroyed',
+          'ERR_SCHROEDER_FROZEN_REFRESH_RUNTIME_DESTROYED'
+        );
+      }
+      const prior = validatePriorLevelAssignment(
+        priorLevelAssignment,
+        device,
+        resolvedMaxParticleCount
+      );
+      const current = validateCurrentState({
+        currentSphParticleUpload,
+        device,
+        particleCount: prior.particleCount,
+        priorIdentity: prior.identity,
+        physicsTick,
+        physicsSubstep
+      });
+      const currentMechanics = validateCurrentMechanics({
+        currentMlsMpmParticleUpload,
+        device,
+        particleCount: prior.particleCount,
+        currentState: current
+      });
+      const descriptorAuthority =
+        validateFrozenFineSubstepDescriptorAuthority({
+          priorLevelAssignment,
+          currentSphParticleUpload,
+          currentMlsMpmParticleUpload,
+          device,
+          particleCount: prior.particleCount,
+          priorIdentity: prior.identity,
+          currentState: current,
+          currentMechanics
+        });
+      const proof = Object.freeze({
+        schema: 'peercompute.ulg.schroeder-frozen-fine-substep-authority.v1',
+        status: 'schroeder-frozen-fine-substep-authority-ready',
+        ready: true,
+        mode: 'sealed-topology-stable-mechanics-microstep',
+        descriptorMutationPolicy:
+          'macro-frozen-descriptors-position-only-with-exact-generation-proof',
+        sourceAssignmentBuffer: priorLevelAssignment.assignmentBuffer,
+        currentStateBuffer: current.stateBuffer,
+        frozenThermoBuffer: descriptorAuthority.sourceThermoBuffer,
+        currentMechanicsBuffer: descriptorAuthority.currentMechanicsBuffer,
+        storageGeneration: current.storageGeneration,
+        physicsTick: current.physicsTick,
+        physicsSubstep: current.physicsSubstep,
+        positionEpoch: current.positionEpoch,
+        topologyEpoch: current.topologyEpoch,
+        chartEpoch: current.chartEpoch,
+        levelEpoch: prior.identity.levelEpoch,
+        supportEpoch: prior.identity.supportEpoch
+      });
+      frozenFineSubstepAuthorityProofs.set(proof, {
+        runtime,
+        priorLevelAssignment,
+        currentSphParticleUpload,
+        currentMlsMpmParticleUpload
+      });
+      return proof;
+    },
+
     async advance({
       refreshMode =
         SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE.FINE_SUBSTEP,
@@ -886,6 +1353,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       priorLevelAssignment,
       currentSphParticleUpload,
       currentMlsMpmParticleUpload = null,
+      frozenFineSubstepAuthorityProof = null,
       physicsTick,
       physicsSubstep,
       macroBoundaryLevelAssignment = null,
@@ -900,6 +1368,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           priorLevelAssignment,
           currentSphParticleUpload,
           currentMlsMpmParticleUpload,
+          frozenFineSubstepAuthorityProof,
           physicsTick,
           physicsSubstep,
           refreshMode
@@ -976,6 +1445,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       priorLevelAssignment,
       currentSphParticleUpload,
       currentMlsMpmParticleUpload = null,
+      frozenFineSubstepAuthorityProof = null,
       physicsTick = priorLevelAssignment?.physicsTick,
       physicsSubstep,
       refreshMode =
@@ -1022,6 +1492,31 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
         particleCount: prior.particleCount,
         currentState: current
       });
+      const descriptorAuthority =
+        validateFrozenFineSubstepDescriptorAuthority({
+          priorLevelAssignment,
+          currentSphParticleUpload,
+          currentMlsMpmParticleUpload,
+          device,
+          particleCount: prior.particleCount,
+          priorIdentity: prior.identity,
+          currentState: current,
+          currentMechanics
+        });
+      if (!exactFrozenFineSubstepAuthorityProof(
+        frozenFineSubstepAuthorityProof,
+        {
+          runtime,
+          priorLevelAssignment,
+          currentSphParticleUpload,
+          currentMlsMpmParticleUpload
+        }
+      )) {
+        throw refreshError(
+          'frozen fine refresh requires the exact controller-issued topology/generation proof',
+          'ERR_SCHROEDER_FROZEN_REFRESH_AUTHORITY_PROOF'
+        );
+      }
       const arena = arenas.find((candidate) => !candidate.busy && !candidate.retired);
       if (!arena) {
         throw refreshError(
@@ -1074,6 +1569,10 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           retainedAssignmentBuffer: true,
           sourceStateBuffer: current.stateBuffer,
           sourceStateBufferBorrowed: true,
+          sourceThermoBuffer: descriptorAuthority.sourceThermoBuffer,
+          sourceThermoBufferBorrowed: true,
+          sourceThermoBufferByteLength:
+            descriptorAuthority.sourceThermoBufferByteLength,
           sourceMechanicsBuffer: currentMechanics?.mechanicsBuffer ?? null,
           sourceMechanicsBufferBorrowed: currentMechanics != null,
           sourceMechanicsBufferByteLength:
@@ -1081,6 +1580,9 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           sourceMechanicsProvenanceStatus: currentMechanics
             ? 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-ready'
             : 'schroeder-frozen-level-assignment-refresh-current-mechanics-v0j-unavailable',
+          frozenFineSubstepAuthorityProof,
+          frozenFineSubstepAuthorityStatus:
+            frozenFineSubstepAuthorityProof.status,
           storageGeneration: current.storageGeneration,
           physicsTick: current.physicsTick,
           physicsSubstep: current.physicsSubstep,

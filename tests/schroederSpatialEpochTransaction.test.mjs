@@ -741,11 +741,13 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
   assert.equal(transaction.mechanicsLevelCount, 2);
   assert.deepEqual(transaction.mechanicsLevels, [0, 1]);
   assert.equal(transaction.hierarchyView, f.generation.hierarchyView);
-  assert.equal(transaction.activeRankView, f.generation.activeRankView);
+  assert.equal(transaction.activeSourceView, f.generation.activeSourceView);
   assert.equal(
-    transaction.activeRankView?.activeRankViewBuffer,
-    f.generation.execution.activeRankViewBuffer
+    transaction.activeSourceView.activeSourceViewBuffer,
+    f.generation.execution.activeSourceViewBuffer
   );
+  assert.equal(transaction.activeRankView, null);
+  assert.equal(f.generation.execution.activeRankViewBuffer, null);
   const summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.twoLevelAuthoritative, true);
   assert.equal(summary.mechanicsLevelCount, 2);
@@ -1008,7 +1010,7 @@ test('two-level transaction refuses an A/B-only S9-A sidecar without its receipt
   }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_PHASE_VOLUME_RECEIPT_IDENTITY' });
 });
 
-test('two-level transaction freezes the active-rank sidecar identity', () => {
+test('two-level transaction freezes the directory-v2 ActiveSource identity', () => {
   const f = twoLevelFixture();
   const transaction = createSchroederSpatialEpochTransaction({
     ...f,
@@ -1026,8 +1028,9 @@ test('two-level transaction freezes the active-rank sidecar identity', () => {
     ),
     true
   );
-  const activeRankBuildEncoded = f.generation.execution.activeRankViewBuildEncoded;
-  f.generation.execution.activeRankViewBuildEncoded = false;
+  const activeSourceViewBuffer = f.generation.execution.activeSourceViewBuffer;
+  f.generation.execution.activeSourceViewBuffer =
+    f.buffer('foreign-active-source-sidecar');
   assert.equal(
     validateSchroederSpatialEpochTransactionSourceFamily(
       transaction,
@@ -1035,7 +1038,28 @@ test('two-level transaction freezes the active-rank sidecar identity', () => {
     ),
     false
   );
-  f.generation.execution.activeRankViewBuildEncoded = activeRankBuildEncoded;
+  f.generation.execution.activeSourceViewBuffer = activeSourceViewBuffer;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    true
+  );
+  const activeSourceCountAuthority =
+    f.generation.execution.activeSourceCountAuthority;
+  f.generation.execution.activeSourceCountAuthority = Object.freeze({
+    ...activeSourceCountAuthority
+  });
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    false
+  );
+  f.generation.execution.activeSourceCountAuthority =
+    activeSourceCountAuthority;
   assert.equal(
     validateSchroederSpatialEpochTransactionSourceFamily(
       transaction,
@@ -1060,9 +1084,27 @@ test('two-level transaction freezes the active-rank sidecar identity', () => {
     ),
     true
   );
-  f.generation.activeRankView = Object.freeze({
-    ...f.generation.activeRankView,
-    activeRankViewBuffer: f.buffer('foreign-active-rank-sidecar')
+  const sourceFingerprint = f.generation.activeSourceView.sourceFingerprint;
+  f.generation.activeSourceView.sourceFingerprint =
+    (sourceFingerprint + 1) >>> 0;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    false
+  );
+  f.generation.activeSourceView.sourceFingerprint = sourceFingerprint;
+  assert.equal(
+    validateSchroederSpatialEpochTransactionSourceFamily(
+      transaction,
+      readerInputs
+    ),
+    true
+  );
+  const activeSourceView = f.generation.activeSourceView;
+  f.generation.activeSourceView = Object.freeze({
+    ...activeSourceView
   });
   assert.equal(
     validateSchroederSpatialEpochTransactionSourceFamily(
@@ -1073,31 +1115,16 @@ test('two-level transaction freezes the active-rank sidecar identity', () => {
   );
 });
 
-test('two-level transaction rejects a mutable active-rank descriptor', () => {
+test('two-level transaction rejects a mutable ActiveSource layout', () => {
   const f = twoLevelFixture();
-  const activeRankView = f.generation.activeRankView;
-  const mutableLayout = { ...activeRankView.layout };
-  const mutableExecution = {
-    ...f.generation.execution,
-    activeRankView: null,
-    activeRankViewLayout: mutableLayout
+  f.generation.activeSourceView.layout = {
+    ...f.generation.activeSourceView.layout
   };
-  const mutableActiveRankView = {
-    ...activeRankView,
-    spatialExecution: mutableExecution,
-    layout: mutableLayout
-  };
-  mutableExecution.activeRankView = mutableActiveRankView;
-  const mutableGeneration = {
-    ...f.generation,
-    execution: mutableExecution,
-    activeRankView: mutableActiveRankView
-  };
+  assert.equal(Object.isFrozen(f.generation.activeSourceView.layout), false);
   assert.throws(() => createSchroederSpatialEpochTransaction({
     ...f,
-    generation: mutableGeneration,
     twoLevelAuthoritative: true
-  }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_RANK_IDENTITY' });
+  }), { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_SOURCE_IDENTITY' });
 });
 
 test('two-level transaction admits one exact post-mechanics far-aggregate receipt after G2P', async () => {

@@ -13,6 +13,23 @@ import {
   validateSchroederSpatialHierarchyViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_PHYSICAL_WORK_IDENTITY,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+} from '../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+} from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
   schroederSpatialHierarchyViewWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialHierarchyViewWgsl.js';
 import {
@@ -122,18 +139,105 @@ function identity() {
   };
 }
 
-function createEncodedInputs(device) {
+function createEncodedInputs(device, {
+  directoryAbiVersion = SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+  physicalSourceCount = 8,
+  physicalSourceCapacity = physicalSourceCount,
+  gpuActivePhysicalSlots = null
+} = {}) {
   const ids = identity();
-  const sourceBuffer = device.createBuffer({ label: 'hierarchy-source', size: 2048, usage: 128 });
+  const directoryV2 =
+    directoryAbiVersion
+      === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2;
+  const directorySchema = directoryV2
+    ? ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    : ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA;
+  const sourceWorkIdentity = directoryV2
+    ? SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+    : SCHROEDER_SPATIAL_MECHANICS_VIEW_PHYSICAL_WORK_IDENTITY;
+  const sourceBuffer = device.createBuffer({
+    label: 'hierarchy-source',
+    size: physicalSourceCapacity * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
   const directoryBuffer = device.createBuffer({ label: 'hierarchy-directory', size: 4096, usage: 128 });
+  let activeSourceView = null;
+  let activeSourceViewBuffer = null;
+  let activeSourceCountAuthority = null;
+  if (directoryV2) {
+    activeSourceViewBuffer = device.createBuffer({
+      label: 'hierarchy-active-source-view',
+      size: 4096,
+      usage: 128 | 256
+    });
+    const activeOwner = {
+      ownsExecution(value) {
+        return value === activeSourceView;
+      }
+    };
+    activeSourceView = {
+      schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+      status: 'schroeder-spatial-active-source-view-gpu-encoded',
+      submitPerformed: false,
+      released: false,
+      sourceBuffer,
+      activeSourceViewBuffer,
+      physicalSourceCount,
+      physicalSourceCapacity,
+      activeSourceCapacity: physicalSourceCapacity,
+      activeSourceCount: null,
+      gpuActivePhysicalSlots: Object.freeze([
+        ...(gpuActivePhysicalSlots ?? [physicalSourceCount - 1])
+      ]),
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+      sourceRowStrideFloats: 16,
+      activeDispatchOffsetBytes: 32 * Uint32Array.BYTES_PER_ELEMENT,
+      ...ids,
+      buildOrdinal: ids.buildOrdinal,
+      ownerRuntime: activeOwner
+    };
+    activeSourceCountAuthority = Object.freeze({
+      schema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+      activeSourceView,
+      buffer: activeSourceViewBuffer,
+      offsetWords: SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+      offsetBytes:
+        SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+        * Uint32Array.BYTES_PER_ELEMENT,
+      capacity: physicalSourceCapacity,
+      residency: 'gpu-only'
+    });
+  }
   const spatialOwner = { ownsExecution: (value) => value === spatialExecution };
   const spatialExecution = {
-    schema: 'peercompute.ulg.schroeder-spatial-epoch.v1',
-    status: 'schroeder-spatial-epoch-gpu-encoded',
+    schema: directorySchema,
+    directorySchema,
+    directoryAbiVersion,
+    abiVersion: directoryAbiVersion,
+    status: directoryV2
+      ? 'schroeder-spatial-epoch-v2-gpu-encoded'
+      : 'schroeder-spatial-epoch-gpu-encoded',
     submitPerformed: false,
     released: false,
     sourceBuffer,
     directoryBuffer,
+    sourceCount: physicalSourceCount,
+    physicalSourceCount,
+    physicalSourceCapacity,
+    sourceWorkIdentity,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    reverseEncoding: directoryV2
+      ? SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+      : 0,
+    layout: {
+      schema: directorySchema,
+      physicalSourceCapacity
+    },
+    activeSourceView,
+    activeSourceViewBuffer,
+    activeSourceCountAuthority,
     ...ids
   };
   Object.defineProperty(spatialExecution, 'ownerRuntime', { value: spatialOwner });
@@ -152,6 +256,21 @@ function createEncodedInputs(device) {
       released: false,
       sourceBuffer,
       directoryBuffer,
+      spatialExecution,
+      directorySchema,
+      directoryAbiVersion,
+      sourceAuthorityVersion: directoryAbiVersion,
+      sourceWorkIdentity,
+      sourceCount: physicalSourceCount,
+      physicalSourceCount,
+      gpuAuthoredActiveSourceCount: directoryV2,
+      sourceRowLayoutId:
+        SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+      activeSourceView,
+      activeSourceViewBuffer,
+      activeSourceCountAuthority,
+      activeSourceDispatchOffsetBytes:
+        activeSourceView?.activeDispatchOffsetBytes ?? null,
       mechanicsViewBuffer,
       indirectDispatchBuffer: mechanicsViewBuffer,
       indirectDispatchOffsetBytes: 240,
@@ -168,6 +287,8 @@ function createEncodedInputs(device) {
   };
   return {
     spatialExecution,
+    activeSourceView,
+    activeSourceCountAuthority,
     fineMechanicsView: mechanics({ level: 0, dims: [8, 8, 8], spacing: 0.25, label: 'fine-view' }),
     coarseMechanicsView: mechanics({ level: 1, dims: [5, 5, 5], spacing: 0.5, label: 'coarse-view' })
   };
@@ -301,6 +422,119 @@ test('hierarchy runtime fails before encoding on foreign or nonadjacent mechanic
     /exact live encoded mechanics views/
   );
   inputs.coarseMechanicsView.selectedLevel = 1;
+  assert.equal(runtime.activeExecutionCount(), 0);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('hierarchy runtime admits exact directory-v2 active authority for sparse, mixed-level, and empty active sets', () => {
+  const device = createFakeDevice();
+  const runtime = createSchroederSpatialHierarchyViewGpu(device, {
+    fineGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseGrid: {
+      gridNodeCount: 125,
+      gridDims: [5, 5, 5],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    }
+  });
+  const sparse = createEncodedInputs(device, {
+    directoryAbiVersion: SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+    physicalSourceCount: 8,
+    physicalSourceCapacity: 8,
+    gpuActivePhysicalSlots: [7]
+  });
+  const sparseExecution = runtime.encode(createFakeEncoder(), sparse);
+  assert.equal(sparse.activeSourceView.activeSourceCount, null);
+  assert.deepEqual(sparse.activeSourceView.gpuActivePhysicalSlots, [7]);
+  assert.equal(sparseExecution.directorySchema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(sparseExecution.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+  assert.equal(
+    sparseExecution.sourceWorkIdentity,
+    SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+  );
+  assert.equal(sparseExecution.physicalSourceCount, 8);
+  assert.equal(sparseExecution.physicalSourceCapacity, 8);
+  assert.equal(
+    sparseExecution.activeSourceCountAuthority,
+    sparse.spatialExecution.activeSourceCountAuthority
+  );
+  assert.equal(runtime.releaseExecution(sparseExecution, { discardedEncoder: true }), true);
+
+  const empty = createEncodedInputs(device, {
+    directoryAbiVersion: SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+    physicalSourceCount: 8,
+    physicalSourceCapacity: 8,
+    gpuActivePhysicalSlots: []
+  });
+  const emptyExecution = runtime.encode(createFakeEncoder(), empty);
+  assert.equal(empty.activeSourceView.activeSourceCount, null);
+  assert.deepEqual(empty.activeSourceView.gpuActivePhysicalSlots, []);
+  assert.equal(emptyExecution.bufferAllocationCountDuringEncode, 0);
+  assert.equal(emptyExecution.readbackPerformed, false);
+  assert.equal(runtime.releaseExecution(emptyExecution, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('hierarchy runtime rejects cloned, forged, or stale directory-v2 mechanics authority', () => {
+  const device = createFakeDevice();
+  const inputs = createEncodedInputs(device, {
+    directoryAbiVersion: SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+    physicalSourceCount: 8,
+    physicalSourceCapacity: 8,
+    gpuActivePhysicalSlots: [7]
+  });
+  const runtime = createSchroederSpatialHierarchyViewGpu(device, {
+    fineGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseGrid: {
+      gridNodeCount: 125,
+      gridDims: [5, 5, 5],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    }
+  });
+  const exactSpatialExecution = inputs.fineMechanicsView.spatialExecution;
+  inputs.fineMechanicsView.spatialExecution = { ...exactSpatialExecution };
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), inputs),
+    /exact directory-v2 mechanics and ActiveSource authority/
+  );
+  inputs.fineMechanicsView.spatialExecution = exactSpatialExecution;
+
+  const exactCountAuthority = inputs.coarseMechanicsView.activeSourceCountAuthority;
+  inputs.coarseMechanicsView.activeSourceCountAuthority = {
+    ...exactCountAuthority
+  };
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), inputs),
+    /exact directory-v2 mechanics and ActiveSource authority/
+  );
+  inputs.coarseMechanicsView.activeSourceCountAuthority = exactCountAuthority;
+
+  inputs.coarseMechanicsView.levelEpoch += 1;
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), inputs),
+    /exact directory-v2 mechanics and ActiveSource authority/
+  );
+  inputs.coarseMechanicsView.levelEpoch -= 1;
+
+  inputs.spatialExecution.layout = {
+    ...inputs.spatialExecution.layout,
+    physicalSourceCapacity: 16
+  };
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), inputs),
+    /exact directory-v2 mechanics and ActiveSource authority/
+  );
   assert.equal(runtime.activeExecutionCount(), 0);
   assert.equal(runtime.destroy(), true);
 });

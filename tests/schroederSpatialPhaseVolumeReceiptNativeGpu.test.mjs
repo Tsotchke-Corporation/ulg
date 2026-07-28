@@ -550,3 +550,782 @@ test('native receipt WGSL fails closed when either authenticated field count hea
     await browser.close();
   }
 });
+
+test('native directory-v2 phase volume is sparse, mixed-level, physical-id stable, and A=0 exact', {
+  skip: RUN_NATIVE
+    ? false
+    : 'set ULG_RUN_NATIVE_PHASE_VOLUME_MOMENT=1 for native directory-v2 phase-volume coverage',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_PHASE_VOLUME_RECEIPT_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    const native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+
+      const nonce = Date.now();
+      const [momentAbi, momentWgsl, receiptAbi, receiptWgsl, fieldAbi, activeAbi] =
+        await Promise.all([
+          import(`/ulg-gpu-abi/src/schroederSpatialPhaseVolumeMoment.js?v2native=${nonce}`),
+          import(`/ulg-gpu-abi/src/schroederSpatialPhaseVolumeMomentWgsl.js?v2native=${nonce}`),
+          import(`/ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceipt.js?v2native=${nonce}`),
+          import(`/ulg-gpu-abi/src/schroederSpatialPhaseVolumeReceiptWgsl.js?v2native=${nonce}`),
+          import(`/ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js?v2native=${nonce}`),
+          import(`/ulg-gpu-abi/src/schroederSpatialActiveSourceView.js?v2native=${nonce}`)
+        ]);
+
+      const physicalSourceCount = 8;
+      const sourceCapacity = 8;
+      const fieldCapacity = sourceCapacity * 27;
+      const selectedLevel = 0;
+      const gridSpacingM = 0.25;
+      const identity = {
+        generationId: 131,
+        deviceOrdinal: 5,
+        laneOrdinal: 7,
+        leaseToken: 11,
+        sourceFamilyId: 13,
+        storageGeneration: 17,
+        physicsTick: 19,
+        physicsSubstep: 0,
+        positionEpoch: 23,
+        topologyEpoch: 29,
+        chartEpoch: 37,
+        levelEpoch: 41,
+        supportEpoch: 43,
+        completionOrdinal: 147
+      };
+      const momentLayout = momentAbi.createSchroederSpatialPhaseVolumeMomentLayout({
+        sourceCapacity,
+        fieldCapacity
+      });
+      const receiptLayout = receiptAbi.createSchroederSpatialPhaseVolumeReceiptLayout({
+        sourceCapacity,
+        fieldCapacity
+      });
+      const fieldLayout = fieldAbi.createSchroederSpatialMechanicsFieldViewLayout({
+        sourceCapacity
+      });
+      const activeLayout = activeAbi.createSchroederSpatialActiveSourceViewLayout({
+        physicalSourceCapacity: sourceCapacity,
+        activeSourceCapacity: sourceCapacity
+      });
+      const momentPlan = momentAbi.createSchroederSpatialPhaseVolumeMomentPlan({
+        sourceCount: physicalSourceCount,
+        sourceCapacity,
+        fieldCapacity,
+        selectedLevel,
+        gridNodeCount: 27,
+        gridSpacingM,
+        ...identity,
+        sourceAuthorityVersion: 2
+      });
+      const receiptPlan = receiptAbi.createSchroederSpatialPhaseVolumeReceiptPlan({
+        sourceCount: physicalSourceCount,
+        sourceCapacity,
+        fieldCapacity,
+        selectedLevel,
+        gridNodeCount: 27,
+        gridSpacingM,
+        ...identity,
+        sourceAuthorityVersion: 2
+      });
+      const momentShader = device.createShaderModule({
+        label: 'native-phase-volume-moment-v2',
+        code: momentWgsl.createSchroederSpatialPhaseVolumeMomentWgsl(
+          momentLayout,
+          { sourceAuthorityVersion: 2 }
+        )
+      });
+      const receiptShader = device.createShaderModule({
+        label: 'native-phase-volume-receipt-v2',
+        code: receiptWgsl.createSchroederSpatialPhaseVolumeReceiptWgsl(
+          receiptLayout,
+          { sourceAuthorityVersion: 2 }
+        )
+      });
+      const compilationErrors = [];
+      for (const shader of [momentShader, receiptShader]) {
+        const info = await shader.getCompilationInfo();
+        compilationErrors.push(...info.messages
+          .filter((message) => message.type === 'error')
+          .map((message) => message.message));
+      }
+      if (compilationErrors.length > 0) {
+        return { status: 'shader-error', compilationErrors, uncapturedErrors };
+      }
+      const createPipelines = (shader, names) => Object.fromEntries(
+        names.map((entryPoint) => [
+          entryPoint,
+          device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: shader, entryPoint }
+          })
+        ])
+      );
+      const momentPipelines = createPipelines(momentShader, [
+        'emit_phase_volume_moment_contributions',
+        'materialize_phase_volume_moment_ranges',
+        'reduce_phase_volume_moments',
+        'finalize_phase_volume_moments'
+      ]);
+      const receiptPipelines = createPipelines(receiptShader, [
+        'reduce_phase_volume_receipt_sources',
+        'reduce_phase_volume_receipt_fields',
+        'finalize_phase_volume_receipt'
+      ]);
+      const f32Bits = (value) => {
+        const words = new Uint32Array(1);
+        new Float32Array(words.buffer)[0] = value;
+        return words[0];
+      };
+      const paramsBytes = (plan, receipt = false) => {
+        const byteLength = receipt
+          ? receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_PARAMS_BYTES
+          : momentAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_PARAMS_BYTES;
+        const bytes = new ArrayBuffer(byteLength);
+        const view = new DataView(bytes);
+        const u32 = (word, value) => view.setUint32(
+          word * Uint32Array.BYTES_PER_ELEMENT,
+          Number(value) >>> 0,
+          true
+        );
+        u32(0, physicalSourceCount);
+        u32(1, sourceCapacity);
+        u32(2, fieldCapacity);
+        u32(3, fieldCapacity);
+        view.setInt32(4 * 4, selectedLevel, true);
+        u32(5, 27);
+        view.setFloat32(6 * 4, gridSpacingM, true);
+        view.setFloat32(7 * 4, 1 / gridSpacingM, true);
+        for (const [word, key] of [
+          [8, 'generationId'],
+          [9, 'deviceOrdinal'],
+          [10, 'laneOrdinal'],
+          [11, 'leaseToken'],
+          [12, 'sourceFamilyId'],
+          [13, 'storageGeneration'],
+          [14, 'physicsTick'],
+          [15, 'physicsSubstep'],
+          [16, 'positionEpoch'],
+          [17, 'topologyEpoch'],
+          [18, 'chartEpoch'],
+          [19, 'levelEpoch'],
+          [20, 'supportEpoch'],
+          [21, 'completionOrdinal']
+        ]) u32(word, identity[key]);
+        if (receipt) {
+          u32(22, receiptLayout.sourceGroupCapacity);
+          u32(23, receiptLayout.fieldGroupCapacity);
+          u32(24, receiptLayout.sourcePartialOffsetVec4);
+          u32(25, receiptLayout.fieldPartialOffsetVec4);
+          u32(26, receiptLayout.fieldConditioningOffsetVec4);
+          u32(27, receiptLayout.partialVec4Capacity);
+          u32(28, plan.sourceMechanicsStrideFloats);
+          u32(29, plan.rawVolumeRatioJMechanicsWord);
+          u32(30, plan.rawRestVolumeMechanicsWord);
+        } else {
+          u32(22, plan.assignmentStrideFloats);
+          u32(23, plan.mechanicsStrideFloats);
+          u32(24, plan.rawVolumeRatioJMechanicsWord);
+          u32(25, plan.rawRestVolumeMechanicsWord);
+          u32(26, plan.sourceRowLayoutId);
+        }
+        return bytes;
+      };
+      const writeIdentity = (words) => {
+        for (const [word, key] of [
+          [3, 'generationId'],
+          [4, 'deviceOrdinal'],
+          [5, 'laneOrdinal'],
+          [6, 'leaseToken'],
+          [7, 'sourceFamilyId'],
+          [8, 'storageGeneration'],
+          [9, 'physicsTick'],
+          [10, 'physicsSubstep'],
+          [11, 'positionEpoch'],
+          [12, 'topologyEpoch'],
+          [13, 'chartEpoch'],
+          [14, 'levelEpoch'],
+          [15, 'supportEpoch']
+        ]) words[word] = identity[key];
+      };
+      const activeDispatchShape = (count) => [
+        Math.ceil(count / 64),
+        1,
+        1
+      ];
+      const fieldDispatchShape = (count) => count === 0
+        ? [0, 0, 0]
+        : [Math.ceil(count / 64), 1, 1];
+      const makeActiveSource = (activePhysical) => {
+        const activeCount = activePhysical.length;
+        const words = new Uint32Array(activeLayout.wordLength);
+        words.fill(0xffff_ffff, activeLayout.activeToPhysicalOffsetWords);
+        words.fill(0, 0, activeLayout.activeToPhysicalOffsetWords);
+        words[0] = activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC;
+        words[1] = activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION;
+        words[2] = activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+          | activeAbi.SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED;
+        writeIdentity(words);
+        words[16] = physicalSourceCount;
+        words[17] = sourceCapacity;
+        words[18] = activeCount;
+        words[19] = sourceCapacity;
+        words[20] = physicalSourceCount - activeCount;
+        words[21] = 0;
+        words[22] = 0;
+        words[23] = 1;
+        words[24] = 16;
+        words[25] = activeLayout.activeToPhysicalOffsetWords;
+        words[26] = activeLayout.physicalToActiveOffsetWords;
+        words[27] = activeLayout.wordLength;
+        words[28] = activeLayout.headerWords + activeCount + physicalSourceCount;
+        words[29] = identity.completionOrdinal;
+        words[30] = identity.completionOrdinal;
+        words[32] = physicalSourceCount;
+        words[33] = activeCount;
+        words[34] = activeCount;
+        words[35] = activeCount;
+        words[36] = activeCount === 0 ? 0 : Math.max(...activePhysical) + 1;
+        words[37] = 64;
+        words[38] = 65535;
+        words[40] = 48;
+        words[41] = 51;
+        words[42] = 54;
+        words[43] = activeCount * 27;
+        words[44] = sourceCapacity * 27;
+        words[47] = identity.completionOrdinal ^ identity.generationId;
+        words.set(activeDispatchShape(activeCount), 48);
+        words.set(activeDispatchShape(activeCount * 27), 51);
+        words.set(activeDispatchShape(physicalSourceCount), 54);
+        for (const [activeOrdinal, physical] of activePhysical.entries()) {
+          words[activeLayout.activeToPhysicalOffsetWords + activeOrdinal] = physical;
+          words[activeLayout.physicalToActiveOffsetWords + physical] = activeOrdinal;
+        }
+        return words;
+      };
+      const makeField = ({ activeCount, selectedPhysical }) => {
+        const fieldCount = selectedPhysical.length === 0 ? 0 : 27;
+        const words = new Uint32Array(fieldLayout.wordLength);
+        words[0] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC;
+        words[1] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION;
+        words[2] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+          | fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED;
+        writeIdentity(words);
+        words[16] = physicalSourceCount;
+        words[17] = selectedLevel;
+        words[18] = 27;
+        words[19] = 3;
+        words[20] = 3;
+        words[21] = 3;
+        words[22] = 0;
+        words[23] = f32Bits(gridSpacingM);
+        words[24] = fieldLayout.descriptorOffsetWords;
+        words[25] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS;
+        words[26] = fieldLayout.keyOffsetWords;
+        words[27] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS;
+        words[28] = fieldLayout.accumulatorOffsetWords;
+        words[29] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ACCUMULATOR_WORDS;
+        words[30] = fieldLayout.stateOffsetWords;
+        words[31] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS;
+        words[32] = fieldCapacity;
+        words[33] = activeCount * 27;
+        words[34] = fieldCount;
+        words[35] = 0;
+        words[36] = 0;
+        words[37] = 0;
+        words[38] = identity.completionOrdinal;
+        words[39] = 1;
+        words[40] = 1;
+        words[41] = fieldLayout.pressureOffsetWords
+          + fieldCount
+            * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS;
+        words[42] = fieldLayout.wordLength;
+        words[43] = 0;
+        const fieldDispatch = fieldDispatchShape(fieldCount);
+        words.set(fieldDispatch, 44);
+        words[54] = physicalSourceCount;
+        words[55] = 1;
+        words[56] = 1;
+        words[57] = 1;
+        words[58] = 0;
+        words[59] = 0;
+        words.set(fieldDispatch, 60);
+        words[63] = 0;
+        for (const physical of selectedPhysical) {
+          const descriptor = fieldLayout.descriptorOffsetWords
+            + physical * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DESCRIPTOR_WORDS;
+          words[descriptor] = 1;
+          words[descriptor + 1] = 7;
+          words[descriptor + 2] = 0;
+          words[descriptor + 3] = 1;
+          for (let ordinal = 0; ordinal < 27; ordinal += 1) {
+            words[descriptor + 4 + ordinal] = ordinal;
+          }
+        }
+        for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
+          const key = fieldLayout.keyOffsetWords
+            + fieldIndex * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS;
+          words[key] = fieldIndex;
+          words[key + 1] = 1;
+          words[key + 2] = 7;
+          words[key + 3] = 0;
+        }
+        return words;
+      };
+      const makeSources = ({ activePhysical, selectedPhysical }) => {
+        const assignments = new Float32Array(sourceCapacity * 16);
+        const mechanics = new Float32Array(sourceCapacity * 32);
+        for (const physical of activePhysical) {
+          const assignment = physical * 16;
+          assignments[assignment] = selectedPhysical.includes(physical) ? 0 : 1;
+          assignments[assignment + 1] = gridSpacingM;
+          assignments[assignment + 6] = 1;
+          assignments[assignment + 8] = 1;
+          assignments[assignment + 9] = 7;
+          assignments[assignment + 10] = 1;
+          // Exact half-cell alignment deliberately creates valid zero-weight
+          // boundary fields; v2 must retain those keyed rows without turning
+          // a conservation identity into a lineage failure.
+          assignments[assignment + 12] = 0.375;
+          assignments[assignment + 13] = 0.375;
+          assignments[assignment + 14] = 0.375;
+          mechanics[physical * 32 + 18] = 2;
+          mechanics[physical * 32 + 19] = 0.003;
+        }
+        return { assignments, mechanics };
+      };
+      const makeStableOrder = ({ activePhysical, selectedPhysical }) => {
+        const selectedOrdinals = activePhysical
+          .map((physical, activeOrdinal) => ({ physical, activeOrdinal }))
+          .filter(({ physical }) => selectedPhysical.includes(physical))
+          .map(({ activeOrdinal }) => activeOrdinal);
+        const offLevelOrdinals = activePhysical
+          .map((physical, activeOrdinal) => ({ physical, activeOrdinal }))
+          .filter(({ physical }) => !selectedPhysical.includes(physical))
+          .map(({ activeOrdinal }) => activeOrdinal);
+        const values = [];
+        for (let stencil = 0; stencil < 27; stencil += 1) {
+          for (const activeOrdinal of selectedOrdinals) {
+            values.push(activeOrdinal * 27 + stencil);
+          }
+        }
+        for (const activeOrdinal of offLevelOrdinals) {
+          for (let stencil = 0; stencil < 27; stencil += 1) {
+            values.push(activeOrdinal * 27 + stencil);
+          }
+        }
+        const order = new Uint32Array(momentLayout.candidateCapacity);
+        order.fill(0xffff_ffff);
+        order.set(values);
+        return order;
+      };
+      const createBuffer = (label, dataOrSize, usage) => {
+        const size = typeof dataOrSize === 'number'
+          ? dataOrSize
+          : dataOrSize.byteLength;
+        const buffer = device.createBuffer({ label, size, usage });
+        if (typeof dataOrSize !== 'number') {
+          device.queue.writeBuffer(buffer, 0, dataOrSize);
+        }
+        return buffer;
+      };
+      const runCase = async ({ activePhysical, selectedPhysical, label }) => {
+        const activeWords = makeActiveSource(activePhysical);
+        const fieldWords = makeField({
+          activeCount: activePhysical.length,
+          selectedPhysical
+        });
+        const { assignments, mechanics } = makeSources({
+          activePhysical,
+          selectedPhysical
+        });
+        const stableOrder = makeStableOrder({
+          activePhysical,
+          selectedPhysical
+        });
+        const activeBuffer = createBuffer(
+          `${label}-active`,
+          activeWords,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+            | GPUBufferUsage.INDIRECT
+        );
+        const fieldBuffer = createBuffer(
+          `${label}-field`,
+          fieldWords,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+            | GPUBufferUsage.INDIRECT
+        );
+        const assignmentBuffer = createBuffer(
+          `${label}-assignments`,
+          assignments,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const mechanicsBuffer = createBuffer(
+          `${label}-mechanics`,
+          mechanics,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const orderBuffer = createBuffer(
+          `${label}-order`,
+          stableOrder,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const momentParams = createBuffer(
+          `${label}-moment-params`,
+          paramsBytes(momentPlan),
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+        const momentControl = createBuffer(
+          `${label}-moment-control`,
+          momentLayout.controlByteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+        );
+        const momentRows = createBuffer(
+          `${label}-moment-rows`,
+          momentLayout.momentByteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const contributions = createBuffer(
+          `${label}-contributions`,
+          momentLayout.candidateContributionByteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+        );
+        const scratch = createBuffer(
+          `${label}-scratch`,
+          momentLayout.scratchByteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+        );
+        const receiptParams = createBuffer(
+          `${label}-receipt-params`,
+          paramsBytes(receiptPlan, true),
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+        const receiptControl = createBuffer(
+          `${label}-receipt-control`,
+          receiptLayout.controlByteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        const receiptPartials = createBuffer(
+          `${label}-receipt-partials`,
+          receiptLayout.partialByteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+        const readback = createBuffer(
+          `${label}-readback`,
+          receiptLayout.controlByteLength,
+          GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        );
+        const buffers = [
+          activeBuffer,
+          fieldBuffer,
+          assignmentBuffer,
+          mechanicsBuffer,
+          orderBuffer,
+          momentParams,
+          momentControl,
+          momentRows,
+          contributions,
+          scratch,
+          receiptParams,
+          receiptControl,
+          receiptPartials,
+          readback
+        ];
+        try {
+          const momentEntries = {
+            assignment: { binding: 0, resource: { buffer: assignmentBuffer } },
+            mechanics: { binding: 1, resource: { buffer: mechanicsBuffer } },
+            field: { binding: 2, resource: { buffer: fieldBuffer } },
+            order: { binding: 3, resource: { buffer: orderBuffer } },
+            contributions: { binding: 4, resource: { buffer: contributions } },
+            scratch: { binding: 5, resource: { buffer: scratch } },
+            control: { binding: 6, resource: { buffer: momentControl } },
+            rows: { binding: 7, resource: { buffer: momentRows } },
+            params: { binding: 8, resource: { buffer: momentParams } },
+            active: { binding: 9, resource: { buffer: activeBuffer } }
+          };
+          const momentGroups = {
+            emit_phase_volume_moment_contributions: device.createBindGroup({
+              layout: momentPipelines.emit_phase_volume_moment_contributions
+                .getBindGroupLayout(0),
+              entries: [
+                momentEntries.assignment,
+                momentEntries.mechanics,
+                momentEntries.field,
+                momentEntries.order,
+                momentEntries.contributions,
+                momentEntries.scratch,
+                momentEntries.control,
+                momentEntries.params,
+                momentEntries.active
+              ]
+            }),
+            materialize_phase_volume_moment_ranges: device.createBindGroup({
+              layout: momentPipelines.materialize_phase_volume_moment_ranges
+                .getBindGroupLayout(0),
+              entries: [
+                momentEntries.field,
+                momentEntries.scratch,
+                momentEntries.control,
+                momentEntries.params,
+                momentEntries.active
+              ]
+            }),
+            reduce_phase_volume_moments: device.createBindGroup({
+              layout: momentPipelines.reduce_phase_volume_moments
+                .getBindGroupLayout(0),
+              entries: [
+                momentEntries.field,
+                momentEntries.contributions,
+                momentEntries.scratch,
+                momentEntries.control,
+                momentEntries.rows,
+                momentEntries.params,
+                momentEntries.active
+              ]
+            }),
+            finalize_phase_volume_moments: device.createBindGroup({
+              layout: momentPipelines.finalize_phase_volume_moments
+                .getBindGroupLayout(0),
+              entries: [
+                momentEntries.field,
+                momentEntries.control,
+                momentEntries.params,
+                momentEntries.active
+              ]
+            })
+          };
+          const receiptEntries = {
+            mechanics: { binding: 0, resource: { buffer: mechanicsBuffer } },
+            momentControl: { binding: 1, resource: { buffer: momentControl } },
+            momentRows: { binding: 2, resource: { buffer: momentRows } },
+            field: { binding: 3, resource: { buffer: fieldBuffer } },
+            partials: { binding: 4, resource: { buffer: receiptPartials } },
+            control: { binding: 5, resource: { buffer: receiptControl } },
+            params: { binding: 6, resource: { buffer: receiptParams } },
+            assignments: { binding: 7, resource: { buffer: assignmentBuffer } },
+            active: { binding: 8, resource: { buffer: activeBuffer } }
+          };
+          const receiptCommon = [
+            receiptEntries.momentControl,
+            receiptEntries.momentRows,
+            receiptEntries.field,
+            receiptEntries.partials,
+            receiptEntries.control,
+            receiptEntries.params,
+            receiptEntries.active
+          ];
+          const receiptGroups = {
+            reduce_phase_volume_receipt_sources: device.createBindGroup({
+              layout: receiptPipelines.reduce_phase_volume_receipt_sources
+                .getBindGroupLayout(0),
+              entries: [
+                receiptEntries.mechanics,
+                ...receiptCommon.slice(0, 6),
+                receiptEntries.assignments,
+                receiptEntries.active
+              ]
+            }),
+            reduce_phase_volume_receipt_fields: device.createBindGroup({
+              layout: receiptPipelines.reduce_phase_volume_receipt_fields
+                .getBindGroupLayout(0),
+              entries: receiptCommon
+            }),
+            finalize_phase_volume_receipt: device.createBindGroup({
+              layout: receiptPipelines.finalize_phase_volume_receipt
+                .getBindGroupLayout(0),
+              entries: receiptCommon
+            })
+          };
+          const encoder = device.createCommandEncoder({ label });
+          encoder.clearBuffer(momentControl);
+          encoder.clearBuffer(momentRows);
+          encoder.clearBuffer(scratch);
+          for (const [entryPoint, indirectBuffer, indirectOffset] of [
+            [
+              'emit_phase_volume_moment_contributions',
+              activeBuffer,
+              activeLayout.candidateDispatchOffsetBytes
+            ],
+            [
+              'materialize_phase_volume_moment_ranges',
+              activeBuffer,
+              activeLayout.candidateDispatchOffsetBytes
+            ],
+            [
+              'reduce_phase_volume_moments',
+              fieldBuffer,
+              fieldLayout.dispatchOffsetWords * 4
+            ]
+          ]) {
+            const pass = encoder.beginComputePass({ label: `${label}-${entryPoint}` });
+            pass.setPipeline(momentPipelines[entryPoint]);
+            pass.setBindGroup(0, momentGroups[entryPoint]);
+            pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset);
+            pass.end();
+          }
+          {
+            const entryPoint = 'finalize_phase_volume_moments';
+            const pass = encoder.beginComputePass({ label: `${label}-${entryPoint}` });
+            pass.setPipeline(momentPipelines[entryPoint]);
+            pass.setBindGroup(0, momentGroups[entryPoint]);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+          }
+          encoder.clearBuffer(receiptControl);
+          encoder.clearBuffer(receiptPartials);
+          for (const [entryPoint, indirectBuffer, indirectOffset] of [
+            [
+              'reduce_phase_volume_receipt_sources',
+              activeBuffer,
+              activeLayout.activeDispatchOffsetBytes
+            ],
+            [
+              'reduce_phase_volume_receipt_fields',
+              fieldBuffer,
+              fieldLayout.dispatchOffsetWords * 4
+            ]
+          ]) {
+            const pass = encoder.beginComputePass({ label: `${label}-${entryPoint}` });
+            pass.setPipeline(receiptPipelines[entryPoint]);
+            pass.setBindGroup(0, receiptGroups[entryPoint]);
+            pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset);
+            pass.end();
+          }
+          {
+            const entryPoint = 'finalize_phase_volume_receipt';
+            const pass = encoder.beginComputePass({ label: `${label}-${entryPoint}` });
+            pass.setPipeline(receiptPipelines[entryPoint]);
+            pass.setBindGroup(0, receiptGroups[entryPoint]);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+          }
+          encoder.copyBufferToBuffer(
+            receiptControl,
+            0,
+            readback,
+            0,
+            receiptLayout.controlByteLength
+          );
+          device.queue.submit([encoder.finish()]);
+          await readback.mapAsync(GPUMapMode.READ);
+          const control = new Uint32Array(readback.getMappedRange()).slice();
+          readback.unmap();
+          const floats = new Float32Array(control.buffer);
+          return {
+            statusFlags: control[2],
+            globalSourceCount: control[16],
+            fieldCount: control[18],
+            globalCandidateCount: control[20],
+            selectedSourceCount: control[47],
+            selectedCandidateCount: control[48],
+            selectedSourceVolumeM3: floats[30],
+            fieldVolumeM3: floats[31],
+            residualM3: floats[32],
+            terminalSeal: control[59],
+            sourceAuthorityVersion: control[60],
+            physicalSourceCount: control[61],
+            activeSourceCountAuthorityWord: control[62],
+            candidateCountAuthorityWord: control[63]
+          };
+        } finally {
+          for (const buffer of buffers) buffer.destroy();
+        }
+      };
+
+      const sparseMixed = await runCase({
+        activePhysical: [1, 5, 7],
+        selectedPhysical: [1, 7],
+        label: 'native-phase-volume-v2-sparse-mixed'
+      });
+      const empty = await runCase({
+        activePhysical: [],
+        selectedPhysical: [],
+        label: 'native-phase-volume-v2-empty'
+      });
+      await device.queue.onSubmittedWorkDone();
+      const validationError = await device.popErrorScope();
+      return {
+        status: 'ok',
+        ready:
+          receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_READY,
+        admitted:
+          receiptAbi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_ADMITTED,
+        sparseMixed,
+        empty,
+        validationError: validationError?.message || null,
+        uncapturedErrors
+      };
+    });
+
+    assert.notEqual(native.status, 'unsupported', native.reason);
+    assert.equal(native.status, 'ok', native.compilationErrors?.join('\n'));
+    assert.equal(native.validationError, null, native.validationError);
+    assert.deepEqual(native.uncapturedErrors, []);
+    for (const result of [native.sparseMixed, native.empty]) {
+      assert.equal(
+        result.statusFlags,
+        native.ready | native.admitted,
+        JSON.stringify(result)
+      );
+      assert.equal(result.sourceAuthorityVersion, 2);
+      assert.equal(result.physicalSourceCount, 8);
+      assert.equal(result.activeSourceCountAuthorityWord, 18);
+      assert.equal(result.candidateCountAuthorityWord, 43);
+      assert.notEqual(result.terminalSeal, 0);
+    }
+    assert.equal(native.sparseMixed.globalSourceCount, 3);
+    assert.equal(native.sparseMixed.globalCandidateCount, 81);
+    assert.equal(native.sparseMixed.selectedSourceCount, 2);
+    assert.equal(native.sparseMixed.selectedCandidateCount, 54);
+    assert.equal(native.sparseMixed.fieldCount, 27);
+    assert.ok(Math.abs(native.sparseMixed.selectedSourceVolumeM3 - 0.012) < 2e-5);
+    assert.ok(Math.abs(native.sparseMixed.fieldVolumeM3 - 0.012) < 2e-5);
+    assert.ok(Math.abs(native.sparseMixed.residualM3) < 2e-5);
+    assert.equal(native.empty.globalSourceCount, 0);
+    assert.equal(native.empty.globalCandidateCount, 0);
+    assert.equal(native.empty.selectedSourceCount, 0);
+    assert.equal(native.empty.selectedCandidateCount, 0);
+    assert.equal(native.empty.fieldCount, 0);
+    assert.equal(native.empty.selectedSourceVolumeM3, 0);
+    assert.equal(native.empty.fieldVolumeM3, 0);
+    assert.equal(native.empty.residualM3, 0);
+  } finally {
+    await browser.close();
+  }
+});

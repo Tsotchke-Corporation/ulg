@@ -1,4 +1,20 @@
 import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAGIC,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAX_RANKS_PER_LANE,
@@ -6,15 +22,22 @@ import {
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_STATUS_READY,
   SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+  validateSchroederSpatialActiveSourceViewDescriptor,
   validateSchroederSpatialActiveRankViewDescriptor,
   validateSchroederSpatialAggregateViewDescriptor
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
-  createSchroederSpatialExactNearTraversalV1Wgsl
+  createSchroederSpatialExactNearTraversalV1Wgsl,
+  createSchroederSpatialExactNearTraversalV2Wgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js';
 import {
   createSchroederSpatialExactNearCellTreeTraversalV1Wgsl
@@ -48,7 +71,7 @@ import {
 } from './sphPostSeparationThermalBinAuthority.js';
 
 export const ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-thermal-proposal.v2';
+  'peercompute.ulg.schroeder-spatial-thermal-proposal.v3';
 export const ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_BUFFER_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-proposal-buffer.v2';
 export const ULG_SCHROEDER_SPATIAL_THERMAL_EVIDENCE_SCHEMA =
@@ -95,10 +118,16 @@ export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL = 2;
 // The base epoch's compact canonical-rank view.  It is intentionally a
 // separate value so saved aggregate/local receipts retain their ABI meaning.
 export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK = 3;
+// Directory-v2 owns a retained GPU-authenticated ActiveSource view. In this
+// mode every thermal source invocation is an active ordinal whose physical
+// identity is recovered from that view; no host count or legacy rank sidecar
+// is authoritative.
+export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE = 4;
 export const SCHROEDER_SPATIAL_THERMAL_CURRENT_ACTIVE_SOURCE_COUNT_WORD = 6;
 export const SCHROEDER_SPATIAL_THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD = 7;
 export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD = 8;
-export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS = 9;
+export const SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD = 9;
+export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS = 10;
 export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES = 80;
 export const SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES = 104;
@@ -185,7 +214,8 @@ export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT = Object.freeze([
   'activeMemberProjectionAdmission:atomic<u32>',
   'currentActiveSourceCount:atomic<u32>',
   'expectedActiveMemberCount:atomic<u32>',
-  'materializedActiveSourceRankCount:atomic<u32>'
+  'materializedActiveSourceRankCount:atomic<u32>',
+  'physicalTopologyMismatchCount:atomic<u32>'
 ]);
 
 export const SCHROEDER_SPATIAL_THERMAL_EVIDENCE_LAYOUT = Object.freeze([
@@ -440,7 +470,7 @@ function createThermalParamsArray({
   );
   if (
     projectionMode
-      > SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+      > SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
   ) {
     throw new RangeError('activeSourceProjectionMode is unsupported');
   }
@@ -1195,6 +1225,30 @@ const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE: u32 = ${SCHROEDER_SPATIAL_THER
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE}u;
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL}u;
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK}u;
+const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC >>> 0}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_STATUS_EXACT: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED
+}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_REJECTED_MASK: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+  | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE
+}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_STRIDE_FLOATS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_ROW_LAYOUT: u32 = ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_CANDIDATE_DISPATCH_OFFSET: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS}u;
+const THERMAL_PREFLIGHT_ACTIVE_SOURCE_MISSING_ORDINAL: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL}u;
+const THERMAL_PREFLIGHT_DIRECTORY_V2_VERSION: u32 = ${SCHROEDER_SPATIAL_EPOCH_V2_VERSION}u;
+const THERMAL_PREFLIGHT_PHYSICAL_TOPOLOGY_MISMATCH_WORD: u32 = ${SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD}u;
 const THERMAL_PREFLIGHT_ACTIVE_RANK_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAGIC >>> 0}u;
 const THERMAL_PREFLIGHT_ACTIVE_RANK_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_VERSION}u;
 const THERMAL_PREFLIGHT_ACTIVE_RANK_STATUS_EXACT: u32 = ${
@@ -1222,7 +1276,232 @@ fn thermal_prepass_finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
 }
 
+fn thermal_prepass_active_source_fold(value: u32, word: u32) -> u32 {
+  return (value ^ word) * 16777619u;
+}
+
+fn thermal_prepass_active_source_seal(
+  source_fingerprint: u32,
+  active_count: u32,
+  dormant_count: u32,
+  completion_ordinal: u32,
+  physical_to_active_offset: u32,
+  capacity_words: u32
+) -> u32 {
+  var value = thermal_prepass_active_source_fold(
+    source_fingerprint,
+    THERMAL_PREFLIGHT_ACTIVE_SOURCE_HEADER_WORDS
+  );
+  value = thermal_prepass_active_source_fold(
+    value,
+    physical_to_active_offset
+  );
+  value = thermal_prepass_active_source_fold(value, capacity_words);
+  value = thermal_prepass_active_source_fold(value, active_count);
+  value = thermal_prepass_active_source_fold(value, dormant_count);
+  return thermal_prepass_active_source_fold(value, completion_ordinal);
+}
+
+fn thermal_prepass_active_source_dispatch_admitted(
+  invocation_count: u32,
+  dispatch_offset: u32,
+  dispatch_x_limit: u32
+) -> bool {
+  if (
+    dispatch_offset + 2u >= arrayLength(&preflight_spatial_aggregate_view)
+    || dispatch_x_limit == 0u
+  ) { return false; }
+  let dispatch_x = preflight_spatial_aggregate_view[dispatch_offset];
+  let dispatch_y = preflight_spatial_aggregate_view[dispatch_offset + 1u];
+  let dispatch_z = preflight_spatial_aggregate_view[dispatch_offset + 2u];
+  if (invocation_count == 0u) {
+    return dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u;
+  }
+  let group_count = (invocation_count + 63u) / 64u;
+  let expected_x = min(group_count, dispatch_x_limit);
+  let expected_y = (group_count + expected_x - 1u) / expected_x;
+  return dispatch_x == expected_x
+    && dispatch_y == expected_y
+    && dispatch_y <= dispatch_x_limit
+    && dispatch_z == 1u;
+}
+
+// Binding 10 is the retained directory-v2 ActiveSource projection in mode 4.
+// Authenticate the complete immutable header, projection seal, GPU-authored
+// active count, and both two-dimensional indirect dispatches before any
+// active ordinal or physical slot can address either map.
+fn thermal_prepass_active_source_view_admitted() -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return false; }
+  let directory_bound_words = arrayLength(&preflight_spatial_directory);
+  let view_bound_words = arrayLength(&preflight_spatial_aggregate_view);
+  if (
+    directory_bound_words < THERMAL_PREFLIGHT_DIRECTORY_HEADER_WORDS
+    || view_bound_words < THERMAL_PREFLIGHT_ACTIVE_SOURCE_HEADER_WORDS
+  ) { return false; }
+  let physical_count = preflight_spatial_directory[16u];
+  let physical_capacity = preflight_spatial_directory[17u];
+  let physical_upper = preflight_spatial_directory[47u];
+  let physical_to_cell_plus_one_offset =
+    preflight_spatial_directory[32u];
+  let active_count = preflight_spatial_aggregate_view[18u];
+  let active_capacity = preflight_spatial_aggregate_view[19u];
+  let dormant_count = preflight_spatial_aggregate_view[20u];
+  let active_to_physical_offset = preflight_spatial_aggregate_view[25u];
+  let physical_to_active_offset = preflight_spatial_aggregate_view[26u];
+  let capacity_words = preflight_spatial_aggregate_view[27u];
+  let dispatch_x_limit = preflight_spatial_aggregate_view[38u];
+  if (
+    preflight_spatial_directory[0u] != THERMAL_PREFLIGHT_DIRECTORY_MAGIC
+    || preflight_spatial_directory[1u]
+      != THERMAL_PREFLIGHT_DIRECTORY_V2_VERSION
+    || preflight_spatial_directory[2u] != (
+      THERMAL_PREFLIGHT_DIRECTORY_READY | THERMAL_PREFLIGHT_DIRECTORY_ADMITTED
+    )
+    || physical_count != thermal_params.particle_count
+    || physical_count > physical_capacity
+    || preflight_spatial_directory[22u] > directory_bound_words
+    || physical_upper > preflight_spatial_directory[22u]
+    || physical_to_cell_plus_one_offset > physical_upper
+    || physical_capacity
+      > physical_upper - physical_to_cell_plus_one_offset
+    || preflight_spatial_directory[37u] != active_count
+    || active_count > physical_count
+    || preflight_spatial_aggregate_view[0u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_MAGIC
+    || preflight_spatial_aggregate_view[1u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_VERSION
+    || preflight_spatial_aggregate_view[2u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_STATUS_EXACT
+    || (
+      preflight_spatial_aggregate_view[2u]
+        & THERMAL_PREFLIGHT_ACTIVE_SOURCE_REJECTED_MASK
+    ) != 0u
+  ) { return false; }
+  for (var identity_word = 3u; identity_word <= 15u; identity_word = identity_word + 1u) {
+    if (
+      preflight_spatial_aggregate_view[identity_word]
+        != preflight_spatial_directory[identity_word]
+    ) { return false; }
+  }
+  if (
+    preflight_spatial_aggregate_view[16u] != physical_count
+    || preflight_spatial_aggregate_view[17u] != physical_capacity
+    || active_count > active_capacity
+    || active_capacity > physical_capacity
+    || dormant_count != physical_count - active_count
+    || preflight_spatial_aggregate_view[21u] != 0u
+    || preflight_spatial_aggregate_view[22u] != 0u
+    || preflight_spatial_aggregate_view[23u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_ROW_LAYOUT
+    || preflight_spatial_aggregate_view[24u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_STRIDE_FLOATS
+    || active_to_physical_offset
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_HEADER_WORDS
+    || physical_to_active_offset
+      != active_to_physical_offset + active_capacity
+    || capacity_words != physical_to_active_offset + physical_capacity
+    || capacity_words > view_bound_words
+    || preflight_spatial_aggregate_view[28u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_HEADER_WORDS
+        + active_count + physical_capacity
+    || preflight_spatial_aggregate_view[29u]
+      != preflight_spatial_directory[33u]
+    || preflight_spatial_aggregate_view[30u]
+      != preflight_spatial_directory[35u]
+    || preflight_spatial_aggregate_view[29u]
+      != preflight_spatial_aggregate_view[30u]
+    || preflight_spatial_aggregate_view[32u] != physical_count
+    || preflight_spatial_aggregate_view[33u] != active_count
+    || preflight_spatial_aggregate_view[34u] != active_count
+    || preflight_spatial_aggregate_view[35u] != active_count
+    || preflight_spatial_aggregate_view[36u] > physical_count
+    || (active_count == 0u
+      && preflight_spatial_aggregate_view[36u] != 0u)
+    || (active_count != 0u
+      && preflight_spatial_aggregate_view[36u] == 0u)
+    || preflight_spatial_aggregate_view[37u] != 64u
+    || dispatch_x_limit == 0u
+    || preflight_spatial_aggregate_view[40u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
+    || preflight_spatial_aggregate_view[41u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_CANDIDATE_DISPATCH_OFFSET
+    || preflight_spatial_aggregate_view[42u]
+      != THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET
+    || preflight_spatial_aggregate_view[43u] != active_count * 27u
+    || preflight_spatial_aggregate_view[44u] != active_capacity * 27u
+    || preflight_spatial_aggregate_view[46u] != 0u
+    || preflight_spatial_aggregate_view[47u]
+      != thermal_prepass_active_source_seal(
+        preflight_spatial_aggregate_view[31u],
+        active_count,
+        dormant_count,
+        preflight_spatial_aggregate_view[30u],
+        physical_to_active_offset,
+        capacity_words
+      )
+  ) { return false; }
+  return thermal_prepass_active_source_dispatch_admitted(
+      active_count,
+      THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET,
+      dispatch_x_limit
+    )
+    && thermal_prepass_active_source_dispatch_admitted(
+      preflight_spatial_aggregate_view[43u],
+      THERMAL_PREFLIGHT_ACTIVE_SOURCE_CANDIDATE_DISPATCH_OFFSET,
+      dispatch_x_limit
+    )
+    && thermal_prepass_active_source_dispatch_admitted(
+      physical_count,
+      THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET,
+      dispatch_x_limit
+    );
+}
+
+fn thermal_prepass_active_source_at_ordinal(
+  active_ordinal: u32
+) -> ThermalPrepassSourceLookup {
+  let rejected = ThermalPrepassSourceLookup(0u, 0u);
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  if (
+    atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+    || active_ordinal >= expected_active_count
+    || expected_active_count != preflight_spatial_aggregate_view[18u]
+  ) { return rejected; }
+  let active_to_physical_offset = preflight_spatial_aggregate_view[25u];
+  let physical_to_active_offset = preflight_spatial_aggregate_view[26u];
+  let physical_index = preflight_spatial_aggregate_view[
+    active_to_physical_offset + active_ordinal
+  ];
+  if (
+    physical_index >= thermal_params.particle_count
+    || physical_to_active_offset + physical_index
+      >= arrayLength(&preflight_spatial_aggregate_view)
+    || preflight_spatial_aggregate_view[
+      physical_to_active_offset + physical_index
+    ] != active_ordinal
+    || preflight_spatial_directory[32u] + physical_index
+      >= arrayLength(&preflight_spatial_directory)
+    || preflight_spatial_directory[
+      preflight_spatial_directory[32u] + physical_index
+    ] == 0u
+  ) { return rejected; }
+  return ThermalPrepassSourceLookup(1u, physical_index);
+}
+
 fn thermal_prepass_source_at_rank(source_rank: u32) -> ThermalPrepassSourceLookup {
+  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return thermal_prepass_active_source_at_ordinal(source_rank);
+  }
   if (
     thermal_params.active_member_projection_enabled
       != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
@@ -1598,6 +1877,12 @@ fn thermal_prepass_active_member_projection_admitted() -> bool {
       == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
   ) {
     return thermal_prepass_active_rank_view_admitted();
+  }
+  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return thermal_prepass_active_source_view_admitted();
   }
   if (
     thermal_params.active_member_projection_enabled
@@ -2242,11 +2527,222 @@ fn thermal_prepass_nominal_radius_m(mass_kg: f32, rest_density_kg_per_m3: f32) -
   return pow(0.238732414637843 * mass_kg / rest_density_kg_per_m3, 1.0 / 3.0);
 }
 
+fn thermal_prepass_record_physical_topology_mismatch() {
+  atomicAdd(&thermal_derived[1u], 1u);
+  atomicAdd(
+    &thermal_derived[THERMAL_PREFLIGHT_PHYSICAL_TOPOLOGY_MISMATCH_WORD],
+    1u
+  );
+}
+
+// The compact ActiveSource traversal deliberately skips dormant slots. This
+// physical-domain preflight therefore owns the exact topology certificate:
+// every current mass must match the immutable directory-position family, and
+// every physical slot must agree with both ActiveSource maps and the directory
+// reverse map. This makes A=0 honest without a host count readback.
+fn thermal_prepass_physical_topology_row_admitted(
+  physical_index: u32
+) -> bool {
+  if (
+    atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+    || physical_index >= thermal_params.particle_count
+  ) { return false; }
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  if (expected_active_count != preflight_spatial_aggregate_view[18u]) {
+    return false;
+  }
+  let active_to_physical_offset = preflight_spatial_aggregate_view[25u];
+  let physical_to_active_offset = preflight_spatial_aggregate_view[26u];
+  let directory_reverse_offset = preflight_spatial_directory[32u];
+  if (
+    physical_to_active_offset + physical_index
+      >= arrayLength(&preflight_spatial_aggregate_view)
+    || directory_reverse_offset + physical_index
+      >= arrayLength(&preflight_spatial_directory)
+  ) { return false; }
+  let current_pos_mass = source_state[physical_index * 2u];
+  let directory_pos_mass = directory_position_state[physical_index * 2u];
+  let current_mass = current_pos_mass.w;
+  let directory_mass = directory_pos_mass.w;
+  if (
+    any(current_pos_mass.xyz != current_pos_mass.xyz)
+    || any(abs(current_pos_mass.xyz) > vec3<f32>(3.402823e38))
+    || any(directory_pos_mass.xyz != directory_pos_mass.xyz)
+    || any(abs(directory_pos_mass.xyz) > vec3<f32>(3.402823e38))
+    || !thermal_prepass_finite(current_mass)
+    || !thermal_prepass_finite(directory_mass)
+    || current_mass < 0.0
+    || directory_mass < 0.0
+    || bitcast<u32>(current_mass) != bitcast<u32>(directory_mass)
+  ) { return false; }
+  let current_active = current_mass > 0.0;
+  let directory_active = directory_mass > 0.0;
+  if (current_active != directory_active) { return false; }
+  let active_ordinal = preflight_spatial_aggregate_view[
+    physical_to_active_offset + physical_index
+  ];
+  let directory_cell_plus_one = preflight_spatial_directory[
+    directory_reverse_offset + physical_index
+  ];
+  if (!current_active) {
+    return active_ordinal == THERMAL_PREFLIGHT_ACTIVE_SOURCE_MISSING_ORDINAL
+      && directory_cell_plus_one == 0u;
+  }
+  if (
+    active_ordinal >= expected_active_count
+    || active_to_physical_offset + active_ordinal
+      >= arrayLength(&preflight_spatial_aggregate_view)
+    || preflight_spatial_aggregate_view[
+      active_to_physical_offset + active_ordinal
+    ] != physical_index
+    || directory_cell_plus_one == 0u
+    || directory_cell_plus_one > preflight_spatial_directory[18u]
+  ) { return false; }
+  let cell_index = directory_cell_plus_one - 1u;
+  let cell_offsets_offset = preflight_spatial_directory[30u];
+  let cell_members_offset = preflight_spatial_directory[31u];
+  if (
+    cell_offsets_offset + cell_index + 1u
+      >= arrayLength(&preflight_spatial_directory)
+  ) { return false; }
+  let member_begin = preflight_spatial_directory[
+    cell_offsets_offset + cell_index
+  ];
+  let member_end = preflight_spatial_directory[
+    cell_offsets_offset + cell_index + 1u
+  ];
+  if (
+    member_begin >= member_end
+    || member_end > expected_active_count
+    || cell_members_offset + member_end
+      > arrayLength(&preflight_spatial_directory)
+  ) { return false; }
+  for (
+    var member_ordinal = member_begin;
+    member_ordinal < member_end;
+    member_ordinal = member_ordinal + 1u
+  ) {
+    if (
+      preflight_spatial_directory[
+        cell_members_offset + member_ordinal
+      ] == physical_index
+    ) { return true; }
+  }
+  return false;
+}
+
 @compute @workgroup_size(64)
-fn derive(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let source_rank = global_id.x;
-  if (source_rank >= thermal_params.particle_count) { return; }
-  if (source_rank == 0u) {
+fn preflight_physical_topology(
+  @builtin(local_invocation_index) local_invocation_index: u32,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+    || atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+  ) { return; }
+  if (
+    num_workgroups.x != preflight_spatial_aggregate_view[
+      THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET
+    ]
+    || num_workgroups.y != preflight_spatial_aggregate_view[
+      THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET + 1u
+    ]
+    || num_workgroups.z != 1u
+    || workgroup_id.z != 0u
+  ) {
+    if (
+      workgroup_id.x == 0u
+      && workgroup_id.y == 0u
+      && local_invocation_index == 0u
+    ) {
+      thermal_prepass_record_physical_topology_mismatch();
+    }
+    return;
+  }
+  let physical_index = (
+    workgroup_id.x + workgroup_id.y * num_workgroups.x
+  ) * 64u + local_invocation_index;
+  if (physical_index >= thermal_params.particle_count) { return; }
+  if (!thermal_prepass_physical_topology_row_admitted(physical_index)) {
+    thermal_prepass_record_physical_topology_mismatch();
+    return;
+  }
+  if (source_state[physical_index * 2u].w <= 0.0) {
+    let row_offset = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u
+      + physical_index * ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u;
+    atomicStore(&thermal_derived[row_offset + 4u], bitcast<u32>(1.0));
+    atomicStore(&thermal_derived[row_offset + 5u], bitcast<u32>(1.0));
+    return;
+  }
+  atomicAdd(
+    &thermal_derived[THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD],
+    1u
+  );
+  atomicAdd(
+    &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_SOURCE_RANK_COUNT_WORD],
+    1u
+  );
+}
+
+@compute @workgroup_size(64)
+fn derive(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_index) local_invocation_index: u32,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+  let active_source_projection =
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
+  if (
+    active_source_projection
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+  ) { return; }
+  var source_rank = global_id.x;
+  if (active_source_projection) {
+    if (
+      num_workgroups.x != preflight_spatial_aggregate_view[
+        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
+      ]
+      || num_workgroups.y != preflight_spatial_aggregate_view[
+        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET + 1u
+      ]
+      || num_workgroups.z != 1u
+      || workgroup_id.z != 0u
+    ) {
+      if (
+        workgroup_id.x == 0u
+        && workgroup_id.y == 0u
+        && local_invocation_index == 0u
+      ) {
+        atomicAdd(&thermal_derived[1u], 1u);
+      }
+      return;
+    }
+    let linear_group = workgroup_id.x
+      + workgroup_id.y * num_workgroups.x;
+    source_rank = linear_group * 64u + local_invocation_index;
+  }
+  var derive_source_count = thermal_params.particle_count;
+  if (active_source_projection) {
+    derive_source_count = atomicLoad(
+      &thermal_derived[
+        THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD
+      ]
+    );
+  }
+  if (source_rank >= derive_source_count) { return; }
+  if (source_rank == 0u && !active_source_projection) {
     let projection_admitted = thermal_prepass_active_member_projection_admitted();
     atomicStore(
       &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD],
@@ -2315,16 +2811,27 @@ fn derive(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let directory_pos_mass = directory_position_state[particle_index * 2u];
   let current_active = pos_mass.w > 0.0;
   let directory_active = directory_pos_mass.w > 0.0;
+  let mass_family_valid = thermal_prepass_finite(pos_mass.w)
+    && thermal_prepass_finite(directory_pos_mass.w)
+    && pos_mass.w >= 0.0
+    && directory_pos_mass.w >= 0.0
+    && current_active == directory_active
+    && bitcast<u32>(pos_mass.w) == bitcast<u32>(directory_pos_mass.w);
   let position_family_valid = all(pos_mass.xyz == pos_mass.xyz)
     && all(abs(pos_mass.xyz) <= vec3<f32>(3.402823e38))
     && all(directory_pos_mass.xyz == directory_pos_mass.xyz)
     && all(abs(directory_pos_mass.xyz) <= vec3<f32>(3.402823e38))
-    && thermal_prepass_finite(pos_mass.w)
-    && thermal_prepass_finite(directory_pos_mass.w)
-    && current_active == directory_active
-    && pos_mass.w == directory_pos_mass.w;
+    && mass_family_valid;
   if (!position_family_valid) {
     atomicAdd(&thermal_derived[1u], 1u);
+    if (!mass_family_valid) {
+      atomicAdd(
+        &thermal_derived[
+          THERMAL_PREFLIGHT_PHYSICAL_TOPOLOGY_MISMATCH_WORD
+        ],
+        1u
+      );
+    }
     for (var component = 0u; component < ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u; component = component + 1u) {
       atomicStore(&thermal_derived[row_offset + component], 0u);
     }
@@ -2351,10 +2858,12 @@ fn derive(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     return;
   }
-  atomicAdd(
-    &thermal_derived[THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD],
-    1u
-  );
+  if (!active_source_projection) {
+    atomicAdd(
+      &thermal_derived[THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD],
+      1u
+    );
+  }
   if (
     thermal_params.active_member_projection_enabled
       == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
@@ -2440,11 +2949,34 @@ fn derive(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn finalize_active_dispatch(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
+  if (global_id.x != 0u) { return; }
+  let projection_mode = thermal_params.active_member_projection_enabled;
   if (
-    global_id.x != 0u
-    || thermal_params.active_member_projection_enabled
-      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
-  ) { return; }
+    projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    let admitted = thermal_prepass_active_source_view_admitted();
+    let dispatch_source_count = select(
+      0u,
+      preflight_spatial_aggregate_view[18u],
+      admitted
+    );
+    atomicStore(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD],
+      select(
+        THERMAL_PREFLIGHT_ACTIVE_MEMBER_REJECTED,
+        THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED,
+        admitted
+      )
+    );
+    atomicStore(
+      &thermal_derived[THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD],
+      dispatch_source_count
+    );
+    return;
+  }
+  if (projection_mode != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL) {
+    return;
+  }
   let current_active_count = atomicLoad(
     &thermal_derived[THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD]
   );
@@ -2477,9 +3009,101 @@ fn finalize_active_dispatch(
   atomicStore(&thermal_active_dispatch[2u], 1u);
 }
 
+@compute @workgroup_size(1)
+fn finalize_active_topology(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (
+    global_id.x != 0u
+    || thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return; }
+  let header_admitted = thermal_prepass_active_source_view_admitted();
+  let expected_active_count = select(
+    0u,
+    preflight_spatial_aggregate_view[18u],
+    header_admitted
+  );
+  let topology_admitted = header_admitted
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) == THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+    && atomicLoad(&thermal_derived[1u]) == 0u
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_PHYSICAL_TOPOLOGY_MISMATCH_WORD]
+    ) == 0u
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_CURRENT_ACTIVE_SOURCE_COUNT_WORD]
+    ) == expected_active_count
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_SOURCE_RANK_COUNT_WORD]
+    ) == expected_active_count;
+  atomicStore(
+    &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD],
+    select(
+      THERMAL_PREFLIGHT_ACTIVE_MEMBER_REJECTED,
+      THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED,
+      topology_admitted
+    )
+  );
+  atomicStore(
+    &thermal_derived[THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD],
+    expected_active_count
+  );
+}
+
 @compute @workgroup_size(64)
-fn resolve_budget(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let particle_index = global_id.x;
+fn resolve_budget(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_index) local_invocation_index: u32,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+  let active_source_projection =
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
+  if (
+    active_source_projection
+    && atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
+    ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
+  ) { return; }
+  var particle_index = global_id.x;
+  if (active_source_projection) {
+    if (
+      num_workgroups.x != preflight_spatial_aggregate_view[
+        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
+      ]
+      || num_workgroups.y != preflight_spatial_aggregate_view[
+        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET + 1u
+      ]
+      || num_workgroups.z != 1u
+      || workgroup_id.z != 0u
+    ) {
+      if (
+        workgroup_id.x == 0u
+        && workgroup_id.y == 0u
+        && local_invocation_index == 0u
+      ) {
+        atomicAdd(&thermal_derived[1u], 1u);
+      }
+      return;
+    }
+    let active_ordinal = (
+      workgroup_id.x + workgroup_id.y * num_workgroups.x
+    ) * 64u + local_invocation_index;
+    let expected_active_count = atomicLoad(
+      &thermal_derived[THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+    );
+    if (active_ordinal >= expected_active_count) { return; }
+    let source_lookup =
+      thermal_prepass_active_source_at_ordinal(active_ordinal);
+    if (source_lookup.admitted == 0u) {
+      atomicAdd(&thermal_derived[1u], 1u);
+      return;
+    }
+    particle_index = source_lookup.source_index;
+  }
   if (particle_index >= thermal_params.particle_count) { return; }
   let row_offset = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u
     + particle_index * ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u;
@@ -2575,9 +3199,14 @@ fn resolve_budget(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-const exactNearTraversalWgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
+const exactNearTraversalV1Wgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
   directoryBindingName: 'spatial_directory'
 });
+const exactNearTraversalV2Wgsl = createSchroederSpatialExactNearTraversalV2Wgsl({
+  directoryBindingName: 'spatial_directory'
+});
+// The classic/native diagnostic derivations below intentionally remain v1.
+const exactNearTraversalWgsl = exactNearTraversalV1Wgsl;
 
 const spatialThermalExactEntryPointsWgsl = /* wgsl */ `
 // A uniform temperature field has no pairwise conduction or radiation work to
@@ -2628,6 +3257,7 @@ fn thermal_uniform_completion_admitted() -> bool {
   if (
     projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
     || projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+    || projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
   ) {
     return current_active_count == expected_active_count
       && atomicLoad(
@@ -2653,10 +3283,19 @@ fn thermal_uniform_completion_workgroup_admitted(
 
 fn thermal_record_uniform_completion(budget_mode: bool) {
   let source_count = thermal_params.particle_count;
-  thermal_evidence_add(0u, source_count, true);
-  thermal_evidence_add(0u, source_count, false);
-  thermal_evidence_add(1u, source_count, true);
-  thermal_evidence_add(1u, source_count, false);
+  var source_invocation_count = source_count;
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE
+  ) {
+    source_invocation_count = atomicLoad(
+      &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+    );
+  }
+  thermal_evidence_add(0u, source_invocation_count, true);
+  thermal_evidence_add(0u, source_invocation_count, false);
+  thermal_evidence_add(1u, source_invocation_count, true);
+  thermal_evidence_add(1u, source_invocation_count, false);
   if (!budget_mode) {
     if (thermal_params.candidate_capacity != 0u) {
       // No pairwise candidates are consumed when the GPU-derived field is
@@ -2687,18 +3326,17 @@ fn thermal_publish_uniform_completion_row(particle_index: u32) {
   );
 }
 
-fn thermal_bulk_dormant_projection_evidence(
+fn thermal_publish_dormant_projection_rows(
   expected_active_count: u32,
   budget_mode: bool
 ) {
   if (expected_active_count > thermal_params.particle_count) { return; }
   let dormant_count = thermal_params.particle_count - expected_active_count;
   if (dormant_count == 0u) { return; }
-  thermal_evidence_add(0u, dormant_count, true);
-  thermal_evidence_add(0u, dormant_count, false);
-  thermal_evidence_add(1u, dormant_count, true);
-  thermal_evidence_add(1u, dormant_count, false);
   if (!budget_mode) {
+    // Dormant storage is cleared and authenticated as inert output by the
+    // physical topology preflight. It contributes complete proposal rows,
+    // never fabricated source invocations or directory admissions.
     atomicAdd(&thermal_proposals[15u], dormant_count);
     thermal_evidence_add(6u, dormant_count, true);
     thermal_evidence_add(6u, dormant_count, false);
@@ -2724,6 +3362,17 @@ fn thermal_publish_uniform_completion_active_ordinal(active_ordinal: u32) {
   thermal_publish_uniform_completion_row(lookup.source_index);
 }
 
+fn thermal_publish_uniform_completion_active_source_ordinal(
+  active_ordinal: u32
+) {
+  let lookup = thermal_active_source_view_source_at_ordinal(active_ordinal);
+  if (lookup.admitted == 0u) {
+    thermal_fail_active_source_rank_lookup();
+    return;
+  }
+  thermal_publish_uniform_completion_row(lookup.source_index);
+}
+
 fn thermal_materialize_uniform_completion_active_ordinal(active_ordinal: u32) {
   let lookup = thermal_active_rank_view_source_at_ordinal(active_ordinal, false);
   let sidecar_word = thermal_active_source_rank_sidecar_word(active_ordinal);
@@ -2735,15 +3384,47 @@ fn thermal_materialize_uniform_completion_active_ordinal(active_ordinal: u32) {
 }
 
 fn thermal_fail_active_projection_global_seal() {
-  let source_count = thermal_params.particle_count;
-  thermal_evidence_add(0u, source_count, true);
-  thermal_evidence_add(0u, source_count, false);
-  thermal_evidence_add(1u, source_count, true);
-  thermal_evidence_add(1u, source_count, false);
-  thermal_evidence_add(5u, source_count, true);
-  thermal_evidence_add(5u, source_count, false);
-  atomicAdd(&thermal_proposals[6u], source_count);
-  atomicAdd(&thermal_proposals[7u], source_count);
+  // This is one global malformed-authority certificate, not P fabricated
+  // source invocations. Both law passes and the A=0 finalizer can observe the
+  // same rejected seal, so claim publication exactly once.
+  if (atomicMax(&thermal_proposals[6u], 1u) != 0u) { return; }
+  atomicStore(&thermal_proposals[7u], 1u);
+  thermal_evidence_add(5u, 1u, true);
+  thermal_evidence_add(5u, 1u, false);
+}
+
+@compute @workgroup_size(1)
+fn finalize_zero_active_projection(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (
+    global_id.x != 0u
+    || thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return; }
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  if (expected_active_count != 0u) { return; }
+  let admitted = thermal_active_member_projection_admitted()
+    && atomicLoad(&thermal_derived[1u]) == 0u
+    && atomicLoad(
+      &thermal_derived[THERMAL_CURRENT_ACTIVE_SOURCE_COUNT_WORD]
+    ) == 0u
+    && atomicLoad(
+      &thermal_derived[THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD]
+    ) == 0u;
+  if (!admitted) {
+    thermal_fail_active_projection_global_seal();
+    return;
+  }
+  // A canonical proposal still publishes one inert row per physical slot.
+  // Both law traversals were exact zero-dispatch no-ops. The retained
+  // physical preflight authenticated every cleared dormant output row, so
+  // proposal completeness is P while source invocation/admission counts stay
+  // truthfully zero.
+  thermal_publish_dormant_projection_rows(0u, true);
+  thermal_publish_dormant_projection_rows(0u, false);
 }
 
 fn thermal_traverse_exact_source_rank(
@@ -2783,31 +3464,48 @@ fn thermal_traverse_exact_source_rank(
 fn budget(
   @builtin(global_invocation_id) global_id: vec3<u32>,
   @builtin(local_invocation_index) local_invocation_index: u32,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  let source_ordinal = thermal_projection_work_ordinal(
+    global_id,
+    local_invocation_index,
+    workgroup_id,
+    num_workgroups
+  );
+  if (!thermal_active_source_dispatch_matches(num_workgroups)) {
+    if (source_ordinal == 0u) {
+      thermal_fail_active_projection_global_seal();
+    }
+    return;
+  }
   if (thermal_uniform_completion_workgroup_admitted(local_invocation_index)) {
     let projection_mode = thermal_params.active_member_projection_enabled;
     if (
       projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
-      && global_id.x < atomicLoad(
+      && source_ordinal < atomicLoad(
         &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
       )
     ) {
-      thermal_materialize_uniform_completion_active_ordinal(global_id.x);
+      thermal_materialize_uniform_completion_active_ordinal(source_ordinal);
     }
-    if (workgroup_id.x == 0u && local_invocation_index == 0u) {
+    if (
+      workgroup_id.x == 0u
+      && workgroup_id.y == 0u
+      && local_invocation_index == 0u
+    ) {
       thermal_record_uniform_completion(true);
     }
     return;
   }
   let projection_mode = thermal_params.active_member_projection_enabled;
   if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
-    if (global_id.x >= thermal_params.particle_count) { return; }
-    thermal_traverse_exact_source_rank(global_id.x, true, false);
+    if (source_ordinal >= thermal_params.particle_count) { return; }
+    thermal_traverse_exact_source_rank(source_ordinal, true, false);
     return;
   }
   if (!thermal_active_member_projection_admitted()) {
-    if (global_id.x == 0u) {
+    if (source_ordinal == 0u) {
       thermal_fail_active_projection_global_seal();
     }
     return;
@@ -2829,43 +3527,56 @@ fn budget(
         projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL
         || projection_mode
           == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+        || projection_mode
+          == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
       )
       && materialized_active_count != expected_active_count
     )
   ) {
-    if (global_id.x == 0u) {
+    if (source_ordinal == 0u) {
       thermal_fail_active_projection_global_seal();
     }
     return;
   }
-  if (global_id.x == 0u) {
-    thermal_bulk_dormant_projection_evidence(expected_active_count, true);
+  if (source_ordinal == 0u) {
+    thermal_publish_dormant_projection_rows(expected_active_count, true);
   }
   if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL) {
-    if (global_id.x >= thermal_params.particle_count) { return; }
-    let local_sidecar_word = thermal_active_source_rank_sidecar_word(global_id.x);
+    if (source_ordinal >= thermal_params.particle_count) { return; }
+    let local_sidecar_word = thermal_active_source_rank_sidecar_word(
+      source_ordinal
+    );
     if (local_sidecar_word >= arrayLength(&thermal_derived)) {
       thermal_fail_active_source_rank_lookup();
       return;
     }
     let local_source_rank = atomicLoad(&thermal_derived[local_sidecar_word]);
     if (local_source_rank == 0xffffffffu) { return; }
-    if (local_source_rank != global_id.x) {
+    if (local_source_rank != source_ordinal) {
       thermal_fail_active_source_rank_lookup();
       return;
     }
     thermal_traverse_exact_source_rank(local_source_rank, true, false);
     return;
   }
-  if (global_id.x >= expected_active_count) { return; }
-  let sidecar_word = thermal_active_source_rank_sidecar_word(global_id.x);
+  if (source_ordinal >= expected_active_count) { return; }
+  if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE) {
+    let lookup = thermal_active_source_view_source_at_ordinal(source_ordinal);
+    if (lookup.admitted == 0u) {
+      thermal_fail_active_source_rank_lookup();
+      return;
+    }
+    thermal_traverse_particle(lookup.source_index, true, 0u, false);
+    return;
+  }
+  let sidecar_word = thermal_active_source_rank_sidecar_word(source_ordinal);
   if (sidecar_word >= arrayLength(&thermal_derived)) {
     thermal_fail_active_source_rank_lookup();
     return;
   }
   var source_rank = atomicLoad(&thermal_derived[sidecar_word]);
   if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE) {
-    let lookup = thermal_active_source_rank_at_ordinal(global_id.x);
+    let lookup = thermal_active_source_rank_at_ordinal(source_ordinal);
     if (lookup.admitted == 0u) {
       thermal_fail_active_source_rank_lookup();
       return;
@@ -2876,7 +3587,10 @@ fn budget(
   } else if (
     projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
   ) {
-    let lookup = thermal_active_rank_view_source_at_ordinal(global_id.x, false);
+    let lookup = thermal_active_rank_view_source_at_ordinal(
+      source_ordinal,
+      false
+    );
     if (lookup.admitted == 0u) {
       thermal_fail_active_source_rank_lookup();
       return;
@@ -2895,36 +3609,64 @@ fn budget(
 fn propose(
   @builtin(global_invocation_id) global_id: vec3<u32>,
   @builtin(local_invocation_index) local_invocation_index: u32,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  let source_ordinal = thermal_projection_work_ordinal(
+    global_id,
+    local_invocation_index,
+    workgroup_id,
+    num_workgroups
+  );
+  if (!thermal_active_source_dispatch_matches(num_workgroups)) {
+    if (source_ordinal == 0u) {
+      thermal_fail_active_projection_global_seal();
+    }
+    return;
+  }
   if (thermal_uniform_completion_workgroup_admitted(local_invocation_index)) {
     let projection_mode = thermal_params.active_member_projection_enabled;
     if (
       projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
-      && global_id.x < atomicLoad(
+      && source_ordinal < atomicLoad(
         &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
       )
     ) {
-      thermal_publish_uniform_completion_active_ordinal(global_id.x);
+      thermal_publish_uniform_completion_active_ordinal(source_ordinal);
+    } else if (
+      projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+      && source_ordinal < atomicLoad(
+        &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+      )
+    ) {
+      thermal_publish_uniform_completion_active_source_ordinal(
+        source_ordinal
+      );
     } else if (
       projection_mode != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
-      && global_id.x < thermal_params.particle_count
+      && projection_mode
+        != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+      && source_ordinal < thermal_params.particle_count
     ) {
-      thermal_publish_uniform_completion_row(global_id.x);
+      thermal_publish_uniform_completion_row(source_ordinal);
     }
-    if (workgroup_id.x == 0u && local_invocation_index == 0u) {
+    if (
+      workgroup_id.x == 0u
+      && workgroup_id.y == 0u
+      && local_invocation_index == 0u
+    ) {
       thermal_record_uniform_completion(false);
     }
     return;
   }
   let projection_mode = thermal_params.active_member_projection_enabled;
   if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE) {
-    if (global_id.x >= thermal_params.particle_count) { return; }
-    thermal_traverse_exact_source_rank(global_id.x, false, false);
+    if (source_ordinal >= thermal_params.particle_count) { return; }
+    thermal_traverse_exact_source_rank(source_ordinal, false, false);
     return;
   }
   if (!thermal_active_member_projection_admitted()) {
-    if (global_id.x == 0u) {
+    if (source_ordinal == 0u) {
       thermal_fail_active_projection_global_seal();
     }
     return;
@@ -2943,32 +3685,48 @@ fn propose(
     || current_active_count != expected_active_count
     || materialized_active_count != expected_active_count
   ) {
-    if (global_id.x == 0u) {
+    if (source_ordinal == 0u) {
       thermal_fail_active_projection_global_seal();
     }
     return;
   }
-  if (global_id.x == 0u) {
-    thermal_bulk_dormant_projection_evidence(expected_active_count, false);
+  if (source_ordinal == 0u) {
+    thermal_publish_dormant_projection_rows(expected_active_count, false);
   }
   if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL) {
-    if (global_id.x >= thermal_params.particle_count) { return; }
-    let local_sidecar_word = thermal_active_source_rank_sidecar_word(global_id.x);
+    if (source_ordinal >= thermal_params.particle_count) { return; }
+    let local_sidecar_word = thermal_active_source_rank_sidecar_word(
+      source_ordinal
+    );
     if (local_sidecar_word >= arrayLength(&thermal_derived)) {
       thermal_fail_active_source_rank_lookup();
       return;
     }
     let local_source_rank = atomicLoad(&thermal_derived[local_sidecar_word]);
     if (local_source_rank == 0xffffffffu) { return; }
-    if (local_source_rank != global_id.x) {
+    if (local_source_rank != source_ordinal) {
       thermal_fail_active_source_rank_lookup();
       return;
     }
     thermal_traverse_exact_source_rank(local_source_rank, false, false);
     return;
   }
-  if (global_id.x >= expected_active_count) { return; }
-  let sidecar_word = thermal_active_source_rank_sidecar_word(global_id.x);
+  if (source_ordinal >= expected_active_count) { return; }
+  if (projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE) {
+    let lookup = thermal_active_source_view_source_at_ordinal(source_ordinal);
+    if (lookup.admitted == 0u) {
+      thermal_fail_active_source_rank_lookup();
+      return;
+    }
+    thermal_traverse_particle(
+      lookup.source_index,
+      false,
+      select(0u, 2u, thermal_params.candidate_capacity != 0u),
+      false
+    );
+    return;
+  }
+  let sidecar_word = thermal_active_source_rank_sidecar_word(source_ordinal);
   if (sidecar_word >= arrayLength(&thermal_derived)) {
     thermal_fail_active_source_rank_lookup();
     return;
@@ -2977,7 +3735,10 @@ fn propose(
   if (
     projection_mode == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
   ) {
-    let lookup = thermal_active_rank_view_source_at_ordinal(global_id.x, false);
+    let lookup = thermal_active_rank_view_source_at_ordinal(
+      source_ordinal,
+      false
+    );
     if (lookup.admitted == 0u || lookup.source_rank != source_rank) {
       thermal_fail_active_source_rank_lookup();
       return;
@@ -3658,8 +4419,11 @@ const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE: u32 = ${SCHROEDER_SPATIAL_THER
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE}u;
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL}u;
 const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK}u;
+const THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE: u32 = ${SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE}u;
 const THERMAL_ACTIVE_RANK_VIEW_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS}u;
 const THERMAL_ACTIVE_RANK_VIEW_MAX_SOURCE_COUNT: u32 = ${SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_MAX_SOURCE_COUNT}u;
+const THERMAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
+const THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS}u;
 
 struct ThermalActiveSourceRankLookup {
   admitted: u32,
@@ -3678,11 +4442,91 @@ struct ThermalActiveRankViewRange {
   admitted: u32,
 };
 
+struct ThermalActiveSourceViewLookup {
+  source_index: u32,
+  admitted: u32,
+};
+
 fn thermal_active_member_projection_admitted() -> bool {
   if (thermal_params.active_member_projection_enabled == 0u) { return true; }
   return atomicLoad(
     &thermal_derived[THERMAL_ACTIVE_MEMBER_PROJECTION_ADMISSION_WORD]
   ) == THERMAL_ACTIVE_MEMBER_PROJECTION_ADMITTED;
+}
+
+fn thermal_invalid_active_source_view() -> ThermalActiveSourceViewLookup {
+  return ThermalActiveSourceViewLookup(0u, 0u);
+}
+
+// The full ActiveSource header and dispatch are authenticated by the prepass
+// before the v2 indirect derive. The following passes reuse that same retained,
+// read-only epoch object while still checking both maps for every ordinal.
+fn thermal_active_source_view_source_at_ordinal(
+  active_ordinal: u32
+) -> ThermalActiveSourceViewLookup {
+  let rejected = thermal_invalid_active_source_view();
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+    || !thermal_active_member_projection_admitted()
+  ) { return rejected; }
+  let expected_active_count = atomicLoad(
+    &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+  );
+  if (
+    arrayLength(&spatial_aggregate_view)
+      < THERMAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS
+    || active_ordinal >= expected_active_count
+    || expected_active_count != spatial_aggregate_view[18u]
+  ) { return rejected; }
+  let active_to_physical_offset = spatial_aggregate_view[25u];
+  let physical_to_active_offset = spatial_aggregate_view[26u];
+  let source_index = spatial_aggregate_view[
+    active_to_physical_offset + active_ordinal
+  ];
+  if (
+    source_index >= thermal_params.particle_count
+    || physical_to_active_offset + source_index
+      >= arrayLength(&spatial_aggregate_view)
+    || spatial_aggregate_view[physical_to_active_offset + source_index]
+      != active_ordinal
+  ) { return rejected; }
+  return ThermalActiveSourceViewLookup(source_index, 1u);
+}
+
+fn thermal_projection_work_ordinal(
+  global_id: vec3<u32>,
+  local_invocation_index: u32,
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
+) -> u32 {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return global_id.x;
+  }
+  return (
+    workgroup_id.x + workgroup_id.y * num_workgroups.x
+  ) * 64u + local_invocation_index;
+}
+
+fn thermal_active_source_dispatch_matches(
+  num_workgroups: vec3<u32>
+) -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return true; }
+  return num_workgroups.x == spatial_aggregate_view[
+      THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET
+    ]
+    && num_workgroups.y == spatial_aggregate_view[
+      THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 1u
+    ]
+    && num_workgroups.z == spatial_aggregate_view[
+      THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 2u
+    ];
 }
 
 // ULG_THERMAL_ACTIVE_SOURCE_RANK_HELPERS_BEGIN
@@ -5034,6 +5878,24 @@ fn propose_binned(@builtin(global_invocation_id) global_id: vec3<u32>) {
   thermal_traverse_particle(global_id.x, false, 1u, false);
 }
 `;
+
+if (!schroederSpatialThermalProposalWgsl.includes(exactNearTraversalV1Wgsl)) {
+  throw new Error(
+    'Unable to derive directory-v2 thermal proposal WGSL from the v1 traversal'
+  );
+}
+
+export const schroederSpatialThermalProposalV2Wgsl =
+  schroederSpatialThermalProposalWgsl
+    .replace(exactNearTraversalV1Wgsl, exactNearTraversalV2Wgsl)
+    .replaceAll(
+      'SchroederSpatialExactNearExpectationV1',
+      'SchroederSpatialExactNearExpectationV2'
+    )
+    .replaceAll(
+      'conduction_expectation.source_count',
+      'conduction_expectation.physical_source_count'
+    );
 
 // S9D-4 native evidence needs to exercise the real matched-time thermal
 // producer and canonical apply before the exact-cell hierarchy can become a
@@ -6598,7 +7460,7 @@ fn thermal_source_cell_dispatch(
     && thermal_params.active_member_projection_enabled
       != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE
   ) {
-    thermal_bulk_dormant_projection_evidence(
+    thermal_publish_dormant_projection_rows(
       atomicLoad(
         &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
       ),
@@ -7754,6 +8616,7 @@ function createThermalProposalSourceAuthority({
 export function isLiveThermalProposalSourceAuthority(authority, {
   device = null,
   generation = null,
+  generationConsumerLease = null,
   stateBuffer = null,
   thermoBuffer = null,
   particleCount = null
@@ -7772,7 +8635,13 @@ export function isLiveThermalProposalSourceAuthority(authority, {
     && (stateBuffer == null || authority.stateBuffer === stateBuffer)
     && (thermoBuffer == null || authority.thermoBuffer === thermoBuffer)
     && (particleCount == null || authority.particleCount === particleCount)
-    && authority.generation?.releaseScheduled !== true
+    && (
+      authority.generation?.releaseScheduled !== true
+      || ownsSchroederSpatialEpochGenerationConsumerLease(
+        generationConsumerLease,
+        authority.generation
+      )
+    )
     && authority.generation?.execution?.released !== true
   );
 }
@@ -7841,18 +8710,115 @@ export function runSchroederSpatialThermalProposalWebGpu({
   const conductionAuthentication = authentications[0];
   const radiationAuthentication = authentications[1];
   const execution = generation.execution;
+  const directoryV2 =
+    execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+    && execution?.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  if (
+    (
+      execution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || execution?.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    )
+    && !directoryV2
+  ) {
+    throw new TypeError(
+      'Canonical thermal directory-v2 execution schema/version is inconsistent'
+    );
+  }
+  const directoryAbiVersion = directoryV2
+    ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    : SCHROEDER_SPATIAL_EPOCH_VERSION;
   const aggregateView = generation?.aggregateView ?? null;
   const generationActiveRankView = generation?.activeRankView ?? null;
   const activeRankView = generationActiveRankView
     ?? execution.activeRankView
     ?? null;
+  let activeSourceView = null;
+  let activeSourceCountAuthority = null;
+  let activeSourceViewAdmissionStatus = directoryV2
+    ? 'schroeder-spatial-active-source-view-not-authenticated'
+    : 'schroeder-spatial-active-source-view-not-applicable';
   let activeSourceProjectionMode =
     SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL;
   let activeProjectionViewBuffer = execution.directoryBuffer;
   let activeRankViewAdmissionStatus = activeRankView
     ? 'schroeder-spatial-active-rank-view-not-selected'
     : 'schroeder-spatial-active-rank-view-absent';
-  if (aggregateView) {
+  if (directoryV2) {
+    activeSourceView = execution.activeSourceView ?? generation.activeSourceView;
+    activeSourceCountAuthority = execution.activeSourceCountAuthority ?? null;
+    const activeSourceAdmission =
+      validateSchroederSpatialActiveSourceViewDescriptor(
+        activeSourceView,
+        {
+          sourceBuffer: execution.sourceBuffer,
+          activeSourceViewBuffer: execution.activeSourceViewBuffer,
+          physicalSourceCount: particleCount,
+          physicalSourceCapacity: execution.physicalSourceCapacity,
+          activeSourceCapacity: execution.activeSourceCapacity,
+          sourceRowLayoutId: execution.sourceRowLayoutId,
+          generationId: execution.generationId,
+          deviceOrdinal: execution.deviceOrdinal,
+          laneOrdinal: execution.laneOrdinal,
+          leaseToken: execution.leaseToken,
+          sourceFamilyId: execution.sourceFamilyId,
+          storageGeneration: execution.storageGeneration,
+          physicsTick: execution.physicsTick,
+          physicsSubstep: execution.physicsSubstep,
+          positionEpoch: execution.positionEpoch,
+          topologyEpoch: execution.topologyEpoch,
+          chartEpoch: execution.chartEpoch,
+          levelEpoch: execution.levelEpoch,
+          supportEpoch: execution.supportEpoch,
+          buildOrdinal: execution.buildOrdinal
+        }
+      );
+    activeSourceViewAdmissionStatus = activeSourceAdmission.status;
+    const exactActiveSourceAuthority = (
+      generation.activeSourceView === activeSourceView
+      && execution.activeSourceView === activeSourceView
+      && activeSourceView?.sourceBuffer === execution.sourceBuffer
+      && activeSourceView?.activeSourceViewBuffer
+        === execution.activeSourceViewBuffer
+      && activeSourceCountAuthority?.activeSourceView === activeSourceView
+      && activeSourceCountAuthority?.buffer
+        === activeSourceView?.activeSourceViewBuffer
+      && activeSourceCountAuthority?.offsetWords
+        === SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      && activeSourceCountAuthority?.offsetBytes
+        === SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+          * Uint32Array.BYTES_PER_ELEMENT
+      && activeSourceCountAuthority?.capacity
+        === activeSourceView?.activeSourceCapacity
+      && activeSourceCountAuthority?.residency === 'gpu-only'
+      && authentications.every((authentication) => (
+        authentication.directoryAbiVersion
+          === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        && authentication.execution === execution
+        && authentication.activeSourceView === activeSourceView
+        && authentication.activeSourceCountAuthority
+          === activeSourceCountAuthority
+      ))
+    );
+    if (activeSourceAdmission.admitted !== true || !exactActiveSourceAuthority) {
+      const error = new TypeError(
+        activeSourceAdmission.admitted !== true
+          ? `canonical thermal ActiveSource projection was rejected: ${
+              activeSourceAdmission.status
+            }`
+          : 'canonical thermal ActiveSource projection lost its exact directory-v2 authority'
+      );
+      error.code = 'ERR_SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_AUTHENTICATION';
+      throw error;
+    }
+    activeProjectionViewBuffer = requireBuffer(
+      device,
+      activeSourceView.activeSourceViewBuffer,
+      'generation.activeSourceView.activeSourceViewBuffer',
+      activeSourceView.layout.byteLength
+    );
+    activeSourceProjectionMode =
+      SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
+  } else if (aggregateView) {
     const aggregateAdmission = validateSchroederSpatialAggregateViewDescriptor(
       aggregateView,
       {
@@ -7954,11 +8920,19 @@ export function runSchroederSpatialThermalProposalWebGpu({
     activeSourceProjectionMode =
       SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK;
   }
-  const { runtime, entry, cacheHit } = acquireRuntimeEntry(
-    device,
-    execution,
-    particleCount
-  );
+  const generationConsumerLease =
+    acquireSchroederSpatialEpochGenerationConsumerLease(
+      generation,
+      { consumerId: 'schroeder-spatial-thermal-proposal' }
+    );
+  let entry = null;
+  try {
+  const {
+    runtime,
+    entry: acquiredEntry,
+    cacheHit
+  } = acquireRuntimeEntry(device, execution, particleCount);
+  entry = acquiredEntry;
   // The CPU mirror only selects whether it is worth paying the extra
   // materialize/replay passes.  A stale positive result takes the established
   // direct GPU traversal, so this optimization hint cannot alter correctness.
@@ -7987,8 +8961,6 @@ export function runSchroederSpatialThermalProposalWebGpu({
     activeDispatchBuffer,
     thermalCsrDummyBuffer
   } = entry.buffers;
-
-  try {
 
   device.queue.writeBuffer(
     proposalBuffer,
@@ -8043,8 +9015,13 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ...preparedLawConfig
   }));
 
+  const directoryAbiCacheKey = `directory-v${directoryAbiVersion}`;
+  const thermalProposalWgsl = directoryV2
+    ? schroederSpatialThermalProposalV2Wgsl
+    : schroederSpatialThermalProposalWgsl;
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-schroeder-spatial-thermal-derived-prepass.v9',
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-derived-prepass.v10.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',
@@ -8064,7 +9041,8 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ]
   });
   const activeDispatchFinalizePipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-schroeder-spatial-thermal-active-dispatch-finalize.v3',
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-active-dispatch-finalize.v4.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'finalize_active_dispatch',
@@ -8083,8 +9061,55 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(11, 'storage')
     ]
   });
+  const physicalTopologyPreflightPipeline = directoryV2
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-thermal-physical-topology-preflight.v1.${directoryAbiCacheKey}`,
+        label: 'ulg-schroeder-spatial-thermal-physical-topology-preflight',
+        code: schroederSpatialThermalDerivedPrepassWgsl,
+        entryPoint: 'preflight_physical_topology',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'read-only-storage'),
+          computeBufferBinding(6, 'storage'),
+          computeBufferBinding(7, 'uniform'),
+          computeBufferBinding(8, 'read-only-storage'),
+          computeBufferBinding(9, 'read-only-storage'),
+          computeBufferBinding(10, 'read-only-storage'),
+          computeBufferBinding(11, 'storage')
+        ]
+      })
+    : null;
+  const activeTopologyFinalizePipeline = directoryV2
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-thermal-active-topology-finalize.v1.${directoryAbiCacheKey}`,
+        label: 'ulg-schroeder-spatial-thermal-active-topology-finalize',
+        code: schroederSpatialThermalDerivedPrepassWgsl,
+        entryPoint: 'finalize_active_topology',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'read-only-storage'),
+          computeBufferBinding(6, 'storage'),
+          computeBufferBinding(7, 'uniform'),
+          computeBufferBinding(8, 'read-only-storage'),
+          computeBufferBinding(9, 'read-only-storage'),
+          computeBufferBinding(10, 'read-only-storage'),
+          computeBufferBinding(11, 'storage')
+        ]
+      })
+    : null;
   const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-schroeder-spatial-thermal-budget-resolve.v9',
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-budget-resolve.v10.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-budget-resolve',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'resolve_budget',
@@ -8104,9 +9129,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ]
   });
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-schroeder-spatial-thermal-fused-budget.v21',
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-fused-budget.v22.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-budget',
-    code: schroederSpatialThermalProposalWgsl,
+    code: thermalProposalWgsl,
     entryPoint: 'budget',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -8126,9 +9152,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ]
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-schroeder-spatial-thermal-fused-proposal.v22',
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-fused-proposal.v23.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-proposal',
-    code: schroederSpatialThermalProposalWgsl,
+    code: thermalProposalWgsl,
     entryPoint: 'propose',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -8147,6 +9174,31 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(13, 'storage')
     ]
   });
+  const zeroActiveProjectionFinalizePipeline = directoryV2
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-thermal-zero-active-finalize.v1.${directoryAbiCacheKey}`,
+        label: 'ulg-schroeder-spatial-thermal-zero-active-finalize',
+        code: thermalProposalWgsl,
+        entryPoint: 'finalize_zero_active_projection',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'storage'),
+          computeBufferBinding(4, 'storage'),
+          computeBufferBinding(5, 'storage'),
+          computeBufferBinding(6, 'uniform'),
+          computeBufferBinding(7, 'uniform'),
+          computeBufferBinding(8, 'uniform'),
+          computeBufferBinding(9, 'read-only-storage'),
+          computeBufferBinding(10, 'read-only-storage'),
+          computeBufferBinding(11, 'storage'),
+          computeBufferBinding(12, 'storage'),
+          computeBufferBinding(13, 'storage')
+        ]
+      })
+    : null;
   const thermalCandidateCsrPipelineBindings = [
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(1, 'storage'),
@@ -8166,9 +9218,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
   const createThermalCandidateCsrControlPipeline = (entryPoint, suffix) => (
     candidateCsrEnabled
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-schroeder-spatial-thermal-csr-${suffix}.v5`,
+          cacheKey:
+            `ulg-schroeder-spatial-thermal-csr-${suffix}.v6.${directoryAbiCacheKey}`,
           label: `ulg-schroeder-spatial-thermal-csr-${suffix}`,
-          code: schroederSpatialThermalProposalWgsl,
+          code: thermalProposalWgsl,
           entryPoint,
           bindings: thermalCandidateCsrPipelineBindings
         })
@@ -8257,6 +9310,18 @@ export function runSchroederSpatialThermalProposalWebGpu({
       layout: activeDispatchFinalizePipeline.bindGroupLayout,
       entries: derivedEntries
     });
+    const physicalTopologyPreflightBindGroup = physicalTopologyPreflightPipeline
+      ? device.createBindGroup({
+          layout: physicalTopologyPreflightPipeline.bindGroupLayout,
+          entries: derivedEntries
+        })
+      : null;
+    const activeTopologyFinalizeBindGroup = activeTopologyFinalizePipeline
+      ? device.createBindGroup({
+          layout: activeTopologyFinalizePipeline.bindGroupLayout,
+          entries: derivedEntries
+        })
+      : null;
     const budgetResolveBindGroup = device.createBindGroup({
       layout: budgetResolvePipeline.bindGroupLayout,
       entries: derivedEntries
@@ -8344,6 +9409,13 @@ export function runSchroederSpatialThermalProposalWebGpu({
       layout: artifactRecord.proposalPipeline.bindGroupLayout,
       entries: [...proposalEntries, ...traversalEntries]
     });
+    const zeroActiveProjectionFinalizeBindGroup =
+      zeroActiveProjectionFinalizePipeline
+        ? device.createBindGroup({
+            layout: zeroActiveProjectionFinalizePipeline.bindGroupLayout,
+            entries: [...proposalEntries, ...candidateCsrEntries]
+          })
+        : null;
     const candidateCsrControlBindGroup = (pipelineInfo) => {
       if (!pipelineInfo || !candidateCsrEnabled) return null;
       return device.createBindGroup({
@@ -8368,9 +9440,12 @@ export function runSchroederSpatialThermalProposalWebGpu({
     return Object.freeze({
       derivedBindGroup,
       activeDispatchFinalizeBindGroup,
+      physicalTopologyPreflightBindGroup,
+      activeTopologyFinalizeBindGroup,
       budgetResolveBindGroup,
       budgetBindGroup,
       proposalBindGroup,
+      zeroActiveProjectionFinalizeBindGroup,
       thermalCandidateCsrValidateBindGroup,
       thermalCandidateCsrSealBindGroup,
       sourceCellInitializeBindGroup: sourceCellControlBindGroup(
@@ -8436,6 +9511,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     encoderStage: null,
     device,
     generation,
+    generationConsumerLease,
     execution,
     particleCount,
     entry,
@@ -8448,7 +9524,30 @@ export function runSchroederSpatialThermalProposalWebGpu({
     conductionEvidenceBuffer,
     radiationEvidenceBuffer,
     activeDispatchBuffer,
+    directoryAbiVersion,
+    directoryV2,
+    sourceWorkIdentity: directoryV2
+      ? 'gpu-active-ordinal'
+      : 'legacy-directory-member-rank',
+    sourceWorkIndirectBuffer: directoryV2
+      ? activeSourceView.activeSourceViewBuffer
+      : activeDispatchBuffer,
+    sourceWorkIndirectOffset: directoryV2
+      ? activeSourceView.activeDispatchOffsetBytes
+      : 0,
+    physicalTopologyWorkIdentity: directoryV2
+      ? 'gpu-physical-source-slot'
+      : 'legacy-host-physical-source-index',
+    physicalTopologyWorkIndirectBuffer: directoryV2
+      ? activeSourceView.activeSourceViewBuffer
+      : null,
+    physicalTopologyWorkIndirectOffset: directoryV2
+      ? activeSourceView.physicalDispatchOffsetBytes
+      : 0,
     activeSourceProjectionMode,
+    activeSourceView,
+    activeSourceCountAuthority,
+    activeSourceViewAdmissionStatus,
     activeRankView,
     activeRankViewAdmissionStatus,
     activeProjectionViewBuffer,
@@ -8456,9 +9555,12 @@ export function runSchroederSpatialThermalProposalWebGpu({
     thermalCandidateCsr,
     derivedPipeline,
     activeDispatchFinalizePipeline,
+    physicalTopologyPreflightPipeline,
+    activeTopologyFinalizePipeline,
     budgetPipeline,
     budgetResolvePipeline,
     proposalPipeline,
+    zeroActiveProjectionFinalizePipeline,
     thermalCandidateCsrValidatePipeline,
     thermalCandidateCsrSealPipeline,
     nativeTestTreeShadow: null,
@@ -8483,8 +9585,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     sourceCellTreeShadow?.batchBuffer?.destroy?.();
     sourceCellTreeShadow?.dispatchBuffer?.destroy?.();
     const treeConsumerLease = sourceCellTreeShadow?.treeConsumerLease;
-    const generationConsumerLease =
+    const sourceCellGenerationConsumerLease =
       sourceCellTreeShadow?.generationConsumerLease;
+    const proposalGenerationConsumerLease =
+      artifactRecord.generationConsumerLease;
     const treeRuntime = sourceCellTreeShadow?.tree?.ownerRuntime;
     const treeLeaseActive = Boolean(
       treeConsumerLease
@@ -8493,14 +9597,25 @@ export function runSchroederSpatialThermalProposalWebGpu({
         sourceCellTreeShadow.tree
       )
     );
-    const generationLeaseActive = Boolean(
-      generationConsumerLease
+    const sourceCellGenerationLeaseActive = Boolean(
+      sourceCellGenerationConsumerLease
       && ownsSchroederSpatialEpochGenerationConsumerLease(
-        generationConsumerLease,
+        sourceCellGenerationConsumerLease,
         artifactRecord.generation
       )
     );
-    if (treeLeaseActive || generationLeaseActive) {
+    const proposalGenerationLeaseActive = Boolean(
+      proposalGenerationConsumerLease
+      && ownsSchroederSpatialEpochGenerationConsumerLease(
+        proposalGenerationConsumerLease,
+        artifactRecord.generation
+      )
+    );
+    if (
+      treeLeaseActive
+      || sourceCellGenerationLeaseActive
+      || proposalGenerationLeaseActive
+    ) {
       if (
         artifactRecord.submissionObserved
         && !lostThermalProposalDevices.has(device)
@@ -8512,9 +9627,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
             submissionFence
           );
         }
-        if (generationLeaseActive) {
+        if (sourceCellGenerationLeaseActive) {
           releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
-            generationConsumerLease,
+            sourceCellGenerationConsumerLease,
+            submissionFence
+          );
+        }
+        if (proposalGenerationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+            proposalGenerationConsumerLease,
             submissionFence
           );
         }
@@ -8525,9 +9646,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
             { discardedEncoder: true }
           );
         }
-        if (generationLeaseActive) {
+        if (sourceCellGenerationLeaseActive) {
           releaseSchroederSpatialEpochGenerationConsumerLease(
-            generationConsumerLease,
+            sourceCellGenerationConsumerLease,
+            { discardedEncoder: true }
+          );
+        }
+        if (proposalGenerationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLease(
+            proposalGenerationConsumerLease,
             { discardedEncoder: true }
           );
         }
@@ -8623,7 +9750,30 @@ export function runSchroederSpatialThermalProposalWebGpu({
     proposalBuffer,
     thermalDerivedBudgetBuffer: derivedBuffer,
     activeDispatchBuffer,
+    directoryAbiVersion,
+    sourceWorkIdentity: directoryV2
+      ? 'gpu-active-ordinal'
+      : 'legacy-directory-member-rank',
+    sourceWorkIndirectBuffer: directoryV2
+      ? activeSourceView.activeSourceViewBuffer
+      : activeDispatchBuffer,
+    sourceWorkIndirectOffsetBytes: directoryV2
+      ? activeSourceView.activeDispatchOffsetBytes
+      : 0,
+    physicalTopologyWorkIdentity: directoryV2
+      ? 'gpu-physical-source-slot'
+      : 'legacy-host-physical-source-index',
+    physicalTopologyWorkIndirectBuffer: directoryV2
+      ? activeSourceView.activeSourceViewBuffer
+      : null,
+    physicalTopologyWorkIndirectOffsetBytes: directoryV2
+      ? activeSourceView.physicalDispatchOffsetBytes
+      : 0,
+    physicalTopologyReadbackPerformed: false,
     activeSourceProjectionMode,
+    activeSourceView,
+    activeSourceCountAuthority,
+    activeSourceViewAdmissionStatus,
     activeRankView,
     activeRankViewAdmissionStatus,
     activeProjectionViewBuffer,
@@ -8751,8 +9901,25 @@ export function runSchroederSpatialThermalProposalWebGpu({
   }
   return artifact;
   } catch (error) {
-    entry.inUseGenerationId = null;
-    entry.releaseScheduled = false;
+    if (
+      ownsSchroederSpatialEpochGenerationConsumerLease(
+        generationConsumerLease,
+        generation
+      )
+    ) {
+      releaseSchroederSpatialEpochGenerationConsumerLease(
+        generationConsumerLease,
+        { discardedEncoder: true }
+      );
+    }
+    const sourceAuthorityRecord = thermalProposalSourceAuthorities.get(
+      thermalProposalSourceAuthority
+    );
+    if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
+    if (entry) {
+      entry.inUseGenerationId = null;
+      entry.releaseScheduled = false;
+    }
     throw error;
   }
 }
@@ -8777,6 +9944,11 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
   if (device !== record.device || lostThermalProposalDevices.has(device)) {
     throw new TypeError(
       'Native thermal tree shadow requires the live proposal device'
+    );
+  }
+  if (record.directoryV2) {
+    throw new Error(
+      'Native thermal tree shadow is directory-v1-only; directory-v2 must exercise the production ActiveSource path'
     );
   }
   if (
@@ -8933,6 +10105,11 @@ export function armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
   if (device !== record.device || lostThermalProposalDevices.has(device)) {
     throw new TypeError(
       'Native thermal source-cell tree shadow requires the live proposal device'
+    );
+  }
+  if (record.directoryV2) {
+    throw new Error(
+      'Native thermal source-cell tree shadow is directory-v1-only; directory-v2 must exercise the production ActiveSource path'
     );
   }
   if (
@@ -9208,6 +10385,11 @@ export function armSchroederSpatialThermalExhaustiveShadowForNativeTest({
       'Native thermal exhaustive shadow requires the live proposal device'
     );
   }
+  if (record.directoryV2) {
+    throw new Error(
+      'Native thermal exhaustive shadow is directory-v1-only; directory-v2 must exercise the production ActiveSource path'
+    );
+  }
   if (
     record.released
     || record.releaseScheduled
@@ -9318,11 +10500,25 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
   ) {
     throw new Error('Matched-time thermal proposal materialization is single-use');
   }
+  if (
+    !ownsSchroederSpatialEpochGenerationConsumerLease(
+      record.generationConsumerLease,
+      record.generation
+    )
+  ) {
+    const error = new Error(
+      'Matched-time thermal proposal lost its spatial-generation consumer lease'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_THERMAL_GENERATION_LEASE_STALE';
+    throw error;
+  }
   if (!isLiveThermalProposalSourceAuthority(
     artifact.thermalProposalSourceAuthority,
     {
       device,
       generation: record.generation,
+      generationConsumerLease: record.generationConsumerLease,
       stateBuffer: record.frozenStateBuffer,
       thermoBuffer: record.frozenThermoBuffer,
       particleCount: record.particleCount
@@ -9402,10 +10598,13 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
   };
   const localActiveProjection = record.activeSourceProjectionMode
     === SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_LOCAL;
+  const activeSourceProjection = record.activeSourceProjectionMode
+    === SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
   const compactActiveProjection = record.activeSourceProjectionMode
     === SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE
     || record.activeSourceProjectionMode
-      === SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK;
+      === SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+    || activeSourceProjection;
   const stage = Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_MATCHED_TIME_THERMAL_ENCODER_STAGE_SCHEMA,
     status: 'schroeder-spatial-matched-time-thermal-encoder-stage-ready',
@@ -9423,7 +10622,8 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       record.candidateCsrEnabled
         ? (localActiveProjection ? 7 : 6)
         : (localActiveProjection ? 5 : 4)
-    ) + (record.nativeTestSourceCellTreeShadow ? 4 : 0),
+    ) + (activeSourceProjection ? 4 : 0)
+      + (record.nativeTestSourceCellTreeShadow ? 4 : 0),
     hierarchyTraversalCount: 2,
     preferredHierarchyTraversalCount: record.candidateCsrEnabled ? 1 : 2,
     maximumHierarchyTraversalCount: 2,
@@ -9447,6 +10647,19 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       }
       if (encodeAttempted || record.encoded || record.releaseScheduled || record.released) {
         throw new Error('Matched-time thermal encoder stage is single-use');
+      }
+      if (
+        !ownsSchroederSpatialEpochGenerationConsumerLease(
+          record.generationConsumerLease,
+          record.generation
+        )
+      ) {
+        const error = new Error(
+          'Matched-time thermal encoder lost its spatial-generation consumer lease'
+        );
+        error.code =
+          'ERR_SCHROEDER_SPATIAL_THERMAL_GENERATION_LEASE_STALE';
+        throw error;
       }
       if (
         !encoder?.clearBuffer
@@ -9520,6 +10733,17 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
         ) => {
           const timestamp = beginTimestamp(encoder, timestampStage);
           const pass = encoder.beginComputePass({ label });
+          if (
+            (
+              dispatchIndirectBuffer
+              || (compactActiveProjection && activeProjectionIndirect)
+            )
+            && typeof pass?.dispatchWorkgroupsIndirect !== 'function'
+          ) {
+            throw new TypeError(
+              'Matched-time thermal compact source execution requires dispatchWorkgroupsIndirect'
+            );
+          }
           pass.setPipeline(pipelineInfo.pipeline);
           pass.setBindGroup(0, bindGroup);
           if (dispatchIndirectBuffer) {
@@ -9528,7 +10752,10 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
               dispatchIndirectOffset
             );
           } else if (compactActiveProjection && activeProjectionIndirect) {
-            pass.dispatchWorkgroupsIndirect(record.activeDispatchBuffer, 0);
+            pass.dispatchWorkgroupsIndirect(
+              record.sourceWorkIndirectBuffer,
+              record.sourceWorkIndirectOffset
+            );
           } else if (dispatchWorkgroups != null) {
             if (Array.isArray(dispatchWorkgroups)) {
               pass.dispatchWorkgroups(...dispatchWorkgroups);
@@ -9541,11 +10768,40 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           pass.end();
           endTimestamp(encoder, timestamp);
         };
+        if (activeSourceProjection) {
+          encodePass(
+            'ulg-schroeder-spatial-thermal-active-source-preflight',
+            'active-source-preflight',
+            record.activeDispatchFinalizePipeline,
+            bindGroups.activeDispatchFinalizeBindGroup,
+            { singleWorkgroup: true }
+          );
+          encodePass(
+            'ulg-schroeder-spatial-thermal-physical-topology-preflight',
+            'physical-topology-preflight',
+            record.physicalTopologyPreflightPipeline,
+            bindGroups.physicalTopologyPreflightBindGroup,
+            {
+              dispatchIndirectBuffer:
+                record.physicalTopologyWorkIndirectBuffer,
+              dispatchIndirectOffset:
+                record.physicalTopologyWorkIndirectOffset
+            }
+          );
+          encodePass(
+            'ulg-schroeder-spatial-thermal-active-topology-finalize',
+            'active-topology-finalize',
+            record.activeTopologyFinalizePipeline,
+            bindGroups.activeTopologyFinalizeBindGroup,
+            { singleWorkgroup: true }
+          );
+        }
         encodePass(
           'ulg-schroeder-spatial-thermal-derived-prepass',
           'derived-prepass',
           record.derivedPipeline,
-          bindGroups.derivedBindGroup
+          bindGroups.derivedBindGroup,
+          { activeProjectionIndirect: activeSourceProjection }
         );
         if (localActiveProjection) {
           encodePass(
@@ -9647,7 +10903,10 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           'ulg-schroeder-spatial-thermal-budget-resolve',
           'budget-resolve',
           record.budgetResolvePipeline,
-          bindGroups.budgetResolveBindGroup
+          bindGroups.budgetResolveBindGroup,
+          activeSourceProjection
+            ? { activeProjectionIndirect: true }
+            : {}
         );
         encodePass(
           'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal',
@@ -9661,6 +10920,15 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
               }
             : { activeProjectionIndirect: true }
         );
+        if (activeSourceProjection) {
+          encodePass(
+            'ulg-schroeder-spatial-thermal-zero-active-finalize',
+            'zero-active-finalize',
+            record.zeroActiveProjectionFinalizePipeline,
+            bindGroups.zeroActiveProjectionFinalizeBindGroup,
+            { singleWorkgroup: true }
+          );
+        }
         record.encoded = true;
         record.lifecycleStatus = 'encoded';
       } catch (error) {
@@ -9676,6 +10944,19 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
         throw new Error('Matched-time thermal producer was not encoded before submission');
       }
       if (record.submissionObserved) return false;
+      if (
+        !ownsSchroederSpatialEpochGenerationConsumerLease(
+          record.generationConsumerLease,
+          record.generation
+        )
+      ) {
+        const error = new Error(
+          'Matched-time thermal submission lost its spatial-generation consumer lease'
+        );
+        error.code =
+          'ERR_SCHROEDER_SPATIAL_THERMAL_GENERATION_LEASE_STALE';
+        throw error;
+      }
       record.submissionObserved = true;
       record.lifecycleStatus = 'submitted';
       const sourceCellTreeShadow =
@@ -9688,14 +10969,24 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
             sourceCellTreeShadow.tree
           )
       );
-      const generationLeaseActive = Boolean(
+      const sourceCellGenerationLeaseActive = Boolean(
         sourceCellTreeShadow?.generationConsumerLease
         && ownsSchroederSpatialEpochGenerationConsumerLease(
           sourceCellTreeShadow.generationConsumerLease,
           record.generation
         )
       );
-      if (treeLeaseActive || generationLeaseActive) {
+      const proposalGenerationLeaseActive = Boolean(
+        ownsSchroederSpatialEpochGenerationConsumerLease(
+          record.generationConsumerLease,
+          record.generation
+        )
+      );
+      if (
+        treeLeaseActive
+        || sourceCellGenerationLeaseActive
+        || proposalGenerationLeaseActive
+      ) {
         const submissionFence = device.queue.onSubmittedWorkDone();
         if (treeLeaseActive) {
           sourceCellTreeShadow.tree.ownerRuntime
@@ -9704,9 +10995,15 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
               submissionFence
             );
         }
-        if (generationLeaseActive) {
+        if (sourceCellGenerationLeaseActive) {
           releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
             sourceCellTreeShadow.generationConsumerLease,
+            submissionFence
+          );
+        }
+        if (proposalGenerationLeaseActive) {
+          releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+            record.generationConsumerLease,
             submissionFence
           );
         }

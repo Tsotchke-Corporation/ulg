@@ -1,3 +1,13 @@
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+  validateSchroederSpatialActiveSourceViewDescriptor
+} from './schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from './schroederSpatialEpoch.js';
+
 export const ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA =
   'peercompute.ulg.schroeder-spatial-mechanics-field-view.v5';
 
@@ -14,6 +24,8 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE = 27;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS = 60;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PARAMS_BYTES = 192;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1 = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2 = 2;
 
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED = 1 << 1;
@@ -197,6 +209,24 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
     'solid-initial-body-domain;non-solid-material-continuum-domain-zero',
   construction:
     'gpu-authenticated-particle-stencil-packed-u32x3-stable-radix-scan-unique-to-public-u32x4',
+  sourceAuthorities: Object.freeze({
+    v1: Object.freeze({
+      id: SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+      sourceWorkIdentity: 'physical-source-index',
+      dispatch: 'host-authenticated-direct-source-and-candidate-counts'
+    }),
+    v2: Object.freeze({
+      id: SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
+      directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+      activeSourceSchema: ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+      sourceWorkIdentity: 'gpu-active-ordinal',
+      sourceProjection: 'active-ordinal-to-stable-physical-source-index',
+      directoryAdmission:
+        'physical-to-cell-plus-one-and-exact-cell-key-authenticated',
+      dispatch:
+        'active-source-gpu-indirect-source-and-candidate-counts-no-host-active-count'
+    })
+  }),
   constructionDispatch: Object.freeze({
     directLinearization:
       'linearGroup=workgroup.x+workgroup.y*dispatchX',
@@ -276,6 +306,54 @@ function exactTwoDimensionalDispatchShape(
 }
 
 function dispatchTelemetryAdmitted(view) {
+  if (
+    view?.sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+  ) {
+    const evidence = view.constructionDispatchEvidence;
+    return view.sourceCount === view.physicalSourceCount
+      && view.candidateCount === null
+      && view.consumerDispatchWorkgroupSize
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+      && view.consumerDispatchDimensions === 2
+      && view.directDispatchLinearization
+        === 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+      && view.consumerDispatchLinearization
+        === 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+      && Number.isInteger(view.maxComputeWorkgroupsPerDimension)
+      && view.maxComputeWorkgroupsPerDimension >= 1
+      && view.maxComputeWorkgroupsPerDimension <= 65535
+      && view.sourceDispatchWorkgroups === null
+      && view.candidateDispatchWorkgroups === null
+      && view.sourceDispatchIndirectBuffer
+        === view.activeSourceView?.activeSourceViewBuffer
+      && view.candidateDispatchIndirectBuffer
+        === view.activeSourceView?.activeSourceViewBuffer
+      && view.sourceDispatchIndirectOffsetBytes
+        === view.activeSourceView?.activeDispatchOffsetBytes
+      && view.candidateDispatchIndirectOffsetBytes
+        === view.activeSourceView?.candidateDispatchOffsetBytes
+      && evidence?.workgroupSize
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE
+      && evidence?.linearization
+        === 'linearGroup=workgroup.x+workgroup.y*dispatchX'
+      && evidence?.sourceWorkIdentity === 'gpu-active-ordinal'
+      && evidence?.sourceInvocationCountAuthority?.buffer
+        === view.activeSourceView?.activeSourceViewBuffer
+      && evidence?.sourceInvocationCountAuthority?.offsetWords === 18
+      && evidence?.candidateInvocationCountAuthority?.buffer
+        === view.activeSourceView?.activeSourceViewBuffer
+      && evidence?.candidateInvocationCountAuthority?.offsetWords === 43
+      && evidence?.generationSealAuthority?.buffer
+        === view.activeSourceView?.activeSourceViewBuffer
+      && evidence?.generationSealAuthority?.offsetWords === 30
+      && evidence?.generationSealAuthority?.expected
+        === view.activeSourceView?.buildOrdinal
+      && evidence?.maxComputeWorkgroupsPerDimension
+        === view.maxComputeWorkgroupsPerDimension
+      && evidence?.authenticatedByGpuFinalizer === true
+      && evidence?.hostActiveCountReadbackRequired === false;
+  }
   const workgroupSize = Number(view?.consumerDispatchWorkgroupSize);
   const maxDimension = Number(view?.maxComputeWorkgroupsPerDimension);
   if (
@@ -452,6 +530,8 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
 export function createSchroederSpatialMechanicsFieldViewPlan({
   sourceCount,
   sourceCapacity = sourceCount,
+  sourceAuthorityVersion =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
   sourceRowLayoutId = 1,
   identityStrideWords = 1,
   selectedLevel = 0,
@@ -479,6 +559,12 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     sourceCapacity,
     'sourceCapacity',
     resolvedSourceCount
+  );
+  const resolvedSourceAuthorityVersion = integer(
+    sourceAuthorityVersion,
+    'sourceAuthorityVersion',
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
   );
   if ((!Array.isArray(gridDims) && !ArrayBuffer.isView(gridDims)) || gridDims.length !== 3) {
     throw new TypeError('gridDims must be an array-like [x, y, z] value');
@@ -523,7 +609,13 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     status: 'schroeder-spatial-mechanics-field-view-plan-ready',
     ...identity,
     sourceCount: resolvedSourceCount,
+    physicalSourceCount: resolvedSourceCount,
     sourceCapacity: resolvedSourceCapacity,
+    sourceAuthorityVersion: resolvedSourceAuthorityVersion,
+    sourceWorkIdentity: resolvedSourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      ? 'gpu-active-ordinal'
+      : 'physical-source-index',
     // Active-node rows are not particle aligned and cannot carry one stable
     // material/body descriptor per source carrier. The field child is derived
     // only from the exact retained level-assignment family.
@@ -540,7 +632,11 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     gridDims: Object.freeze(resolvedGridDims),
     gridShift: integer(gridShift, 'gridShift', 0, 0x7fff_ffff),
     gridSpacingM: finitePositive(gridSpacingM, 'gridSpacingM'),
-    candidateCount,
+    candidateCount: resolvedSourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      ? null
+      : candidateCount,
+    candidateCapacity: candidateCount,
     fieldCapacity: layout.fieldCapacity,
     layout,
     deterministicOrdering: 'stable-lexicographic-u32x4',
@@ -577,6 +673,8 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     'supportEpoch',
     'completionOrdinal',
     'sourceCount',
+    'physicalSourceCount',
+    'sourceAuthorityVersion',
     'sourceRowLayoutId',
     'identityStrideWords',
     'selectedLevel',
@@ -642,14 +740,29 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     };
   }
   const gridDims = Array.from(view.gridDims || []);
+  const sourceAuthorityVersion = Number(
+    view.sourceAuthorityVersion
+      ?? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+  );
+  const v2Authority =
+    sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
   if (
     gridDims.length !== 3
     || gridDims.some((value) => !Number.isInteger(value) || value < 1)
     || gridDims.reduce((product, value) => product * value, 1) !== view.gridNodeCount
     || view.sourceCount < 1
     || view.sourceCount > view.sourceCapacity
-    || view.candidateCount !== view.sourceCount
-      * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE
+    || view.physicalSourceCount !== view.sourceCount
+    || (
+      v2Authority
+        ? view.candidateCount !== null
+          || view.candidateCapacity !== view.sourceCount
+            * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE
+        : view.candidateCount !== view.sourceCount
+            * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE
+          || view.candidateCapacity !== view.candidateCount
+    )
     || view.fieldCapacity !== expectedLayout.fieldCapacity
     || view.layout?.schema !== ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA
     || view.layout?.headerWords !== SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
@@ -693,6 +806,105 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     return {
       admitted: false,
       status: 'schroeder-spatial-mechanics-field-view-rejected-layout'
+    };
+  }
+  if (v2Authority) {
+    const spatialExecution = view.spatialExecution;
+    const activeSourceView = view.activeSourceView;
+    const parent = view.parentMechanicsView;
+    let activeSourceAdmission = { admitted: false };
+    try {
+      activeSourceAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
+        activeSourceView,
+        {
+          physicalSourceCount: view.sourceCount,
+          physicalSourceCapacity: view.sourceCapacity,
+          sourceBuffer: view.sourceBuffer,
+          activeSourceViewBuffer: view.activeSourceViewBuffer,
+          generationId: view.generationId,
+          deviceOrdinal: view.deviceOrdinal,
+          laneOrdinal: view.laneOrdinal,
+          leaseToken: view.leaseToken,
+          sourceFamilyId: view.sourceFamilyId,
+          storageGeneration: view.storageGeneration,
+          physicsTick: view.physicsTick,
+          physicsSubstep: view.physicsSubstep,
+          positionEpoch: view.positionEpoch,
+          topologyEpoch: view.topologyEpoch,
+          chartEpoch: view.chartEpoch,
+          levelEpoch: view.levelEpoch,
+          supportEpoch: view.supportEpoch,
+          buildOrdinal: view.completionOrdinal
+        }
+      );
+    } catch {
+      activeSourceAdmission = { admitted: false };
+    }
+    if (
+      activeSourceAdmission.admitted !== true
+      || spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || spatialExecution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      || spatialExecution.reverseEncoding
+        !== SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+      || spatialExecution.physicalSourceCount !== view.sourceCount
+      || spatialExecution.physicalSourceCapacity !== view.sourceCapacity
+      || spatialExecution.sourceBuffer !== view.sourceBuffer
+      || spatialExecution.buildOrdinal !== view.completionOrdinal
+      || spatialExecution.directoryBuffer !== view.directoryBuffer
+      || spatialExecution.activeSourceView !== activeSourceView
+      || spatialExecution.activeSourceCountAuthority
+        !== view.activeSourceCountAuthority
+      || spatialExecution.activeSourceViewBuffer
+        !== view.activeSourceViewBuffer
+      || parent?.sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      || parent.directorySchema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || parent.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      || parent.sourceWorkIdentity !== 'gpu-active-ordinal'
+      || parent.physicalSourceCount !== view.sourceCount
+      || parent.spatialExecution !== spatialExecution
+      || parent.activeSourceView !== activeSourceView
+      || parent.activeSourceViewBuffer !== view.activeSourceViewBuffer
+      || parent.activeSourceCountAuthority !== view.activeSourceCountAuthority
+      || view.activeSourceCountAuthority?.activeSourceView !== activeSourceView
+      || view.activeSourceCountAuthority?.buffer !== view.activeSourceViewBuffer
+      || view.activeSourceCountAuthority?.offsetWords !== 18
+      || view.activeSourceCountAuthority?.offsetBytes
+        !== 18 * Uint32Array.BYTES_PER_ELEMENT
+      || view.activeSourceCountAuthority?.capacity
+        !== activeSourceView.activeSourceCapacity
+      || view.directorySchema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || view.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      || view.sourceWorkIdentity !== 'gpu-active-ordinal'
+      || view.retainedMemoryScaling !== 'physical-source-capacity'
+      || view.computeDispatchScaling
+        !== 'gpu-active-source-count-and-occupied-field-count'
+    ) {
+      return {
+        admitted: false,
+        status:
+          'schroeder-spatial-mechanics-field-view-rejected-v2-source-authority'
+      };
+    }
+  } else if (
+    sourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    || (
+      view.parentMechanicsView.sourceAuthorityVersion
+        ?? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    ) !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    || (view.parentMechanicsView.directoryAbiVersion ?? 1) !== 1
+    || view.sourceWorkIdentity !== 'physical-source-index'
+    || view.directorySchema !== null
+    || view.directoryAbiVersion !== null
+    || view.spatialExecution !== null
+    || view.activeSourceView !== null
+    || view.activeSourceCountAuthority !== null
+  ) {
+    return {
+      admitted: false,
+      status:
+        'schroeder-spatial-mechanics-field-view-rejected-source-authority-version'
     };
   }
   if (

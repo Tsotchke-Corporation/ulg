@@ -20,9 +20,16 @@ import {
   schroederSpatialAggregateViewWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialAggregateViewWgsl.js';
 import {
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
-  createSchroederSpatialEpochLayout
+  createSchroederSpatialEpochLayout,
+  createSchroederSpatialEpochV2Layout
 } from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  createSchroederSpatialActiveSourceViewLayout
+} from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import {
   createSchroederSpatialAggregateViewGpu
 } from '../src/runtime/sph/schroederSpatialAggregateViewGpu.js';
@@ -200,6 +207,160 @@ function createAuthorities(device, { sourceCount = 3, sourceCapacity = 4 } = {})
     ...epochIdentity
   };
   return { spatialExecution, spatialSource, particleBufferSet };
+}
+
+function createV2Authorities(device, {
+  physicalSourceCount = 4097,
+  physicalSourceCapacity = physicalSourceCount,
+  activeSourceCapacity = 4,
+  cellCapacity = activeSourceCapacity,
+  fixtureActiveCount = 2
+} = {}) {
+  const layout = createSchroederSpatialEpochV2Layout({
+    physicalSourceCapacity,
+    activeSourceCapacity,
+    cellCapacity
+  });
+  const activeLayout = createSchroederSpatialActiveSourceViewLayout({
+    physicalSourceCapacity,
+    activeSourceCapacity
+  });
+  const directoryBuffer = taggedBuffer(device, 'directory-v2', layout.byteLength);
+  const consumerDispatchBuffer = taggedBuffer(device, 'directory-v2-dispatch', 12);
+  const sourceBuffer = taggedBuffer(
+    device,
+    'level-assignment-v2',
+    physicalSourceCapacity * 16 * 4
+  );
+  const stateBuffer = taggedBuffer(
+    device,
+    'state-v2',
+    physicalSourceCount * 8 * 4
+  );
+  const thermoBuffer = taggedBuffer(
+    device,
+    'thermo-v2',
+    physicalSourceCount * 12 * 4
+  );
+  const identityBuffer = taggedBuffer(
+    device,
+    'identity-v2',
+    physicalSourceCount * 4
+  );
+  const activeSourceViewBuffer = taggedBuffer(
+    device,
+    'active-source-v2',
+    activeLayout.byteLength
+  );
+  const activeOwners = new WeakSet();
+  const spatialOwners = new WeakSet();
+  const activeOwnerRuntime = {
+    ownsExecution(value) { return activeOwners.has(value); }
+  };
+  const spatialOwnerRuntime = {
+    ownsExecution(value) { return spatialOwners.has(value); }
+  };
+  const identity = {
+    generationId: 21,
+    deviceOrdinal: 22,
+    laneOrdinal: 23,
+    leaseToken: 24,
+    sourceFamilyId: 25,
+    physicsTick: 26,
+    physicsSubstep: 27,
+    buildOrdinal: 21,
+    ...epochIdentity
+  };
+  const activeSourceView = {
+    schema: 'peercompute.ulg.schroeder-spatial-active-source-view.v1',
+    status: 'schroeder-spatial-active-source-view-gpu-encoded',
+    released: false,
+    ownerRuntime: activeOwnerRuntime,
+    sourceBuffer,
+    activeSourceViewBuffer,
+    physicalSourceCount,
+    physicalSourceCapacity,
+    activeSourceCapacity,
+    activeSourceCount: null,
+    fixtureActiveCount,
+    sourceRowLayoutId: 1,
+    sourceRowStrideFloats: 16,
+    activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+    layout: activeLayout,
+    ...identity
+  };
+  activeOwners.add(activeSourceView);
+  const activeSourceCountAuthority = Object.freeze({
+    schema: activeSourceView.schema,
+    activeSourceView,
+    buffer: activeSourceViewBuffer,
+    offsetWords: 18,
+    offsetBytes: 18 * 4,
+    capacity: activeSourceCapacity,
+    residency: 'gpu-only'
+  });
+  const spatialExecution = {
+    schema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    directorySchema: ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+    status: 'schroeder-spatial-epoch-v2-gpu-encoded',
+    released: false,
+    ownerRuntime: spatialOwnerRuntime,
+    abiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    directoryAbiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    directoryBuffer,
+    consumerDispatchBuffer,
+    sourceBuffer,
+    sourceCount: physicalSourceCount,
+    sourceCapacity: physicalSourceCapacity,
+    physicalSourceCount,
+    physicalSourceCapacity,
+    activeSourceCapacity,
+    activeSourceCount: null,
+    activeSourceView,
+    activeSourceViewBuffer,
+    activeSourceCountAuthority,
+    logicalSourceCountAuthority: activeSourceCountAuthority,
+    activeSourceCountAuthorityOffsetWords: 18,
+    activeSourceGenerationSeal: Object.freeze({
+      buffer: activeSourceViewBuffer,
+      offsetWords: 30,
+      expected: identity.buildOrdinal
+    }),
+    sourceWorkIdentity: 'gpu-active-ordinal',
+    reverseEncoding: SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+    sourceRowLayoutId: 1,
+    sourceAdapterId: 2,
+    layout,
+    sortUniqueOrdinal: identity.buildOrdinal,
+    ...identity
+  };
+  spatialOwners.add(spatialExecution);
+  const spatialSource = {
+    ready: true,
+    sourceBuffer,
+    sourceStateBuffer: stateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceCount: physicalSourceCount,
+    ...epochIdentity
+  };
+  const particleBufferSet = {
+    status: 'webgpu-uploaded',
+    particleCount: physicalSourceCount,
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    stateStrideBytes: 8 * 4,
+    thermoStrideBytes: 12 * 4,
+    identityStrideBytes: 4,
+    ...epochIdentity
+  };
+  return {
+    spatialExecution,
+    spatialSource,
+    particleBufferSet,
+    activeSourceView,
+    activeSourceCountAuthority
+  };
 }
 
 function oneParticlePerCellFixture(cellCount) {
@@ -1007,9 +1168,15 @@ test('runtime retains Morton radix arenas and uses separate cell/internal/record
   assert.equal(runtime.schema, ULG_SCHROEDER_SPATIAL_AGGREGATE_VIEW_SCHEMA);
   assert.equal(runtime.aggregatePipelineCount, 9);
   assert.equal(runtime.radixPipelineCountPerArena, 12);
+  assert.equal(runtime.radixGpuCountPipelineCountPerArena, 9);
+  assert.equal(runtime.gpuCountRadixPrepared, true);
   assert.equal(
     runtime.pipelineCount,
-    runtime.aggregatePipelineCount + 2 * runtime.radixPipelineCountPerArena
+    runtime.aggregatePipelineCount
+      + 2 * (
+        runtime.radixPipelineCountPerArena
+        + runtime.radixGpuCountPipelineCountPerArena
+      )
   );
   assert.equal(runtime.topologyMode, 2);
   assert.equal(runtime.mortonKeyWordCount, 5);
@@ -1060,6 +1227,291 @@ test('runtime retains Morton radix arenas and uses separate cell/internal/record
   assert.equal(validateSchroederSpatialAggregateViewDescriptor(execution).admitted, true);
   assert.equal(await runtime.releaseExecutionAfter(execution, Promise.resolve()), true);
   assert.equal(runtime.activeExecutionCount(), 0);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('directory v2 aggregate uses GPU cell-count work and traversal maps active ordinals to physical summaries', async () => {
+  const tracker = createFakeDevice();
+  const aggregateRuntime = createSchroederSpatialAggregateViewGpu(
+    tracker.device,
+    {
+      maxSourceCount: 4097,
+      cellCapacity: 4,
+      arenaCount: 1
+    }
+  );
+  const authorities = createV2Authorities(tracker.device, {
+    physicalSourceCount: 4097,
+    physicalSourceCapacity: 4097,
+    activeSourceCapacity: 4,
+    cellCapacity: 4,
+    fixtureActiveCount: 2
+  });
+  const createdBeforeEncode = tracker.createdBuffers.length;
+  const timestampBegins = [];
+  const timestampEnds = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      const token = { encoder, descriptor };
+      timestampBegins.push(token);
+      return token;
+    },
+    endEncoderSpan(encoder, token) {
+      timestampEnds.push({ encoder, token });
+    }
+  };
+  const aggregateEncoder = createFakeEncoder();
+  const aggregateView = aggregateRuntime.encode(aggregateEncoder, {
+    ...authorities,
+    gpuTimestampRecorder,
+    timestampMetadata: { fixture: 'sparse-high-physical-id' }
+  });
+  assert.equal(tracker.createdBuffers.length, createdBeforeEncode);
+  assert.equal(aggregateView.directoryAbiVersion, 2);
+  assert.equal(aggregateView.sourceCount, 4097);
+  assert.equal(aggregateView.sourceWorkIdentity, 'gpu-active-ordinal');
+  assert.equal(
+    aggregateView.aggregateMemberCountSource,
+    'gpu-directory-active-source-count-word-37'
+  );
+  assert.equal(aggregateView.mortonSortElementCount, null);
+  assert.equal(
+    aggregateView.mortonSortElementCountSource,
+    'gpu-directory-cell-count-word-18'
+  );
+  assert.equal(
+    aggregateView.mortonKeyDispatchIndirectBuffer,
+    authorities.spatialExecution.consumerDispatchBuffer
+  );
+  assert.match(
+    schroederSpatialAggregateViewWgsl,
+    /let v2_group_index = workgroup_id\.x\s*\+ workgroup_id\.y \* spatial_directory\[42u\]/
+  );
+  assert.equal(aggregateView.radixCountAuthorityBuffer,
+    authorities.spatialExecution.directoryBuffer);
+  assert.equal(aggregateView.radixCountAuthorityByteOffset, 18 * 4);
+  assert.equal(aggregateView.radixGenerationSealByteOffset, 35 * 4);
+  assert.equal(
+    aggregateView.radixTimestampProducerId,
+    'schroeder-spatial-aggregate-gpu-count-radix-sort-unique'
+  );
+  assert.equal(aggregateView.radixParamsBufferResidency,
+    'retained-gpu-count-config-arena');
+  assert.equal(aggregateView.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(aggregateView.readbackPerformed, false);
+  const emitPass = aggregateEncoder.passes.find(
+    ({ descriptor }) => descriptor.label?.endsWith('EmitMortonKeysV2')
+  );
+  assert.ok(emitPass);
+  assert.equal(
+    emitPass.indirect.buffer,
+    authorities.spatialExecution.consumerDispatchBuffer
+  );
+  assert.equal(emitPass.indirect.offset, 0);
+  assert.equal(timestampBegins.length, 1);
+  assert.equal(timestampEnds.length, 1);
+  assert.equal(
+    timestampBegins[0].descriptor.producerId,
+    'schroeder-spatial-aggregate-gpu-count-radix-sort-unique'
+  );
+  assert.equal(timestampBegins[0].descriptor.elementCount, null);
+  assert.equal(
+    timestampBegins[0].descriptor.elementCountSource,
+    'authenticated-gpu-authority'
+  );
+  assert.equal(
+    tracker.writes.some(({ buffer }) => (
+      buffer === authorities.spatialExecution.directoryBuffer
+      || buffer === authorities.spatialExecution.consumerDispatchBuffer
+      || buffer === authorities.activeSourceView.activeSourceViewBuffer
+    )),
+    false,
+    'the host must not publish a live v2 count or dispatch'
+  );
+  aggregateRuntime.markExecutionSubmitted(aggregateView);
+  assert.equal(
+    validateSchroederSpatialAggregateViewDescriptor(aggregateView).admitted,
+    true
+  );
+
+  const traversalRuntime = createSchroederSpatialAggregateTraversalGpu(
+    tracker.device,
+    { maxQueryCount: 4097, arenaCount: 1 }
+  );
+  const traversalEncoder = createFakeEncoder();
+  const publicEpochIdentity = Object.freeze(Object.fromEntries([
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ].map((field) => [field, aggregateView[field]])));
+  const traversal = traversalRuntime.encode(traversalEncoder, {
+    aggregateView,
+    queryBuffer: authorities.spatialSource.sourceBuffer,
+    queryCount: 4097,
+    queryStrideFloats: 16,
+    querySourceLayoutId:
+      SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_QUERY_SOURCE_LAYOUT
+        .LEVEL_ASSIGNMENT_V0,
+    publicEpochIdentity
+  });
+  assert.equal(
+    traversal.queryWorkIdentity,
+    'gpu-active-ordinal-mapped-to-stable-physical-source'
+  );
+  assert.equal(
+    traversal.activeSourceDispatchLinearization,
+    'linearGroup=workgroup.x+workgroup.y*dispatchX'
+  );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /let linear_group = workgroup_id\.x\s*\+ workgroup_id\.y\s*\* active_source_view\[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD\]/
+  );
+  assert.equal(traversal.summaryDestinationIdentity,
+    'stable-physical-source-slot');
+  assert.equal(
+    traversal.indirectDispatchBuffer,
+    authorities.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    traversal.indirectDispatchOffsetBytes,
+    authorities.activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(traversal.activeSourceCountReadbackPerformed, false);
+  assert.equal(traversalEncoder.passes.length, 1);
+  assert.equal(
+    traversalEncoder.passes[0].indirect.buffer,
+    authorities.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    traversalEncoder.passes[0].indirect.offset,
+    authorities.activeSourceView.activeDispatchOffsetBytes
+  );
+  const traversalParamsWrite = tracker.writes.findLast(
+    ({ data }) => data instanceof ArrayBuffer && data.byteLength === 128
+  );
+  const traversalParams = new DataView(traversalParamsWrite.data);
+  assert.equal(traversalParams.getUint32(29 * 4, true), 1);
+  assert.equal(
+    traversalParams.getUint32(30 * 4, true),
+    aggregateView.activeMemberOffsetWords
+  );
+  const traversalBindings = tracker.bindGroups.findLast(
+    ({ descriptor }) => descriptor.label.includes('aggregate-traversal-bind-group')
+  );
+  assert.deepEqual(
+    traversalBindings.descriptor.entries.map(({ binding }) => binding),
+    [0, 1, 2, 3, 4]
+  );
+  traversalRuntime.markExecutionSubmitted(traversal);
+  assert.equal(
+    await traversalRuntime.releaseExecutionAfter(
+      traversal,
+      Promise.resolve()
+    ),
+    true
+  );
+  assert.equal(traversalRuntime.destroy(), true);
+  assert.equal(
+    await aggregateRuntime.releaseExecutionAfter(
+      aggregateView,
+      Promise.resolve()
+    ),
+    true
+  );
+  assert.equal(aggregateRuntime.destroy(), true);
+});
+
+test('directory v2 aggregate fails closed on cloned authorities and encodes an A=0 no-root path', () => {
+  const tracker = createFakeDevice();
+  const runtime = createSchroederSpatialAggregateViewGpu(tracker.device, {
+    maxSourceCount: 8,
+    cellCapacity: 4,
+    arenaCount: 1
+  });
+  const authorities = createV2Authorities(tracker.device, {
+    physicalSourceCount: 8,
+    physicalSourceCapacity: 8,
+    activeSourceCapacity: 4,
+    cellCapacity: 4,
+    fixtureActiveCount: 0
+  });
+  assert.throws(() => runtime.encode(createFakeEncoder(), {
+    ...authorities,
+    spatialExecution: { ...authorities.spatialExecution }
+  }), /exact live encoded or submitted SS spatial generation/);
+
+  const originalActiveSourceView =
+    authorities.spatialExecution.activeSourceView;
+  const originalActiveSourceViewBuffer =
+    authorities.spatialExecution.activeSourceViewBuffer;
+  const originalAuthority =
+    authorities.spatialExecution.activeSourceCountAuthority;
+  const forgedActiveSourceView = {
+    ...originalActiveSourceView
+  };
+  const forgedAuthority = Object.freeze({
+    ...originalAuthority,
+    activeSourceView: forgedActiveSourceView
+  });
+  authorities.spatialExecution.activeSourceView = forgedActiveSourceView;
+  authorities.spatialExecution.activeSourceViewBuffer =
+    forgedActiveSourceView.activeSourceViewBuffer;
+  authorities.spatialExecution.activeSourceCountAuthority = forgedAuthority;
+  authorities.spatialExecution.logicalSourceCountAuthority = forgedAuthority;
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), authorities),
+    /exact live encoded or submitted SS spatial generation/
+  );
+  authorities.spatialExecution.activeSourceView = originalActiveSourceView;
+  authorities.spatialExecution.activeSourceViewBuffer =
+    originalActiveSourceViewBuffer;
+  authorities.spatialExecution.activeSourceCountAuthority = originalAuthority;
+  authorities.spatialExecution.logicalSourceCountAuthority = originalAuthority;
+
+  authorities.spatialExecution.activeSourceCountAuthority =
+    Object.freeze({ ...originalAuthority });
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), authorities),
+    /exact live encoded or submitted SS spatial generation/
+  );
+  authorities.spatialExecution.activeSourceCountAuthority = originalAuthority;
+
+  const originalSeal = authorities.spatialExecution.activeSourceGenerationSeal;
+  authorities.spatialExecution.activeSourceGenerationSeal = Object.freeze({
+    ...originalSeal,
+    expected: originalSeal.expected + 1
+  });
+  assert.throws(
+    () => runtime.encode(createFakeEncoder(), authorities),
+    /exact live encoded or submitted SS spatial generation/
+  );
+  authorities.spatialExecution.activeSourceGenerationSeal = originalSeal;
+
+  const execution = runtime.encode(createFakeEncoder(), authorities);
+  assert.equal(execution.mortonSortElementCount, null);
+  assert.equal(execution.activeSourceCountAuthority, originalAuthority);
+  assert.match(
+    schroederSpatialAggregateViewWgsl,
+    /if \(cell_count == 0u\) \{[\s\S]*load_word\(H_ROOT_RECORD_INDEX\) != INVALID_U32/
+  );
+  assert.match(
+    schroederSpatialAggregateViewWgsl,
+    /publish_aggregate_success\(0u\)/
+  );
+  assert.match(
+    schroederSpatialAggregateStacklessTraversalWgsl,
+    /aggregate_view\[params\.active_member_offset_words \+ active_ordinal\]/
+  );
+  assert.equal(
+    runtime.releaseExecution(execution, { discardedEncoder: true }),
+    true
+  );
   assert.equal(runtime.destroy(), true);
 });
 

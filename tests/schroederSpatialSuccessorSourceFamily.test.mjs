@@ -2,14 +2,25 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+import {
   SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_FINAL_SEAL,
   SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_MAGIC,
   SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_STATUS,
   SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_VERSION
 } from '../ulg-gpu-abi/src/schroederSpatialTopologyTransition.js';
 import {
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
   acquireSchroederSpatialSuccessorSourceFamilyLease,
+  abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication,
   allocateSchroederSpatialSuccessorBufferFamilyIdentity,
+  applySchroederSpatialPositionTransitionReceipt,
   createSchroederSpatialSuccessorSourceFamily,
   prepareSchroederSpatialSuccessorSourceFamilyPublication,
   publishPreparedSchroederSpatialSuccessorSourceFamily,
@@ -18,6 +29,7 @@ import {
   resolveSchroederSpatialSuccessorSourceFamily,
   retireSchroederSpatialSuccessorSourceFamily,
   retireSchroederSpatialSuccessorSourceFamilyAfterLeases,
+  runSchroederSpatialPositionTransitionWebGpu,
   schroederSpatialSuccessorSourceFamilyLiveness,
   validateSchroederSpatialSuccessorPublicationReceipt
 } from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
@@ -109,6 +121,79 @@ function createFakeDevice() {
           const entries = Object.fromEntries(
             boundGroup.entries.map((entry) => [entry.binding, entry.resource.buffer])
           );
+          if (
+            String(source?.label || '')
+              .includes('spatial-position-transition-receipt')
+          ) {
+            const [
+              sourceCount,
+              successorCount,
+              generationId,
+              nonce,
+              sourceEpoch
+            ] = entries[2]._writtenData;
+            const sourceMasses = entries[0]._masses
+              ?? new Array(sourceCount).fill(1);
+            const successorMasses = entries[1]._masses
+              ?? new Array(successorCount).fill(1);
+            const sourcePositions = entries[0]._positions
+              ?? Array.from({ length: sourceCount }, (_, index) => [
+                index, 0, 0
+              ]);
+            const successorPositions = entries[1]._positions
+              ?? Array.from({ length: successorCount }, (_, index) => [
+                index, 0, 0
+              ]);
+            const comparisonCount = Math.max(sourceCount, successorCount);
+            let comparedActiveCount = 0;
+            let movedParticleCount = 0;
+            for (
+              let index = 0;
+              index < Math.min(sourceCount, successorCount);
+              index += 1
+            ) {
+              if (
+                !activeMass(sourceMasses[index])
+                || !activeMass(successorMasses[index])
+              ) continue;
+              comparedActiveCount += 1;
+              const sourcePosition = sourcePositions[index] ?? [index, 0, 0];
+              const successorPosition =
+                successorPositions[index] ?? [index, 0, 0];
+              if (sourcePosition.some(
+                (value, axis) => value !== successorPosition[axis]
+              )) {
+                movedParticleCount += 1;
+              }
+            }
+            const changed = movedParticleCount > 0;
+            const words = new Uint32Array(20);
+            words.set([
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
+              generationId,
+              nonce,
+              sourceEpoch,
+              sourceCount,
+              successorCount,
+              comparisonCount,
+              comparisonCount,
+              comparedActiveCount,
+              movedParticleCount,
+              0,
+              0,
+              1,
+              changed ? 1 : 0,
+              changed ? sourceEpoch + 1 : sourceEpoch,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.COMPLETE,
+              0,
+              0,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL
+            ]);
+            source._observedWords = words;
+            destination._mappedData = words;
+            return;
+          }
           const [
             sourceCount,
             successorCount,
@@ -211,13 +296,62 @@ async function successorFixture() {
   };
   const sourceParticleUploads = {
     sphParticleUpload: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+      status: 'webgpu-uploaded',
+      particleCount,
       stateBuffer: sourceStateBuffer,
       thermoBuffer: taggedBuffer(device, 'source-thermo', particleCount * 48),
-      identityBuffer: taggedBuffer(device, 'source-identity', particleCount * 16)
+      identityBuffer: taggedBuffer(device, 'source-identity', particleCount * 16),
+      stateStrideBytes: 32,
+      thermoStrideBytes: 48,
+      identityStrideBytes: 16,
+      ...sourceEpoch
     },
     mlsMpmParticleUpload: {
-      mechanicsBuffer: taggedBuffer(device, 'source-mechanics', particleCount * 128)
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+      status: 'webgpu-uploaded',
+      particleCount,
+      mechanicsBuffer: taggedBuffer(device, 'source-mechanics', particleCount * 128),
+      mechanicsStrideBytes: 128,
+      ...sourceEpoch
     }
+  };
+  const lookupAssignments = new Float32Array(particleCount * 16);
+  // The highest physical slot is dormant in E* and will be activated by the
+  // post-closure classifier in the prepared-publication tests.
+  lookupAssignments[(particleCount - 1) * 16 + 6] = 0;
+  const lookupAssignmentBuffer = taggedBuffer(
+    device,
+    'lookup-level-assignment',
+    lookupAssignments.byteLength
+  );
+  const lookupLevelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    assignmentSchema: 'peercompute.ulg.schroeder-level-assignment.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: 16,
+    assignmentStrideBytes: 64,
+    assignmentBuffer: lookupAssignmentBuffer,
+    assignmentBufferByteLength: lookupAssignments.byteLength,
+    assignments: lookupAssignments,
+    sourceStateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceStateBufferByteLength: particleCount * 32,
+    sourceThermoBuffer: sourceParticleUploads.sphParticleUpload.thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: particleCount * 48,
+    sourceMechanicsBuffer:
+      sourceParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: particleCount * 128,
+    minLevel: 0,
+    maxLevel: 1,
+    chartId: 0,
+    baseGridSpacingM: 0.25,
+    ...sourceEpoch
   };
   const generation = {
     selected: true,
@@ -253,6 +387,14 @@ async function successorFixture() {
       successorStateBuffer: stateBuffer,
       successorParticleCount: particleCount
     });
+  const positionTransitionReceipt =
+    await runSchroederSpatialPositionTransitionWebGpu({
+      device,
+      generation,
+      sourceStateBuffer,
+      successorStateBuffer: stateBuffer,
+      successorParticleCount: particleCount
+    });
   const successorEpoch = {
     storageGeneration: 12,
     physicsTick: 18,
@@ -271,6 +413,7 @@ async function successorFixture() {
   };
   const nextParticleUploads = {
     sphParticleUpload: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       stateBuffer: buffers.stateBuffer,
       thermoBuffer: buffers.thermoBuffer,
@@ -282,6 +425,7 @@ async function successorFixture() {
       identityStrideBytes: 16
     },
     mlsMpmParticleUpload: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       mechanicsBuffer: buffers.mechanicsBuffer,
       particleCount,
@@ -292,6 +436,11 @@ async function successorFixture() {
   applySchroederSpatialTopologyTransitionReceipt(
     nextParticleUploads,
     topologyTransitionReceipt,
+    { generation }
+  );
+  applySchroederSpatialPositionTransitionReceipt(
+    nextParticleUploads,
+    positionTransitionReceipt,
     { generation }
   );
   const transaction = createSchroederSpatialEpochTransaction({
@@ -334,10 +483,99 @@ async function successorFixture() {
     buffers,
     particleCount,
     generation,
+    lookupLevelAssignment,
     topologyTransitionReceipt,
+    positionTransitionReceipt,
     sourceParticleUploads,
     nextParticleUploads
   };
+}
+
+function preparedUploads(f) {
+  const source = f.generation.execution;
+  const nextParticleUploads = {
+    sphParticleUpload: {
+      ...f.nextParticleUploads.sphParticleUpload,
+      physicsTick: source.physicsTick,
+      physicsSubstep: source.physicsSubstep
+    },
+    mlsMpmParticleUpload: {
+      ...f.nextParticleUploads.mlsMpmParticleUpload,
+      physicsTick: source.physicsTick,
+      physicsSubstep: source.physicsSubstep
+    }
+  };
+  applySchroederSpatialTopologyTransitionReceipt(
+    nextParticleUploads,
+    f.topologyTransitionReceipt,
+    { generation: f.generation }
+  );
+  applySchroederSpatialPositionTransitionReceipt(
+    nextParticleUploads,
+    f.positionTransitionReceipt,
+    { generation: f.generation }
+  );
+  return nextParticleUploads;
+}
+
+function createSuccessorClassifier(f, {
+  activateHighSlot = true
+} = {}) {
+  const calls = [];
+  const results = [];
+  const runner = async (options) => {
+    calls.push(options);
+    const sph = options.nextParticleUploads.sphParticleUpload;
+    const mls = options.nextParticleUploads.mlsMpmParticleUpload;
+    const assignments = f.lookupLevelAssignment.assignments.slice();
+    const highSlot = f.particleCount - 1;
+    const offset = highSlot * 16;
+    if (activateHighSlot) {
+      assignments.set([
+        1, 0.5, 0.75,
+        0.00125, 0.001, 0.00125,
+        1.25, 1000,
+        3, 11, 1, 0.1,
+        4, 5, 6, 0
+      ], offset);
+    }
+    const assignmentBuffer = taggedBuffer(
+      f.device,
+      `successor-level-assignment-${calls.length}`,
+      assignments.byteLength
+    );
+    const result = {
+      ...f.lookupLevelAssignment,
+      assignmentBuffer,
+      assignmentBufferByteLength: assignments.byteLength,
+      assignments,
+      sourceStateBuffer: sph.stateBuffer,
+      sourceStateBufferBorrowed: true,
+      sourceStateBufferByteLength: f.particleCount * 32,
+      sourceThermoBuffer: sph.thermoBuffer,
+      sourceThermoBufferBorrowed: true,
+      sourceThermoBufferByteLength: f.particleCount * 48,
+      sourceMechanicsBuffer: mls.mechanicsBuffer,
+      sourceMechanicsBufferBorrowed: true,
+      sourceMechanicsBufferByteLength: f.particleCount * 128,
+      kernelScope: 'schroeder-gpu-level-assignment',
+      fullParticleReadbackPerformed: false,
+      storageGeneration: sph.storageGeneration,
+      physicsTick: sph.physicsTick,
+      physicsSubstep: sph.physicsSubstep,
+      positionEpoch: sph.positionEpoch,
+      topologyEpoch: sph.topologyEpoch,
+      chartEpoch: sph.chartEpoch,
+      levelEpoch: sph.levelEpoch,
+      supportEpoch: sph.supportEpoch,
+      destroyAssignmentBuffer() {
+        assignmentBuffer.destroy();
+      }
+    };
+    results.push(result);
+    return result;
+  };
+  return { calls, results, runner };
 }
 
 function assertBorrowedBuffersSurvive(buffers) {
@@ -400,6 +638,8 @@ test('exact successor leases block retirement and release exactly once', async (
       retirementFenceSettled: false,
       retirementBlocked: false,
       ownsBuffers: false,
+      ownsSuccessorLevelAssignment: false,
+      successorLevelAssignmentDestroyed: false,
       sourceGenerationId: 19,
       deviceId: webGpuDeviceId(f.device)
     }
@@ -643,10 +883,10 @@ test('queue-fenced lease release and retirement fail closed without an exact fen
 
 test('precommit successor preparation allocates final identity and postcommit publication is total', async () => {
   const f = await successorFixture();
-  const nextParticleUploads = {
-    sphParticleUpload: { ...f.nextParticleUploads.sphParticleUpload },
-    mlsMpmParticleUpload: { ...f.nextParticleUploads.mlsMpmParticleUpload }
-  };
+  const nextParticleUploads = preparedUploads(f);
+  const classifier = createSuccessorClassifier(f, {
+    activateHighSlot: false
+  });
   applySchroederSpatialTopologyTransitionReceipt(
     nextParticleUploads,
     f.topologyTransitionReceipt,
@@ -657,10 +897,21 @@ test('precommit successor preparation allocates final identity and postcommit pu
     await prepareSchroederSpatialSuccessorSourceFamilyPublication({
       transaction: tx.transaction,
       generation: f.generation,
+      lookupLevelAssignment: f.lookupLevelAssignment,
       nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
       topologyTransitionReceipt: f.topologyTransitionReceipt,
-      forcePositionAdvance: true
+      forcePositionAdvance: false
     });
+  assert.equal(classifier.calls.length, 1);
+  assert.equal(
+    classifier.calls[0].lookupLevelAssignment,
+    f.lookupLevelAssignment
+  );
+  assert.equal(
+    classifier.calls[0].nextParticleUploads,
+    nextParticleUploads
+  );
   assert.ok(
     nextParticleUploads.sphParticleUpload.storageGeneration
       > f.nextParticleUploads.sphParticleUpload.storageGeneration
@@ -671,10 +922,23 @@ test('precommit successor preparation allocates final identity and postcommit pu
   );
   assert.equal(
     nextParticleUploads.sphParticleUpload.positionEpoch,
-    f.generation.execution.positionEpoch + 1
+    f.generation.execution.positionEpoch,
+    'a descriptor-only advance is replaced by the exact no-motion receipt'
+  );
+  assert.ok(
+    nextParticleUploads.sphParticleUpload.levelEpoch
+      > f.lookupLevelAssignment.levelEpoch
+  );
+  assert.ok(
+    nextParticleUploads.sphParticleUpload.supportEpoch
+      > f.lookupLevelAssignment.supportEpoch
   );
   assert.equal(
     nextParticleUploads.schroederSpatialSuccessorSourceFamily,
+    null
+  );
+  assert.equal(
+    nextParticleUploads.schroederSpatialSuccessorLevelAssignment,
     null
   );
   const commitReceipt = tx.commit();
@@ -730,9 +994,63 @@ test('precommit successor preparation allocates final identity and postcommit pu
     nextParticleUploads.schroederSpatialSuccessorSourceFamily,
     receipt.sourceFamily
   );
+  const successorAssignment =
+    nextParticleUploads.schroederSpatialSuccessorLevelAssignment;
+  assert.ok(successorAssignment);
+  assert.equal(
+    successorAssignment.sourceLookupAssignmentBuffer,
+    f.lookupLevelAssignment.assignmentBuffer
+  );
+  assert.equal(
+    successorAssignment.sourceStateBuffer,
+    nextParticleUploads.sphParticleUpload.stateBuffer
+  );
+  assert.equal(
+    successorAssignment.sourceThermoBuffer,
+    nextParticleUploads.sphParticleUpload.thermoBuffer
+  );
+  assert.equal(
+    successorAssignment.sourceMechanicsBuffer,
+    nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+  );
+  const highSlotOffset = (f.particleCount - 1) * 16;
+  assert.equal(
+    f.lookupLevelAssignment.assignments[highSlotOffset + 6],
+    0,
+    'E* lookup authority remains dormant and immutable'
+  );
+  assert.equal(successorAssignment.assignments[highSlotOffset + 6], 0);
+  const resolved = resolveSchroederSpatialSuccessorSourceFamily(
+    receipt.sourceFamily,
+    {
+      device: f.device,
+      particleCount: f.particleCount,
+      stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+      thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+      identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+      mechanicsBuffer:
+        nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+    }
+  );
+  assert.equal(resolved.levelAssignment, successorAssignment);
+  assert.equal(
+    resolved.levelAssignmentSeal,
+    receipt.sourceFamily.successorLevelAssignmentSeal
+  );
   assert.equal(
     receipt.sourceFamily.storageGeneration,
     nextParticleUploads.sphParticleUpload.storageGeneration
+  );
+  assert.equal(f.topologyTransitionReceipt.topologyChanged, false);
+  assert.equal(
+    receipt.sourceFamily.topologyEpoch,
+    f.generation.execution.topologyEpoch,
+    'zero-activation closure keeps the exact topology epoch'
+  );
+  assert.equal(
+    receipt.sourceFamily.positionEpoch,
+    f.generation.execution.positionEpoch,
+    'zero motion and zero topology change preserve position identity'
   );
   const replay = publishPreparedSchroederSpatialSuccessorSourceFamily(
     plan,
@@ -765,6 +1083,314 @@ test('precommit successor preparation allocates final identity and postcommit pu
   );
 });
 
+test('observed dormant-slot activation publishes exact successor descriptors and retires once', async () => {
+  const f = await successorFixture();
+  const nextParticleUploads = preparedUploads(f);
+  const activatedStateBuffer = taggedBuffer(
+    f.device,
+    'activated-successor-state',
+    f.particleCount * 32,
+    [1, 1, 1]
+  );
+  nextParticleUploads.sphParticleUpload.stateBuffer = activatedStateBuffer;
+  const topologyTransitionReceipt =
+    await runSchroederSpatialTopologyTransitionWebGpu({
+      device: f.device,
+      generation: f.generation,
+      sourceStateBuffer: f.generation.source.sourceStateBuffer,
+      successorStateBuffer: activatedStateBuffer,
+      successorParticleCount: f.particleCount
+    });
+  applySchroederSpatialTopologyTransitionReceipt(
+    nextParticleUploads,
+    topologyTransitionReceipt,
+    { generation: f.generation }
+  );
+  const positionTransitionReceipt =
+    await runSchroederSpatialPositionTransitionWebGpu({
+      device: f.device,
+      generation: f.generation,
+      sourceStateBuffer: f.generation.source.sourceStateBuffer,
+      successorStateBuffer: activatedStateBuffer,
+      successorParticleCount: f.particleCount
+    });
+  applySchroederSpatialPositionTransitionReceipt(
+    nextParticleUploads,
+    positionTransitionReceipt,
+    { generation: f.generation }
+  );
+  const classifier = createSuccessorClassifier(f);
+  const tx = transactionForSuccessor(f, nextParticleUploads);
+  const plan =
+    await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: tx.transaction,
+      generation: f.generation,
+      lookupLevelAssignment: f.lookupLevelAssignment,
+      nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
+      topologyTransitionReceipt
+    });
+  const receipt = publishPreparedSchroederSpatialSuccessorSourceFamily(
+    plan,
+    { commitReceipt: tx.commit() }
+  );
+  assert.equal(receipt.published, true);
+  assert.equal(topologyTransitionReceipt.topologyChanged, true);
+  assert.equal(topologyTransitionReceipt.activatedCount, 1);
+  assert.equal(topologyTransitionReceipt.deactivatedCount, 0);
+  assert.equal(classifier.calls.length, 1);
+  const successorAssignment =
+    nextParticleUploads.schroederSpatialSuccessorLevelAssignment;
+  const highSlotOffset = (f.particleCount - 1) * 16;
+  assert.equal(
+    f.lookupLevelAssignment.assignments[highSlotOffset + 6],
+    0
+  );
+  assert.equal(successorAssignment.assignments[highSlotOffset + 6], 1.25);
+  assert.equal(successorAssignment.assignments[highSlotOffset + 8], 3);
+  assert.equal(successorAssignment.assignments[highSlotOffset + 9], 11);
+  assert.equal(successorAssignment.assignments[highSlotOffset + 10], 1);
+  assert.equal(successorAssignment.sourceStateBuffer, activatedStateBuffer);
+  assert.equal(
+    receipt.sourceFamily.topologyEpoch,
+    f.generation.execution.topologyEpoch + 1
+  );
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 0);
+  const retirement = retireSchroederSpatialSuccessorSourceFamily(
+    receipt.sourceFamily,
+    { device: f.device, reason: 'activation generation superseded' }
+  );
+  assert.equal(retirement.retired, true);
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 1);
+  retireSchroederSpatialSuccessorSourceFamily(
+    receipt.sourceFamily,
+    { device: f.device }
+  );
+  assert.equal(
+    classifier.results[0].assignmentBuffer.destroyCount,
+    1,
+    'normal retirement destroys the owned successor assignment exactly once'
+  );
+});
+
+test('prepared successor abandon and rejected publication retire assignment ownership exactly once', async () => {
+  const abandonedFixture = await successorFixture();
+  const abandonedUploads = preparedUploads(abandonedFixture);
+  applySchroederSpatialTopologyTransitionReceipt(
+    abandonedUploads,
+    abandonedFixture.topologyTransitionReceipt,
+    { generation: abandonedFixture.generation }
+  );
+  const abandonedClassifier = createSuccessorClassifier(abandonedFixture, {
+    activateHighSlot: false
+  });
+  const abandonedTx =
+    transactionForSuccessor(abandonedFixture, abandonedUploads);
+  const abandonedPlan =
+    await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: abandonedTx.transaction,
+      generation: abandonedFixture.generation,
+      lookupLevelAssignment: abandonedFixture.lookupLevelAssignment,
+      nextParticleUploads: abandonedUploads,
+      successorLevelAssignmentRunner: abandonedClassifier.runner,
+      topologyTransitionReceipt:
+        abandonedFixture.topologyTransitionReceipt
+    });
+  const abandonedBuffer =
+    abandonedClassifier.results[0].assignmentBuffer;
+  assert.equal(
+    abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(
+      abandonedPlan,
+      { reason: 'injected precommit failure' }
+    ),
+    true
+  );
+  assert.equal(
+    abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(
+      abandonedPlan,
+      { reason: 'replayed abandonment' }
+    ),
+    false
+  );
+  assert.equal(abandonedBuffer.destroyCount, 1);
+
+  const rejectedFixture = await successorFixture();
+  const rejectedUploads = preparedUploads(rejectedFixture);
+  applySchroederSpatialTopologyTransitionReceipt(
+    rejectedUploads,
+    rejectedFixture.topologyTransitionReceipt,
+    { generation: rejectedFixture.generation }
+  );
+  const rejectedClassifier = createSuccessorClassifier(rejectedFixture, {
+    activateHighSlot: false
+  });
+  const rejectedTx = transactionForSuccessor(
+    rejectedFixture,
+    rejectedUploads
+  );
+  const rejectedPlan =
+    await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: rejectedTx.transaction,
+      generation: rejectedFixture.generation,
+      lookupLevelAssignment: rejectedFixture.lookupLevelAssignment,
+      nextParticleUploads: rejectedUploads,
+      successorLevelAssignmentRunner: rejectedClassifier.runner,
+      topologyTransitionReceipt: rejectedFixture.topologyTransitionReceipt
+    });
+  const rejectedCommit = rejectedTx.commit();
+  rejectedUploads.schroederSpatialSuccessorLevelAssignment =
+    Object.freeze({ foreign: true });
+  const rejectedReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      rejectedPlan,
+      { commitReceipt: rejectedCommit }
+    );
+  assert.equal(rejectedReceipt.published, false);
+  assert.equal(rejectedClassifier.results[0].assignmentBuffer.destroyCount, 1);
+  publishPreparedSchroederSpatialSuccessorSourceFamily(
+    rejectedPlan,
+    { commitReceipt: rejectedCommit }
+  );
+  assert.equal(
+    rejectedClassifier.results[0].assignmentBuffer.destroyCount,
+    1,
+    'boolean rejection plus replay cannot double-destroy'
+  );
+});
+
+test('throwing publication and classifier-admission failure retire assignment ownership exactly once', async () => {
+  const throwingFixture = await successorFixture();
+  const throwingUploads = preparedUploads(throwingFixture);
+  applySchroederSpatialTopologyTransitionReceipt(
+    throwingUploads,
+    throwingFixture.topologyTransitionReceipt,
+    { generation: throwingFixture.generation }
+  );
+  const throwingClassifier = createSuccessorClassifier(throwingFixture, {
+    activateHighSlot: false
+  });
+  const throwingTx = transactionForSuccessor(
+    throwingFixture,
+    throwingUploads
+  );
+  const throwingPlan =
+    await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: throwingTx.transaction,
+      generation: throwingFixture.generation,
+      lookupLevelAssignment: throwingFixture.lookupLevelAssignment,
+      nextParticleUploads: throwingUploads,
+      successorLevelAssignmentRunner: throwingClassifier.runner,
+      topologyTransitionReceipt: throwingFixture.topologyTransitionReceipt
+    });
+  const throwingCommit = throwingTx.commit();
+  Object.defineProperty(
+    throwingUploads,
+    'schroederSpatialSuccessorSourceFamily',
+    {
+      configurable: true,
+      enumerable: true,
+      get() {
+        throw new Error('injected adversarial publication getter');
+      }
+    }
+  );
+  const throwingReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      throwingPlan,
+      { commitReceipt: throwingCommit }
+    );
+  assert.equal(throwingReceipt.published, false);
+  assert.match(
+    throwingReceipt.reason,
+    /injected adversarial publication getter/
+  );
+  assert.equal(throwingClassifier.results[0].assignmentBuffer.destroyCount, 1);
+  publishPreparedSchroederSpatialSuccessorSourceFamily(
+    throwingPlan,
+    { commitReceipt: throwingCommit }
+  );
+  assert.equal(
+    throwingClassifier.results[0].assignmentBuffer.destroyCount,
+    1,
+    'throwing publication plus replay cannot leak or double-destroy'
+  );
+
+  const invalidFixture = await successorFixture();
+  const invalidUploads = preparedUploads(invalidFixture);
+  applySchroederSpatialTopologyTransitionReceipt(
+    invalidUploads,
+    invalidFixture.topologyTransitionReceipt,
+    { generation: invalidFixture.generation }
+  );
+  const invalidClassifier = createSuccessorClassifier(invalidFixture, {
+    activateHighSlot: false
+  });
+  const invalidTx = transactionForSuccessor(invalidFixture, invalidUploads);
+  await assert.rejects(
+    prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: invalidTx.transaction,
+      generation: invalidFixture.generation,
+      lookupLevelAssignment: invalidFixture.lookupLevelAssignment,
+      nextParticleUploads: invalidUploads,
+      successorLevelAssignmentRunner: async (options) => {
+        const result = await invalidClassifier.runner(options);
+        result.sourceThermoBuffer = invalidFixture.lookupLevelAssignment
+          .sourceThermoBuffer;
+        return result;
+      },
+      topologyTransitionReceipt: invalidFixture.topologyTransitionReceipt
+    }),
+    {
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_PROVENANCE'
+    }
+  );
+  assert.equal(invalidClassifier.results[0].assignmentBuffer.destroyCount, 1);
+});
+
+test('device loss quarantines and destroys an owned successor assignment exactly once', async () => {
+  const f = await successorFixture();
+  const nextParticleUploads = preparedUploads(f);
+  applySchroederSpatialTopologyTransitionReceipt(
+    nextParticleUploads,
+    f.topologyTransitionReceipt,
+    { generation: f.generation }
+  );
+  const classifier = createSuccessorClassifier(f, {
+    activateHighSlot: false
+  });
+  const tx = transactionForSuccessor(f, nextParticleUploads);
+  const plan =
+    await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+      transaction: tx.transaction,
+      generation: f.generation,
+      lookupLevelAssignment: f.lookupLevelAssignment,
+      nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
+      topologyTransitionReceipt: f.topologyTransitionReceipt
+    });
+  const receipt = publishPreparedSchroederSpatialSuccessorSourceFamily(
+    plan,
+    { commitReceipt: tx.commit() }
+  );
+  assert.equal(receipt.published, true);
+  const ownedBuffer = classifier.results[0].assignmentBuffer;
+  f.device.lose({ message: 'owned assignment device loss' });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(ownedBuffer.destroyCount, 1);
+  assert.equal(
+    schroederSpatialSuccessorSourceFamilyLiveness(
+      receipt.sourceFamily
+    ).deviceLost,
+    true
+  );
+  retireSchroederSpatialSuccessorSourceFamily(
+    receipt.sourceFamily,
+    { device: f.device }
+  );
+  assert.equal(ownedBuffer.destroyCount, 1);
+});
+
 test('device loss terminally settles an async retirement request with outstanding leases', async () => {
   const f = await successorFixture();
   const never = deferred();
@@ -787,18 +1413,21 @@ test('device loss terminally settles an async retirement request with outstandin
 
 test('resident successor preflight conservatively advances topology and position without host observation', async () => {
   const f = await successorFixture();
-  const nextParticleUploads = {
-    sphParticleUpload: { ...f.nextParticleUploads.sphParticleUpload },
-    mlsMpmParticleUpload: { ...f.nextParticleUploads.mlsMpmParticleUpload }
-  };
+  const nextParticleUploads = preparedUploads(f);
+  const classifier = createSuccessorClassifier(f, {
+    activateHighSlot: false
+  });
   const tx = transactionForSuccessor(f, nextParticleUploads);
   const plan =
     await prepareSchroederSpatialSuccessorSourceFamilyPublication({
       transaction: tx.transaction,
       generation: f.generation,
+      lookupLevelAssignment: f.lookupLevelAssignment,
       nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
       conservativeTopologyAdvance: true
     });
+  assert.equal(classifier.calls.length, 1);
   assert.equal(
     nextParticleUploads.sphParticleUpload.topologyEpoch,
     f.generation.execution.topologyEpoch + 1

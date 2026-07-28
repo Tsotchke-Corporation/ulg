@@ -2,8 +2,13 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_HEADER_WORDS,
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS,
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STENCIL_SIZE,
-  ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_SCHEMA
+  ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_SCHEMA,
+  validateSchroederSpatialPhaseVolumeMomentDescriptor
 } from './schroederSpatialPhaseVolumeMoment.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+} from './schroederSpatialMechanicsFieldView.js';
 
 /**
  * S9-B is deliberately a read-only eligibility receipt.  It authenticates
@@ -111,7 +116,20 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_ABI = Object.freeze({
   mutationPolicy:
     'diagnostic-only;no-p2g-grid-g2p-reflux-particle-thermo-reaction-phase-or-render-mutation',
   residency: 'same-command-encoder-retained-gpu-receipt-no-hot-path-readback',
-  futureLawPolicy: 'eligible-read-only-evidence-not-a-pressure-or-drag-operator'
+  futureLawPolicy: 'eligible-read-only-evidence-not-a-pressure-or-drag-operator',
+  sourceAuthorities: Object.freeze({
+    v1: Object.freeze({
+      id: SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+      scan: 'host-physical-source-count'
+    }),
+    v2: Object.freeze({
+      id: SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
+      scan:
+        'active-source-word-18-indirect-dispatch-and-active-ordinal-to-physical-map',
+      candidateCount: 'active-source-word-43',
+      generationSeal: 'active-source-word-30'
+    })
+  })
 });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -272,7 +290,9 @@ export function createSchroederSpatialPhaseVolumeReceiptPlan({
   chartEpoch,
   levelEpoch,
   supportEpoch,
-  completionOrdinal
+  completionOrdinal,
+  sourceAuthorityVersion =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
 } = {}) {
   const layout = createSchroederSpatialPhaseVolumeReceiptLayout({
     sourceCapacity,
@@ -308,6 +328,23 @@ export function createSchroederSpatialPhaseVolumeReceiptPlan({
     SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STENCIL_SIZE,
     'phase-volume receipt candidate count'
   );
+  const resolvedSourceAuthorityVersion = integer(
+    sourceAuthorityVersion,
+    'sourceAuthorityVersion',
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+  );
+  if (
+    resolvedSourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    && resolvedSourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+  ) {
+    throw new RangeError('sourceAuthorityVersion must select the exact v1 or v2 authority');
+  }
+  const v2Authority =
+    resolvedSourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA,
     status: 'schroeder-spatial-phase-volume-receipt-plan-ready',
@@ -316,13 +353,18 @@ export function createSchroederSpatialPhaseVolumeReceiptPlan({
     // header makes their global scan meaning explicit so it cannot be
     // confused with the selected source subset for one mechanics level.
     sourceCount: resolvedSourceCount,
+    physicalSourceCount: resolvedSourceCount,
     sourceCapacity: layout.sourceCapacity,
-    globalScanSourceCount: resolvedSourceCount,
+    globalScanSourceCount: v2Authority ? null : resolvedSourceCount,
     globalScanSourceCapacity: layout.sourceCapacity,
     fieldCapacity: layout.fieldCapacity,
-    candidateCount,
-    globalScanCandidateCount: candidateCount,
-    sourceGroupCount: groupCount(resolvedSourceCount),
+    candidateCount: v2Authority ? null : candidateCount,
+    globalScanCandidateCount: v2Authority ? null : candidateCount,
+    sourceGroupCount: v2Authority ? null : groupCount(resolvedSourceCount),
+    sourceAuthorityVersion: resolvedSourceAuthorityVersion,
+    sourceWorkIdentity: v2Authority
+      ? 'gpu-active-ordinal'
+      : 'physical-source-index',
     selectedLevel: integer(selectedLevel, 'selectedLevel', -0x8000_0000, 0x7fff_ffff),
     gridNodeCount: integer(gridNodeCount, 'gridNodeCount', 1),
     gridSpacingM: finitePositive(gridSpacingM, 'gridSpacingM'),
@@ -432,7 +474,8 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     'levelEpoch',
     'supportEpoch',
     'selectedLevel',
-    'completionOrdinal'
+    'completionOrdinal',
+    'sourceAuthorityVersion'
   ]) {
     if (Object.hasOwn(expected, field) && descriptor[field] !== expected[field]) {
       return rejectedDescriptor(
@@ -443,6 +486,13 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     }
   }
   const moment = descriptor.phaseVolumeMoment;
+  const momentAdmission = validateSchroederSpatialPhaseVolumeMomentDescriptor(
+    moment,
+    {
+      sourceCount: descriptor.sourceCount,
+      sourceAuthorityVersion: descriptor.sourceAuthorityVersion
+    }
+  );
   if (
     moment?.schema !== ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_SCHEMA
     || moment?.diagnosticOnly !== true
@@ -459,21 +509,45 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     || descriptor.mechanicsFieldView !== moment?.mechanicsFieldView
     || descriptor.parentPhaseVolumeMoment !== moment
     || !descriptor.mechanicsFieldView
+    || momentAdmission.admitted !== true
   ) {
     return rejectedDescriptor(
       'schroeder-spatial-phase-volume-receipt-rejected-lineage',
       'phase-volume receipt lost its exact S9-A moment or mechanics-field parent'
     );
   }
+  const sourceAuthorityVersion = Number(
+    descriptor.sourceAuthorityVersion
+      ?? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+  );
+  const v2Authority =
+    sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
   if (
-    descriptor.candidateCount !== descriptor.sourceCount * SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STENCIL_SIZE
-    || descriptor.sourceGroupCount !== groupCount(descriptor.sourceCount)
+    (
+      v2Authority
+        ? descriptor.candidateCount !== null
+          || descriptor.globalScanCandidateCount !== null
+          || descriptor.globalScanSourceCount !== null
+          || descriptor.sourceGroupCount !== null
+          || descriptor.activeSourceCountAuthority
+            !== moment.activeSourceCountAuthority
+          || descriptor.candidateCountAuthority
+            !== moment.candidateCountAuthority
+        : descriptor.candidateCount
+            !== descriptor.sourceCount
+              * SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STENCIL_SIZE
+          || descriptor.globalScanCandidateCount !== descriptor.candidateCount
+          || descriptor.globalScanSourceCount !== descriptor.sourceCount
+          || descriptor.sourceGroupCount !== groupCount(descriptor.sourceCount)
+    )
     || descriptor.sourceMechanicsStrideFloats !== 32
     || descriptor.sourceAssignmentStrideFloats !== 16
     || descriptor.rawVolumeRatioJMechanicsWord !== 18
     || descriptor.rawRestVolumeMechanicsWord !== 19
     || !sameIdentity(descriptor, moment)
     || descriptor.sourceCount !== moment.sourceCount
+    || descriptor.physicalSourceCount !== descriptor.sourceCount
     || descriptor.sourceCapacity !== moment.sourceCapacity
     || descriptor.fieldCapacity !== moment.fieldCapacity
     || descriptor.selectedLevel !== moment.selectedLevel
@@ -483,6 +557,46 @@ export function validateSchroederSpatialPhaseVolumeReceiptDescriptor(
     return rejectedDescriptor(
       'schroeder-spatial-phase-volume-receipt-rejected-lineage',
       'phase-volume receipt descriptor lost strict S9-A raw-volume lineage'
+    );
+  }
+  if (v2Authority) {
+    if (
+      moment.sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      || descriptor.sourceWorkIdentity !== 'gpu-active-ordinal'
+      || descriptor.directorySchema !== moment.directorySchema
+      || descriptor.directoryAbiVersion !== moment.directoryAbiVersion
+      || descriptor.spatialExecution !== moment.spatialExecution
+      || descriptor.directoryBuffer !== moment.directoryBuffer
+      || descriptor.activeSourceView !== moment.activeSourceView
+      || descriptor.activeSourceViewBuffer !== moment.activeSourceViewBuffer
+      || descriptor.activeSourceCountAuthority
+        !== moment.activeSourceCountAuthority
+      || descriptor.candidateCountAuthority !== moment.candidateCountAuthority
+    ) {
+      return rejectedDescriptor(
+        'schroeder-spatial-phase-volume-receipt-rejected-v2-source-authority',
+        'phase-volume receipt lost exact directory-v2 ActiveSource lineage'
+      );
+    }
+  } else if (
+    sourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    || moment.sourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    || descriptor.sourceWorkIdentity !== 'physical-source-index'
+    || descriptor.directorySchema !== null
+    || descriptor.directoryAbiVersion !== null
+    || descriptor.spatialExecution !== null
+    || descriptor.directoryBuffer !== null
+    || descriptor.activeSourceView !== null
+    || descriptor.activeSourceViewBuffer !== null
+    || descriptor.activeSourceCountAuthority !== null
+    || descriptor.candidateCountAuthority !== null
+  ) {
+    return rejectedDescriptor(
+      'schroeder-spatial-phase-volume-receipt-rejected-source-authority-version',
+      'phase-volume receipt source authority version is not exact'
     );
   }
   let owned = false;

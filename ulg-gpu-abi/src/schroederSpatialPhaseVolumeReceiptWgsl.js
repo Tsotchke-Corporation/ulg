@@ -27,6 +27,8 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_VERSION
 } from './schroederSpatialPhaseVolumeMoment.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
@@ -46,7 +48,10 @@ function u32(value) {
  * scratch and fixed control header.  This is intentionally one local receipt
  * per S9-A sidecar; parent/reflux aggregation waits for the later force slice.
  */
-export function createSchroederSpatialPhaseVolumeReceiptWgsl(layout) {
+export function createSchroederSpatialPhaseVolumeReceiptWgsl(layout, {
+  sourceAuthorityVersion =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+} = {}) {
   if (
     !layout
     || layout.controlWords !== SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS
@@ -67,6 +72,18 @@ export function createSchroederSpatialPhaseVolumeReceiptWgsl(layout) {
     || layout.partialFloats !== layout.partialVec4Capacity * 4
   ) {
     throw new TypeError('phase-volume receipt layout is not canonical');
+  }
+  const directoryV2 =
+    sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
+  if (
+    !directoryV2
+    && sourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+  ) {
+    throw new RangeError(
+      'phase-volume receipt WGSL requires the exact v1 or v2 source authority'
+    );
   }
   return /* wgsl */ `
 struct PhaseVolumeReceiptParams {
@@ -115,6 +132,9 @@ struct PhaseVolumeReceiptParams {
 // source family but only sums rows which this immutable assignment and the
 // mechanics-field descriptor jointly select for the current level.
 @group(0) @binding(7) var<storage, read> source_assignments: array<f32>;
+${directoryV2
+    ? '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;'
+    : ''}
 
 const RECEIPT_MAGIC: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_MAGIC)};
 const RECEIPT_VERSION: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION)};
@@ -181,6 +201,22 @@ const CONTROL_INVALID_SOURCE: u32 = 41u;
 const CONTROL_INVALID_FIELD: u32 = 42u;
 const CONTROL_SELECTED_SOURCE_COUNT: u32 = 47u;
 const CONTROL_FIELD_CONTRIBUTIONS: u32 = 48u;
+${directoryV2
+    ? `
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_READY_ADMITTED: u32 = 3u;
+const ACTIVE_SOURCE_REJECTED_MASK: u32 = 252u;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = 64u;
+const ACTIVE_SOURCE_MISSING: u32 = 0xffffffffu;
+const ACTIVE_SOURCE_COUNT_WORD: u32 = 18u;
+const ACTIVE_SOURCE_CANDIDATE_COUNT_WORD: u32 = 43u;
+const ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD: u32 = 48u;
+const ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD: u32 = 51u;
+const ACTIVE_SOURCE_COMPLETION_WORD: u32 = 30u;
+const ACTIVE_SOURCE_SEAL_WORD: u32 = 47u;
+`
+    : ''}
 
 var<workgroup> source_sums: array<vec4<f32>, ${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE}>;
 var<workgroup> field_sums: array<vec4<f32>, ${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE}>;
@@ -198,6 +234,143 @@ fn group_count(count: u32) -> u32 {
   return count / RECEIPT_WORKGROUP_SIZE
     + select(0u, 1u, count % RECEIPT_WORKGROUP_SIZE != 0u);
 }
+${directoryV2
+    ? `
+fn active_dispatch_shape_admitted(count: u32, offset: u32) -> bool {
+  let groups = group_count(count);
+  let dispatch_x = active_source_view[offset];
+  let dispatch_y = active_source_view[offset + 1u];
+  let dispatch_z = active_source_view[offset + 2u];
+  if (count == 0u) {
+    return dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > groups
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  return dispatch_y == groups / dispatch_x
+    + select(0u, 1u, groups % dispatch_x != 0u);
+}
+
+fn active_source_view_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ACTIVE_SOURCE_HEADER_WORDS) { return false; }
+  let status = active_source_view[2u];
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[ACTIVE_SOURCE_COUNT_WORD];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  return active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_READY_ADMITTED) == ACTIVE_SOURCE_READY_ADMITTED
+    && (status & ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && physical_count == params.source_count
+    && physical_capacity == params.source_capacity
+    && active_count <= active_capacity
+    && active_capacity <= physical_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u] == 1u
+    && active_source_view[24u] == ASSIGNMENT_STRIDE
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[29u] == params.completion_ordinal
+    && active_source_view[ACTIVE_SOURCE_COMPLETION_WORD]
+      == params.completion_ordinal
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[37u] == RECEIPT_WORKGROUP_SIZE
+    && active_source_view[38u] > 0u
+    && active_source_view[40u] == ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD
+    && active_source_view[41u] == ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD
+    && active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD]
+      == active_count * FIELD_STENCIL_SIZE
+    && active_source_view[44u] == active_capacity * FIELD_STENCIL_SIZE
+    && active_source_view[ACTIVE_SOURCE_SEAL_WORD] != 0u
+    && active_dispatch_shape_admitted(
+      active_count,
+      ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD
+    )
+    && active_dispatch_shape_admitted(
+      active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD],
+      ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD
+    );
+}
+
+fn active_source_count() -> u32 {
+  return select(
+    0u,
+    active_source_view[ACTIVE_SOURCE_COUNT_WORD],
+    active_source_view_admitted()
+  );
+}
+
+fn active_candidate_count() -> u32 {
+  return select(
+    0u,
+    active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD],
+    active_source_view_admitted()
+  );
+}
+
+fn physical_source_for_active(active_ordinal: u32) -> u32 {
+  if (active_ordinal >= active_source_count()) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let physical_source = active_source_view[active_to_physical + active_ordinal];
+  if (
+    physical_source >= params.source_count
+    || active_source_view[physical_to_active + physical_source]
+      != active_ordinal
+  ) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return physical_source;
+}
+
+fn active_source_linear_group(workgroup_id: vec3<u32>) -> u32 {
+  return workgroup_id.x
+    + workgroup_id.y
+      * active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD];
+}
+
+fn active_source_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>
+) -> u32 {
+  return active_source_linear_group(workgroup_id)
+    * RECEIPT_WORKGROUP_SIZE + local_id.x;
+}
+`
+    : ''}
 
 fn mechanics_field_dispatch_shape_admitted(field_count: u32) -> bool {
   let expected_group_count = group_count(field_count);
@@ -307,7 +480,9 @@ fn moment_header_admitted() -> bool {
     && moment_control[31u] % MOMENT_ROW_WORDS == 0u
     && moment_control[31u] / MOMENT_ROW_WORDS == params.field_capacity
     && moment_control[31u] <= arrayLength(&moment_rows)
-    && moment_control[32u] == params.candidate_count
+    && moment_control[32u] == ${directoryV2
+      ? 'active_candidate_count()'
+      : 'params.candidate_count'}
     && moment_control[33u] == RAW_VOLUME_RATIO_J_WORD
     && moment_control[34u] == RAW_REST_VOLUME_WORD
     && moment_control[35u] == MECHANICS_STRIDE
@@ -318,27 +493,43 @@ fn moment_header_admitted() -> bool {
     // S9-A scans the full source family, but it records only the exact
     // selected-level candidates here.  A mixed-level family therefore has a
     // smaller valid contribution count than its global scan capacity.
-    && moment_control[40u] > 0u
-    && moment_control[40u] <= params.candidate_count
+    && moment_control[40u] ${directoryV2 ? '>=' : '>'} 0u
+    && moment_control[40u] <= ${directoryV2
+      ? 'active_candidate_count()'
+      : 'params.candidate_count'}
     && moment_control[40u] % FIELD_STENCIL_SIZE == 0u
     // The S9-A reducer dispatches its retained capacity.  Every unused
     // field-capacity row is deliberately zeroed, so this is an expected
     // capacity tail rather than evidence of a rejected active field.
-    && moment_control[41u] == params.field_capacity - moment_control[18u]
+    && moment_control[41u] == ${directoryV2
+      ? '0u'
+      : 'params.field_capacity - moment_control[18u]'}
     && moment_control[42u] == 0u
     && moment_control[43u] == 0u
     && moment_control[44u] == 1u
     && moment_control[45u] == 0u
-    && moment_control[46u] == group_count(moment_control[18u])
-    && moment_control[47u] == 1u
-    && moment_control[48u] == 1u
+    && moment_control[46u] == ${directoryV2
+      ? 'mechanics_field[60u]'
+      : 'group_count(moment_control[18u])'}
+    && moment_control[47u] == ${directoryV2 ? 'mechanics_field[61u]' : '1u'}
+    && moment_control[48u] == ${directoryV2 ? 'mechanics_field[62u]' : '1u'}
     && moment_control[49u] == MOMENT_HEADER_WORDS
     && moment_control[50u] == 4u
     && moment_control[51u] == 2u
     && moment_control[52u] == FIELD_MAGIC
     && moment_control[53u] == FIELD_VERSION
     && moment_control[54u] == 1u
-    && moment_control[18u] > 0u
+    ${directoryV2
+      ? `&& moment_control[55u] == ${u32(
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      )}
+    && moment_control[56u] == active_source_count()
+    && moment_control[57u] == ACTIVE_SOURCE_COUNT_WORD
+    && moment_control[58u] == ACTIVE_SOURCE_CANDIDATE_COUNT_WORD
+    && moment_control[59u] == ACTIVE_SOURCE_COMPLETION_WORD
+    && moment_control[60u] == params.completion_ordinal`
+      : ''}
+    && moment_control[18u] ${directoryV2 ? '>=' : '>'} 0u
     && moment_control[18u] <= params.field_capacity;
 }
 
@@ -373,8 +564,10 @@ fn mechanics_field_header_admitted() -> bool {
     || mechanics_field[29u] != 8u
     || mechanics_field[31u] != 8u
     || mechanics_field[32u] != params.field_capacity
-    || mechanics_field[33u] != params.candidate_count
-    || field_count == 0u
+    || mechanics_field[33u] != ${directoryV2
+      ? 'active_candidate_count()'
+      : 'params.candidate_count'}
+    ${directoryV2 ? '' : '|| field_count == 0u'}
     || field_count > params.field_capacity
     || mechanics_field[38u] != params.completion_ordinal
     || mechanics_field[39u] != 1u
@@ -451,7 +644,9 @@ fn mechanics_field_header_admitted() -> bool {
 // field set.  Do this before either source or field reduction so a corrupt
 // header cannot leave a numerically plausible prefix receipt behind.
 fn phase_volume_headers_admitted() -> bool {
-  if (!moment_header_admitted() || !mechanics_field_header_admitted()) {
+  if (!moment_header_admitted() || !mechanics_field_header_admitted()${directoryV2
+    ? ' || !active_source_view_admitted()'
+    : ''}) {
     return false;
   }
   return moment_control[18u] == mechanics_field[34u]
@@ -498,9 +693,16 @@ fn reduce_phase_volume_receipt_sources(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  let source_index = global_id.x;
+  let work_source = ${directoryV2
+    ? 'active_source_linear_invocation(local_id, workgroup_id)'
+    : 'global_id.x'};
+  let source_index = ${directoryV2
+    ? 'physical_source_for_active(work_source)'
+    : 'work_source'};
   var local_sum = vec4<f32>(0.0);
-  if (source_index < params.source_count && phase_volume_headers_admitted()) {
+  if (${directoryV2
+    ? 'work_source < active_source_count() && source_index != ACTIVE_SOURCE_MISSING'
+    : 'source_index < params.source_count'} && phase_volume_headers_admitted()) {
     let mechanics_row = source_index * MECHANICS_STRIDE;
     let assignment_row = source_index * ASSIGNMENT_STRIDE;
     let descriptor_base = mechanics_field[24u];
@@ -599,7 +801,9 @@ fn reduce_phase_volume_receipt_sources(
         }
       }
     }
-  } else if (source_index < params.source_count) {
+  } else if (${directoryV2
+    ? 'work_source < active_source_count()'
+    : 'source_index < params.source_count'}) {
     atomicAdd(&receipt_control[44u], 1u);
   }
   source_sums[local_id.x] = local_sum;
@@ -615,7 +819,14 @@ fn reduce_phase_volume_receipt_sources(
     stride = stride / 2u;
   }
   if (local_id.x == 0u) {
-    partials[params.source_partial_offset_vec4 + workgroup_id.x] = source_sums[0u];
+    let linear_group = ${directoryV2
+      ? 'active_source_linear_group(workgroup_id)'
+      : 'workgroup_id.x'};
+    if (linear_group < ${directoryV2
+      ? 'group_count(active_source_count())'
+      : 'params.source_group_capacity'}) {
+      partials[params.source_partial_offset_vec4 + linear_group] = source_sums[0u];
+    }
   }
 }
 
@@ -649,7 +860,7 @@ fn reduce_phase_volume_receipt_fields(
         && finite_f32(gradient_x)
         && finite_f32(gradient_y)
         && finite_f32(gradient_z)
-        && volume > 0.0;
+        && volume ${directoryV2 ? '>=' : '>'} 0.0;
       let key_matches = field_key_matches(field_index, row);
       if (!row_admitted || !key_matches) {
         atomicAdd(&receipt_control[CONTROL_INVALID_FIELD], 1u);
@@ -688,7 +899,13 @@ fn reduce_phase_volume_receipt_fields(
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE})
 fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u32>) {
   let field_count = admitted_field_count();
-  let source_group_count = group_count(params.source_count);
+  let global_scan_source_count = ${directoryV2
+    ? 'active_source_count()'
+    : 'params.source_count'};
+  let global_scan_candidate_count = ${directoryV2
+    ? 'active_candidate_count()'
+    : 'params.candidate_count'};
+  let source_group_count = group_count(global_scan_source_count);
   let field_group_count = select(0u, group_count(field_count), field_count <= params.field_capacity);
   var source_local = vec4<f32>(0.0);
   var field_local = vec4<f32>(0.0);
@@ -753,10 +970,10 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
   let count_ok = source_group_count <= params.source_group_capacity
     && field_group_count <= params.field_group_capacity
     && params.field_conditioning_offset_vec4 + field_group_count <= params.partial_vec4_capacity
-    && selected_source_count > 0u
-    && selected_source_count <= params.source_count
+    && selected_source_count ${directoryV2 ? '>=' : '>'} 0u
+    && selected_source_count <= global_scan_source_count
     && selected_source_count <= 0xffffffffu / FIELD_STENCIL_SIZE
-    && selected_candidate_count <= params.candidate_count
+    && selected_candidate_count <= global_scan_candidate_count
     && selected_candidate_count == moment_selected_candidate_count
     && field_contribution_count == selected_candidate_count;
   let finite_totals = finite_f32(source_total)
@@ -828,11 +1045,11 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
   control_store(13u, params.chart_epoch);
   control_store(14u, params.level_epoch);
   control_store(15u, params.support_epoch);
-  control_store(16u, params.source_count);
+  control_store(16u, global_scan_source_count);
   control_store(17u, params.source_capacity);
   control_store(18u, select(0u, field_count, admitted));
   control_store(19u, params.field_capacity);
-  control_store(20u, params.candidate_count);
+  control_store(20u, global_scan_candidate_count);
   control_store(21u, bitcast<u32>(params.selected_level));
   control_store(22u, params.grid_node_count);
   control_store_f32(23u, params.grid_spacing_m);
@@ -874,6 +1091,14 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
   control_store(56u, source_group_count);
   control_store(57u, field_group_count);
   control_store(58u, RECEIPT_HEADER_WORDS);
+  ${directoryV2
+    ? `control_store(60u, ${u32(
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+    )});
+  control_store(61u, params.source_count);
+  control_store(62u, ACTIVE_SOURCE_COUNT_WORD);
+  control_store(63u, ACTIVE_SOURCE_CANDIDATE_COUNT_WORD);`
+    : ''}
   // The seal is intentionally the final header write. Future operators must
   // require both this exact seal and READY|ADMITTED before consuming it.
   control_store(59u, RECEIPT_MAGIC ^ params.generation_id ^ params.completion_ordinal ^ flags);

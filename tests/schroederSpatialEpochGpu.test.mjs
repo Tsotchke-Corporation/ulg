@@ -8,12 +8,16 @@ import {
   SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_EPOCH_STATUS_FAIL_CLOSED,
   SCHROEDER_SPATIAL_EPOCH_STATUS_READY,
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
   SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI,
   SCHROEDER_SPATIAL_QUERY_EVIDENCE_WORDS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   createSchroederBoundedAtlasPlan,
   createSchroederSpatialEpochBuildPlan,
   createSchroederSpatialEpochLayout,
@@ -23,7 +27,9 @@ import {
 } from '../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   schroederSpatialEpochAssembleWgsl,
-  schroederSpatialEpochKeyWgsl
+  schroederSpatialEpochKeyWgsl,
+  schroederSpatialEpochV2AssembleWgsl,
+  schroederSpatialEpochV2KeyWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialEpochWgsl.js';
 import {
   SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES,
@@ -67,6 +73,7 @@ import {
 import {
   ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA,
   acquireSchroederSpatialEpochGenerationConsumerLease,
+  armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest,
   createSchroederSpatialEpochGpu,
   ownsSchroederSpatialEpochGenerationConsumerLease,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
@@ -78,6 +85,9 @@ import {
   runSchroederSpatialEpochGenerationWebGpu,
   runSchroederSpatialEpochGenerationWithBackpressureWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  createSchroederSpatialActiveSourceViewGpu
+} from '../src/runtime/sph/schroederSpatialActiveSourceViewGpu.js';
 
 function deferred() {
   let resolve;
@@ -473,10 +483,17 @@ test('compact mechanics view ABI fixes authenticated header, indirect, and node 
 test('direct level-assignment generation publishes and retires its active-source and compact mechanics views', async () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-level-assignment-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device,
     levelAssignment,
     particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
     selectedLevel: 0,
     mechanicsGrid: {
       gridNodeCount: 512,
@@ -487,6 +504,16 @@ test('direct level-assignment generation publishes and retires its active-source
   });
   assert.equal(generation.ready, true, generation.reason);
   assert.equal(generation.selected, true);
+  assert.equal(generation.runtime.schema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(generation.runtime.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+  assert.equal(generation.execution.schema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(generation.execution.abiVersion, SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+  assert.equal(generation.execution.cellCapacity, generation.runtime.cellCapacity);
+  assert.equal(generation.execution.cellCapacity, levelAssignment.particleCount);
+  assert.equal(
+    generation.execution.reverseEncoding,
+    SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+  );
   assert.equal(device.submissions.length, 1);
   assert.equal(generation.execution.sourceBuffer, levelAssignment.assignmentBuffer);
   assert.equal(generation.activeSourceView.sourceBuffer, levelAssignment.assignmentBuffer);
@@ -497,6 +524,34 @@ test('direct level-assignment generation publishes and retires its active-source
   );
   assert.equal(generation.activeSourceView.submitPerformed, true);
   assert.equal(generation.activeSourceViewRuntime.activeExecutionCount(), 1);
+  assert.equal(generation.execution.activeSourceCount, null);
+  assert.equal(generation.execution.activeSourceCountReadbackPerformed, false);
+  assert.equal(generation.execution.readbackPerformed, false);
+  assert.equal(
+    generation.execution.activeSourceCountAuthority.activeSourceView,
+    generation.activeSourceView
+  );
+  assert.equal(
+    generation.execution.activeSourceCountAuthority.offsetWords,
+    SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+  );
+  assert.equal(
+    generation.execution.logicalSourceCountAuthority,
+    generation.execution.activeSourceCountAuthority
+  );
+  assert.equal(
+    generation.mechanicsView.activeSourceCountAuthority,
+    generation.execution.activeSourceCountAuthority
+  );
+  assert.equal(
+    generation.mechanicsFieldView.activeSourceCountAuthority,
+    generation.execution.activeSourceCountAuthority
+  );
+  assert.equal(
+    generation.mechanicsFieldView.directoryBuffer,
+    generation.execution.directoryBuffer
+  );
+  assert.equal(generation.mechanicsFieldView.forceRadixFallbackRequested, false);
   assert.equal(generation.source.sourceStateBuffer, levelAssignment.sourceStateBuffer);
   assert.equal(generation.mechanicsView.sourceBuffer, generation.execution.sourceBuffer);
   assert.equal(generation.mechanicsView.directoryBuffer, generation.execution.directoryBuffer);
@@ -533,8 +588,24 @@ test('direct level-assignment generation publishes and retires its active-source
   const directoryKeyIndex = entryPoints.findIndex(
     (label) => /spatial-epoch.*key-pipeline/.test(label)
   );
+  const activeSourceFinalizeIndex = entryPoints.findIndex(
+    (label) => /active-source-view.*finalize/.test(label)
+  );
+  const directoryRadixIndex = entryPoints.findIndex(
+    (label) => /spatial-epoch.*gpu-count-prepare/.test(label)
+  );
+  const directoryAssembleIndex = entryPoints.findIndex(
+    (label) => /spatial-epoch.*assemble-pipeline/.test(label)
+  );
+  const directoryFinalizeIndex = entryPoints.findIndex(
+    (label) => /spatial-epoch.*finalize-pipeline/.test(label)
+  );
   assert.ok(activeSourceClassifyIndex >= 0);
-  assert.ok(directoryKeyIndex > activeSourceClassifyIndex);
+  assert.ok(activeSourceFinalizeIndex > activeSourceClassifyIndex);
+  assert.ok(directoryKeyIndex > activeSourceFinalizeIndex);
+  assert.ok(directoryRadixIndex > directoryKeyIndex);
+  assert.ok(directoryAssembleIndex > directoryRadixIndex);
+  assert.ok(directoryFinalizeIndex > directoryAssembleIndex);
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
     generation,
@@ -545,6 +616,342 @@ test('direct level-assignment generation publishes and retires its active-source
   assert.equal(generation.activeSourceViewRuntime.activeExecutionCount(), 0);
   assert.equal(generation.execution.released, true);
   assert.equal(generation.mechanicsView.released, true);
+
+  const legacyGeneration = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    activeNodeList: createDirectSpatialActiveNodeList(device),
+    particleCount: 2
+  });
+  assert.equal(legacyGeneration.ready, true, legacyGeneration.reason);
+  assert.notEqual(legacyGeneration.runtime, generation.runtime);
+  assert.equal(legacyGeneration.runtime.schema, ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA);
+  assert.equal(legacyGeneration.runtime.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_VERSION);
+  assert.equal(legacyGeneration.execution.schema, ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA);
+  assert.equal(legacyGeneration.execution.abiVersion, SCHROEDER_SPATIAL_EPOCH_VERSION);
+  assert.equal(legacyGeneration.activeSourceView, null);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    legacyGeneration,
+    device
+  ), true);
+  assert.equal(await legacyGeneration.releasePromise, true);
+});
+
+test('native-test legacy level assignment keeps an owned directory-v1 ActiveRank generation', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  assert.throws(
+    () => runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment,
+      particleCount: levelAssignment.particleCount,
+      mechanicsLevels: [],
+      nativeTestLegacyLevelAssignmentDirectoryV1: true
+    }),
+    /boolean selection is forbidden/
+  );
+  const nativeTestLegacyLevelAssignmentDirectoryV1Arm =
+    armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+      device,
+      levelAssignment
+    });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    mechanicsLevels: [],
+    nativeTestLegacyLevelAssignmentDirectoryV1Arm
+  });
+  assert.equal(
+    nativeTestLegacyLevelAssignmentDirectoryV1Arm.consumed,
+    true
+  );
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.selected, true);
+  assert.equal(generation.nativeTestLegacyLevelAssignmentDirectoryV1, true);
+  assert.equal(generation.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_VERSION);
+  assert.equal(generation.runtime.schema, ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA);
+  assert.equal(generation.execution.schema, ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA);
+  assert.equal(generation.execution.abiVersion, SCHROEDER_SPATIAL_EPOCH_VERSION);
+  assert.equal(generation.activeSourceView, null);
+  assert.equal(generation.execution.activeSourceView, null);
+  assert.equal(generation.activeRankView, generation.execution.activeRankView);
+  assert.ok(generation.activeRankView);
+  assert.equal(generation.execution.submitPerformed, true);
+  assert.equal(generation.exactNearCellTree.submitPerformed, true);
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'native-test-v1-active-rank-owned-generation' }
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationConsumerLease(
+      lease,
+      { discardedEncoder: true }
+    ),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(generation.execution.released, true);
+
+  assert.throws(
+    () => runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment,
+      particleCount: levelAssignment.particleCount,
+      mechanicsLevels: [],
+      nativeTestLegacyLevelAssignmentDirectoryV1Arm
+    }),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_NATIVE_TEST_LEGACY_DIRECTORY_V1_ARM_CONSUMED'
+    }
+  );
+
+  const otherLevelAssignment = createDirectSpatialLevelAssignment(device);
+  const swappedArm =
+    armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+      device,
+      levelAssignment
+    });
+  assert.throws(
+    () => runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment: otherLevelAssignment,
+      particleCount: otherLevelAssignment.particleCount,
+      mechanicsLevels: [],
+      nativeTestLegacyLevelAssignmentDirectoryV1Arm: swappedArm
+    }),
+    {
+      code: 'ERR_SCHROEDER_SPATIAL_NATIVE_TEST_LEGACY_DIRECTORY_V1_ARM'
+    }
+  );
+});
+
+test('directory v2 keeps sparse physical identity GPU-resident and fail-closes forged ActiveSource reuse', () => {
+  const device = createFakeDevice();
+  const physicalSourceCount = 1001;
+  const activeSourceCapacity = 64;
+  const sourceBuffer = device.createBuffer({
+    label: 'directory-v2-sparse-high-physical-source',
+    size: physicalSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const activeSourceRuntime = createSchroederSpatialActiveSourceViewGpu(device, {
+    maxPhysicalSourceCount: physicalSourceCount,
+    activeSourceCapacity,
+    arenaCount: 1,
+    label: 'directory-v2-active-source'
+  });
+  const directoryRuntime = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: physicalSourceCount,
+    activeSourceCapacity,
+    cellCapacity: activeSourceCapacity,
+    directoryAbiVersion: SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+    arenaCount: 1,
+    label: 'directory-v2'
+  });
+  const exactNearQueryProfile = Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1',
+    status: 'schroeder-spatial-exact-near-query-profile-ready',
+    ready: true,
+    sourceCount: physicalSourceCount,
+    chartId: 0,
+    minLevel: -1,
+    maxLevel: 1,
+    levelCount: 3,
+    baseGridSpacingM: 0.25,
+    levelSpacingMode: 'base-grid-spacing-times-pow2-level',
+    positionAuthority: 'same-epoch-pre-integration-particle-state'
+  });
+  const identity = Object.freeze({
+    generationId: 7,
+    deviceOrdinal: 3,
+    laneOrdinal: 5,
+    leaseToken: 11,
+    sourceFamily: 'directory-v2-sparse-physical-family',
+    sourceFamilyId: 13,
+    storageGeneration: 17,
+    physicsTick: 19,
+    physicsSubstep: 0,
+    positionEpoch: 23,
+    topologyEpoch: 29,
+    chartEpoch: 31,
+    levelEpoch: 37,
+    supportEpoch: 41,
+    buildOrdinal: 43
+  });
+  const encoder = createFakeEncoder();
+  const retainedBufferCount = device.buffers.length;
+  const activeSourceView = activeSourceRuntime.encode(encoder, {
+    sourceBuffer,
+    physicalSourceCount,
+    sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    exactNearQueryProfile,
+    ...identity
+  });
+  const directoryArgs = {
+    sourceBuffer,
+    sourceCount: physicalSourceCount,
+    sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    sortMode: 'lexicographic-u32x5',
+    exactNearQueryProfile,
+    activeSourceView,
+    ...identity
+  };
+  const execution = directoryRuntime.encode(encoder, directoryArgs);
+
+  assert.equal(device.buffers.length, retainedBufferCount);
+  assert.equal(directoryRuntime.schema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(directoryRuntime.gpuCountRadixPrepared, true);
+  assert.equal(execution.schema, ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA);
+  assert.equal(execution.abiVersion, SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+  assert.equal(execution.physicalSourceCount, physicalSourceCount);
+  assert.equal(execution.activeSourceCapacity, activeSourceCapacity);
+  assert.equal(execution.activeSourceCount, null);
+  assert.equal(execution.activeSourceCountReadbackPerformed, false);
+  assert.equal(execution.readbackPerformed, false);
+  assert.equal(execution.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(execution.bufferAllocationCountDuringEncode, 0);
+  assert.equal(
+    execution.activeSourceCountAuthority.activeSourceView,
+    activeSourceView
+  );
+  assert.equal(
+    execution.activeSourceCountAuthority.buffer,
+    activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    execution.activeSourceCountAuthority.offsetWords,
+    SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+  );
+  assert.equal(execution.activeSourceGenerationSeal.offsetWords, 30);
+  assert.equal(
+    execution.activeSourceGenerationSeal.expected,
+    activeSourceView.buildOrdinal
+  );
+  assert.equal(
+    execution.keyDispatchIndirectBuffer,
+    activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    execution.keyDispatchIndirectOffsetBytes,
+    activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(
+    execution.assembleDispatchIndirectBuffer,
+    activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    execution.assembleDispatchIndirectOffsetBytes,
+    activeSourceView.activeDispatchOffsetBytes
+  );
+  assert.equal(
+    execution.exactKeyBuffer.size,
+    physicalSourceCount * 6 * Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    execution.sortKeyBuffer.size,
+    activeSourceCapacity * 5 * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const paramsWrite = device.writes.find(
+    ({ buffer, byteLength }) => (
+      buffer.label === 'directory-v2-arena-0-params'
+        && byteLength === 192
+    )
+  );
+  assert.ok(paramsWrite);
+  assert.equal(
+    new DataView(paramsWrite.snapshot).getUint32(188, true),
+    activeSourceCapacity
+  );
+  assert.match(
+    schroederSpatialEpochV2KeyWgsl,
+    /active_capacity == params\.physical_radix_count/
+  );
+  assert.match(
+    schroederSpatialEpochV2AssembleWgsl,
+    /arrayLength\(&sorted_group_indices\) >= params\.physical_radix_count/
+  );
+  assert.equal(
+    execution.reverseEncoding,
+    SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+  );
+
+  const physicalReverseClear = encoder.events.find((event) => (
+    event.kind === 'clear'
+      && event.label === execution.directoryBuffer.label
+      && event.offset === execution.layout.physicalToCellPlusOneOffsetWords
+        * Uint32Array.BYTES_PER_ELEMENT
+      && event.size === execution.layout.physicalToCellPlusOneWords
+        * Uint32Array.BYTES_PER_ELEMENT
+  ));
+  assert.ok(physicalReverseClear);
+  const commands = encoder.events
+    .filter((event) => event.kind === 'pass')
+    .flatMap((event) => event.commands);
+  const keyIndex = commands.findIndex(({ pipeline }) => (
+    pipeline === 'directory-v2-key-pipeline'
+  ));
+  const radixPrepareIndex = commands.findIndex(({ pipeline }) => (
+    pipeline === 'directory-v2-arena-0-radix-gpu-count-prepare'
+  ));
+  const assembleIndex = commands.findIndex(({ pipeline }) => (
+    pipeline === 'directory-v2-assemble-pipeline'
+  ));
+  const finalizeIndex = commands.findIndex(({ pipeline }) => (
+    pipeline === 'directory-v2-finalize-pipeline'
+  ));
+  assert.ok(keyIndex >= 0);
+  assert.ok(radixPrepareIndex > keyIndex);
+  assert.ok(assembleIndex > radixPrepareIndex);
+  assert.ok(finalizeIndex > assembleIndex);
+  assert.deepEqual(commands[keyIndex].dispatchIndirect, {
+    label: activeSourceView.activeSourceViewBuffer.label,
+    byteOffset: activeSourceView.activeDispatchOffsetBytes
+  });
+  assert.deepEqual(commands[assembleIndex].dispatchIndirect, {
+    label: activeSourceView.activeSourceViewBuffer.label,
+    byteOffset: activeSourceView.activeDispatchOffsetBytes
+  });
+
+  assert.throws(
+    () => directoryRuntime.encode(createFakeEncoder(), {
+      ...directoryArgs,
+      activeSourceView: { ...activeSourceView }
+    }),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_V2_ACTIVE_SOURCE_AUTHORITY'
+  );
+  activeSourceView.buildOrdinal += 1;
+  assert.throws(
+    () => directoryRuntime.encode(createFakeEncoder(), directoryArgs),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_V2_ACTIVE_SOURCE_AUTHORITY'
+  );
+  activeSourceView.buildOrdinal -= 1;
+
+  assert.equal(
+    directoryRuntime.releaseExecution(execution, { discardedEncoder: true }),
+    true
+  );
+  assert.equal(
+    activeSourceRuntime.releaseExecution(
+      activeSourceView,
+      { discardedEncoder: true }
+    ),
+    true
+  );
+  assert.throws(
+    () => directoryRuntime.encode(createFakeEncoder(), directoryArgs),
+    (error) => error.code === 'ERR_SCHROEDER_SPATIAL_V2_ACTIVE_SOURCE_AUTHORITY'
+  );
+  assert.equal(directoryRuntime.destroy(), true);
+  assert.equal(activeSourceRuntime.destroy(), true);
 });
 
 test('generation consumer lease holds the complete spatial artifact family past an earlier owner fence', async () => {
@@ -710,7 +1117,7 @@ test('strict raw V0J sidecar attaches only to an exact borrowed mechanics family
   );
   assert.equal(
     generation.phaseVolumeReceipt.storageBindingCount,
-    7
+    8
   );
   assert.equal(
     validateSchroederSpatialPhaseVolumeReceiptDescriptor(
@@ -873,7 +1280,7 @@ test('missing or unborrowed mechanics provenance leaves spatial generation intac
   );
 });
 
-test('frozen fine refresh keeps the spatial generation live but suppresses stale V0J lineage', () => {
+test('manufactured frozen fine refresh is rejected without controller-issued authority', () => {
   const device = createFakeDevice();
   const sourceMechanicsBuffer = device.createBuffer({
     label: 'direct-spatial-frozen-mechanics-source',
@@ -905,17 +1312,15 @@ test('frozen fine refresh keeps the spatial generation live but suppresses stale
       gridSpacingM: 0.25
     }
   });
-  assert.equal(generation.ready, true, generation.reason);
-  assert.equal(generation.phaseVolumeMoment, null);
-  assert.equal(generation.phaseVolumeReceipt, null);
-  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeMoment, null);
-  assert.equal(generation.mechanicsLevelViews[0].phaseVolumeReceipt, null);
-  assert.equal(generation.source.sourceMechanicsBuffer, null);
-  assert.equal(generation.source.sourceMechanicsBufferBorrowed, false);
+  assert.equal(generation.ready, false);
+  assert.equal(generation.selected, false);
+  assert.equal(generation.directoryBuildCount, 0);
+  assert.equal(generation.privateLookupBuildCount, 0);
   assert.equal(
-    generation.source.sourceMechanicsProvenanceStatus,
-    'schroeder-spatial-directory-source-mechanics-v0j-frozen-refresh-unreproved'
+    generation.status,
+    'schroeder-spatial-directory-source-rejected-frozen-refresh-authority'
   );
+  assert.match(generation.reason, /controller-issued topology\/generation proof/);
 });
 
 test('one spatial generation owns exactly two adjacent compact mechanics and field views', async () => {
@@ -1563,8 +1968,8 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
   );
   assert.equal(compactRuntime.activeExecutionCount(), 0);
   assert.equal(fieldRuntime.activeExecutionCount(), 3);
-  assert.equal(timestampBegins.length, 12);
-  assert.equal(timestampEnds.length, 9);
+  assert.equal(timestampBegins.length, 10);
+  assert.equal(timestampEnds.length, 7);
   assert.equal(timestampDiscards.length, 1);
   const discardedEncoder = timestampDiscards[0];
   assert.ok(timestampBegins.every((token) => token.encoder === discardedEncoder));
@@ -1578,10 +1983,8 @@ test('field-arena backpressure discards the current compact mechanics acquisitio
       'schroeder-spatial-active-source-view-build',
       'schroeder-spatial-directory-prepare',
       'schroeder-spatial-key-emission',
-      'webgpu-stable-radix-sort',
-      'webgpu-sorted-unique',
+      'schroeder-spatial-directory-gpu-count-radix-sort-unique',
       'schroeder-spatial-directory-assemble-finalize',
-      'schroeder-spatial-active-rank-view-build',
       'schroeder-spatial-exact-near-cell-tree-build',
       'schroeder-spatial-derived-view-build',
       'schroeder-spatial-mechanics-view-build',

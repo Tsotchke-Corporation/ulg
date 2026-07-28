@@ -767,3 +767,405 @@ fn finalize_directory() {
   );
 }
 `;
+
+function replaceRequired(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`unable to derive Schroeder spatial v2 WGSL: ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+function createSchroederSpatialEpochV2KeyWgsl() {
+  let source = schroederSpatialEpochKeyWgsl;
+  source = replaceRequired(
+    source,
+    '@group(0) @binding(4) var<uniform> params: SpatialEpochParams;',
+    `@group(0) @binding(4) var<uniform> params: SpatialEpochParams;
+@group(0) @binding(5) var<storage, read> active_source_view: array<u32>;`,
+    'active-source binding'
+  );
+  source = replaceRequired(
+    source,
+    'const EXACT_KEY_WORDS: u32 = 5u;',
+    `const EXACT_KEY_WORDS: u32 = 5u;
+const SOURCE_KEY_WORDS: u32 = 6u;
+const SOURCE_KEY_PHYSICAL_WORD: u32 = 5u;
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_STATUS_EXACT: u32 = 3u;
+const ACTIVE_SOURCE_STATUS_REJECTED: u32 = 0xfcu;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = 64u;
+const ACTIVE_SOURCE_MISSING: u32 = 0xffffffffu;`,
+    'v2 source-key and active-source constants'
+  );
+  source = replaceRequired(
+    source,
+    `  if (params.logical_count_gpu_authored != 0u) {
+    return false;
+  }
+`,
+    '',
+    'v2 GPU count query-profile admission'
+  );
+  source = replaceRequired(
+    source,
+    `fn count_contract_ready() -> bool {
+  return params.logical_count_gpu_authored <= 1u
+    && params.physical_radix_count <= params.source_capacity
+    && params.source_count <= params.physical_radix_count
+    && (
+      params.logical_count_gpu_authored != 0u
+      || params.source_count == params.physical_radix_count
+    );
+}
+
+fn effective_source_count() -> u32 {
+  return select(0u, params.source_count, count_contract_ready());
+}`,
+    `fn active_source_view_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ACTIVE_SOURCE_HEADER_WORDS) {
+    return false;
+  }
+  let status = active_source_view[2u];
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  return params.logical_count_gpu_authored == 1u
+    && params.physical_radix_count <= params.source_capacity
+    && active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_STATUS_EXACT) == ACTIVE_SOURCE_STATUS_EXACT
+    && (status & ACTIVE_SOURCE_STATUS_REJECTED) == 0u
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && physical_count == params.source_count
+    && physical_count <= physical_capacity
+    && physical_capacity == params.source_capacity
+    && active_count <= active_capacity
+    && active_count <= params.physical_radix_count
+    && active_capacity == params.physical_radix_count
+    && active_capacity <= physical_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u] == SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+    && active_source_view[24u] == ACTIVE_NODE_STRIDE
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[29u] == params.build_ordinal
+    && active_source_view[30u] == params.build_ordinal
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[43u] == active_count * 27u
+    && active_source_view[47u] != 0u;
+}
+
+fn effective_source_count() -> u32 {
+  return select(0u, active_source_view[18u], active_source_view_admitted());
+}
+
+fn physical_source_for_active(active_ordinal: u32) -> u32 {
+  let active_count = effective_source_count();
+  if (active_ordinal >= active_count) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let physical_source = active_source_view[active_to_physical + active_ordinal];
+  if (
+    physical_source >= params.source_count
+    || active_source_view[physical_to_active + physical_source] != active_ordinal
+  ) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return physical_source;
+}`,
+    'v2 active-source admission and projection'
+  );
+  source = replaceRequired(
+    source,
+    '  let exact_base = source_index * EXACT_KEY_WORDS;',
+    '  let exact_base = source_index * SOURCE_KEY_WORDS;',
+    'v2 invalid source-key stride'
+  );
+  source = replaceRequired(
+    source,
+    `  exact_keys[exact_base + 4u] = 0xffffffffu;
+  let sort_base = source_index * params.sort_key_word_count;`,
+    `  exact_keys[exact_base + 4u] = 0xffffffffu;
+  exact_keys[exact_base + SOURCE_KEY_PHYSICAL_WORD] = ACTIVE_SOURCE_MISSING;
+  let sort_base = source_index * params.sort_key_word_count;`,
+    'v2 invalid physical identity word'
+  );
+  source = replaceRequired(
+    source,
+    `  let linear_group = workgroup_id.x + workgroup_id.y * params.key_dispatch_x;
+  let source_index = linear_group * 64u + local_id.x;
+  if (source_index >= params.physical_radix_count) {
+    return;
+  }
+  // A caller may copy a GPU-authored logical count into params.source_count
+  // after the host packs the capacity plan. The retained radix primitive still
+  // sorts the fixed capacity, so the inactive suffix must receive one maximal
+  // sentinel key without being counted as an invalid source.
+  if (!count_contract_ready() || source_index >= effective_source_count()) {
+    write_invalid_keys(source_index);
+    return;
+  }
+  let row = source_index * ACTIVE_NODE_STRIDE;`,
+    `  let linear_group = workgroup_id.x + workgroup_id.y * params.key_dispatch_x;
+  let active_ordinal = linear_group * 64u + local_id.x;
+  let active_count = effective_source_count();
+  if (active_ordinal >= active_count) {
+    return;
+  }
+  let source_index = physical_source_for_active(active_ordinal);
+  if (source_index == ACTIVE_SOURCE_MISSING) {
+    write_invalid_keys(active_ordinal);
+    atomicAdd(&epoch_evidence[0], 1u);
+    return;
+  }
+  let row = source_index * ACTIVE_NODE_STRIDE;`,
+    'v2 active-ordinal key invocation'
+  );
+  source = source.replaceAll(
+    'write_invalid_keys(source_index);',
+    'write_invalid_keys(active_ordinal);'
+  );
+  source = replaceRequired(
+    source,
+    '  let exact_base = source_index * EXACT_KEY_WORDS;',
+    '  let exact_base = active_ordinal * SOURCE_KEY_WORDS;',
+    'v2 admitted source-key stride'
+  );
+  source = replaceRequired(
+    source,
+    `  exact_keys[exact_base + 4u] = cell_order.z;
+
+  if (params.sort_mode == SORT_MODE_BOUNDED_ATLAS) {`,
+    `  exact_keys[exact_base + 4u] = cell_order.z;
+  exact_keys[exact_base + SOURCE_KEY_PHYSICAL_WORD] = source_index;
+
+  if (params.sort_mode == SORT_MODE_BOUNDED_ATLAS) {`,
+    'v2 admitted physical identity word'
+  );
+  source = replaceRequired(
+    source,
+    '    sort_keys[source_index] = ordinal;',
+    '    sort_keys[active_ordinal] = ordinal;',
+    'v2 bounded sort index'
+  );
+  source = replaceRequired(
+    source,
+    '    let sort_base = source_index * EXACT_KEY_WORDS;',
+    '    let sort_base = active_ordinal * EXACT_KEY_WORDS;',
+    'v2 lexicographic sort index'
+  );
+  return source;
+}
+
+function createSchroederSpatialEpochV2AssembleWgsl() {
+  let source = schroederSpatialEpochAssembleWgsl;
+  source = replaceRequired(
+    source,
+    'const ABI_VERSION: u32 = 1u;',
+    `const ABI_VERSION: u32 = 2u;
+const SOURCE_KEY_WORDS: u32 = 6u;
+const SOURCE_KEY_PHYSICAL_WORD: u32 = 5u;`,
+    'v2 directory version and source-key constants'
+  );
+  source = replaceRequired(
+    source,
+    `  if (params.logical_count_gpu_authored != 0u) {
+    return false;
+  }
+`,
+    '',
+    'v2 GPU count query-profile admission'
+  );
+  source = replaceRequired(
+    source,
+    `fn count_contract_ready() -> bool {
+  return params.logical_count_gpu_authored <= 1u
+    && params.physical_radix_count <= params.source_capacity
+    && params.source_count <= params.physical_radix_count
+    && (
+      params.logical_count_gpu_authored != 0u
+      || params.source_count == params.physical_radix_count
+    );
+}
+
+fn effective_source_count() -> u32 {
+  return select(0u, params.source_count, count_contract_ready());
+}`,
+    `fn count_contract_ready() -> bool {
+  return params.logical_count_gpu_authored == 1u
+    && params.source_row_layout_id == 1u
+    && params.source_count <= params.source_capacity
+    && params.physical_radix_count <= params.source_capacity;
+}
+
+fn effective_source_count() -> u32 {
+  let active_count = unique_evidence[1u];
+  return select(
+    0u,
+    active_count,
+    count_contract_ready()
+      && active_count <= params.physical_radix_count
+      && active_count <= params.source_count
+  );
+}`,
+    'v2 active unique-input count contract'
+  );
+  source = replaceRequired(
+    source,
+    `fn admitted_unique_count(primitive_unique_count: u32) -> u32 {
+  if (!count_contract_ready() || params.source_count == 0u) {
+    return 0u;
+  }
+  if (
+    params.logical_count_gpu_authored == 0u
+    || params.source_count == params.physical_radix_count
+  ) {
+    return primitive_unique_count;
+  }
+  // Stable radix ordering places the all-ones inactive suffix after every
+  // admitted spatial key. The exclusive head prefix at the first suffix row
+  // is therefore the exact number of live unique cells.
+  return sorted_group_indices[params.source_count];
+}`,
+    `fn admitted_unique_count(primitive_unique_count: u32) -> u32 {
+  let active_count = effective_source_count();
+  return select(
+    0u,
+    primitive_unique_count,
+    primitive_unique_count <= active_count
+      && arrayLength(&sorted_group_indices) >= params.physical_radix_count
+  );
+}`,
+    'v2 unique count admission'
+  );
+  source = replaceRequired(
+    source,
+    `  let source_index = sorted_indices[sorted_position];
+  var inclusive_head_count = unique_count;`,
+    `  let active_ordinal = sorted_indices[sorted_position];
+  if (active_ordinal >= live_source_count) {
+    atomicAdd(&epoch_evidence[3], 1u);
+    return;
+  }
+  let source_key = active_ordinal * SOURCE_KEY_WORDS;
+  let source_index = exact_keys[source_key + SOURCE_KEY_PHYSICAL_WORD];
+  var inclusive_head_count = unique_count;`,
+    'v2 physical member projection'
+  );
+  source = replaceRequired(
+    source,
+    `    source_index >= live_source_count
+    || group_index >= unique_count`,
+    `    source_index >= params.source_count
+    || group_index >= unique_count`,
+    'v2 physical member bound'
+  );
+  source = replaceRequired(
+    source,
+    '  directory[params.particle_to_cell_offset_words + source_index] = group_index;',
+    `  // Zero is the exact dormant/missing sentinel after the runtime clears
+  // the retained physical reverse arena.
+  directory[params.particle_to_cell_offset_words + source_index] =
+    group_index + 1u;`,
+    'v2 plus-one physical reverse'
+  );
+  source = replaceRequired(
+    source,
+    '    let source_key = source_index * EXACT_KEY_WORDS;\n',
+    '',
+    'v2 source-key scratch index'
+  );
+  source = replaceRequired(
+    source,
+    '      params.cell_keys_offset_words + logical_unique_count * EXACT_KEY_WORDS,\n        logical_unique_count > 0u',
+    '      params.cell_keys_offset_words + logical_unique_count * EXACT_KEY_WORDS,\n        logical_unique_count > 0u',
+    'v2 cell key high-water anchor'
+  );
+  source = replaceRequired(
+    source,
+    `          params.header_words,
+          params.particle_to_cell_offset_words + live_source_count,
+          live_source_count > 0u`,
+    `          params.header_words,
+          params.particle_to_cell_offset_words + params.source_count,
+          params.source_count > 0u`,
+    'v2 physical reverse high-water'
+  );
+  source = replaceRequired(
+    source,
+    `    && primitive_input_count == params.physical_radix_count
+    && logical_unique_count <= live_source_count
+    && primitive_unique_count <= params.physical_radix_count`,
+    `    && primitive_input_count == live_source_count
+    && logical_unique_count <= live_source_count
+    && primitive_unique_count <= live_source_count`,
+    'v2 primitive live-count evidence'
+  );
+  source = replaceRequired(
+    source,
+    `    + logical_unique_count + 1u
+    + live_source_count * 2u`,
+    `    + logical_unique_count + 1u
+    + live_source_count
+    + params.source_count`,
+    'v2 logical payload count'
+  );
+  source = replaceRequired(
+    source,
+    `  let query_evidence_offset_words = params.particle_to_cell_offset_words
+    + params.physical_radix_count;`,
+    `  let query_evidence_offset_words = params.particle_to_cell_offset_words
+    + params.source_capacity;`,
+    'v2 capacity-stable query evidence'
+  );
+  source = replaceRequired(
+    source,
+    '  directory[16] = live_source_count;',
+    '  directory[16] = params.source_count;',
+    'v2 physical source header'
+  );
+  source = replaceRequired(
+    source,
+    `  // Preserve the established v1 consumer invariants. Raw physical primitive
+  // evidence remains in unique_evidence; the authoritative directory exposes
+  // the admitted logical source and cell counts.
+  directory[37] = live_source_count;`,
+    `  // V2 word 37 is the exact GPU-authored active CSR member count. Word 16
+  // remains the stable physical particle identity bound.
+  directory[37] = live_source_count;`,
+    'v2 active count telemetry'
+  );
+  return source;
+}
+
+export const schroederSpatialEpochV2KeyWgsl =
+  createSchroederSpatialEpochV2KeyWgsl();
+export const schroederSpatialEpochV2AssembleWgsl =
+  createSchroederSpatialEpochV2AssembleWgsl();

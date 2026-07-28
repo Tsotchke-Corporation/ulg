@@ -13,6 +13,8 @@ import {
   validateSchroederSpatialPhaseVolumeMomentDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeMoment.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
@@ -107,7 +109,7 @@ function paramsData(plan) {
   u32(0, plan.sourceCount);
   u32(1, plan.sourceCapacity);
   u32(2, plan.fieldCapacity);
-  u32(3, plan.candidateCount);
+  u32(3, plan.candidateCount ?? plan.layout.candidateCapacity);
   view.setInt32(4 * UINT32_BYTES, plan.selectedLevel, true);
   u32(5, plan.gridNodeCount);
   view.setFloat32(6 * UINT32_BYTES, plan.gridSpacingM, true);
@@ -258,8 +260,10 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     'device.limits.maxStorageBuffersPerShaderStage',
     0xffff
   );
-  if (maxStorageBuffersPerShaderStage < 7) {
-    throw new RangeError('phase-volume receipt requires seven storage bindings');
+  if (maxStorageBuffersPerShaderStage < 8) {
+    throw new RangeError(
+      'phase-volume receipt requires eight storage bindings for dual v1/v2 authority'
+    );
   }
   const maxBufferSize = positiveInteger(
     device.limits?.maxBufferSize ?? 256 * 1024 * 1024,
@@ -296,19 +300,35 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     );
   }
 
-  const module = device.createShaderModule({
-    label: `${label}-shader`,
-    code: createSchroederSpatialPhaseVolumeReceiptWgsl(layout)
+  const modules = Object.freeze({
+    v1: device.createShaderModule({
+      label: `${label}-v1-shader`,
+      code: createSchroederSpatialPhaseVolumeReceiptWgsl(layout, {
+        sourceAuthorityVersion:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+      })
+    }),
+    v2: device.createShaderModule({
+      label: `${label}-v2-shader`,
+      code: createSchroederSpatialPhaseVolumeReceiptWgsl(layout, {
+        sourceAuthorityVersion:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+      })
+    })
   });
-  const pipeline = (entryPoint) => device.createComputePipeline({
-    label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
+  const pipeline = (entryPoint, route, module) => device.createComputePipeline({
+    label: `${label}-${route}-${entryPoint.replaceAll('_', '-')}-pipeline`,
     layout: 'auto',
     compute: { module, entryPoint }
   });
-  const pipelines = Object.freeze({
-    sources: pipeline('reduce_phase_volume_receipt_sources'),
-    fields: pipeline('reduce_phase_volume_receipt_fields'),
-    finalize: pipeline('finalize_phase_volume_receipt')
+  const createPipelineSet = (route, module) => Object.freeze({
+    sources: pipeline('reduce_phase_volume_receipt_sources', route, module),
+    fields: pipeline('reduce_phase_volume_receipt_fields', route, module),
+    finalize: pipeline('finalize_phase_volume_receipt', route, module)
+  });
+  const pipelineSets = Object.freeze({
+    v1: createPipelineSet('v1', modules.v1),
+    v2: createPipelineSet('v2', modules.v2)
   });
   const deviceId = webGpuDeviceId(device);
   let destroyed = false;
@@ -431,6 +451,12 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       || execution?.sourceBuffer !== ownership.sourceBuffer
       || execution?.sourceBufferBorrowed !== true
       || execution?.mechanicsFieldView !== ownership.mechanicsFieldView
+      || execution?.spatialExecution !== ownership.spatialExecution
+      || execution?.activeSourceView !== ownership.activeSourceView
+      || execution?.activeSourceCountAuthority
+        !== ownership.activeSourceCountAuthority
+      || execution?.candidateCountAuthority
+        !== ownership.candidateCountAuthority
     ) {
       throw phaseVolumeReceiptError(
         'phase-volume receipt execution is not owned by this runtime',
@@ -551,6 +577,14 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       || !webGpuBufferMatchesDevice(phaseVolumeMoment.controlBuffer, device)
       || !webGpuBufferMatchesDevice(phaseVolumeMoment.momentBuffer, device)
       || !webGpuBufferMatchesDevice(mechanicsFieldView.fieldViewBuffer, device)
+      || (
+        phaseVolumeMoment.sourceAuthorityVersion
+          === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+        && !webGpuBufferMatchesDevice(
+          phaseVolumeMoment.activeSourceViewBuffer,
+          device
+        )
+      )
     ) {
       throw new TypeError(
         'phase-volume receipt requires one exact live encoded S9-A moment sidecar'
@@ -581,7 +615,33 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       Math.max(mechanicsFieldView.layout?.byteLength ?? 0, FIELD_VIEW_DISPATCH_OFFSET_BYTES + 12),
       'phase-volume receipt mechanics field view'
     );
-    return mechanicsFieldView;
+    const sourceAuthorityVersion = Number(
+      phaseVolumeMoment.sourceAuthorityVersion
+        ?? SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    );
+    if (
+      sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+      && sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+    ) {
+      throw new TypeError(
+        'phase-volume receipt requires an exact v1 or v2 source authority'
+      );
+    }
+    const directoryV2 =
+      sourceAuthorityVersion
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
+    return {
+      mechanicsFieldView,
+      sourceAuthorityVersion,
+      directoryV2,
+      spatialExecution: phaseVolumeMoment.spatialExecution,
+      activeSourceView: phaseVolumeMoment.activeSourceView,
+      activeSourceCountAuthority:
+        phaseVolumeMoment.activeSourceCountAuthority,
+      candidateCountAuthority: phaseVolumeMoment.candidateCountAuthority
+    };
   }
 
   function encode(encoder, {
@@ -590,7 +650,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     timestampMetadata = null
   } = {}) {
     assertEncoder(encoder);
-    const mechanicsFieldView = assertPhaseVolumeMoment(phaseVolumeMoment);
+    const authority = assertPhaseVolumeMoment(phaseVolumeMoment);
+    const { mechanicsFieldView } = authority;
     const plan = createSchroederSpatialPhaseVolumeReceiptPlan({
       sourceCount: phaseVolumeMoment.sourceCount,
       sourceCapacity: resolvedMaxSourceCount,
@@ -611,7 +672,8 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       chartEpoch: phaseVolumeMoment.chartEpoch,
       levelEpoch: phaseVolumeMoment.levelEpoch,
       supportEpoch: phaseVolumeMoment.supportEpoch,
-      completionOrdinal: phaseVolumeMoment.completionOrdinal
+      completionOrdinal: phaseVolumeMoment.completionOrdinal,
+      sourceAuthorityVersion: authority.sourceAuthorityVersion
     });
     if (!sameIdentity(plan, phaseVolumeMoment)) {
       throw new TypeError('phase-volume receipt plan lost exact S9-A lineage');
@@ -636,14 +698,28 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         partials: { binding: 4, resource: resource(arena.partialBuffer) },
         control: { binding: 5, resource: resource(arena.controlBuffer) },
         params: { binding: 6, resource: paramsResource },
-        sourceAssignments: { binding: 7, resource: resource(phaseVolumeMoment.sourceBuffer) }
+        sourceAssignments: { binding: 7, resource: resource(phaseVolumeMoment.sourceBuffer) },
+        activeSource: authority.directoryV2
+          ? {
+              binding: 8,
+              resource: resource(
+                authority.activeSourceView.activeSourceViewBuffer
+              )
+            }
+          : null
       });
+      const pipelines = authority.directoryV2
+        ? pipelineSets.v2
+        : pipelineSets.v1;
+      const withActiveSource = (bindingEntries) => authority.directoryV2
+        ? [...bindingEntries, entries.activeSource]
+        : bindingEntries;
       const bindGroup = (pipelineObject, bindingEntries, suffix) => device.createBindGroup({
         label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
         layout: pipelineObject.getBindGroupLayout(0),
         entries: bindingEntries
       });
-      const sourceBindGroup = bindGroup(pipelines.sources, [
+      const sourceBindGroup = bindGroup(pipelines.sources, withActiveSource([
         entries.sourceMechanics,
         // Header pairing is checked before source reduction, so this pass
         // intentionally sees the complete read-only S9-A evidence set.
@@ -654,23 +730,23 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         entries.control,
         entries.params,
         entries.sourceAssignments
-      ], 'sources');
-      const fieldBindGroup = bindGroup(pipelines.fields, [
+      ]), 'sources');
+      const fieldBindGroup = bindGroup(pipelines.fields, withActiveSource([
         entries.momentControl,
         entries.momentRows,
         entries.mechanicsField,
         entries.partials,
         entries.control,
         entries.params
-      ], 'fields');
-      const finalizeBindGroup = bindGroup(pipelines.finalize, [
+      ]), 'fields');
+      const finalizeBindGroup = bindGroup(pipelines.finalize, withActiveSource([
         entries.momentControl,
         entries.momentRows,
         entries.mechanicsField,
         entries.partials,
         entries.control,
         entries.params
-      ], 'finalize');
+      ]), 'finalize');
       const commonTimestamp = {
         generationId: plan.generationId,
         selectedLevel: plan.selectedLevel,
@@ -697,12 +773,23 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         sourceBuffer: phaseVolumeMoment.sourceBuffer,
         sourceBufferBorrowed: true,
         mechanicsFieldView,
+        sourceAuthorityVersion: authority.sourceAuthorityVersion,
+        physicalSourceCount: plan.sourceCount,
+        directorySchema: phaseVolumeMoment.directorySchema,
+        directoryAbiVersion: phaseVolumeMoment.directoryAbiVersion,
+        spatialExecution: authority.spatialExecution,
+        directoryBuffer: phaseVolumeMoment.directoryBuffer,
+        activeSourceView: authority.activeSourceView,
+        activeSourceViewBuffer:
+          authority.activeSourceView?.activeSourceViewBuffer ?? null,
+        activeSourceCountAuthority: authority.activeSourceCountAuthority,
+        candidateCountAuthority: authority.candidateCountAuthority,
         controlBuffer: arena.controlBuffer,
         partialBuffer: arena.partialBuffer,
         paramsBuffer: arena.paramsBuffer,
         encodedDispatchCount: 0,
         encodedComputePassCount: 0,
-        storageBindingCount: 7,
+        storageBindingCount: authority.directoryV2 ? 8 : 7,
         retainedGpuBufferBytes: retainedGpuBufferBytesPerArena[arena.arenaIndex],
         retainedGpuBufferBytesAllArenas: retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
@@ -717,6 +804,9 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
           'linearGroup=workgroup.x+workgroup.y*dispatchX',
         mechanicsFieldDispatchCapacityWorkgroups:
           plan.layout.fieldGroupCapacity,
+        sourceDispatchScaling: authority.directoryV2
+          ? 'gpu-active-source-count'
+          : 'physical-source-count',
         maxComputeWorkgroupsPerDimension,
         diagnosticOnly: true,
         stateMutationAllowed: false,
@@ -740,26 +830,48 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
         phaseVolumeMoment,
         sourceMechanicsBuffer: phaseVolumeMoment.sourceMechanicsBuffer,
         sourceBuffer: phaseVolumeMoment.sourceBuffer,
-        mechanicsFieldView
+        mechanicsFieldView,
+        spatialExecution: authority.spatialExecution,
+        activeSourceView: authority.activeSourceView,
+        activeSourceCountAuthority: authority.activeSourceCountAuthority,
+        candidateCountAuthority: authority.candidateCountAuthority
       };
       executionOwnership.set(execution, ownership);
       createRetirementRecord(execution, ownership);
 
       recordingStarted = true;
       encoder.clearBuffer(arena.controlBuffer);
-      encodedDispatchCount += encodePass(
-        encoder,
-        pipelines.sources,
-        sourceBindGroup,
-        [plan.sourceGroupCount, 1, 1],
-        `${label}ReduceSources`,
-        {
-          gpuTimestampRecorder,
-          timestampMetadata: commonTimestamp,
-          producerId: 'schroeder-spatial-phase-volume-receipt-source-reduction',
-          stage: 'reduce-sources'
-        }
-      );
+      encoder.clearBuffer(arena.partialBuffer);
+      encodedDispatchCount += authority.directoryV2
+        ? encodeIndirectPass(
+            encoder,
+            pipelines.sources,
+            sourceBindGroup,
+            authority.activeSourceView.activeSourceViewBuffer,
+            authority.activeSourceView.activeDispatchOffsetBytes,
+            `${label}ReduceSources`,
+            {
+              gpuTimestampRecorder,
+              timestampMetadata: commonTimestamp,
+              producerId:
+                'schroeder-spatial-phase-volume-receipt-source-reduction',
+              stage: 'reduce-sources'
+            }
+          )
+        : encodePass(
+            encoder,
+            pipelines.sources,
+            sourceBindGroup,
+            [plan.sourceGroupCount, 1, 1],
+            `${label}ReduceSources`,
+            {
+              gpuTimestampRecorder,
+              timestampMetadata: commonTimestamp,
+              producerId:
+                'schroeder-spatial-phase-volume-receipt-source-reduction',
+              stage: 'reduce-sources'
+            }
+          );
       encodedDispatchCount += encodeIndirectPass(
         encoder,
         pipelines.fields,
@@ -995,8 +1107,9 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
     maxComputeWorkgroupsPerDimension,
     arenaCount: resolvedArenaCount,
     layout,
-    pipelineCount: Object.keys(pipelines).length,
-    storageBindingCount: 7,
+    pipelineCount: Object.values(pipelineSets)
+      .reduce((count, set) => count + Object.keys(set).length, 0),
+    storageBindingCount: 8,
     retainedGpuBufferBytes,
     normalHotLoopReadbackFree: true,
     encode,

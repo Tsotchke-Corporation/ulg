@@ -2,7 +2,8 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1
 } from './schroederSpatialExactNear.js';
 import {
-  schroederSpatialExactNearTraversalV1Wgsl
+  schroederSpatialExactNearTraversalV1Wgsl,
+  schroederSpatialExactNearTraversalV2Wgsl
 } from './schroederSpatialExactNearTraversalWgsl.js';
 
 // Pressure/contact is the first staged exact-near consumer of
@@ -963,3 +964,33 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
 }
 `;
+
+function derivePressureContactV2Wgsl() {
+  if (
+    !sphPressureInterfaceSpatialExactNearContactKinematicsWgsl.includes(
+      schroederSpatialExactNearTraversalV1Wgsl
+    )
+  ) {
+    throw new Error(
+      'unable to derive pressure/contact v2 WGSL: v1 traversal module missing'
+    );
+  }
+  return sphPressureInterfaceSpatialExactNearContactKinematicsWgsl
+    .replace(
+      schroederSpatialExactNearTraversalV1Wgsl,
+      schroederSpatialExactNearTraversalV2Wgsl
+    )
+    .replaceAll(
+      'SchroederSpatialExactNearExpectationV1',
+      'SchroederSpatialExactNearExpectationV2'
+    );
+}
+
+/**
+ * Directory-v2 pressure/contact source. Its external uniform remains byte-for-
+ * byte compatible with v1; the embedded expectation interprets particle_count
+ * and source_capacity as physical identity bounds while directory word 37
+ * supplies the GPU-authored active CSR span.
+ */
+export const sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl =
+  derivePressureContactV2Wgsl();

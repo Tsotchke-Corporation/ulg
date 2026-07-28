@@ -14,6 +14,12 @@ export const SCHROEDER_SPATIAL_MECHANICS_VIEW_PARAMS_BYTES = 192;
 
 export const SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0 = 1;
 export const SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_ACTIVE_NODE_V0 = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1 = 1;
+export const SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2 = 2;
+export const SCHROEDER_SPATIAL_MECHANICS_VIEW_PHYSICAL_WORK_IDENTITY =
+  'stable-physical-source-index';
+export const SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY =
+  'gpu-active-ordinal';
 
 export const SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED = 1 << 1;
@@ -74,8 +80,25 @@ export const SCHROEDER_SPATIAL_MECHANICS_VIEW_ABI = Object.freeze({
   nodeIdentity: 'ascending-unique-dense-grid-storage-index-u32',
   construction:
     'directory-authenticated-particle-stencil-bitset-popcount-exclusive-scan',
-  sourceAuthority: 'ss-spatial-epoch-v1-reverse-membership',
+  sourceAuthority:
+    'ss-spatial-epoch-v1-physical-or-v2-active-source-projection-and-physical-reverse',
   dispatchAuthority: 'gpu-finalized-node-count-indirect-dispatch',
+  directoryVersions: Object.freeze({
+    1: Object.freeze({
+      sourceWorkIdentity:
+        SCHROEDER_SPATIAL_MECHANICS_VIEW_PHYSICAL_WORK_IDENTITY,
+      sourceDispatchAuthority: 'host-physical-count'
+    }),
+    2: Object.freeze({
+      sourceWorkIdentity:
+        SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+      sourceDispatchAuthority:
+        'retained-active-source-view-v1-gpu-indirect-dispatch',
+      publicSourceIdentity: 'stable-physical-source-slot-u32',
+      activeCountReadback: false,
+      emptyActiveSet: 'admitted-zero-node-zero-consumer-dispatch'
+    })
+  }),
   particleAlignment: false,
   overflowPolicy: 'fail-closed-zero-indirect-dispatch',
   readbackPolicy: 'explicit-probe-only'
@@ -136,6 +159,8 @@ export function createSchroederSpatialMechanicsViewLayout({
 export function createSchroederSpatialMechanicsViewPlan({
   sourceCount,
   sourceRowLayoutId = SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+  directoryAbiVersion =
+    SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
   selectedLevel = 0,
   gridNodeCount,
   gridDims,
@@ -157,6 +182,12 @@ export function createSchroederSpatialMechanicsViewPlan({
   completionOrdinal = generationId
 } = {}) {
   const resolvedSourceCount = integer(sourceCount, 'sourceCount', 1);
+  const resolvedDirectoryAbiVersion = integer(
+    directoryAbiVersion,
+    'directoryAbiVersion',
+    SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+    SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+  );
   if (!Array.isArray(gridDims) && !ArrayBuffer.isView(gridDims)) {
     throw new TypeError('gridDims must be an array-like [x, y, z] value');
   }
@@ -175,6 +206,15 @@ export function createSchroederSpatialMechanicsViewPlan({
     gridNodeCapacity: resolvedGridNodeCount
   });
   const rowLayout = integer(sourceRowLayoutId, 'sourceRowLayoutId', 1, 2);
+  if (
+    resolvedDirectoryAbiVersion
+      === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+    && rowLayout !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+  ) {
+    throw new RangeError(
+      'directory v2 mechanics work is level-assignment-only'
+    );
+  }
   const identity = Object.fromEntries([
     ['generationId', generationId, true],
     ['deviceOrdinal', deviceOrdinal, false],
@@ -199,8 +239,17 @@ export function createSchroederSpatialMechanicsViewPlan({
     status: 'schroeder-spatial-mechanics-view-plan-ready',
     ...identity,
     sourceCount: resolvedSourceCount,
+    physicalSourceCount: resolvedSourceCount,
     sourceRowLayoutId: rowLayout,
     sourceRowStrideFloats: 16,
+    directoryAbiVersion: resolvedDirectoryAbiVersion,
+    sourceAuthorityVersion: resolvedDirectoryAbiVersion,
+    sourceWorkIdentity: resolvedDirectoryAbiVersion
+      === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      ? SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+      : SCHROEDER_SPATIAL_MECHANICS_VIEW_PHYSICAL_WORK_IDENTITY,
+    gpuAuthoredActiveSourceCount: resolvedDirectoryAbiVersion
+      === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
     selectedLevel: integer(
       selectedLevel,
       'selectedLevel',
@@ -242,7 +291,12 @@ export function validateSchroederSpatialMechanicsViewDescriptor(view, expected =
     'supportEpoch',
     'completionOrdinal',
     'sourceCount',
+    'physicalSourceCount',
     'sourceRowLayoutId',
+    'directorySchema',
+    'directoryAbiVersion',
+    'sourceAuthorityVersion',
+    'sourceWorkIdentity',
     'selectedLevel',
     'gridNodeCount',
     'gridShift',
@@ -290,6 +344,60 @@ export function validateSchroederSpatialMechanicsViewDescriptor(view, expected =
     return {
       admitted: false,
       status: 'schroeder-spatial-mechanics-view-rejected-not-live'
+    };
+  }
+  const directoryAbiVersion = Number(
+    view.directoryAbiVersion
+      ?? SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1
+  );
+  if (
+    directoryAbiVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1
+    && directoryAbiVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+  ) {
+    return {
+      admitted: false,
+      status:
+        'schroeder-spatial-mechanics-view-rejected-directory-abi-version'
+    };
+  }
+  if (
+    directoryAbiVersion
+      === SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+    && (
+      view.sourceRowLayoutId
+        !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+      || view.directorySchema
+        !== 'peercompute.ulg.schroeder-spatial-epoch.v2'
+      || view.sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      || view.physicalSourceCount !== view.sourceCount
+      || view.sourceWorkIdentity
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+      || !view.spatialExecution
+      || view.spatialExecution.schema !== view.directorySchema
+      || view.spatialExecution.directoryBuffer !== view.directoryBuffer
+      || view.spatialExecution.sourceBuffer !== view.sourceBuffer
+      || !view.activeSourceView
+      || !view.activeSourceViewBuffer
+      || view.activeSourceViewBuffer
+        !== view.activeSourceView.activeSourceViewBuffer
+      || view.spatialExecution.activeSourceView !== view.activeSourceView
+      || view.spatialExecution.activeSourceViewBuffer
+        !== view.activeSourceViewBuffer
+      || view.activeSourceCountAuthority?.activeSourceView
+        !== view.activeSourceView
+      || view.activeSourceCountAuthority?.buffer
+        !== view.activeSourceViewBuffer
+      || view.activeSourceDispatchOffsetBytes
+        !== view.activeSourceView.activeDispatchOffsetBytes
+    )
+  ) {
+    return {
+      admitted: false,
+      status:
+        'schroeder-spatial-mechanics-view-rejected-v2-source-authority'
     };
   }
   const gridDims = Array.from(view.gridDims || []);

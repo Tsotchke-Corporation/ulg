@@ -1,8 +1,12 @@
 import {
-  createSchroederSpatialExactNearTraversalV1Wgsl
+  createSchroederSpatialExactNearTraversalV1Wgsl,
+  createSchroederSpatialExactNearTraversalV2Wgsl
 } from './schroederSpatialExactNearTraversalWgsl.js';
 
 const exactNearTraversalWgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
+  directoryBindingName: 'spatial_directory'
+});
+const exactNearTraversalV2Wgsl = createSchroederSpatialExactNearTraversalV2Wgsl({
   directoryBindingName: 'spatial_directory'
 });
 
@@ -162,6 +166,98 @@ fn ss_exact_cell_tree_leaf_cell_index(node_index: u32) -> u32 {
   return ${treeBindingName}[ss_exact_cell_tree_node_base(node_index) + 7u];
 }
 `;
+}
+
+function replaceCellTreeRequired(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`unable to derive exact-near cell-tree v2 WGSL: ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+export function createSchroederSpatialExactNearCellTreeTraversalV2Wgsl({
+  treeBindingName = 'exact_near_cell_tree',
+  directoryBindingName = 'spatial_directory'
+} = {}) {
+  let source = createSchroederSpatialExactNearCellTreeTraversalV1Wgsl({
+    treeBindingName,
+    directoryBindingName
+  });
+  source = source
+    .replaceAll(
+      'SchroederSpatialExactNearExpectationV1',
+      'SchroederSpatialExactNearExpectationV2'
+    )
+    .replaceAll('expected.source_count', 'expected.physical_source_count')
+    .replaceAll(
+      'expected.expected_source_capacity',
+      'expected.expected_physical_source_capacity'
+    )
+    .replaceAll(
+      'expected.expected_particle_to_cell_offset_words',
+      'expected.expected_physical_to_cell_plus_one_offset_words'
+    );
+  source = replaceCellTreeRequired(
+    source,
+    'const SS_EXACT_CELL_TREE_VERSION: u32 = 1u;',
+    `const SS_EXACT_CELL_TREE_VERSION: u32 = 2u;
+const SS_EXACT_CELL_TREE_REVERSE_CELL_PLUS_ONE: u32 = 1u;`,
+    'tree ABI version'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `    && ${treeBindingName}[33u] == SS_EXACT_CELL_TREE_NODE_WORDS
+    && root_base + SS_EXACT_CELL_TREE_NODE_WORDS <= tree_word_length`,
+    `    && ${treeBindingName}[33u] == SS_EXACT_CELL_TREE_NODE_WORDS
+    && ${treeBindingName}[34u]
+      == ${directoryBindingName}[SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT]
+    && ${treeBindingName}[34u] > 0u
+    && ${treeBindingName}[34u] <= expected.physical_source_count
+    && ${treeBindingName}[35u] == SS_EXACT_CELL_TREE_REVERSE_CELL_PLUS_ONE
+    && root_base + SS_EXACT_CELL_TREE_NODE_WORDS <= tree_word_length`,
+    'active count and reverse encoding admission'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    '    && cell_count > 0u\n',
+    '',
+    'admitted empty active CSR'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `    && ${treeBindingName}[32u] == 0u`,
+    `    && ${treeBindingName}[32u] == select(
+      SS_EXACT_CELL_TREE_INVALID_U32,
+      0u,
+      cell_count > 0u
+    )`,
+    'empty root identity'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `    && ${treeBindingName}[34u] > 0u
+    && ${treeBindingName}[34u] <= expected.physical_source_count`,
+    `    && ${treeBindingName}[34u] <= expected.physical_source_count
+    && ((${treeBindingName}[34u] == 0u) == (cell_count == 0u))`,
+    'zero-active source admission'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `    && ((root_status & (
+      SS_EXACT_CELL_TREE_NODE_VALID | SS_EXACT_CELL_TREE_NODE_INTERNAL | SS_EXACT_CELL_TREE_NODE_LEAF
+    )) == expected_root_kind);`,
+    `    && select(
+      root_status == 0u,
+      ((root_status & (
+        SS_EXACT_CELL_TREE_NODE_VALID
+          | SS_EXACT_CELL_TREE_NODE_INTERNAL
+          | SS_EXACT_CELL_TREE_NODE_LEAF
+      )) == expected_root_kind),
+      cell_count > 0u
+    );`,
+    'empty root admission'
+  );
+  return source;
 }
 
 /**
@@ -501,3 +597,122 @@ fn finalize_exact_near_cell_tree() {
   tree_store(H_STATUS, TREE_READY | TREE_ADMITTED);
 }
 `;
+
+function deriveSchroederSpatialExactNearCellTreeV2Wgsl() {
+  let source = schroederSpatialExactNearCellTreeWgsl;
+  source = replaceCellTreeRequired(
+    source,
+    exactNearTraversalWgsl,
+    exactNearTraversalV2Wgsl,
+    'embedded directory traversal'
+  );
+  source = source
+    .replaceAll(
+      'SchroederSpatialExactNearExpectationV1',
+      'SchroederSpatialExactNearExpectationV2'
+    )
+    .replaceAll(
+      'spatial_expectation.source_count',
+      'spatial_expectation.physical_source_count'
+    )
+    .replaceAll(
+      'spatial_expectation.expected_source_capacity',
+      'spatial_expectation.expected_physical_source_capacity'
+    )
+    .replaceAll(
+      'spatial_expectation.expected_particle_to_cell_offset_words',
+      'spatial_expectation.expected_physical_to_cell_plus_one_offset_words'
+    );
+  source = replaceCellTreeRequired(
+    source,
+    'const TREE_VERSION: u32 = 1u;',
+    `const TREE_VERSION: u32 = 2u;
+const TREE_REVERSE_CELL_PLUS_ONE: u32 = 1u;`,
+    'build tree ABI version'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    'const H_NODE_WORD_COUNT: u32 = 33u;',
+    `const H_NODE_WORD_COUNT: u32 = 33u;
+const H_ACTIVE_SOURCE_COUNT: u32 = 34u;
+const H_REVERSE_ENCODING: u32 = 35u;`,
+    'v2 header words'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `  tree_store(H_ROOT_INDEX, 0u);
+  tree_store(H_NODE_WORD_COUNT, TREE_NODE_WORDS);`,
+    `  tree_store(
+    H_ROOT_INDEX,
+    select(TREE_INVALID_U32, 0u, directory_cell_count > 0u)
+  );
+  tree_store(H_NODE_WORD_COUNT, TREE_NODE_WORDS);
+  tree_store(
+    H_ACTIVE_SOURCE_COUNT,
+    spatial_directory[SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT]
+  );
+  tree_store(H_REVERSE_ENCODING, TREE_REVERSE_CELL_PLUS_ONE);`,
+    'v2 active and reverse header evidence'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `  if (directory_cell_count == 0u || directory_cell_count > tree_params.cell_capacity) {`,
+    `  if (directory_cell_count > tree_params.cell_capacity) {`,
+    'admitted empty directory'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `    begin >= end
+    || end > spatial_expectation.physical_source_count`,
+    `    begin >= end
+    || end > tree_load(H_ACTIVE_SOURCE_COUNT)`,
+    'active CSR leaf bound'
+  );
+  source = replaceCellTreeRequired(
+    source,
+    `  if (
+    tree_load(H_STATUS) != 0u
+    || tree_load(H_MAGIC) != TREE_MAGIC
+    || tree_load(H_VERSION) != TREE_VERSION
+    || tree_load(H_LEAF_BUILD_COUNT) != tree_load(H_CELL_COUNT)
+    || tree_load(H_INVALID_NODE_COUNT) != 0u
+    || !valid_root
+  ) {
+    tree_fail(TREE_INVALID_SOURCE);
+    return;
+  }
+  tree_store(H_STATUS, TREE_READY | TREE_ADMITTED);`,
+    `  if (
+    tree_load(H_STATUS) != 0u
+    || tree_load(H_MAGIC) != TREE_MAGIC
+    || tree_load(H_VERSION) != TREE_VERSION
+    || tree_load(H_LEAF_BUILD_COUNT) != tree_load(H_CELL_COUNT)
+    || tree_load(H_INVALID_NODE_COUNT) != 0u
+  ) {
+    tree_fail(TREE_INVALID_SOURCE);
+    return;
+  }
+  if (tree_load(H_CELL_COUNT) == 0u) {
+    if (
+      tree_load(H_ACTIVE_SOURCE_COUNT) != 0u
+      || root_status != 0u
+      || tree_load(H_ROOT_INDEX) != TREE_INVALID_U32
+    ) {
+      tree_fail(TREE_INVALID_SOURCE);
+      return;
+    }
+    tree_store(H_STATUS, TREE_READY | TREE_ADMITTED);
+    return;
+  }
+  if (!valid_root) {
+    tree_fail(TREE_INVALID_SOURCE);
+    return;
+  }
+  tree_store(H_STATUS, TREE_READY | TREE_ADMITTED);`,
+    'empty tree finalization'
+  );
+  return source;
+}
+
+export const schroederSpatialExactNearCellTreeV2Wgsl =
+  deriveSchroederSpatialExactNearCellTreeV2Wgsl();

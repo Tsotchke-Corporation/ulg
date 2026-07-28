@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -12,8 +13,11 @@ import {
 import {
   SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE,
   ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA,
+  admitSchroederPostClosureLevelAssignment,
   createSchroederFrozenLevelAssignmentRefreshGpu,
-  refreshSchroederFrozenLevelAssignmentRowsCpuOracle
+  refreshSchroederFrozenLevelAssignmentRowsCpuOracle,
+  validateSchroederFrozenFineSubstepAuthorityProof,
+  validateSchroederPostClosureLevelAssignment
 } from '../src/runtime/sph/schroederFrozenLevelAssignmentRefreshGpu.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
@@ -138,6 +142,21 @@ function createFixture(device, overrides = {}) {
     size: particleCount * 8 * 4,
     usage: 128
   }), device);
+  const macroThermoBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'macro-thermo',
+    size: particleCount * 12 * 4,
+    usage: 128
+  }), device);
+  const macroMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'macro-mechanics',
+    size: particleCount * 32 * 4,
+    usage: 128
+  }), device);
+  const currentMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'current-substep-mechanics',
+    size: particleCount * 32 * 4,
+    usage: 128
+  }), device);
   const priorLevelAssignment = {
     schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
     assignmentSchema: 'peercompute.ulg.schroeder-level-assignment.v0',
@@ -151,6 +170,12 @@ function createFixture(device, overrides = {}) {
     assignmentBufferByteLength: particleCount * 16 * 4,
     sourceStateBuffer: macroStateBuffer,
     sourceStateBufferBorrowed: true,
+    sourceThermoBuffer: macroThermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: particleCount * 12 * 4,
+    sourceMechanicsBuffer: macroMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: particleCount * 32 * 4,
     storageGeneration: 7,
     physicsTick: 11,
     physicsSubstep: 0,
@@ -173,17 +198,66 @@ function createFixture(device, overrides = {}) {
     bufferFamilyGeneration: 8,
     bufferFamilyGenerationStatus:
       'resident-particle-buffer-family-generation-advanced',
+    physicsTick: 11,
+    physicsSubstep: 1,
     positionEpoch: 14,
     topologyEpoch: 17,
     chartEpoch: 19,
-    levelEpoch: 14,
-    supportEpoch: 14,
+    levelEpoch: 23,
+    supportEpoch: 29,
     stateStrideBytes: 8 * 4,
     stateBufferByteLength: particleCount * 8 * 4,
     stateBuffer: currentStateBuffer,
+    thermoStrideBytes: 12 * 4,
+    thermoBufferByteLength: particleCount * 12 * 4,
+    thermoBuffer: macroThermoBuffer,
     ...overrides.current
   };
-  return { particleCount, priorLevelAssignment, currentSphParticleUpload };
+  const currentMlsMpmParticleUpload = {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    particleCount,
+    storageGeneration:
+      currentSphParticleUpload.storageGeneration,
+    bufferFamilyGeneration:
+      currentSphParticleUpload.bufferFamilyGeneration,
+    bufferFamilyGenerationStatus:
+      currentSphParticleUpload.bufferFamilyGenerationStatus,
+    physicsTick: currentSphParticleUpload.physicsTick,
+    physicsSubstep: currentSphParticleUpload.physicsSubstep,
+    positionEpoch: currentSphParticleUpload.positionEpoch,
+    topologyEpoch: currentSphParticleUpload.topologyEpoch,
+    chartEpoch: currentSphParticleUpload.chartEpoch,
+    levelEpoch: currentSphParticleUpload.levelEpoch,
+    supportEpoch: currentSphParticleUpload.supportEpoch,
+    mechanicsStrideBytes: 32 * 4,
+    mechanicsBufferByteLength: particleCount * 32 * 4,
+    mechanicsBuffer: currentMechanicsBuffer,
+    ...overrides.mechanics
+  };
+  return {
+    particleCount,
+    priorLevelAssignment,
+    currentSphParticleUpload,
+    currentMlsMpmParticleUpload
+  };
+}
+
+function frozenFineOptions(runtime, fixture, overrides = {}) {
+  const options = {
+    priorLevelAssignment: fixture.priorLevelAssignment,
+    currentSphParticleUpload: fixture.currentSphParticleUpload,
+    currentMlsMpmParticleUpload: fixture.currentMlsMpmParticleUpload,
+    physicsTick: fixture.currentSphParticleUpload.physicsTick,
+    physicsSubstep: fixture.currentSphParticleUpload.physicsSubstep,
+    ...overrides
+  };
+  const frozenFineSubstepAuthorityProof =
+    runtime.proveFineSubstepAuthority(options);
+  return {
+    ...options,
+    frozenFineSubstepAuthorityProof
+  };
 }
 
 test('frozen assignment WGSL copies all words bitwise and replaces only current XYZ', () => {
@@ -235,17 +309,30 @@ test('caller-owned encoder publishes a fresh position epoch while freezing macro
     arenaCount: 2
   });
   const encoder = createFakeEncoder();
-  const execution = runtime.encode(encoder, {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsTick: 11,
-    physicsSubstep: 1
-  });
+  const options = frozenFineOptions(runtime, fixture);
+  const execution = runtime.encode(encoder, options);
 
   assert.equal(execution.refreshSchema, ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA);
   assert.equal(execution.status, 'schroeder-frozen-level-assignment-refresh-gpu-encoded');
   assert.equal(execution.sourceStateBuffer, fixture.currentSphParticleUpload.stateBuffer);
   assert.equal(execution.sourceAssignmentBuffer, fixture.priorLevelAssignment.assignmentBuffer);
+  assert.equal(execution.sourceThermoBuffer,
+    fixture.currentSphParticleUpload.thermoBuffer);
+  assert.equal(execution.sourceMechanicsBuffer,
+    fixture.currentMlsMpmParticleUpload.mechanicsBuffer);
+  assert.equal(
+    validateSchroederFrozenFineSubstepAuthorityProof(
+      execution.frozenFineSubstepAuthorityProof,
+      {
+        runtime,
+        priorLevelAssignment: fixture.priorLevelAssignment,
+        currentSphParticleUpload: fixture.currentSphParticleUpload,
+        currentMlsMpmParticleUpload:
+          fixture.currentMlsMpmParticleUpload
+      }
+    ),
+    true
+  );
   assert.equal(execution.storageGeneration, 8);
   assert.equal(execution.physicsTick, 11);
   assert.equal(execution.physicsSubstep, 1);
@@ -281,6 +368,38 @@ test('caller-owned encoder publishes a fresh position epoch while freezing macro
   ).every((buffer) => buffer.destroyed), true);
   assert.equal(fixture.priorLevelAssignment.assignmentBuffer.destroyed, false);
   assert.equal(fixture.currentSphParticleUpload.stateBuffer.destroyed, false);
+});
+
+test('frozen fine refresh rejects missing or manufactured authority before encoding', () => {
+  const device = createFakeDevice();
+  const fixture = createFixture(device);
+  const runtime = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: fixture.particleCount,
+    arenaCount: 1
+  });
+  const admitted = frozenFineOptions(runtime, fixture);
+  const encoder = createFakeEncoder();
+  const writesBefore = device.writes.length;
+  for (const frozenFineSubstepAuthorityProof of [
+    null,
+    Object.freeze({
+      ...admitted.frozenFineSubstepAuthorityProof
+    })
+  ]) {
+    assert.throws(
+      () => runtime.encode(encoder, {
+        ...admitted,
+        frozenFineSubstepAuthorityProof
+      }),
+      {
+        code: 'ERR_SCHROEDER_FROZEN_REFRESH_AUTHORITY_PROOF'
+      }
+    );
+  }
+  assert.equal(device.writes.length, writesBefore);
+  assert.equal(device.bindGroups.length, 0);
+  assert.equal(encoder.events.length, 0);
+  assert.equal(runtime.destroy(), true);
 });
 
 test('macro-boundary mode admits one fresh full reclassification at N+1/substep 0', async () => {
@@ -400,6 +519,115 @@ test('macro-boundary mode rejects stale copy output, wrong epoch, and missing cl
   assert.equal(runtime.destroy(), true);
 });
 
+test('post-closure admission publishes exact descriptors for an activated high physical slot', () => {
+  const device = createFakeDevice();
+  const fixture = createFixture(device, { particleCount: 4 });
+  const highSlot = fixture.particleCount - 1;
+  fixture.priorLevelAssignment.assignments =
+    new Float32Array(fixture.particleCount * 16);
+  fixture.priorLevelAssignment.assignments[highSlot * 16 + 6] = 0;
+  fixture.priorLevelAssignment.assignments[highSlot * 16 + 8] = 0;
+  fixture.priorLevelAssignment.assignments[highSlot * 16 + 9] = 0;
+  fixture.priorLevelAssignment.assignments[highSlot * 16 + 10] = 0;
+
+  const finalSph = {
+    ...fixture.currentSphParticleUpload,
+    physicsSubstep: 0,
+    levelEpoch: fixture.priorLevelAssignment.levelEpoch + 1,
+    supportEpoch: fixture.priorLevelAssignment.supportEpoch + 1
+  };
+  const finalMls = {
+    ...fixture.currentMlsMpmParticleUpload,
+    physicsSubstep: 0,
+    levelEpoch: finalSph.levelEpoch,
+    supportEpoch: finalSph.supportEpoch
+  };
+  const assignments = new Float32Array(fixture.particleCount * 16);
+  const productOffset = highSlot * 16;
+  assignments.set([
+    1, 0.5, 0.75,
+    0.00125, 0.001, 0.00125,
+    1.25, 1000,
+    3, 11, 1, 0.1,
+    4, 5, 6, 0
+  ], productOffset);
+  const assignmentBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'post-closure-product-assignment',
+    size: assignments.byteLength,
+    usage: 128
+  }), device);
+  const classified = {
+    ...fixture.priorLevelAssignment,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignments.byteLength,
+    assignments,
+    sourceStateBuffer: finalSph.stateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceStateBufferByteLength: fixture.particleCount * 8 * 4,
+    sourceThermoBuffer: finalSph.thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: fixture.particleCount * 12 * 4,
+    sourceMechanicsBuffer: finalMls.mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: fixture.particleCount * 32 * 4,
+    kernelScope: 'schroeder-gpu-level-assignment',
+    fullParticleReadbackPerformed: false,
+    storageGeneration: finalSph.storageGeneration,
+    physicsTick: finalSph.physicsTick,
+    physicsSubstep: finalSph.physicsSubstep,
+    positionEpoch: finalSph.positionEpoch,
+    // Active topology can remain numerically unchanged; the full descriptor
+    // generation is still mandatory and advances level/support authority.
+    topologyEpoch: finalSph.topologyEpoch,
+    chartEpoch: finalSph.chartEpoch,
+    levelEpoch: finalSph.levelEpoch,
+    supportEpoch: finalSph.supportEpoch
+  };
+  const nextParticleUploads = {
+    sphParticleUpload: finalSph,
+    mlsMpmParticleUpload: finalMls
+  };
+
+  const admitted = admitSchroederPostClosureLevelAssignment({
+    device,
+    lookupLevelAssignment: fixture.priorLevelAssignment,
+    nextParticleUploads,
+    postClosureLevelAssignment: classified
+  });
+  assert.equal(admitted, classified);
+  assert.equal(
+    validateSchroederPostClosureLevelAssignment(admitted, {
+      device,
+      lookupLevelAssignment: fixture.priorLevelAssignment,
+      nextParticleUploads
+    }),
+    true
+  );
+  assert.equal(admitted.sourceLookupAssignmentBuffer,
+    fixture.priorLevelAssignment.assignmentBuffer);
+  assert.equal(admitted.sourceStateBuffer, finalSph.stateBuffer);
+  assert.equal(admitted.sourceThermoBuffer, finalSph.thermoBuffer);
+  assert.equal(admitted.sourceMechanicsBuffer, finalMls.mechanicsBuffer);
+  assert.deepEqual(
+    Array.from(admitted.assignments.slice(productOffset, productOffset + 12)),
+    [
+      1, 0.5, 0.75,
+      0.0012499999720603228,
+      0.0010000000474974513,
+      0.0012499999720603228,
+      1.25, 1000, 3, 11, 1,
+      0.10000000149011612
+    ]
+  );
+  assert.equal(
+    validateSchroederPostClosureLevelAssignment({
+      ...admitted
+    }, { device, nextParticleUploads }),
+    false,
+    'public-field copying cannot forge the private exact-lineage seal'
+  );
+});
+
 test('refresh fails closed before encoding on count, layout, epoch and device mismatch', () => {
   const cases = [
     {
@@ -445,12 +673,7 @@ test('refresh fails closed before encoding on count, layout, epoch and device mi
     const encoder = createFakeEncoder();
     const writesBefore = device.writes.length;
     assert.throws(
-      () => runtime.encode(encoder, {
-        priorLevelAssignment: fixture.priorLevelAssignment,
-        currentSphParticleUpload: fixture.currentSphParticleUpload,
-        physicsTick: 11,
-        physicsSubstep: 1
-      }),
+      () => frozenFineOptions(runtime, fixture),
       (error) => error.code === entry.code,
       entry.name
     );
@@ -468,26 +691,15 @@ test('persistent arenas apply bounded backpressure until abandonment or a queue 
     maxParticleCount: fixture.particleCount,
     arenaCount: 1
   });
-  const first = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
+  const options = frozenFineOptions(runtime, fixture);
+  const first = runtime.encode(createFakeEncoder(), options);
   assert.throws(
-    () => runtime.encode(createFakeEncoder(), {
-      priorLevelAssignment: fixture.priorLevelAssignment,
-      currentSphParticleUpload: fixture.currentSphParticleUpload,
-      physicsSubstep: 1
-    }),
+    () => runtime.encode(createFakeEncoder(), options),
     (error) => error.code === 'ERR_SCHROEDER_FROZEN_REFRESH_BACKPRESSURE'
   );
   assert.equal(runtime.abandonExecution(first), true);
 
-  const second = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
+  const second = runtime.encode(createFakeEncoder(), options);
   runtime.markExecutionSubmitted(second);
   assert.throws(
     () => runtime.abandonExecution(second),
@@ -505,11 +717,10 @@ test('device loss supersedes a frozen-refresh fence without stale recycling or b
     maxParticleCount: fixture.particleCount,
     arenaCount: 2
   });
-  const execution = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
+  const execution = runtime.encode(
+    createFakeEncoder(),
+    frozenFineOptions(runtime, fixture)
+  );
   runtime.markExecutionSubmitted(execution);
   const arenaBuffers = device.buffers.filter(
     (buffer) => String(buffer.label).includes('frozen-level-assignment-refresh')
@@ -555,11 +766,10 @@ test('device loss supersedes a frozen-refresh fence without stale recycling or b
   assert.equal(runtime.quarantineExecutionAfterDeviceLoss(execution), completion);
   assert.equal(await completion, true);
   assert.throws(
-    () => runtime.encode(createFakeEncoder(), {
-      priorLevelAssignment: fixture.priorLevelAssignment,
-      currentSphParticleUpload: fixture.currentSphParticleUpload,
-      physicsSubstep: 1
-    }),
+    () => runtime.encode(
+      createFakeEncoder(),
+      frozenFineOptions(runtime, fixture)
+    ),
     (error) => error.code === 'ERR_SCHROEDER_FROZEN_REFRESH_DEVICE_LOST'
   );
   assert.equal(runtime.destroy(), true);
@@ -573,11 +783,10 @@ test('frozen-refresh loss retry retains exact ownership after partial owned-buff
     maxParticleCount: fixture.particleCount,
     arenaCount: 1
   });
-  const execution = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
+  const execution = runtime.encode(
+    createFakeEncoder(),
+    frozenFineOptions(runtime, fixture)
+  );
   runtime.markExecutionSubmitted(execution);
   device.lost = Promise.resolve({ reason: 'destroyed' });
   const owned = device.buffers.filter(
@@ -618,16 +827,9 @@ test('one observed device loss redirects every live frozen refresh without a que
     maxParticleCount: fixture.particleCount,
     arenaCount: 2
   });
-  const first = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
-  const second = runtime.encode(createFakeEncoder(), {
-    priorLevelAssignment: fixture.priorLevelAssignment,
-    currentSphParticleUpload: fixture.currentSphParticleUpload,
-    physicsSubstep: 1
-  });
+  const options = frozenFineOptions(runtime, fixture);
+  const first = runtime.encode(createFakeEncoder(), options);
+  const second = runtime.encode(createFakeEncoder(), options);
   runtime.markExecutionSubmitted(first);
   runtime.markExecutionSubmitted(second);
   const deviceLoss = deferred();
@@ -684,6 +886,9 @@ test('native WebGPU refresh preserves macro assignment words and replaces only s
       const module = await import(
         `/src/runtime/sph/schroederFrozenLevelAssignmentRefreshGpu.js?native=${nonce}`
       );
+      const identityModule = await import(
+        `/src/runtime/sph/sphGpuDeviceIdentity.js?native=${nonce}`
+      );
       const particleCount = 2;
       const priorRows = new Float32Array(particleCount * 16);
       priorRows.set([
@@ -698,18 +903,26 @@ test('native WebGPU refresh preserves macro assignment words and replaces only s
       const currentState = macroState.slice();
       currentState.set([10.5, -11.25, 12.75], 0);
       currentState.set([-13.5, 14.25, 15.75], 8);
+      const thermo = new Float32Array(particleCount * 12);
+      const macroMechanics = new Float32Array(particleCount * 32);
+      const currentMechanics = macroMechanics.slice();
       const storageBuffer = (label, data) => {
-        const buffer = device.createBuffer({
+        const buffer = identityModule.tagWebGpuBufferDevice(device.createBuffer({
           label,
           size: data.byteLength,
           usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        });
+        }), device);
         device.queue.writeBuffer(buffer, 0, data);
         return buffer;
       };
       const priorBuffer = storageBuffer('native-prior-assignments', priorRows);
       const macroStateBuffer = storageBuffer('native-macro-state', macroState);
       const currentStateBuffer = storageBuffer('native-current-state', currentState);
+      const thermoBuffer = storageBuffer('native-frozen-thermo', thermo);
+      const macroMechanicsBuffer =
+        storageBuffer('native-macro-mechanics', macroMechanics);
+      const currentMechanicsBuffer =
+        storageBuffer('native-current-mechanics', currentMechanics);
       const priorLevelAssignment = {
         schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
         assignmentSchema: 'peercompute.ulg.schroeder-level-assignment.v0',
@@ -723,6 +936,12 @@ test('native WebGPU refresh preserves macro assignment words and replaces only s
         assignmentBufferByteLength: priorRows.byteLength,
         sourceStateBuffer: macroStateBuffer,
         sourceStateBufferBorrowed: true,
+        sourceThermoBuffer: thermoBuffer,
+        sourceThermoBufferBorrowed: true,
+        sourceThermoBufferByteLength: thermo.byteLength,
+        sourceMechanicsBuffer: macroMechanicsBuffer,
+        sourceMechanicsBufferBorrowed: true,
+        sourceMechanicsBufferByteLength: macroMechanics.byteLength,
         storageGeneration: 7,
         physicsTick: 11,
         physicsSubstep: 0,
@@ -742,21 +961,59 @@ test('native WebGPU refresh preserves macro assignment words and replaces only s
         particleCount,
         storageGeneration: 8,
         bufferFamilyGeneration: 8,
+        bufferFamilyGenerationStatus:
+          'resident-particle-buffer-family-generation-advanced',
+        physicsTick: 11,
+        physicsSubstep: 1,
         positionEpoch: 14,
         topologyEpoch: 17,
         chartEpoch: 19,
+        levelEpoch: 23,
+        supportEpoch: 29,
         stateStrideBytes: 32,
         stateBufferByteLength: currentState.byteLength,
-        stateBuffer: currentStateBuffer
+        stateBuffer: currentStateBuffer,
+        thermoStrideBytes: 48,
+        thermoBufferByteLength: thermo.byteLength,
+        thermoBuffer
+      };
+      const currentMlsMpmParticleUpload = {
+        schema: 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0',
+        status: 'webgpu-uploaded',
+        particleCount,
+        storageGeneration: 8,
+        bufferFamilyGeneration: 8,
+        bufferFamilyGenerationStatus:
+          'resident-particle-buffer-family-generation-advanced',
+        physicsTick: 11,
+        physicsSubstep: 1,
+        positionEpoch: 14,
+        topologyEpoch: 17,
+        chartEpoch: 19,
+        levelEpoch: 23,
+        supportEpoch: 29,
+        mechanicsStrideBytes: 128,
+        mechanicsBufferByteLength: currentMechanics.byteLength,
+        mechanicsBuffer: currentMechanicsBuffer
       };
       const runtime = module.createSchroederFrozenLevelAssignmentRefreshGpu(device, {
         maxParticleCount: particleCount,
         arenaCount: 1
       });
       const encoder = device.createCommandEncoder();
+      const frozenFineSubstepAuthorityProof =
+        runtime.proveFineSubstepAuthority({
+          priorLevelAssignment,
+          currentSphParticleUpload,
+          currentMlsMpmParticleUpload,
+          physicsTick: 11,
+          physicsSubstep: 1
+        });
       const execution = runtime.encode(encoder, {
         priorLevelAssignment,
         currentSphParticleUpload,
+        currentMlsMpmParticleUpload,
+        frozenFineSubstepAuthorityProof,
         physicsSubstep: 1
       });
       device.queue.submit([encoder.finish()]);
@@ -787,6 +1044,9 @@ test('native WebGPU refresh preserves macro assignment words and replaces only s
       priorBuffer.destroy();
       macroStateBuffer.destroy();
       currentStateBuffer.destroy();
+      thermoBuffer.destroy();
+      macroMechanicsBuffer.destroy();
+      currentMechanicsBuffer.destroy();
       return {
         status: 'complete',
         outputWords,

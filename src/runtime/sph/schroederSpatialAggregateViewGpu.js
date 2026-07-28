@@ -19,8 +19,15 @@ import {
   schroederSpatialAggregateViewWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialAggregateViewWgsl.js';
 import {
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import { createWebGpuStableRadixScanUnique } from '../webgpuRadixScanUnique.js';
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -141,6 +148,14 @@ function aggregateParamsData(plan, spatialExecution) {
   u32(33, plan.activeMemberProjection.memberOffsetWords);
   u32(34, plan.activeMemberProjection.memberCapacity);
   u32(35, plan.physicalWordLength);
+  u32(36, spatialExecution.abiVersion ?? 1);
+  u32(37, spatialExecution.reverseEncoding ?? 0);
+  u32(
+    38,
+    spatialExecution.activeSourceCountAuthorityOffsetWords
+      ?? SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+  );
+  u32(39, spatialExecution.activeSourceCapacity ?? 0);
   return data;
 }
 
@@ -284,6 +299,18 @@ export function createSchroederSpatialAggregateViewGpu(device, {
 
   const arenas = Array.from({ length: resolvedArenaCount }, (_, arenaIndex) => {
     const arenaLabel = `${label}-arena-${arenaIndex}`;
+    const radix = createWebGpuStableRadixScanUnique(device, {
+      maxElementCount: resolvedMaxSourceCount,
+      maxKeyWordCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+      label: `${arenaLabel}-radix`,
+      maxComputeWorkgroupsPerDimension,
+      retainConstantScanParamsBuffers: true,
+      retainVariableScanParamsBuffers: true,
+      retainedParamsSlotCount: 1
+    });
+    // A v2 generation can arrive at any encode. Prepare its GPU-count
+    // topology while the retained arena is created, never in the hot loop.
+    const gpuCountPreparation = radix.prepareGpuCountResources();
     return {
       arenaIndex,
       inUse: false,
@@ -320,15 +347,8 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         mortonKeyByteLength,
         GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
       ),
-      radix: createWebGpuStableRadixScanUnique(device, {
-        maxElementCount: resolvedMaxSourceCount,
-        maxKeyWordCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
-        label: `${arenaLabel}-radix`,
-        maxComputeWorkgroupsPerDimension,
-        retainConstantScanParamsBuffers: true,
-        retainVariableScanParamsBuffers: true,
-        retainedParamsSlotCount: 1
-      })
+      radix,
+      gpuCountPreparation
     };
   });
 
@@ -443,27 +463,112 @@ export function createSchroederSpatialAggregateViewGpu(device, {
     } catch {
       owned = false;
     }
+    const directoryV2 =
+      spatialExecution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA;
+    const expectedStatuses = directoryV2
+      ? [
+          'schroeder-spatial-epoch-v2-gpu-encoded',
+          'schroeder-spatial-epoch-v2-gpu-build-submitted'
+        ]
+      : [
+          'schroeder-spatial-epoch-gpu-encoded',
+          'schroeder-spatial-epoch-gpu-build-submitted'
+        ];
+    const sourceCount = Number(
+      directoryV2
+        ? spatialExecution?.physicalSourceCount
+        : spatialExecution?.sourceCount
+    );
+    const sourceCapacity = Number(
+      directoryV2
+        ? spatialExecution?.physicalSourceCapacity
+        : spatialExecution?.sourceCapacity
+    );
+    let v2AuthorityAdmitted = !directoryV2;
+    if (directoryV2) {
+      const activeSourceView = spatialExecution?.activeSourceView;
+      const authority = spatialExecution?.activeSourceCountAuthority;
+      let activeSourceOwned = false;
+      try {
+        activeSourceOwned =
+          activeSourceView?.ownerRuntime?.ownsExecution?.(activeSourceView)
+            === true;
+      } catch {
+        activeSourceOwned = false;
+      }
+      v2AuthorityAdmitted = Boolean(
+        spatialExecution.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        && spatialExecution.directoryAbiVersion
+          === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+        && spatialExecution.sourceWorkIdentity === 'gpu-active-ordinal'
+        && spatialExecution.reverseEncoding
+          === SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+        && spatialExecution.consumerDispatchBuffer
+        && webGpuBufferMatchesDevice(
+          spatialExecution.consumerDispatchBuffer,
+          device
+        )
+        && activeSourceView
+        && activeSourceOwned
+        && activeSourceView.schema
+          === ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+        && activeSourceView.status
+          === 'schroeder-spatial-active-source-view-gpu-encoded'
+        && activeSourceView.released !== true
+        && activeSourceView.sourceBuffer === spatialExecution.sourceBuffer
+        && activeSourceView.physicalSourceCount === sourceCount
+        && activeSourceView.physicalSourceCapacity === sourceCapacity
+        && activeSourceView.activeSourceCapacity
+          === spatialExecution.activeSourceCapacity
+        && activeSourceView.activeSourceViewBuffer
+          === spatialExecution.activeSourceViewBuffer
+        && webGpuBufferMatchesDevice(
+          activeSourceView.activeSourceViewBuffer,
+          device
+        )
+        && authority
+        && authority === spatialExecution.logicalSourceCountAuthority
+        && authority.activeSourceView === activeSourceView
+        && authority.buffer === activeSourceView.activeSourceViewBuffer
+        && authority.offsetWords
+          === SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+        && authority.offsetBytes
+          === SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+            * UINT32_BYTES
+        && authority.capacity === activeSourceView.activeSourceCapacity
+        && spatialExecution.activeSourceCountAuthorityOffsetWords
+          === SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+        && spatialExecution.activeSourceGenerationSeal?.buffer
+          === activeSourceView.activeSourceViewBuffer
+        && spatialExecution.activeSourceGenerationSeal?.offsetWords === 30
+        && spatialExecution.activeSourceGenerationSeal?.expected
+          === spatialExecution.buildOrdinal
+      );
+    }
     if (
-      spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+      ![
+        ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+        ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      ].includes(spatialExecution?.schema)
       || spatialExecution.released === true
       || !owned
-      || ![
-        'schroeder-spatial-epoch-gpu-encoded',
-        'schroeder-spatial-epoch-gpu-build-submitted'
-      ].includes(spatialExecution.status)
+      || !expectedStatuses.includes(spatialExecution.status)
       || !spatialExecution.directoryBuffer
       || !spatialExecution.sourceBuffer
-      || spatialExecution.sourceCount < 1
-      || spatialExecution.sourceCapacity !== resolvedMaxSourceCount
+      || !Number.isInteger(sourceCount)
+      || sourceCount < 1
+      || sourceCapacity !== resolvedMaxSourceCount
       || spatialExecution.layout?.cellCapacity !== resolvedCellCapacity
       || spatialExecution.sortUniqueOrdinal !== spatialExecution.buildOrdinal
       || !webGpuBufferMatchesDevice(spatialExecution.directoryBuffer, device)
       || !webGpuBufferMatchesDevice(spatialExecution.sourceBuffer, device)
+      || !v2AuthorityAdmitted
     ) {
       throw new TypeError(
         'spatial aggregate view requires an exact live encoded or submitted SS spatial generation'
       );
     }
+    return Object.freeze({ directoryV2, sourceCount, sourceCapacity });
   }
 
   function resolveParticleAuthority(spatialExecution, spatialSource, particleBufferSet) {
@@ -537,18 +642,21 @@ export function createSchroederSpatialAggregateViewGpu(device, {
   function encode(encoder, {
     spatialExecution,
     spatialSource,
-    particleBufferSet
+    particleBufferSet,
+    gpuTimestampRecorder = null,
+    timestampMetadata = null
   } = {}) {
     assertEncoder(encoder);
-    assertSpatialExecution(spatialExecution);
+    const spatialAuthority = assertSpatialExecution(spatialExecution);
+    const { directoryV2 } = spatialAuthority;
     const particleAuthority = resolveParticleAuthority(
       spatialExecution,
       spatialSource,
       particleBufferSet
     );
     const plan = createSchroederSpatialAggregateViewPlan({
-      sourceCount: spatialExecution.sourceCount,
-      sourceCapacity: spatialExecution.sourceCapacity,
+      sourceCount: spatialAuthority.sourceCount,
+      sourceCapacity: spatialAuthority.sourceCapacity,
       cellCapacity: spatialExecution.layout.cellCapacity,
       sourceRowLayoutId: spatialExecution.sourceRowLayoutId,
       generationId: spatialExecution.generationId,
@@ -662,29 +770,75 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         ),
         `${label}InitializeRecords`
       );
-      const mortonKeyDispatchWorkgroups = Object.freeze([
-        Math.ceil(plan.sourceCount / SCHROEDER_SPATIAL_AGGREGATE_VIEW_WORKGROUP_SIZE),
-        1,
-        1
-      ]);
-      aggregateDispatchCount += encodeDirectPass(
-        encoder,
-        pipelines.emitMortonKeys,
-        emitMortonKeysGroup,
-        mortonKeyDispatchWorkgroups,
-        `${label}EmitMortonKeys`
-      );
-      radixSort = arena.radix.encodeSort(encoder, {
-        keyBuffer: arena.mortonKeyBuffer,
-        elementCount: plan.sourceCount,
-        keyWordCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
-        keyStrideWords: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
-        generationId: plan.generationId,
-        retainedParamsSlotIndex: 0
-      });
+      const mortonKeyDispatchWorkgroups = directoryV2
+        ? null
+        : Object.freeze([
+            Math.ceil(
+              plan.sourceCount
+                / SCHROEDER_SPATIAL_AGGREGATE_VIEW_WORKGROUP_SIZE
+            ),
+            1,
+            1
+          ]);
+      aggregateDispatchCount += directoryV2
+        ? encodeIndirectPass(
+            encoder,
+            pipelines.emitMortonKeys,
+            emitMortonKeysGroup,
+            spatialExecution.consumerDispatchBuffer,
+            0,
+            `${label}EmitMortonKeysV2`
+          )
+        : encodeDirectPass(
+            encoder,
+            pipelines.emitMortonKeys,
+            emitMortonKeysGroup,
+            mortonKeyDispatchWorkgroups,
+            `${label}EmitMortonKeys`
+          );
+      radixSort = directoryV2
+        ? arena.radix.encodeSortUniqueGpuCount(encoder, {
+            keyBuffer: arena.mortonKeyBuffer,
+            authorityBuffer: spatialExecution.directoryBuffer,
+            authorityCountByteOffset: 18 * UINT32_BYTES,
+            generationSeal: {
+              expected: spatialExecution.buildOrdinal,
+              byteOffset: 35 * UINT32_BYTES
+            },
+            maxElementCount: plan.cellCapacity,
+            keyWordCount:
+              SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+            keyStrideWords:
+              SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+            generationId: plan.generationId,
+            consumerWorkgroupSize:
+              SCHROEDER_SPATIAL_AGGREGATE_VIEW_WORKGROUP_SIZE,
+            retainedParamsSlotIndex: 0,
+            gpuTimestampRecorder,
+            timestampProducerId:
+              'schroeder-spatial-aggregate-gpu-count-radix-sort-unique',
+            timestampMetadata: {
+              sourceWorkIdentity: 'gpu-cell-index',
+              activeSourceCountSource: 'directory-header-word-37',
+              ...(timestampMetadata || {})
+            }
+          })
+        : arena.radix.encodeSort(encoder, {
+            keyBuffer: arena.mortonKeyBuffer,
+            elementCount: plan.sourceCount,
+            keyWordCount:
+              SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+            keyStrideWords:
+              SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+            generationId: plan.generationId,
+            retainedParamsSlotIndex: 0
+          });
       if (
         radixSort.paramsBufferCreationCount !== 0
-        || radixSort.paramsBufferResidency !== 'retained-slot-arena'
+        || ![
+          'retained-slot-arena',
+          'retained-gpu-count-config-arena'
+        ].includes(radixSort.paramsBufferResidency)
         || radixSort.paramsSlotIndex !== 0
         || radixSort.transientBuffers?.length !== 0
       ) {
@@ -800,6 +954,8 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         [1, 1, 1],
         `${label}Finalize`
       );
+      const radixPassCount =
+        radixSort.radixPassCount ?? radixSort.passCount;
       const encodedDispatchCount = aggregateDispatchCount
         + radixSort.encodedDispatchCount;
       const encodedComputePassCount = aggregateDispatchCount
@@ -817,6 +973,25 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         sourceStateBuffer: particleAuthority.stateBuffer,
         sourceThermoBuffer: particleAuthority.thermoBuffer,
         sourceIdentityBuffer: particleAuthority.identityBuffer,
+        directorySchema: spatialExecution.schema,
+        directoryAbiVersion: directoryV2
+          ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+          : 1,
+        sourceWorkIdentity: directoryV2
+          ? 'gpu-active-ordinal'
+          : 'stable-physical-source-index',
+        aggregateMemberCountSource: directoryV2
+          ? 'gpu-directory-active-source-count-word-37'
+          : 'physical-source-count',
+        activeSourceView: directoryV2
+          ? spatialExecution.activeSourceView
+          : null,
+        activeSourceViewBuffer: directoryV2
+          ? spatialExecution.activeSourceViewBuffer
+          : null,
+        activeSourceCountAuthority: directoryV2
+          ? spatialExecution.activeSourceCountAuthority
+          : null,
         aggregateViewBuffer: arena.aggregateViewBuffer,
         activeMemberProjectionBuffer: arena.aggregateViewBuffer,
         activeMemberOffsetWords: plan.activeMemberProjection.memberOffsetWords,
@@ -851,16 +1026,38 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         mortonKeyWordCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
         mortonKeyStrideWords: SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
         mortonPrefixBitCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_PREFIX_BIT_COUNT,
-        mortonSortElementCount: plan.sourceCount,
+        mortonSortElementCount: directoryV2 ? null : plan.sourceCount,
+        mortonSortElementCountSource: directoryV2
+          ? 'gpu-directory-cell-count-word-18'
+          : 'host-physical-source-count',
         mortonKeyDispatchWorkgroups,
-        radixPassCount: radixSort.passCount,
-        radixDigitPassCount: radixSort.passCount,
+        mortonKeyDispatchIndirectBuffer: directoryV2
+          ? spatialExecution.consumerDispatchBuffer
+          : null,
+        mortonKeyDispatchIndirectOffsetBytes: directoryV2 ? 0 : null,
+        radixPassCount,
+        radixDigitPassCount: radixPassCount,
         radixParamsBufferResidency: radixSort.paramsBufferResidency,
         radixParamsSlotIndex: radixSort.paramsSlotIndex,
         radixBindGroupCreationCount: radixSort.bindGroupCreationCount,
         radixBindGroupReuseCount: radixSort.bindGroupReuseCount,
         radixEncodedDispatchCount: radixSort.encodedDispatchCount,
         radixEncodedComputePassCount: radixSort.encodedComputePassCount,
+        radixCountAuthorityBuffer: directoryV2
+          ? spatialExecution.directoryBuffer
+          : null,
+        radixCountAuthorityByteOffset: directoryV2
+          ? 18 * UINT32_BYTES
+          : null,
+        radixGenerationSealByteOffset: directoryV2
+          ? 35 * UINT32_BYTES
+          : null,
+        radixGenerationSealExpected: directoryV2
+          ? spatialExecution.buildOrdinal
+          : null,
+        radixTimestampProducerId: directoryV2
+          ? radixSort.timestampProducerId
+          : null,
         paramsWriteCount: 1 + (radixSort.paramsWriteCount ?? 0),
         encodedDispatchCount,
         encodedComputePassCount,
@@ -874,7 +1071,9 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         submitPerformed: false,
         releaseScheduled: false,
         submissionOwnership: 'caller',
-        constructionComplexity: plan.constructionComplexity,
+        constructionComplexity: directoryV2
+          ? 'O(activeCellCount*keyWords+activeSourceCount+activeCellCount*prefixDepth)'
+          : plan.constructionComplexity,
         traversalComplexity: plan.traversalComplexity,
         contributionRowCount: 0,
         materializedCandidateRowCount: 0,
@@ -897,6 +1096,13 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         spatialSource,
         particleBufferSet,
         particleAuthority,
+        directoryV2,
+        activeSourceView: directoryV2
+          ? spatialExecution.activeSourceView
+          : null,
+        activeSourceCountAuthority: directoryV2
+          ? spatialExecution.activeSourceCountAuthority
+          : null,
         radixSort,
         mortonKeyBuffer: arena.mortonKeyBuffer,
         sortedIndicesBuffer: radixSort.sortedIndicesBuffer,
@@ -944,6 +1150,21 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       || execution.sourceStateBuffer !== ownership.particleAuthority.stateBuffer
       || execution.sourceThermoBuffer !== ownership.particleAuthority.thermoBuffer
       || execution.sourceIdentityBuffer !== ownership.particleAuthority.identityBuffer
+      || execution.directoryAbiVersion !== (ownership.directoryV2 ? 2 : 1)
+      || execution.activeSourceView !== ownership.activeSourceView
+      || execution.activeSourceCountAuthority
+        !== ownership.activeSourceCountAuthority
+      || (
+        ownership.directoryV2
+        && (
+          execution.activeSourceViewBuffer
+            !== ownership.activeSourceView.activeSourceViewBuffer
+          || execution.mortonKeyDispatchIndirectBuffer
+            !== ownership.spatialExecution.consumerDispatchBuffer
+          || execution.radixCountAuthorityBuffer
+            !== ownership.spatialExecution.directoryBuffer
+        )
+      )
     ) {
       throw aggregateError(
         'spatial aggregate view execution is not owned by this runtime',
@@ -1224,11 +1445,14 @@ export function createSchroederSpatialAggregateViewGpu(device, {
     mortonPrefixBitCount: SCHROEDER_SPATIAL_AGGREGATE_VIEW_PREFIX_BIT_COUNT,
     mortonKeyByteLengthPerArena: mortonKeyByteLength,
     pipelineCount: Object.keys(pipelines).length + arenas.reduce(
-      (sum, arena) => sum + arena.radix.pipelineCount,
+      (sum, arena) => sum + arena.radix.totalPipelineCount,
       0
     ),
     aggregatePipelineCount: Object.keys(pipelines).length,
     radixPipelineCountPerArena: arenas[0].radix.pipelineCount,
+    radixGpuCountPipelineCountPerArena:
+      arenas[0].radix.gpuCountPipelineCount,
+    gpuCountRadixPrepared: true,
     retainedGpuBufferBytes,
     retainedGpuBufferBytesPerArena,
     normalHotLoopReadbackFree: true,

@@ -13,7 +13,9 @@ import {
 } from '../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_SCHROEDER_SPATIAL_REACTION_PLACEMENT_SOURCE_FAMILY_SCHEMA,
@@ -443,6 +445,75 @@ function injectedRunners(fx) {
     spatialEpochGenerationRunner,
     generationReleaseRunner,
     generationQuarantineRunner
+  };
+}
+
+function exactPostClosureClassifier(
+  fx,
+  { lookupEpochIdentity = fx.ancestor.execution } = {}
+) {
+  const lookupLevelAssignment = {
+    ...fx.ancestorLevelAssignment,
+    storageGeneration: lookupEpochIdentity.storageGeneration,
+    physicsTick: lookupEpochIdentity.physicsTick,
+    physicsSubstep: lookupEpochIdentity.physicsSubstep,
+    positionEpoch: lookupEpochIdentity.positionEpoch,
+    topologyEpoch: lookupEpochIdentity.topologyEpoch,
+    chartEpoch: lookupEpochIdentity.chartEpoch,
+    levelEpoch: lookupEpochIdentity.levelEpoch,
+    supportEpoch: lookupEpochIdentity.supportEpoch
+  };
+  const results = [];
+  const runner = async ({
+    nextParticleUploads,
+    successorEpochIdentity
+  }) => {
+    const assignmentBuffer = buffer(
+      fx.device,
+      'successor-publication-post-closure-assignment',
+      fx.particleCount * 16 * Float32Array.BYTES_PER_ELEMENT
+    );
+    const result = {
+      schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+      assignmentSchema: 'peercompute.ulg.schroeder-level-assignment.v0',
+      status: 'schroeder-level-assignment-submitted',
+      bufferFamilyGenerationStatus:
+        'schroeder-particle-buffer-family-generation-ready',
+      kernelScope: 'schroeder-gpu-level-assignment',
+      particleCount: fx.particleCount,
+      assignmentStrideFloats: 16,
+      assignmentStrideBytes: 16 * Float32Array.BYTES_PER_ELEMENT,
+      assignmentBuffer,
+      assignmentBufferByteLength: assignmentBuffer.size,
+      sourceStateBuffer:
+        nextParticleUploads.sphParticleUpload.stateBuffer,
+      sourceStateBufferBorrowed: true,
+      sourceStateBufferByteLength: fx.stateBytes,
+      sourceThermoBuffer:
+        nextParticleUploads.sphParticleUpload.thermoBuffer,
+      sourceThermoBufferBorrowed: true,
+      sourceThermoBufferByteLength: fx.thermoBytes,
+      sourceMechanicsBuffer:
+        nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+      sourceMechanicsBufferBorrowed: true,
+      sourceMechanicsBufferByteLength: fx.mechanicsBytes,
+      minLevel: lookupLevelAssignment.minLevel,
+      maxLevel: lookupLevelAssignment.maxLevel,
+      chartId: lookupLevelAssignment.chartId,
+      baseGridSpacingM: lookupLevelAssignment.baseGridSpacingM,
+      ...successorEpochIdentity,
+      fullParticleReadbackPerformed: false,
+      destroyAssignmentBuffer() {
+        assignmentBuffer.destroy();
+      }
+    };
+    results.push(result);
+    return result;
+  };
+  return {
+    lookupLevelAssignment,
+    results,
+    runner
   };
 }
 
@@ -1424,6 +1495,7 @@ test('genuine post-G2P discovery and one-shot placement establish a strict posit
   sealSchroederSpatialEpochTransactionProposals(transaction);
   const nextParticleUploads = {
     sphParticleUpload: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       particleCount: fx.particleCount,
       stateBuffer: family.placedDestinationStateBuffer,
@@ -1438,6 +1510,7 @@ test('genuine post-G2P discovery and one-shot placement establish a strict posit
       ...family.epochIdentity
     },
     mlsMpmParticleUpload: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       particleCount: fx.particleCount,
       mechanicsBuffer: family.placedDestinationMechanicsBuffer,
@@ -1447,11 +1520,16 @@ test('genuine post-G2P discovery and one-shot placement establish a strict posit
     },
     schroederSpatialReactionPlacementPositionEpochFloorReceipt: positionReceipt
   };
+  const classifier = exactPostClosureClassifier(fx, {
+    lookupEpochIdentity: family.epochIdentity
+  });
   const publicationPlan =
     await prepareSchroederSpatialSuccessorSourceFamilyPublication({
       transaction,
       generation: fx.ancestor,
+      lookupLevelAssignment: classifier.lookupLevelAssignment,
       nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
       conservativeTopologyAdvance: true
     });
   const commitReceipt = commitSchroederSpatialEpochTransaction(transaction, {
@@ -1564,6 +1642,7 @@ test('mixed final component family preserves the authenticated placement positio
   sealSchroederSpatialEpochTransactionProposals(transaction);
   const nextParticleUploads = {
     sphParticleUpload: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       particleCount: fx.particleCount,
       stateBuffer: family.placedDestinationStateBuffer,
@@ -1578,6 +1657,7 @@ test('mixed final component family preserves the authenticated placement positio
       ...family.epochIdentity
     },
     mlsMpmParticleUpload: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       particleCount: fx.particleCount,
       mechanicsBuffer: buffer(
@@ -1590,11 +1670,16 @@ test('mixed final component family preserves the authenticated placement positio
       ...family.epochIdentity
     }
   };
+  const classifier = exactPostClosureClassifier(fx, {
+    lookupEpochIdentity: family.epochIdentity
+  });
   await assert.rejects(
     prepareSchroederSpatialSuccessorSourceFamilyPublication({
       transaction,
       generation: fx.ancestor,
+      lookupLevelAssignment: classifier.lookupLevelAssignment,
       nextParticleUploads,
+      successorLevelAssignmentRunner: classifier.runner,
       conservativeTopologyAdvance: true,
       placementPositionEpochFloorReceipt:
         Object.freeze({ ...positionReceipt })
@@ -1607,7 +1692,9 @@ test('mixed final component family preserves the authenticated placement positio
   const plan = await prepareSchroederSpatialSuccessorSourceFamilyPublication({
     transaction,
     generation: fx.ancestor,
+    lookupLevelAssignment: classifier.lookupLevelAssignment,
     nextParticleUploads,
+    successorLevelAssignmentRunner: classifier.runner,
     conservativeTopologyAdvance: true,
     placementPositionEpochFloorReceipt: positionReceipt
   });

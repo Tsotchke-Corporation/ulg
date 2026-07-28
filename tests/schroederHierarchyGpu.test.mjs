@@ -328,6 +328,10 @@ import {
   summarizeSchroederSpatialEpochTransaction
 } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
 import {
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS,
+  SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
   publishPreparedSchroederSpatialSuccessorSourceFamily
 } from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
 import {
@@ -343,6 +347,12 @@ import {
   schroederPhaseVolumeMigrationWgsl,
   schroederPhaseVolumeTargetAggregateWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_FINAL_SEAL,
+  SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_MAGIC,
+  SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_STATUS,
+  SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_VERSION
+} from '../ulg-gpu-abi/src/schroederSpatialTopologyTransition.js';
 
 const referenceMaterialClosures = createReferenceMaterialClosures();
 const canonicalSidecarThermalMaterialTable = buildSphThermalMaterialTable({
@@ -464,12 +474,15 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
       return descriptor;
     },
     createCommandEncoder() {
+      let boundGroup = null;
       return {
         clearBuffer() {},
         beginComputePass() {
           return {
             setPipeline() {},
-            setBindGroup() {},
+            setBindGroup(index, value) {
+              boundGroup = value;
+            },
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
             },
@@ -480,7 +493,21 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
           };
         },
         copyBufferToBuffer(source, sourceOffset, destination) {
-          if (!allowReadbackCopies && String(destination?.label || '').includes('readback')) {
+          const destinationLabel = String(destination?.label || '');
+          const compactTopologyReceipt =
+            destinationLabel.includes(
+              'spatial-topology-transition-compact-readback'
+            );
+          const compactPositionReceipt =
+            destinationLabel.includes(
+              'spatial-position-transition-compact-readback'
+            );
+          if (
+            !allowReadbackCopies
+            && destinationLabel.includes('readback')
+            && !compactTopologyReceipt
+            && !compactPositionReceipt
+          ) {
             throw new Error('Schroeder no-full-readback test should not copy to a readback buffer');
           }
           if (String(source?.label || '').includes('reaction-discovery-evidence')) {
@@ -499,6 +526,153 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
             words[8] = 0;
             words[14] = 0;
             words[15] = 0;
+            destination._mappedData = words;
+          }
+          if (
+            String(source?.label || '')
+              .includes('spatial-position-transition-receipt')
+          ) {
+            const entries = Object.fromEntries(
+              (boundGroup?.entries ?? []).map((entry) => [
+                entry.binding,
+                entry.resource.buffer
+              ])
+            );
+            const [
+              sourceCount,
+              successorCount,
+              generationId,
+              nonce,
+              sourceEpoch
+            ] = entries[2]._writtenData;
+            const sourceMasses = entries[0]._masses
+              ?? new Array(sourceCount).fill(1);
+            const successorMasses = entries[1]._masses
+              ?? new Array(successorCount).fill(1);
+            const sourcePositions = entries[0]._positions
+              ?? Array.from({ length: sourceCount }, (_, index) => [
+                index, 0, 0
+              ]);
+            const successorPositions = entries[1]._positions
+              ?? Array.from({ length: successorCount }, (_, index) => [
+                index, 0, 0
+              ]);
+            const comparisonCount = Math.max(sourceCount, successorCount);
+            let comparedActiveCount = 0;
+            let movedParticleCount = 0;
+            for (
+              let index = 0;
+              index < Math.min(sourceCount, successorCount);
+              index += 1
+            ) {
+              if (
+                !(Number(sourceMasses[index]) > 0)
+                || !(Number(successorMasses[index]) > 0)
+              ) continue;
+              comparedActiveCount += 1;
+              const sourcePosition = sourcePositions[index] ?? [index, 0, 0];
+              const successorPosition =
+                successorPositions[index] ?? [index, 0, 0];
+              if (sourcePosition.some(
+                (value, axis) => value !== successorPosition[axis]
+              )) {
+                movedParticleCount += 1;
+              }
+            }
+            const changed = movedParticleCount > 0;
+            const words = new Uint32Array(20);
+            words.set([
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
+              generationId,
+              nonce,
+              sourceEpoch,
+              sourceCount,
+              successorCount,
+              comparisonCount,
+              comparisonCount,
+              comparedActiveCount,
+              movedParticleCount,
+              0,
+              0,
+              1,
+              changed ? 1 : 0,
+              changed ? sourceEpoch + 1 : sourceEpoch,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS.COMPLETE,
+              0,
+              0,
+              SCHROEDER_SPATIAL_POSITION_TRANSITION_FINAL_SEAL
+            ]);
+            destination._mappedData = words;
+          }
+          if (
+            String(source?.label || '')
+              .includes('spatial-topology-transition-receipt')
+          ) {
+            const entries = Object.fromEntries(
+              (boundGroup?.entries ?? []).map((entry) => [
+                entry.binding,
+                entry.resource.buffer
+              ])
+            );
+            const [
+              sourceCount,
+              successorCount,
+              generationId,
+              nonce,
+              sourceEpoch,
+              forceAdvance
+            ] = entries[2]._writtenData;
+            const sourceMasses = entries[0]._masses
+              ?? new Array(sourceCount).fill(1);
+            const successorMasses = entries[1]._masses
+              ?? new Array(successorCount).fill(1);
+            const comparisonCount = Math.max(sourceCount, successorCount);
+            let sourceActiveCount = 0;
+            let successorActiveCount = 0;
+            let activatedCount = 0;
+            let deactivatedCount = 0;
+            for (let index = 0; index < comparisonCount; index += 1) {
+              const sourceActive =
+                index < sourceCount && Number(sourceMasses[index]) > 0;
+              const successorActive =
+                index < successorCount && Number(successorMasses[index]) > 0;
+              if (sourceActive) sourceActiveCount += 1;
+              if (successorActive) successorActiveCount += 1;
+              if (sourceActive !== successorActive) {
+                if (successorActive) activatedCount += 1;
+                else deactivatedCount += 1;
+              }
+            }
+            const xorCount = activatedCount + deactivatedCount;
+            const changed = xorCount > 0 || forceAdvance === 1;
+            const words = new Uint32Array(24);
+            words.set([
+              SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_MAGIC,
+              SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_VERSION,
+              generationId,
+              nonce,
+              sourceEpoch,
+              sourceCount,
+              successorCount,
+              comparisonCount,
+              1,
+              comparisonCount,
+              sourceActiveCount,
+              successorActiveCount,
+              activatedCount,
+              deactivatedCount,
+              xorCount,
+              0,
+              0,
+              forceAdvance,
+              1,
+              changed ? 1 : 0,
+              changed ? sourceEpoch + 1 : sourceEpoch,
+              SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_STATUS.COMPLETE,
+              0,
+              SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_FINAL_SEAL
+            ]);
             destination._mappedData = words;
           }
         },
@@ -7443,7 +7617,7 @@ test('Schroeder same-level mechanics reclaims a render transfer when final hando
 });
 
 test('Schroeder single-level commits and fences a generation before successor publication', async () => {
-  const device = createFakeWebGpuDevice();
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, {
     particleCount: 3,
@@ -7530,6 +7704,38 @@ test('Schroeder single-level commits and fences a generation before successor pu
 
   assert.equal(publicationCallCount, 1);
   assert.equal(
+    result.residentStep.schroederSpatialTopologyTransitionReceipt
+      .topologyChanged,
+    false
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyEpoch,
+    generation.execution.topologyEpoch,
+    'the default compact topology comparison preserves an exact no-change epoch'
+  );
+  assert.equal(
+    result.residentStep.schroederSpatialPositionTransitionReceipt
+      .positionChanged,
+    false
+  );
+  assert.equal(
+    result.residentStep.schroederSpatialPositionTransitionReceipt
+      .terminalQueueOutcomeObserved,
+    true
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionEpoch,
+    generation.execution.positionEpoch,
+    'no resident position mutation and no topology mutation preserve position identity'
+  );
+  assert.equal(
+    device.createdBuffers.filter(
+      (buffer) => buffer.label === 'ulg-schroeder-level-assignments-out'
+    ).length,
+    2,
+    'one lookup classifier plus one shared successor/render classifier'
+  );
+  assert.equal(
     result.finalRenderProxyBuildStatus,
     'final-render-proxy-published-from-exact-committed-successor'
   );
@@ -7584,6 +7790,317 @@ test('Schroeder single-level commits and fences a generation before successor pu
   resolveGenerationFence(true);
   assert.equal(await result.schroederSpatialEpochReleasePromise, true);
   assert.equal(generation.execution.released, true);
+});
+
+test('Schroeder default closure advances actual resident motion exactly once', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount: 3,
+    storageGeneration: 5,
+    physicsTick: 7,
+    positionEpoch: 13,
+    topologyEpoch: 17,
+    chartEpoch: 19,
+    levelEpoch: 23,
+    supportEpoch: 29,
+    prefix: 'default-closure-motion'
+  });
+  uploads.sphParticleUpload.stateBuffer._masses = [1, 1, 1];
+  uploads.sphParticleUpload.stateBuffer._positions = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [2, 0, 0]
+  ];
+  const finalStateBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'default-closure-motion-final-state',
+    size: uploads.sphParticleUpload.stateBufferByteLength,
+    usage: 128
+  }), device);
+  finalStateBuffer._masses = [1, 1, 1];
+  finalStateBuffer._positions = [
+    [0, 0, 0],
+    [1.125, 0, 0],
+    [2, 0, 0]
+  ];
+  let generation = null;
+  const residentStepRunner = async (options) => {
+    generation = options.schroederSpatialEpochGeneration;
+    const readerInputs = {
+      generation,
+      sphParticleUpload: options.sphParticleUpload,
+      mlsMpmParticleUpload: options.mlsMpmParticleUpload
+    };
+    for (const [readerId, phase] of [
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION
+      ],
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
+      ]
+    ]) {
+      admitSchroederSpatialEpochTransactionReader(
+        options.schroederSpatialEpochTransaction,
+        { readerId, phase, ...readerInputs }
+      );
+    }
+    sealSchroederSpatialEpochTransactionReaders(
+      options.schroederSpatialEpochTransaction
+    );
+    return {
+      status: 'resident-step-actual-position-motion',
+      nextParticleUploads: {
+        sphParticleUpload: {
+          ...options.sphParticleUpload,
+          stateBuffer: finalStateBuffer,
+          // This descriptor is deliberately excessive. The compact GPU
+          // receipt, not mutable metadata, owns the exact +1 transition.
+          positionEpoch: options.sphParticleUpload.positionEpoch + 91
+        },
+        mlsMpmParticleUpload: {
+          ...options.mlsMpmParticleUpload,
+          positionEpoch: options.mlsMpmParticleUpload.positionEpoch + 91
+        }
+      }
+    };
+  };
+  residentStepRunner.schroederSpatialEpochTransactionAware = true;
+  residentStepRunner.schroederSpatialTopologyTransitionAware = true;
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePressureInterfaceOwnerScope: false,
+    residentStepRunner
+  });
+
+  const positionReceipt =
+    result.residentStep.schroederSpatialPositionTransitionReceipt;
+  assert.equal(positionReceipt.positionChanged, true);
+  assert.equal(positionReceipt.movedParticleCount, 1);
+  assert.equal(positionReceipt.terminalQueueOutcomeObserved, true);
+  assert.equal(
+    positionReceipt.nextPositionEpoch,
+    generation.execution.positionEpoch + 1
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionEpoch,
+    generation.execution.positionEpoch + 1,
+    'one or many moved particles advance the public position generation once'
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyEpoch,
+    generation.execution.topologyEpoch
+  );
+});
+
+test('Schroeder default closure ignores descriptor-only position spoofing', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount: 3,
+    storageGeneration: 5,
+    physicsTick: 7,
+    positionEpoch: 13,
+    topologyEpoch: 17,
+    chartEpoch: 19,
+    levelEpoch: 23,
+    supportEpoch: 29,
+    prefix: 'default-closure-position-spoof'
+  });
+  uploads.sphParticleUpload.stateBuffer._masses = [1, 1, 1];
+  uploads.sphParticleUpload.stateBuffer._positions = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [2, 0, 0]
+  ];
+  let generation = null;
+  const residentStepRunner = async (options) => {
+    generation = options.schroederSpatialEpochGeneration;
+    const readerInputs = {
+      generation,
+      sphParticleUpload: options.sphParticleUpload,
+      mlsMpmParticleUpload: options.mlsMpmParticleUpload
+    };
+    for (const [readerId, phase] of [
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION
+      ],
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
+      ]
+    ]) {
+      admitSchroederSpatialEpochTransactionReader(
+        options.schroederSpatialEpochTransaction,
+        { readerId, phase, ...readerInputs }
+      );
+    }
+    sealSchroederSpatialEpochTransactionReaders(
+      options.schroederSpatialEpochTransaction
+    );
+    return {
+      status: 'resident-step-descriptor-position-spoof',
+      nextParticleUploads: {
+        sphParticleUpload: {
+          ...options.sphParticleUpload,
+          positionEpoch: options.sphParticleUpload.positionEpoch + 99
+        },
+        mlsMpmParticleUpload: {
+          ...options.mlsMpmParticleUpload,
+          positionEpoch: options.mlsMpmParticleUpload.positionEpoch + 99
+        }
+      }
+    };
+  };
+  residentStepRunner.schroederSpatialEpochTransactionAware = true;
+  residentStepRunner.schroederSpatialTopologyTransitionAware = true;
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePressureInterfaceOwnerScope: false,
+    residentStepRunner
+  });
+
+  assert.equal(
+    result.residentStep.schroederSpatialPositionTransitionReceipt
+      .positionChanged,
+    false
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionEpoch,
+    generation.execution.positionEpoch,
+    'mutable upload epochs cannot promote a position generation without GPU evidence'
+  );
+});
+
+test('Schroeder default closure activates a dormant high slot with one successor classifier', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({
+    particleCount: 3,
+    smoothingLengthM: 0.25
+  });
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount: 3,
+    storageGeneration: 5,
+    physicsTick: 7,
+    positionEpoch: 13,
+    topologyEpoch: 17,
+    chartEpoch: 19,
+    levelEpoch: 23,
+    supportEpoch: 29,
+    prefix: 'default-closure-activation'
+  });
+  uploads.sphParticleUpload.stateBuffer._masses = [1, 1, 0];
+  const finalStateBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'default-closure-activation-final-state',
+    size: uploads.sphParticleUpload.stateBufferByteLength,
+    usage: 128
+  }), device);
+  finalStateBuffer._masses = [1, 1, 1];
+  let generation = null;
+  const residentStepRunner = async (options) => {
+    generation = options.schroederSpatialEpochGeneration;
+    const readerInputs = {
+      generation,
+      sphParticleUpload: options.sphParticleUpload,
+      mlsMpmParticleUpload: options.mlsMpmParticleUpload
+    };
+    for (const [readerId, phase] of [
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION
+      ],
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
+      ]
+    ]) {
+      admitSchroederSpatialEpochTransactionReader(
+        options.schroederSpatialEpochTransaction,
+        { readerId, phase, ...readerInputs }
+      );
+    }
+    sealSchroederSpatialEpochTransactionReaders(
+      options.schroederSpatialEpochTransaction
+    );
+    return {
+      status: 'resident-step-activated-high-slot',
+      nextParticleUploads: {
+        sphParticleUpload: {
+          ...options.sphParticleUpload,
+          stateBuffer: finalStateBuffer,
+          positionEpoch: options.sphParticleUpload.positionEpoch + 1
+        },
+        mlsMpmParticleUpload: {
+          ...options.mlsMpmParticleUpload,
+          positionEpoch: options.mlsMpmParticleUpload.positionEpoch + 1
+        }
+      }
+    };
+  };
+  residentStepRunner.schroederSpatialEpochTransactionAware = true;
+  residentStepRunner.schroederSpatialTopologyTransitionAware = true;
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePressureInterfaceOwnerScope: false,
+    residentStepRunner
+  });
+
+  const topologyReceipt =
+    result.residentStep.schroederSpatialTopologyTransitionReceipt;
+  assert.equal(topologyReceipt.topologyChanged, true);
+  assert.equal(topologyReceipt.activatedCount, 1);
+  assert.equal(topologyReceipt.deactivatedCount, 0);
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyEpoch,
+    generation.execution.topologyEpoch + 1
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionEpoch,
+    generation.execution.positionEpoch + 1,
+    'the exact mechanics upload transition advances position independently'
+  );
+  const successorAssignment =
+    result.residentStep.nextParticleUploads
+      .schroederSpatialSuccessorLevelAssignment;
+  assert.equal(successorAssignment.sourceStateBuffer, finalStateBuffer);
+  assert.equal(
+    successorAssignment.sourceThermoBuffer,
+    result.residentStep.nextParticleUploads.sphParticleUpload.thermoBuffer
+  );
+  assert.equal(
+    successorAssignment.sourceMechanicsBuffer,
+    result.residentStep.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+  );
+  assert.equal(
+    device.createdBuffers.filter(
+      (buffer) => buffer.label === 'ulg-schroeder-level-assignments-out'
+    ).length,
+    2,
+    'activation still runs only lookup plus shared successor/render classification'
+  );
 });
 
 test('Schroeder owner scope submits borrowed pressure before resident mechanics and captures one final generation fence', async () => {
@@ -10638,6 +11155,9 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
   let encodeCount = 0;
   let releaseCount = 0;
   const refreshRuntime = {
+    proveFineSubstepAuthority() {
+      return Object.freeze({ status: 'fake-topology-stable-proof' });
+    },
     encode() {
       encodeCount += 1;
       return refreshedAssignment;
@@ -10740,6 +11260,9 @@ test('canonical refresh preserves the submission error while one stable orphan r
   let uncertainMarkCount = 0;
   let releaseAttemptCount = 0;
   const refreshRuntime = {
+    proveFineSubstepAuthority() {
+      return Object.freeze({ status: 'fake-topology-stable-proof' });
+    },
     encode() { return refreshedAssignment; },
     markExecutionSubmitted() { return false; },
     markExecutionSubmissionUncertain(execution) {
@@ -10848,6 +11371,9 @@ test('canonical refresh does not duplicate uncertain acknowledgement when mark t
   let uncertainMarkCount = 0;
   let releaseAttemptCount = 0;
   const refreshRuntime = {
+    proveFineSubstepAuthority() {
+      return Object.freeze({ status: 'fake-topology-stable-proof' });
+    },
     encode() { return refreshedAssignment; },
     markExecutionSubmitted(execution) {
       execution.submitPerformed = true;
@@ -10987,6 +11513,12 @@ test('canonical controller loss supersedes a post-generation refresh orphan with
     assignmentBufferByteLength: assignmentBuffer.size,
     sourceStateBuffer: uploads.sphParticleUpload.stateBuffer,
     sourceStateBufferBorrowed: true,
+    sourceThermoBuffer: uploads.sphParticleUpload.thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: particleCount * 12 * 4,
+    sourceMechanicsBuffer: uploads.mlsMpmParticleUpload.mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: particleCount * 32 * 4,
     storageGeneration: 1,
     bufferFamilyGeneration: 1,
     physicsTick: 0,
@@ -11178,7 +11710,10 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
-  const fakeBuffer = (label, size = 4096) => ({ label, size, destroy() {} });
+  const fakeBuffer = (label, size = 4096) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 }),
+    device
+  );
   const twoLevelMechanicsRunner = (options) =>
     driveAuthoritativeCanonicalEpochs(options, { prefix: 'adoption-two-level' });
   const result = await runSchroederSameLevelMechanicsWebGpu({

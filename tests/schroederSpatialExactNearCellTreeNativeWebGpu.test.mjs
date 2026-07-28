@@ -16,6 +16,988 @@ function median(values) {
     : ordered[middle];
 }
 
+test('native Vulkan directory v2 preserves sparse physical identity through active CSR traversal', {
+  skip: RUN_NATIVE
+    ? false
+    : 'set ULG_RUN_NATIVE_EXACT_CELL_TREE=1 for native Vulkan WebGPU'
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: CHROME,
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    const result = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const device = await adapter.requestDevice();
+      const [
+        epochAbi,
+        epochWgsl,
+        exactAbi,
+        traversalAbi,
+        cellTreeWgsl,
+        pressureWgsl
+      ] = await Promise.all([
+        import('/ulg-gpu-abi/src/schroederSpatialEpoch.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialEpochWgsl.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialExactNear.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialExactNearCellTreeWgsl.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialExactNearWgsl.js')
+      ]);
+      const v2ModuleSources = {
+        key: epochWgsl.schroederSpatialEpochV2KeyWgsl,
+        cellTree: cellTreeWgsl.schroederSpatialExactNearCellTreeV2Wgsl,
+        pressureContact:
+          pressureWgsl
+            .sphPressureInterfaceSpatialExactNearContactKinematicsV2Wgsl
+      };
+      for (const [label, code] of Object.entries(v2ModuleSources)) {
+        const module = device.createShaderModule({
+          label: `directory-v2-${label}-compile-proof`,
+          code
+        });
+        const compilation = await module.getCompilationInfo();
+        const errors = compilation.messages.filter(
+          (message) => message.type === 'error'
+        );
+        if (errors.length > 0) {
+          device.destroy();
+          return {
+            status: `${label}-compile-error`,
+            compilationErrors: errors.map(
+              (message) => (
+                `${message.lineNum}:${message.linePos} ${message.message}`
+              )
+            )
+          };
+        }
+      }
+      const physicalSourceCount = 4;
+      const activeSourceCount = 2;
+      const layout = epochAbi.createSchroederSpatialEpochV2Layout({
+        physicalSourceCapacity: 4,
+        activeSourceCapacity: 2,
+        cellCapacity: 2
+      });
+      const directory = new Uint32Array(layout.wordLength);
+      const setHeader = (word, value) => { directory[word] = value >>> 0; };
+      const lineage = {
+        generationId: 5,
+        deviceOrdinal: 6,
+        laneOrdinal: 7,
+        leaseToken: 8,
+        sourceFamilyId: 9,
+        storageGeneration: 10,
+        physicsTick: 11,
+        physicsSubstep: 12,
+        positionEpoch: 13,
+        topologyEpoch: 14,
+        chartEpoch: 15,
+        levelEpoch: 16,
+        supportEpoch: 17
+      };
+      setHeader(0, epochAbi.SCHROEDER_SPATIAL_EPOCH_MAGIC);
+      setHeader(1, epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+      setHeader(
+        2,
+        epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_READY
+          | epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED
+      );
+      [
+        lineage.generationId,
+        lineage.deviceOrdinal,
+        lineage.laneOrdinal,
+        lineage.leaseToken,
+        lineage.sourceFamilyId,
+        lineage.storageGeneration,
+        lineage.physicsTick,
+        lineage.physicsSubstep,
+        lineage.positionEpoch,
+        lineage.topologyEpoch,
+        lineage.chartEpoch,
+        lineage.levelEpoch,
+        lineage.supportEpoch
+      ].forEach((value, index) => setHeader(3 + index, value));
+      setHeader(16, physicalSourceCount);
+      setHeader(17, layout.physicalSourceCapacity);
+      setHeader(18, 2);
+      setHeader(19, layout.cellCapacity);
+      setHeader(20, 73);
+      setHeader(21, 73);
+      setHeader(22, layout.wordLength);
+      setHeader(23, 0);
+      setHeader(24, 0);
+      setHeader(25, 5);
+      setHeader(26, 5);
+      setHeader(27, 2);
+      setHeader(28, 48);
+      setHeader(29, layout.cellKeysOffsetWords);
+      setHeader(30, layout.cellOffsetsOffsetWords);
+      setHeader(31, layout.cellMembersOffsetWords);
+      setHeader(32, layout.physicalToCellPlusOneOffsetWords);
+      setHeader(33, 1);
+      setHeader(34, 1);
+      setHeader(35, 1);
+      setHeader(36, lineage.generationId);
+      setHeader(37, activeSourceCount);
+      setHeader(38, 2);
+      setHeader(39, 1);
+      setHeader(40, 0);
+      setHeader(41, 1);
+      setHeader(45, 48);
+      setHeader(46, 2);
+      setHeader(47, layout.wordLength);
+
+      const signedOrder = (value) => ((value >>> 0) ^ 0x80000000) >>> 0;
+      directory.set(
+        [
+          7, signedOrder(0), signedOrder(-1), signedOrder(0), signedOrder(0),
+          7, signedOrder(0), signedOrder(0), signedOrder(0), signedOrder(0)
+        ],
+        layout.cellKeysOffsetWords
+      );
+      directory.set([0, 1, 2], layout.cellOffsetsOffsetWords);
+      directory.set([1, 3], layout.cellMembersOffsetWords);
+      directory.set([0, 1, 0, 2], layout.physicalToCellPlusOneOffsetWords);
+      new Float32Array(directory.buffer)[layout.queryEvidenceCapacityOffsetWords + 3]
+        = 0.25;
+      directory.set(
+        [7, 0, 0],
+        layout.queryEvidenceCapacityOffsetWords
+      );
+      directory[layout.queryEvidenceCapacityOffsetWords + 4] = 1;
+      directory[layout.queryEvidenceCapacityOffsetWords + 5] = 0;
+
+      const expectation = exactAbi.createSchroederSpatialExactNearExpectationV2Data({
+        physicalSourceCount,
+        supportProfileId:
+          exactAbi.SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
+        chartId: 7,
+        levelCount: 1,
+        ...lineage,
+        minLevel: 0,
+        baseGridSpacingM: 0.25,
+        cellKeysOffsetWords: layout.cellKeysOffsetWords,
+        cellOffsetsOffsetWords: layout.cellOffsetsOffsetWords,
+        cellMembersOffsetWords: layout.cellMembersOffsetWords,
+        physicalToCellPlusOneOffsetWords:
+          layout.physicalToCellPlusOneOffsetWords,
+        directoryCapacityWords: layout.wordLength,
+        physicalSourceCapacity: layout.physicalSourceCapacity,
+        cellCapacity: layout.cellCapacity
+      });
+      const shader = `
+@group(0) @binding(0) var<storage, read> spatial_directory: array<u32>;
+@group(0) @binding(1) var<storage, read_write> probe_result: array<u32>;
+@group(0) @binding(2) var<uniform> expected: SchroederSpatialExactNearExpectationV2;
+${traversalAbi.schroederSpatialExactNearTraversalV2Wgsl}
+
+@compute @workgroup_size(1)
+fn probe_directory_v2() {
+  probe_result[0] = select(0u, 1u, ss_exact_near_directory_admitted(expected));
+  let member0 = ss_exact_near_source_at_member(expected, 0u);
+  let member1 = ss_exact_near_source_at_member(expected, 1u);
+  let member2 = ss_exact_near_source_at_member(expected, 2u);
+  probe_result[1] = member0.admitted;
+  probe_result[2] = member0.source_index;
+  probe_result[3] = member1.admitted;
+  probe_result[4] = member1.source_index;
+  probe_result[5] = member2.admitted;
+  let physical0 = ss_exact_near_cell_for_source(expected, 0u);
+  let physical1 = ss_exact_near_cell_for_source(expected, 1u);
+  let physical2 = ss_exact_near_cell_for_source(expected, 2u);
+  let physical3 = ss_exact_near_cell_for_source(expected, 3u);
+  probe_result[6] = physical0.admitted;
+  probe_result[7] = physical1.admitted;
+  probe_result[8] = physical1.source_index;
+  probe_result[9] = physical2.admitted;
+  probe_result[10] = physical3.admitted;
+  probe_result[11] = physical3.source_index;
+  let range0 = ss_exact_near_cell_member_range(expected, 0u);
+  let range1 = ss_exact_near_cell_member_range(expected, 1u);
+  probe_result[12] = range0.admitted;
+  probe_result[13] = range0.begin;
+  probe_result[14] = range0.end;
+  probe_result[15] = range1.end;
+  probe_result[16] = select(0u, 1u, ss_exact_near_level_occupied(expected, 0u));
+}`;
+      const shaderModule = device.createShaderModule({
+        label: 'directory-v2-native-traversal-probe',
+        code: shader
+      });
+      const compilation = await shaderModule.getCompilationInfo();
+      const compilationErrors = compilation.messages
+        .filter((message) => message.type === 'error')
+        .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
+      if (compilationErrors.length > 0) {
+        device.destroy();
+        return { status: 'compile-error', compilationErrors };
+      }
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: shaderModule, entryPoint: 'probe_directory_v2' }
+      });
+      const createBuffer = (label, size, usage, data) => {
+        const buffer = device.createBuffer({ label, size, usage });
+        if (data) device.queue.writeBuffer(buffer, 0, data);
+        return buffer;
+      };
+      const directoryBuffer = createBuffer(
+        'directory-v2-native-input',
+        directory.byteLength,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        directory
+      );
+      const resultBytes = 17 * Uint32Array.BYTES_PER_ELEMENT;
+      const resultBuffer = createBuffer(
+        'directory-v2-native-result',
+        resultBytes,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+      );
+      const expectationBuffer = createBuffer(
+        'directory-v2-native-expectation',
+        expectation.byteLength,
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        expectation
+      );
+      const readback = createBuffer(
+        'directory-v2-native-readback',
+        resultBytes,
+        GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      );
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: directoryBuffer } },
+          { binding: 1, resource: { buffer: resultBuffer } },
+          { binding: 2, resource: { buffer: expectationBuffer } }
+        ]
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      encoder.copyBufferToBuffer(resultBuffer, 0, readback, 0, resultBytes);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = Array.from(new Uint32Array(readback.getMappedRange().slice(0)));
+      readback.unmap();
+
+      // The all-dormant generation is still an admitted directory: the CSR is
+      // empty, every retained physical reverse slot is exactly zero, and the
+      // occupied-level evidence is empty.
+      directory[18] = 0;
+      directory[20] = 59;
+      directory[21] = 59;
+      directory[37] = 0;
+      directory[38] = 0;
+      directory[layout.cellOffsetsOffsetWords] = 0;
+      directory.fill(
+        0,
+        layout.cellMembersOffsetWords,
+        layout.queryEvidenceCapacityOffsetWords
+      );
+      directory[layout.queryEvidenceCapacityOffsetWords + 4] = 0;
+      directory[layout.queryEvidenceCapacityOffsetWords + 5] = 0;
+      device.queue.writeBuffer(directoryBuffer, 0, directory);
+      device.queue.writeBuffer(resultBuffer, 0, new Uint32Array(17));
+      const dormantEncoder = device.createCommandEncoder();
+      const dormantPass = dormantEncoder.beginComputePass();
+      dormantPass.setPipeline(pipeline);
+      dormantPass.setBindGroup(0, bindGroup);
+      dormantPass.dispatchWorkgroups(1);
+      dormantPass.end();
+      dormantEncoder.copyBufferToBuffer(
+        resultBuffer,
+        0,
+        readback,
+        0,
+        resultBytes
+      );
+      device.queue.submit([dormantEncoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const dormantWords = Array.from(
+        new Uint32Array(readback.getMappedRange().slice(0))
+      );
+      readback.unmap();
+
+      const assemblyModule = device.createShaderModule({
+        label: 'directory-v2-native-empty-finalize',
+        code: epochWgsl.schroederSpatialEpochV2AssembleWgsl
+      });
+      const assemblyCompilation = await assemblyModule.getCompilationInfo();
+      const assemblyCompilationErrors = assemblyCompilation.messages
+        .filter((message) => message.type === 'error')
+        .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`);
+      if (assemblyCompilationErrors.length > 0) {
+        device.destroy();
+        return {
+          status: 'assembly-compile-error',
+          compilationErrors: assemblyCompilationErrors
+        };
+      }
+      const assemblyPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: {
+          module: assemblyModule,
+          entryPoint: 'finalize_directory'
+        }
+      });
+      const paramsBytes = new ArrayBuffer(48 * Uint32Array.BYTES_PER_ELEMENT);
+      const paramsView = new DataView(paramsBytes);
+      let paramsOffset = 0;
+      const paramU32 = (value) => {
+        paramsView.setUint32(paramsOffset, value >>> 0, true);
+        paramsOffset += Uint32Array.BYTES_PER_ELEMENT;
+      };
+      const paramI32 = (value) => {
+        paramsView.setInt32(paramsOffset, value | 0, true);
+        paramsOffset += Uint32Array.BYTES_PER_ELEMENT;
+      };
+      const paramF32 = (value) => {
+        paramsView.setFloat32(paramsOffset, value, true);
+        paramsOffset += Uint32Array.BYTES_PER_ELEMENT;
+      };
+      [
+        physicalSourceCount,
+        layout.physicalSourceCapacity,
+        layout.cellCapacity,
+        5,
+        2,
+        lineage.generationId,
+        lineage.deviceOrdinal,
+        lineage.laneOrdinal,
+        lineage.sourceFamilyId,
+        lineage.storageGeneration,
+        lineage.physicsTick,
+        lineage.physicsSubstep,
+        lineage.positionEpoch,
+        lineage.topologyEpoch,
+        lineage.chartEpoch,
+        lineage.levelEpoch,
+        lineage.supportEpoch,
+        lineage.leaseToken,
+        1,
+        1,
+        0,
+        0
+      ].forEach(paramU32);
+      paramI32(0);
+      paramU32(0);
+      paramI32(0);
+      paramU32(0);
+      paramI32(0);
+      paramU32(0);
+      paramI32(0);
+      paramU32(0);
+      [
+        layout.headerWords,
+        layout.cellKeysOffsetWords,
+        layout.cellOffsetsOffsetWords,
+        layout.cellMembersOffsetWords,
+        layout.physicalToCellPlusOneOffsetWords,
+        layout.wordLength,
+        layout.wordLength,
+        1,
+        1,
+        65_535,
+        1,
+        7
+      ].forEach(paramU32);
+      paramI32(0);
+      paramI32(0);
+      paramF32(0.25);
+      paramU32(1);
+      paramU32(1);
+      paramU32(2);
+      if (paramsOffset !== paramsBytes.byteLength) {
+        throw new Error(
+          `directory v2 params packed ${paramsOffset}/${paramsBytes.byteLength} bytes`
+        );
+      }
+      const assemblyGroupIndices = createBuffer(
+        'directory-v2-empty-group-indices',
+        2 * Uint32Array.BYTES_PER_ELEMENT,
+        GPUBufferUsage.STORAGE,
+        new Uint32Array(2)
+      );
+      const assemblyParams = createBuffer(
+        'directory-v2-empty-params',
+        paramsBytes.byteLength,
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        new Uint8Array(paramsBytes)
+      );
+      const runEmptyFinalize = async (uniqueEvidence, label) => {
+        const primitiveEvidence = createBuffer(
+          `${label}-primitive-evidence`,
+          uniqueEvidence.byteLength,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          uniqueEvidence
+        );
+        const epochEvidence = createBuffer(
+          `${label}-epoch-evidence`,
+          6 * Uint32Array.BYTES_PER_ELEMENT,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          new Uint32Array(6)
+        );
+        const outputDirectory = createBuffer(
+          `${label}-directory`,
+          layout.byteLength,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST,
+          new Uint32Array(layout.wordLength)
+        );
+        const outputDispatch = createBuffer(
+          `${label}-dispatch`,
+          3 * Uint32Array.BYTES_PER_ELEMENT,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST,
+          new Uint32Array(3)
+        );
+        const outputReadback = createBuffer(
+          `${label}-readback`,
+          layout.byteLength + 3 * Uint32Array.BYTES_PER_ELEMENT,
+          GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        );
+        const assemblyBindGroup = device.createBindGroup({
+          layout: assemblyPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 2, resource: { buffer: assemblyGroupIndices } },
+            { binding: 4, resource: { buffer: primitiveEvidence } },
+            { binding: 5, resource: { buffer: epochEvidence } },
+            { binding: 6, resource: { buffer: outputDirectory } },
+            { binding: 7, resource: { buffer: outputDispatch } },
+            { binding: 8, resource: { buffer: assemblyParams } }
+          ]
+        });
+        const assemblyEncoder = device.createCommandEncoder();
+        const assemblyPass = assemblyEncoder.beginComputePass();
+        assemblyPass.setPipeline(assemblyPipeline);
+        assemblyPass.setBindGroup(0, assemblyBindGroup);
+        assemblyPass.dispatchWorkgroups(1);
+        assemblyPass.end();
+        assemblyEncoder.copyBufferToBuffer(
+          outputDirectory,
+          0,
+          outputReadback,
+          0,
+          layout.byteLength
+        );
+        assemblyEncoder.copyBufferToBuffer(
+          outputDispatch,
+          0,
+          outputReadback,
+          layout.byteLength,
+          3 * Uint32Array.BYTES_PER_ELEMENT
+        );
+        device.queue.submit([assemblyEncoder.finish()]);
+        await outputReadback.mapAsync(GPUMapMode.READ);
+        const outputWords = new Uint32Array(
+          outputReadback.getMappedRange().slice(0)
+        );
+        outputReadback.unmap();
+        const finalized = {
+          header: Array.from(outputWords.slice(0, 48)),
+          reverse: Array.from(outputWords.slice(
+            layout.physicalToCellPlusOneOffsetWords,
+            layout.physicalToCellPlusOneOffsetWords
+              + layout.physicalToCellPlusOneWords
+          )),
+          dispatch: Array.from(outputWords.slice(
+            layout.wordLength,
+            layout.wordLength + 3
+          ))
+        };
+        for (const buffer of [
+          primitiveEvidence,
+          epochEvidence,
+          outputDirectory,
+          outputDispatch,
+          outputReadback
+        ]) {
+          buffer.destroy();
+        }
+        return finalized;
+      };
+      const admittedEmpty = await runEmptyFinalize(
+        new Uint32Array([
+          lineage.generationId,
+          0,
+          0,
+          1,
+          0,
+          5,
+          5,
+          1
+        ]),
+        'directory-v2-admitted-empty'
+      );
+      const rejectedEmpty = await runEmptyFinalize(
+        new Uint32Array([
+          lineage.generationId,
+          0,
+          0,
+          0,
+          0,
+          5,
+          5,
+          4
+        ]),
+        'directory-v2-rejected-empty'
+      );
+      assemblyGroupIndices.destroy();
+      assemblyParams.destroy();
+      for (const buffer of [
+        directoryBuffer,
+        resultBuffer,
+        expectationBuffer,
+        readback
+      ]) {
+        buffer.destroy();
+      }
+      device.destroy();
+      return {
+        status: 'ok',
+        words,
+        dormantWords,
+        admittedEmpty,
+        rejectedEmpty
+      };
+    });
+    assert.equal(result.status, 'ok', JSON.stringify(result));
+    assert.deepEqual(result.words, [
+      1,
+      1, 1,
+      1, 3,
+      0,
+      0,
+      1, 0,
+      0,
+      1, 1,
+      1, 0, 1,
+      2,
+      1
+    ]);
+    assert.deepEqual(result.dormantWords, [
+      1,
+      0, 0,
+      0, 0,
+      0,
+      0,
+      0, 0,
+      0,
+      0, 0,
+      0, 0, 0,
+      0,
+      0
+    ]);
+    assert.equal(
+      result.admittedEmpty.header[2]
+        & (
+          1
+          | 2
+        ),
+      1 | 2
+    );
+    assert.equal(result.admittedEmpty.header[16], 4);
+    assert.equal(result.admittedEmpty.header[18], 0);
+    assert.equal(result.admittedEmpty.header[21], 59);
+    assert.equal(result.admittedEmpty.header[37], 0);
+    assert.deepEqual(result.admittedEmpty.reverse, [0, 0, 0, 0]);
+    assert.deepEqual(result.admittedEmpty.dispatch, [0, 0, 0]);
+    assert.equal(result.rejectedEmpty.header[2] & 2, 0);
+    assert.notEqual(result.rejectedEmpty.header[2] & 4, 0);
+    assert.equal(result.rejectedEmpty.header[21], 0);
+    assert.equal(result.rejectedEmpty.header[35], 0);
+    assert.deepEqual(result.rejectedEmpty.reverse, [0, 0, 0, 0]);
+    assert.deepEqual(result.rejectedEmpty.dispatch, [0, 0, 0]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('native Vulkan cell-tree runtime builds sparse and admitted-empty directory v2 executions', {
+  skip: RUN_NATIVE
+    ? false
+    : 'set ULG_RUN_NATIVE_EXACT_CELL_TREE=1 for native Vulkan WebGPU'
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: CHROME,
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    const result = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const device = await adapter.requestDevice();
+      const [
+        epochAbi,
+        activeAbi,
+        mechanicsAbi,
+        treeRuntimeModule,
+        identityModule
+      ] = await Promise.all([
+        import('/ulg-gpu-abi/src/schroederSpatialEpoch.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialActiveSourceView.js'),
+        import('/ulg-gpu-abi/src/schroederSpatialMechanicsView.js'),
+        import('/src/runtime/sph/schroederSpatialExactNearCellTreeGpu.js'),
+        import('/src/runtime/sph/sphGpuDeviceIdentity.js')
+      ]);
+      const physicalSourceCount = 4;
+      const activeSourceCapacity = 2;
+      const layout = epochAbi.createSchroederSpatialEpochV2Layout({
+        physicalSourceCapacity: physicalSourceCount,
+        activeSourceCapacity,
+        cellCapacity: activeSourceCapacity
+      });
+      const activeLayout = activeAbi.createSchroederSpatialActiveSourceViewLayout({
+        physicalSourceCapacity: physicalSourceCount,
+        activeSourceCapacity
+      });
+      const identity = {
+        generationId: 5,
+        deviceOrdinal: 6,
+        laneOrdinal: 7,
+        leaseToken: 8,
+        sourceFamilyId: 9,
+        storageGeneration: 10,
+        physicsTick: 11,
+        physicsSubstep: 12,
+        positionEpoch: 13,
+        topologyEpoch: 14,
+        chartEpoch: 15,
+        levelEpoch: 16,
+        supportEpoch: 17,
+        buildOrdinal: 5
+      };
+      const usage = {
+        copySrc: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
+        copyDst: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+        mapRead: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+        storage: globalThis.GPUBufferUsage?.STORAGE ?? 128,
+        indirect: globalThis.GPUBufferUsage?.INDIRECT ?? 256
+      };
+      const createTaggedBuffer = (label, size, bufferUsage, data = null) => {
+        const buffer = identityModule.tagWebGpuBufferDevice(
+          device.createBuffer({ label, size, usage: bufferUsage }),
+          device
+        );
+        if (data) device.queue.writeBuffer(buffer, 0, data);
+        return buffer;
+      };
+      const sourceBuffer = createTaggedBuffer(
+        'cell-tree-v2-native-source',
+        physicalSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+        usage.storage
+      );
+      const activeSourceViewBuffer = createTaggedBuffer(
+        'cell-tree-v2-native-active-source',
+        activeLayout.byteLength,
+        usage.storage | usage.indirect
+      );
+      const sourceFingerprint =
+        activeAbi.createSchroederSpatialActiveSourceFingerprint({
+          ...identity,
+          physicalSourceCount,
+          physicalSourceCapacity: physicalSourceCount,
+          activeSourceCapacity,
+          sourceRowLayoutId:
+            mechanicsAbi
+              .SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          sourceRowStrideFloats: 16,
+          queryGeometryMode: 1,
+          queryChartId: 0,
+          queryMinLevel: -1,
+          queryMaxLevel: 1,
+          queryBaseGridSpacingM: 0.25
+        });
+      let activeSourceView = null;
+      const activeOwnerRuntime = {
+        ownsExecution(candidate) {
+          return candidate === activeSourceView;
+        }
+      };
+      activeSourceView = {
+        schema: activeAbi.ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
+        status: 'schroeder-spatial-active-source-view-gpu-encoded',
+        ready: true,
+        selected: true,
+        sourceBuffer,
+        activeSourceViewBuffer,
+        layout: activeLayout,
+        physicalSourceCount,
+        physicalSourceCapacity: physicalSourceCount,
+        activeSourceCapacity,
+        sourceRowLayoutId:
+          mechanicsAbi.SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+        sourceRowStrideFloats: 16,
+        ...identity,
+        sourceFingerprint,
+        activeDispatchOffsetBytes: activeLayout.activeDispatchOffsetBytes,
+        candidateDispatchOffsetBytes: activeLayout.candidateDispatchOffsetBytes,
+        physicalDispatchOffsetBytes: activeLayout.physicalDispatchOffsetBytes,
+        ownerRuntime: activeOwnerRuntime
+      };
+      const signedOrder = (value) => (
+        ((value >>> 0) ^ 0x80000000) >>> 0
+      );
+      const makeDirectory = (activeSourceCount) => {
+        const cellCount = activeSourceCount === 0 ? 0 : 2;
+        const words = new Uint32Array(layout.wordLength);
+        const setHeader = (word, value) => {
+          words[word] = value >>> 0;
+        };
+        setHeader(0, epochAbi.SCHROEDER_SPATIAL_EPOCH_MAGIC);
+        setHeader(1, epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+        setHeader(
+          2,
+          epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_READY
+            | epochAbi.SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED
+        );
+        [
+          identity.generationId,
+          identity.deviceOrdinal,
+          identity.laneOrdinal,
+          identity.leaseToken,
+          identity.sourceFamilyId,
+          identity.storageGeneration,
+          identity.physicsTick,
+          identity.physicsSubstep,
+          identity.positionEpoch,
+          identity.topologyEpoch,
+          identity.chartEpoch,
+          identity.levelEpoch,
+          identity.supportEpoch
+        ].forEach((value, index) => setHeader(3 + index, value));
+        setHeader(16, physicalSourceCount);
+        setHeader(17, layout.physicalSourceCapacity);
+        setHeader(18, cellCount);
+        setHeader(19, layout.cellCapacity);
+        setHeader(20, layout.wordLength);
+        setHeader(21, layout.wordLength);
+        setHeader(22, layout.wordLength);
+        setHeader(25, 5);
+        setHeader(26, 5);
+        setHeader(27, 2);
+        setHeader(28, 48);
+        setHeader(29, layout.cellKeysOffsetWords);
+        setHeader(30, layout.cellOffsetsOffsetWords);
+        setHeader(31, layout.cellMembersOffsetWords);
+        setHeader(32, layout.physicalToCellPlusOneOffsetWords);
+        setHeader(33, identity.buildOrdinal);
+        setHeader(34, identity.buildOrdinal);
+        setHeader(35, identity.buildOrdinal);
+        setHeader(36, identity.generationId);
+        setHeader(37, activeSourceCount);
+        setHeader(38, cellCount);
+        setHeader(39, 1);
+        setHeader(41, 1);
+        setHeader(42, cellCount > 0 ? 1 : 0);
+        setHeader(43, cellCount > 0 ? 1 : 0);
+        setHeader(44, cellCount > 0 ? 1 : 0);
+        setHeader(45, 48);
+        setHeader(
+          46,
+          epochAbi.SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
+        );
+        setHeader(47, layout.wordLength);
+        if (cellCount > 0) {
+          words.set([
+            0, signedOrder(0), signedOrder(-1), signedOrder(0), signedOrder(0),
+            0, signedOrder(0), signedOrder(0), signedOrder(0), signedOrder(0)
+          ], layout.cellKeysOffsetWords);
+          words.set([0, 1, 2], layout.cellOffsetsOffsetWords);
+          words.set([1, 3], layout.cellMembersOffsetWords);
+          words.set([0, 1, 0, 2], layout.physicalToCellPlusOneOffsetWords);
+        } else {
+          words[layout.cellOffsetsOffsetWords] = 0;
+        }
+        words[layout.queryEvidenceCapacityOffsetWords] = 0;
+        new Int32Array(words.buffer)[
+          layout.queryEvidenceCapacityOffsetWords + 1
+        ] = -1;
+        new Int32Array(words.buffer)[
+          layout.queryEvidenceCapacityOffsetWords + 2
+        ] = 1;
+        new Float32Array(words.buffer)[
+          layout.queryEvidenceCapacityOffsetWords + 3
+        ] = 0.25;
+        words[layout.queryEvidenceCapacityOffsetWords + 4] =
+          cellCount > 0 ? 2 : 0;
+        words[layout.queryEvidenceCapacityOffsetWords + 5] = 0;
+        return words;
+      };
+      const runtime =
+        treeRuntimeModule.createSchroederSpatialExactNearCellTreeGpu(
+          device,
+          {
+            maxSourceCount: physicalSourceCount,
+            cellCapacity: activeSourceCapacity,
+            arenaCount: 1,
+            label: 'cell-tree-v2-native-runtime'
+          }
+        );
+      const outputs = [];
+      device.pushErrorScope('validation');
+      for (const activeSourceCount of [2, 0]) {
+        const directoryWords = makeDirectory(activeSourceCount);
+        const directoryBuffer = createTaggedBuffer(
+          `cell-tree-v2-directory-${activeSourceCount}`,
+          directoryWords.byteLength,
+          usage.storage | usage.copySrc | usage.copyDst,
+          directoryWords
+        );
+        let spatialExecution = null;
+        const ownerRuntime = {
+          ownsExecution(candidate) {
+            return candidate === spatialExecution;
+          }
+        };
+        spatialExecution = {
+          schema: epochAbi.ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+          status: 'schroeder-spatial-epoch-v2-gpu-encoded',
+          magic: epochAbi.SCHROEDER_SPATIAL_EPOCH_MAGIC,
+          abiVersion: epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+          reverseEncoding:
+            epochAbi.SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+          deviceId: identityModule.webGpuDeviceId(device),
+          released: false,
+          ownerRuntime,
+          sourceBuffer,
+          sourceCount: physicalSourceCount,
+          sourceCapacity: physicalSourceCount,
+          physicalSourceCount,
+          physicalSourceCapacity: physicalSourceCount,
+          activeSourceCapacity,
+          sourceRowLayoutId:
+            mechanicsAbi
+              .SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+          sourceAdapterId:
+            epochAbi.SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
+          layout,
+          directoryBuffer,
+          activeSourceView,
+          activeSourceViewBuffer,
+          ...identity,
+          exactNearQueryProfile: { ready: true },
+          queryChartId: 0,
+          queryLevelCount: 3,
+          queryMinLevel: -1,
+          queryBaseGridSpacingM: 0.25
+        };
+        const encoder = device.createCommandEncoder({
+          label: `cell-tree-v2-native-encoder-${activeSourceCount}`
+        });
+        const execution = runtime.encode(encoder, { spatialExecution });
+        const readback = device.createBuffer({
+          label: `cell-tree-v2-native-readback-${activeSourceCount}`,
+          size: execution.layout.byteLength,
+          usage: usage.mapRead | usage.copyDst
+        });
+        encoder.copyBufferToBuffer(
+          execution.treeBuffer,
+          0,
+          readback,
+          0,
+          execution.layout.byteLength
+        );
+        device.queue.submit([encoder.finish()]);
+        runtime.markExecutionSubmitted(execution);
+        await readback.mapAsync(globalThis.GPUMapMode?.READ ?? 1);
+        const treeWords = new Uint32Array(
+          readback.getMappedRange().slice(0)
+        );
+        readback.unmap();
+        outputs.push({
+          activeSourceCount,
+          schema: execution.schema,
+          abiVersion: execution.abiVersion,
+          header: Array.from(treeWords.slice(0, 40))
+        });
+        await runtime.releaseExecutionAfter(
+          execution,
+          device.queue.onSubmittedWorkDone()
+        );
+        directoryBuffer.destroy();
+        readback.destroy();
+      }
+      const validationError = await device.popErrorScope();
+      runtime.destroy();
+      sourceBuffer.destroy();
+      activeSourceViewBuffer.destroy();
+      device.destroy();
+      return {
+        status: validationError ? 'validation-error' : 'ok',
+        validationError: validationError?.message ?? null,
+        outputs
+      };
+    });
+    assert.equal(result.status, 'ok', JSON.stringify(result));
+    assert.equal(result.outputs.length, 2);
+    const sparse = result.outputs[0];
+    assert.equal(
+      sparse.schema,
+      'peercompute.ulg.schroeder-spatial-exact-near-cell-tree.v2'
+    );
+    assert.equal(sparse.abiVersion, 2);
+    assert.equal(sparse.header[1], 2);
+    assert.equal(sparse.header[2] & (1 | 2), 1 | 2);
+    assert.equal(sparse.header[16], 4);
+    assert.equal(sparse.header[18], 2);
+    assert.equal(sparse.header[30], 2);
+    assert.equal(sparse.header[34], 2);
+    assert.equal(sparse.header[35], 1);
+    const empty = result.outputs[1];
+    assert.equal(empty.header[1], 2);
+    assert.equal(empty.header[2] & (1 | 2), 1 | 2);
+    assert.equal(empty.header[16], 4);
+    assert.equal(empty.header[18], 0);
+    assert.equal(empty.header[30], 0);
+    assert.equal(empty.header[32], 0xffff_ffff);
+    assert.equal(empty.header[34], 0);
+    assert.equal(empty.header[35], 1);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('native Vulkan exact-cell tree preserves canonical CSR membership and reaction parity', {
   skip: RUN_NATIVE
     ? false

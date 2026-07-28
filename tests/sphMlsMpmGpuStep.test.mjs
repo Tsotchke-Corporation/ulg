@@ -98,10 +98,16 @@ import {
   mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl,
   mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl,
   mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl,
   mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
   mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl,
   mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
   mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl,
   mlsMpmMechanicsFieldGridUpdateWgsl,
   classifyMlsMpmMechanicsFieldContactPair,
   reactionOutputComponentMutations,
@@ -198,6 +204,10 @@ const RUN_NATIVE_PHASE_LINEAGE_SUMMARY =
   process.env.ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY === '1';
 const NATIVE_PHASE_LINEAGE_SUMMARY_BASE_URL =
   process.env.ULG_PHASE_LINEAGE_SUMMARY_BASE_URL || 'https://127.0.0.1:5174/';
+const RUN_NATIVE_ACTIVE_SOURCE_P2G =
+  process.env.ULG_RUN_NATIVE_ACTIVE_SOURCE_P2G === '1';
+const NATIVE_ACTIVE_SOURCE_P2G_BASE_URL =
+  process.env.ULG_ACTIVE_SOURCE_P2G_BASE_URL || 'https://127.0.0.1:5174/';
 
 test('mechanics-field indirect consumers authenticate and flatten public x/y dispatches', () => {
   for (const wgsl of [
@@ -607,6 +617,125 @@ test('mechanics-field P2G emits records and reduces them in retained stable orde
     assert.doesNotMatch(
       finalizeSection(crossLevel),
       /transient deterministic reduction buffer/
+    );
+  }
+});
+
+test('ActiveSource-v2 P2G is sparse while single-level and cross-level G2P stay distinct', () => {
+  const p2gVariants = [
+    mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+  ];
+  const singleLevelG2pVariants = [
+    mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+  ];
+  const crossLevelG2pVariants = [
+    mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl,
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl
+  ];
+  const section = (source, start, end) => {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex + start.length);
+    assert.notEqual(startIndex, -1);
+    assert.notEqual(endIndex, -1);
+    return source.slice(startIndex, endIndex);
+  };
+
+  for (const source of p2gVariants) {
+    assert.match(
+      source,
+      /@binding\(7\) var<storage, read> schroeder_spatial_authority_evidence: array<u32>/
+    );
+    assert.match(
+      source,
+      /@binding\(8\) var<storage, read> active_source_view: array<u32>/
+    );
+    assert.doesNotMatch(source, /var<storage, read_write> schroeder_spatial_authority_evidence/);
+    assert.doesNotMatch(source, /atomic(?:Store|Add)\(&schroeder_spatial_authority_evidence/);
+    assert.match(
+      source,
+      /active_source_view\[47u\] == p2g_active_source_projection_seal\(\)/
+    );
+    assert.match(
+      source,
+      /if \(invocation_count == 0u\) \{\s*return x == 0u && y == 1u && z == 1u;/
+    );
+    assert.match(source, /active_candidate_count == active_count \* 27u/);
+    assert.match(
+      source,
+      /let active_ordinal =\s*\(workgroup_id\.x \+ workgroup_id\.y \* dispatch_x\) \* 64u \+ local_id\.x;/
+    );
+    assert.match(
+      source,
+      /let particle_index = p2g_physical_for_active\(active_ordinal\);/
+    );
+    assert.match(
+      source,
+      /let candidate_index = active_ordinal \* P2G_FIELD_STENCIL_SIZE\s*\+ stencil_ordinal;/
+    );
+    assert.doesNotMatch(
+      section(
+        source,
+        'fn p2g_physical_for_active(',
+        'fn p2g_active_for_physical('
+      ),
+      /p2g_spatial_directory_admitted/
+    );
+    assert.doesNotMatch(
+      section(
+        source,
+        'fn p2g_particle_enabled(',
+        '\n}'
+      ),
+      /p2g_authenticate_spatial_header/
+    );
+  }
+
+  for (const source of [
+    ...singleLevelG2pVariants,
+    ...crossLevelG2pVariants
+  ]) {
+    assert.match(
+      source,
+      /@binding\(7\) var<storage, read> schroeder_spatial_authority_evidence: array<u32>/
+    );
+    assert.match(
+      source,
+      /@binding\(8\) var<storage, read> active_source_view: array<u32>/
+    );
+    assert.doesNotMatch(source, /var<storage, read_write> schroeder_spatial_authority_evidence/);
+    assert.doesNotMatch(source, /atomic(?:Store|Add)\(&schroeder_spatial_authority_evidence/);
+    assert.match(
+      source,
+      /active_source_view\[47u\] == g2p_active_source_projection_seal\(\)/
+    );
+    assert.match(source, /let particle_index = global_id\.x;/);
+    assert.match(
+      source,
+      /if \(active_ordinal == G2P_ACTIVE_SOURCE_MISSING\) \{\s*return false;/
+    );
+    assert.match(
+      source,
+      /active_source_view\[active_source_view\[25u\] \+ active_ordinal\]\s*!= particle_index/
+    );
+  }
+  for (const source of singleLevelG2pVariants) {
+    assert.match(
+      source,
+      /fn g2p_reflux_present\(\) -> bool \{\s*\/\/ runFusedNoFullMlsMpmMechanicsWebGpu always binds the dummy ledger\.\s*return false;/
+    );
+  }
+  for (const source of crossLevelG2pVariants) {
+    assert.match(
+      source,
+      /fn g2p_reflux_present\(\) -> bool \{\s*return arrayLength\(&cross_level_reflux\) >= G2P_REFLUX_HEADER_WORDS/
+    );
+    assert.match(source, /fn consume_g2p_fine_reflux_receipt\(\)/);
+    assert.match(source, /fn consume_g2p_coarse_reflux_receipt\(\)/);
+    assert.doesNotMatch(
+      source,
+      /runFusedNoFullMlsMpmMechanicsWebGpu always binds the dummy ledger/
     );
   }
 });
@@ -1678,13 +1807,28 @@ function fakeSummaryDevice(summaryValues) {
               dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
             },
             dispatchWorkgroupsIndirect(buffer, offset) {
-              const data = buffer.lastWrite ? new Uint32Array(buffer.lastWrite) : new Uint32Array();
+              const bytes = buffer._writeBytes
+                ?? (buffer.lastWrite ? new Uint8Array(buffer.lastWrite) : new Uint8Array());
+              const view = new DataView(
+                bytes.buffer,
+                bytes.byteOffset,
+                bytes.byteLength
+              );
+              const readWord = (wordOffset) => (
+                offset + wordOffset * Uint32Array.BYTES_PER_ELEMENT
+                  + Uint32Array.BYTES_PER_ELEMENT <= bytes.byteLength
+                  ? view.getUint32(
+                      offset + wordOffset * Uint32Array.BYTES_PER_ELEMENT,
+                      true
+                    )
+                  : null
+              );
               indirectDispatches.push({
                 buffer,
                 offset,
-                workgroupCountX: data[0] ?? null,
-                workgroupCountY: data[1] ?? null,
-                workgroupCountZ: data[2] ?? null,
+                workgroupCountX: readWord(0),
+                workgroupCountY: readWord(1),
+                workgroupCountZ: readWord(2),
                 pipeline: this.pipeline,
                 bindGroup: this.bindGroup?.bindGroup
               });
@@ -2976,6 +3120,562 @@ test('native four-lane resident summary keeps a live companion and ignores poiso
   });
   assert.equal(native.drop.status, 'cohort-summary-empty');
   assert.equal(native.drop.massKg, 0);
+});
+
+test('native WebGPU executes ActiveSource-v2 sparse/A=0 P2G and compiles physical-direct G2P pipelines', {
+  skip: RUN_NATIVE_ACTIVE_SOURCE_P2G
+    ? false
+    : 'set ULG_RUN_NATIVE_ACTIVE_SOURCE_P2G=1 for native WebGPU execution',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_ACTIVE_SOURCE_P2G_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_ACTIVE_SOURCE_P2G_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      try {
+        const nonce = Date.now();
+        const step = await import(
+          `/src/runtime/sph/sphMlsMpmGpuStep.js?nativeActiveSourceP2g=${nonce}`
+        );
+        const definitions = [
+          [
+            'p2g-observed',
+            step.mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+            ['main', 'finalize_grid', 'preflight_compact_mechanics_view']
+          ],
+          [
+            'p2g-unobserved',
+            step.mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl,
+            ['main', 'finalize_grid', 'preflight_compact_mechanics_view']
+          ],
+          [
+            'g2p-observed',
+            step.mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+            ['main', 'finalize_canonical_spatial_authority']
+          ],
+          [
+            'g2p-unobserved',
+            step.mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl,
+            ['main', 'finalize_canonical_spatial_authority']
+          ],
+          [
+            'g2p-cross-level-observed',
+            step.mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl,
+            [
+              'main',
+              'finalize_canonical_spatial_authority',
+              'claim_g2p_energy_receipt',
+              'measure_g2p_energy_receipt',
+              'consume_g2p_energy_receipt',
+              'consume_g2p_fine_reflux_receipt',
+              'consume_g2p_coarse_reflux_receipt'
+            ]
+          ],
+          [
+            'g2p-cross-level-unobserved',
+            step.mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl,
+            [
+              'main',
+              'finalize_canonical_spatial_authority',
+              'claim_g2p_energy_receipt',
+              'measure_g2p_energy_receipt',
+              'consume_g2p_energy_receipt',
+              'consume_g2p_fine_reflux_receipt',
+              'consume_g2p_coarse_reflux_receipt'
+            ]
+          ]
+        ];
+        const compilationErrors = [];
+        const compiledEntryPoints = [];
+        for (const [label, code, entryPoints] of definitions) {
+          const module = device.createShaderModule({
+            label: `native-active-source-v2-${label}`,
+            code
+          });
+          const info = await module.getCompilationInfo();
+          for (const message of info.messages) {
+            if (message.type === 'error') {
+              compilationErrors.push(`${label}: ${message.message}`);
+            }
+          }
+          for (const entryPoint of entryPoints) {
+            await device.createComputePipelineAsync({
+              label: `native-active-source-v2-${label}-${entryPoint}`,
+              layout: 'auto',
+              compute: { module, entryPoint }
+            });
+            compiledEntryPoints.push(`${label}:${entryPoint}`);
+          }
+        }
+        const [
+          abi,
+          buffersModule,
+          hierarchyModule,
+          spatialModule,
+          gridModule
+        ] = await Promise.all([
+          import(`/ulg-gpu-abi/src/index.js?nativeActiveSourceP2g=${nonce}`),
+          import(
+            `/src/runtime/sph/sphGpuBuffers.js`
+              + `?nativeActiveSourceP2g=${nonce}`
+          ),
+          import(
+            `/src/runtime/sph/schroederHierarchyGpu.js`
+              + `?nativeActiveSourceP2g=${nonce}`
+          ),
+          import(
+            `/src/runtime/sph/schroederSpatialEpochGpu.js`
+              + `?nativeActiveSourceP2g=${nonce}`
+          ),
+          import(
+            `/src/runtime/sph/sphGridGpuKernel.js`
+              + `?nativeActiveSourceP2g=${nonce}`
+          )
+        ]);
+        const readWords = async (buffer, byteLength, label) => {
+          const readback = device.createBuffer({
+            label,
+            size: byteLength,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+          });
+          const encoder = device.createCommandEncoder();
+          encoder.copyBufferToBuffer(buffer, 0, readback, 0, byteLength);
+          device.queue.submit([encoder.finish()]);
+          await readback.mapAsync(GPUMapMode.READ);
+          const words = new Uint32Array(readback.getMappedRange()).slice();
+          readback.unmap();
+          readback.destroy();
+          return words;
+        };
+        const runExecutionCase = async ({
+          label,
+          activePhysicalSources
+        }) => {
+          const physicalSourceCount = 1024;
+          const activePhysicalSet = new Set(activePhysicalSources);
+          const state = new Float32Array(physicalSourceCount * 8);
+          const thermo = new Float32Array(physicalSourceCount * 12);
+          const identity = new Uint32Array(physicalSourceCount);
+          const mechanics = new Float32Array(physicalSourceCount * 32);
+          for (let physical = 0;
+            physical < physicalSourceCount;
+            physical += 1) {
+            const active = activePhysicalSet.has(physical);
+            state.set([
+              1,
+              1,
+              1,
+              active ? 1 : 0,
+              0,
+              0,
+              0,
+              0
+            ], physical * 8);
+            thermo.set([
+              7,
+              1,
+              300,
+              1000,
+              1,
+              0,
+              0,
+              0,
+              0.25,
+              active ? 1 : 0,
+              active ? 1 : 254,
+              active ? 0.1 : 0
+            ], physical * 12);
+            identity[physical] = 1;
+            const mechanicsOffset = physical * 32;
+            mechanics.set([
+              1, 0, 0,
+              0, 1, 0,
+              0, 0, 1
+            ], mechanicsOffset);
+            mechanics[mechanicsOffset + 18] = 1;
+            mechanics[mechanicsOffset + 19] = active ? 0.001 : 0;
+            mechanics[mechanicsOffset + 20] = 1;
+            mechanics[mechanicsOffset + 21] = active ? 1 : 254;
+            mechanics[mechanicsOffset + 27] = active ? 1 : 254;
+            mechanics[mechanicsOffset + 31] = active ? 1 : 0;
+          }
+          const sphParticleState = {
+            schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+            status: 'cpu-derived-gpu-buffer-ready',
+            particleCount: physicalSourceCount,
+            dimension: 3,
+            step: 0,
+            time: 0,
+            positionEpoch: 0,
+            topologyEpoch: 0,
+            chartEpoch: 0,
+            levelEpoch: 0,
+            supportEpoch: 0,
+            smoothingLengthM: 0.25,
+            storageGeneration: 1,
+            stateStrideFloats: 8,
+            thermoStrideFloats: 12,
+            identityStrideUints: 1,
+            stateStrideBytes: 32,
+            thermoStrideBytes: 48,
+            identityStrideBytes: 4,
+            identityRequired: true,
+            identityRevision: `native-active-source-p2g-${label}`,
+            renderDomainKeys: { 1: `native-active-source-p2g-${label}` },
+            state,
+            thermo,
+            identity,
+            metadata: []
+          };
+          const mlsMpmParticleState = {
+            schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+            status: 'cpu-derived-gpu-buffer-ready',
+            particleCount: physicalSourceCount,
+            step: 0,
+            time: 0,
+            storageGeneration: 1,
+            mechanicsStrideFloats: 32,
+            mechanicsStrideBytes: 128,
+            mechanicsDtS: 0,
+            mechanicalSubsteps: 1,
+            gridCflFactor: 0.4,
+            gravityMPerS2: [0, 0, 0],
+            particleSeparationRelaxation: 0,
+            particleSeparationVelocityDamping: 0,
+            mechanics,
+            metadata: [],
+            algorithmMaterialContactRows: null
+          };
+          const sphParticleUpload =
+            buffersModule.uploadSphGpuParticleBuffers(
+              device,
+              sphParticleState
+            );
+          const mlsMpmParticleUpload =
+            buffersModule.uploadMlsMpmGpuParticleBuffers(
+              device,
+              mlsMpmParticleState
+            );
+          sphParticleUpload.slot = 0;
+          mlsMpmParticleUpload.slot = 0;
+          let levelAssignment = null;
+          let generation = null;
+          try {
+            levelAssignment =
+              await hierarchyModule.runSchroederLevelAssignmentWebGpu({
+                device,
+                sphParticleState,
+                mlsMpmParticleState,
+                sphParticleUpload,
+                mlsMpmParticleUpload,
+                baseGridSpacingM: 0.25,
+                minLevel: 0,
+                maxLevel: 0,
+                targetSupportCells: 1,
+                supportRadiusScale: 1,
+                chartId: 0,
+                retainAssignmentBuffer: true
+              });
+            const gridSpec = gridModule.createMlsMpmGridSpec({
+              boxDimsM: [2, 2, 2],
+              gridSpacingM: 0.25
+            });
+            generation =
+              spatialModule.runSchroederSpatialEpochGenerationWebGpu({
+                device,
+                levelAssignment,
+                particleCount: physicalSourceCount,
+                particleIdentityBuffer: sphParticleUpload.identityBuffer,
+                particleIdentityStrideWords: 1,
+                selectedLevel: 0,
+                mechanicsGrid: {
+                  gridNodeCount: gridSpec.gridNodeCount,
+                  gridDims: gridSpec.gridDims,
+                  gridShift: gridSpec.shift,
+                  gridSpacingM: gridSpec.gridSpacingM
+                }
+              });
+            if (!generation.ready) {
+              throw new Error(
+                `${label} directory-v2 generation rejected: `
+                  + (generation.reason || generation.status)
+              );
+            }
+            const projection =
+              await gridModule.runMlsMpmP2gGridProjectionWebGpu({
+                device,
+                sphParticleState,
+                mlsMpmParticleState,
+                sphParticleUpload,
+                mlsMpmParticleUpload,
+                schroederSelectedLevel: 0,
+                schroederSpatialEpochGeneration: generation,
+                canonicalSpatialRequired: true,
+                mechanicsFieldMode: 'required',
+                gridSpacingM: 0.25,
+                boxDimsM: [2, 2, 2],
+                dt: 0,
+                internalPressureScale: 0,
+                readbackMode: 'no-full-readback'
+              });
+            await device.queue.onSubmittedWorkDone();
+            const activeSourceView = generation.activeSourceView
+              ?? generation.execution.activeSourceView;
+            const activeWords = await readWords(
+              activeSourceView.activeSourceViewBuffer,
+              activeSourceView.layout.byteLength,
+              `native-active-source-p2g-${label}-active`
+            );
+            const field = generation.mechanicsFieldView;
+            const fieldWords = await readWords(
+              field.fieldViewBuffer,
+              field.layout.byteLength,
+              `native-active-source-p2g-${label}-field`
+            );
+            const fieldFloats = new Float32Array(fieldWords.buffer);
+            const fieldCount = fieldWords[34];
+            const descriptorStatuses = Array.from(
+              { length: physicalSourceCount },
+              (_, physical) => fieldWords[
+                field.layout.descriptorOffsetWords
+                  + physical * field.layout.descriptorWords
+                  + 3
+              ]
+            );
+            const contributionCounts = Array.from(
+              { length: fieldCount },
+              (_, fieldIndex) => fieldWords[
+                field.layout.stateOffsetWords
+                  + fieldIndex * field.layout.stateWords
+                  + 7
+              ]
+            );
+            const depositedMass = Array.from(
+              { length: fieldCount },
+              (_, fieldIndex) => fieldFloats[
+                field.layout.stateOffsetWords
+                  + fieldIndex * field.layout.stateWords
+              ]
+            ).reduce((sum, mass) => sum + mass, 0);
+            return {
+              label,
+              activeCount: activeWords[18],
+              activeCandidateCount: activeWords[43],
+              highWaterMark: activeWords[36],
+              activeToPhysical: Array.from(activeWords.slice(
+                activeSourceView.layout.activeToPhysicalOffsetWords,
+                activeSourceView.layout.activeToPhysicalOffsetWords
+                  + activeWords[18]
+              )),
+              activeDispatch: Array.from(activeWords.slice(
+                activeSourceView.layout.activeDispatchOffsetWords,
+                activeSourceView.layout.activeDispatchOffsetWords + 3
+              )),
+              fieldAdmitted: fieldWords[2]
+                === (
+                  abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+                    | abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED
+                ),
+              fieldCount,
+              fieldDispatch: Array.from(fieldWords.slice(60, 63)),
+              descriptorStatuses,
+              contributionCounts,
+              depositedMass,
+              stateEncoding: fieldWords[59],
+              activeSourceP2gEnabled:
+                projection.activeSourceP2gEnabled === true,
+              activeSourceP2gDispatchMode:
+                projection.activeSourceP2gDispatchMode,
+              activeSourceP2gWorkIdentity:
+                projection.activeSourceP2gWorkIdentity,
+              activeCountHostKnown:
+                projection.activeSourceP2gActiveCountHostKnown,
+              executionActiveCount: generation.execution.activeSourceCount,
+              activeSourceCountReadbackPerformed:
+                generation.execution.activeSourceCountReadbackPerformed,
+              sourceWorkIdentity: generation.execution.sourceWorkIdentity,
+              fieldCandidateCount: field.candidateCount,
+              fieldStableCandidateOrderCount:
+                field.stableCandidateOrderCount,
+              fieldCandidateCountAuthorityOffsetWords:
+                field.stableCandidateOrderCountAuthority?.offsetWords ?? null,
+              fullReadbackPerformed:
+                projection.fullReadbackPerformed === true,
+              normalHotLoopReadbackFree:
+                projection.normalHotLoopReadbackFree === true,
+              denseGridBufferAllocatedBytes:
+                projection.denseGridBufferAllocatedBytes,
+              denseAccumulatorBufferAllocatedBytes:
+                projection.denseAccumulatorBufferAllocatedBytes
+            };
+          } finally {
+            if (generation) {
+              spatialModule.releaseSchroederSpatialEpochGenerationAfterQueue(
+                generation,
+                device
+              );
+              await generation.releasePromise;
+            }
+            levelAssignment?.destroyAssignmentBuffer?.();
+            buffersModule.destroySphGpuParticleBuffers(sphParticleUpload);
+            buffersModule.destroyMlsMpmGpuParticleBuffers(
+              mlsMpmParticleUpload
+            );
+          }
+        };
+        const executionCases = [
+          await runExecutionCase({
+            label: 'all-dormant-a0',
+            activePhysicalSources: []
+          }),
+          await runExecutionCase({
+            label: 'sparse-high-slot',
+            activePhysicalSources: [7, 1000]
+          })
+        ];
+        const validationError = await device.popErrorScope();
+        return {
+          status: 'complete',
+          compilationErrors,
+          validationError: validationError?.message || null,
+          uncapturedErrors,
+          compiledEntryPoints,
+          executionCases
+        };
+      } finally {
+        device.destroy();
+      }
+    });
+  } finally {
+    await browser.close();
+  }
+
+  assert.equal(native.status, 'complete', native.reason || 'native WebGPU did not run');
+  assert.deepEqual(native.compilationErrors, []);
+  assert.equal(native.validationError, null);
+  assert.deepEqual(native.uncapturedErrors, []);
+  assert.deepEqual(native.compiledEntryPoints, [
+    'p2g-observed:main',
+    'p2g-observed:finalize_grid',
+    'p2g-observed:preflight_compact_mechanics_view',
+    'p2g-unobserved:main',
+    'p2g-unobserved:finalize_grid',
+    'p2g-unobserved:preflight_compact_mechanics_view',
+    'g2p-observed:main',
+    'g2p-observed:finalize_canonical_spatial_authority',
+    'g2p-unobserved:main',
+    'g2p-unobserved:finalize_canonical_spatial_authority',
+    'g2p-cross-level-observed:main',
+    'g2p-cross-level-observed:finalize_canonical_spatial_authority',
+    'g2p-cross-level-observed:claim_g2p_energy_receipt',
+    'g2p-cross-level-observed:measure_g2p_energy_receipt',
+    'g2p-cross-level-observed:consume_g2p_energy_receipt',
+    'g2p-cross-level-observed:consume_g2p_fine_reflux_receipt',
+    'g2p-cross-level-observed:consume_g2p_coarse_reflux_receipt',
+    'g2p-cross-level-unobserved:main',
+    'g2p-cross-level-unobserved:finalize_canonical_spatial_authority',
+    'g2p-cross-level-unobserved:claim_g2p_energy_receipt',
+    'g2p-cross-level-unobserved:measure_g2p_energy_receipt',
+    'g2p-cross-level-unobserved:consume_g2p_energy_receipt',
+    'g2p-cross-level-unobserved:consume_g2p_fine_reflux_receipt',
+    'g2p-cross-level-unobserved:consume_g2p_coarse_reflux_receipt'
+  ]);
+  assert.deepEqual(native.executionCases, [
+    {
+      label: 'all-dormant-a0',
+      activeCount: 0,
+      activeCandidateCount: 0,
+      highWaterMark: 0,
+      activeToPhysical: [],
+      activeDispatch: [0, 1, 1],
+      fieldAdmitted: true,
+      fieldCount: 0,
+      fieldDispatch: [0, 0, 0],
+      descriptorStatuses: new Array(1024).fill(0),
+      contributionCounts: [],
+      depositedMass: 0,
+      stateEncoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+      activeSourceP2gEnabled: true,
+      activeSourceP2gDispatchMode: 'gpu-authored-active-source-indirect',
+      activeSourceP2gWorkIdentity: 'gpu-active-ordinal-to-physical',
+      activeCountHostKnown: false,
+      executionActiveCount: null,
+      activeSourceCountReadbackPerformed: false,
+      sourceWorkIdentity: 'gpu-active-ordinal',
+      fieldCandidateCount: null,
+      fieldStableCandidateOrderCount: null,
+      fieldCandidateCountAuthorityOffsetWords: 43,
+      fullReadbackPerformed: false,
+      normalHotLoopReadbackFree: true,
+      denseGridBufferAllocatedBytes: 0,
+      denseAccumulatorBufferAllocatedBytes: 0
+    },
+    {
+      label: 'sparse-high-slot',
+      activeCount: 2,
+      activeCandidateCount: 54,
+      highWaterMark: 1001,
+      activeToPhysical: [7, 1000],
+      activeDispatch: [1, 1, 1],
+      fieldAdmitted: true,
+      fieldCount: 27,
+      fieldDispatch: [1, 1, 1],
+      descriptorStatuses: Array.from(
+        { length: 1024 },
+        (_, physical) => (
+          physical === 7 || physical === 1000 ? 1 : 0
+        )
+      ),
+      contributionCounts: new Array(27).fill(2),
+      depositedMass: 2,
+      stateEncoding:
+        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
+      activeSourceP2gEnabled: true,
+      activeSourceP2gDispatchMode: 'gpu-authored-active-source-indirect',
+      activeSourceP2gWorkIdentity: 'gpu-active-ordinal-to-physical',
+      activeCountHostKnown: false,
+      executionActiveCount: null,
+      activeSourceCountReadbackPerformed: false,
+      sourceWorkIdentity: 'gpu-active-ordinal',
+      fieldCandidateCount: null,
+      fieldStableCandidateOrderCount: null,
+      fieldCandidateCountAuthorityOffsetWords: 43,
+      fullReadbackPerformed: false,
+      normalHotLoopReadbackFree: true,
+      denseGridBufferAllocatedBytes: 0,
+      denseAccumulatorBufferAllocatedBytes: 0
+    }
+  ]);
 });
 
 test('MLS-MPM resident summary can skip the active-grid scan for particle-visual diagnostics', async () => {
@@ -5276,10 +5976,20 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
     group.entries.find((entry) => entry.binding === 8)?.resource?.buffer
       === spatialDirectoryBuffer
   ));
+  const ownedG2pEvidenceBuffer = device.createdBuffers.find((buffer) => (
+    buffer.label === 'ulg-mls-mpm-fused-compact-mechanics-g2p-owned-evidence'
+  ));
+  assert.ok(ownedG2pEvidenceBuffer);
   assert.ok(canonicalBindGroups.length >= 7);
   assert.ok(canonicalBindGroups.every((group) => (
+    [
+      mechanicsViewBuffer,
+      ownedG2pEvidenceBuffer
+    ].includes(group.entries.find((entry) => entry.binding === 7)?.resource?.buffer)
+  )));
+  assert.ok(canonicalBindGroups.some((group) => (
     group.entries.find((entry) => entry.binding === 7)?.resource?.buffer
-      === mechanicsViewBuffer
+      === ownedG2pEvidenceBuffer
   )));
   assert.ok(canonicalBindGroups.every((group) => (
     group.entries.find((entry) => entry.binding === 8)?.resource?.buffer
@@ -5310,15 +6020,114 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
   assert.ok(dispatchCopies.every((copy) => (
     copy.sourceOffset === 240 && copy.destinationOffset === 0 && copy.size === 12
   )));
-  assert.ok(device.clears.some((clear) => (
+  assert.equal(device.clears.some((clear) => (
     clear.buffer === mechanicsViewBuffer
     && clear.offset === 16
     && clear.size === 64
-  )));
-  assert.equal(device.clears.some((clear) => (
-    clear.buffer?.label === 'ulg-mls-mpm-fused-p2g-grid-accumulators'
   )), false);
+  const p2gAccumulator = device.createdBuffers.find((buffer) => (
+    buffer.label === 'ulg-mls-mpm-fused-p2g-grid-accumulators'
+  ));
+  assert.ok(p2gAccumulator);
+  assert.ok(device.clears.some((clear) => (
+    clear.buffer === p2gAccumulator
+    && clear.offset === gridSpec.gridNodeCount * 4 * Int32Array.BYTES_PER_ELEMENT
+    && clear.size === 80
+  )));
+  assert.ok(device.clears.some((clear) => (
+    clear.buffer === ownedG2pEvidenceBuffer
+    && clear.offset === 0
+    && clear.size === 80
+  )));
+  assert.ok(device.copies.some((copy) => (
+    copy.source === p2gAccumulator
+    && copy.sourceOffset
+      === gridSpec.gridNodeCount * 4 * Int32Array.BYTES_PER_ELEMENT
+    && copy.destination === ownedG2pEvidenceBuffer
+    && copy.destinationOffset === 0
+    && copy.size === 80
+  )));
   assert.equal(mechanicsViewBuffer.destroyed, false);
+
+  const activeSourceV2Generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount,
+    particleIdentityBuffer: sphParticleUpload.identityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: gridSpec.gridNodeCount,
+      gridDims: gridSpec.gridDims,
+      gridShift: gridSpec.shift,
+      gridSpacingM: gridSpec.gridSpacingM
+    }
+  });
+  assert.equal(activeSourceV2Generation.ready, true);
+  assert.ok(activeSourceV2Generation.activeSourceView);
+  assert.ok(activeSourceV2Generation.mechanicsFieldView);
+  const activeSourceV2Transaction = createSchroederSpatialEpochTransaction({
+    device,
+    generation: activeSourceV2Generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
+  const indirectDispatchCountBeforeV2 = device.indirectDispatches.length;
+  const createdBufferCountBeforeV2 = device.createdBuffers.length;
+  const activeSourceV2Step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederLevelAssignment: levelAssignment,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: activeSourceV2Generation,
+    schroederSpatialEpochTransaction: activeSourceV2Transaction,
+    spatialMechanicalProposalRunner,
+    canonicalSpatialRequired: true,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    fuseNoFullResidentMechanics: true,
+    summaryRunner: fusedMechanicsSummaryStub(buffers)
+  });
+  assert.equal(
+    activeSourceV2Step.p2gGridProjection.schroederSpatialDirectory
+      .activeSourceP2gEnabled,
+    true
+  );
+  assert.equal(
+    activeSourceV2Step.p2gGridProjection.mechanicsFieldViewEnabled,
+    true
+  );
+  const activeSourceV2P2gParamsWrite = device.writes.findLast(
+    (write) => write.label === 'ulg-mls-mpm-fused-p2g-params'
+  );
+  const activeSourceV2G2pParamsWrite = device.writes.findLast(
+    (write) => write.label === 'ulg-mls-mpm-fused-g2p-params'
+  );
+  assert.equal(activeSourceV2P2gParamsWrite.byteLength, 192);
+  assert.equal(activeSourceV2G2pParamsWrite.byteLength, 176);
+  assert.ok(device.indirectDispatches
+    .slice(indirectDispatchCountBeforeV2)
+    .some((dispatch) => (
+      dispatch.buffer
+        === activeSourceV2Generation.activeSourceView.activeSourceViewBuffer
+      && dispatch.offset
+        === activeSourceV2Generation.activeSourceView.activeDispatchOffsetBytes
+      && dispatch.pipeline?.compute?.entryPoint === 'main'
+    )));
+  assert.equal(
+    device.createdBuffers
+      .slice(createdBufferCountBeforeV2)
+      .some((buffer) => (buffer.usage & 1) !== 0),
+    false,
+    'ActiveSource-v2 fused production must not allocate MAP_READ buffers'
+  );
+  assert.equal(device.createdBuffers.some((buffer) => (
+    /private.*spatial|spatial.*private/i.test(buffer.label ?? '')
+  )), false);
 
   const createCommandEncoder = device.createCommandEncoder.bind(device);
   device.createCommandEncoder = (...args) => {

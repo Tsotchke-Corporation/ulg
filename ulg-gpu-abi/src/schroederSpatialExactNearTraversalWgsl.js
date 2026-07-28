@@ -10,6 +10,8 @@ import {
 
 export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_WGSL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-exact-near-traversal-wgsl.v1';
+export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_V2_WGSL_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-exact-near-traversal-wgsl.v2';
 
 export const SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_WGSL_ABI = Object.freeze({
   schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_WGSL_SCHEMA,
@@ -23,6 +25,25 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_WGSL_ABI = Object.freeze({
   malformedRangePolicy: 'fail-closed-admitted-zero',
   candidateBudget: null
 });
+
+export const SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_V2_WGSL_ABI =
+  Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_TRAVERSAL_V2_WGSL_SCHEMA,
+    version: 2,
+    directoryBindingDeclaration:
+      'var<storage, read> spatial_directory: array<u32>',
+    generationAdmission:
+      'complete-v2-header-query-evidence-active-csr-and-physical-reverse-validation-before-lookup',
+    keyOrder: 'chart-level-signed-x-y-z-u32x5-lexicographic',
+    lookup:
+      'binary-search-occupied-key-range-and-active-csr-physical-source-lookup',
+    memberSpanBound: 'directory.header.activeSourceCount',
+    memberIdentityBound: 'expectation.physicalSourceCount',
+    reverseLookup:
+      'physical-source-to-cell-index-plus-one-zero-means-dormant-or-missing',
+    malformedRangePolicy: 'fail-closed-admitted-zero',
+    candidateBudget: null
+  });
 
 const WGSL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -670,3 +691,217 @@ export function createSchroederSpatialExactNearTraversalV1Wgsl({
 
 export const schroederSpatialExactNearTraversalV1Wgsl =
   createSchroederSpatialExactNearTraversalV1Wgsl();
+
+function replaceTraversalRequired(source, search, replacement, label) {
+  if (!source.includes(search)) {
+    throw new Error(`unable to derive exact-near traversal v2 WGSL: ${label}`);
+  }
+  return source.replace(search, replacement);
+}
+
+function exactNearTraversalV2Source(directoryBindingName) {
+  let source = exactNearTraversalSource(directoryBindingName);
+  source = source
+    .replaceAll(
+      'SchroederSpatialExactNearExpectationV1',
+      'SchroederSpatialExactNearExpectationV2'
+    )
+    .replaceAll(
+      'SchroederSpatialExactNearRangeV1',
+      'SchroederSpatialExactNearRangeV2'
+    )
+    .replaceAll(
+      'SchroederSpatialExactNearSourceLookupV1',
+      'SchroederSpatialExactNearSourceLookupV2'
+    )
+    .replaceAll('SS_EXACT_NEAR_MAGIC_V1', 'SS_EXACT_NEAR_MAGIC_V2')
+    .replaceAll('SS_EXACT_NEAR_ABI_VERSION_V1', 'SS_EXACT_NEAR_ABI_VERSION_V2')
+    .replaceAll('expected.source_count', 'expected.physical_source_count')
+    .replaceAll(
+      'expected.expected_particle_to_cell_offset_words',
+      'expected.expected_physical_to_cell_plus_one_offset_words'
+    )
+    .replaceAll(
+      'expected.expected_source_capacity',
+      'expected.expected_physical_source_capacity'
+    );
+  source = replaceTraversalRequired(
+    source,
+    '  source_count: u32,',
+    '  physical_source_count: u32,',
+    'physical source expectation field'
+  );
+  source = replaceTraversalRequired(
+    source,
+    '  expected_particle_to_cell_offset_words: u32,',
+    '  expected_physical_to_cell_plus_one_offset_words: u32,',
+    'physical reverse expectation field'
+  );
+  source = replaceTraversalRequired(
+    source,
+    '  expected_source_capacity: u32,',
+    '  expected_physical_source_capacity: u32,',
+    'physical source capacity expectation field'
+  );
+  source = replaceTraversalRequired(
+    source,
+    'const SS_EXACT_NEAR_ABI_VERSION_V2: u32 = 1u;',
+    'const SS_EXACT_NEAR_ABI_VERSION_V2: u32 = 2u;',
+    'directory ABI version'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  let cell_count = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  let cell_capacity = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_CAPACITY];`,
+    `  let cell_count = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  let cell_capacity = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_CAPACITY];
+  let active_source_count = ${directoryBindingName}[
+    SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT
+  ];`,
+    'GPU-authored active source count'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `    source_count > 0xffffffffu - expected.expected_physical_to_cell_plus_one_offset_words`,
+    `    expected.expected_physical_source_capacity
+      > 0xffffffffu - expected.expected_physical_to_cell_plus_one_offset_words`,
+    'capacity-stable query evidence overflow guard'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  let query_evidence_offset = expected.expected_physical_to_cell_plus_one_offset_words
+    + source_count;`,
+    `  let query_evidence_offset = expected.expected_physical_to_cell_plus_one_offset_words
+    + expected.expected_physical_source_capacity;`,
+    'capacity-stable query evidence offset'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `    && source_count == expected.physical_source_count
+    && source_capacity == expected.expected_physical_source_capacity
+    && cell_count > 0u
+    && cell_count <= source_count`,
+    `    && source_count == expected.physical_source_count
+    && source_capacity == expected.expected_physical_source_capacity
+    && active_source_count <= source_count
+    && cell_count <= active_source_count
+    && (active_source_count == 0u || cell_count > 0u)`,
+    'active source admission'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `    && ${directoryBindingName}[SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT]
+      == source_count`,
+    `    && ${directoryBindingName}[SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT]
+      == active_source_count`,
+    'active primitive input evidence'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `      expected.expected_cell_members_offset_words,
+      source_count,
+      physical_upper
+    )
+    && ss_exact_near_range_within(
+      expected.expected_physical_to_cell_plus_one_offset_words,
+      source_count,`,
+    `      expected.expected_cell_members_offset_words,
+      active_source_count,
+      physical_upper
+    )
+    && ss_exact_near_range_within(
+      expected.expected_physical_to_cell_plus_one_offset_words,
+      expected.expected_physical_source_capacity,`,
+    'active CSR and physical reverse spans'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `      expected.expected_cell_offsets_offset_words + cell_count
+    ] == source_count;`,
+    `      expected.expected_cell_offsets_offset_words + cell_count
+    ] == active_source_count;`,
+    'active CSR terminal offset'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `    && (occupied_level_mask_low | occupied_level_mask_high) != 0u
+    && (occupied_level_mask_low & ~allowed_level_mask_low) == 0u
+    && (occupied_level_mask_high & ~allowed_level_mask_high) == 0u`,
+    `    && (
+      active_source_count == 0u
+      || (
+        (occupied_level_mask_low | occupied_level_mask_high) != 0u
+        && (occupied_level_mask_low & ~allowed_level_mask_low) == 0u
+        && (occupied_level_mask_high & ~allowed_level_mask_high) == 0u
+      )
+    )`,
+    'empty active-set query evidence'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  if (member_begin > member_end || member_end > expected.physical_source_count) {`,
+    `  let active_source_count = ${directoryBindingName}[
+    SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT
+  ];
+  if (member_begin > member_end || member_end > active_source_count) {`,
+    'active cell member range'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  if (member_offset >= expected.physical_source_count) {
+    return SchroederSpatialExactNearSourceLookupV2(0u, 0u);
+  }`,
+    `  let active_source_count = ${directoryBindingName}[
+    SS_EXACT_NEAR_HEADER_UNIQUE_INPUT_COUNT
+  ];
+  if (member_offset >= active_source_count) {
+    return SchroederSpatialExactNearSourceLookupV2(0u, 0u);
+  }`,
+    'active member offset bound'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  let cell_index = ${directoryBindingName}[
+    expected.expected_physical_to_cell_plus_one_offset_words + source_index
+  ];
+  let cell_count = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  if (cell_index >= cell_count) {
+    return SchroederSpatialExactNearSourceLookupV2(0u, 0u);
+  }
+  return SchroederSpatialExactNearSourceLookupV2(1u, cell_index);`,
+    `  let cell_plus_one = ${directoryBindingName}[
+    expected.expected_physical_to_cell_plus_one_offset_words + source_index
+  ];
+  if (cell_plus_one == 0u) {
+    return SchroederSpatialExactNearSourceLookupV2(0u, 0u);
+  }
+  let cell_index = cell_plus_one - 1u;
+  let cell_count = ${directoryBindingName}[SS_EXACT_NEAR_HEADER_CELL_COUNT];
+  if (cell_index >= cell_count) {
+    return SchroederSpatialExactNearSourceLookupV2(0u, 0u);
+  }
+  return SchroederSpatialExactNearSourceLookupV2(1u, cell_index);`,
+    'plus-one physical reverse lookup'
+  );
+  source = replaceTraversalRequired(
+    source,
+    `  let query_evidence_offset = expected.expected_physical_to_cell_plus_one_offset_words
+    + expected.physical_source_count;`,
+    `  let query_evidence_offset = expected.expected_physical_to_cell_plus_one_offset_words
+    + expected.expected_physical_source_capacity;`,
+    'level mask evidence offset'
+  );
+  return source;
+}
+
+export function createSchroederSpatialExactNearTraversalV2Wgsl({
+  directoryBindingName = 'spatial_directory'
+} = {}) {
+  if (!WGSL_IDENTIFIER.test(directoryBindingName)) {
+    throw new TypeError('directoryBindingName must be a WGSL identifier');
+  }
+  return exactNearTraversalV2Source(directoryBindingName);
+}
+
+export const schroederSpatialExactNearTraversalV2Wgsl =
+  createSchroederSpatialExactNearTraversalV2Wgsl();

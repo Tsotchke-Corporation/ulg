@@ -13,6 +13,8 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE
 } from './schroederSpatialPhaseVolumeMoment.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
 } from './schroederSpatialMechanicsFieldView.js';
@@ -27,7 +29,10 @@ function u32(value) {
  * accumulator, P2G, grid, closure, particle, phase, or renderer binding is
  * writable from this module.
  */
-export function createSchroederSpatialPhaseVolumeMomentWgsl(layout) {
+export function createSchroederSpatialPhaseVolumeMomentWgsl(layout, {
+  sourceAuthorityVersion =
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+} = {}) {
   if (
     !layout
     || layout.controlWords !== SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_HEADER_WORDS
@@ -44,6 +49,18 @@ export function createSchroederSpatialPhaseVolumeMomentWgsl(layout) {
     || layout.candidateContributionFloats !== layout.candidateCapacity * 4
   ) {
     throw new TypeError('phase-volume moment sidecar layout is not canonical');
+  }
+  const directoryV2 =
+    sourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2;
+  if (
+    !directoryV2
+    && sourceAuthorityVersion
+      !== SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+  ) {
+    throw new RangeError(
+      'phase-volume moment WGSL requires the exact v1 or v2 source authority'
+    );
   }
   return /* wgsl */ `
 struct PhaseVolumeMomentParams {
@@ -93,6 +110,9 @@ struct PhaseVolumeMomentParams {
 @group(0) @binding(6) var<storage, read_write> control: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> moment_rows: array<u32>;
 @group(0) @binding(8) var<uniform> params: PhaseVolumeMomentParams;
+${directoryV2
+    ? '@group(0) @binding(9) var<storage, read> active_source_view: array<u32>;'
+    : ''}
 
 const MOMENT_MAGIC: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_MAGIC)};
 const MOMENT_VERSION: u32 = ${u32(SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_VERSION)};
@@ -125,11 +145,165 @@ const ASSIGNMENT_STRIDE: u32 = 16u;
 const MECHANICS_STRIDE: u32 = 32u;
 const RAW_VOLUME_RATIO_J_WORD: u32 = 18u;
 const RAW_REST_VOLUME_WORD: u32 = 19u;
+const FIELD_DESCRIPTOR_ACTIVE_WORD: u32 = 3u;
+const F32_I32_MIN: f32 = -2147483648.0;
+const F32_I32_EXCLUSIVE_MAX: f32 = 2147483648.0;
 const CONTROL_INVALID_RAW_VOLUME: u32 = 37u;
 const CONTROL_INVALID_LINEAGE: u32 = 38u;
 const CONTROL_CLIPPED_CANDIDATES: u32 = 39u;
 const CONTROL_CONTRIBUTION_COUNT: u32 = 40u;
 const CONTROL_ZEROED_FIELD_COUNT: u32 = 41u;
+${directoryV2
+    ? `
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_READY_ADMITTED: u32 = 3u;
+const ACTIVE_SOURCE_REJECTED_MASK: u32 = 252u;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = 64u;
+const ACTIVE_SOURCE_MISSING: u32 = 0xffffffffu;
+const ACTIVE_SOURCE_COUNT_WORD: u32 = 18u;
+const ACTIVE_SOURCE_CANDIDATE_COUNT_WORD: u32 = 43u;
+const ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD: u32 = 48u;
+const ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD: u32 = 51u;
+const ACTIVE_SOURCE_COMPLETION_WORD: u32 = 30u;
+const ACTIVE_SOURCE_SEAL_WORD: u32 = 47u;
+
+fn group_count(count: u32) -> u32 {
+  return count / MOMENT_WORKGROUP_SIZE
+    + select(0u, 1u, count % MOMENT_WORKGROUP_SIZE != 0u);
+}
+
+fn dispatch_shape_admitted(count: u32, offset: u32) -> bool {
+  let groups = group_count(count);
+  let dispatch_x = active_source_view[offset];
+  let dispatch_y = active_source_view[offset + 1u];
+  let dispatch_z = active_source_view[offset + 2u];
+  if (count == 0u) {
+    return dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u;
+  }
+  if (
+    dispatch_x == 0u
+    || dispatch_x > groups
+    || dispatch_y == 0u
+    || dispatch_z != 1u
+  ) {
+    return false;
+  }
+  return dispatch_y == groups / dispatch_x
+    + select(0u, 1u, groups % dispatch_x != 0u);
+}
+
+fn active_source_view_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ACTIVE_SOURCE_HEADER_WORDS) { return false; }
+  let status = active_source_view[2u];
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[ACTIVE_SOURCE_COUNT_WORD];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  return active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_READY_ADMITTED) == ACTIVE_SOURCE_READY_ADMITTED
+    && (status & ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && physical_count == params.source_count
+    && physical_capacity == params.source_capacity
+    && active_count <= active_capacity
+    && active_capacity <= physical_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u] == SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+    && active_source_view[24u] == ASSIGNMENT_STRIDE
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[29u] == params.completion_ordinal
+    && active_source_view[ACTIVE_SOURCE_COMPLETION_WORD]
+      == params.completion_ordinal
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[37u] == MOMENT_WORKGROUP_SIZE
+    && active_source_view[38u] > 0u
+    && active_source_view[40u] == ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD
+    && active_source_view[41u] == ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD
+    && active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD]
+      == active_count * FIELD_STENCIL_SIZE
+    && active_source_view[44u] == active_capacity * FIELD_STENCIL_SIZE
+    && active_source_view[ACTIVE_SOURCE_SEAL_WORD] != 0u
+    && dispatch_shape_admitted(
+      active_count,
+      ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD
+    )
+    && dispatch_shape_admitted(
+      active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD],
+      ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD
+    );
+}
+
+fn active_source_count() -> u32 {
+  return select(
+    0u,
+    active_source_view[ACTIVE_SOURCE_COUNT_WORD],
+    active_source_view_admitted()
+  );
+}
+
+fn active_candidate_count() -> u32 {
+  return select(
+    0u,
+    active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD],
+    active_source_view_admitted()
+  );
+}
+
+fn physical_source_for_active(active_ordinal: u32) -> u32 {
+  if (active_ordinal >= active_source_count()) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let physical_source = active_source_view[active_to_physical + active_ordinal];
+  if (
+    physical_source >= params.source_count
+    || active_source_view[physical_to_active + physical_source]
+      != active_ordinal
+  ) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return physical_source;
+}
+
+fn active_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>,
+  dispatch_offset: u32
+) -> u32 {
+  let linear_group = workgroup_id.x
+    + workgroup_id.y * active_source_view[dispatch_offset];
+  return linear_group * MOMENT_WORKGROUP_SIZE + local_id.x;
+}
+`
+    : ''}
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -213,7 +387,9 @@ fn field_identity_admitted() -> bool {
     || mechanics_field[29u] != 8u
     || mechanics_field[31u] != 8u
     || mechanics_field[32u] != params.field_capacity
-    || mechanics_field[33u] != params.candidate_count
+    || mechanics_field[33u] != ${directoryV2
+      ? 'active_candidate_count()'
+      : 'params.candidate_count'}
     || mechanics_field[38u] != params.completion_ordinal
     || mechanics_field[39u] != params.source_row_layout_id
     || mechanics_field[40u] == 0u
@@ -230,7 +406,7 @@ fn field_identity_admitted() -> bool {
     || field_count > (mechanics_field[42u] - key_offset) / FIELD_KEY_WORDS
     || !mechanics_field_dispatch_shape_admitted(field_count)
   ) { return false; }
-  return true;
+  return ${directoryV2 ? 'active_source_view_admitted()' : 'true'};
 }
 
 fn source_row_admitted(source_index: u32) -> bool {
@@ -279,8 +455,11 @@ fn quadratic_gradient(fraction: f32, ordinal: u32, inv_spacing: f32) -> f32 {
 }
 
 fn candidate_field_index(candidate_index: u32) -> u32 {
-  let source_index = candidate_index / FIELD_STENCIL_SIZE;
-  let stencil_ordinal = candidate_index - source_index * FIELD_STENCIL_SIZE;
+  let work_source = candidate_index / FIELD_STENCIL_SIZE;
+  let stencil_ordinal = candidate_index - work_source * FIELD_STENCIL_SIZE;
+  let source_index = ${directoryV2
+    ? 'physical_source_for_active(work_source)'
+    : 'work_source'};
   if (source_index >= params.source_count || stencil_ordinal >= FIELD_STENCIL_SIZE) {
     return INVALID_FIELD;
   }
@@ -295,10 +474,19 @@ fn candidate_field_index(candidate_index: u32) -> u32 {
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE})
 fn emit_phase_volume_moment_contributions(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
+    ? `,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+    : ''}
 ) {
-  let sorted_position = global_id.x;
-  if (sorted_position >= params.candidate_count) { return; }
+  let sorted_position = ${directoryV2
+    ? 'active_linear_invocation(local_id, workgroup_id, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
+    : 'global_id.x'};
+  let candidate_count = ${directoryV2
+    ? 'active_candidate_count()'
+    : 'params.candidate_count'};
+  if (sorted_position >= candidate_count) { return; }
   write_empty_candidate(sorted_position);
   if (
     !field_identity_admitted()
@@ -310,12 +498,52 @@ fn emit_phase_volume_moment_contributions(
     return;
   }
   let candidate_index = sorted_candidate_indices[sorted_position];
-  if (candidate_index >= params.candidate_count) {
+  if (candidate_index >= candidate_count) {
     record_invalid_lineage();
     return;
   }
-  let source_index = candidate_index / FIELD_STENCIL_SIZE;
-  let stencil_ordinal = candidate_index - source_index * FIELD_STENCIL_SIZE;
+  let work_source = candidate_index / FIELD_STENCIL_SIZE;
+  let stencil_ordinal = candidate_index - work_source * FIELD_STENCIL_SIZE;
+  let source_index = ${directoryV2
+    ? 'physical_source_for_active(work_source)'
+    : 'work_source'};
+  ${directoryV2
+    ? `if (source_index == ACTIVE_SOURCE_MISSING) {
+    record_invalid_lineage();
+    return;
+  }
+  if (!source_row_admitted(source_index)) {
+    record_invalid_lineage();
+    return;
+  }
+  let v2_assignment_offset = source_index * ASSIGNMENT_STRIDE;
+  let v2_level = assignment_rows[v2_assignment_offset + 0u];
+  let v2_descriptor_offset = mechanics_field[24u]
+    + source_index * FIELD_DESCRIPTOR_WORDS;
+  if (
+    v2_descriptor_offset > arrayLength(&mechanics_field)
+    || FIELD_DESCRIPTOR_WORDS
+      > arrayLength(&mechanics_field) - v2_descriptor_offset
+    || !integral_f32(v2_level)
+    || v2_level < F32_I32_MIN
+    || v2_level >= F32_I32_EXCLUSIVE_MAX
+  ) {
+    record_invalid_lineage();
+    return;
+  }
+  let v2_descriptor_status =
+    mechanics_field[v2_descriptor_offset + FIELD_DESCRIPTOR_ACTIVE_WORD];
+  if (i32(round(v2_level)) != params.selected_level) {
+    if (v2_descriptor_status != 0u) {
+      record_invalid_lineage();
+    }
+    return;
+  }
+  if (v2_descriptor_status != 1u) {
+    record_invalid_lineage();
+    return;
+  }`
+    : ''}
   let field_index = candidate_field_index(candidate_index);
   // The existing mechanics-field builder marks clipped/dormant rows with the
   // sentinel.  The finalizer turns any clipped source evidence into a whole
@@ -403,10 +631,19 @@ fn emit_phase_volume_moment_contributions(
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE})
 fn materialize_phase_volume_moment_ranges(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
+    ? `,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+    : ''}
 ) {
-  let sorted_position = global_id.x;
-  if (sorted_position >= params.candidate_count
+  let sorted_position = ${directoryV2
+    ? 'active_linear_invocation(local_id, workgroup_id, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
+    : 'global_id.x'};
+  let candidate_count = ${directoryV2
+    ? 'active_candidate_count()'
+    : 'params.candidate_count'};
+  if (sorted_position >= candidate_count
     || sorted_position >= arrayLength(&scratch_words)) { return; }
   if (!field_identity_admitted()) {
     record_invalid_lineage();
@@ -425,7 +662,7 @@ fn materialize_phase_volume_moment_ranges(
     previous = scratch_words[sorted_position - 1u];
   }
   var next = INVALID_FIELD;
-  if (sorted_position + 1u < params.candidate_count) {
+  if (sorted_position + 1u < candidate_count) {
     next = scratch_words[sorted_position + 1u];
   }
   if ((previous != INVALID_FIELD && previous > field_index)
@@ -448,17 +685,34 @@ fn zero_moment_row(field_index: u32) {
 }
 
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE})
-fn reduce_phase_volume_moments(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let field_index = global_id.x;
+fn reduce_phase_volume_moments(
+  @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
+    ? `,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+    : ''}
+) {
+  let field_index = ${directoryV2
+    ? '(workgroup_id.x + workgroup_id.y * mechanics_field[60u]) * MOMENT_WORKGROUP_SIZE + local_id.x'
+    : 'global_id.x'};
   if (field_index >= params.field_capacity) { return; }
   if (!field_identity_admitted()) {
     zero_moment_row(field_index);
     atomicAdd(&control[CONTROL_ZEROED_FIELD_COUNT], 1u);
     return;
   }
+  if (field_index >= mechanics_field[34u]) {
+    ${directoryV2
+      ? `// Directory-v2 dispatches the exact GPU-authenticated field shape.
+    // The retained moment arena was cleared before this pass, so padded
+    // workgroup lanes need no write and are not rejected field rows.
+    return;`
+      : `zero_moment_row(field_index);
+    atomicAdd(&control[CONTROL_ZEROED_FIELD_COUNT], 1u);
+    return;`}
+  }
   if (
-    field_index >= mechanics_field[34u]
-    || control_load(CONTROL_INVALID_RAW_VOLUME) != 0u
+    control_load(CONTROL_INVALID_RAW_VOLUME) != 0u
     || control_load(CONTROL_INVALID_LINEAGE) != 0u
     || mechanics_field[36u] != 0u
     || mechanics_field[37u] != 0u
@@ -478,7 +732,9 @@ fn reduce_phase_volume_moments(@builtin(global_invocation_id) global_id: vec3<u3
   }
   let range_start = scratch_words[range_offset];
   let range_end = scratch_words[range_offset + 1u];
-  if (!(range_end > range_start) || range_end > params.candidate_count) {
+  if (!(range_end > range_start) || range_end > ${directoryV2
+    ? 'active_candidate_count()'
+    : 'params.candidate_count'}) {
     record_invalid_lineage();
     zero_moment_row(field_index);
     return;
@@ -512,7 +768,7 @@ fn reduce_phase_volume_moments(@builtin(global_invocation_id) global_id: vec3<u3
     || FIELD_KEY_WORDS > arrayLength(&mechanics_field) - key_offset
     || output > arrayLength(&moment_rows)
     || MOMENT_ROW_WORDS > arrayLength(&moment_rows) - output
-    || !(sum.x > 0.0)
+    || !(sum.x ${directoryV2 ? '>=' : '>'} 0.0)
     || !finite_f32(sum.x)
     || !finite_f32(sum.y)
     || !finite_f32(sum.z)
@@ -572,7 +828,11 @@ fn finalize_phase_volume_moments() {
     }
     field_count = 0u;
   }
-  let dispatch_x = select(0u, (field_count + MOMENT_WORKGROUP_SIZE - 1u) / MOMENT_WORKGROUP_SIZE, admitted);
+  let dispatch_x = select(0u, ${directoryV2
+    ? 'mechanics_field[60u]'
+    : '(field_count + MOMENT_WORKGROUP_SIZE - 1u) / MOMENT_WORKGROUP_SIZE'}, admitted);
+  let dispatch_y = select(0u, ${directoryV2 ? 'mechanics_field[61u]' : '1u'}, admitted);
+  let dispatch_z = select(0u, ${directoryV2 ? 'mechanics_field[62u]' : '1u'}, admitted);
   control_store(0u, MOMENT_MAGIC);
   control_store(1u, MOMENT_VERSION);
   control_store(2u, flags);
@@ -605,7 +865,9 @@ fn finalize_phase_volume_moments() {
   control_store(29u, MOMENT_ROW_WORDS);
   control_store(30u, field_count * MOMENT_ROW_WORDS);
   control_store(31u, MOMENT_WORD_CAPACITY);
-  control_store(32u, params.candidate_count);
+  control_store(32u, ${directoryV2
+    ? 'active_candidate_count()'
+    : 'params.candidate_count'});
   control_store(33u, RAW_VOLUME_RATIO_J_WORD);
   control_store(34u, RAW_REST_VOLUME_WORD);
   control_store(35u, MECHANICS_STRIDE);
@@ -620,15 +882,25 @@ fn finalize_phase_volume_moments() {
   control_store(44u, 1u);
   control_store(45u, 0u);
   control_store(46u, dispatch_x);
-  control_store(47u, select(0u, 1u, admitted));
-  control_store(48u, select(0u, 1u, admitted));
+  control_store(47u, dispatch_y);
+  control_store(48u, dispatch_z);
   control_store(49u, MOMENT_HEADER_WORDS);
   control_store(50u, 4u);
   control_store(51u, 2u);
   control_store(52u, FIELD_MAGIC);
   control_store(53u, FIELD_VERSION);
   control_store(54u, SOURCE_LAYOUT_LEVEL_ASSIGNMENT);
-  for (var word = 55u; word < MOMENT_HEADER_WORDS; word = word + 1u) {
+  ${directoryV2
+    ? `control_store(55u, ${u32(
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
+    )});
+  control_store(56u, active_source_count());
+  control_store(57u, ACTIVE_SOURCE_COUNT_WORD);
+  control_store(58u, ACTIVE_SOURCE_CANDIDATE_COUNT_WORD);
+  control_store(59u, ACTIVE_SOURCE_COMPLETION_WORD);
+  control_store(60u, params.completion_ordinal);
+  for (var word = 61u; word < MOMENT_HEADER_WORDS; word = word + 1u) {`
+    : 'for (var word = 55u; word < MOMENT_HEADER_WORDS; word = word + 1u) {'}
     control_store(word, 0u);
   }
 }

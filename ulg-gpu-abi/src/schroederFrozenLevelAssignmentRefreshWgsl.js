@@ -8,6 +8,11 @@ export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_FLAG_ADMITTED = 1;
  * volume, material, phase, status, hysteresis and chart identity remain
  * bit-for-bit frozen for the macro step. Only the three position words are
  * replaced from the exact retained state buffer for the current substep.
+ *
+ * This kernel is not an authority boundary. The host runtime may encode it
+ * only with its private proof that the exact thermo/topology/support
+ * descriptors remain macro-frozen and that the matching current mechanics
+ * generation is retained separately for strict V0*J consumers.
  */
 export const schroederFrozenLevelAssignmentRefreshWgsl = /* wgsl */ `
 struct FrozenLevelAssignmentRefreshParams {

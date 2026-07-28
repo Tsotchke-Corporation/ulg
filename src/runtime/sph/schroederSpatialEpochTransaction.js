@@ -50,6 +50,13 @@ import {
   validateSchroederSpatialActiveRankViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialActiveRankView.js';
 import {
+  validateSchroederSpatialActiveSourceViewDescriptor
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+} from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
   isFinalizedSchroederSpatialExactNearConsumerReceipt,
   isSchroederSpatialExactNearResidentConsumerBinding
 } from './schroederSpatialEpochGpu.js';
@@ -318,6 +325,165 @@ function sourceBuffersMatch(expected, actual) {
     && expected.thermoBuffer === actual.thermoBuffer
     && expected.identityBuffer === actual.identityBuffer
     && expected.mechanicsBuffer === actual.mechanicsBuffer;
+}
+
+function runtimeOwnsSubmittedExecution(runtime, execution) {
+  try {
+    return runtime?.ownsExecution?.(execution) === true
+      && runtime?.isExecutionSubmitted?.(execution) === true;
+  } catch {
+    return false;
+  }
+}
+
+function activeSourceDescriptorExpectation({
+  activeSourceView,
+  execution,
+  sourceBuffer
+}) {
+  return Object.freeze({
+    sourceBuffer,
+    activeSourceViewBuffer: activeSourceView.activeSourceViewBuffer,
+    physicalSourceCount: execution.physicalSourceCount,
+    physicalSourceCapacity: execution.physicalSourceCapacity,
+    activeSourceCapacity: execution.activeSourceCapacity,
+    sourceRowLayoutId: execution.sourceRowLayoutId,
+    sourceRowStrideFloats: execution.sourceRowStrideFloats,
+    generationId: execution.generationId,
+    deviceOrdinal: execution.deviceOrdinal,
+    laneOrdinal: execution.laneOrdinal,
+    leaseToken: execution.leaseToken,
+    sourceFamilyId: execution.sourceFamilyId,
+    storageGeneration: execution.storageGeneration,
+    physicsTick: execution.physicsTick,
+    physicsSubstep: execution.physicsSubstep,
+    positionEpoch: execution.positionEpoch,
+    topologyEpoch: execution.topologyEpoch,
+    chartEpoch: execution.chartEpoch,
+    levelEpoch: execution.levelEpoch,
+    supportEpoch: execution.supportEpoch,
+    buildOrdinal: execution.buildOrdinal,
+    sourceFingerprint: activeSourceView.sourceFingerprint,
+    ownerRuntime: activeSourceView.ownerRuntime,
+    executionSourceCount: execution.sourceCount,
+    executionSourceFamily: execution.sourceFamily,
+    executionAbiVersion: execution.abiVersion,
+    sourceWorkIdentity: execution.sourceWorkIdentity,
+    logicalSourceCountGpuAuthored: execution.logicalSourceCountGpuAuthored,
+    queryGeometryMode: execution.queryGeometryMode,
+    queryChartId: execution.queryChartId,
+    queryMinLevel: execution.queryMinLevel,
+    queryMaxLevel: execution.queryMaxLevel,
+    queryBaseGridSpacingM: execution.queryBaseGridSpacingM,
+    capacityTierOrdinal: activeSourceView.capacityTierOrdinal,
+    activeDispatchOffsetBytes: activeSourceView.activeDispatchOffsetBytes,
+    candidateDispatchOffsetBytes: activeSourceView.candidateDispatchOffsetBytes,
+    physicalDispatchOffsetBytes: activeSourceView.physicalDispatchOffsetBytes
+  });
+}
+
+function activeSourceViewMatchesSnapshot(snapshot, generation, device) {
+  const execution = generation?.execution ?? null;
+  const source = generation?.source ?? null;
+  const activeSourceView = snapshot.activeSourceView;
+  if (!snapshot.directoryV2) {
+    return (generation?.activeSourceView ?? null) === null
+      && (generation?.activeSourceViewRuntime ?? null) === null
+      && (execution?.activeSourceView ?? null) === null
+      && (execution?.activeSourceViewBuffer ?? null) === null
+      && (execution?.activeSourceCountAuthority ?? null) === null;
+  }
+  const expected = snapshot.activeSourceDescriptorExpectation;
+  const countAuthority = snapshot.activeSourceCountAuthority;
+  if (
+    !activeSourceView
+    || !expected
+    || !countAuthority
+    || generation?.activeSourceView !== activeSourceView
+    || generation?.activeSourceViewRuntime !== snapshot.activeSourceViewRuntime
+    || execution?.activeSourceView !== activeSourceView
+    || execution?.activeSourceViewBuffer !== snapshot.activeSourceViewBuffer
+    || execution?.activeSourceCountAuthority !== countAuthority
+    || execution?.logicalSourceCountAuthority !== countAuthority
+    || execution?.activeSourceCountAuthorityOffsetWords
+      !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+    || activeSourceView.activeSourceViewBuffer !== snapshot.activeSourceViewBuffer
+    || activeSourceView.layout !== snapshot.activeSourceViewLayout
+    || !Object.isFrozen(activeSourceView.layout)
+    || activeSourceView.submitPerformed !== true
+    || activeSourceView.released === true
+    || activeSourceView.ownerRuntime !== snapshot.activeSourceViewRuntime
+    || !runtimeOwnsSubmittedExecution(
+      activeSourceView.ownerRuntime,
+      activeSourceView
+    )
+    || !runtimeOwnsSubmittedExecution(execution?.ownerRuntime, execution)
+    || source?.sourceCount !== expected.physicalSourceCount
+    || countAuthority.activeSourceView !== activeSourceView
+    || countAuthority.buffer !== snapshot.activeSourceViewBuffer
+    || countAuthority.offsetWords
+      !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+    || countAuthority.offsetBytes
+      !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+        * Uint32Array.BYTES_PER_ELEMENT
+    || countAuthority.capacity !== expected.activeSourceCapacity
+    || countAuthority.residency !== 'gpu-only'
+    || !Object.isFrozen(countAuthority)
+    || !webGpuBufferMatchesDevice(snapshot.activeSourceViewBuffer, device)
+  ) return false;
+  for (const field of [
+    'physicalSourceCount',
+    'physicalSourceCapacity',
+    'activeSourceCapacity',
+    'sourceRowLayoutId',
+    'sourceRowStrideFloats',
+    'generationId',
+    'deviceOrdinal',
+    'laneOrdinal',
+    'leaseToken',
+    'sourceFamilyId',
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch',
+    'buildOrdinal',
+    'queryGeometryMode',
+    'queryChartId',
+    'queryMinLevel',
+    'queryMaxLevel',
+    'queryBaseGridSpacingM'
+  ]) {
+    if (!Object.is(execution[field], expected[field])) return false;
+  }
+  if (
+    execution.sourceCount !== expected.executionSourceCount
+    || execution.sourceFamily !== expected.executionSourceFamily
+    || execution.abiVersion !== expected.executionAbiVersion
+    || execution.sourceWorkIdentity !== expected.sourceWorkIdentity
+    || execution.logicalSourceCountGpuAuthored
+      !== expected.logicalSourceCountGpuAuthored
+  ) return false;
+  for (const field of [
+    'queryGeometryMode',
+    'queryChartId',
+    'queryMinLevel',
+    'queryMaxLevel',
+    'queryBaseGridSpacingM',
+    'capacityTierOrdinal',
+    'activeDispatchOffsetBytes',
+    'candidateDispatchOffsetBytes',
+    'physicalDispatchOffsetBytes'
+  ]) {
+    if (!Object.is(activeSourceView[field], expected[field])) return false;
+  }
+  return validateSchroederSpatialActiveSourceViewDescriptor(
+    activeSourceView,
+    expected
+  ).admitted === true;
 }
 
 /**
@@ -1249,6 +1415,7 @@ function generationMatchesSnapshot(authority, generation) {
     || (source?.sourceBuffer ?? source?.activeNodeBuffer) !== snapshot.sourceBuffer
     || (execution?.sourceBuffer ?? execution?.activeNodeBuffer) !== snapshot.sourceBuffer
     || execution?.directoryBuffer !== snapshot.directoryBuffer
+    || !activeSourceViewMatchesSnapshot(snapshot, generation, authority.device)
     || (generation?.activeRankView ?? null) !== snapshot.activeRankView
     || (execution?.activeRankView ?? null) !== snapshot.activeRankView
     || (execution?.activeRankViewBuffer ?? null)
@@ -1971,6 +2138,41 @@ export function createSchroederSpatialEpochTransaction({
       'ERR_SCHROEDER_SPATIAL_EPOCH_IDENTITY'
     );
   }
+  const directoryV2 =
+    execution.abiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  const activeSourceView = generation.activeSourceView
+    ?? execution.activeSourceView
+    ?? null;
+  const activeSourceSnapshot = Object.freeze({
+    directoryV2,
+    activeSourceView,
+    activeSourceViewRuntime: generation.activeSourceViewRuntime ?? null,
+    activeSourceViewBuffer:
+      activeSourceView?.activeSourceViewBuffer ?? null,
+    activeSourceViewLayout: activeSourceView?.layout ?? null,
+    activeSourceCountAuthority:
+      execution.activeSourceCountAuthority ?? null,
+    activeSourceDescriptorExpectation:
+      directoryV2 && activeSourceView
+        ? activeSourceDescriptorExpectation({
+            activeSourceView,
+            execution,
+            sourceBuffer: spatialSourceBuffer
+          })
+        : null
+  });
+  if (!activeSourceViewMatchesSnapshot(
+    activeSourceSnapshot,
+    generation,
+    device
+  )) {
+    throw transactionError(
+      directoryV2
+        ? 'Spatial epoch ActiveSource view is not an exact submitted directory-v2 authority'
+        : 'Legacy spatial epoch retained directory-v2 ActiveSource resources',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_ACTIVE_SOURCE_IDENTITY'
+    );
+  }
   const activeRankView = generation.activeRankView
     ?? execution.activeRankView
     ?? null;
@@ -2194,6 +2396,7 @@ export function createSchroederSpatialEpochTransaction({
       deviceId,
       sourceBuffer: spatialSourceBuffer,
       directoryBuffer: execution.directoryBuffer,
+      ...activeSourceSnapshot,
       activeRankView,
       activeRankViewBuffer: activeRankView?.activeRankViewBuffer ?? null,
       activeRankViewLayout: activeRankView?.layout ?? null,
@@ -2304,6 +2507,7 @@ export function createSchroederSpatialEpochTransaction({
       ?? (generation.mechanicsView ? 1 : 0),
     mechanicsLevels: twoLevel?.mechanicsLevels ?? null,
     hierarchyView: twoLevel?.hierarchyView ?? null,
+    activeSourceView,
     activeRankView,
     phaseVolumeReceipt,
     phaseVolumeReceiptRuntime,

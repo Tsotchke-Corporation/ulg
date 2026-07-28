@@ -7,9 +7,22 @@ import {
   createSchroederSpatialHierarchyViewPlan
 } from '../../../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2,
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
-import { ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
+  SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+} from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
+import {
+  ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import {
   schroederSpatialHierarchyViewWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialHierarchyViewWgsl.js';
@@ -28,6 +41,21 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+const SPATIAL_LINEAGE_FIELDS = Object.freeze([
+  'generationId',
+  'deviceOrdinal',
+  'laneOrdinal',
+  'leaseToken',
+  'sourceFamilyId',
+  'storageGeneration',
+  'physicsTick',
+  'physicsSubstep',
+  'positionEpoch',
+  'topologyEpoch',
+  'chartEpoch',
+  'levelEpoch',
+  'supportEpoch'
+]);
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
   const number = Number(value);
@@ -401,6 +429,79 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
         'spatial hierarchy view requires exact live encoded mechanics views from one generation'
       );
     }
+    if (spatialExecution.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA) {
+      return;
+    }
+    const activeSourceView = spatialExecution.activeSourceView;
+    const activeSourceCountAuthority =
+      spatialExecution.activeSourceCountAuthority;
+    const physicalSourceCount = spatialExecution.physicalSourceCount;
+    const physicalSourceCapacity = spatialExecution.physicalSourceCapacity;
+    const lineageMatches = SPATIAL_LINEAGE_FIELDS.every((field) => (
+      Object.is(view[field], spatialExecution[field])
+      && Object.is(activeSourceView?.[field], spatialExecution[field])
+    ));
+    if (
+      view.spatialExecution !== spatialExecution
+      || view.directorySchema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || view.directoryAbiVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      || view.sourceAuthorityVersion
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+      || view.sourceRowLayoutId
+        !== SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+      || view.sourceWorkIdentity
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+      || view.gpuAuthoredActiveSourceCount !== true
+      || view.sourceCount !== physicalSourceCount
+      || view.physicalSourceCount !== physicalSourceCount
+      || !Number.isInteger(physicalSourceCapacity)
+      || physicalSourceCapacity < physicalSourceCount
+      || spatialExecution.directorySchema
+        !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || spatialExecution.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      || spatialExecution.abiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      || spatialExecution.sourceWorkIdentity
+        !== SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY
+      || spatialExecution.reverseEncoding
+        !== SCHROEDER_SPATIAL_EPOCH_V2_REVERSE_CELL_PLUS_ONE
+      || spatialExecution.layout?.schema
+        !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || spatialExecution.layout?.physicalSourceCapacity
+        !== physicalSourceCapacity
+      || activeSourceView?.schema
+        !== ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+      || activeSourceView.sourceBuffer !== spatialExecution.sourceBuffer
+      || activeSourceView.physicalSourceCount !== physicalSourceCount
+      || activeSourceView.physicalSourceCapacity !== physicalSourceCapacity
+      || activeSourceView.buildOrdinal !== spatialExecution.buildOrdinal
+      || spatialExecution.activeSourceViewBuffer
+        !== activeSourceView.activeSourceViewBuffer
+      || view.activeSourceView !== activeSourceView
+      || view.activeSourceViewBuffer !== activeSourceView.activeSourceViewBuffer
+      || view.activeSourceDispatchOffsetBytes
+        !== activeSourceView.activeDispatchOffsetBytes
+      || view.activeSourceCountAuthority !== activeSourceCountAuthority
+      || activeSourceCountAuthority?.schema
+        !== ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA
+      || activeSourceCountAuthority.activeSourceView !== activeSourceView
+      || activeSourceCountAuthority.buffer
+        !== activeSourceView.activeSourceViewBuffer
+      || activeSourceCountAuthority.offsetWords
+        !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+      || activeSourceCountAuthority.offsetBytes
+        !== SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD
+          * UINT32_BYTES
+      || activeSourceCountAuthority.capacity
+        !== activeSourceView.activeSourceCapacity
+      || activeSourceCountAuthority.residency !== 'gpu-only'
+      || !lineageMatches
+      || !webGpuBufferMatchesDevice(activeSourceView.activeSourceViewBuffer, device)
+    ) {
+      throw new TypeError(
+        'spatial hierarchy view requires exact directory-v2 mechanics and ActiveSource authority'
+      );
+    }
   }
 
   function encode(encoder, {
@@ -418,9 +519,17 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
     } catch {
       spatialOwnerAdmitted = false;
     }
+    const directoryV2 =
+      spatialExecution?.schema === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA;
+    const expectedSpatialStatus = directoryV2
+      ? 'schroeder-spatial-epoch-v2-gpu-encoded'
+      : 'schroeder-spatial-epoch-gpu-encoded';
     if (
-      spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
-      || spatialExecution.status !== 'schroeder-spatial-epoch-gpu-encoded'
+      (
+        spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_SCHEMA
+        && spatialExecution?.schema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      )
+      || spatialExecution.status !== expectedSpatialStatus
       || spatialExecution.submitPerformed !== false
       || spatialExecution.released === true
       || !spatialOwnerAdmitted
@@ -620,6 +729,30 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
         spatialExecution,
         fineMechanicsView,
         coarseMechanicsView,
+        directorySchema: spatialExecution.schema,
+        directoryAbiVersion: directoryV2
+          ? SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V2
+          : SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+        sourceAuthorityVersion: fineMechanicsView.sourceAuthorityVersion
+          ?? SCHROEDER_SPATIAL_MECHANICS_VIEW_DIRECTORY_VERSION_V1,
+        sourceWorkIdentity: fineMechanicsView.sourceWorkIdentity ?? null,
+        physicalSourceCount: fineMechanicsView.physicalSourceCount
+          ?? fineMechanicsView.sourceCount,
+        physicalSourceCapacity: directoryV2
+          ? spatialExecution.physicalSourceCapacity
+          : (
+              spatialExecution.physicalSourceCapacity
+              ?? fineMechanicsView.sourceCount
+            ),
+        activeSourceView: directoryV2
+          ? spatialExecution.activeSourceView
+          : null,
+        activeSourceViewBuffer: directoryV2
+          ? spatialExecution.activeSourceViewBuffer
+          : null,
+        activeSourceCountAuthority: directoryV2
+          ? spatialExecution.activeSourceCountAuthority
+          : null,
         hierarchyViewBuffer: arena.hierarchyViewBuffer,
         indirectDispatchBuffer: arena.hierarchyViewBuffer,
         indirectDispatchOffsetBytes:
@@ -661,7 +794,16 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
         token,
         spatialExecution,
         fineMechanicsView,
-        coarseMechanicsView
+        coarseMechanicsView,
+        directorySchema: execution.directorySchema,
+        directoryAbiVersion: execution.directoryAbiVersion,
+        sourceAuthorityVersion: execution.sourceAuthorityVersion,
+        sourceWorkIdentity: execution.sourceWorkIdentity,
+        physicalSourceCount: execution.physicalSourceCount,
+        physicalSourceCapacity: execution.physicalSourceCapacity,
+        activeSourceView: execution.activeSourceView,
+        activeSourceViewBuffer: execution.activeSourceViewBuffer,
+        activeSourceCountAuthority: execution.activeSourceCountAuthority
       });
       return execution;
     } catch (error) {
@@ -684,6 +826,16 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
       || execution.spatialExecution !== ownership.spatialExecution
       || execution.fineMechanicsView !== ownership.fineMechanicsView
       || execution.coarseMechanicsView !== ownership.coarseMechanicsView
+      || execution.directorySchema !== ownership.directorySchema
+      || execution.directoryAbiVersion !== ownership.directoryAbiVersion
+      || execution.sourceAuthorityVersion !== ownership.sourceAuthorityVersion
+      || execution.sourceWorkIdentity !== ownership.sourceWorkIdentity
+      || execution.physicalSourceCount !== ownership.physicalSourceCount
+      || execution.physicalSourceCapacity !== ownership.physicalSourceCapacity
+      || execution.activeSourceView !== ownership.activeSourceView
+      || execution.activeSourceViewBuffer !== ownership.activeSourceViewBuffer
+      || execution.activeSourceCountAuthority
+        !== ownership.activeSourceCountAuthority
     ) {
       const error = new Error('spatial hierarchy view execution is not owned by this runtime');
       error.code = 'ERR_SCHROEDER_HIERARCHY_VIEW_FOREIGN_EXECUTION';

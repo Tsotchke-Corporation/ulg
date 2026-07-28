@@ -236,7 +236,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         }
         return identity.tagWebGpuBufferDevice(buffer, targetDevice);
       };
-      const readBuffer = async (source, byteLength, label) => {
+      const readBuffer = async (
+        source,
+        byteLength,
+        label,
+        sourceOffset = 0
+      ) => {
         const size = Math.max(4, Math.ceil(byteLength / 4) * 4);
         const readback = device.createBuffer({
           label,
@@ -246,7 +251,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         const encoder = device.createCommandEncoder({
           label: `${label}-copy-encoder`
         });
-        encoder.copyBufferToBuffer(source, 0, readback, 0, size);
+        encoder.copyBufferToBuffer(source, sourceOffset, readback, 0, size);
         device.queue.submit([encoder.finish()]);
         await readback.mapAsync(GPUMapMode.READ, 0, size);
         const bytes = readback.getMappedRange(0, size).slice(0, byteLength);
@@ -519,9 +524,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         exactTouchPlane = false,
         currentPositions = null,
         currentMasses = null,
+        expectedPhysicalTopologyMismatchCount = null,
         currentSpecificEnergies = null,
         cpuStateStale = false,
+        nativeTestActiveSourceDispatchXLimit = null,
         corruptActiveProjection = null,
+        corruptPhysicalToActiveProjection = null,
+        corruptDirectoryPhysicalCell = null,
         expectProducerFailClosed = false,
         corruptTreeWord = null,
         expectTreeFailClosed = false,
@@ -534,6 +543,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         requireRadiationExchange = radiationEnabled,
         useAggregate = true,
         useActiveRank = false,
+        useDirectoryV2 = false,
         producerTraversal = 'direct',
         observeTreeTraversalCounters = true,
         includeAppliedRowsInResult = false,
@@ -549,8 +559,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           ? radiationResponseUpload
           : responseUpload;
         requireTrue(
-          !(useAggregate && useActiveRank),
-          `${name}: aggregate and base active-rank projections are mutually exclusive`
+          Number(useAggregate) + Number(useActiveRank)
+              + Number(useDirectoryV2) <= 1,
+          `${name}: aggregate, base active-rank, and directory-v2 ActiveSource projections are mutually exclusive`
         );
         requireTrue(
           producerTraversal === 'direct'
@@ -763,7 +774,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         };
         let levelAssignmentBuffer = null;
         let levelAssignment = null;
-        if (useActiveRank) {
+        if (useDirectoryV2 || useActiveRank) {
           const assignmentRows = new Float32Array(packed.particleCount * 16);
           for (let index = 0; index < packed.particleCount; index += 1) {
             const stateOffset = index * 8;
@@ -837,16 +848,26 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         let canonicalValidationScopeOpen = false;
         let classicValidationScopeOpen = false;
         try {
+          const nativeTestLegacyLevelAssignmentDirectoryV1Arm = useActiveRank
+            ? spatial
+                .armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+                  device,
+                  levelAssignment
+                })
+            : null;
           generation = spatial.runSchroederSpatialEpochGenerationWebGpu({
             device,
-            ...(useActiveRank ? { levelAssignment } : { activeNodeList }),
+            ...(useDirectoryV2 || useActiveRank
+              ? { levelAssignment }
+              : { activeNodeList }),
             particleCount: packed.particleCount,
             particleIdentityBuffer: particleUpload.identityBuffer,
             particleIdentityStrideWords: 1,
             particleBufferSet: useAggregate ? particleUpload : null,
             laneId: `native-thermal-${name}`,
             sourceFamily: `native-thermal-${name}`,
-            mechanicsLevels: []
+            mechanicsLevels: [],
+            nativeTestLegacyLevelAssignmentDirectoryV1Arm
           });
           requireTrue(
             generation.ready === true && generation.selected === true,
@@ -865,6 +886,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               ? generation.activeRankView != null
               : generation.activeRankView == null,
             `${name}: base active-rank view presence did not match activeRank=${useActiveRank}`
+          );
+          requireTrue(
+            useDirectoryV2
+              ? (
+                  generation.directoryAbiVersion === 2
+                  && generation.activeSourceView != null
+                  && generation.execution.activeSourceView
+                    === generation.activeSourceView
+                )
+              : generation.activeSourceView == null,
+            `${name}: retained ActiveSource presence did not match directoryV2=${useDirectoryV2}`
           );
           transactionMechanicsBuffer = createTaggedBuffer(
             `ulg-native-thermal-${name}-transaction-mechanics`,
@@ -946,6 +978,59 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             conductionRate
           });
           requireTrue(proposal.ready === true, `${name}: proposal was not ready`);
+          if (nativeTestActiveSourceDispatchXLimit != null) {
+            requireTrue(
+              useDirectoryV2
+                && Number.isInteger(nativeTestActiveSourceDispatchXLimit)
+                && nativeTestActiveSourceDispatchXLimit > 0,
+              `${name}: native 2D ActiveSource consumer proof requires directory v2 and a positive x limit`
+            );
+            const dispatchForInvocations = (invocationCount) => {
+              if (invocationCount === 0) return [0, 1, 1];
+              const groupCount = Math.ceil(invocationCount / 64);
+              const x = Math.min(
+                groupCount,
+                nativeTestActiveSourceDispatchXLimit
+              );
+              return [x, Math.ceil(groupCount / x), 1];
+            };
+            const frozenActiveCount = Array.from(
+              { length: packed.particleCount },
+              (_, index) => packed.state[index * 8 + 3]
+            ).filter((massKg) => massKg > 0).length;
+            const activeSourceBuffer =
+              generation.activeSourceView.activeSourceViewBuffer;
+            const activeSourceLayout = generation.activeSourceView.layout;
+            // The producer's own scalable 2D construction is covered by its
+            // retained-runtime tests. Here the native consumer executes an
+            // internally valid y>1 indirect contract on real WebGPU without
+            // pretending this mutation is producer performance evidence.
+            device.queue.writeBuffer(
+              activeSourceBuffer,
+              38 * Uint32Array.BYTES_PER_ELEMENT,
+              new Uint32Array([nativeTestActiveSourceDispatchXLimit])
+            );
+            for (const [offsetWords, invocationCount] of [
+              [
+                activeSourceLayout.activeDispatchOffsetWords,
+                frozenActiveCount
+              ],
+              [
+                activeSourceLayout.candidateDispatchOffsetWords,
+                frozenActiveCount * 27
+              ],
+              [
+                activeSourceLayout.physicalDispatchOffsetWords,
+                packed.particleCount
+              ]
+            ]) {
+              device.queue.writeBuffer(
+                activeSourceBuffer,
+                offsetWords * Uint32Array.BYTES_PER_ELEMENT,
+                new Uint32Array(dispatchForInvocations(invocationCount))
+              );
+            }
+          }
           if (producerTraversal === 'native-test-tree-shadow') {
             treeShadowReceipt = proposalModule
               .armSchroederSpatialThermalTreeShadowForNativeTest({
@@ -1000,7 +1085,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           }
           requireTrue(
             proposal.activeSourceProjectionMode === (
-              useAggregate
+              useDirectoryV2
+                ? proposalModule
+                  .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+                : useAggregate
                 ? proposalModule
                   .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_AGGREGATE
                 : (
@@ -1013,18 +1101,24 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             ),
             `${name}: active-source projection mode ${
               proposal.activeSourceProjectionMode
-            } did not match aggregate=${useAggregate}, activeRank=${useActiveRank}`
+            } did not match aggregate=${useAggregate}, activeRank=${
+              useActiveRank
+            }, directoryV2=${useDirectoryV2}`
           );
           if (corruptActiveProjection) {
             const { ordinal, sourceIndex } = corruptActiveProjection;
-            const projectionOffset = useAggregate
-              ? generation.aggregateView.activeMemberOffsetWords
-              : generation.activeRankView?.layout.activeSourceIndicesOffsetWords;
-            const projectionBuffer = useAggregate
-              ? generation.aggregateView.aggregateViewBuffer
-              : generation.activeRankView?.activeRankViewBuffer;
+            const projectionOffset = useDirectoryV2
+              ? generation.activeSourceView.layout.activeToPhysicalOffsetWords
+              : useAggregate
+                ? generation.aggregateView.activeMemberOffsetWords
+                : generation.activeRankView?.layout.activeSourceIndicesOffsetWords;
+            const projectionBuffer = useDirectoryV2
+              ? generation.activeSourceView.activeSourceViewBuffer
+              : useAggregate
+                ? generation.aggregateView.aggregateViewBuffer
+                : generation.activeRankView?.activeRankViewBuffer;
             requireTrue(
-              (useAggregate || useActiveRank)
+              (useAggregate || useActiveRank || useDirectoryV2)
                 && Number.isInteger(ordinal)
                 && ordinal >= 0
                 && ordinal < packed.particleCount
@@ -1038,6 +1132,50 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               projectionBuffer,
               (projectionOffset + ordinal) * Uint32Array.BYTES_PER_ELEMENT,
               new Uint32Array([sourceIndex])
+            );
+          }
+          if (corruptPhysicalToActiveProjection) {
+            const { physicalIndex, activeOrdinal } =
+              corruptPhysicalToActiveProjection;
+            requireTrue(
+              useDirectoryV2
+                && Number.isInteger(physicalIndex)
+                && physicalIndex >= 0
+                && physicalIndex < packed.particleCount
+                && Number.isInteger(activeOrdinal)
+                && activeOrdinal >= 0
+                && activeOrdinal <= 0xffff_ffff,
+              `${name}: physical-to-active corruption request is invalid`
+            );
+            device.queue.writeBuffer(
+              generation.activeSourceView.activeSourceViewBuffer,
+              (
+                generation.activeSourceView.layout
+                  .physicalToActiveOffsetWords + physicalIndex
+              ) * Uint32Array.BYTES_PER_ELEMENT,
+              new Uint32Array([activeOrdinal])
+            );
+          }
+          if (corruptDirectoryPhysicalCell) {
+            const { physicalIndex, cellPlusOne } =
+              corruptDirectoryPhysicalCell;
+            requireTrue(
+              useDirectoryV2
+                && Number.isInteger(physicalIndex)
+                && physicalIndex >= 0
+                && physicalIndex < packed.particleCount
+                && Number.isInteger(cellPlusOne)
+                && cellPlusOne >= 0
+                && cellPlusOne <= 0xffff_ffff,
+              `${name}: directory physical-cell corruption request is invalid`
+            );
+            device.queue.writeBuffer(
+              generation.execution.directoryBuffer,
+              (
+                generation.execution.layout
+                  .physicalToCellPlusOneOffsetWords + physicalIndex
+              ) * Uint32Array.BYTES_PER_ELEMENT,
+              new Uint32Array([cellPlusOne])
             );
           }
           canonicalThermalStage = thermal.createSphThermalStepWebGpuEncoderStage({
@@ -1090,6 +1228,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             conductionEvidenceBytes,
             radiationEvidenceBytes,
             activeDispatchBytes,
+            physicalTopologyDispatchBytes,
             directoryBytes
           ] = await Promise.all([
             readBuffer(
@@ -1113,10 +1252,19 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               `ulg-native-thermal-${name}-radiation-evidence-readback`
             ),
             readBuffer(
-              proposal.activeDispatchBuffer,
+              proposal.sourceWorkIndirectBuffer,
               3 * Uint32Array.BYTES_PER_ELEMENT,
-              `ulg-native-thermal-${name}-active-dispatch-readback`
+              `ulg-native-thermal-${name}-active-dispatch-readback`,
+              proposal.sourceWorkIndirectOffsetBytes
             ),
+            proposal.physicalTopologyWorkIndirectBuffer
+              ? readBuffer(
+                  proposal.physicalTopologyWorkIndirectBuffer,
+                  3 * Uint32Array.BYTES_PER_ELEMENT,
+                  `ulg-native-thermal-${name}-physical-topology-dispatch-readback`,
+                  proposal.physicalTopologyWorkIndirectOffsetBytes
+                )
+              : null,
             readBuffer(
               generation.execution.directoryBuffer,
               generation.execution.layout.wordLength
@@ -1137,6 +1285,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const activeDispatch = Array.from(
             new Uint32Array(activeDispatchBytes)
           );
+          const physicalTopologyDispatch = physicalTopologyDispatchBytes
+            ? Array.from(new Uint32Array(physicalTopologyDispatchBytes))
+            : null;
           const directoryWords = new Uint32Array(directoryBytes);
           const treeShadowDiagnostics = treeShadowReceipt?.diagnosticBuffer
             ? Array.from(new Uint32Array(await readBuffer(
@@ -1189,6 +1340,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 `ulg-native-thermal-${name}-active-rank-header-readback`
               )))
             : null;
+          const activeSourceViewWords = generation.activeSourceView
+            ? new Uint32Array(await readBuffer(
+                generation.activeSourceView.activeSourceViewBuffer,
+                generation.activeSourceView.layout.byteLength,
+                `ulg-native-thermal-${name}-active-source-view-readback`
+              ))
+            : null;
           const thermalCandidateCsrReplayBytes = proposal.thermalCandidateCsr
             ? await readBuffer(
                 proposal.thermalCandidateCsr.replayBuffer,
@@ -1234,6 +1392,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const materializedRankCountHeaderWord = proposal.derivedHeaderLayout.indexOf(
             'materializedActiveSourceRankCount:atomic<u32>'
           );
+          const physicalTopologyMismatchHeaderWord =
+            proposal.derivedHeaderLayout.indexOf(
+              'physicalTopologyMismatchCount:atomic<u32>'
+            );
           requireTrue(
             displacementHeaderWord >= 0,
             `${name}: matched-time displacement header ABI is missing`
@@ -1243,6 +1405,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               === proposalModule
                 .SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_ADMISSION_WORD,
             `${name}: active-member projection admission header ABI is missing`
+          );
+          requireTrue(
+            physicalTopologyMismatchHeaderWord
+              === proposalModule
+                .SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD,
+            `${name}: physical-topology mismatch header ABI is missing`
           );
           if (!expectedFailClosed && proposal.thermalCandidateCsr) {
             const candidateCsr = proposal.thermalCandidateCsr;
@@ -1325,7 +1493,25 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   header: thermalCandidateCsrHeader || null,
                   expectedRoute,
                   candidateCsrStatus,
-                  candidateCsrRoute
+                  candidateCsrRoute,
+                  candidateCsrRowStates: thermalCandidateCsrRowStates,
+                  candidateCsrRowStatesComplete,
+                  activeDispatch,
+                  activeSources: activeSourceViewWords
+                    ? Array.from(activeSourceViewWords.slice(
+                        activeSourceViewWords[25],
+                        activeSourceViewWords[25]
+                          + activeSourceViewWords[18]
+                      ))
+                    : null,
+                  derivedHeader: Array.from(derivedWords.slice(
+                    0,
+                    proposal.derivedHeaderWords
+                  )),
+                  proposalHeader: Array.from(proposalWords.slice(
+                    0,
+                    proposal.proposalHeaderWords
+                  ))
                 })
               }`
             );
@@ -1358,6 +1544,15 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             (_, index) => packed.state[index * 8 + 3]
           ).filter((massKg) => massKg > 0).length;
           if (expectedFailClosed) {
+            if (expectedPhysicalTopologyMismatchCount != null) {
+              requireTrue(
+                derivedWords[physicalTopologyMismatchHeaderWord]
+                  === expectedPhysicalTopologyMismatchCount,
+                `${name}: physical-topology mismatch receipt was ${
+                  derivedWords[physicalTopologyMismatchHeaderWord]
+                }, expected ${expectedPhysicalTopologyMismatchCount}`
+              );
+            }
             requireTrue(
               expectTreeFailClosed
                 || derivedWords[1] > 0
@@ -1402,16 +1597,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               sourceCellTreeShadowBatchControl,
               useAggregate,
               useActiveRank,
+              useDirectoryV2,
+              nativeTestActiveSourceDispatchXLimit,
               activeSourceProjectionMode: proposal.activeSourceProjectionMode,
               particleCount: packed.particleCount,
               expectedFailClosed: true,
               derivedInvalidCount: derivedWords[1],
+              physicalTopologyMismatchCount:
+                derivedWords[physicalTopologyMismatchHeaderWord],
               currentActiveCount: derivedWords[currentActiveCountHeaderWord],
               expectedActiveCount: derivedWords[expectedActiveCountHeaderWord],
               materializedRankCount: derivedWords[materializedRankCountHeaderWord],
               proposalInvalidCounts: [proposalWords[6], proposalWords[7]],
               publishedRowCount: proposalWords[15],
               activeDispatch,
+              physicalTopologyDispatch,
               conductionEvidence,
               radiationEvidence
             };
@@ -1429,43 +1629,169 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               derivedWords[materializedRankCountHeaderWord]
             }, expected ${activeSourceCount}`
           );
+          const activeGroupCount = Math.ceil(activeSourceCount / 64);
+          const expectedActiveDispatch = useDirectoryV2
+            ? (
+                activeSourceCount === 0
+                  ? [0, 1, 1]
+                  : [
+                      Math.min(activeGroupCount, activeSourceViewWords[38]),
+                      Math.ceil(
+                        activeGroupCount
+                          / Math.min(activeGroupCount, activeSourceViewWords[38])
+                      ),
+                      1
+                    ]
+              )
+            : [Math.max(1, activeGroupCount), 1, 1];
           requireTrue(
-            activeDispatch[0] === Math.max(1, Math.ceil(activeSourceCount / 64))
-              && activeDispatch[1] === 1
-              && activeDispatch[2] === 1,
-            `${name}: finalized active dispatch was ${activeDispatch}`
+            JSON.stringify(activeDispatch)
+              === JSON.stringify(expectedActiveDispatch),
+            `${name}: finalized active dispatch was ${activeDispatch}, expected ${
+              expectedActiveDispatch
+            }`
           );
+          if (useDirectoryV2) {
+            const activeSourceLayout = generation.activeSourceView.layout;
+            const physicalDispatchOffset =
+              activeSourceLayout.physicalDispatchOffsetWords;
+            const physicalGroupCount = Math.ceil(packed.particleCount / 64);
+            const physicalDispatchX = Math.min(
+              physicalGroupCount,
+              activeSourceViewWords[38]
+            );
+            const expectedPhysicalTopologyDispatch = [
+              physicalDispatchX,
+              Math.ceil(physicalGroupCount / physicalDispatchX),
+              1
+            ];
+            requireTrue(
+              proposal.physicalTopologyWorkIdentity
+                  === 'gpu-physical-source-slot'
+                && proposal.physicalTopologyWorkIndirectBuffer
+                  === generation.activeSourceView.activeSourceViewBuffer
+                && proposal.physicalTopologyWorkIndirectOffsetBytes
+                  === generation.activeSourceView.physicalDispatchOffsetBytes
+                && proposal.physicalTopologyReadbackPerformed === false
+                && activeSourceViewWords[42] === physicalDispatchOffset
+                && JSON.stringify(Array.from(activeSourceViewWords.slice(
+                  physicalDispatchOffset,
+                  physicalDispatchOffset + 3
+                ))) === JSON.stringify(expectedPhysicalTopologyDispatch)
+                && physicalTopologyDispatch != null
+                && JSON.stringify(physicalTopologyDispatch)
+                  === JSON.stringify(expectedPhysicalTopologyDispatch),
+              `${name}: physical-topology dispatch was ${
+                JSON.stringify(physicalTopologyDispatch)
+              }, expected ${JSON.stringify(expectedPhysicalTopologyDispatch)}`
+            );
+            const physicalToCellPlusOneOffset =
+              generation.execution.layout.physicalToCellPlusOneOffsetWords;
+            for (
+              let physicalIndex = 0;
+              physicalIndex < packed.particleCount;
+              physicalIndex += 1
+            ) {
+              const expectedActive = packed.state[physicalIndex * 8 + 3] > 0;
+              const activeOrdinal = activeSourceViewWords[
+                activeSourceLayout.physicalToActiveOffsetWords + physicalIndex
+              ];
+              const directoryCellPlusOne = directoryWords[
+                physicalToCellPlusOneOffset + physicalIndex
+              ];
+              requireTrue(
+                expectedActive
+                  ? (
+                      activeOrdinal < activeSourceCount
+                      && activeSourceViewWords[
+                        activeSourceLayout.activeToPhysicalOffsetWords
+                          + activeOrdinal
+                      ] === physicalIndex
+                      && directoryCellPlusOne > 0
+                      && directoryCellPlusOne <= directoryWords[18]
+                    )
+                  : (
+                      activeOrdinal === 0xffff_ffff
+                      && directoryCellPlusOne === 0
+                    ),
+                `${name}: physical topology row ${physicalIndex} was ${
+                  activeOrdinal
+                }/${directoryCellPlusOne}, expected active=${expectedActive}`
+              );
+            }
+          }
           const activeRankSidecarOffset = proposal.derivedHeaderWords
             + packed.particleCount * proposal.derivedRowWords;
           const activeRankSidecar = Array.from(derivedWords.slice(
             activeRankSidecarOffset,
             activeRankSidecarOffset + packed.particleCount
           ));
-          const activeSourceRanks = (useAggregate || useActiveRank)
-            ? activeRankSidecar.slice(0, activeSourceCount)
-            : activeRankSidecar.filter((sourceRank) => sourceRank !== 0xffffffff);
-          const materializedActiveSources = activeSourceRanks.map((sourceRank) => {
-            requireTrue(
-              sourceRank < packed.particleCount,
-              `${name}: materialized source rank ${sourceRank} is out of range`
-            );
-            return directoryWords[
-              generation.execution.layout.cellMembersOffsetWords + sourceRank
-            ];
-          });
+          const activeSourceRanks = useDirectoryV2
+            ? []
+            : (useAggregate || useActiveRank)
+              ? activeRankSidecar.slice(0, activeSourceCount)
+              : activeRankSidecar.filter(
+                  (sourceRank) => sourceRank !== 0xffffffff
+                );
+          const materializedActiveSources = useDirectoryV2
+            ? Array.from(activeSourceViewWords.slice(
+                activeSourceViewWords[25],
+                activeSourceViewWords[25] + activeSourceCount
+              ))
+            : activeSourceRanks.map((sourceRank) => {
+                requireTrue(
+                  sourceRank < packed.particleCount,
+                  `${name}: materialized source rank ${sourceRank} is out of range`
+                );
+                return directoryWords[
+                  generation.execution.layout.cellMembersOffsetWords
+                    + sourceRank
+                ];
+              });
           const expectedActiveSources = Array.from(
             { length: packed.particleCount },
             (_, index) => index
           ).filter((index) => packed.state[index * 8 + 3] > 0);
           requireTrue(
-            new Set(activeSourceRanks).size === activeSourceCount
+            new Set(materializedActiveSources).size === activeSourceCount
               && JSON.stringify([...materializedActiveSources].sort((a, b) => a - b))
                 === JSON.stringify(expectedActiveSources),
-            `${name}: active rank sidecar ${activeSourceRanks} decoded to ${
+            `${name}: active work identity ${activeSourceRanks} decoded to ${
               materializedActiveSources
             }, expected ${expectedActiveSources}`
           );
-          if (useAggregate) {
+          if (useDirectoryV2) {
+            requireTrue(
+              aggregateHeader == null
+                && activeRankHeader == null
+                && activeSourceViewWords != null
+                && proposal.directoryAbiVersion === 2
+                && proposal.sourceWorkIdentity === 'gpu-active-ordinal'
+                && proposal.activeSourceView === generation.activeSourceView
+                && proposal.activeSourceCountAuthority
+                  === generation.execution.activeSourceCountAuthority
+                && activeSourceViewWords[0] === 0x53535631
+                && activeSourceViewWords[1] === 1
+                && activeSourceViewWords[2] === 3
+                && activeSourceViewWords[16] === packed.particleCount
+                && activeSourceViewWords[18] === activeSourceCount
+                && activeSourceViewWords[20]
+                  === packed.particleCount - activeSourceCount
+                && activeSourceViewWords[25] === 64
+                && activeSourceViewWords[30] === activeSourceViewWords[29]
+                && activeSourceViewWords[33] === activeSourceCount
+                && activeSourceViewWords[34] === activeSourceCount
+                && activeSourceViewWords[35] === activeSourceCount
+                && activeSourceViewWords[40]
+                  === generation.activeSourceView.layout.activeDispatchOffsetWords
+                && activeSourceViewWords[47] !== 0
+                && directoryWords[1] === 2
+                && directoryWords[37] === activeSourceCount,
+              `${name}: directory-v2 ActiveSource header is invalid: ${
+                JSON.stringify(Array.from(activeSourceViewWords.slice(0, 64)))
+              }`
+            );
+          } else if (useAggregate) {
             requireTrue(
               aggregateHeader != null
                 && aggregateHeader[2] === 259
@@ -1507,8 +1833,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             );
           }
           requireTrue(
-            derivedWords[1] === 0,
-            `${name}: derived invalid count ${derivedWords[1]}`
+            derivedWords[1] === 0
+              && derivedWords[physicalTopologyMismatchHeaderWord] === 0,
+            `${name}: derived invalid/topology-mismatch count ${
+              derivedWords[1]
+            }/${derivedWords[physicalTopologyMismatchHeaderWord]}`
           );
           requireTrue(
             proposalWords[0] === proposalModule.SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
@@ -1543,8 +1872,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               `${name}: ${consumer} producer rows/traversals ${evidence[6]}/${evidence[12]}`
             );
             requireTrue(
-              evidence[0] === 2 * packed.particleCount
-                && evidence[1] === 2 * packed.particleCount,
+              evidence[0] === 2 * activeSourceCount
+                && evidence[1] === 2 * activeSourceCount,
               `${name}: ${consumer} source/directory evidence ${evidence[0]}/${evidence[1]}`
             );
           }
@@ -3160,9 +3489,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             treeRuntimeCapacity: generation.runtimeCapacity,
             useAggregate,
             useActiveRank,
+            useDirectoryV2,
+            nativeTestActiveSourceDispatchXLimit,
             activeSourceProjectionMode: proposal.activeSourceProjectionMode,
             particleCount: packed.particleCount,
             inactiveProposalRowCount,
+            publishedRowCount: proposalWords[15],
             initialEnergyJ,
             finalEnergyJ,
             reciprocalProposalEnergyJ,
@@ -3180,12 +3512,16 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             gpuPairwiseTemperatureUniform:
               derivedWords[2] === ((~derivedWords[3]) >>> 0),
             activeDispatch,
+            physicalTopologyDispatch,
             currentActiveCount:
               derivedWords[currentActiveCountHeaderWord],
             expectedActiveCount:
               derivedWords[expectedActiveCountHeaderWord],
             materializedRankCount:
               derivedWords[materializedRankCountHeaderWord],
+            physicalTopologyMismatchCount:
+              derivedWords[physicalTopologyMismatchHeaderWord],
+            materializedActiveSources,
             derivedRows,
             proposalRows,
             conductionEvidence,
@@ -3475,6 +3811,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             `ulg-native-thermal-timing-${name}-${ordinal}-tree-build`,
             ['exact-near-cell-tree-build']
           );
+          const nativeTestLegacyLevelAssignmentDirectoryV1Arm =
+            spatial
+              .armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+                device,
+                levelAssignment
+              });
           generation = spatial.runSchroederSpatialEpochGenerationWebGpu({
             device,
             levelAssignment,
@@ -3485,12 +3827,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             laneId: `native-thermal-timing-${name}`,
             sourceFamily: `native-thermal-timing-${name}`,
             mechanicsLevels: [],
+            nativeTestLegacyLevelAssignmentDirectoryV1Arm,
             gpuTimestampRecorder: treeBuildTimer.recorder
           });
           requireTrue(
             generation.ready === true
               && generation.selected === true
+              && generation.directoryAbiVersion === 1
+              && generation.execution.abiVersion === 1
+              && generation.nativeTestLegacyLevelAssignmentDirectoryV1 === true
               && generation.activeRankView != null
+              && generation.activeSourceView == null
               && generation.exactNearCellTree != null,
             `${name}/${ordinal}: timing generation rejected: ${
               generation.reason || generation.status
@@ -3539,6 +3886,20 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   smoothingLengthM: packed.smoothingLengthM,
                   conductionRate
                 });
+              requireTrue(
+                proposal.directoryAbiVersion === 1
+                  && proposal.activeSourceProjectionMode
+                    === proposalModule
+                      .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+                  && proposal.activeRankView === generation.activeRankView
+                  && proposal.activeSourceView == null
+                  && proposal.sourceWorkIdentity
+                    === 'legacy-directory-member-rank'
+                  && proposal.sourceWorkIndirectBuffer
+                    === proposal.activeDispatchBuffer
+                  && proposal.sourceWorkIndirectOffsetBytes === 0,
+                `${name}/${ordinal}/${route}: timing arm was not an explicit directory-v1 ActiveRank route`
+              );
               let sourceCellReceipt = null;
               if (route === 'perParticle') {
                 const receipt = proposalModule
@@ -3863,6 +4224,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             name,
             order,
             ordinal,
+            directoryAbiVersion: 1,
+            sourceWorkIdentity: 'legacy-directory-member-rank',
+            evidenceScope: 'native-directory-v1-tree-shadow-only',
             particleCount: packed.particleCount,
             treeBuildMs: buildTiming['exact-near-cell-tree-build'],
             parityReceipts,
@@ -5124,71 +5488,270 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           `base active-rank sparse thermal path failed: ${JSON.stringify(baseSparse)}`
         );
 
-        const baseDormant = await runFixture({
-          name: 'base-active-rank-all-dormant',
+        const directoryV2Sparse = await runFixture({
+          name: 'directory-v2-active-source-sparse-iron-ice-planes',
+          smoothingLengthM: productionSmoothingLengthM,
+          spatialCellSizeM: productionPitchM,
+          nativeGridSpacingM: productionPitchM,
+          exactTouchPlane: true,
+          particles: frozenSlabParticles,
+          useAggregate: false,
+          useDirectoryV2: true
+        });
+        cases.push(directoryV2Sparse);
+        requireTrue(
+          directoryV2Sparse.activeSourceProjectionMode
+              === proposalModule
+                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+            && directoryV2Sparse.particleCount === 32
+            && directoryV2Sparse.currentActiveCount === 8
+            && directoryV2Sparse.expectedActiveCount === 8
+            && directoryV2Sparse.materializedRankCount === 8
+            && directoryV2Sparse.inactiveProposalRowCount === 24
+            && directoryV2Sparse.activeDispatch[0] === 1
+            && directoryV2Sparse.activeDispatch[1] === 1
+            && directoryV2Sparse.exactTouchEvidence?.h2oAcceptedEnergyJ > 0,
+          `directory-v2 sparse ActiveSource thermal path failed: ${
+            JSON.stringify(directoryV2Sparse)
+          }`
+        );
+
+        const directoryV2Dormant = await runFixture({
+          name: 'directory-v2-active-source-all-dormant',
           particles: allDormantParticles,
           smoothingLengthM: 0.05,
           spatialCellSizeM: 0.1,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
-        cases.push(baseDormant);
+        cases.push(directoryV2Dormant);
         requireTrue(
-          baseDormant.currentActiveCount === 0
-            && baseDormant.expectedActiveCount === 0
-            && baseDormant.materializedRankCount === 0
-            && baseDormant.activeDispatch[0] === 1
-            && baseDormant.inactiveProposalRowCount === 4,
-          `base active-rank all-dormant path failed: ${JSON.stringify(baseDormant)}`
+          directoryV2Dormant.currentActiveCount === 0
+            && directoryV2Dormant.expectedActiveCount === 0
+            && directoryV2Dormant.materializedRankCount === 0
+            && directoryV2Dormant.physicalTopologyMismatchCount === 0
+            && directoryV2Dormant.activeDispatch[0] === 0
+            && directoryV2Dormant.activeDispatch[1] === 1
+            && directoryV2Dormant.activeDispatch[2] === 1
+            && JSON.stringify(directoryV2Dormant.physicalTopologyDispatch)
+              === JSON.stringify([1, 1, 1])
+            && directoryV2Dormant.conductionEvidence[0] === 0
+            && directoryV2Dormant.conductionEvidence[1] === 0
+            && directoryV2Dormant.radiationEvidence[0] === 0
+            && directoryV2Dormant.radiationEvidence[1] === 0
+            && directoryV2Dormant.publishedRowCount === 4
+            && directoryV2Dormant.inactiveProposalRowCount === 4,
+          `directory-v2 all-dormant zero-dispatch path failed: ${
+            JSON.stringify(directoryV2Dormant)
+          }`
+        );
+
+        const directoryV2HighSlotParticles = Array.from(
+          { length: 1024 },
+          (_, index) => {
+            const active = index === 7 || index === 1000;
+            const isWater = index === 7;
+            return {
+              id: `directory-v2-high-slot-${index}`,
+              material: isWater ? 'h2o' : 'fe',
+              x: [
+                1 + (index % 32) * 0.2,
+                1 + Math.floor(index / 32) * 0.2,
+                1
+              ],
+              v: [0, 0, 0],
+              massKg: active ? 1.0e-3 : 0,
+              specificInternalEnergyJPerKg:
+                isWater ? productionIceColdU : ironColdU
+            };
+          }
+        );
+        const directoryV2HighSlotSparse = await runFixture({
+          name: 'directory-v2-active-source-p1024-a2-high-slots',
+          particles: directoryV2HighSlotParticles,
+          smoothingLengthM: 0.05,
+          spatialCellSizeM: 0.1,
+          requireThermalExchange: false,
+          useAggregate: false,
+          useDirectoryV2: true,
+          nativeTestActiveSourceDispatchXLimit: 4
+        });
+        cases.push(directoryV2HighSlotSparse);
+        requireTrue(
+          directoryV2HighSlotSparse.particleCount === 1024
+            && directoryV2HighSlotSparse.currentActiveCount === 2
+            && directoryV2HighSlotSparse.expectedActiveCount === 2
+            && directoryV2HighSlotSparse.materializedRankCount === 2
+            && directoryV2HighSlotSparse.physicalTopologyMismatchCount === 0
+            && JSON.stringify(
+              directoryV2HighSlotSparse.materializedActiveSources
+            ) === JSON.stringify([7, 1000])
+            && JSON.stringify(directoryV2HighSlotSparse.activeDispatch)
+              === JSON.stringify([1, 1, 1])
+            && JSON.stringify(
+              directoryV2HighSlotSparse.physicalTopologyDispatch
+            ) === JSON.stringify([4, 4, 1])
+            && directoryV2HighSlotSparse.inactiveProposalRowCount === 1022
+            && directoryV2HighSlotSparse.publishedRowCount === 1024
+            && directoryV2HighSlotSparse.conductionEvidence[0] === 4
+            && directoryV2HighSlotSparse.conductionEvidence[1] === 4
+            && directoryV2HighSlotSparse.radiationEvidence[0] === 4
+            && directoryV2HighSlotSparse.radiationEvidence[1] === 4,
+          `directory-v2 P1024/A2 high-slot path failed: ${
+            JSON.stringify(directoryV2HighSlotSparse)
+          }`
         );
 
         const baseMismatch = await runFixture({
-          name: 'base-active-rank-current-active-mismatch-fails-closed',
+          name: 'directory-v2-active-source-dormant-to-active-fails-closed',
           particles: allDormantParticles,
           smoothingLengthM: 0.05,
           spatialCellSizeM: 0.1,
           currentMasses: [1.0e-3, 0, 0, 0],
+          expectedPhysicalTopologyMismatchCount: 1,
           expectProducerFailClosed: true,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
         cases.push(baseMismatch);
         requireTrue(
-          baseMismatch.expectedFailClosed === true,
-          `base active-rank current mass mismatch did not fail closed: ${
+          baseMismatch.expectedFailClosed === true
+            && baseMismatch.physicalTopologyMismatchCount === 1
+            && baseMismatch.currentActiveCount === 0
+            && baseMismatch.expectedActiveCount === 0
+            && baseMismatch.materializedRankCount === 0,
+          `directory-v2 ActiveSource current mass mismatch did not fail closed: ${
             JSON.stringify(baseMismatch)
           }`
         );
 
+        const activeToDormant = await runFixture({
+          name: 'directory-v2-active-source-active-to-dormant-fails-closed',
+          particles: corruptedProjectionParticles,
+          smoothingLengthM: 0.1,
+          spatialCellSizeM: 0.1,
+          currentMasses: [1.0e-3, 0, 0, 0],
+          expectedPhysicalTopologyMismatchCount: 1,
+          expectProducerFailClosed: true,
+          requireThermalExchange: false,
+          useAggregate: false,
+          useDirectoryV2: true
+        });
+        cases.push(activeToDormant);
+        requireTrue(
+          activeToDormant.expectedFailClosed === true
+            && activeToDormant.physicalTopologyMismatchCount === 1,
+          `directory-v2 ActiveSource active-to-dormant transition did not fail closed: ${
+            JSON.stringify(activeToDormant)
+          }`
+        );
+
+        const activeMassChange = await runFixture({
+          name: 'directory-v2-active-source-active-mass-change-fails-closed',
+          particles: corruptedProjectionParticles,
+          smoothingLengthM: 0.1,
+          spatialCellSizeM: 0.1,
+          currentMasses: [1.0e-3, 0, 2.0e-2, 0],
+          expectedPhysicalTopologyMismatchCount: 1,
+          expectProducerFailClosed: true,
+          requireThermalExchange: false,
+          useAggregate: false,
+          useDirectoryV2: true
+        });
+        cases.push(activeMassChange);
+        requireTrue(
+          activeMassChange.expectedFailClosed === true
+            && activeMassChange.physicalTopologyMismatchCount === 1,
+          `directory-v2 ActiveSource active mass drift did not fail closed: ${
+            JSON.stringify(activeMassChange)
+          }`
+        );
+
         const baseCorruptProjection = await runFixture({
-          name: 'base-active-rank-corrupt-paired-index-fails-closed',
+          name: 'directory-v2-active-source-corrupt-paired-index-fails-closed',
           particles: corruptedProjectionParticles,
           smoothingLengthM: 0.1,
           spatialCellSizeM: 0.1,
           corruptActiveProjection: { ordinal: 0, sourceIndex: 1 },
+          expectedPhysicalTopologyMismatchCount: 1,
           expectProducerFailClosed: true,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
         cases.push(baseCorruptProjection);
         requireTrue(
           baseCorruptProjection.expectedFailClosed === true,
-          `base active-rank paired-index corruption did not fail closed: ${
+          `directory-v2 ActiveSource paired-index corruption did not fail closed: ${
             JSON.stringify(baseCorruptProjection)
           }`
         );
 
+        const reverseCorruptProjection = await runFixture({
+          name: 'directory-v2-active-source-corrupt-reverse-index-fails-closed',
+          particles: corruptedProjectionParticles,
+          smoothingLengthM: 0.1,
+          spatialCellSizeM: 0.1,
+          corruptPhysicalToActiveProjection: {
+            physicalIndex: 0,
+            activeOrdinal: 1
+          },
+          expectedPhysicalTopologyMismatchCount: 1,
+          expectProducerFailClosed: true,
+          requireThermalExchange: false,
+          useAggregate: false,
+          useDirectoryV2: true
+        });
+        cases.push(reverseCorruptProjection);
+        requireTrue(
+          reverseCorruptProjection.expectedFailClosed === true
+            && reverseCorruptProjection.physicalTopologyMismatchCount === 1,
+          `directory-v2 ActiveSource reverse-map corruption did not fail closed: ${
+            JSON.stringify(reverseCorruptProjection)
+          }`
+        );
+
+        const separatedDirectoryCellParticles =
+          corruptedProjectionParticles.map((particle, index) => ({
+            ...particle,
+            x: index < 2
+              ? [5 + index * 0.01, 5, 5]
+              : [6 + (index - 2) * 0.01, 5, 5]
+          }));
+        const directoryCellCorruption = await runFixture({
+          name: 'directory-v2-active-source-corrupt-physical-cell-fails-closed',
+          particles: separatedDirectoryCellParticles,
+          smoothingLengthM: 0.1,
+          spatialCellSizeM: 0.1,
+          corruptDirectoryPhysicalCell: {
+            physicalIndex: 0,
+            cellPlusOne: 2
+          },
+          expectedPhysicalTopologyMismatchCount: 1,
+          expectProducerFailClosed: true,
+          requireThermalExchange: false,
+          useAggregate: false,
+          useDirectoryV2: true
+        });
+        cases.push(directoryCellCorruption);
+        requireTrue(
+          directoryCellCorruption.expectedFailClosed === true
+            && directoryCellCorruption.physicalTopologyMismatchCount === 1,
+          `directory-v2 physical-cell corruption did not fail closed: ${
+            JSON.stringify(directoryCellCorruption)
+          }`
+        );
+
         const baseMultiWorkgroup = await runFixture({
-          name: 'base-active-rank-sixty-five-active',
+          name: 'directory-v2-active-source-sixty-five-active',
           particles: multiWorkgroupParticles,
           smoothingLengthM: 0.05,
           spatialCellSizeM: 0.1,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
         cases.push(baseMultiWorkgroup);
         requireTrue(
@@ -5197,7 +5760,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             && baseMultiWorkgroup.expectedActiveCount === 65
             && baseMultiWorkgroup.materializedRankCount === 65
             && baseMultiWorkgroup.activeDispatch[0] === 2,
-          `base active-rank 65-active dispatch failed: ${
+          `directory-v2 ActiveSource 65-active dispatch failed: ${
             JSON.stringify(baseMultiWorkgroup)
           }`
         );
@@ -5332,14 +5895,14 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           ]
         );
         const activeSeparatedCapacityReplay = await runFixture({
-          name: 'active-one-thousand-twenty-six-currently-separated-csr-replays',
+          name: 'directory-v2-active-source-one-thousand-twenty-six-currently-separated-csr-replays',
           particles: activeSeparatedCapacityParticles,
           currentPositions: activeSeparatedCurrentPositions,
           smoothingLengthM: 0.1,
           spatialCellSizeM: 0.1,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true,
+          useDirectoryV2: true,
           includePairLedgerInResult: false
         });
         cases.push(activeSeparatedCapacityReplay);
@@ -5353,7 +5916,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         requireTrue(
           activeSeparatedCapacityReplay.activeSourceProjectionMode
               === proposalModule
-                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
             && activeSeparatedCapacityReplay.currentActiveCount === 1026
             && activeSeparatedCapacityReplay.expectedActiveCount === 1026
             && activeSeparatedCapacityReplay.materializedRankCount === 1026
@@ -5436,13 +5999,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           'active near/far current-position fixture is undersized'
         );
         const activeNearFarCapacityReplay = await runFixture({
-          name: 'active-one-thousand-twenty-six-one-near-pair-csr-replays',
+          name: 'directory-v2-active-source-one-thousand-twenty-six-one-near-pair-csr-replays',
           particles: activeSeparatedCapacityParticles,
           currentPositions: activeNearFarCurrentPositions,
           smoothingLengthM: 0.1,
           spatialCellSizeM: 0.1,
           useAggregate: false,
-          useActiveRank: true,
+          useDirectoryV2: true,
           includePairLedgerInResult: false
         });
         cases.push(activeNearFarCapacityReplay);
@@ -5455,7 +6018,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         requireTrue(
           activeNearFarCapacityReplay.activeSourceProjectionMode
               === proposalModule
-                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
+                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
             && activeNearFarCapacityReplay.currentActiveCount === 1026
             && activeNearFarCapacityReplay.expectedActiveCount === 1026
             && activeNearFarCapacityReplay.materializedRankCount === 1026
@@ -5614,39 +6177,39 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           }`
         );
 
-        const activeRankUniformTemperature = await runFixture({
-          name: 'base-active-rank-uniform-temperature-sixty-five-active-completion',
+        const activeSourceUniformTemperature = await runFixture({
+          name: 'directory-v2-active-source-uniform-temperature-sixty-five-active-completion',
           particles: uniformTemperatureParticles,
           smoothingLengthM: 0.05,
           spatialCellSizeM: 0.1,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
-        cases.push(activeRankUniformTemperature);
+        cases.push(activeSourceUniformTemperature);
         requireTrue(
-          activeRankUniformTemperature.activeSourceProjectionMode
+          activeSourceUniformTemperature.activeSourceProjectionMode
               === proposalModule
-                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_RANK
-            && activeRankUniformTemperature.particleCount === 130
-            && activeRankUniformTemperature.inactiveProposalRowCount === 65
-            && activeRankUniformTemperature.currentActiveCount === 65
-            && activeRankUniformTemperature.expectedActiveCount === 65
-            && activeRankUniformTemperature.materializedRankCount === 65
-            && activeRankUniformTemperature.activeDispatch[0] === 2
-            && activeRankUniformTemperature.conductionEvidence[3] === 0
-            && activeRankUniformTemperature.radiationEvidence[3] === 0
-            && activeRankUniformTemperature.proposalRows.every((row) => (
+                .SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+            && activeSourceUniformTemperature.particleCount === 130
+            && activeSourceUniformTemperature.inactiveProposalRowCount === 65
+            && activeSourceUniformTemperature.currentActiveCount === 65
+            && activeSourceUniformTemperature.expectedActiveCount === 65
+            && activeSourceUniformTemperature.materializedRankCount === 65
+            && activeSourceUniformTemperature.activeDispatch[0] === 2
+            && activeSourceUniformTemperature.conductionEvidence[3] === 0
+            && activeSourceUniformTemperature.radiationEvidence[3] === 0
+            && activeSourceUniformTemperature.proposalRows.every((row) => (
               row[0] === 0 && row[1] === 0
             )),
-          `base active-rank uniform completion retained traversal work or wrote nonzero transfer: ${
+          `directory-v2 ActiveSource uniform completion retained traversal work or wrote nonzero transfer: ${
             JSON.stringify({
-              currentActiveCount: activeRankUniformTemperature.currentActiveCount,
-              expectedActiveCount: activeRankUniformTemperature.expectedActiveCount,
-              materializedRankCount: activeRankUniformTemperature.materializedRankCount,
-              conductionEvidence: activeRankUniformTemperature.conductionEvidence,
-              radiationEvidence: activeRankUniformTemperature.radiationEvidence,
-              proposalRows: activeRankUniformTemperature.proposalRows
+              currentActiveCount: activeSourceUniformTemperature.currentActiveCount,
+              expectedActiveCount: activeSourceUniformTemperature.expectedActiveCount,
+              materializedRankCount: activeSourceUniformTemperature.materializedRankCount,
+              conductionEvidence: activeSourceUniformTemperature.conductionEvidence,
+              radiationEvidence: activeSourceUniformTemperature.radiationEvidence,
+              proposalRows: activeSourceUniformTemperature.proposalRows
             })
           }`
         );
@@ -5724,8 +6287,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           }`
         );
 
-        const activeRankUniformCorrupt = await runFixture({
-          name: 'base-active-rank-uniform-corrupt-mapping-fails-closed',
+        const activeSourceUniformCorrupt = await runFixture({
+          name: 'directory-v2-active-source-uniform-corrupt-mapping-fails-closed',
           particles: uniformTemperatureParticles,
           smoothingLengthM: 0.05,
           spatialCellSizeM: 0.1,
@@ -5733,13 +6296,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           expectProducerFailClosed: true,
           requireThermalExchange: false,
           useAggregate: false,
-          useActiveRank: true
+          useDirectoryV2: true
         });
-        cases.push(activeRankUniformCorrupt);
+        cases.push(activeSourceUniformCorrupt);
         requireTrue(
-          activeRankUniformCorrupt.expectedFailClosed === true,
-          `base active-rank uniform corrupt mapping was not rejected: ${
-            JSON.stringify(activeRankUniformCorrupt)
+          activeSourceUniformCorrupt.expectedFailClosed === true,
+          `directory-v2 ActiveSource uniform corrupt mapping was not rejected: ${
+            JSON.stringify(activeSourceUniformCorrupt)
           }`
         );
 
@@ -6453,6 +7016,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             ];
             const receipt = {
               name: campaign.name,
+              directoryAbiVersion:
+                campaign.counterProbe.directoryAbiVersion,
+              sourceWorkIdentity:
+                campaign.counterProbe.sourceWorkIdentity,
+              evidenceScope:
+                campaign.counterProbe.evidenceScope,
               warmupSamples: campaign.warmupCount,
               measuredSamples: campaign.measurements.length,
               measuredOrders: campaign.measuredOrders,
@@ -6595,6 +7164,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           thermalTreeTiming = {
             schema:
               'peercompute.ulg.native-test.s9d5-thermal-source-cell-tree-timing.v0',
+            directoryAbiVersion: 1,
+            sourceWorkIdentity: 'legacy-directory-member-rank',
+            evidenceScope: 'native-directory-v1-tree-shadow-only',
             timestampQueryRequired: true,
             arms: ['direct', 'perParticle', 'sourceCell'],
             warmupSamplesPerFixture: warmupOrders.length,
@@ -6708,18 +7280,24 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       'local-rank-mask-current-active-mismatch-fails-closed',
       'local-rank-mask-sixty-five-active',
       'base-active-rank-sparse-four-lane-iron-ice-planes',
-      'base-active-rank-all-dormant',
-      'base-active-rank-current-active-mismatch-fails-closed',
-      'base-active-rank-corrupt-paired-index-fails-closed',
-      'base-active-rank-sixty-five-active',
+      'directory-v2-active-source-sparse-iron-ice-planes',
+      'directory-v2-active-source-all-dormant',
+      'directory-v2-active-source-p1024-a2-high-slots',
+      'directory-v2-active-source-dormant-to-active-fails-closed',
+      'directory-v2-active-source-active-to-dormant-fails-closed',
+      'directory-v2-active-source-active-mass-change-fails-closed',
+      'directory-v2-active-source-corrupt-paired-index-fails-closed',
+      'directory-v2-active-source-corrupt-reverse-index-fails-closed',
+      'directory-v2-active-source-corrupt-physical-cell-fails-closed',
+      'directory-v2-active-source-sixty-five-active',
       'local-two-live-plus-one-thousand-twenty-four-dormant-csr-replays',
-      'active-one-thousand-twenty-six-currently-separated-csr-replays',
-      'active-one-thousand-twenty-six-one-near-pair-csr-replays',
+      'directory-v2-active-source-one-thousand-twenty-six-currently-separated-csr-replays',
+      'directory-v2-active-source-one-thousand-twenty-six-one-near-pair-csr-replays',
       'dense-one-thousand-twenty-six-overflow-rewalks-exactly',
       'uniform-temperature-sixty-five-active-completion',
-      'base-active-rank-uniform-temperature-sixty-five-active-completion',
+      'directory-v2-active-source-uniform-temperature-sixty-five-active-completion',
       'stale-uniform-cpu-mirror-nonuniform-gpu-state-seals-csr',
-      'base-active-rank-uniform-corrupt-mapping-fails-closed'
+      'directory-v2-active-source-uniform-corrupt-mapping-fails-closed'
     ]
   );
   assert.ok(native.cases.every(({ particleCount }) => particleCount > 0));
@@ -7041,9 +7619,22 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         'dense-one-cell-overflow-rewalk'
       ]
     );
+    assert.equal(native.thermalTreeTiming?.directoryAbiVersion, 1);
+    assert.equal(
+      native.thermalTreeTiming?.sourceWorkIdentity,
+      'legacy-directory-member-rank'
+    );
+    assert.equal(
+      native.thermalTreeTiming?.evidenceScope,
+      'native-directory-v1-tree-shadow-only'
+    );
     assert.ok(
       native.thermalTreeTiming.fixtures.every((fixture) => (
-        fixture.measuredSamples === 9
+        fixture.directoryAbiVersion === 1
+          && fixture.sourceWorkIdentity === 'legacy-directory-member-rank'
+          && fixture.evidenceScope
+            === 'native-directory-v1-tree-shadow-only'
+          && fixture.measuredSamples === 9
           && fixture.treeBuildMedianMs > 0
           && Object.values(fixture.routePositionCounts).every(
             (counts) => counts.every((count) => count === 3)
@@ -7069,6 +7660,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
     );
     const timingSummary = {
       adapterInfo: native.adapterInfo,
+      directoryAbiVersion:
+        native.thermalTreeTiming.directoryAbiVersion,
+      sourceWorkIdentity:
+        native.thermalTreeTiming.sourceWorkIdentity,
+      evidenceScope:
+        native.thermalTreeTiming.evidenceScope,
       accepted: native.thermalTreeTiming.accepted,
       perParticleAccepted:
         native.thermalTreeTiming.perParticleAccepted,

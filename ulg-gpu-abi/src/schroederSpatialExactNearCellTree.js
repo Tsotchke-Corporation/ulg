@@ -1,8 +1,12 @@
 export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-exact-near-cell-tree.v1';
+export const ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-exact-near-cell-tree.v2';
 
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_MAGIC = 0x53435431;
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_VERSION = 1;
+export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_VERSION = 2;
+export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_REVERSE_CELL_PLUS_ONE = 1;
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_HEADER_WORDS = 40;
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_NODE_WORDS = 8;
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_WORKGROUP_SIZE = 64;
@@ -57,6 +61,50 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_HEADER_LAYOUT = Object.freez
   'reserved38:u32',
   'reserved39:u32'
 ]);
+
+export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_HEADER_LAYOUT =
+  Object.freeze([
+    'magic:u32',
+    'abiVersion:u32',
+    'statusFlags:u32',
+    'generationId:u32',
+    'deviceOrdinal:u32',
+    'laneOrdinal:u32',
+    'leaseToken:u32',
+    'sourceFamilyId:u32',
+    'storageGeneration:u32',
+    'physicsTick:u32',
+    'physicsSubstep:u32',
+    'positionEpoch:u32',
+    'topologyEpoch:u32',
+    'chartEpoch:u32',
+    'levelEpoch:u32',
+    'supportEpoch:u32',
+    'physicalSourceCount:u32',
+    'physicalSourceCapacity:u32',
+    'cellCount:u32',
+    'cellCapacity:u32',
+    'leafCapacity:u32',
+    'nodeCapacity:u32',
+    'nodeOffsetWords:u32',
+    'treeDepth:u32',
+    'directoryCapacityWords:u32',
+    'directoryCellKeysOffsetWords:u32',
+    'directoryCellOffsetsOffsetWords:u32',
+    'directoryCellMembersOffsetWords:u32',
+    'directoryPhysicalToCellPlusOneOffsetWords:u32',
+    'directoryCompletionOrdinal:u32',
+    'leafBuildCount:u32',
+    'invalidNodeCount:u32',
+    'rootNodeIndex:u32',
+    'nodeWords:u32',
+    'activeSourceCount:u32',
+    'reverseEncoding:u32',
+    'reserved36:u32',
+    'reserved37:u32',
+    'reserved38:u32',
+    'reserved39:u32'
+  ]);
 
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_NODE_LAYOUT = Object.freeze([
   'aabbMinXM:f32',
@@ -158,6 +206,15 @@ export function createSchroederSpatialExactNearCellTreeLayout({
   });
 }
 
+export function createSchroederSpatialExactNearCellTreeV2Layout(options = {}) {
+  const v1 = createSchroederSpatialExactNearCellTreeLayout(options);
+  return Object.freeze({
+    ...v1,
+    schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA,
+    version: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_VERSION
+  });
+}
+
 export function createSchroederSpatialExactNearCellTreePlan({
   sourceCount,
   sourceCapacity,
@@ -239,6 +296,73 @@ export function createSchroederSpatialExactNearCellTreePlan({
   });
 }
 
+export function createSchroederSpatialExactNearCellTreeV2Plan({
+  physicalSourceCount,
+  physicalSourceCapacity,
+  cellCapacity = physicalSourceCapacity,
+  generationId,
+  deviceOrdinal,
+  laneOrdinal,
+  leaseToken,
+  sourceFamilyId,
+  storageGeneration,
+  physicsTick,
+  physicsSubstep,
+  positionEpoch,
+  topologyEpoch,
+  chartEpoch,
+  levelEpoch,
+  supportEpoch,
+  directoryCapacityWords,
+  cellKeysOffsetWords,
+  cellOffsetsOffsetWords,
+  cellMembersOffsetWords,
+  physicalToCellPlusOneOffsetWords,
+  completionOrdinal = generationId
+} = {}) {
+  const v1 = createSchroederSpatialExactNearCellTreePlan({
+    sourceCount: physicalSourceCount,
+    sourceCapacity: physicalSourceCapacity,
+    cellCapacity,
+    generationId,
+    deviceOrdinal,
+    laneOrdinal,
+    leaseToken,
+    sourceFamilyId,
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
+    directoryCapacityWords,
+    cellKeysOffsetWords,
+    cellOffsetsOffsetWords,
+    cellMembersOffsetWords,
+    particleToCellOffsetWords: physicalToCellPlusOneOffsetWords,
+    completionOrdinal
+  });
+  const layout = createSchroederSpatialExactNearCellTreeV2Layout({
+    cellCapacity
+  });
+  return Object.freeze({
+    ...v1,
+    schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA,
+    abiVersion: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_VERSION,
+    physicalSourceCount: v1.sourceCount,
+    physicalSourceCapacity: v1.sourceCapacity,
+    physicalToCellPlusOneOffsetWords: v1.particleToCellOffsetWords,
+    activeSourceCountAuthorityWord: 37,
+    reverseEncoding:
+      SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_REVERSE_CELL_PLUS_ONE,
+    layout,
+    construction:
+      'canonical-v2-active-cell-aabb-complete-binary-union-hierarchy'
+  });
+}
+
 export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_ABI = Object.freeze({
   schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_SCHEMA,
   version: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_VERSION,
@@ -254,4 +378,24 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_ABI = Object.freeze({
   materializedCandidateRows: false,
   perSourceCandidateBudget: null,
   fallbackPolicy: 'none-after-admitted-canonical-generation-selection'
+});
+
+export const SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_ABI = Object.freeze({
+  schema: ULG_SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_SCHEMA,
+  version: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_VERSION,
+  magic: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_MAGIC,
+  headerWords: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_HEADER_WORDS,
+  nodeWords: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_NODE_WORDS,
+  headerLayout: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_V2_HEADER_LAYOUT,
+  nodeLayout: SCHROEDER_SPATIAL_EXACT_NEAR_CELL_TREE_NODE_LAYOUT,
+  topology: 'complete-power-of-two-binary-cell-aabb-tree',
+  sourceAuthority: 'immutable-ss-spatial-epoch-v2-active-cell-csr',
+  activeSourceCountAuthorityWord: 37,
+  memberIdentity: 'stable-physical-source-slot-u32',
+  reverseEncoding: 'cell-index-plus-one-zero-dormant',
+  construction: 'fixed-bottom-up-union-levels-no-private-sort',
+  traversal: 'consumer-exact-leaf-streaming-with-current-law-predicate',
+  materializedCandidateRows: false,
+  perSourceCandidateBudget: null,
+  fallbackPolicy: 'none-after-admitted-level-assignment-v2-generation-selection'
 });

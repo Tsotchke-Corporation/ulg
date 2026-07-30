@@ -80,7 +80,12 @@ function createFakeDevice() {
     },
     queue: {
       writeBuffer(buffer, offset, data) {
-        writes.push({ buffer, offset, byteLength: data.byteLength });
+        writes.push({
+          buffer,
+          offset,
+          byteLength: data.byteLength,
+          data: data.slice?.(0) ?? data
+        });
       },
       onSubmittedWorkDone() { return Promise.resolve(); }
     },
@@ -155,7 +160,11 @@ function createOwnedExecution(value, {
   return value;
 }
 
-function createExactInputs(device, { submitted = false } = {}) {
+function createExactInputs(device, {
+  submitted = false,
+  fineFieldCapacity = 4,
+  coarseFieldCapacity = 3
+} = {}) {
   const ids = identity();
   const sourceBuffer = device.createBuffer({
     label: 'parent-field-source',
@@ -208,14 +217,14 @@ function createExactInputs(device, { submitted = false } = {}) {
   const fineFieldView = field({
     level: 0,
     grid: fineGrid,
-    capacity: 4,
+    capacity: fineFieldCapacity,
     parentMechanicsView: fineMechanicsView,
     label: 'fine-field-view'
   });
   const coarseFieldView = field({
     level: 1,
     grid: coarseGrid,
-    capacity: 3,
+    capacity: coarseFieldCapacity,
     parentMechanicsView: coarseMechanicsView,
     label: 'coarse-field-view'
   });
@@ -355,8 +364,72 @@ test('parent-field shader consumes hierarchy edges and has no arbitrary candidat
   assert.match(schroederSpatialParentFieldViewWgsl, /fn scatter_fine_field_edges/);
   assert.match(schroederSpatialParentFieldViewWgsl, /weight_sum - 1\.0/);
   assert.match(schroederSpatialParentFieldViewWgsl, /length\(reproduced - fine_position\)/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /@builtin\(num_workgroups\)/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /fn flattened_invocation_index/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /fn bounded_dispatch_shape/);
   assert.doesNotMatch(schroederSpatialParentFieldViewWgsl, /candidate_budget/i);
   assert.doesNotMatch(schroederSpatialParentFieldViewWgsl, /readback/i);
+});
+
+test('parent-field runtime shapes direct and published work over two dimensions', () => {
+  const device = createFakeDevice();
+  device.limits.maxComputeWorkgroupsPerDimension = 2;
+  const inputs = createExactInputs(device, {
+    fineFieldCapacity: 17,
+    coarseFieldCapacity: 1
+  });
+  const runtime = createSchroederSpatialParentFieldViewGpu(device, {
+    fineGrid: inputs.fineGrid,
+    coarseGrid: inputs.coarseGrid,
+    fineFieldCapacity: 17,
+    coarseFieldCapacity: 1
+  });
+  const encoder = createFakeEncoder();
+  const execution = runtime.encode(encoder, inputs);
+  assert.equal(execution.maxComputeWorkgroupsPerDimension, 2);
+  const dispatchByPipeline = new Map(
+    encoder.events
+      .filter((event) => event.kind === 'pass')
+      .flatMap((event) => event.commands)
+      .filter(({ dispatch }) => dispatch)
+      .map(({ pipeline, dispatch }) => [pipeline, dispatch])
+  );
+  assert.deepEqual(
+    dispatchByPipeline.get(
+      'ulg-schroeder-spatial-parent-field-view-materialize-candidate-union-indices-pipeline'
+    ),
+    [2, 2, 1]
+  );
+  assert.deepEqual(
+    dispatchByPipeline.get(
+      'ulg-schroeder-spatial-parent-field-view-assemble-parent-field-keys-pipeline'
+    ),
+    [2, 2, 1]
+  );
+  for (const dispatch of dispatchByPipeline.values()) {
+    assert.ok(dispatch[0] <= 2);
+    assert.ok(dispatch[1] <= 2);
+  }
+  const paramsWrite = device.writes.find(
+    ({ buffer }) => buffer.label.endsWith('-params')
+  );
+  assert.equal(new DataView(paramsWrite.data).getUint32(204, true), 2);
+  assert.equal(runtime.releaseExecution(execution, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+
+  const rejectedInputs = createExactInputs(device, {
+    fineFieldCapacity: 33,
+    coarseFieldCapacity: 1
+  });
+  assert.throws(
+    () => createSchroederSpatialParentFieldViewGpu(device, {
+      fineGrid: rejectedInputs.fineGrid,
+      coarseGrid: rejectedInputs.coarseGrid,
+      fineFieldCapacity: 33,
+      coarseFieldCapacity: 1
+    }),
+    /maxComputeWorkgroupsPerDimension squared/
+  );
 });
 
 test('parent-field runtime encodes persistent union topology and retires after a fence', async () => {

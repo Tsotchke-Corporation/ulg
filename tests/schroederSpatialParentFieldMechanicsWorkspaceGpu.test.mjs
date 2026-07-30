@@ -568,8 +568,20 @@ test('parent-field mechanics ABI reserves predictors plus phase-separated causal
   assert.equal(layout.combinedStateOffsetWords, 248);
   assert.equal(layout.coarsePredictorStateOffsetWords, 320);
   assert.equal(layout.routeProposalOffsetWords, 392);
-  assert.equal(layout.parentToCoarseOrdinalOffsetWords, 536);
-  assert.equal(layout.wordLength, 545);
+  assert.equal(layout.parentToCoarseOrdinalOffsetWords, 576);
+  assert.equal(layout.parentToCoarseOrdinalPaddingWords, 40);
+  assert.equal(layout.workspaceBindingWordLength, 576);
+  assert.equal(layout.workspaceBindingByteLength, 2304);
+  assert.equal(layout.workspaceHeadBindingWordLength, 192);
+  assert.equal(layout.workspaceHeadBindingByteLength, 768);
+  assert.equal(layout.workspaceContinuationBindingOffsetWords, 192);
+  assert.equal(layout.workspaceContinuationBindingByteOffset, 768);
+  assert.equal(layout.workspaceContinuationBindingWordLength, 384);
+  assert.equal(layout.workspaceContinuationBindingByteLength, 1536);
+  assert.equal(layout.parentToCoarseOrdinalByteOffset, 2304);
+  assert.equal(layout.parentToCoarseOrdinalByteLength, 36);
+  assert.equal(layout.wordLength, 585);
+  assert.equal(layout.byteLength, 2340);
   assert.throws(
     () => createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
       parentFieldCapacity: 0x4000_0000
@@ -607,7 +619,100 @@ test('parent-field mechanics CPU oracle restricts and prolongs one transpose del
   assert.ok(Math.abs(oracle.totalEnergyResidualJ) < 1e-12);
 });
 
+test('high-N workspace splits one allocation into portable storage-binding ranges', () => {
+  const device = fakeDevice();
+  device.limits.maxBufferSize = 4_294_967_292;
+  device.limits.maxStorageBufferBindingSize = 2_147_483_644;
+  device.limits.minStorageBufferOffsetAlignment = 256;
+  const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+    parentFieldCapacity: 16_000_000,
+    fineFieldCapacity: 1_800_000,
+    arenaCount: 1
+  });
+  assert.ok(runtime.layout.byteLength
+    > device.limits.maxStorageBufferBindingSize);
+  assert.ok(runtime.layout.byteLength <= device.limits.maxBufferSize);
+  assert.ok(runtime.layout.workspaceBindingByteLength
+    > device.limits.maxStorageBufferBindingSize);
+  assert.ok(runtime.layout.workspaceHeadBindingByteLength
+    <= device.limits.maxStorageBufferBindingSize);
+  assert.ok(runtime.layout.workspaceContinuationBindingByteLength
+    <= device.limits.maxStorageBufferBindingSize);
+  assert.ok(runtime.layout.parentToCoarseOrdinalByteLength
+    <= device.limits.maxStorageBufferBindingSize);
+  assert.equal(runtime.layout.workspaceHeadBindingByteLength, 1_024_000_256);
+  assert.equal(
+    runtime.layout.workspaceContinuationBindingByteOffset,
+    1_024_000_256
+  );
+  assert.equal(
+    runtime.layout.workspaceContinuationBindingByteLength,
+    1_593_600_256
+  );
+  assert.equal(runtime.layout.workspaceBindingByteLength, 2_617_600_512);
+  assert.equal(runtime.layout.parentToCoarseOrdinalByteOffset, 2_617_600_512);
+  assert.equal(runtime.layout.parentToCoarseOrdinalByteLength, 64_000_000);
+  assert.equal(runtime.layout.byteLength, 2_681_600_512);
+  assert.equal(
+    runtime.layout.workspaceContinuationBindingByteOffset
+      % device.limits.minStorageBufferOffsetAlignment,
+    0
+  );
+  assert.equal(
+    runtime.layout.parentToCoarseOrdinalByteOffset
+      % device.limits.minStorageBufferOffsetAlignment,
+    0
+  );
+  assert.equal(
+    runtime.layout.workspaceHeadBindingByteLength,
+    runtime.layout.workspaceContinuationBindingByteOffset
+  );
+  assert.equal(
+    runtime.layout.workspaceContinuationBindingByteOffset
+      + runtime.layout.workspaceContinuationBindingByteLength,
+    runtime.layout.parentToCoarseOrdinalByteOffset
+  );
+  assert.equal(
+    runtime.layout.parentToCoarseOrdinalByteOffset
+      + runtime.layout.parentToCoarseOrdinalByteLength,
+    runtime.layout.byteLength
+  );
+  const workspaceBuffers = device.buffers.filter(
+    ({ label }) => label?.endsWith('-workspace')
+  );
+  assert.equal(workspaceBuffers.length, 1);
+  assert.equal(workspaceBuffers[0].size, runtime.layout.byteLength);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('parent-field mechanics admits the six statically used storage bindings', () => {
+  const insufficientDevice = fakeDevice();
+  insufficientDevice.limits.maxStorageBuffersPerShaderStage = 5;
+  assert.throws(
+    () => createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      insufficientDevice,
+      { parentFieldCapacity: 1, arenaCount: 1 }
+    ),
+    /requires six storage bindings/
+  );
+  const sufficientDevice = fakeDevice();
+  sufficientDevice.limits.maxStorageBuffersPerShaderStage = 6;
+  const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+    sufficientDevice,
+    { parentFieldCapacity: 1, arenaCount: 1 }
+  );
+  assert.equal(runtime.destroy(), true);
+});
+
 test('workspace WGSL has frozen coarse registry, causal affine routes, and sealed energy evidence', () => {
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /@binding\(12\) var<storage, read_write> workspace_continuation/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn workspace_ranges_admitted\(\) -> bool/
+  );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn begin_fine_velocity_correction/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_EMPTY\)/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_VELOCITY\)/);
@@ -667,6 +772,64 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_REFLUX_MEASURED_CONSERVATIVE, 2);
 });
 
+test('workspace indirect parent-field kernels flatten two-dimensional dispatch rows', () => {
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn indirect_row_index\(\s*id: vec3<u32>,\s*workgroup_count: vec3<u32>\s*\) -> u32 \{\s*return id\.x \+ id\.y \* workgroup_count\.x \* 64u;\s*\}/
+  );
+  const indirectEntryPoints = [
+    'restrict_fine_field_state',
+    'finalize_fine_parent_baseline',
+    'inject_coarse_native_state',
+    'update_parent_field_predictors',
+    'contact_parent_field_predictors',
+    'validate_fine_velocity_correction',
+    'validate_routed_coarse_cfl',
+    'apply_fine_route_heat',
+    'apply_fine_velocity_correction',
+    'validate_coarse_velocity_publish',
+    'apply_coarse_reflux_rows',
+    'apply_coarse_velocity_publish'
+  ];
+  for (const entryPoint of indirectEntryPoints) {
+    const begin = schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      `fn ${entryPoint}(`
+    );
+    assert.notEqual(begin, -1, `missing ${entryPoint}`);
+    const nextEntryPoint = schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      '@compute',
+      begin + entryPoint.length + 3
+    );
+    const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
+      begin,
+      nextEntryPoint === -1
+        ? schroederSpatialParentFieldMechanicsWorkspaceWgsl.length
+        : nextEntryPoint
+    );
+    assert.match(
+      source,
+      /@builtin\(num_workgroups\)\s+workgroup_count: vec3<u32>/,
+      `${entryPoint} must observe the encoded indirect dispatch shape`
+    );
+    assert.match(
+      source,
+      /let \w+ = indirect_row_index\(id, workgroup_count\);/,
+      `${entryPoint} must flatten x/y invocation coordinates`
+    );
+    assert.doesNotMatch(
+      source,
+      /let \w+ = id\.x;/,
+      `${entryPoint} must not alias rows from later y workgroups`
+    );
+  }
+  assert.equal(
+    [...schroederSpatialParentFieldMechanicsWorkspaceWgsl.matchAll(
+      /indirect_row_index\(id, workgroup_count\)/g
+    )].length,
+    indirectEntryPoints.length
+  );
+});
+
 test('workspace runtime stages predictors and terminal branches without encode-time buffers', async () => {
   const device = fakeDevice();
   const fixture = exactFixture(device);
@@ -705,6 +868,73 @@ test('workspace runtime stages predictors and terminal branches without encode-t
   assert.equal(
     predictorEncoder.events.filter((event) => event.kind === 'pass').length,
     9
+  );
+  const predictorPasses = predictorEncoder.events.filter(
+    (event) => event.kind === 'pass'
+  );
+  const initializeEntries = predictorPasses[0].bindGroups[0].value.entries;
+  assert.equal(initializeEntries.some(({ binding }) => binding === 11), false);
+  const initializeHeadBinding = initializeEntries.find(
+    ({ binding }) => binding === 3
+  );
+  const initializeContinuationBinding = initializeEntries.find(
+    ({ binding }) => binding === 12
+  );
+  assert.equal(initializeHeadBinding.resource.buffer, fineExecution.workspaceBuffer);
+  assert.equal(initializeHeadBinding.resource.offset, 0);
+  assert.equal(
+    initializeHeadBinding.resource.size,
+    fineExecution.layout.workspaceHeadBindingByteLength
+  );
+  assert.equal(
+    initializeContinuationBinding.resource.buffer,
+    fineExecution.workspaceBuffer
+  );
+  assert.equal(
+    initializeContinuationBinding.resource.offset,
+    fineExecution.layout.workspaceContinuationBindingByteOffset
+  );
+  assert.equal(
+    initializeContinuationBinding.resource.size,
+    fineExecution.layout.workspaceContinuationBindingByteLength
+  );
+  assert.equal(
+    predictorPasses.every(({ bindGroups }) => {
+      const entries = bindGroups[0].value.entries;
+      return !entries.some(({ binding }) => binding === 3)
+        || entries.some(({ binding }) => binding === 12);
+    }),
+    true
+  );
+  const splitEntries = predictorPasses
+    .map((event) => event.bindGroups[0].value.entries)
+    .find((entries) => entries.some(({ binding }) => binding === 11));
+  const workspaceBinding = splitEntries.find(({ binding }) => binding === 3);
+  const reverseMapBinding = splitEntries.find(({ binding }) => binding === 11);
+  const continuationBinding = splitEntries.find(({ binding }) => binding === 12);
+  assert.equal(workspaceBinding.resource.buffer, fineExecution.workspaceBuffer);
+  assert.equal(reverseMapBinding.resource.buffer, fineExecution.workspaceBuffer);
+  assert.equal(continuationBinding.resource.buffer, fineExecution.workspaceBuffer);
+  assert.equal(workspaceBinding.resource.offset, 0);
+  assert.equal(
+    workspaceBinding.resource.size,
+    fineExecution.layout.workspaceHeadBindingByteLength
+  );
+  assert.equal(
+    continuationBinding.resource.offset,
+    fineExecution.layout.workspaceContinuationBindingByteOffset
+  );
+  assert.equal(
+    continuationBinding.resource.size,
+    fineExecution.layout.workspaceContinuationBindingByteLength
+  );
+  assert.equal(
+    reverseMapBinding.resource.offset,
+    fineExecution.layout.parentToCoarseOrdinalByteOffset
+  );
+  assert.equal(
+    reverseMapBinding.resource.size,
+    fineExecution.layout.parentToCoarseOrdinalByteLength
   );
   device.queue.submit([predictorEncoder.finish()]);
   runtime.markPredictorsSubmitted(fineExecution);

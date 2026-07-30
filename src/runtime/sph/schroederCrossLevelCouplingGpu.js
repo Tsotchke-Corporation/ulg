@@ -99,6 +99,17 @@ export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE =
   'compact-grid-conservation-summary-readback';
 
+const DIRECT_PARENT_FIELD_MECHANICS_ARENA_COUNT = (() => {
+  const requested = Number(
+    import.meta.env?.VITE_ULG_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_COUNT
+      ?? import.meta.env?.VITE_ULG_SCHROEDER_SPATIAL_ARENA_COUNT
+      ?? 3
+  );
+  return Number.isInteger(requested) && requested >= 1 && requested <= 8
+    ? requested
+    : 3;
+})();
+
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -2161,7 +2172,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       const runtime = parentFieldMechanicsWorkspaceRuntimeFactory(device, {
         parentFieldCapacity: parentFieldView.parentFieldCapacity,
         fineFieldCapacity: parentFieldView.fineFieldCapacity,
-        arenaCount: 3
+        arenaCount: DIRECT_PARENT_FIELD_MECHANICS_ARENA_COUNT
       });
       if (
         !runtime?.encodePredictors

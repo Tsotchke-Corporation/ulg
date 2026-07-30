@@ -73,7 +73,15 @@ const ACTIVE_NODE_STRIDE_FLOATS = 16;
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const PARAMS_BUFFER_BYTES = 256;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
-const DIRECT_SPATIAL_EPOCH_ARENA_COUNT = 3;
+const DIRECT_SPATIAL_EPOCH_ARENA_COUNT = (() => {
+  const requested = Number(
+    import.meta.env?.VITE_ULG_SCHROEDER_SPATIAL_EPOCH_ARENA_COUNT
+      ?? 3
+  );
+  return Number.isInteger(requested) && requested >= 2 && requested <= 8
+    ? requested
+    : 3;
+})();
 const DIRECT_MECHANICS_VIEW_RUNTIME_CACHE_LIMIT = 4;
 const DIRECT_MECHANICS_FIELD_VIEW_DRAINING_RUNTIME_LIMIT =
   DIRECT_SPATIAL_EPOCH_ARENA_COUNT * 2;

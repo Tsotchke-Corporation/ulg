@@ -1,5 +1,6 @@
 import {
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ATOMIC_SCALE,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_MAGIC,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_INTERNAL_ENERGY_PARTICLE_OWNED_UNTOUCHED,
@@ -146,6 +147,8 @@ struct ParentFieldMechanicsParams {
 @group(0) @binding(3) var<storage, read_write> workspace: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> reflux_ledger: array<atomic<u32>>;
 @group(0) @binding(5) var<uniform> params: ParentFieldMechanicsParams;
+@group(0) @binding(11) var<storage, read_write> parent_to_coarse_ordinals: array<atomic<u32>>;
+@group(0) @binding(12) var<storage, read_write> workspace_continuation: array<atomic<u32>>;
 
 const WORKSPACE_MAGIC: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_MAGIC}u;
 const WORKSPACE_VERSION: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_VERSION}u;
@@ -153,6 +156,7 @@ const WORKSPACE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_W
 const ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROW_WORDS}u;
 const ROUTE_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS}u;
 const FINE_IMPULSE_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS}u;
+const WORKSPACE_BINDING_ALIGNMENT_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS}u;
 const ATOMIC_SCALE: f32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ATOMIC_SCALE}.0;
 const READY_ADMITTED: u32 = ${
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY
@@ -220,14 +224,87 @@ const REFLUX_PHASE_SEALED: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_SEALED}u;
 const REFLUX_PHASE_COARSE_APPLIED: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_COARSE_APPLIED}u;
 const REFLUX_PHASE_ENERGY_READY: u32 = ${SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_ENERGY_READY}u;
 
-fn ws_load(word: u32) -> u32 { return atomicLoad(&workspace[word]); }
-fn ws_store(word: u32, value: u32) { atomicStore(&workspace[word], value); }
+fn workspace_split_word() -> u32 {
+  return params.combined_offset
+    - params.combined_offset % WORKSPACE_BINDING_ALIGNMENT_WORDS;
+}
+
+fn workspace_ranges_admitted() -> bool {
+  let split_word = workspace_split_word();
+  if (params.required_words < split_word) { return false; }
+  return arrayLength(&workspace) == split_word
+    && arrayLength(&workspace_continuation)
+      == params.required_words - split_word;
+}
+
+fn ws_load(word: u32) -> u32 {
+  let split_word = workspace_split_word();
+  if (word < split_word) {
+    return atomicLoad(&workspace[word]);
+  }
+  return atomicLoad(&workspace_continuation[word - split_word]);
+}
+
+fn ws_store(word: u32, value: u32) {
+  let split_word = workspace_split_word();
+  if (word < split_word) {
+    atomicStore(&workspace[word], value);
+    return;
+  }
+  atomicStore(&workspace_continuation[word - split_word], value);
+}
+
+fn ws_atomic_add(word: u32, value: u32) -> u32 {
+  let split_word = workspace_split_word();
+  if (word < split_word) {
+    return atomicAdd(&workspace[word], value);
+  }
+  return atomicAdd(&workspace_continuation[word - split_word], value);
+}
+
+fn ws_atomic_or(word: u32, value: u32) -> u32 {
+  let split_word = workspace_split_word();
+  if (word < split_word) {
+    return atomicOr(&workspace[word], value);
+  }
+  return atomicOr(&workspace_continuation[word - split_word], value);
+}
+
+fn ws_compare_exchange_weak(
+  word: u32,
+  compare: u32,
+  value: u32
+) -> bool {
+  let split_word = workspace_split_word();
+  if (word < split_word) {
+    return atomicCompareExchangeWeak(
+      &workspace[word], compare, value
+    ).exchanged;
+  }
+  return atomicCompareExchangeWeak(
+    &workspace_continuation[word - split_word], compare, value
+  ).exchanged;
+}
+
 fn fine_load(word: u32) -> u32 { return atomicLoad(&fine_view[word]); }
 fn fine_store(word: u32, value: u32) { atomicStore(&fine_view[word], value); }
 fn coarse_load(word: u32) -> u32 { return atomicLoad(&coarse_view[word]); }
 fn coarse_store(word: u32, value: u32) { atomicStore(&coarse_view[word], value); }
 fn reflux_load(word: u32) -> u32 { return atomicLoad(&reflux_ledger[word]); }
 fn reflux_store(word: u32, value: u32) { atomicStore(&reflux_ledger[word], value); }
+fn parent_to_coarse_load(parent: u32) -> u32 {
+  return atomicLoad(&parent_to_coarse_ordinals[parent]);
+}
+fn parent_to_coarse_store(parent: u32, value: u32) {
+  atomicStore(&parent_to_coarse_ordinals[parent], value);
+}
+
+fn indirect_row_index(
+  id: vec3<u32>,
+  workgroup_count: vec3<u32>
+) -> u32 {
+  return id.x + id.y * workgroup_count.x * 64u;
+}
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= bitcast<f32>(0x7f7fffffu);
@@ -273,8 +350,8 @@ fn scaled_range_fits(
 fn reflux_reject(flags: u32) {
   atomicOr(&reflux_ledger[2u], REFLUX_FAIL_CLOSED | flags);
   atomicAdd(&reflux_ledger[12u], 1u);
-  atomicOr(&workspace[2u], STATUS_FAIL_CLOSED | STATUS_INVALID_SOURCE);
-  atomicAdd(&workspace[37u], 1u);
+  ws_atomic_or(2u, STATUS_FAIL_CLOSED | STATUS_INVALID_SOURCE);
+  ws_atomic_add(37u, 1u);
 }
 
 fn reflux_structural() -> bool {
@@ -358,10 +435,9 @@ fn ws_atomic_add_f32(address: u32, value: f32) -> bool {
     let prior = bitcast<f32>(prior_bits);
     let next = prior + value;
     if (!finite_f32(prior) || !finite_f32(next)) { return false; }
-    let claimed = atomicCompareExchangeWeak(
-      &workspace[address], prior_bits, bitcast<u32>(next)
-    );
-    if (claimed.exchanged) { return true; }
+    if (ws_compare_exchange_weak(
+      address, prior_bits, bitcast<u32>(next)
+    )) { return true; }
     attempts = attempts + 1u;
     if (attempts >= 256u) { return false; }
   }
@@ -374,10 +450,9 @@ fn ws_atomic_min_nonnegative_f32(address: u32, value: f32) -> bool {
     let prior_bits = ws_load(address);
     let prior = bitcast<f32>(prior_bits);
     if (!finite_f32(prior) || prior <= value) { return finite_f32(prior); }
-    let claimed = atomicCompareExchangeWeak(
-      &workspace[address], prior_bits, bitcast<u32>(value)
-    );
-    if (claimed.exchanged) { return true; }
+    if (ws_compare_exchange_weak(
+      address, prior_bits, bitcast<u32>(value)
+    )) { return true; }
     attempts = attempts + 1u;
     if (attempts >= 256u) { return false; }
   }
@@ -390,10 +465,9 @@ fn ws_atomic_max_nonnegative_f32(address: u32, value: f32) -> bool {
     let prior_bits = ws_load(address);
     let prior = bitcast<f32>(prior_bits);
     if (!finite_f32(prior) || prior >= value) { return finite_f32(prior); }
-    let claimed = atomicCompareExchangeWeak(
-      &workspace[address], prior_bits, bitcast<u32>(value)
-    );
-    if (claimed.exchanged) { return true; }
+    if (ws_compare_exchange_weak(
+      address, prior_bits, bitcast<u32>(value)
+    )) { return true; }
     attempts = attempts + 1u;
     if (attempts >= 256u) { return false; }
   }
@@ -416,9 +490,9 @@ fn fine_stage_store(index: u32, value: u32) {
 }
 
 fn ws_reject(flags: u32, counter_word: u32) {
-  atomicOr(&workspace[2u], STATUS_FAIL_CLOSED | flags);
+  ws_atomic_or(2u, STATUS_FAIL_CLOSED | flags);
   if (counter_word < WORKSPACE_HEADER_WORDS) {
-    atomicAdd(&workspace[counter_word], 1u);
+    ws_atomic_add(counter_word, 1u);
   }
 }
 
@@ -687,7 +761,7 @@ fn coarse_receipt_admitted(phase: u32, mutation_ordinal: u32) -> bool {
 }
 
 fn workspace_admitted(phase: u32) -> bool {
-  return arrayLength(&workspace) >= params.required_words
+  return workspace_ranges_admitted()
     && ws_load(0u) == WORKSPACE_MAGIC
     && ws_load(1u) == WORKSPACE_VERSION
     && ws_load(2u) == READY_ADMITTED
@@ -717,7 +791,7 @@ fn workspace_admitted(phase: u32) -> bool {
     && ws_load(79u) == params.parent_to_coarse_offset
     && ws_load(28u) == ROW_WORDS
     && ws_load(29u) == params.required_words
-    && ws_load(30u) == arrayLength(&workspace)
+    && ws_load(30u) == params.required_words
     && ws_load(52u) == params.completion_ordinal
     && ws_load(53u) == params.parent_completion_ordinal
     && ws_load(54u) == params.fine_completion_ordinal
@@ -734,7 +808,7 @@ fn workspace_admitted(phase: u32) -> bool {
       params.fine_impulse_offset, params.fine_capacity,
       FINE_IMPULSE_WORDS, params.required_words
     )
-    && range_fits(params.parent_to_coarse_offset, params.parent_capacity, params.required_words)
+    && arrayLength(&parent_to_coarse_ordinals) >= params.parent_capacity
     && reflux_structural()
     && ws_load(36u) == phase;
 }
@@ -773,7 +847,7 @@ fn quantize(value: f32) -> vec2<i32> {
 fn add_fixed(address: u32, value: f32) -> bool {
   let q = quantize(value);
   if (q.y != 0) { return false; }
-  let old = bitcast<i32>(atomicAdd(&workspace[address], bitcast<u32>(q.x)));
+  let old = bitcast<i32>(ws_atomic_add(address, bitcast<u32>(q.x)));
   let sum = f32(old) + f32(q.x);
   return abs(sum) <= 2147483000.0;
 }
@@ -853,7 +927,7 @@ fn initialize_parent_field_workspace() {
   ws_store(85u, bitcast<u32>(1.0));
   ws_store(28u, ROW_WORDS);
   ws_store(29u, params.required_words);
-  ws_store(30u, arrayLength(&workspace));
+  ws_store(30u, params.required_words);
   ws_store(31u, bitcast<u32>(params.atomic_scale));
   ws_store(32u, bitcast<u32>(params.dt));
   ws_store(33u, bitcast<u32>(params.fine_dt));
@@ -897,7 +971,7 @@ fn initialize_parent_field_workspace() {
     || params.fine_substep_count == 0u
     || params.fine_substep_count > 4u
     || params.fine_substep_ordinal > params.fine_substep_count
-    || params.required_words > arrayLength(&workspace)
+    || !workspace_ranges_admitted()
     || !reflux_structural()
     || reflux_load(77u) != bitcast<u32>(params.fine_level)
     || reflux_load(78u) != bitcast<u32>(params.coarse_level)
@@ -965,7 +1039,7 @@ fn initialize_coarse_terminal_workspace() {
   ws_store(27u, params.combined_offset);
   ws_store(28u, ROW_WORDS);
   ws_store(29u, params.required_words);
-  ws_store(30u, arrayLength(&workspace));
+  ws_store(30u, params.required_words);
   ws_store(31u, bitcast<u32>(params.atomic_scale));
   ws_store(32u, bitcast<u32>(params.dt));
   ws_store(33u, bitcast<u32>(params.fine_dt));
@@ -1005,7 +1079,7 @@ fn initialize_coarse_terminal_workspace() {
     || params.fine_substep_count == 0u
     || params.fine_substep_count > 4u
     || params.fine_substep_ordinal != params.fine_substep_count
-    || params.required_words > arrayLength(&workspace)
+    || !workspace_ranges_admitted()
     || !reflux_accumulating()
     || reflux_load(7u) != params.macro_owner_id
     || reflux_load(8u) != params.fine_substep_count
@@ -1076,7 +1150,7 @@ fn register_reflux_coarse_registry() {
     return;
   }
   for (var parent = 0u; parent < ws_load(23u); parent = parent + 1u) {
-    ws_store(params.parent_to_coarse_offset + parent, INVALID_INDEX);
+    parent_to_coarse_store(parent, INVALID_INDEX);
   }
   let initialize = ledger_phase == REFLUX_PHASE_ALLOCATED;
   if (!initialize && reflux_load(4u) != coarse_count) {
@@ -1087,7 +1161,7 @@ fn register_reflux_coarse_registry() {
   for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
     let parent = parent_view[parent_view[54u] + coarse_field];
     if (parent >= ws_load(23u) || !coarse_parent_key_matches(coarse_field, parent)
-        || ws_load(params.parent_to_coarse_offset + parent) != INVALID_INDEX) {
+        || parent_to_coarse_load(parent) != INVALID_INDEX) {
       ws_reject(STATUS_INVALID_REGISTRY, 87u);
       reflux_reject(REFLUX_KEY_REJECTED);
       return;
@@ -1109,7 +1183,7 @@ fn register_reflux_coarse_registry() {
         reflux_store(row + word, 0u);
       }
     }
-    ws_store(params.parent_to_coarse_offset + parent, coarse_field);
+    parent_to_coarse_store(parent, coarse_field);
   }
   if (initialize) {
     reflux_store(4u, coarse_count);
@@ -1135,14 +1209,14 @@ fn register_coarse_terminal_registry() {
     return;
   }
   for (var parent = 0u; parent < ws_load(23u); parent = parent + 1u) {
-    ws_store(params.parent_to_coarse_offset + parent, INVALID_INDEX);
+    parent_to_coarse_store(parent, INVALID_INDEX);
   }
   for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
     let parent = parent_view[parent_view[54u] + coarse_field];
     let row = reflux_row(coarse_field);
     if (parent >= ws_load(23u)
         || !coarse_parent_key_matches(coarse_field, parent)
-        || ws_load(params.parent_to_coarse_offset + parent) != INVALID_INDEX
+        || parent_to_coarse_load(parent) != INVALID_INDEX
         || reflux_load(row + 14u) != 1u) {
       ws_reject(STATUS_INVALID_REGISTRY, 87u);
       reflux_reject(REFLUX_KEY_REJECTED);
@@ -1155,7 +1229,7 @@ fn register_coarse_terminal_registry() {
         return;
       }
     }
-    ws_store(params.parent_to_coarse_offset + parent, coarse_field);
+    parent_to_coarse_store(parent, coarse_field);
   }
   reflux_store(60u, params.generation_id);
 }
@@ -1189,8 +1263,11 @@ fn validate_reflux_coarse_registry_mass() {
 }
 
 @compute @workgroup_size(64)
-fn restrict_fine_field_state(@builtin(global_invocation_id) id: vec3<u32>) {
-  let fine_field = id.x;
+fn restrict_fine_field_state(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_BUILDING) || fine_field >= ws_load(21u)) { return; }
   let edge_count = parent_view[parent_view[50u] + fine_field];
   let edge_begin = parent_view[parent_view[51u] + fine_field];
@@ -1246,15 +1323,18 @@ fn restrict_fine_field_state(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var word = 0u; word < 7u; word = word + 1u) {
       valid = add_fixed(destination + word, weight * source_values[word]) && valid;
     }
-    atomicAdd(&workspace[destination + 7u], 1u);
+    ws_atomic_add(destination + 7u, 1u);
     if (!valid) { ws_reject(STATUS_OVERFLOW, 38u); }
-    atomicAdd(&workspace[42u], 1u);
+    ws_atomic_add(42u, 1u);
   }
 }
 
 @compute @workgroup_size(64)
-fn finalize_fine_parent_baseline(@builtin(global_invocation_id) id: vec3<u32>) {
-  let parent = id.x;
+fn finalize_fine_parent_baseline(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let parent = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_BUILDING) || parent >= ws_load(23u)) { return; }
   let accumulator = params.accumulator_offset + parent * ROW_WORDS;
   let baseline = params.baseline_offset + parent * ROW_WORDS;
@@ -1271,14 +1351,17 @@ fn finalize_fine_parent_baseline(@builtin(global_invocation_id) id: vec3<u32>) {
   ws_store(combined + 7u, active_flag);
   ws_store(coarse_state + 7u, 0u);
   if (active_flag != 0u) {
-    atomicAdd(&workspace[44u], 1u);
-    atomicAdd(&workspace[45u], 1u);
+    ws_atomic_add(44u, 1u);
+    ws_atomic_add(45u, 1u);
   }
 }
 
 @compute @workgroup_size(64)
-fn inject_coarse_native_state(@builtin(global_invocation_id) id: vec3<u32>) {
-  let coarse_field = id.x;
+fn inject_coarse_native_state(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_BUILDING) || coarse_field >= ws_load(22u)) { return; }
   let parent = parent_view[parent_view[54u] + coarse_field];
   if (parent >= ws_load(23u) || !coarse_parent_key_matches(coarse_field, parent)) {
@@ -1325,9 +1408,9 @@ fn inject_coarse_native_state(@builtin(global_invocation_id) id: vec3<u32>) {
   ws_store(combined + 7u, select(0u, 1u, state_load(combined, 0u) > 0.0));
   ws_store(coarse_state + 7u, source_active);
   if (!combined_was_active && ws_load(combined + 7u) != 0u) {
-    atomicAdd(&workspace[45u], 1u);
+    ws_atomic_add(45u, 1u);
   }
-  atomicAdd(&workspace[43u], 1u);
+  ws_atomic_add(43u, 1u);
 }
 
 fn parent_node_position(parent: u32) -> vec3<f32> {
@@ -1434,8 +1517,11 @@ fn update_predictor_state(base: u32, node: vec3<f32>) {
 }
 
 @compute @workgroup_size(64)
-fn update_parent_field_predictors(@builtin(global_invocation_id) id: vec3<u32>) {
-  let parent = id.x;
+fn update_parent_field_predictors(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let parent = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_BUILDING) || parent >= ws_load(23u)) { return; }
   let node = parent_node_position(parent);
   update_predictor_state(params.baseline_offset + parent * ROW_WORDS, node);
@@ -1496,8 +1582,11 @@ fn contact_pair(bank: u32, left: u32, right: u32, publish_energy: bool) {
 }
 
 @compute @workgroup_size(64)
-fn contact_parent_field_predictors(@builtin(global_invocation_id) id: vec3<u32>) {
-  let first = id.x;
+fn contact_parent_field_predictors(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let first = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_BUILDING) || first >= ws_load(23u)) { return; }
   let dense = parent_key(first, 0u);
   if (first > 0u && parent_key(first - 1u, 0u) == dense) { return; }
@@ -1655,7 +1744,7 @@ fn evaluate_causal_route(
       incomplete = true;
       continue;
     }
-    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + recipient);
+    let coarse_ordinal = parent_to_coarse_load(recipient);
     if (coarse_ordinal == INVALID_INDEX || coarse_ordinal >= ws_load(22u)) {
       incomplete = true;
       continue;
@@ -1735,7 +1824,7 @@ fn scatter_causal_route_proposal(
       parent_key(fine_parent, 0u), candidate_cohort
     ));
     if (recipient == INVALID_INDEX) { return false; }
-    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + recipient);
+    let coarse_ordinal = parent_to_coarse_load(recipient);
     if (coarse_ordinal == INVALID_INDEX || coarse_ordinal >= ws_load(22u)) {
       return false;
     }
@@ -1745,7 +1834,7 @@ fn scatter_causal_route_proposal(
         || !ws_atomic_add_f32(proposal + 2u, -weight * impulse.z)) {
       return false;
     }
-    atomicAdd(&workspace[proposal + 3u], 1u);
+    ws_atomic_add(proposal + 3u, 1u);
   }
   return true;
 }
@@ -1770,7 +1859,7 @@ fn causal_impulse_sum(fine_field: u32, scatter: bool) -> vec3<f32> {
   }
   var total = vec3<f32>(0.0);
   for (var candidate = group_begin; candidate < group_end; candidate = candidate + 1u) {
-    let coarse_ordinal = ws_load(params.parent_to_coarse_offset + candidate);
+    let coarse_ordinal = parent_to_coarse_load(candidate);
     if (coarse_ordinal == INVALID_INDEX) { continue; }
     let cohort = parent_cohort(candidate);
     let route = evaluate_causal_route(fine_field, cohort);
@@ -1788,7 +1877,7 @@ fn causal_impulse_sum(fine_field: u32, scatter: bool) -> vec3<f32> {
       return vec3<f32>(0.0);
     }
     total = total + route.impulse;
-    if (scatter) { atomicAdd(&workspace[88u], 1u); }
+    if (scatter) { ws_atomic_add(88u, 1u); }
   }
   return total;
 }
@@ -1866,8 +1955,11 @@ fn begin_fine_velocity_correction() {
 }
 
 @compute @workgroup_size(64)
-fn validate_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32>) {
-  let fine_field = id.x;
+fn validate_fine_velocity_correction(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS) || fine_field >= ws_load(21u)) { return; }
   if (!fine_admitted(
       FIELD_VELOCITY,
@@ -1983,7 +2075,7 @@ fn validate_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32
   }
   // The parent CSR was already admitted in u32 range; active edge counts are
   // therefore a safe measured contribution count without a wrapping add.
-  atomicAdd(&workspace[47u], edge_count);
+  ws_atomic_add(47u, edge_count);
   let prior = vec3<f32>(
     bitcast<f32>(fine_load(state + 1u)),
     bitcast<f32>(fine_load(state + 2u)),
@@ -2024,17 +2116,20 @@ fn validate_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32
     reflux_reject(REFLUX_NONFINITE);
     return;
   }
-  atomicAdd(&workspace[89u], 1u);
+  ws_atomic_add(89u, 1u);
 }
 
 @compute @workgroup_size(64)
-fn validate_routed_coarse_cfl(@builtin(global_invocation_id) id: vec3<u32>) {
-  let coarse_field = id.x;
+fn validate_routed_coarse_cfl(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
       || coarse_field >= ws_load(22u)) { return; }
   let parent = parent_view[parent_view[54u] + coarse_field];
   if (parent >= ws_load(23u)
-      || ws_load(params.parent_to_coarse_offset + parent) != coarse_field) {
+      || parent_to_coarse_load(parent) != coarse_field) {
     ws_reject(STATUS_INVALID_REGISTRY, 87u);
     reflux_reject(REFLUX_KEY_REJECTED);
     return;
@@ -2163,8 +2258,11 @@ fn seal_fine_correction_alpha() {
 }
 
 @compute @workgroup_size(64)
-fn apply_fine_route_heat(@builtin(global_invocation_id) id: vec3<u32>) {
-  let fine_field = id.x;
+fn apply_fine_route_heat(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
       || reflux_load(8u) != params.fine_substep_ordinal + 1u
       || reflux_load(15u) != params.fine_substep_ordinal
@@ -2189,8 +2287,11 @@ fn apply_fine_route_heat(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn apply_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32>) {
-  let fine_field = id.x;
+fn apply_fine_velocity_correction(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
       || reflux_load(8u) != params.fine_substep_ordinal + 1u
       || reflux_load(15u) != params.fine_substep_ordinal
@@ -2204,7 +2305,7 @@ fn apply_fine_velocity_correction(@builtin(global_invocation_id) id: vec3<u32>) 
   fine_store(state + 1u, ws_load(impulse_row));
   fine_store(state + 2u, ws_load(impulse_row + 1u));
   fine_store(state + 3u, ws_load(impulse_row + 2u));
-  atomicAdd(&workspace[46u], 1u);
+  ws_atomic_add(46u, 1u);
 }
 
 @compute @workgroup_size(1)
@@ -2998,8 +3099,11 @@ fn begin_coarse_terminal_validation() {
 }
 
 @compute @workgroup_size(64)
-fn validate_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>) {
-  let coarse_field = id.x;
+fn validate_coarse_velocity_publish(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
       || coarse_field >= ws_load(22u)) { return; }
   if (!coarse_admitted(
@@ -3015,7 +3119,7 @@ fn validate_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>
   let parent = parent_view[parent_view[54u] + coarse_field];
   let row = reflux_row(coarse_field);
   if (parent >= ws_load(23u)
-      || ws_load(params.parent_to_coarse_offset + parent) != coarse_field
+      || parent_to_coarse_load(parent) != coarse_field
       || !coarse_parent_key_matches(coarse_field, parent)) {
     ws_reject(STATUS_INVALID_KEY | STATUS_INVALID_REGISTRY, 87u);
     reflux_reject(REFLUX_KEY_REJECTED);
@@ -3189,7 +3293,7 @@ fn seal_coarse_velocity_publish() {
       bitcast<f32>(reflux_load(row + 7u))
     );
     if (parent >= ws_load(23u)
-        || ws_load(params.parent_to_coarse_offset + parent) != coarse_field
+        || parent_to_coarse_load(parent) != coarse_field
         || !coarse_parent_key_matches(coarse_field, parent)
         || coarse_load(state + 7u) != state_contribution_count
         || coarse_load(accumulator) != ws_load(proposal + 6u)
@@ -3692,8 +3796,11 @@ fn commit_coarse_reflux() {
 }
 
 @compute @workgroup_size(64)
-fn apply_coarse_reflux_rows(@builtin(global_invocation_id) id: vec3<u32>) {
-  let coarse_field = id.x;
+fn apply_coarse_reflux_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS)
       || ws_load(68u) != params.fine_substep_count + 2u
       || coarse_field >= ws_load(22u)) { return; }
@@ -3708,8 +3815,11 @@ fn apply_coarse_reflux_rows(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn apply_coarse_velocity_publish(@builtin(global_invocation_id) id: vec3<u32>) {
-  let coarse_field = id.x;
+fn apply_coarse_velocity_publish(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
   if (!workspace_admitted(PHASE_PREDICTORS)
       || ws_load(68u) != params.fine_substep_count + 2u
       || coarse_field >= ws_load(22u)) { return; }

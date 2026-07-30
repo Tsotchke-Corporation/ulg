@@ -59,6 +59,16 @@ const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const MECHANICS_FIELD_MODE_REQUIRED = 'required';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GRID_STATE_AUTHORITY = 'schroeder-spatial-mechanics-field-view-v1';
+const DIRECT_PARENT_FIELD_MECHANICS_ARENA_COUNT = (() => {
+  const requested = Number(
+    import.meta.env?.VITE_ULG_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_COUNT
+      ?? import.meta.env?.VITE_ULG_SCHROEDER_SPATIAL_ARENA_COUNT
+      ?? 3
+  );
+  return Number.isInteger(requested) && requested >= 1 && requested <= 8
+    ? requested
+    : 3;
+})();
 const refluxLedgerOwnership = new WeakMap();
 const fineCorrectionOrigins = new WeakMap();
 const fineCorrectionClaims = new WeakMap();
@@ -94,36 +104,36 @@ const IDENTITY_FIELDS = Object.freeze([
 ]);
 
 const PIPELINE_BINDINGS = Object.freeze({
-  initialize: Object.freeze([0, 1, 2, 3, 4, 5]),
-  registerReflux: Object.freeze([0, 2, 3, 4, 5]),
-  restrictFine: Object.freeze([0, 1, 3, 4, 5]),
-  finalizeBaseline: Object.freeze([3, 4, 5]),
-  injectCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  validateRegistry: Object.freeze([0, 3, 4, 5]),
-  updatePredictors: Object.freeze([0, 3, 4, 5]),
-  contactPredictors: Object.freeze([0, 3, 4, 5]),
-  sealPredictors: Object.freeze([3, 4, 5]),
-  beginFine: Object.freeze([0, 1, 3, 4, 5]),
-  validateFine: Object.freeze([0, 1, 3, 4, 5]),
-  validateRoutedCoarse: Object.freeze([0, 3, 4, 5]),
-  sealFineAlpha: Object.freeze([3, 4, 5]),
-  prepareFine: Object.freeze([0, 1, 3, 4, 5]),
-  applyFine: Object.freeze([0, 1, 3, 4, 5]),
-  applyFineHeat: Object.freeze([0, 1, 3, 4, 5]),
-  commitReflux: Object.freeze([0, 1, 3, 4, 5]),
-  finalizeFine: Object.freeze([0, 1, 3, 4, 5]),
-  initializeTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  registerTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  sealTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  prevalidateCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  beginCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  validateCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  sealCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  prepareCoarse: Object.freeze([3, 4, 5]),
-  applyCoarseRows: Object.freeze([3, 4, 5]),
-  applyCoarse: Object.freeze([2, 3, 4, 5]),
-  commitCoarse: Object.freeze([3, 4, 5]),
-  finalizeCoarse: Object.freeze([2, 3, 4, 5])
+  initialize: Object.freeze([0, 1, 2, 3, 4, 5, 12]),
+  registerReflux: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  restrictFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  finalizeBaseline: Object.freeze([3, 4, 5, 11, 12]),
+  injectCoarse: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  validateRegistry: Object.freeze([0, 3, 4, 5, 11, 12]),
+  updatePredictors: Object.freeze([0, 3, 4, 5, 11, 12]),
+  contactPredictors: Object.freeze([0, 3, 4, 5, 11, 12]),
+  sealPredictors: Object.freeze([3, 4, 5, 11, 12]),
+  beginFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  validateFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  validateRoutedCoarse: Object.freeze([0, 3, 4, 5, 11, 12]),
+  sealFineAlpha: Object.freeze([3, 4, 5, 11, 12]),
+  prepareFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  applyFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  applyFineHeat: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  commitReflux: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  finalizeFine: Object.freeze([0, 1, 3, 4, 5, 11, 12]),
+  initializeTerminal: Object.freeze([0, 2, 3, 4, 5, 12]),
+  registerTerminal: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  sealTerminal: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  prevalidateCoarse: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  beginCoarse: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  validateCoarse: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  sealCoarse: Object.freeze([0, 2, 3, 4, 5, 11, 12]),
+  prepareCoarse: Object.freeze([3, 4, 5, 11, 12]),
+  applyCoarseRows: Object.freeze([3, 4, 5, 11, 12]),
+  applyCoarse: Object.freeze([2, 3, 4, 5, 11, 12]),
+  commitCoarse: Object.freeze([3, 4, 5, 11, 12]),
+  finalizeCoarse: Object.freeze([2, 3, 4, 5, 11, 12])
 });
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
@@ -1075,7 +1085,7 @@ function paramsData(execution, {
   u32(3, plan.layout.accumulatorOffsetWords);
   u32(4, plan.layout.baselineStateOffsetWords);
   u32(5, plan.layout.combinedStateOffsetWords);
-  u32(6, plan.layout.wordLength);
+  u32(6, plan.layout.workspaceBindingWordLength);
   for (let index = 0; index < IDENTITY_FIELDS.length; index += 1) {
     u32(7 + index, plan[IDENTITY_FIELDS[index]]);
   }
@@ -1292,6 +1302,11 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'device.limits.maxStorageBufferBindingSize',
     Number.MAX_SAFE_INTEGER
   );
+  const minStorageBufferOffsetAlignment = positiveInteger(
+    device.limits?.minStorageBufferOffsetAlignment ?? 256,
+    'device.limits.minStorageBufferOffsetAlignment',
+    Number.MAX_SAFE_INTEGER
+  );
   const maxUniformBufferBindingSize = positiveInteger(
     device.limits?.maxUniformBufferBindingSize ?? 64 * 1024,
     'device.limits.maxUniformBufferBindingSize',
@@ -1299,19 +1314,70 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   );
   if (
     layout.byteLength > maxBufferSize
-    || layout.byteLength > maxStorageBufferBindingSize
+    || layout.workspaceHeadBindingByteLength < UINT32_BYTES
+    || layout.workspaceContinuationBindingByteLength < UINT32_BYTES
+    || layout.parentToCoarseOrdinalByteLength < UINT32_BYTES
+    || layout.workspaceHeadBindingByteLength
+      !== layout.workspaceContinuationBindingByteOffset
+    || layout.workspaceContinuationBindingByteOffset
+      + layout.workspaceContinuationBindingByteLength
+      !== layout.parentToCoarseOrdinalByteOffset
+    || layout.parentToCoarseOrdinalByteOffset
+      + layout.parentToCoarseOrdinalByteLength
+      !== layout.byteLength
+    || layout.workspaceHeadBindingByteLength > maxStorageBufferBindingSize
+    || layout.workspaceContinuationBindingByteLength
+      > maxStorageBufferBindingSize
+    || layout.parentToCoarseOrdinalByteLength > maxStorageBufferBindingSize
+    || layout.workspaceContinuationBindingByteOffset
+      % minStorageBufferOffsetAlignment !== 0
+    || layout.parentToCoarseOrdinalByteOffset
+      % minStorageBufferOffsetAlignment !== 0
     || localRefluxLayout.byteLength > maxBufferSize
     || localRefluxLayout.byteLength > maxStorageBufferBindingSize
   ) {
-    throw new RangeError('parent-field mechanics workspace exceeds WebGPU buffer limits');
+    const error = new RangeError(
+      'parent-field mechanics workspace exceeds WebGPU buffer limits '
+      + `(workspace=${layout.byteLength}, `
+      + `workspaceHeadBinding=${layout.workspaceHeadBindingByteLength}, `
+      + `workspaceContinuationBinding=${
+        layout.workspaceContinuationBindingByteLength
+      }, `
+      + `reverseMapBinding=${layout.parentToCoarseOrdinalByteLength}, `
+      + `reflux=${localRefluxLayout.byteLength}, `
+      + `maxBuffer=${maxBufferSize}, `
+      + `maxBinding=${maxStorageBufferBindingSize}, `
+      + `workspaceContinuationOffset=${
+        layout.workspaceContinuationBindingByteOffset
+      }, `
+      + `reverseMapOffset=${layout.parentToCoarseOrdinalByteOffset}, `
+      + `offsetAlignment=${minStorageBufferOffsetAlignment})`
+    );
+    Object.assign(error, {
+      workspaceByteLength: layout.byteLength,
+      workspaceBindingByteLength: layout.workspaceBindingByteLength,
+      workspaceHeadBindingByteLength:
+        layout.workspaceHeadBindingByteLength,
+      workspaceContinuationBindingByteLength:
+        layout.workspaceContinuationBindingByteLength,
+      reverseMapBindingByteLength: layout.parentToCoarseOrdinalByteLength,
+      refluxByteLength: localRefluxLayout.byteLength,
+      maxBufferSize,
+      maxStorageBufferBindingSize,
+      workspaceContinuationBindingByteOffset:
+        layout.workspaceContinuationBindingByteOffset,
+      reverseMapByteOffset: layout.parentToCoarseOrdinalByteOffset,
+      minStorageBufferOffsetAlignment
+    });
+    throw error;
   }
   const maxStorageBuffersPerShaderStage = positiveInteger(
     device.limits?.maxStorageBuffersPerShaderStage ?? 8,
     'device.limits.maxStorageBuffersPerShaderStage',
     0xffff
   );
-  if (maxStorageBuffersPerShaderStage < 5) {
-    throw new RangeError('parent-field mechanics requires five storage bindings');
+  if (maxStorageBuffersPerShaderStage < 6) {
+    throw new RangeError('parent-field mechanics requires six storage bindings');
   }
   if (
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
@@ -1818,7 +1884,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       [2, execution.parentFieldView.coarseFieldView.fieldViewBuffer],
       [3, execution.workspaceBuffer],
       [4, execution.refluxLedger.buffer],
-      [5, execution.paramsBuffer]
+      [5, execution.paramsBuffer],
+      [11, execution.workspaceBuffer],
+      [12, execution.workspaceBuffer]
     ]);
   }
 
@@ -1886,7 +1954,25 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       layout: pipelineObject.getBindGroupLayout(0),
       entries: PIPELINE_BINDINGS[pipelineName].map((binding) => ({
         binding,
-        resource: { buffer: resources.get(binding) }
+        resource: binding === 3
+          ? {
+              buffer: resources.get(binding),
+              offset: 0,
+              size: layout.workspaceHeadBindingByteLength
+            }
+          : binding === 11
+            ? {
+                buffer: resources.get(binding),
+                offset: layout.parentToCoarseOrdinalByteOffset,
+                size: layout.parentToCoarseOrdinalByteLength
+              }
+            : binding === 12
+              ? {
+                  buffer: resources.get(binding),
+                  offset: layout.workspaceContinuationBindingByteOffset,
+                  size: layout.workspaceContinuationBindingByteLength
+                }
+            : { buffer: resources.get(binding) }
       }))
     });
   }
@@ -3935,7 +4021,7 @@ const DIRECT_RUNTIME_CACHE_LIMIT = 4;
 export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   parentFieldCapacity,
   fineFieldCapacity = parentFieldCapacity,
-  arenaCount = 3
+  arenaCount = DIRECT_PARENT_FIELD_MECHANICS_ARENA_COUNT
 } = {}) {
   assertDevice(device);
   const capacity = positiveInteger(parentFieldCapacity, 'parentFieldCapacity');

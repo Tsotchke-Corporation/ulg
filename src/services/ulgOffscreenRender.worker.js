@@ -1,3 +1,7 @@
+import {
+  webGpuDeviceDescriptorForResidentSph
+} from '../runtime/webgpuDeviceLimits.js';
+
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
 const DISPLAY_HANDOFF = 'transferControlToOffscreen';
@@ -1842,7 +1846,9 @@ async function initPresentation(data) {
     });
     return;
   }
-  device = await adapter.requestDevice();
+  device = await adapter.requestDevice(
+    webGpuDeviceDescriptorForResidentSph(adapter)
+  );
   format = gpu.getPreferredCanvasFormat();
   configureCanvas({
     width: data.width,

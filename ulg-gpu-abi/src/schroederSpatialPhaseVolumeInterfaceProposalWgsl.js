@@ -745,7 +745,13 @@ fn parent_admitted() -> bool {
     || capacity_words != required_words
   ) { return false; }
   return parent_field_view[57u] == params.generation_id
-    && parent_field_view[58u] == candidate_capacity
+    // The parent view radix-sorts only the authenticated live candidate
+    // prefix (fine_count * PARENT_MAX_EDGES fine rows plus coarse_count
+    // native rows), so word 58 seals that live domain rather than the full
+    // candidate capacity tail.
+    && fine_count <= fine_capacity
+    && coarse_count <= coarse_capacity
+    && parent_field_view[58u] == fine_count * PARENT_MAX_EDGES + coarse_count
     && (
       parent_field_view[59u] == parent_count
       || (parent_count < 0xffffffffu && parent_field_view[59u] == parent_count + 1u)

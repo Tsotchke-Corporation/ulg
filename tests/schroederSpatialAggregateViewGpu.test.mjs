@@ -1168,7 +1168,7 @@ test('runtime retains Morton radix arenas and uses separate cell/internal/record
   assert.equal(runtime.schema, ULG_SCHROEDER_SPATIAL_AGGREGATE_VIEW_SCHEMA);
   assert.equal(runtime.aggregatePipelineCount, 9);
   assert.equal(runtime.radixPipelineCountPerArena, 12);
-  assert.equal(runtime.radixGpuCountPipelineCountPerArena, 9);
+  assert.equal(runtime.radixGpuCountPipelineCountPerArena, 10);
   assert.equal(runtime.gpuCountRadixPrepared, true);
   assert.equal(
     runtime.pipelineCount,
@@ -1227,6 +1227,29 @@ test('runtime retains Morton radix arenas and uses separate cell/internal/record
   assert.equal(validateSchroederSpatialAggregateViewDescriptor(execution).admitted, true);
   assert.equal(await runtime.releaseExecutionAfter(execution, Promise.resolve()), true);
   assert.equal(runtime.activeExecutionCount(), 0);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('aggregate arenas reuse exact immutable bind groups', () => {
+  const tracker = createFakeDevice();
+  const runtime = createSchroederSpatialAggregateViewGpu(tracker.device, {
+    maxSourceCount: 4,
+    cellCapacity: 4,
+    arenaCount: 1,
+    label: 'test-aggregate-bind-cache'
+  });
+  const authorities = createAuthorities(tracker.device);
+  const explicitGroups = () => tracker.bindGroups.filter(({ descriptor }) => (
+    /test-aggregate-bind-cache-arena-0-(?:initialize|initialize-records|emit-morton-keys|leaves|build-prefix-topology|build-escape-ropes|reduce-internals|authenticate|finalize)-bindings/u
+      .test(descriptor.label)
+  ));
+  const first = runtime.encode(createFakeEncoder(), authorities);
+  const explicitBindGroupCount = explicitGroups().length;
+  assert.equal(explicitBindGroupCount, 9);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(createFakeEncoder(), authorities);
+  assert.equal(explicitGroups().length, explicitBindGroupCount);
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
   assert.equal(runtime.destroy(), true);
 });
 

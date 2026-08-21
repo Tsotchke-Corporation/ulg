@@ -4,8 +4,13 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   computeBufferBinding,
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
   createCachedExplicitComputePipeline,
-  deferSubmittedWorkCleanup
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  submitQueueOrderedFinalConsumerWork,
+  releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -15,9 +20,21 @@ import {
 import { pressureCarrierTransformWgsl } from '../../../ulg-gpu-abi/src/pressureCarrierTransformWgsl.js';
 import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from './sphMechanicsMaterialTable.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import {
+  appendGpuReadbackTelemetryObservation,
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export const ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA =
   'peercompute.ulg.sph-phase-carrier-transfer.v2';
+const phaseCarrierTransferCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'sph-phase-carrier-transfer-submitted-work'
+  });
+const phaseCarrierOutputCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'sph-phase-carrier-output'
+  });
 export const ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA =
   'peercompute.ulg.sph-phase-carrier-plan.v2';
 export const SPH_PHASE_FRACTION_VALIDATION_EPSILON = 1e-7;
@@ -1082,20 +1099,54 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   const workgroups = Math.max(1, Math.ceil(plan.lineageCapacity / 64));
   let cleaned = false;
   let outputsDestroyed = false;
+  let outputDestroyScheduled = false;
+  let outputDestroyRelease = null;
+  const destroyedBuffers = new Set();
+  const destroyBufferOnce = (buffer) => {
+    if (!buffer || destroyedBuffers.has(buffer)) return;
+    buffer.destroy?.();
+    destroyedBuffers.add(buffer);
+  };
   const destroyOutputs = () => {
     if (outputsDestroyed) return;
+    let firstError = null;
+    for (const buffer of [
+      outStateBuffer,
+      outThermoBuffer,
+      outMechanicsBuffer
+    ]) {
+      try {
+        destroyBufferOnce(buffer);
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError) throw firstError;
     outputsDestroyed = true;
-    outStateBuffer.destroy?.();
-    outThermoBuffer.destroy?.();
-    outMechanicsBuffer.destroy?.();
   };
   const cleanup = () => {
     if (cleaned) return;
+    let firstError = null;
+    for (const buffer of [
+      closureBuffer,
+      evidenceBuffer,
+      paramsBuffer
+    ]) {
+      try {
+        destroyBufferOnce(buffer);
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (!retainOutputParticleBuffers) {
+      try {
+        destroyOutputs();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError) throw firstError;
     cleaned = true;
-    closureBuffer.destroy?.();
-    evidenceBuffer.destroy?.();
-    paramsBuffer.destroy?.();
-    if (!retainOutputParticleBuffers) destroyOutputs();
   };
   const result = {
     schema: ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA,
@@ -1121,12 +1172,88 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     mechanicsBufferByteLength: mechanicsByteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     readbackMode,
-    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     fullParticleReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    ...(readbackMode === NO_FULL_READBACK_MODE
+      ? createGpuReadbackTelemetry({
+          scope: 'sph-phase-carrier-transfer-webgpu',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        })
+      : createGpuReadbackTelemetry({
+          scope: 'sph-phase-carrier-transfer-webgpu',
+          complete: false,
+          unknownSources: ['full-readback-pending']
+        })),
     failClosedPolicy: 'global-layout-copy-through-lineage-local-invalid-copy-through',
     conservationPolicy: 'mass-current-volume-momentum-first-moment-total-energy-with-relative-kinetic-thermalization',
     destroyOutputParticleBuffers: retainOutputParticleBuffers
-      ? () => deferSubmittedWorkCleanup(device, destroyOutputs)
+      ? ({ queueOrderedFinalConsumer = null } = {}) => {
+          if (outputsDestroyed) return true;
+          if (outputDestroyScheduled) {
+            return outputDestroyRelease ?? true;
+          }
+          const producerClaim =
+            result.queueOrderedCleanupClaim ?? null;
+          if (queueOrderedFinalConsumer && producerClaim) {
+            outputDestroyScheduled = true;
+            try {
+              const receipt = releaseSubmittedWorkCleanupQueueOrdered(
+                device,
+                destroyOutputs,
+                {
+                  queueOrderedFinalConsumer,
+                  producerClaim,
+                  producerOutput: result,
+                  producerFamily: 'sph-phase-carrier-output'
+                }
+              );
+              outputDestroyRelease = true;
+              result.outputParticleBufferCleanupReceipt = receipt;
+              result.outputParticleBufferCleanupStatus = receipt.status;
+              result.outputParticleBufferQueueCompletionMethod =
+                receipt.queueCompletionMethod;
+            } catch (error) {
+              if (error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED') {
+                outputDestroyScheduled = false;
+              }
+              throw error;
+            }
+            return true;
+          }
+          if (producerClaim) {
+            try {
+              cancelQueueOrderedCleanupClaim(
+                producerClaim,
+                device,
+                {
+                  producerOutput: result,
+                  cleanup: destroyOutputs
+                }
+              );
+            } catch {
+              // A sealed claim requires its published exact capability.
+              // The host-fenced fallback below remains memory-safe.
+            }
+          }
+          outputDestroyScheduled = true;
+          outputDestroyRelease = deferSubmittedWorkCleanup(
+            device,
+            destroyOutputs
+          );
+          appendGpuReadbackTelemetryObservation(result, {
+            hostQueueFenceCount: 1,
+            deferredCleanupHostQueueFenceCount: 1
+          }, {
+            source: 'phase-carrier-output-buffer-cleanup'
+          });
+          result.outputParticleBufferCleanupStatus =
+            'submitted-output-cleanup-deferred-after-host-queue-fence';
+          result.outputParticleBufferQueueCompletionMethod =
+            'gpu-queue-on-submitted-work-done';
+          return outputDestroyRelease ?? true;
+        }
       : null,
     scientificValidation: false,
     phaseChangeValidation: false,
@@ -1156,17 +1283,99 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
       apply.dispatchWorkgroups(workgroups);
       apply.end();
     },
-    cleanupSubmittedWork: cleanup
+    cleanupSubmittedWork: cleanup,
+    cleanupRetainedOutput: destroyOutputs
   };
 }
 
 export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
   const stage = createSphPhaseCarrierTransferWebGpuEncoderStage(args);
-  const { device, retainOutputParticleBuffers = false } = args;
-  const noFullReadback = args.readbackMode === NO_FULL_READBACK_MODE;
+  const {
+    device,
+    retainOutputParticleBuffers = false,
+    queueOrderedProducerClaims = []
+  } = args;
+  const noFullReadback =
+    stage.result.readbackMode === NO_FULL_READBACK_MODE;
+  const exactConsumerClaims =
+    Array.isArray(queueOrderedProducerClaims)
+      ? queueOrderedProducerClaims
+      : [];
+  const authenticatedQueueOrderedRoute =
+    noFullReadback && exactConsumerClaims.length > 0;
   const encoder = device.createCommandEncoder();
   stage.encode(encoder);
-  device.queue.submit([encoder.finish()]);
+  const commandBuffer = encoder.finish();
+  let submittedWorkCleanupClaim = null;
+  let submittedWorkFinalConsumer = null;
+  let outputCleanupClaim = null;
+  if (authenticatedQueueOrderedRoute) {
+    try {
+      if (retainOutputParticleBuffers) {
+        outputCleanupClaim =
+          registerQueueOrderedCleanupClaim(
+            phaseCarrierOutputCleanupClaimIssuer,
+            device,
+            {
+              producerOutput: stage.result,
+              cleanup: stage.cleanupRetainedOutput
+            }
+          );
+        Object.defineProperty(
+          stage.result,
+          'queueOrderedCleanupClaim',
+          {
+            value: outputCleanupClaim,
+            enumerable: false
+          }
+        );
+      }
+      submittedWorkCleanupClaim = registerQueueOrderedCleanupClaim(
+        phaseCarrierTransferCleanupClaimIssuer,
+        device,
+        {
+          producerOutput: stage,
+          cleanup: stage.cleanupSubmittedWork
+        }
+      );
+      submittedWorkFinalConsumer =
+        submitQueueOrderedFinalConsumerWork(
+          device,
+          [commandBuffer],
+          {
+            finalConsumerOwner: stage,
+            producerClaims: [
+              ...exactConsumerClaims,
+              submittedWorkCleanupClaim
+            ]
+          }
+        );
+    } catch (error) {
+      if (submittedWorkCleanupClaim) {
+        cancelQueueOrderedCleanupClaim(
+          submittedWorkCleanupClaim,
+          device,
+          {
+            producerOutput: stage,
+            cleanup: stage.cleanupSubmittedWork
+          }
+        );
+      }
+      if (outputCleanupClaim) {
+        cancelQueueOrderedCleanupClaim(
+          outputCleanupClaim,
+          device,
+          {
+            producerOutput: stage.result,
+            cleanup: stage.cleanupRetainedOutput
+          }
+        );
+      }
+      throw error;
+    }
+  } else {
+    device.queue.submit([commandBuffer]);
+  }
   if (!noFullReadback) {
     const [stateBytes, thermoBytes, mechanicsBytes, evidenceBytes] = await Promise.all([
       readBuffer(device, stage.stateBuffer, stage.stateBufferByteLength, 'ulg-phase-transfer-state-readback'),
@@ -1178,6 +1387,15 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     stage.result.thermo = new Float32Array(thermoBytes);
     stage.result.mechanics = new Float32Array(mechanicsBytes);
     stage.result.evidence = new Uint32Array(evidenceBytes);
+    Object.assign(stage.result, createGpuReadbackTelemetry({
+      scope: 'sph-phase-carrier-transfer-webgpu',
+      mapAsyncCount: 4,
+      readbackBytes:
+        Math.max(4, stage.stateBufferByteLength)
+        + Math.max(4, stage.thermoBufferByteLength)
+        + Math.max(4, stage.mechanicsBufferByteLength)
+        + Math.max(4, stage.evidenceBufferByteLength)
+    }));
     stage.result.invalidLineageCount = stage.result.evidence[6];
     stage.result.firstInvalidLineage = stage.result.evidence[7] === 0xffffffff
       ? null
@@ -1189,7 +1407,71 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
         : 'phase-carrier-transfer-complete');
   }
   if (noFullReadback) {
-    deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+    if (authenticatedQueueOrderedRoute) {
+      Object.defineProperty(
+        stage.result,
+        'queueOrderedFinalConsumerCapability',
+        {
+          value: submittedWorkFinalConsumer,
+          enumerable: false
+        }
+      );
+      try {
+        const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          stage.cleanupSubmittedWork,
+          {
+            queueOrderedFinalConsumer: submittedWorkFinalConsumer,
+            producerClaim: submittedWorkCleanupClaim,
+            producerOutput: stage,
+            producerFamily:
+              'sph-phase-carrier-transfer-submitted-work'
+          }
+        );
+        Object.assign(stage.result, {
+          submittedWorkCleanupReceipt: cleanupReceipt,
+          submittedWorkCleanupStatus: cleanupReceipt.status,
+          submittedWorkCleanupHostQueueFenceCount:
+            cleanupReceipt.hostQueueFenceCount,
+          submittedWorkCleanupMethod: cleanupReceipt.queueCompletionMethod
+        });
+      } catch (error) {
+        deferSubmittedWorkCleanup(
+          device,
+          stage.cleanupSubmittedWork
+        );
+        appendGpuReadbackTelemetryObservation(stage.result, {
+          hostQueueFenceCount: 1,
+          deferredCleanupHostQueueFenceCount: 1
+        }, {
+          source: 'phase-carrier-submitted-work-cleanup-retry'
+        });
+        Object.assign(stage.result, {
+          submittedWorkCleanupStatus:
+            'queue-ordered-local-cleanup-retry-deferred-after-host-queue-fence',
+          submittedWorkCleanupError:
+            error instanceof Error ? error.message : String(error),
+          submittedWorkCleanupHostQueueFenceCount: 1,
+          submittedWorkCleanupMethod:
+            'gpu-queue-on-submitted-work-done'
+        });
+      }
+    } else {
+      deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+      appendGpuReadbackTelemetryObservation(stage.result, {
+        hostQueueFenceCount: 1,
+        deferredCleanupHostQueueFenceCount: 1
+      }, {
+        source: 'phase-carrier-submitted-work-cleanup'
+      });
+      Object.assign(stage.result, {
+        submittedWorkCleanupStatus:
+          'submitted-work-cleanup-deferred-after-host-queue-fence',
+        submittedWorkCleanupHostQueueFenceCount: 1,
+        submittedWorkCleanupMethod:
+          'gpu-queue-on-submitted-work-done'
+      });
+    }
   } else {
     stage.cleanupSubmittedWork();
   }
@@ -1203,12 +1485,45 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
 
 export function retainedPhaseCarrierTransferOutputBuffers(stageOrResult) {
   const source = stageOrResult?.result || stageOrResult;
+  const componentOwnershipFields = Object.fromEntries(
+    ['state', 'thermo', 'mechanics'].map((component) => {
+      const buffer = source?.[`${component}Buffer`]
+        || stageOrResult?.[`${component}Buffer`]
+        || null;
+      const ownershipField =
+        `owns${component[0].toUpperCase()}${component.slice(1)}Buffer`;
+      const declaredOwnership = source?.componentOwnership?.[component]
+        ?? source?.bufferOwnership?.[component];
+      const owned = !buffer
+        ? false
+        : (typeof source?.[ownershipField] === 'boolean'
+            ? source[ownershipField]
+            : (typeof declaredOwnership === 'boolean'
+                ? declaredOwnership
+                : (declaredOwnership === 'borrowed'
+                    || declaredOwnership === 'external'
+                    ? false
+                    : true)));
+      return [ownershipField, owned];
+    })
+  );
   return {
     stateBuffer: source?.stateBuffer || stageOrResult?.stateBuffer || null,
     thermoBuffer: source?.thermoBuffer || stageOrResult?.thermoBuffer || null,
     mechanicsBuffer: source?.mechanicsBuffer || stageOrResult?.mechanicsBuffer || null,
     stateBufferByteLength: source?.stateBufferByteLength || stageOrResult?.stateBufferByteLength || 0,
     thermoBufferByteLength: source?.thermoBufferByteLength || stageOrResult?.thermoBufferByteLength || 0,
-    mechanicsBufferByteLength: source?.mechanicsBufferByteLength || stageOrResult?.mechanicsBufferByteLength || 0
+    mechanicsBufferByteLength: source?.mechanicsBufferByteLength || stageOrResult?.mechanicsBufferByteLength || 0,
+    destroyOutputParticleBuffers:
+      source?.destroyOutputParticleBuffers
+      || stageOrResult?.destroyOutputParticleBuffers
+      || null,
+    destroyOutputParticleBufferComponents:
+      source?.destroyOutputParticleBufferComponents
+      || stageOrResult?.destroyOutputParticleBufferComponents
+      || null,
+    queueOrderedRetainedOutputFinalConsumerCapability:
+      source?.queueOrderedRetainedOutputFinalConsumerCapability ?? null,
+    ...componentOwnershipFields
   };
 }

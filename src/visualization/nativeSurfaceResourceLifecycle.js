@@ -72,7 +72,11 @@ export function resolveNativeSurfaceSuccessorPromotion({
   latestCandidateGeneration = candidateGeneration,
   foregroundValidationStatus = 'not-run',
   foregroundValidationGeneration = null,
-  foregroundValidationNonzeroPixelCount = 0
+  foregroundValidationNonzeroPixelCount = 0,
+  foregroundValidationProofKind = null,
+  foregroundValidationGpuFenceSatisfied = null,
+  foregroundValidationSameQueueSubmissionBoundary = null,
+  foregroundValidationSubmittedDrawCount = 0
 } = {}) {
   const candidate = exactNativeSurfaceGeneration(candidateGeneration);
   const latest = exactNativeSurfaceGeneration(latestCandidateGeneration);
@@ -87,6 +91,39 @@ export function resolveNativeSurfaceSuccessorPromotion({
   ) && foregroundValidationNonzeroPixelCount > 0
     ? foregroundValidationNonzeroPixelCount
     : 0;
+  const proofKind = typeof foregroundValidationProofKind === 'string'
+    ? foregroundValidationProofKind.trim().toLowerCase() || null
+    : null;
+  const gpuFenceSatisfied =
+    foregroundValidationGpuFenceSatisfied === true;
+  const sameQueueSubmissionBoundary =
+    foregroundValidationSameQueueSubmissionBoundary === true;
+  const submittedDrawCount = Number.isSafeInteger(
+    foregroundValidationSubmittedDrawCount
+  ) && foregroundValidationSubmittedDrawCount > 0
+    ? foregroundValidationSubmittedDrawCount
+    : 0;
+  const diagnosticPixelProof = Boolean(
+    proofKind === 'base-composite-color-difference'
+  );
+  const sameQueueStagedCompositeProof = Boolean(
+    proofKind === 'same-queue-private-staged-composite-submission'
+  );
+  const supportedProofKind = Boolean(
+    diagnosticPixelProof
+    || sameQueueStagedCompositeProof
+  );
+  const privateCompositePixelEvidenceSatisfied = Boolean(
+    validationStatus === 'passed'
+    && diagnosticPixelProof
+    && nonzeroPixelCount > 0
+  );
+  const sameQueueStructuralSubmissionEvidenceSatisfied = Boolean(
+    validationStatus === 'passed'
+    && sameQueueStagedCompositeProof
+    && sameQueueSubmissionBoundary
+    && submittedDrawCount > 0
+  );
   const validGenerations = Boolean(
     candidate != null
     && latest != null
@@ -100,15 +137,24 @@ export function resolveNativeSurfaceSuccessorPromotion({
     validGenerations
     && validated === candidate
   );
-  const foregroundValidated = Boolean(
-    validationStatus === 'passed'
-    && nonzeroPixelCount > 0
-  );
-  const promoteCandidate = Boolean(
+  const exactCandidateLineage = Boolean(
     candidateIsLatest
     && validationMatchesCandidate
-    && foregroundValidated
   );
+  const privateCompositePixelValidated = Boolean(
+    exactCandidateLineage
+    && privateCompositePixelEvidenceSatisfied
+  );
+  const sameQueueStructuralSubmissionAdmitted = Boolean(
+    exactCandidateLineage
+    && sameQueueStructuralSubmissionEvidenceSatisfied
+  );
+  const foregroundValidated = privateCompositePixelValidated;
+  const candidateAdmitted = Boolean(
+    privateCompositePixelValidated
+    || sameQueueStructuralSubmissionAdmitted
+  );
+  const promoteCandidate = candidateAdmitted;
   let status = 'native-surface-successor-retained-invalid-generation';
   let reason = 'candidate, latest, and validation generations must be exact non-negative integers';
   if (validGenerations && !candidateIsLatest) {
@@ -120,9 +166,34 @@ export function resolveNativeSurfaceSuccessorPromotion({
   } else if (validGenerations && validationStatus !== 'passed') {
     status = `native-surface-successor-retained-validation-${validationStatus || 'not-run'}`;
     reason = `foreground validation status is ${validationStatus || 'not-run'}`;
-  } else if (validGenerations && nonzeroPixelCount === 0) {
+  } else if (validGenerations && !supportedProofKind) {
+    status = 'native-surface-successor-retained-unsupported-proof-kind';
+    reason = proofKind == null
+      ? 'foreground validation did not provide an explicit supported proof kind'
+      : `foreground proof kind ${proofKind} is not admitted for successor promotion`;
+  } else if (
+    validGenerations
+    && diagnosticPixelProof
+    && nonzeroPixelCount === 0
+  ) {
     status = 'native-surface-successor-retained-empty-foreground';
-    reason = 'foreground validation observed no nonzero pixels';
+    reason = 'diagnostic foreground pixel proof observed no nonzero pixels';
+  } else if (
+    validGenerations
+    && sameQueueStagedCompositeProof
+    && !sameQueueSubmissionBoundary
+  ) {
+    status = 'native-surface-successor-retained-missing-same-queue-boundary';
+    reason = foregroundValidationSameQueueSubmissionBoundary == null
+      ? 'same-queue staged composite proof did not provide its ordered submission boundary'
+      : 'same-queue staged composite proof reports a mismatched submission boundary';
+  } else if (
+    validGenerations
+    && sameQueueStagedCompositeProof
+    && submittedDrawCount === 0
+  ) {
+    status = 'native-surface-successor-retained-no-submitted-draws';
+    reason = 'same-queue staged composite proof did not submit any draw commands';
   } else if (promoteCandidate) {
     status = 'native-surface-successor-promoted';
     reason = null;
@@ -138,9 +209,17 @@ export function resolveNativeSurfaceSuccessorPromotion({
     foregroundValidationStatus: validationStatus,
     foregroundValidationGeneration: validated,
     foregroundValidationNonzeroPixelCount: nonzeroPixelCount,
+    foregroundValidationProofKind: proofKind,
+    foregroundValidationGpuFenceSatisfied: gpuFenceSatisfied,
+    foregroundValidationSameQueueSubmissionBoundary:
+      sameQueueSubmissionBoundary,
+    foregroundValidationSubmittedDrawCount: submittedDrawCount,
     candidateIsLatest,
     validationMatchesCandidate,
-    foregroundValidated
+    foregroundValidated,
+    privateCompositePixelValidated,
+    sameQueueStructuralSubmissionAdmitted,
+    candidateAdmitted
   };
 }
 

@@ -80,6 +80,7 @@ function phasePropertyPaths(properties) {
     for (const key of [
       'cpJPerKgK',
       'densityKgPerM3',
+      'thermalConductivityWPerMK',
       'bulkModulusPa',
       'shearModulusPa',
       'debyeTemperatureK'

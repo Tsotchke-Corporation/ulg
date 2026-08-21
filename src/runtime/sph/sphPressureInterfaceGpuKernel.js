@@ -44,7 +44,16 @@ import {
   sphPressureInterfaceForceRowsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  cancelQueueOrderedCleanupClaim,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  createQueueOrderedCleanupClaimIssuer,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered,
+  submitQueueOrderedFinalConsumerWork
+} from '../webgpuComputeLayout.js';
 import {
   ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA
@@ -52,14 +61,29 @@ import {
 import {
   ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
   abandonSphSpatialGasPressureAuthority,
-  bindSphSpatialGasPressureAuthority,
   describeSphSpatialGasPressureAuthority,
+  encodeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource,
-  markSphSpatialGasPressureAuthoritySubmitted
+  retireSphSpatialGasPressureAuthorityQueueOrdered,
+  sphSpatialGasPressureAuthorityQueueOrderedClaim
 } from './sphSpatialGasLedgerEosGpu.js';
-import { tagWebGpuBufferDevice, webGpuDeviceMismatchInfo } from './sphGpuDeviceIdentity.js';
+import {
+  abandonSphCpuSeededGasPressureAuthorityConsumer,
+  describeSphCpuSeededGasPressureAuthorityGpu,
+  encodeSphCpuSeededGasPressureAuthorityGpu,
+  isExactSphCpuSeededGasPressureAuthorityGpu,
+  retireSphCpuSeededGasPressureAuthorityQueueOrdered,
+  sphCpuSeededGasPressureAuthorityQueueOrderedClaim
+} from './sphCpuSeededGasPressureAuthorityGpu.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuDeviceId,
+  webGpuDeviceMismatchInfo
+} from './sphGpuDeviceIdentity.js';
 
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
@@ -75,6 +99,8 @@ export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
 export const ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
   ULG_SPH_INTERFACE_CONTACT_KINEMATICS_SCHEMA;
 export const ULG_INTERFACE_SOURCE_KEY_SCHEMA = ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA;
+export const ULG_SPH_PRESSURE_INTERFACE_COMPLETION_RECEIPT_SCHEMA =
+  'peercompute.ulg.sph-pressure-interface-completion-receipt.v1';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -125,6 +151,43 @@ const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
 const gasAuthorityControlSentinels = new WeakMap();
+const PRESSURE_LOCAL_QUEUE_ORDERED_PRODUCER_FAMILY =
+  'sph-pressure-interface-local-temporaries';
+const pressureLocalCleanupClaimIssuer = createQueueOrderedCleanupClaimIssuer({
+  producerFamily: PRESSURE_LOCAL_QUEUE_ORDERED_PRODUCER_FAMILY
+});
+const pressureCompletionReceiptRecords = new WeakMap();
+
+export function isExactSphPressureInterfaceCompletionReceipt(
+  receipt,
+  device,
+  expectedResult
+) {
+  const record = pressureCompletionReceiptRecords.get(receipt);
+  let receiptDescriptor = null;
+  try {
+    receiptDescriptor = Object.getOwnPropertyDescriptor(
+      expectedResult,
+      'pressureCompletionReceipt'
+    );
+  } catch {
+    return false;
+  }
+  if (
+    !record
+    || record.receipt !== receipt
+    || record.device !== device
+    || record.state !== 'issued'
+    || record.result !== expectedResult
+    || !receiptDescriptor
+    || !Object.hasOwn(receiptDescriptor, 'value')
+    || receiptDescriptor.value !== receipt
+  ) return false;
+  // Worker validation is a one-shot stage transition. Consuming before the
+  // caller continues makes clones, cross-result reuse, and replay fail closed.
+  record.state = 'consumed';
+  return true;
+}
 
 function gasAuthorityControlSentinel(device) {
   let buffer = gasAuthorityControlSentinels.get(device);
@@ -1119,28 +1182,289 @@ function workerRetainedBufferRef(value = null) {
   return value?.schema === ULG_WORKER_RETAINED_BUFFER_REF_SCHEMA;
 }
 
-function retainedGasCellFieldSourceFromImport(importDescriptor = null) {
-  if (
-    importDescriptor?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
-    || importDescriptor?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1
-  ) {
-    return importDescriptor;
+const RETAINED_GAS_IMPORT_GRAPH_KEYS = Object.freeze([
+  'retainedGasCellFieldSource',
+  'pressureInterfaceGasCellFieldImport',
+  'pressureInterfaceGasCellFieldAdmission',
+  'gasCellFieldAdmission',
+  'admission'
+]);
+
+const RETAINED_GAS_IMPORT_PRESSURE_ALIAS_KEYS = Object.freeze([
+  'gasPressureCellsBuffer',
+  'retainedGasPressureCellsBuffer',
+  'pressureInterfaceGasPressureCellsBuffer'
+]);
+
+const RETAINED_GAS_IMPORT_CONTROL_ALIAS_KEYS = Object.freeze([
+  'gasAuthorityControlBuffer',
+  'retainedGasAuthorityControlBuffer',
+  'pressureInterfaceGasAuthorityControlBuffer'
+]);
+
+const RETAINED_GAS_IMPORT_CAPTURE_KEYS = Object.freeze([
+  ...RETAINED_GAS_IMPORT_GRAPH_KEYS,
+  ...RETAINED_GAS_IMPORT_PRESSURE_ALIAS_KEYS,
+  ...RETAINED_GAS_IMPORT_CONTROL_ALIAS_KEYS,
+  'schema',
+  'telemetryOnly',
+  'bindable'
+]);
+
+function retainedGasCellFieldImportOwnDescriptor(record, key) {
+  try {
+    return Object.getOwnPropertyDescriptor(record, key) || null;
+  } catch (cause) {
+    const error = new TypeError(
+      `Retained gas-cell property ${key} could not be inspected`
+    );
+    error.cause = cause;
+    throw error;
   }
-  return importDescriptor?.retainedGasCellFieldSource
-    || importDescriptor?.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
-    || importDescriptor?.admission?.retainedGasCellFieldSource
-    || null;
 }
 
-function retainedGasPressureLifecycleAvailable(importDescriptor = null) {
-  const source = retainedGasCellFieldSourceFromImport(importDescriptor);
+function retainedGasCellFieldImportGraph(importDescriptor = null) {
+  const records = [];
+  const byRecord = new Map();
+  const pending = [importDescriptor];
+  const seen = new Set();
+  while (pending.length > 0) {
+    const record = pending.shift();
+    if (
+      !record
+      || (typeof record !== 'object' && typeof record !== 'function')
+      || seen.has(record)
+    ) continue;
+    if (records.length >= 64) {
+      throw new TypeError(
+        'Retained gas-cell import graph exceeds the bounded wrapper depth'
+      );
+    }
+    seen.add(record);
+    const descriptors = new Map();
+    for (const key of RETAINED_GAS_IMPORT_CAPTURE_KEYS) {
+      descriptors.set(
+        key,
+        retainedGasCellFieldImportOwnDescriptor(record, key)
+      );
+    }
+    const captured = Object.freeze({ record, descriptors });
+    records.push(captured);
+    byRecord.set(record, captured);
+    for (const key of RETAINED_GAS_IMPORT_GRAPH_KEYS) {
+      const descriptor = descriptors.get(key);
+      if (!descriptor) continue;
+      if (!Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError(
+          `Retained gas-cell wrapper link ${key} must be an own data property`
+        );
+      }
+      const nested = descriptor.value;
+      if (
+        nested
+        && (typeof nested === 'object' || typeof nested === 'function')
+        && !seen.has(nested)
+      ) pending.push(nested);
+    }
+  }
+  return Object.freeze({
+    records: Object.freeze(records),
+    byRecord
+  });
+}
+
+function retainedGasCellFieldImportCapturedValue(captured, key) {
+  const descriptor = captured?.descriptors?.get(key) || null;
+  return descriptor && Object.hasOwn(descriptor, 'value')
+    ? descriptor.value
+    : undefined;
+}
+
+function retainedGasCellFieldImportRecordValue(graph, record, key) {
+  return retainedGasCellFieldImportCapturedValue(
+    graph?.byRecord?.get(record),
+    key
+  );
+}
+
+function retainedGasCellFieldSourceFromGraph(graph) {
+  const exactSource = graph.records.find(({ record }) => (
+    isExactSphSpatialGasPressureAuthoritySource(record)
+  ));
+  if (exactSource) return exactSource.record;
+  // A protected current/pre-current authority anywhere in a recognized
+  // wrapper chain dominates an outer legacy-looking record. This prevents a
+  // v1 shell from masking a nested v4 identity and downgrading its raw alias
+  // to the borrowed-buffer path.
+  for (const schema of [
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1
+  ]) {
+    const source = graph.records.find((captured) => (
+      retainedGasCellFieldImportCapturedValue(captured, 'schema') === schema
+    ));
+    if (source) return source.record;
+  }
+  return null;
+}
+
+function retainedGasCellFieldImportAliasObservation(graph) {
+  const pressureValues = [];
+  const controlValues = [];
+  const presentKeys = [];
+  const accessorKeys = [];
+  const inspect = (captured, keys, values) => {
+    for (const key of keys) {
+      const descriptor = captured.descriptors.get(key);
+      if (!descriptor) continue;
+      presentKeys.push(key);
+      if (!Object.hasOwn(descriptor, 'value')) {
+        accessorKeys.push(key);
+        continue;
+      }
+      if (descriptor.value != null) values.push(descriptor.value);
+    }
+  };
+  for (const captured of graph.records) {
+    inspect(captured, RETAINED_GAS_IMPORT_PRESSURE_ALIAS_KEYS, pressureValues);
+    inspect(captured, RETAINED_GAS_IMPORT_CONTROL_ALIAS_KEYS, controlValues);
+  }
+  return Object.freeze({
+    pressureValues: Object.freeze(pressureValues),
+    controlValues: Object.freeze(controlValues),
+    presentKeys: Object.freeze(presentKeys),
+    accessorKeys: Object.freeze(accessorKeys),
+    anyPresent: presentKeys.length > 0,
+    accessorRejected: accessorKeys.length > 0
+  });
+}
+
+function retainedGasCellFieldImportSchemaObservation(graph) {
+  const exactSources = [];
+  const forgedCurrent = [];
+  const mutatedExact = [];
+  const retiredV2 = [];
+  const retiredV3 = [];
+  const accessorRecords = [];
+  const inheritedProtectedSchema = (record) => {
+    const seen = new Set();
+    let prototype;
+    try {
+      prototype = Object.getPrototypeOf(record);
+    } catch (cause) {
+      const error = new TypeError(
+        'Retained gas-cell prototype could not be inspected'
+      );
+      error.cause = cause;
+      throw error;
+    }
+    while (prototype && !seen.has(prototype) && seen.size < 64) {
+      seen.add(prototype);
+      if (isExactSphSpatialGasPressureAuthoritySource(prototype)) {
+        return ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA;
+      }
+      const descriptor = retainedGasCellFieldImportOwnDescriptor(
+        prototype,
+        'schema'
+      );
+      if (descriptor && !Object.hasOwn(descriptor, 'value')) {
+        return 'accessor';
+      }
+      const schema = descriptor?.value;
+      if (
+        schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+        || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
+        || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+      ) return schema;
+      try {
+        prototype = Object.getPrototypeOf(prototype);
+      } catch (cause) {
+        const error = new TypeError(
+          'Retained gas-cell prototype chain could not be inspected'
+        );
+        error.cause = cause;
+        throw error;
+      }
+    }
+    if (prototype && seen.size >= 64) {
+      throw new TypeError(
+        'Retained gas-cell prototype chain exceeds the bounded inspection depth'
+      );
+    }
+    return null;
+  };
+  for (const captured of graph.records) {
+    const descriptor = captured.descriptors.get('schema');
+    if (descriptor && !Object.hasOwn(descriptor, 'value')) {
+      accessorRecords.push(captured.record);
+      continue;
+    }
+    const schema = retainedGasCellFieldImportCapturedValue(captured, 'schema');
+    const exact = isExactSphSpatialGasPressureAuthoritySource(captured.record);
+    if (exact) {
+      exactSources.push(captured.record);
+      if (schema !== ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
+        mutatedExact.push(captured.record);
+      }
+      continue;
+    }
+    if (schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
+      forgedCurrent.push(captured.record);
+    } else if (schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2) {
+      retiredV2.push(captured.record);
+    } else if (schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3) {
+      retiredV3.push(captured.record);
+    }
+    const inheritedSchema = inheritedProtectedSchema(captured.record);
+    if (inheritedSchema === 'accessor') {
+      accessorRecords.push(captured.record);
+    } else if (
+      inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+    ) {
+      forgedCurrent.push(captured.record);
+    } else if (
+      inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
+    ) {
+      retiredV2.push(captured.record);
+    } else if (
+      inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+    ) {
+      retiredV3.push(captured.record);
+    }
+  }
+  return Object.freeze({
+    exactSources: Object.freeze(exactSources),
+    forgedCurrent: Object.freeze(forgedCurrent),
+    mutatedExact: Object.freeze(mutatedExact),
+    retiredV2: Object.freeze(retiredV2),
+    retiredV3: Object.freeze(retiredV3),
+    accessorRecords: Object.freeze(accessorRecords)
+  });
+}
+
+function retainedGasPressureLifecycleAvailable(
+  importDescriptor = null,
+  importGraph = null,
+  retainedSource = null
+) {
+  const graphFromImport = importGraph
+    || retainedGasCellFieldImportGraph(importDescriptor);
+  const source = retainedSource
+    || retainedGasCellFieldSourceFromGraph(graphFromImport);
   const spatialSource = source?.sourceSpatialGasLedger || null;
   const executions = [
     importDescriptor?.spatialGasLedgerEosExecution,
     source?.spatialGasLedgerEosExecution,
     spatialSource?.spatialGasLedgerEosExecution
   ].filter(Boolean);
-  const records = [importDescriptor, source, spatialSource, ...executions].filter(Boolean);
+  const records = [
+    ...graphFromImport.records.map(({ record }) => record),
+    source,
+    spatialSource,
+    ...executions
+  ].filter(Boolean);
   if (records.some((record) => (
     record.consumed === true
     || record.finalConsumerConsumed === true
@@ -1181,19 +1505,31 @@ function resolveRetainedGasPressureRows({
   rowByteLength = 0,
   importDescriptor = null
 } = {}) {
-  const source = retainedGasCellFieldSourceFromImport(importDescriptor);
-  const candidateBuffers = [
+  const importGraph = retainedGasCellFieldImportGraph(importDescriptor);
+  const source = retainedGasCellFieldSourceFromGraph(importGraph);
+  const aliasObservation = retainedGasCellFieldImportAliasObservation(
+    importGraph
+  );
+  const schemaObservation = retainedGasCellFieldImportSchemaObservation(
+    importGraph
+  );
+  const sourceSchema = retainedGasCellFieldImportRecordValue(
+    importGraph,
+    source,
+    'schema'
+  );
+  const pressureBufferAliases = [
     buffer,
-    importDescriptor?.gasPressureCellsBuffer,
-    importDescriptor?.retainedGasPressureCellsBuffer,
-    importDescriptor?.pressureInterfaceGasPressureCellsBuffer,
-    source?.gasPressureCellsBuffer,
-    source?.retainedGasPressureCellsBuffer,
-    source?.pressureInterfaceGasPressureCellsBuffer
+    ...aliasObservation.pressureValues
   ].filter(Boolean);
+  const candidateBuffers = pressureBufferAliases;
   const consumerDeviceId = webGpuDeviceMismatchInfo({ device }).consumerDeviceId;
   const base = {
-    supplied: Boolean(importDescriptor || candidateBuffers.length > 0),
+    supplied: Boolean(
+      importDescriptor
+      || candidateBuffers.length > 0
+      || aliasObservation.anyPresent
+    ),
     ready: false,
     buffer: null,
     rowCount: 0,
@@ -1210,78 +1546,133 @@ function resolveRetainedGasPressureRows({
     reason,
     ...extra
   });
-  if (
-    importDescriptor?.schema === ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA
-    || source?.schema === ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA
-    || importDescriptor?.telemetryOnly === true
-    || source?.telemetryOnly === true
-    || importDescriptor?.bindable === false
-    || source?.bindable === false
-  ) {
+  if (importGraph.records.some((captured) => (
+    retainedGasCellFieldImportCapturedValue(captured, 'schema')
+      === ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA
+    || retainedGasCellFieldImportCapturedValue(captured, 'telemetryOnly') === true
+    || retainedGasCellFieldImportCapturedValue(captured, 'bindable') === false
+  ))) {
     return reject(
       'retained-gas-pressure-rows-rejected-telemetry-only',
       'Gas pressure telemetry is not a bindable same-realm authority'
     );
   }
-  if (source?.schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
-    if (!isExactSphSpatialGasPressureAuthoritySource(source)) {
+  if (schemaObservation.accessorRecords.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-schema-accessor',
+      'Retained gas pressure schemas must be own data properties'
+    );
+  }
+  if (schemaObservation.exactSources.length > 1) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v4-ambiguous-source',
+      'A retained gas pressure import may carry only one exact v4 authority'
+    );
+  }
+  if (schemaObservation.mutatedExact.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v4-mutated-source',
+      'The producer-issued v4 gas pressure authority schema was mutated'
+    );
+  }
+  if (schemaObservation.forgedCurrent.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v4-unbranded-source',
+      'A v4 gas pressure source must be the exact producer-issued opaque identity'
+    );
+  }
+  if (schemaObservation.retiredV3.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v3-pre-opaque-authority',
+      'A v3 gas pressure source exposes owner-managed buffers and cannot be consumed as an opaque authority'
+    );
+  }
+  if (schemaObservation.retiredV2.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v2-missing-free-volume-authority',
+      'A v2 gas pressure source lacks authoritative condensed-occupancy free volume'
+    );
+  }
+  if (isExactSphSpatialGasPressureAuthoritySource(source)) {
+    if (sourceSchema !== ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
       return reject(
-        'retained-gas-pressure-rows-rejected-v2-unbranded-source',
-        'A v2 gas pressure source must be the exact producer-issued identity'
+        'retained-gas-pressure-rows-rejected-v4-mutated-source',
+        'The producer-issued v4 gas pressure authority schema was mutated'
       );
     }
-    const exactBuffer = source.gasPressureCellsBuffer;
     if (
-      candidateBuffers.some(workerRetainedBufferRef)
-      || candidateBuffers.some((candidate) => candidate !== exactBuffer)
+      buffer != null
+      || aliasObservation.anyPresent
+      || aliasObservation.accessorRejected
     ) {
       return reject(
-        'retained-gas-pressure-rows-rejected-v2-buffer-identity',
-        'A v2 gas pressure source cannot be rebound through a buffer alias or worker reference'
+        'retained-gas-pressure-rows-rejected-v4-raw-buffer-alias',
+        'A v4 gas pressure source cannot be accompanied by raw pressure or control buffer aliases'
       );
     }
-    const telemetry = describeSphSpatialGasPressureAuthority(source);
+    const telemetry = describeSphSpatialGasPressureAuthority(source, { device });
+    if (telemetry?.deviceAuthenticated !== true) {
+      const error = new Error(
+        'The exact v4 gas pressure authority belongs to another WebGPU device'
+      );
+      error.code = 'ERR_SPH_GAS_PRESSURE_AUTHORITY_DEVICE_MISMATCH';
+      throw error;
+    }
     if (
       !telemetry
+      || telemetry.consumerSubmittedObserved === true
+      || telemetry.consumerBorrowedObserved === true
       || telemetry.releaseScheduledObserved
       || telemetry.releasedObserved
       || telemetry.terminalObserved
     ) {
       return reject(
         'retained-gas-pressure-rows-rejected-lifecycle',
-        'The exact v2 gas pressure authority is releasing, released, or terminal'
+        'The exact v4 gas pressure authority is releasing, released, or terminal'
       );
     }
-    const capacity = source.gasPressureCellRowCapacity;
-    const byteLength = source.pressureInterfaceGasPressureCellRowByteLength;
+    const capacity = telemetry.pressureCellCapacity;
+    const strideFloats = telemetry.pressureCellStrideFloats;
+    const byteLength = capacity * strideFloats * Float32Array.BYTES_PER_ELEMENT;
     if (
       !exactPositiveInteger(capacity)
-      || source.pressureInterfaceGasPressureCellRowStrideFloats
-        !== SPH_GAS_PRESSURE_CELL_FLOATS
-      || byteLength !== capacity * SPH_GAS_PRESSURE_CELL_FLOATS
-        * Float32Array.BYTES_PER_ELEMENT
+      || strideFloats !== SPH_GAS_PRESSURE_CELL_FLOATS
+      || !exactPositiveInteger(byteLength)
     ) {
       return reject(
-        'retained-gas-pressure-rows-rejected-v2-layout',
-        'The exact v2 gas pressure authority has an invalid physical allocation layout'
+        'retained-gas-pressure-rows-rejected-v4-layout',
+        'The exact v4 gas pressure authority has an invalid opaque allocation layout'
       );
     }
     return {
       ...base,
       ready: true,
-      exactV2: true,
+      exactV4: true,
       exactSource: source,
+      exactDescription: telemetry,
       buffer: null,
       rowCount: 0,
       rowCapacity: capacity,
       logicalCountGpuAuthored: true,
-      rowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+      rowStrideFloats: strideFloats,
       rowByteLength: byteLength,
-      sourceDeviceId: source.deviceId || null,
+      sourceDeviceId: telemetry.deviceId || consumerDeviceId,
       consumerDeviceId,
-      status: 'retained-gas-pressure-authority-v2-admitted-exact-source',
+      status: 'retained-gas-pressure-authority-v4-admitted-exact-source',
       reason: null
     };
+  }
+  if (sourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v4-unbranded-source',
+      'A v4 gas pressure source must be the exact producer-issued opaque identity'
+    );
+  }
+  if (aliasObservation.accessorRejected) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-raw-buffer-alias-accessor',
+      'Retained gas pressure buffer aliases must be own data properties'
+    );
   }
   if (candidateBuffers.some(workerRetainedBufferRef)) {
     return reject(
@@ -1310,7 +1701,11 @@ function resolveRetainedGasPressureRows({
       'The retained gas-cell GPUBuffer was already destroyed'
     );
   }
-  if (!retainedGasPressureLifecycleAvailable(importDescriptor)) {
+  if (!retainedGasPressureLifecycleAvailable(
+    importDescriptor,
+    importGraph,
+    source
+  )) {
     return reject(
       'retained-gas-pressure-rows-rejected-lifecycle',
       'The retained gas-cell import was consumed, released, terminal, or already scheduled for release'
@@ -4659,6 +5054,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   retainedPressureFieldResolution = LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
   retainedLocalPressureGradientStatus = 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
   retainedGasPressureCellImport = null,
+  cpuSeededGasPressureAuthority = null,
   measureGpuQueueFence = false,
   onGpuStageProgress = null
 } = {}) {
@@ -4669,17 +5065,87 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     if (typeof onGpuStageProgress !== 'function') return;
     onGpuStageProgress({ status, stage, ...details });
   };
-  const retainedGasPressureRows = resolveRetainedGasPressureRows({
-    device,
-    buffer: retainedGasPressureCellsBuffer,
-    rowCount: retainedGasPressureCellRowCount,
-    rowStrideFloats: retainedGasPressureCellRowStrideFloats,
-    rowByteLength: retainedGasPressureCellRowByteLength,
-    importDescriptor: retainedGasPressureCellImport
-  });
+  const cpuSeededGasPressureAuthoritySupplied =
+    cpuSeededGasPressureAuthority != null;
+  if (
+    cpuSeededGasPressureAuthoritySupplied
+    && (
+      retainedGasPressureCellsBuffer != null
+      || retainedGasPressureCellImport != null
+    )
+  ) {
+    const error = new Error(
+      'CPU-seeded gas pressure authority cannot be combined with a raw or v4 retained pressure import'
+    );
+    error.code = 'ERR_SPH_CPU_SEEDED_GAS_PRESSURE_AUTHORITY_AMBIGUOUS';
+    throw error;
+  }
+  if (
+    cpuSeededGasPressureAuthoritySupplied
+    && !isExactSphCpuSeededGasPressureAuthorityGpu(
+      cpuSeededGasPressureAuthority,
+      device
+    )
+  ) {
+    const error = new Error(
+      'Pressure force rows require the exact live same-device CPU-seeded gas pressure authority'
+    );
+    error.code = 'ERR_SPH_CPU_SEEDED_GAS_PRESSURE_AUTHORITY_INVALID';
+    throw error;
+  }
+  const cpuSeededGasPressureDescription =
+    cpuSeededGasPressureAuthoritySupplied
+      ? describeSphCpuSeededGasPressureAuthorityGpu(
+          cpuSeededGasPressureAuthority,
+          { device }
+        )
+      : null;
+  if (
+    cpuSeededGasPressureDescription
+    && cpuSeededGasPressureDescription.rowStrideFloats
+      !== SPH_GAS_PRESSURE_CELL_FLOATS
+  ) {
+    const error = new Error(
+      'CPU-seeded gas pressure rows do not match the pressure-cell row ABI'
+    );
+    error.code = 'ERR_SPH_CPU_SEEDED_GAS_PRESSURE_AUTHORITY_LAYOUT';
+    throw error;
+  }
+  const retainedGasPressureRows = cpuSeededGasPressureDescription
+    ? {
+        supplied: true,
+        ready: true,
+        exactCpuSeeded: true,
+        exactSource: cpuSeededGasPressureAuthority,
+        exactDescription: cpuSeededGasPressureDescription,
+        buffer: null,
+        rowCount: cpuSeededGasPressureDescription.rowCount,
+        rowCapacity: cpuSeededGasPressureDescription.rowCapacity,
+        logicalCountGpuAuthored: false,
+        rowStrideFloats: cpuSeededGasPressureDescription.rowStrideFloats,
+        rowByteLength: cpuSeededGasPressureDescription.rowByteLength,
+        sourceDeviceId: cpuSeededGasPressureDescription.deviceId,
+        consumerDeviceId: webGpuDeviceId(device),
+        status: 'cpu-seeded-gas-pressure-authority-admitted-exact-source',
+        reason: null
+      }
+    : resolveRetainedGasPressureRows({
+        device,
+        buffer: retainedGasPressureCellsBuffer,
+        rowCount: retainedGasPressureCellRowCount,
+        rowStrideFloats: retainedGasPressureCellRowStrideFloats,
+        rowByteLength: retainedGasPressureCellRowByteLength,
+        importDescriptor: retainedGasPressureCellImport
+      });
   const retainedGasPressureRowsReady = retainedGasPressureRows.ready === true;
-  const retainedGasPressureAuthorityV2Ready = retainedGasPressureRowsReady
-    && retainedGasPressureRows.exactV2 === true;
+  const retainedGasPressureAuthorityV4Ready = retainedGasPressureRowsReady
+    && retainedGasPressureRows.exactV4 === true;
+  const retainedGasPressureAuthorityCpuSeededReady =
+    retainedGasPressureRowsReady
+    && retainedGasPressureRows.exactCpuSeeded === true;
+  const retainedOpaqueGasPressureAuthorityReady =
+    retainedGasPressureAuthorityV4Ready
+    || retainedGasPressureAuthorityCpuSeededReady;
   const pressurePa = finiteNumber(
     pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa,
     retainedGasPressureRowsReady ? 0 : Number.NaN
@@ -4688,18 +5154,18 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     ? {
         pressureFieldMode: retainedPressureFieldMode || LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
         pressureFieldResolution: retainedPressureFieldResolution || LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
-        pressureGradientStatus: retainedGasPressureAuthorityV2Ready
+        pressureGradientStatus: retainedGasPressureAuthorityV4Ready
           ? 'exact-gpu-gas-pressure-authority-authentication-required-in-force-shader'
           : 'retained-gpu-gas-cell-pressure-rows-consumed',
         localPressureGradientSchema: ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
-        localPressureGradientReady: !retainedGasPressureAuthorityV2Ready,
-        localPressureGradientStatus: retainedGasPressureAuthorityV2Ready
+        localPressureGradientReady: !retainedGasPressureAuthorityV4Ready,
+        localPressureGradientStatus: retainedGasPressureAuthorityV4Ready
           ? 'gpu-authentication-outcome-not-host-observed'
           : retainedLocalPressureGradientStatus,
-        localPressureGradientBlockers: retainedGasPressureAuthorityV2Ready
+        localPressureGradientBlockers: retainedGasPressureAuthorityV4Ready
           ? ['gpu-authentication-outcome-not-host-observed']
           : [],
-        localPressureGradientForceCouplingStatus: retainedGasPressureAuthorityV2Ready
+        localPressureGradientForceCouplingStatus: retainedGasPressureAuthorityV4Ready
           ? 'exact-gpu-authority-will-be-authenticated-by-force-shader'
           : 'retained-gpu-gas-cell-rows-ready-for-force-coupling',
         localPressureGradientValidation: false
@@ -4803,7 +5269,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         particleCount: particleSource.particleCount
       })
     : null;
-  const pressureModelId = retainedGasPressureAuthorityV2Ready
+  const pressureModelId = retainedGasPressureAuthorityV4Ready
     ? 2
     : (packedGasPressureCells.rowCount > 0
         && pressureFieldResolution.localPressureGradientReady
@@ -4832,7 +5298,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowCapacity,
       gasPressureCellLogicalCountGpuAuthored,
       gasPressureAuthorityConsumerSubmitted: false,
-      gasPressureAuthorityConsumerStatus: retainedGasPressureAuthorityV2Ready
+      gasPressureAuthorityConsumerStatus: retainedGasPressureAuthorityV4Ready
         ? 'gas-pressure-authority-consumer-not-bound-solver-blocked'
         : 'gas-pressure-authority-consumer-not-required',
       pressureInterfaceForceSolver: {
@@ -4841,7 +5307,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         forceApplicationStatus: 'not-applied-solver-blocked',
         pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
         forceCouplingStatus: pressureInterfaceCoupling?.forceCouplingStatus || null,
-        gasInterfacePressurePa: retainedGasPressureAuthorityV2Ready
+        gasInterfacePressurePa: retainedGasPressureAuthorityV4Ready
           ? null
           : (Number.isFinite(pressurePa) ? pressurePa : null),
         gasInterfacePressureRangePa: null,
@@ -4862,9 +5328,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         retainedGasPressureRowsSourceDeviceId: retainedGasPressureRows.sourceDeviceId,
         retainedGasPressureRowsConsumerDeviceId: retainedGasPressureRows.consumerDeviceId,
         gasPressureAuthorityConsumerSubmitted: false,
-        gasPressureAuthorityConsumerStatus: retainedGasPressureAuthorityV2Ready
-          ? 'gas-pressure-authority-consumer-not-bound-solver-blocked'
-          : 'gas-pressure-authority-consumer-not-required',
+        gasPressureAuthorityConsumerStatus:
+          retainedOpaqueGasPressureAuthorityReady
+            ? 'gas-pressure-authority-consumer-not-bound-solver-blocked'
+            : 'gas-pressure-authority-consumer-not-required',
         pressureModelId,
         algorithmContactPairResponseSchema: contactPolicy.schema,
         algorithmContactPairResponseStatus: contactPolicy.status,
@@ -5001,17 +5468,51 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   let readBuffer = null;
   let returnedRetainedForceRowsBuffer = false;
   let returnedRetainedGasPressureCellsBuffer = false;
-  let returnedResultForOwnerCleanup = null;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
-  let gasPressureAuthorityBinding = null;
   let gasPressureAuthorityReceipt = null;
+  let gasPressureAuthorityKind = null;
   let gasPressureAuthorityConsumerSubmitted = false;
-  let gasPressureAuthorityConsumerStatus = retainedGasPressureAuthorityV2Ready
+  let gasPressureAuthorityConsumerStatus = retainedOpaqueGasPressureAuthorityReady
     ? 'gas-pressure-authority-consumer-not-bound'
     : 'gas-pressure-authority-consumer-not-required';
-  let gasAuthorityControlBuffer = null;
   let forceRowsSubmitPerformed = false;
+  let pressureSubmissionOwner = null;
+  let pressureLocalCleanupClaim = null;
+  let pressureFinalConsumerCapability = null;
+  let pressureCompletionReceipt = null;
+  let cleanupPerformed = false;
+  const cleanup = () => {
+    if (cleanupPerformed) return false;
+    cleanupPerformed = true;
+    const cleanupBuffers = [inputBuffer];
+    if (!retainedGasPressureRowsReady && !returnedRetainedGasPressureCellsBuffer) {
+      cleanupBuffers.push(gasPressureCellsBuffer);
+    }
+    cleanupBuffers.push(
+      contactPolicyBuffer,
+      contactKinematicsBuffer,
+      ...contactKinematicsCleanupBuffers,
+      paramsBuffer,
+      readBuffer
+    );
+    if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) {
+      cleanupBuffers.push(forceRowsBuffer);
+    }
+    let firstCleanupError = null;
+    const attempted = new Set();
+    for (const buffer of cleanupBuffers) {
+      if (!buffer || attempted.has(buffer)) continue;
+      attempted.add(buffer);
+      try {
+        buffer.destroy?.();
+      } catch (error) {
+        firstCleanupError ??= error;
+      }
+    }
+    if (firstCleanupError) throw firstCleanupError;
+    return true;
+  };
 
   try {
     inputBuffer = writeStorageBuffer(
@@ -5019,7 +5520,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       'ulg-sph-pressure-interface-elements-in',
       packed.rows
     );
-    gasPressureCellsBuffer = retainedGasPressureAuthorityV2Ready
+    gasPressureCellsBuffer = retainedOpaqueGasPressureAuthorityReady
       ? null
       : (retainedGasPressureRowsReady
           ? retainedGasPressureRows.buffer
@@ -5230,23 +5731,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
           usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
         });
 
-    if (retainedGasPressureAuthorityV2Ready) {
-      gasPressureAuthorityBinding = bindSphSpatialGasPressureAuthority(
-        retainedGasPressureRows.exactSource,
-        { device }
-      );
-      gasPressureAuthorityReceipt = gasPressureAuthorityBinding.receipt;
-      gasPressureCellsBuffer = gasPressureAuthorityBinding.gasPressureCellsBuffer;
-      gasAuthorityControlBuffer = gasPressureAuthorityBinding.gasAuthorityControlBuffer;
-      gasPressureAuthorityConsumerStatus =
-        'gas-pressure-authority-consumer-borrowed-pre-submit';
-    } else {
-      gasAuthorityControlBuffer = gasAuthorityControlSentinel(device);
-    }
+    const gasPressureAuthorityDescription = retainedGasPressureAuthorityV4Ready
+      ? retainedGasPressureRows.exactDescription
+      : null;
     device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceParamsArray({
       elementCount: packed.rowCount,
       pressurePa,
-      gasPressureCellCount: retainedGasPressureAuthorityV2Ready
+      gasPressureCellCount: retainedGasPressureAuthorityV4Ready
         ? 0
         : packedGasPressureCells.rowCount,
       pressureModelId,
@@ -5255,13 +5746,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       algorithmContactMaxPressurePa: contactPolicy.maxContactPressurePa,
       algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0,
       gasAuthorityExecutionGeneration:
-        gasPressureAuthorityBinding?.executionGeneration ?? 0,
+        gasPressureAuthorityDescription?.executionGeneration ?? 0,
       gasAuthorityStorageGeneration:
-        gasPressureAuthorityBinding?.storageGeneration ?? 0,
+        gasPressureAuthorityDescription?.storageGeneration ?? 0,
       gasPressureCellCapacity:
-        gasPressureAuthorityBinding?.gasPressureCellRowCapacity ?? 0,
+        gasPressureAuthorityDescription?.pressureCellCapacity ?? 0,
       gasPressureCellStrideFloats:
-        gasPressureAuthorityBinding?.pressureInterfaceGasPressureCellRowStrideFloats
+        gasPressureAuthorityDescription?.pressureCellStrideFloats
           ?? SPH_GAS_PRESSURE_CELL_FLOATS
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
@@ -5279,18 +5770,6 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         computeBufferBinding(6, 'read-only-storage')
       ]
     });
-    const bindGroup = device.createBindGroup({
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: inputBuffer } },
-        { binding: 1, resource: { buffer: forceRowsBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } },
-        { binding: 3, resource: { buffer: gasPressureCellsBuffer } },
-        { binding: 4, resource: { buffer: contactPolicyBuffer } },
-        { binding: 5, resource: { buffer: contactKinematicsBuffer } },
-        { binding: 6, resource: { buffer: gasAuthorityControlBuffer } }
-      ]
-    });
     const forceRowsProgress = {
       elementCount: packed.rowCount,
       contactPolicyRowCount: packedContactPolicy.rowCount,
@@ -5305,17 +5784,118 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
+    const publicEntries = [
+      { binding: 0, resource: { buffer: inputBuffer } },
+      { binding: 1, resource: { buffer: forceRowsBuffer } },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+      { binding: 4, resource: { buffer: contactPolicyBuffer } },
+      { binding: 5, resource: { buffer: contactKinematicsBuffer } }
+    ];
+    if (retainedGasPressureAuthorityV4Ready) {
+      const gasPressureAuthorityEncoding = encodeSphSpatialGasPressureAuthority(
+        retainedGasPressureRows.exactSource,
+        {
+          device,
+          passEncoder: pass,
+          bindGroupLayout,
+          bindGroupIndex: 0,
+          publicEntries
+        }
+      );
+      gasPressureAuthorityReceipt = gasPressureAuthorityEncoding.receipt;
+      gasPressureAuthorityKind = 'exact-v4-gpu-authored';
+      gasPressureAuthorityConsumerStatus =
+        'gas-pressure-authority-consumer-borrowed-pre-submit';
+    } else if (retainedGasPressureAuthorityCpuSeededReady) {
+      const gasPressureAuthorityEncoding =
+        encodeSphCpuSeededGasPressureAuthorityGpu(
+          retainedGasPressureRows.exactSource,
+          {
+            device,
+            passEncoder: pass,
+            bindGroupLayout,
+            bindGroupIndex: 0,
+            controlSentinelBuffer: gasAuthorityControlSentinel(device),
+            publicEntries
+          }
+        );
+      gasPressureAuthorityReceipt = gasPressureAuthorityEncoding.receipt;
+      gasPressureAuthorityKind = 'exact-cpu-seeded-single-write';
+      gasPressureAuthorityConsumerStatus =
+        'cpu-seeded-gas-pressure-authority-consumer-borrowed-pre-submit';
+    } else {
+      const bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+          publicEntries[0],
+          publicEntries[1],
+          publicEntries[2],
+          { binding: 3, resource: { buffer: gasPressureCellsBuffer } },
+          publicEntries[3],
+          publicEntries[4],
+          {
+            binding: 6,
+            resource: { buffer: gasAuthorityControlSentinel(device) }
+          }
+        ]
+      });
+      pass.setBindGroup(0, bindGroup);
+    }
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(packed.rowCount / 64)));
     pass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(forceRowsBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
     }
-    device.queue.submit([encoder.finish()]);
+    pressureSubmissionOwner = Object.freeze({
+      schema: 'peercompute.ulg.sph-pressure-interface-submission-owner.v1',
+      status: 'sph-pressure-interface-useful-submit-prepared'
+    });
+    pressureLocalCleanupClaim = registerQueueOrderedCleanupClaim(
+      pressureLocalCleanupClaimIssuer,
+      device,
+      {
+        producerOutput: pressureSubmissionOwner,
+        cleanup
+      }
+    );
+    const pressureProducerClaims = [];
+    if (gasPressureAuthorityReceipt) {
+      pressureProducerClaims.push(
+        gasPressureAuthorityKind === 'exact-v4-gpu-authored'
+          ? sphSpatialGasPressureAuthorityQueueOrderedClaim(
+              gasPressureAuthorityReceipt,
+              device
+            )
+          : sphCpuSeededGasPressureAuthorityQueueOrderedClaim(
+              gasPressureAuthorityReceipt,
+              device
+            )
+      );
+    }
+    pressureProducerClaims.push(pressureLocalCleanupClaim);
+    const commandBuffer = encoder.finish();
+    pressureFinalConsumerCapability = submitQueueOrderedFinalConsumerWork(
+      device,
+      [commandBuffer],
+      {
+        finalConsumerOwner: pressureSubmissionOwner,
+        producerClaims: pressureProducerClaims
+      }
+    );
     forceRowsSubmitPerformed = true;
     if (gasPressureAuthorityReceipt) {
       gasPressureAuthorityConsumerSubmitted =
-        markSphSpatialGasPressureAuthoritySubmitted(gasPressureAuthorityReceipt);
+        gasPressureAuthorityKind === 'exact-v4-gpu-authored'
+          ? retireSphSpatialGasPressureAuthorityQueueOrdered(
+              gasPressureAuthorityReceipt,
+              device,
+              pressureFinalConsumerCapability
+            )
+          : retireSphCpuSeededGasPressureAuthorityQueueOrdered(
+              gasPressureAuthorityReceipt,
+              device,
+              pressureFinalConsumerCapability
+            );
       if (!gasPressureAuthorityConsumerSubmitted) {
         gasPressureAuthorityConsumerStatus =
           'gas-pressure-authority-consumer-submit-receipt-quarantined';
@@ -5325,11 +5905,31 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         error.code = 'ERR_SPH_GAS_PRESSURE_AUTHORITY_RECEIPT_COMMIT';
         throw error;
       }
-      gasPressureAuthorityConsumerStatus =
-        'gas-pressure-authority-consumer-submitted';
+      gasPressureAuthorityConsumerStatus = gasPressureAuthorityKind
+        === 'exact-v4-gpu-authored'
+        ? 'gas-pressure-authority-consumer-submitted-and-retired-queue-ordered'
+        : 'cpu-seeded-gas-pressure-authority-consumer-submitted-and-retired-queue-ordered';
     }
+    pressureCompletionReceipt = Object.freeze({
+      schema: ULG_SPH_PRESSURE_INTERFACE_COMPLETION_RECEIPT_SCHEMA,
+      status: 'sph-pressure-interface-useful-work-submitted',
+      deviceId: webGpuDeviceId(device),
+      forceRowCount: packed.rowCount,
+      forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
+      gasPressureAuthorityKind,
+      queueOrdered: true,
+      queueSubmitCount: 1,
+      hostQueueFenceCount: 0
+    });
+    pressureCompletionReceiptRecords.set(pressureCompletionReceipt, {
+      receipt: pressureCompletionReceipt,
+      device,
+      result: null,
+      state: 'pending-result'
+    });
     queueCompletionStatus = 'queue-submitted';
-    queueCompletionMethod = 'queue.submit';
+    queueCompletionMethod =
+      'submitQueueOrderedFinalConsumerWork(existing-useful-submit)';
     reportGpuStage(
       'pressure-interface-gpu-stage-submitted',
       'force-rows',
@@ -5360,28 +5960,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowValues = new Float32Array(readBuffer.getMappedRange()).slice(0, packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
       readBuffer.unmap();
     } else {
-      if (
-        schroederSpatialEpochGeneration != null
-        && sharedSpatialFenceAuthority !== 'generation-owner'
-        && typeof device.queue?.onSubmittedWorkDone === 'function'
-      ) {
-        await device.queue.onSubmittedWorkDone();
-        queueCompletionStatus = 'queue-work-completed';
-        queueCompletionMethod = 'queue.onSubmittedWorkDone';
-      } else if (
-        schroederSpatialEpochGeneration != null
-        && sharedSpatialFenceAuthority === 'generation-owner'
-      ) {
-        queueCompletionStatus = 'queue-submitted-generation-owner-fence-pending';
-        queueCompletionMethod = 'generation-owner-final-consumer-fence';
-      } else {
-        queueCompletionStatus = device.queue?.onSubmittedWorkDone
-          ? 'queue-submitted-cleanup-deferred'
-          : 'queue-submitted-no-explicit-completion';
-        queueCompletionMethod = device.queue?.onSubmittedWorkDone
-          ? 'deferred queue.onSubmittedWorkDone cleanup'
-          : null;
-      }
+      queueCompletionStatus = 'queue-submitted-cleanup-queue-ordered';
+      queueCompletionMethod =
+        'authenticated-useful-submit-queue-ordered-cleanup';
     }
     if (contactKinematicsParticleBins?.metadataReadbackBuffer) {
       await contactKinematicsParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
@@ -5400,7 +5981,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     let summary;
     let algorithmContactSummarySource;
     let algorithmContactSummaryObserved;
-    if (!sharedSpatialGenerationSupplied && !retainedGasPressureAuthorityV2Ready) {
+    if (!sharedSpatialGenerationSupplied && !retainedGasPressureAuthorityV4Ready) {
       const hostSummary = summarizeForceRowsFromElements(
         packed.elements,
         pressurePa,
@@ -5522,7 +6103,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceApplicationStatus: 'solver-ready-not-applied',
       pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
       forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
-      gasInterfacePressurePa: retainedGasPressureAuthorityV2Ready
+      gasInterfacePressurePa: retainedGasPressureAuthorityV4Ready
         ? null
         : pressurePa,
       gasInterfacePressureRangePa: summary.gasInterfacePressureRangePa,
@@ -5542,7 +6123,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellLogicalCountGpuAuthored,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowsBufferRetained:
-        !retainedGasPressureAuthorityV2Ready
+        !retainedOpaqueGasPressureAuthorityReady
         && (retainForceRowsBuffer === true || retainedGasPressureRowsReady)
         && packedGasPressureCells.rowCount > 0,
       gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
@@ -5554,8 +6135,15 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       retainedGasPressureRowsConsumerDeviceId: retainedGasPressureRows.consumerDeviceId,
       gasPressureAuthorityConsumerSubmitted,
       gasPressureAuthorityConsumerStatus,
+      gasPressureAuthorityKind,
+      gasPressureAuthoritySourceAuthorship:
+        retainedGasPressureAuthorityCpuSeededReady
+          ? 'cpu-seeded-single-queue-write'
+          : (retainedGasPressureAuthorityV4Ready
+              ? 'exact-v4-gpu-authored'
+              : 'legacy-or-inline'),
       gasPressureAuthorityGpuAuthenticationEnforced:
-        retainedGasPressureAuthorityV2Ready,
+        retainedGasPressureAuthorityV4Ready,
       gasPressureAuthorityGpuAuthenticationObserved: false,
       pressureModelId,
       algorithmContactPairResponseSchema: summary.algorithmContactPairResponseSchema,
@@ -5796,7 +6384,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       surfaceForceCount: summary.surfaceForceCount,
       surfaceForces: summary.surfaceForces,
       totalInterfaceAreaM2: sharedSpatialGenerationSupplied
-        || retainedGasPressureAuthorityV2Ready
+        || retainedGasPressureAuthorityV4Ready
         ? summary.totalInterfaceAreaM2
         : (materialInterfaceField?.totalSurfaceAreaM2 ?? summary.totalInterfaceAreaM2),
       totalAbsMaterialForceN: summary.totalAbsMaterialForceN,
@@ -5847,7 +6435,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
       gasPressureCellRowsBufferRetained:
-        !retainedGasPressureAuthorityV2Ready
+        !retainedOpaqueGasPressureAuthorityReady
         && (retainForceRowsBuffer === true || retainedGasPressureRowsReady)
         && packedGasPressureCells.rowCount > 0,
       gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
@@ -5859,8 +6447,15 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       retainedGasPressureRowsConsumerDeviceId: retainedGasPressureRows.consumerDeviceId,
       gasPressureAuthorityConsumerSubmitted,
       gasPressureAuthorityConsumerStatus,
+      gasPressureAuthorityKind,
+      gasPressureAuthoritySourceAuthorship:
+        retainedGasPressureAuthorityCpuSeededReady
+          ? 'cpu-seeded-single-queue-write'
+          : (retainedGasPressureAuthorityV4Ready
+              ? 'exact-v4-gpu-authored'
+              : 'legacy-or-inline'),
       gasPressureAuthorityGpuAuthenticationEnforced:
-        retainedGasPressureAuthorityV2Ready,
+        retainedGasPressureAuthorityV4Ready,
       gasPressureAuthorityGpuAuthenticationObserved: false,
       algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
       algorithmContactPolicyRowByteLength: packedContactPolicy.rowByteLength,
@@ -6008,6 +6603,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       pressureInterfaceSpatialIndexMode:
         contactKinematicsGpuDerivation?.pressureInterfaceSpatialIndexMode
         ?? schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexMode,
+      pressureCompletionReceipt,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
@@ -6018,7 +6614,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       returnedRetainedForceRowsBuffer = true;
     }
     if (
-      !retainedGasPressureAuthorityV2Ready
+      !retainedOpaqueGasPressureAuthorityReady
       && (retainForceRowsBuffer || retainedGasPressureRowsReady)
       && packedGasPressureCells.rowCount > 0
     ) {
@@ -6029,55 +6625,50 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         : () => gasPressureCellsBuffer.destroy?.();
       returnedRetainedGasPressureCellsBuffer = true;
     }
-    returnedResultForOwnerCleanup = result;
+    const completionRecord = pressureCompletionReceiptRecords.get(
+      pressureCompletionReceipt
+    );
+    if (completionRecord) {
+      completionRecord.result = result;
+      completionRecord.state = 'issued';
+    }
     return result;
   } finally {
     if (gasPressureAuthorityReceipt && !forceRowsSubmitPerformed) {
-      const abandoned = abandonSphSpatialGasPressureAuthority(
-        gasPressureAuthorityReceipt
-      );
+      const abandoned = gasPressureAuthorityKind === 'exact-v4-gpu-authored'
+        ? abandonSphSpatialGasPressureAuthority(gasPressureAuthorityReceipt)
+        : abandonSphCpuSeededGasPressureAuthorityConsumer(
+            gasPressureAuthorityReceipt
+          );
       gasPressureAuthorityConsumerStatus = abandoned
         ? 'gas-pressure-authority-consumer-abandoned-pre-submit'
         : 'gas-pressure-authority-consumer-abandon-failed-pre-submit';
     }
-    let cleanupPerformed = false;
-    const cleanup = () => {
-      if (cleanupPerformed) return false;
-      cleanupPerformed = true;
-      inputBuffer?.destroy?.();
-      if (!retainedGasPressureRowsReady && !returnedRetainedGasPressureCellsBuffer) {
-        gasPressureCellsBuffer?.destroy?.();
-      }
-      contactPolicyBuffer?.destroy?.();
-      contactKinematicsBuffer?.destroy?.();
-      for (const buffer of contactKinematicsCleanupBuffers) buffer?.destroy?.();
-      paramsBuffer?.destroy?.();
-      readBuffer?.destroy?.();
-      if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) {
-        forceRowsBuffer?.destroy?.();
-      }
-      return true;
-    };
-    if (
-      noFullReadback
-      && schroederSpatialEpochGeneration != null
-      && sharedSpatialFenceAuthority === 'generation-owner'
-      && returnedResultForOwnerCleanup
-    ) {
-      returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupDelegated = true;
-      returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupStatus =
-        'pending-generation-owner-final-consumer-fence';
-      returnedResultForOwnerCleanup.destroyOwnerScopeTemporaryBuffers = ({
-        reason = 'pressure-interface-generation-owner-scope-temporary-cleanup'
-      } = {}) => {
-        const cleaned = cleanup();
-        returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupStatus = cleaned
-          ? 'destroyed-after-generation-owner-final-consumer-fence'
-          : 'already-destroyed-after-generation-owner-final-consumer-fence';
-        returnedResultForOwnerCleanup.pressureInterfaceOwnerScopeTemporaryCleanupReason = reason;
-        return cleaned;
-      };
+    if (pressureLocalCleanupClaim && pressureFinalConsumerCapability) {
+      releaseSubmittedWorkCleanupQueueOrdered(
+        device,
+        cleanup,
+        {
+          queueOrderedFinalConsumer: pressureFinalConsumerCapability,
+          producerClaim: pressureLocalCleanupClaim,
+          producerOutput: pressureSubmissionOwner,
+          producerFamily: PRESSURE_LOCAL_QUEUE_ORDERED_PRODUCER_FAMILY
+        }
+      );
+    } else if (pressureLocalCleanupClaim) {
+      cancelQueueOrderedCleanupClaim(
+        pressureLocalCleanupClaim,
+        device,
+        {
+          producerOutput: pressureSubmissionOwner,
+          cleanup
+        }
+      );
+      cleanup();
     } else if (noFullReadback) {
+      // Exceptional setup failure before the local claim existed may follow a
+      // predecessor substage submit. Canonical useful-submit success never
+      // falls back to a host-observed queue fence.
       deferSubmittedWorkCleanup(device, cleanup);
     } else {
       cleanup();

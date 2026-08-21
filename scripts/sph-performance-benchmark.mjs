@@ -1,9 +1,65 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { deriveSphPhaseInitialBaseBlockEdgeM } from '../src/runtime/sphPhaseDemo.js';
+import { createFailSentinelWriter } from './ss-release-evidence-common.mjs';
+
+export const SPH_BENCH_DURABLE_RELEASE_PUBLICATION_ENV =
+  'ULG_BENCH_DURABLE_RELEASE_PUBLICATION';
+
+export function durableBenchmarkReleasePublicationEnabled(
+  value = process.env[SPH_BENCH_DURABLE_RELEASE_PUBLICATION_ENV]
+) {
+  return value === '1';
+}
+
+export function probeReleasePublicationEnvironment(
+  durableReleasePublication = false
+) {
+  return Object.freeze(durableReleasePublication
+    ? { ULG_PROBE_DURABLE_RELEASE_PUBLICATION: '1' }
+    : {});
+}
+
+export async function writeBenchmarkReport({
+  outputPath,
+  repoDir,
+  report,
+  durableReleasePublication = false
+}) {
+  if (typeof outputPath !== 'string' || outputPath.length === 0) {
+    throw new TypeError('benchmark report output path must be a non-empty string');
+  }
+  const text = `${JSON.stringify(report, null, 2)}\n`;
+  if (!durableReleasePublication) {
+    await mkdir(path.dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, text, 'utf8');
+    return Object.freeze({
+      path: path.resolve(outputPath),
+      text,
+      durableReleasePublication: false
+    });
+  }
+  const writer = await createFailSentinelWriter({
+    outputPath,
+    repoDir,
+    sentinel: {
+      schema: 'peercompute.ulg.sph-performance-benchmark-publication.v1',
+      status: 'failed',
+      reason: 'SPH performance benchmark report did not complete'
+    },
+    label: 'SPH performance benchmark report'
+  });
+  await writer.replace(report);
+  return Object.freeze({
+    path: writer.outputPath,
+    text,
+    durableReleasePublication: true
+  });
+}
 
 const repoDir = path.resolve(process.env.ULG_BENCH_REPO_DIR || process.cwd());
 const profile = String(process.env.ULG_BENCH_PROFILE || 'smoke').trim().toLowerCase();
@@ -43,10 +99,20 @@ const benchmarkIronBaseHeightM = (() => {
   }
   return heightM;
 })();
-const probeScript = path.join(repoDir, 'scripts', 'sph-long-horizon-probe.mjs');
+const probeScript = process.env.ULG_BENCH_PROBE_SCRIPT
+  ? path.resolve(process.env.ULG_BENCH_PROBE_SCRIPT)
+  : path.join(repoDir, 'scripts', 'sph-long-horizon-probe.mjs');
 const basePort = Math.max(1, Math.round(Number(process.env.ULG_BENCH_PORT || 5180) || 5180));
 const batches = Math.max(1, Math.round(Number(process.env.ULG_BENCH_BATCHES || 3) || 3));
 const batchSteps = Math.max(1, Math.round(Number(process.env.ULG_BENCH_BATCH_STEPS || 16) || 16));
+const interactiveCacheLifecycleRequested = [
+  '1',
+  'true',
+  'yes',
+  'on'
+].includes(String(
+  process.env.ULG_BENCH_INTERACTIVE_CACHE_LIFECYCLE || ''
+).toLowerCase());
 const timeoutMs = Math.max(10_000, Math.round(Number(process.env.ULG_BENCH_TIMEOUT_MS || 240_000) || 240_000));
 const requestedProbeMode = String(
   process.env.ULG_BENCH_PROBE_MODE
@@ -159,6 +225,10 @@ const schroederCrossLevelCouplingRequested = booleanEnv(
 );
 const schroederTwoLevelMechanicsRequested = booleanEnv(
   'ULG_BENCH_SCHROEDER_TWO_LEVEL',
+  false
+);
+const schroederMechanicsFieldPairV2Requested = booleanEnv(
+  'ULG_BENCH_SCHROEDER_MECHANICS_FIELD_PAIR_V2',
   false
 );
 const schroederTwoLevelMechanicsAuthority = (() => {
@@ -294,7 +364,8 @@ export function createSchroederBenchmarkScenarioParams({
   phaseVolumeMigrationRequested = false,
   twoLevelMechanicsRequested = false,
   twoLevelMechanicsAuthority = 'observation',
-  twoLevelFineSubstepCount = 2
+  twoLevelFineSubstepCount = 2,
+  mechanicsFieldPairV2Requested = false
 } = {}) {
   if (simulationRequested !== true) return {};
   const normalizedSelectedLevel = Math.max(0, Math.round(Number(selectedLevel) || 0));
@@ -327,12 +398,28 @@ export function createSchroederBenchmarkScenarioParams({
     ...(normalizedTwoLevelRequested ? {
       schroederTwoLevel: '1',
       schroederTwoLevelAuthority: normalizedAuthority,
-      schroederTwoLevelSubsteps: String(normalizedSubstepCount)
+      schroederTwoLevelSubsteps: String(normalizedSubstepCount),
+      ...(mechanicsFieldPairV2Requested === true
+        ? { schroederMechanicsFieldPairV2: '1' }
+        : {})
     } : {})
   };
 }
 
-export function scenarioUrlForCount(targetCount) {
+export function createGpuTimestampBenchmarkScenarioParams({
+  measureGpuTimestampInterval: outerIntervalRequested = false,
+  measureGpuStageTimestamps: stageTimestampsRequested = false
+} = {}) {
+  return {
+    ...((outerIntervalRequested || stageTimestampsRequested)
+      ? { residentGpuTimestampFeature: '1' }
+      : {})
+  };
+}
+
+export function scenarioUrlForCount(targetCount, {
+  interactiveCacheLifecycle = interactiveCacheLifecycleRequested
+} = {}) {
   const edge = edgeForApproxParticleCount(targetCount);
   const actualParticleCount = edge ** 3 * 2;
   const iceBaseHeightM = 0;
@@ -373,9 +460,9 @@ export function scenarioUrlForCount(targetCount) {
     dropn: String(edge),
     basen: String(edge),
     mech: 'mlsmpm',
-    residentAuto: '0',
-    residentFuseSequence: '1',
-    residentActiveGrid: '1',
+    residentAuto: interactiveCacheLifecycle ? '1' : '0',
+    residentFuseSequence: fuseResidentMechanicsSequence ? '1' : '0',
+    residentActiveGrid: fuseResidentMechanicsActiveGrid ? '1' : '0',
     ...(workerOffscreenPresentationRequested ? { workerOffscreenPresentation: '1' } : {}),
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
     ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
@@ -392,7 +479,9 @@ export function scenarioUrlForCount(targetCount) {
       phaseVolumeMigrationRequested: schroederPhaseVolumeMigrationRequested,
       twoLevelMechanicsRequested: schroederTwoLevelMechanicsRequested,
       twoLevelMechanicsAuthority: schroederTwoLevelMechanicsAuthority,
-      twoLevelFineSubstepCount: schroederTwoLevelFineSubstepCount
+      twoLevelFineSubstepCount: schroederTwoLevelFineSubstepCount,
+      mechanicsFieldPairV2Requested:
+        schroederMechanicsFieldPairV2Requested
     }),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
     ...(renderOwnershipUseCase ? { renderUseCase: renderOwnershipUseCase } : {}),
@@ -400,9 +489,10 @@ export function scenarioUrlForCount(targetCount) {
       ? { residentInterfaceRefreshWarmupFrames: String(residentInterfaceRefreshWarmupFrames) }
       : {}),
     ...(measureGpuQueueFence ? { residentQueueFence: '1' } : {}),
-    ...((measureGpuTimestampInterval || measureGpuStageTimestamps)
-      ? { residentGpuTimestampProfile: '1' }
-      : {}),
+    ...createGpuTimestampBenchmarkScenarioParams({
+      measureGpuTimestampInterval,
+      measureGpuStageTimestamps
+    }),
     lawt: lawThermal ? '1' : '0',
     lawr: lawReactions ? '1' : '0',
     lawv: lawViscosity ? '1' : '0',
@@ -426,12 +516,14 @@ export function scenarioUrlForCount(targetCount) {
 
 function runProbe(env) {
   return new Promise((resolve) => {
+    const childEnvironment = {
+      ...process.env,
+      ...env
+    };
+    delete childEnvironment.NODE_OPTIONS;
     const child = spawn(process.execPath, [probeScript], {
       cwd: repoDir,
-      env: {
-        ...process.env,
-        ...env
-      },
+      env: childEnvironment,
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '';
@@ -448,7 +540,154 @@ function runProbe(env) {
   });
 }
 
+export function finalCachedEngineMetric(result) {
+  const timeline = result?.timeline ?? null;
+  const lifecycle = timeline?.interactiveCacheLifecycle ?? null;
+  const exactArray = (candidate, expected) => (
+    Array.isArray(candidate)
+    && candidate.length === expected.length
+    && candidate.every((value, index) => value === expected[index])
+  );
+  const expectedWarmupBatchIndices = [1];
+  const expectedMeasuredBatchIndices = [2, 3];
+  const expectedResidentBatchIndices = [1, 2, 3];
+  const expectedMeasurementClasses = [
+    'post-reset-warmup',
+    'post-reset-measured',
+    'post-reset-measured'
+  ];
+  const playbackQuiescenceComplete = (
+    evidence,
+    { terminal = false, reason } = {}
+  ) => (
+    evidence?.schema
+      === 'peercompute.ulg.sph-interactive-playback-quiescence.v0'
+    && evidence?.status === 'resident-playback-quiescent'
+    && evidence?.reason === reason
+    && ['Play', 'Pause'].includes(evidence?.initialButtonText)
+    && evidence?.finalButtonText === 'Play'
+    && evidence?.pauseRequested
+      === (evidence.initialButtonText === 'Pause')
+    && evidence?.residentPending === false
+    && typeof evidence?.stableFrameCount === 'number'
+    && Number.isSafeInteger(evidence.stableFrameCount)
+    && evidence.stableFrameCount >= 2
+    && typeof evidence?.completedStepCount === 'number'
+    && Number.isSafeInteger(evidence.completedStepCount)
+    && (terminal
+      ? evidence.completedStepCount === 1
+      : evidence.completedStepCount >= 1)
+    && typeof evidence?.elapsedMs === 'number'
+    && Number.isFinite(evidence.elapsedMs)
+    && evidence.elapsedMs >= 0
+  );
+  if (
+    lifecycle?.schema
+      !== 'peercompute.ulg.sph-interactive-cache-lifecycle.v1'
+    || lifecycle?.status
+      !== 'same-page-warm-reset-cached-measurement-complete'
+    || !Array.isArray(timeline?.metrics)
+    || !exactArray(
+      lifecycle?.postResetMeasurement?.warmupBatchIndices,
+      expectedWarmupBatchIndices
+    )
+    || !exactArray(
+      lifecycle?.postResetMeasurement?.measuredBatchIndices,
+      expectedMeasuredBatchIndices
+    )
+    || !exactArray(
+      lifecycle?.postResetMeasurement?.observedResidentBatchIndices,
+      expectedResidentBatchIndices
+    )
+    || !exactArray(
+      lifecycle?.postResetMeasurement?.observedMeasurementClasses,
+      expectedMeasurementClasses
+    )
+    || !playbackQuiescenceComplete(
+      lifecycle?.reset?.playbackQuiescence,
+      { reason: 'reset-playback-before-direct-measurement' }
+    )
+  ) {
+    return null;
+  }
+  const residentMetrics = timeline.metrics.filter(
+    (metric) => metric?.phase === 'resident-batch'
+  );
+  const metricByBatch = new Map(
+    residentMetrics.map((metric) => [Number(metric.batchIndex), metric])
+  );
+  const orderedMetrics = expectedResidentBatchIndices.map(
+    (batchIndex) => metricByBatch.get(Number(batchIndex)) ?? null
+  );
+  const measuredMetrics = expectedMeasuredBatchIndices.map(
+    (batchIndex) => metricByBatch.get(batchIndex) ?? null
+  );
+  const drain = lifecycle.postResetMeasurement.drain;
+  const terminalHandoff = lifecycle.postResetMeasurement.terminalHandoff;
+  if (
+    residentMetrics.length !== expectedResidentBatchIndices.length
+    || metricByBatch.size !== expectedResidentBatchIndices.length
+    || orderedMetrics.some((metric, index) => (
+      !metric
+      || metric.interactiveCacheMeasurementClass
+        !== expectedMeasurementClasses[index]
+      || metric.pageInstanceId !== lifecycle.pageInstanceId
+      || metric.cacheResetOrdinal !== lifecycle?.reset?.resetOrdinal
+      || !metric.renderState
+    ))
+    || drain?.schema
+      !== 'peercompute.ulg.sph-interactive-cache-terminal-drain.v1'
+    || drain?.status !== 'unmeasured-terminal-consumer-complete'
+    || drain?.measured !== false
+    || drain?.metricPublished !== false
+    || drain?.sourceBatchIndex !== expectedMeasuredBatchIndices.at(-1)
+    || drain?.successorBatchIndex !== 4
+    || drain?.completedStepCount !== 1
+    || typeof drain?.elapsedMs !== 'number'
+    || !Number.isFinite(drain.elapsedMs)
+    || drain.elapsedMs < 0
+    || drain?.settledStatus
+      !== 'background-settlement-complete-after-unmeasured-terminal-consumer'
+    || terminalHandoff?.schema
+      !== 'peercompute.ulg.sph-interactive-cache-terminal-handoff.v1'
+    || terminalHandoff?.status !== 'scene-terminal-consumer-settled'
+    || terminalHandoff?.reason !== null
+    || terminalHandoff?.terminalConsumerMethod !== 'scene-api-dispose'
+    || terminalHandoff?.terminalConsumerContract
+      !== 'queue-ordered-overlay-clear-final-consumer-before-resident-artifact-retirement'
+    || terminalHandoff?.recordedDrainExecutionMatched !== true
+    || terminalHandoff?.backgroundSettlementPromisePresent !== true
+    || !playbackQuiescenceComplete(
+      terminalHandoff?.playbackQuiescence,
+      {
+        terminal: true,
+        reason: 'terminal-handoff-before-dispose'
+      }
+    )
+    || typeof terminalHandoff?.pendingBeforeDispose !== 'boolean'
+    || terminalHandoff?.disposeInvoked !== true
+    || typeof terminalHandoff?.settlementAwaitMs !== 'number'
+    || !Number.isFinite(terminalHandoff.settlementAwaitMs)
+    || terminalHandoff.settlementAwaitMs < 0
+    || terminalHandoff?.settlementStatus !== 'terminal-settlement-resolved'
+    || terminalHandoff?.settlementValue !== true
+    || terminalHandoff?.spatialEpochSettlementComplete !== true
+    || terminalHandoff?.hierarchyArtifactSettlementComplete !== true
+    || terminalHandoff?.successorSourceFamilyRetirementComplete !== true
+    || typeof terminalHandoff?.completedAtMs !== 'number'
+    || !Number.isFinite(terminalHandoff.completedAtMs)
+    || terminalHandoff.completedAtMs <= 0
+    || lifecycle.completedAtMs !== terminalHandoff.completedAtMs
+  ) {
+    return null;
+  }
+  return measuredMetrics.at(-1) ?? null;
+}
+
 function lastMetricWithRenderState(result) {
+  const finalCachedMetric = finalCachedEngineMetric(result);
+  if (finalCachedMetric) return finalCachedMetric;
+  if (result?.timeline?.interactiveCacheLifecycle) return null;
   const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
   for (let index = metrics.length - 1; index >= 0; index -= 1) {
     if (metrics[index]?.renderState) return metrics[index];
@@ -664,6 +903,10 @@ export function scenarioPerformanceGate({
   schroederTwoLevelFineSubstepCountObserved = null,
   schroederTwoLevelMechanicsStepStatus = null,
   schroederTwoLevelAuthoritativeCommitVerified = null,
+  schroederMechanicsFieldPairV2Requested = false,
+  schroederMechanicsFieldPairV2Enabled = null,
+  schroederMechanicsFieldConstructionMode = null,
+  schroederMechanicsFieldPairV2CoverageComplete = null,
   gpuTimestampIntervalEvidence = null,
   gpuTimestampRequired = requireGpuTimestampInterval,
   gpuStageTimestampEvidence = null,
@@ -732,6 +975,29 @@ export function scenarioPerformanceGate({
     && schroederTwoLevelAuthoritativeCommitVerified !== true
   ) {
     blockers.push('schroeder-two-level-authoritative-commit-unverified');
+  }
+  if (
+    schroederMechanicsFieldPairV2Requested === true
+    && schroederMechanicsFieldPairV2Enabled !== true
+  ) {
+    blockers.push('schroeder-mechanics-field-pair-v2-request-not-observed');
+  }
+  if (
+    schroederMechanicsFieldPairV2Requested === true
+    && schroederMechanicsFieldConstructionMode
+      !== 'paired-v2-shared-radix'
+  ) {
+    blockers.push(
+      'schroeder-mechanics-field-pair-v2-construction-mode-mismatch'
+    );
+  }
+  if (
+    schroederMechanicsFieldPairV2Requested === true
+    && schroederMechanicsFieldPairV2CoverageComplete !== true
+  ) {
+    blockers.push(
+      'schroeder-mechanics-field-pair-v2-coverage-incomplete'
+    );
   }
   if (
     gpuTimestampRequired === true
@@ -823,6 +1089,10 @@ export function scenarioPerformanceGate({
       schroederTwoLevelFineSubstepCountObserved,
       schroederTwoLevelMechanicsStepStatus,
       schroederTwoLevelAuthoritativeCommitVerified,
+      schroederMechanicsFieldPairV2Requested,
+      schroederMechanicsFieldPairV2Enabled,
+      schroederMechanicsFieldConstructionMode,
+      schroederMechanicsFieldPairV2CoverageComplete,
       gpuTimestampIntervalStatus:
         gpuTimestampIntervalEvidence?.status ?? null,
       gpuTimestampIntervalBatchCoverageComplete:
@@ -2068,7 +2338,7 @@ function exactBenchmarkScenarioUrlEvidence(scenario) {
     schroederTwoLevel: '1',
     schroederTwoLevelAuthority: 'authoritative',
     schroederTwoLevelSubsteps: '2',
-    residentGpuTimestampProfile: '1',
+    residentGpuTimestampFeature: '1',
     lawr: '1'
   };
   const observedParams = Object.fromEntries(Object.keys(exactParams).map(
@@ -2630,7 +2900,8 @@ export function summarizePairedGpuStageProducerRuns({
 
 function authoritativeTwoLevelThroughputScenarioUrlEvidence(
   scenario,
-  requiredFineSubstepCount
+  requiredFineSubstepCount,
+  { pairV2 = false } = {}
 ) {
   let params = null;
   try {
@@ -2648,7 +2919,8 @@ function authoritativeTwoLevelThroughputScenarioUrlEvidence(
     schroederCrossLevelCoupling: '1',
     schroederTwoLevel: '1',
     schroederTwoLevelAuthority: 'authoritative',
-    schroederTwoLevelSubsteps: String(requiredFineSubstepCount)
+    schroederTwoLevelSubsteps: String(requiredFineSubstepCount),
+    ...(pairV2 ? { schroederMechanicsFieldPairV2: '1' } : {})
   };
   const observedParams = Object.fromEntries(Object.keys(expectedParams).map(
     (key) => [key, params?.get(key) ?? null]
@@ -2659,20 +2931,51 @@ function authoritativeTwoLevelThroughputScenarioUrlEvidence(
       && Object.entries(expectedParams).every(
         ([key, expected]) => params.get(key) === expected
       )
+      && (
+        pairV2
+        || !params.has('schroederMechanicsFieldPairV2')
+      )
     ),
+    pairV2,
     expectedParams,
-    observedParams
+    observedParams: {
+      ...observedParams,
+      schroederMechanicsFieldPairV2:
+        params?.get('schroederMechanicsFieldPairV2') ?? null
+    }
   };
 }
 
 function authoritativeTwoLevelThroughputRouteEvidence(
   scenario,
-  requiredFineSubstepCount
+  requiredFineSubstepCount,
+  { pairV2 = false } = {}
 ) {
   const scenarioUrl = authoritativeTwoLevelThroughputScenarioUrlEvidence(
     scenario,
-    requiredFineSubstepCount
+    requiredFineSubstepCount,
+    { pairV2 }
   );
+  const pairV2EvidenceComplete = pairV2
+    ? Boolean(
+      scenario?.schroederMechanicsFieldPairV2ConfiguredRequested === true
+      && scenario?.schroederMechanicsFieldPairV2Enabled === true
+      && scenario?.schroederMechanicsFieldConstructionMode
+        === 'paired-v2-shared-radix'
+      && scenario?.schroederMechanicsFieldPairV2CoverageComplete === true
+    )
+    : Boolean(
+      scenario?.schroederMechanicsFieldPairV2ConfiguredRequested === false
+      && (
+        scenario?.schroederMechanicsFieldPairV2Enabled == null
+        || scenario.schroederMechanicsFieldPairV2Enabled === false
+      )
+      && (
+        scenario?.schroederMechanicsFieldConstructionMode == null
+        || scenario.schroederMechanicsFieldConstructionMode
+          === 'independent-v2'
+      )
+    );
   const complete = Boolean(
     scenario?.schroederTwoLevelMechanicsConfiguredRequested === true
     && scenario?.schroederTwoLevelMechanicsRequestedObserved === true
@@ -2690,6 +2993,7 @@ function authoritativeTwoLevelThroughputRouteEvidence(
     && scenario?.schroederTwoLevelMechanicsStepStatus
       === 'schroeder-two-level-authoritative-step-executed'
     && scenario?.schroederTwoLevelAuthoritativeCommitVerified === true
+    && pairV2EvidenceComplete
     && scenarioUrl.complete
   );
   return {
@@ -2713,6 +3017,16 @@ function authoritativeTwoLevelThroughputRouteEvidence(
     stepStatus: scenario?.schroederTwoLevelMechanicsStepStatus ?? null,
     authoritativeCommitVerified:
       scenario?.schroederTwoLevelAuthoritativeCommitVerified ?? null,
+    pairV2,
+    pairV2EvidenceComplete,
+    mechanicsFieldPairV2ConfiguredRequested:
+      scenario?.schroederMechanicsFieldPairV2ConfiguredRequested ?? null,
+    mechanicsFieldPairV2Enabled:
+      scenario?.schroederMechanicsFieldPairV2Enabled ?? null,
+    mechanicsFieldConstructionMode:
+      scenario?.schroederMechanicsFieldConstructionMode ?? null,
+    mechanicsFieldPairV2CoverageComplete:
+      scenario?.schroederMechanicsFieldPairV2CoverageComplete ?? null,
     scenarioUrl
   };
 }
@@ -2729,7 +3043,8 @@ function pairedThroughputArmEvidence(arm, {
   const twoLevelRoute = authoritativeTwoLevel
     ? authoritativeTwoLevelThroughputRouteEvidence(
         scenario,
-        requiredFineSubstepCount
+        requiredFineSubstepCount,
+        { pairV2: historicalBaseline !== true }
       )
     : null;
   const routeComplete = authoritativeTwoLevel
@@ -3007,11 +3322,26 @@ export function summarizePairedPhysicsThroughputRuns({
   if (commonConfigSignatures.size !== 1) {
     blockers.push('common-config-signature-mismatch');
   }
-  const armConfigSignatures = new Set(normalizedRuns.flatMap((run) => [
-    run.baselineProvenance.armConfigSignature,
+  const baselineArmConfigSignatures = new Set(normalizedRuns.map((run) => (
+    run.baselineProvenance.armConfigSignature
+  )).filter(Boolean));
+  const candidateArmConfigSignatures = new Set(normalizedRuns.map((run) => (
     run.candidateProvenance.armConfigSignature
-  ]).filter(Boolean));
-  if (armConfigSignatures.size !== 1) {
+  )).filter(Boolean));
+  const armConfigSignaturesComplete = routeKind === 'authoritative-two-level'
+    ? Boolean(
+      baselineArmConfigSignatures.size === 1
+      && candidateArmConfigSignatures.size === 1
+      && [...baselineArmConfigSignatures][0]
+        !== [...candidateArmConfigSignatures][0]
+    )
+    : Boolean(
+      baselineArmConfigSignatures.size === 1
+      && candidateArmConfigSignatures.size === 1
+      && [...baselineArmConfigSignatures][0]
+        === [...candidateArmConfigSignatures][0]
+    );
+  if (!armConfigSignaturesComplete) {
     blockers.push(
       routeKind === 'authoritative-two-level'
         ? 'authoritative-two-level-route-signature-mismatch'
@@ -3110,6 +3440,14 @@ export function summarizePairedPhysicsThroughputRuns({
       requiredFineSubstepCount: routeKind === 'authoritative-two-level'
         ? normalizedFineSubstepCount
         : null,
+      mechanicsFieldConstructionComparison:
+        routeKind === 'authoritative-two-level'
+          ? {
+              baseline:
+                'paired-v2-disabled-historical-telemetry-may-be-unavailable',
+              candidate: 'paired-v2-shared-radix-required'
+            }
+          : null,
       pairedAggregation:
         'median-of-within-run-candidate-over-historical-ratios',
       independentMedianCrossCheckRequired: true,
@@ -3150,6 +3488,295 @@ export function summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns(
     ...options,
     routeKind: 'authoritative-two-level'
   });
+}
+
+function pairedScalingArmAtParticleCount(arm, particleCount) {
+  const scenarios = Array.isArray(arm?.scenarios)
+    ? arm.scenarios
+    : (arm?.scenario ? [arm.scenario] : []);
+  const matches = scenarios.filter((scenario) => (
+    exactNonNegativeIntegerOrNull(scenario?.targetParticleCount)
+      === particleCount
+  ));
+  const scenario = matches.length === 1 ? matches[0] : null;
+  return {
+    ...arm,
+    scenario,
+    scenarioStatus: scenario?.status ?? 'missing',
+    reportPerformanceGateStatus:
+      scenario?.performanceGate?.status
+      ?? (scenarios.length === 1
+        ? arm?.reportPerformanceGateStatus
+        : 'missing')
+  };
+}
+
+function pairedScalingArmParticleCoverage(arm, requiredParticleCounts) {
+  const scenarios = Array.isArray(arm?.scenarios)
+    ? arm.scenarios
+    : (arm?.scenario ? [arm.scenario] : []);
+  const observedParticleCounts = scenarios.map((scenario) => (
+    exactNonNegativeIntegerOrNull(scenario?.targetParticleCount)
+  ));
+  const identityComplete = requiredParticleCounts.every((particleCount) => {
+    const matches = scenarios.filter((scenario) => (
+      exactNonNegativeIntegerOrNull(scenario?.targetParticleCount)
+        === particleCount
+    ));
+    return matches.length === 1
+      && exactNonNegativeIntegerOrNull(matches[0]?.actualParticleCount)
+        === particleCount
+      && exactNonNegativeIntegerOrNull(matches[0]?.effectiveParticleCount)
+        === particleCount;
+  });
+  return {
+    complete: Boolean(
+      scenarios.length === requiredParticleCounts.length
+      && observedParticleCounts.every(
+        (particleCount, index) => (
+          particleCount === requiredParticleCounts[index]
+        )
+      )
+      && identityComplete
+    ),
+    observedParticleCounts,
+    identityComplete
+  };
+}
+
+/**
+ * Compare the same historical and candidate authoritative two-level route at
+ * two exact particle counts. Same-N ratios are retained as honest constant
+ * factor evidence and guarded only against a catastrophic slowdown. The hard
+ * performance claim is the double ratio:
+ *
+ *   (candidateHigh / baselineHigh) / (candidateLow / baselineLow)
+ *
+ * A value greater than one proves that candidate performance improves
+ * relative to the historical route as N increases.
+ */
+export function summarizePairedAuthoritativeTwoLevelScalingRuns({
+  runs = [],
+  requiredRunCount = 3,
+  expectedRunOrders = ['AB', 'BA', 'AB'],
+  requiredWarmupBatchCount = 4,
+  requiredMeasuredBatchCount = 1,
+  requiredBatchStepCount = 16,
+  expectedBaselineGitHead = null,
+  requiredFineSubstepCount = 2,
+  requiredParticleCounts = [1024, 9826],
+  minimumRelativeScalingGain = 1.03,
+  minimumSameNThroughputRatio = 0.75
+} = {}) {
+  const normalizedParticleCounts = (Array.isArray(requiredParticleCounts)
+    ? requiredParticleCounts
+    : []
+  ).map((value) => exactNonNegativeIntegerOrNull(value));
+  if (
+    normalizedParticleCounts.length !== 2
+    || normalizedParticleCounts[0] !== 1024
+    || normalizedParticleCounts[1] !== 9826
+  ) {
+    throw new RangeError(
+      'Authoritative two-level scaling requires exact particle counts 1024 and 9826'
+    );
+  }
+  const normalizedMinimumScalingGain = Number(
+    minimumRelativeScalingGain
+  );
+  if (
+    !Number.isFinite(normalizedMinimumScalingGain)
+    || normalizedMinimumScalingGain <= 1
+  ) {
+    throw new RangeError(
+      'minimumRelativeScalingGain must be finite and greater than one'
+    );
+  }
+  const normalizedMinimumSameNRatio = Number(
+    minimumSameNThroughputRatio
+  );
+  if (
+    !Number.isFinite(normalizedMinimumSameNRatio)
+    || normalizedMinimumSameNRatio <= 0
+    || normalizedMinimumSameNRatio > 1
+  ) {
+    throw new RangeError(
+      'minimumSameNThroughputRatio must be finite in the interval (0, 1]'
+    );
+  }
+
+  const normalizedRuns = Array.isArray(runs) ? runs : [];
+  const [lowParticleCount, highParticleCount] = normalizedParticleCounts;
+  const sameNMaximumRegressionPercent =
+    (1 - normalizedMinimumSameNRatio) * 100;
+  const commonSummaryOptions = {
+    requiredRunCount,
+    expectedRunOrders,
+    requiredWarmupBatchCount,
+    requiredMeasuredBatchCount,
+    requiredBatchStepCount,
+    expectedBaselineGitHead,
+    maxRegressionPercent: sameNMaximumRegressionPercent,
+    requiredFineSubstepCount
+  };
+  const runsAtParticleCount = (particleCount) => normalizedRuns.map((run) => ({
+    ...run,
+    baseline: pairedScalingArmAtParticleCount(run?.baseline, particleCount),
+    candidate: pairedScalingArmAtParticleCount(run?.candidate, particleCount)
+  }));
+  const lowN = summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns({
+    ...commonSummaryOptions,
+    runs: runsAtParticleCount(lowParticleCount)
+  });
+  const highN = summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns({
+    ...commonSummaryOptions,
+    runs: runsAtParticleCount(highParticleCount)
+  });
+  const particleCoverage = normalizedRuns.map((run, index) => ({
+    runIndex: index + 1,
+    runId: String(run?.runId ?? ''),
+    baseline: pairedScalingArmParticleCoverage(
+      run?.baseline,
+      normalizedParticleCounts
+    ),
+    candidate: pairedScalingArmParticleCoverage(
+      run?.candidate,
+      normalizedParticleCounts
+    )
+  }));
+  const relativeScalingGains = lowN.runs.map((lowRun, index) => {
+    const highRun = highN.runs[index] ?? null;
+    return lowRun?.runId
+      && highRun?.runId === lowRun.runId
+      && Number.isFinite(lowRun?.throughputRatio)
+      && lowRun.throughputRatio > 0
+      && Number.isFinite(highRun?.throughputRatio)
+      && highRun.throughputRatio > 0
+      ? highRun.throughputRatio / lowRun.throughputRatio
+      : null;
+  }).filter((value) => Number.isFinite(value) && value > 0);
+  const pairedMedianRelativeScalingGain = median(relativeScalingGains);
+  const independentLowRatio = lowN.independentMedianCrossCheck.ratio;
+  const independentHighRatio = highN.independentMedianCrossCheck.ratio;
+  const independentMedianRelativeScalingGain = (
+    Number.isFinite(independentLowRatio)
+    && independentLowRatio > 0
+    && Number.isFinite(independentHighRatio)
+    && independentHighRatio > 0
+  )
+    ? independentHighRatio / independentLowRatio
+    : null;
+  const pairedScalingGainWithinThreshold =
+    pairedMedianRelativeScalingGain !== null
+    && pairedMedianRelativeScalingGain
+      >= normalizedMinimumScalingGain;
+  const independentScalingGainWithinThreshold =
+    independentMedianRelativeScalingGain !== null
+    && independentMedianRelativeScalingGain
+      >= normalizedMinimumScalingGain;
+  const particleCountRatio = highParticleCount / lowParticleCount;
+  const pairedScalingExponentAdvantage =
+    pairedMedianRelativeScalingGain !== null
+      ? Math.log(pairedMedianRelativeScalingGain)
+        / Math.log(particleCountRatio)
+      : null;
+  const independentScalingExponentAdvantage =
+    independentMedianRelativeScalingGain !== null
+      ? Math.log(independentMedianRelativeScalingGain)
+        / Math.log(particleCountRatio)
+      : null;
+
+  const blockers = [];
+  if (particleCoverage.some((run) => (
+    !run.baseline.complete || !run.candidate.complete
+  ))) {
+    blockers.push(
+      'authoritative-two-level-scaling-particle-coverage-incomplete'
+    );
+  }
+  blockers.push(...lowN.blockers.map((blocker) => `low-n-${blocker}`));
+  blockers.push(...highN.blockers.map((blocker) => `high-n-${blocker}`));
+  if (relativeScalingGains.length !== Math.max(
+    1,
+    Math.round(Number(requiredRunCount) || 3)
+  )) {
+    blockers.push(
+      'paired-authoritative-two-level-relative-scaling-coverage-incomplete'
+    );
+  }
+  if (!pairedScalingGainWithinThreshold) {
+    blockers.push(
+      'paired-authoritative-two-level-relative-scaling-gain-below-threshold'
+    );
+  }
+  if (!independentScalingGainWithinThreshold) {
+    blockers.push(
+      'independent-median-authoritative-two-level-relative-scaling-gain-below-threshold'
+    );
+  }
+
+  return {
+    schema:
+      'peercompute.ulg.sph-paired-authoritative-two-level-physics-scaling-campaign.v1',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    method: {
+      independentRunCount: Math.max(
+        1,
+        Math.round(Number(requiredRunCount) || 3)
+      ),
+      expectedRunOrders,
+      warmupBatchCount: Math.max(
+        0,
+        Math.round(Number(requiredWarmupBatchCount) || 0)
+      ),
+      measuredBatchCount: Math.max(
+        1,
+        Math.round(Number(requiredMeasuredBatchCount) || 1)
+      ),
+      batchStepCount: Math.max(
+        1,
+        Math.round(Number(requiredBatchStepCount) || 16)
+      ),
+      metric: 'physicsStepsPerSecond',
+      metricSource: 'complete-engine-batch',
+      direction: 'higher-is-better',
+      routeKind: 'authoritative-two-level',
+      requiredFineSubstepCount,
+      requiredParticleCounts: normalizedParticleCounts,
+      particleCountRatio,
+      pairedAggregation:
+        'median-of-within-run-high-n-ratio-divided-by-low-n-ratio',
+      independentMedianCrossCheckRequired: true,
+      minimumRelativeScalingGain: normalizedMinimumScalingGain,
+      minimumSameNThroughputRatio: normalizedMinimumSameNRatio,
+      sameNPolicy:
+        'reported-constant-factor-with-catastrophic-floor-not-five-percent-regression-gate',
+      expectedBaselineGitHead:
+        typeof expectedBaselineGitHead === 'string'
+          ? expectedBaselineGitHead.trim() || null
+          : null
+    },
+    runCount: normalizedRuns.length,
+    particleCoverage,
+    sameN: {
+      low: lowN,
+      high: highN
+    },
+    paired: {
+      relativeScalingGains,
+      medianRelativeScalingGain: pairedMedianRelativeScalingGain,
+      withinThreshold: pairedScalingGainWithinThreshold,
+      scalingExponentAdvantage: pairedScalingExponentAdvantage
+    },
+    independentMedianCrossCheck: {
+      lowNThroughputRatio: independentLowRatio,
+      highNThroughputRatio: independentHighRatio,
+      relativeScalingGain: independentMedianRelativeScalingGain,
+      withinThreshold: independentScalingGainWithinThreshold,
+      scalingExponentAdvantage: independentScalingExponentAdvantage
+    }
+  };
 }
 
 function spatialArenaDepthScenarioUrlEvidence(scenario, expectedArenaCount) {
@@ -3522,6 +4149,25 @@ function firstNonNullMetricValue(...values) {
   return null;
 }
 
+export function currentResidentSurfaceDrawConsumerMetricValue({
+  surfaceDraw = null,
+  renderState = null,
+  key
+} = {}) {
+  if (typeof key !== 'string' || !key.startsWith('surfaceDraw')) {
+    throw new TypeError('current surface-draw consumer metric key must start with surfaceDraw');
+  }
+  const suffix = key.slice('surfaceDraw'.length);
+  const directAlias = suffix
+    ? `${suffix[0].toLowerCase()}${suffix.slice(1)}`
+    : key;
+  return firstDefinedMetricValue(
+    ownMetricValue(surfaceDraw, key),
+    ownMetricValue(surfaceDraw, directAlias),
+    ownMetricValue(renderState, key)
+  );
+}
+
 // A resident batch publishes `surfaceDraw` after the render-state snapshot.
 // Treat the direct batch record as the authoritative observation when it is
 // available: a snapshot can otherwise describe the pre-publication state
@@ -3642,6 +4288,11 @@ const SCHROEDER_TRANSACTION_COUNTER_KEYS = Object.freeze([
   'staleLawInputForwardCount',
   'legacyPrivateLookupBuildCount',
   'legacyExhaustiveTraversalCount'
+]);
+
+const SCHROEDER_COMPLETED_GENERATION_RELEASE_STATUSES = Object.freeze([
+  'spatial-epoch-generation-released-after-final-consumer',
+  'spatial-epoch-generation-released-queue-ordered-after-exact-successor'
 ]);
 
 function exactNonNegativeIntegerOrNull(value) {
@@ -3842,6 +4493,60 @@ function positionEpochSequenceWithTransitionProof({
         && (authoritativePrivateAdvance || transitionEvidence?.complete === true)
     },
     transitionEvidence
+  };
+}
+
+export function summarizeMechanicsFieldPairV2Evidence({
+  metrics = [],
+  configuredRequested = false
+} = {}) {
+  const generations = (Array.isArray(metrics) ? metrics : [])
+    .filter((entry) => entry?.phase === 'resident-batch')
+    .flatMap((entry) => (
+      Array.isArray(
+        entry?.residentSteps?.schroederSpatialEpochGenerationSummaries
+      )
+        ? entry.residentSteps.schroederSpatialEpochGenerationSummaries
+        : []
+    ))
+    .map((summary) => summary?.spatialEpochGeneration ?? summary)
+    .filter((summary) => summary && typeof summary === 'object');
+  const enabledValues = generations
+    .map((summary) => summary.mechanicsFieldPairV2Enabled)
+    .filter((value) => typeof value === 'boolean');
+  const constructionModes = generations
+    .map((summary) => summary.mechanicsFieldConstructionMode)
+    .filter((value) => typeof value === 'string' && value.length > 0);
+  const uniqueEnabledValues = [...new Set(enabledValues)];
+  const uniqueConstructionModes = [...new Set(constructionModes)];
+  const expectedEnabled = configuredRequested === true;
+  const expectedConstructionMode = expectedEnabled
+    ? 'paired-v2-shared-radix'
+    : 'independent-v2';
+  return {
+    schema:
+      'peercompute.ulg.sph-mechanics-field-pair-v2-benchmark-evidence.v0',
+    configuredRequested: expectedEnabled,
+    generationSummaryCount: generations.length,
+    enabledObservationCount: enabledValues.length,
+    constructionModeObservationCount: constructionModes.length,
+    observedEnabledValues: uniqueEnabledValues,
+    observedConstructionModes: uniqueConstructionModes,
+    mechanicsFieldPairV2Enabled: uniqueEnabledValues.length === 1
+      ? uniqueEnabledValues[0]
+      : null,
+    mechanicsFieldConstructionMode: uniqueConstructionModes.length === 1
+      ? uniqueConstructionModes[0]
+      : null,
+    coverageComplete: Boolean(
+      generations.length > 0
+      && enabledValues.length === generations.length
+      && constructionModes.length === generations.length
+      && enabledValues.every((value) => value === expectedEnabled)
+      && constructionModes.every(
+        (value) => value === expectedConstructionMode
+      )
+    )
   };
 }
 
@@ -4171,8 +4876,9 @@ export function aggregateSchroederResidentBatchEvidence({
       generation?.directoryBuildCount === 1
       && generation?.privateLookupBuildCount === 0
       && generation?.releaseScheduled === true
-      && generation?.releaseStatus
-        === 'spatial-epoch-generation-released-after-final-consumer'
+      && SCHROEDER_COMPLETED_GENERATION_RELEASE_STATUSES.includes(
+        generation?.releaseStatus
+      )
       && generation?.releaseAttemptCount === 1
       && generation?.releaseFailureCount === 0
     ));
@@ -4267,8 +4973,9 @@ export function aggregateSchroederResidentBatchEvidence({
       requestedSpatialArenaCount >= 1
       && generations.length === expectedStepCount
       && generations.every((generation) => (
-        exactNonNegativeIntegerOrNull(generation?.directArenaCount)
-          === requestedSpatialArenaCount
+        exactNonNegativeIntegerOrNull(
+          generation?.directArenaCount ?? generation?.arenaCapacity
+        ) === requestedSpatialArenaCount
         && exactNonNegativeIntegerOrNull(generation?.arenaCapacity)
           === requestedSpatialArenaCount
       ))
@@ -4457,6 +5164,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const probeResidentBatchResidentStepsAwaitMs = numberOrNull(
     probeResidentBatchTiming?.residentStepsAwaitMs
   );
+  const probeResidentBatchBackgroundSettlementAwaitMs = numberOrNull(
+    probeResidentBatchTiming?.backgroundSettlementAwaitMs
+  );
+  const probeResidentBatchBackgroundSettlementStatus =
+    probeResidentBatchTiming?.backgroundSettlementStatus ?? null;
   const probeResidentBatchRenderRefreshAwaitMs = numberOrNull(
     probeResidentBatchTiming?.renderRefreshAwaitMs
   );
@@ -4495,6 +5207,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   })();
   const probeEngineBatchComponents = [
     probeResidentBatchResidentStepsAwaitMs,
+    probeResidentBatchBackgroundSettlementAwaitMs,
     probeResidentBatchRenderRefreshAwaitMs,
     probeResidentBatchMaterialInterfaceDiagnosticMs,
     probeResidentBatchViewportNonRafMs,
@@ -4626,6 +5339,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     viewportNonRafMs: probeResidentBatchViewportNonRafMs,
     nativeSurfaceValidationWaitMs: probeResidentBatchNativeSurfaceValidationWaitMs,
     residentStepsAwaitMs: probeResidentBatchResidentStepsAwaitMs,
+    backgroundSettlementAwaitMs:
+      probeResidentBatchBackgroundSettlementAwaitMs,
+    backgroundSettlementStatus:
+      probeResidentBatchBackgroundSettlementStatus,
     renderRefreshAwaitMs: probeResidentBatchRenderRefreshAwaitMs,
     materialInterfaceDiagnosticMs: probeResidentBatchMaterialInterfaceDiagnosticMs,
     wallOverheadMs: probeWallOverheadMs,
@@ -4654,6 +5371,17 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederTwoLevelFineSubstepCount,
     schroederSpatialArenaCount
   });
+  const schroederMechanicsFieldPairV2Evidence =
+    summarizeMechanicsFieldPairV2Evidence({
+      metrics,
+      configuredRequested: schroederMechanicsFieldPairV2Requested
+    });
+  const schroederMechanicsFieldPairV2Enabled =
+    schroederMechanicsFieldPairV2Evidence.mechanicsFieldPairV2Enabled;
+  const schroederMechanicsFieldConstructionMode =
+    schroederMechanicsFieldPairV2Evidence.mechanicsFieldConstructionMode;
+  const schroederMechanicsFieldPairV2CoverageComplete =
+    schroederMechanicsFieldPairV2Evidence.coverageComplete;
   const schroederSimulationActive = schroederSimulationRequested === true
     ? schroederResidentBatchEvidence.schroederSimulationActive
     : (schroederTelemetry?.active ?? null);
@@ -5531,80 +6259,142 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ownMetricValue(surfaceDraw, 'visibleGpuConsumerRuntimeReady'),
     ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerRuntimeReady')
   ));
-  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerSameDeviceMainThreadImportSelected')
-  );
-  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerSameDeviceMainThreadImportRoute')
-  );
-  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerSameDeviceMainThreadImportThread')
-  );
-  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerSameDeviceMainThreadImportDeviceScope')
-  );
-  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerSameDeviceMainThreadImportStatus')
-  );
-  const surfaceDrawVisibleGpuConsumerPixelValidationStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerPixelValidationStatus'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerPixelValidationStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerPixelValidationStatus')
-  );
-  const surfaceDrawVisibleGpuConsumerValidated = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerValidated'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerValidated'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerValidated')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeReadbackFallbackValidated')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeReadbackSmokeValidationStatus')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeOffscreenValidationStatus')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeDeviceMapSmokeStatus')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeValidationBlockerFamily')
-  );
-  const surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable = firstDefinedMetricValue(
-    ownMetricValue(renderState, 'surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable'),
-    ownMetricValue(surfaceDraw, 'surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable'),
-    ownMetricValue(surfaceDraw, 'visibleGpuConsumerNativeTextureReadbackUnavailable')
-  );
+  const currentSurfaceDrawConsumerMetricValue = (key) => {
+    return currentResidentSurfaceDrawConsumerMetricValue({
+      surfaceDraw,
+      renderState,
+      key
+    });
+  };
+  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected'
+    );
+  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute'
+    );
+  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread'
+    );
+  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope'
+    );
+  const surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerPixelValidationStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerPixelValidationStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted'
+    );
+  const surfaceDrawVisibleGpuConsumerForegroundProofValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerForegroundProofValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted'
+    );
+  const surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration'
+    );
+  const surfaceDrawVisibleGpuConsumerNativePixelValidationSource =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativePixelValidationSource'
+    );
+  const surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount'
+    );
+  const surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily'
+    );
+  const surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
+    currentSurfaceDrawConsumerMetricValue(
+      'surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable'
+    );
   const surfaceDrawRenderBridgeFrameCount = numberOrNull(
-    renderState?.surfaceDrawRenderBridgeFrameCount
-      ?? surfaceDraw?.renderBridgeFrameCount
+    surfaceDraw?.renderBridgeFrameCount
       ?? surfaceDraw?.surfaceDrawRenderBridgeFrameCount
+      ?? renderState?.surfaceDrawRenderBridgeFrameCount
   );
   const surfaceDrawRenderBridgeLastRenderStatus =
-    renderState?.surfaceDrawRenderBridgeLastRenderStatus
-    ?? surfaceDraw?.renderBridgeLastRenderStatus
+    surfaceDraw?.renderBridgeLastRenderStatus
     ?? surfaceDraw?.surfaceDrawRenderBridgeLastRenderStatus
+    ?? renderState?.surfaceDrawRenderBridgeLastRenderStatus
     ?? null;
   const surfaceDrawRenderBridgeReadbackSmokeValidationStatus =
     renderState?.surfaceDrawRenderBridgeReadbackSmokeValidationStatus
@@ -5733,6 +6523,66 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderState?.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus
       ?? surfaceDraw?.extensionSurfaceTranslationPipelineCacheStatus
       ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus
+      ?? null;
+  const surfaceDrawExtensionSurfaceTranslationPipelineCreated =
+    renderState?.surfaceDrawExtensionSurfaceTranslationPipelineCreated
+      ?? surfaceDraw?.extensionSurfaceTranslationPipelineCreated
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationPipelineCreated
+      ?? null;
+  const surfaceDrawExtensionSurfaceTranslationBindGroupCreated =
+    renderState?.surfaceDrawExtensionSurfaceTranslationBindGroupCreated
+      ?? surfaceDraw?.extensionSurfaceTranslationBindGroupCreated
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationBindGroupCreated
+      ?? null;
+  const surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated =
+    renderState?.surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated
+      ?? surfaceDraw?.extensionSurfaceTranslationCommandEncoderCreated
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated
+      ?? null;
+  const surfaceDrawExtensionSurfaceTranslationWorkgroupCountX = numberOrNull(
+    renderState?.surfaceDrawExtensionSurfaceTranslationWorkgroupCountX
+      ?? surfaceDraw?.extensionSurfaceTranslationWorkgroupCountX
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationWorkgroupCountX
+  );
+  const surfaceDrawExtensionSurfaceTranslationSubmissionObserved =
+    renderState?.surfaceDrawExtensionSurfaceTranslationSubmissionObserved
+      ?? surfaceDraw?.extensionSurfaceTranslationSubmissionObserved
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationSubmissionObserved
+      ?? null;
+  const surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource =
+    renderState?.surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource
+      ?? surfaceDraw?.extensionSurfaceDirectCompactPositionDrawIndirectSource
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource
+      ?? null;
+  const surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership =
+    renderState?.surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership
+      ?? surfaceDraw?.extensionSurfaceDrawIndirectRowsOwnership
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership
+      ?? null;
+  const surfaceDrawExtensionSurfaceDrawIndirectBufferRetained =
+    renderState?.surfaceDrawExtensionSurfaceDrawIndirectBufferRetained
+      ?? surfaceDraw?.extensionSurfaceDrawIndirectBufferRetained
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceDrawIndirectBufferRetained
+      ?? null;
+  const surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength
+      ?? surfaceDraw?.extensionSurfaceDrawIndirectBufferByteLength
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength
+  );
+  const surfaceDrawExtensionSurfaceQueueCompletionStatus =
+    renderState?.surfaceDrawExtensionSurfaceQueueCompletionStatus
+      ?? surfaceDraw?.extensionSurfaceQueueCompletionStatus
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceQueueCompletionStatus
+      ?? null;
+  const surfaceDrawExtensionSurfaceQueueCompletionMethod =
+    renderState?.surfaceDrawExtensionSurfaceQueueCompletionMethod
+      ?? surfaceDraw?.extensionSurfaceQueueCompletionMethod
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceQueueCompletionMethod
+      ?? null;
+  const surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired =
+    renderState?.surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired
+      ?? surfaceDraw?.extensionSurfaceHotLoopGpuTranslationRequired
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired
       ?? null;
   const surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus =
     renderState?.surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus
@@ -6232,6 +7082,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederTwoLevelFineSubstepCountObserved,
     schroederTwoLevelMechanicsStepStatus,
     schroederTwoLevelAuthoritativeCommitVerified,
+    schroederMechanicsFieldPairV2Requested,
+    schroederMechanicsFieldPairV2Enabled,
+    schroederMechanicsFieldConstructionMode,
+    schroederMechanicsFieldPairV2CoverageComplete,
     gpuTimestampIntervalEvidence,
     gpuTimestampRequired: requireGpuTimestampInterval,
     gpuStageTimestampEvidence,
@@ -6307,6 +7161,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     physicsStepsPerSecondSource: probeEngineStepsPerSecond !== null
       ? 'complete-engine-batch'
       : 'complete-probe-wall-batch',
+    interactiveCacheLifecycleStatus:
+      result?.timeline?.interactiveCacheLifecycle?.status ?? null,
+    interactiveCachePageInstanceId: metric?.pageInstanceId ?? null,
+    interactiveCacheResetOrdinal: metric?.cacheResetOrdinal ?? null,
+    interactiveCacheMeasurementClass:
+      metric?.interactiveCacheMeasurementClass ?? null,
+    interactiveCacheFinalMeasuredBatchIndex: metric?.batchIndex ?? null,
     probeWallStepsPerSecond,
     probeEngineStepsPerSecond,
     probeBatchWallMs,
@@ -6331,6 +7192,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     thermalCandidateCsrRouteCounts,
     probeResidentBatchTiming,
     probeResidentBatchResidentStepsAwaitMs,
+    probeResidentBatchBackgroundSettlementAwaitMs,
+    probeResidentBatchBackgroundSettlementStatus,
     probeResidentBatchThermalCandidateCsrRouteReadbackMs,
     probeResidentBatchRenderRefreshAwaitMs,
     probeResidentBatchMaterialInterfaceDiagnosticMs,
@@ -6529,6 +7392,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     schroederTwoLevelAuthoritativeCommitVerified,
     schroederTwoLevelAuthoritativeStepCount:
       schroederResidentBatchEvidence.twoLevelAuthoritativeStepCount,
+    schroederMechanicsFieldPairV2ConfiguredRequested:
+      schroederMechanicsFieldPairV2Requested,
+    schroederMechanicsFieldPairV2Enabled,
+    schroederMechanicsFieldConstructionMode,
+    schroederMechanicsFieldPairV2CoverageComplete,
+    schroederMechanicsFieldPairV2Evidence,
     schroederTransactionExpectedStepCount: schroederSimulationRequested === true
       ? schroederResidentBatchEvidence.expectedStepCount
       : 0,
@@ -6666,9 +7535,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus,
     surfaceDrawVisibleGpuConsumerPixelValidationStatus,
     surfaceDrawVisibleGpuConsumerValidated,
+    surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted,
+    surfaceDrawVisibleGpuConsumerForegroundProofValidated,
+    surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted,
+    surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated,
+    surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated,
+    surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration,
+    surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration,
     surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated,
     surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus,
     surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus,
+    surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount,
+    surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration,
+    surfaceDrawVisibleGpuConsumerNativePixelValidationSource,
+    surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount,
+    surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration,
     surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus,
     surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily,
     surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable,
@@ -6699,6 +7585,18 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount,
     surfaceDrawExtensionSurfaceTranslationElapsedMs,
     surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus,
+    surfaceDrawExtensionSurfaceTranslationPipelineCreated,
+    surfaceDrawExtensionSurfaceTranslationBindGroupCreated,
+    surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated,
+    surfaceDrawExtensionSurfaceTranslationWorkgroupCountX,
+    surfaceDrawExtensionSurfaceTranslationSubmissionObserved,
+    surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource,
+    surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership,
+    surfaceDrawExtensionSurfaceDrawIndirectBufferRetained,
+    surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength,
+    surfaceDrawExtensionSurfaceQueueCompletionStatus,
+    surfaceDrawExtensionSurfaceQueueCompletionMethod,
+    surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired,
     surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus,
     surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs,
     surfaceDrawExtensionSurfaceRefreshElapsedMs,
@@ -6960,6 +7858,7 @@ async function main() {
     throw new Error('No particle counts requested');
   }
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'ulg-sph-bench-'));
+  const durableReleasePublication = durableBenchmarkReleasePublicationEnabled();
   const scenarios = [];
   for (let index = 0; index < counts.length; index += 1) {
     const targetParticleCount = counts[index];
@@ -6968,11 +7867,14 @@ async function main() {
     const exit = await runProbe({
       ULG_PROBE_URL: scenario.url,
       ULG_PROBE_OUTPUT: probeOutput,
+      ULG_PROBE_STDOUT_MODE: 'none',
       ULG_PROBE_PORT: String(basePort + index),
       ULG_PROBE_MODE: probeMode,
       ULG_PROBE_TIMEOUT_MS: String(timeoutMs),
       ULG_PROBE_BATCHES: String(batches),
       ULG_PROBE_BATCH_STEPS: String(batchSteps),
+      ULG_PROBE_INTERACTIVE_CACHE_LIFECYCLE:
+        interactiveCacheLifecycleRequested ? '1' : '0',
       ULG_PROBE_RENDER_EVERY: '1',
       ULG_PROBE_READBACK_MODE: 'no-full-readback',
       ULG_PROBE_RENDER_READBACK_MODE: 'no-full-readback',
@@ -7003,11 +7905,14 @@ async function main() {
       ...(deviceScaleFactor ? { ULG_PROBE_DEVICE_SCALE_FACTOR: String(deviceScaleFactor) } : {}),
       ULG_PROBE_IS_MOBILE: isMobile ? '1' : '0',
       ULG_PROBE_HAS_TOUCH: hasTouch ? '1' : '0',
-      ULG_PROBE_FAIL_ON_BAD: '0'
+      ULG_PROBE_FAIL_ON_BAD: '0',
+      ...probeReleasePublicationEnvironment(durableReleasePublication)
     });
     let result = null;
+    let probeArtifactBytes = null;
     try {
-      result = JSON.parse(await readFile(probeOutput, 'utf8'));
+      probeArtifactBytes = await readFile(probeOutput);
+      result = JSON.parse(probeArtifactBytes.toString('utf8'));
     } catch {
       try {
         result = JSON.parse(exit.stdout);
@@ -7017,6 +7922,16 @@ async function main() {
     }
     scenarios.push({
       ...summarizeProbeResult({ targetParticleCount, scenario, result, exit }),
+      rawProbeArtifact: probeArtifactBytes
+        ? {
+            path: probeOutput,
+            byteLength: probeArtifactBytes.byteLength,
+            sha256: createHash('sha256')
+              .update(probeArtifactBytes)
+              .digest('hex')
+          }
+        : null,
+      probeBrowserLaunch: result?.browserLaunch ?? null,
       stderrTail: exit.stderr ? exit.stderr.slice(-4000) : ''
     });
   }
@@ -7024,6 +7939,7 @@ async function main() {
     schema: 'peercompute.ulg.sph-performance-benchmark.v0',
     status: scenarios.every((scenario) => scenario.exitCode === 0) ? 'complete' : 'completed-with-errors',
     profile,
+    durableReleasePublication,
     repoDir,
     generatedAt: new Date().toISOString(),
     materials: {
@@ -7034,6 +7950,7 @@ async function main() {
     },
     batches,
     batchSteps,
+    interactiveCacheLifecycleRequested,
     probeMode,
     compactSummaryMode,
     thermalCandidateCsrRouteEvidenceRequested:
@@ -7076,6 +7993,7 @@ async function main() {
     schroederTwoLevelMechanicsRequested,
     schroederTwoLevelMechanicsAuthority,
     schroederTwoLevelFineSubstepCount,
+    schroederMechanicsFieldPairV2Requested,
     schroederPhaseVolumeMigrationRequested,
     materialInterfaceDiagnosticRequested,
     materialInterfaceCandidateReadbackMode,
@@ -7105,8 +8023,12 @@ async function main() {
     },
     scenarios
   };
-  await mkdir(path.dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  await writeBenchmarkReport({
+    outputPath,
+    repoDir,
+    report,
+    durableReleasePublication
+  });
   const iccTraceEvents = buildSchroederReactionReceiptIccTrace({
     scenarios: report.scenarios,
     reportPath: outputPath

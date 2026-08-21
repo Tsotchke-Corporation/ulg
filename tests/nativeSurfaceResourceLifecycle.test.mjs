@@ -143,20 +143,25 @@ test('native surface submit failure policy makes the first submit irrevocable', 
   );
 });
 
-test('native successor promotion requires latest exact-generation foreground pixels', () => {
-  const promoted = resolveNativeSurfaceSuccessorPromotion({
+test('native successor promotion preserves diagnostic pixel-proof coverage', () => {
+  const exactPixelProof = {
     candidateGeneration: 8,
     latestCandidateGeneration: 8,
     foregroundValidationStatus: 'passed',
     foregroundValidationGeneration: 8,
-    foregroundValidationNonzeroPixelCount: 37
-  });
+    foregroundValidationNonzeroPixelCount: 37,
+    foregroundValidationProofKind: 'base-composite-color-difference'
+  };
+  const promoted = resolveNativeSurfaceSuccessorPromotion(exactPixelProof);
   assert.equal(promoted.status, 'native-surface-successor-promoted');
   assert.equal(promoted.promoteCandidate, true);
   assert.equal(promoted.retainCurrentPresentation, false);
   assert.equal(promoted.candidateIsLatest, true);
   assert.equal(promoted.validationMatchesCandidate, true);
   assert.equal(promoted.foregroundValidated, true);
+  assert.equal(promoted.privateCompositePixelValidated, true);
+  assert.equal(promoted.sameQueueStructuralSubmissionAdmitted, false);
+  assert.equal(promoted.candidateAdmitted, true);
 
   for (const foregroundValidationStatus of [
     'not-run',
@@ -165,37 +170,159 @@ test('native successor promotion requires latest exact-generation foreground pix
     'error'
   ]) {
     const retained = resolveNativeSurfaceSuccessorPromotion({
-      candidateGeneration: 8,
-      latestCandidateGeneration: 8,
-      foregroundValidationStatus,
-      foregroundValidationGeneration: 8,
-      foregroundValidationNonzeroPixelCount: 37
+      ...exactPixelProof,
+      foregroundValidationStatus
     });
     assert.equal(retained.promoteCandidate, false, foregroundValidationStatus);
     assert.equal(retained.retainCurrentPresentation, true, foregroundValidationStatus);
   }
 
   assert.equal(resolveNativeSurfaceSuccessorPromotion({
+    ...exactPixelProof,
+    foregroundValidationNonzeroPixelCount: 0
+  }).status, 'native-surface-successor-retained-empty-foreground');
+  const staleValidation = resolveNativeSurfaceSuccessorPromotion({
+    ...exactPixelProof,
+    foregroundValidationGeneration: 7
+  });
+  assert.equal(
+    staleValidation.status,
+    'native-surface-successor-retained-stale-validation'
+  );
+  assert.equal(staleValidation.foregroundValidated, false);
+  assert.equal(staleValidation.privateCompositePixelValidated, false);
+  assert.equal(staleValidation.candidateAdmitted, false);
+  const staleCandidate = resolveNativeSurfaceSuccessorPromotion({
+    ...exactPixelProof,
+    candidateGeneration: 7,
+    foregroundValidationGeneration: 7
+  });
+  assert.equal(
+    staleCandidate.status,
+    'native-surface-successor-retained-stale-candidate'
+  );
+  assert.equal(staleCandidate.foregroundValidated, false);
+  assert.equal(staleCandidate.privateCompositePixelValidated, false);
+  assert.equal(staleCandidate.candidateAdmitted, false);
+});
+
+test('native successor promotion requires an exact same-queue staged composite proof', () => {
+  const exactStructuralProof = {
     candidateGeneration: 8,
     latestCandidateGeneration: 8,
     foregroundValidationStatus: 'passed',
     foregroundValidationGeneration: 8,
-    foregroundValidationNonzeroPixelCount: 0
-  }).status, 'native-surface-successor-retained-empty-foreground');
-  assert.equal(resolveNativeSurfaceSuccessorPromotion({
+    foregroundValidationNonzeroPixelCount: 0,
+    foregroundValidationProofKind:
+      'same-queue-private-staged-composite-submission',
+    foregroundValidationGpuFenceSatisfied: false,
+    foregroundValidationSameQueueSubmissionBoundary: true,
+    foregroundValidationSubmittedDrawCount: 3
+  };
+  const promoted = resolveNativeSurfaceSuccessorPromotion(exactStructuralProof);
+  assert.equal(promoted.status, 'native-surface-successor-promoted');
+  assert.equal(promoted.promoteCandidate, true);
+  assert.equal(promoted.retainCurrentPresentation, false);
+  assert.equal(
+    promoted.foregroundValidationProofKind,
+    'same-queue-private-staged-composite-submission'
+  );
+  assert.equal(promoted.foregroundValidationGpuFenceSatisfied, false);
+  assert.equal(
+    promoted.foregroundValidationSameQueueSubmissionBoundary,
+    true
+  );
+  assert.equal(promoted.foregroundValidationSubmittedDrawCount, 3);
+  assert.equal(promoted.candidateIsLatest, true);
+  assert.equal(promoted.validationMatchesCandidate, true);
+  assert.equal(promoted.foregroundValidated, false);
+  assert.equal(promoted.privateCompositePixelValidated, false);
+  assert.equal(promoted.sameQueueStructuralSubmissionAdmitted, true);
+  assert.equal(promoted.candidateAdmitted, true);
+
+  const missingBoundary = resolveNativeSurfaceSuccessorPromotion({
     candidateGeneration: 8,
     latestCandidateGeneration: 8,
     foregroundValidationStatus: 'passed',
-    foregroundValidationGeneration: 7,
-    foregroundValidationNonzeroPixelCount: 37
-  }).status, 'native-surface-successor-retained-stale-validation');
-  assert.equal(resolveNativeSurfaceSuccessorPromotion({
+    foregroundValidationGeneration: 8,
+    foregroundValidationNonzeroPixelCount: 0,
+    foregroundValidationProofKind:
+      'same-queue-private-staged-composite-submission',
+    foregroundValidationSubmittedDrawCount: 3
+  });
+  assert.equal(
+    missingBoundary.status,
+    'native-surface-successor-retained-missing-same-queue-boundary'
+  );
+  assert.equal(missingBoundary.promoteCandidate, false);
+  assert.equal(missingBoundary.retainCurrentPresentation, true);
+
+  const falseBoundary = resolveNativeSurfaceSuccessorPromotion({
+    ...exactStructuralProof,
+    foregroundValidationSameQueueSubmissionBoundary: false
+  });
+  assert.equal(
+    falseBoundary.status,
+    'native-surface-successor-retained-missing-same-queue-boundary'
+  );
+  assert.equal(falseBoundary.promoteCandidate, false);
+  assert.equal(falseBoundary.retainCurrentPresentation, true);
+
+  const legacyFenceDoesNotSubstitute =
+    resolveNativeSurfaceSuccessorPromotion({
+      ...exactStructuralProof,
+      foregroundValidationSameQueueSubmissionBoundary: false,
+      foregroundValidationGpuFenceSatisfied: true
+    });
+  assert.equal(
+    legacyFenceDoesNotSubstitute.status,
+    'native-surface-successor-retained-missing-same-queue-boundary'
+  );
+  assert.equal(legacyFenceDoesNotSubstitute.promoteCandidate, false);
+
+  const noSubmittedDraws = resolveNativeSurfaceSuccessorPromotion({
+    ...exactStructuralProof,
+    foregroundValidationSubmittedDrawCount: 0
+  });
+  assert.equal(
+    noSubmittedDraws.status,
+    'native-surface-successor-retained-no-submitted-draws'
+  );
+  assert.equal(noSubmittedDraws.promoteCandidate, false);
+  assert.equal(noSubmittedDraws.retainCurrentPresentation, true);
+
+  const wrongProofKind = resolveNativeSurfaceSuccessorPromotion({
+    ...exactStructuralProof,
+    foregroundValidationProofKind: 'untrusted-staged-composite'
+  });
+  assert.equal(wrongProofKind.promoteCandidate, false);
+  assert.equal(wrongProofKind.retainCurrentPresentation, true);
+  assert.notEqual(
+    wrongProofKind.status,
+    'native-surface-successor-promoted'
+  );
+
+  const staleValidation = resolveNativeSurfaceSuccessorPromotion({
+    ...exactStructuralProof,
+    foregroundValidationGeneration: 7
+  });
+  assert.equal(
+    staleValidation.status,
+    'native-surface-successor-retained-stale-validation'
+  );
+  assert.equal(staleValidation.sameQueueStructuralSubmissionAdmitted, false);
+  assert.equal(staleValidation.candidateAdmitted, false);
+  const staleCandidate = resolveNativeSurfaceSuccessorPromotion({
+    ...exactStructuralProof,
     candidateGeneration: 7,
-    latestCandidateGeneration: 8,
-    foregroundValidationStatus: 'passed',
-    foregroundValidationGeneration: 7,
-    foregroundValidationNonzeroPixelCount: 37
-  }).status, 'native-surface-successor-retained-stale-candidate');
+    foregroundValidationGeneration: 7
+  });
+  assert.equal(
+    staleCandidate.status,
+    'native-surface-successor-retained-stale-candidate'
+  );
+  assert.equal(staleCandidate.sameQueueStructuralSubmissionAdmitted, false);
+  assert.equal(staleCandidate.candidateAdmitted, false);
 });
 
 test('native successor promotion fails closed on inexact generations', () => {
@@ -212,7 +339,8 @@ test('native successor promotion fails closed on inexact generations', () => {
       latestCandidateGeneration: 8,
       foregroundValidationStatus: 'passed',
       foregroundValidationGeneration: 8,
-      foregroundValidationNonzeroPixelCount: 1
+      foregroundValidationNonzeroPixelCount: 1,
+      foregroundValidationProofKind: 'base-composite-color-difference'
     });
     assert.equal(retained.promoteCandidate, false, String(invalidGeneration));
     assert.equal(
@@ -220,6 +348,18 @@ test('native successor promotion fails closed on inexact generations', () => {
       'native-surface-successor-retained-invalid-generation',
       String(invalidGeneration)
     );
+    assert.equal(retained.foregroundValidated, false, String(invalidGeneration));
+    assert.equal(
+      retained.privateCompositePixelValidated,
+      false,
+      String(invalidGeneration)
+    );
+    assert.equal(
+      retained.sameQueueStructuralSubmissionAdmitted,
+      false,
+      String(invalidGeneration)
+    );
+    assert.equal(retained.candidateAdmitted, false, String(invalidGeneration));
   }
 });
 

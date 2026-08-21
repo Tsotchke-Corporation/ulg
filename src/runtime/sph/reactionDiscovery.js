@@ -116,6 +116,7 @@ function materialPropertyCacheDigest(properties) {
       bulkModulusPa: phase.bulkModulusPa ?? phase.eos?.bulkModulusPa ?? null,
       shearModulusPa: phase.shearModulusPa ?? null,
       cpJPerKgK: phase.cpJPerKgK ?? null,
+      thermalConductivityWPerMK: phase.thermalConductivityWPerMK ?? null,
       debyeTemperatureK: phase.debyeTemperatureK ?? null,
       temperatureRange: phase.temperatureRange || null
     })),
@@ -247,7 +248,8 @@ function closureMechanicalInputs(properties, role) {
   const phase = representativeMechanicalPhase(properties, role);
   return {
     densityKgPerM3: phase?.densityKgPerM3 ?? 0,
-    bulkModulusPa: phase?.bulkModulusPa ?? phase?.eos?.bulkModulusPa ?? 0
+    bulkModulusPa: phase?.bulkModulusPa ?? phase?.eos?.bulkModulusPa ?? 0,
+    thermalConductivityWPerMK: phase?.thermalConductivityWPerMK ?? 0
   };
 }
 
@@ -403,7 +405,13 @@ function oxideGeometry(Z) {
 }
 
 function reactantsFor(comps) {
-  return comps.map((c) => ({ densityKgPerM3: c.densityKgPerM3 ?? 0, bulkModulusPa: c.bulkModulusPa ?? 0, molarMassKgPerMol: c.molarMassKgPerMol }));
+  return comps.map((c) => ({
+    material: c.formula ?? null,
+    densityKgPerM3: c.densityKgPerM3 ?? 0,
+    bulkModulusPa: c.bulkModulusPa ?? 0,
+    thermalConductivityWPerMK: c.thermalConductivityWPerMK ?? 0,
+    molarMassKgPerMol: c.molarMassKgPerMol
+  }));
 }
 
 function cachedProductClosureFor(productKey, options = {}) {

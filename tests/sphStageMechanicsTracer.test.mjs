@@ -103,6 +103,38 @@ test('zero-mass phases are dropped so a stage row matches a checkpoint row', asy
   assert.equal(rows[0].phase, 'gas');
 });
 
+test('the compact trace retains numeric motion evidence', async () => {
+  const tracer = createSphStageMechanicsTracer({
+    device: fakeDevice(),
+    particleCount: 9,
+    enabled: true,
+    reducer: async () => evidenceWith([{
+      material: 'Cs',
+      phase: 'solid',
+      massKg: 1,
+      kineticEnergyJ: 0.25,
+      speedSampleCount: 9,
+      maxSpeedMPerS: 0.5,
+      meanVyMPerS: -0.4,
+      minVyMPerS: -0.5,
+      maxVyMPerS: -0.3
+    }])
+  });
+  await tracer.snapshot({
+    stage: 'post-mechanics-closure-input',
+    stateBuffer: {},
+    thermoBuffer: {},
+    mechanicsBuffer: {}
+  });
+  const row = tracer.result().stages[0].materialPhases[0];
+  assert.equal(row.kineticEnergyJ, 0.25);
+  assert.equal(row.speedSampleCount, 9);
+  assert.equal(row.maxSpeedMPerS, 0.5);
+  assert.equal(row.meanVyMPerS, -0.4);
+  assert.equal(row.minVyMPerS, -0.5);
+  assert.equal(row.maxVyMPerS, -0.3);
+});
+
 test('the summary reads a single lane across stages', async () => {
   // The failure this exists to localize looks like: 0 after one stage,
   // 101325 after the next, 0 again after the last.

@@ -71,11 +71,19 @@ const GPU_BUFFER_USAGE = {
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
 };
+const identityValueMaxByBuffer = new WeakMap();
 
 // Render rows store the domain as f32 for the existing surface ABI, so keep
 // structural ids inside the exact-integer range shared by u32 and f32.  This
 // prevents two distinct body ids from silently aliasing after conversion.
 export const SPH_GPU_RENDER_DOMAIN_ID_MAX = 0x00ff_ffff;
+
+export function sphGpuIdentityValueMaxForBuffer(buffer) {
+  const value = buffer && identityValueMaxByBuffer.get(buffer);
+  return Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff
+    ? value
+    : null;
+}
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -631,6 +639,30 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     'ulg-sph-material-bank-particle-size-rows',
     packed.materialPropertyBankParticleSizeTable?.rows
   );
+  const stateBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-particle-state',
+    packed.state,
+    { copySource: true }
+  );
+  const thermoBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-particle-thermo',
+    packed.thermo,
+    { copySource: true }
+  );
+  const identityValues = packed.identity instanceof Uint32Array
+    ? packed.identity
+    : new Uint32Array(packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
+  let identityValueMax = 0;
+  for (const value of identityValues) identityValueMax = Math.max(identityValueMax, value);
+  const identityBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-particle-identity',
+    identityValues,
+    { copySource: true }
+  );
+  identityValueMaxByBuffer.set(identityBuffer, identityValueMax);
   return {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
@@ -658,16 +690,10 @@ export function uploadSphGpuParticleBuffers(device, packed) {
       Uint32Array.BYTES_PER_ELEMENT,
       packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
     ),
-    stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state, { copySource: true }),
-    thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo, { copySource: true }),
-    identityBuffer: writeStorageBuffer(
-      device,
-      'ulg-sph-particle-identity',
-      packed.identity instanceof Uint32Array
-        ? packed.identity
-        : new Uint32Array(packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS),
-      { copySource: true }
-    ),
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer,
+    identityValueMax,
     renderDomainKeys: { ...(packed.renderDomainKeys || {}) },
     phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
     materialPropertyBankWarmInputBuffer,

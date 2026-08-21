@@ -16,6 +16,7 @@ import {
   reorderSphInitialBodies,
   serializeSphInitialBodies,
   sphInitialBodiesFromLegacyDropBase,
+  sphInitialBodiesFromLegacyPhaseControls,
   sphInitialBodiesSignature,
   sphInitialBodiesToLegacyDropBase
 } from '../src/runtime/sphInitialBodies.js';
@@ -330,4 +331,32 @@ test('legacy adapter exactly preserves resolved base/drop semantics', () => {
     () => sphInitialBodiesToLegacyDropBase(duplicateLegacyRole),
     (error) => error.code === 'duplicate-legacy-role'
   );
+});
+
+test('legacy phase controls resolve the exact scaled mounted body geometry', () => {
+  const resolved = sphInitialBodiesFromLegacyPhaseControls({
+    baseMaterial: 'h2o',
+    dropMaterial: 'fe',
+    baseTemperatureK: 233.15,
+    dropTemperatureK: 1850,
+    baseParticlesPerEdge: 5,
+    dropParticlesPerEdge: 3,
+    referenceBaseEdgeM: 1,
+    referenceBaseParticlesPerEdge: 5,
+    sceneLengthScale: 0.028,
+    referenceBoxDimensionsM: [5, 5, 5],
+    referenceBaseBottomM: 0,
+    referenceDropBottomM: 1
+  });
+
+  assert.deepEqual(
+    resolved.bodies.map((entry) => entry.legacyRole),
+    ['base', 'drop']
+  );
+  assert.deepEqual(resolved.bodies[0].sizeM, [0.028, 0.028, 0.028]);
+  assert.deepEqual(resolved.bodies[0].centerM, [0.07, 0.014, 0.07]);
+  assert.deepEqual(resolved.bodies[0].particlesPerEdge, [5, 5, 5]);
+  assert.deepEqual(resolved.bodies[1].sizeM, [0.0168, 0.0168, 0.0168]);
+  assert.deepEqual(resolved.bodies[1].centerM, [0.07, 0.0364, 0.07]);
+  assert.deepEqual(resolved.bodies[1].particlesPerEdge, [3, 3, 3]);
 });

@@ -9,6 +9,8 @@ import {
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION
 } from '../ulg-gpu-abi/src/sphReactionProductPlacementReceipt.js';
 import {
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1
 } from '../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import {
@@ -31,12 +33,17 @@ import {
   releaseSphReactionWarmArenaAfterQueue,
   resolveSphReactionWarmArenaLease,
   resolveSchroederSpatialReactionPlacementSourceFamily,
+  schroederSpatialReactionPlacementTransferredDestinationCleanupClaim,
   schroederSpatialReactionPlacementSourceFamilyLiveness,
   validateSchroederSpatialReactionPlacementPositionEpochFloor,
   runSchroederSpatialReactionPlacementEpochWebGpu,
   sphReactionWarmArenaStats,
   transferSchroederSpatialReactionPlacementDestinationOwnership
 } from '../src/runtime/sph/schroederSpatialReactionPlacementEpochGpu.js';
+import {
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedWork
+} from '../src/runtime/webgpuComputeLayout.js';
 import {
   acquireSphReactionProductPlacementSegmentedArenaWebGpu,
   createSchroederSpatialReactionProductPlacementAuthorityWebGpu,
@@ -96,6 +103,7 @@ function fakeDevice() {
   const submissions = [];
   const encoders = [];
   const operations = [];
+  let queueFenceCount = 0;
   const device = {
     lost: lost.promise,
     limits: {
@@ -191,10 +199,22 @@ function fakeDevice() {
         submissions.push(commandBuffers);
         operations.push({ kind: 'submit', commandBuffers });
       },
-      onSubmittedWorkDone() { return Promise.resolve(); }
+      onSubmittedWorkDone() {
+        queueFenceCount += 1;
+        return Promise.resolve();
+      }
     }
   };
-  return { device, lost, buffers, copies, submissions, encoders, operations };
+  return {
+    device,
+    lost,
+    buffers,
+    copies,
+    submissions,
+    encoders,
+    operations,
+    getQueueFenceCount: () => queueFenceCount
+  };
 }
 
 function buffer(device, label, size) {
@@ -253,8 +273,13 @@ function reactionDiscoveryTable() {
   });
 }
 
-function fixture({ positionEpoch = 12 } = {}) {
-  const gpu = fakeDevice();
+function fixture({
+  positionEpoch = 12,
+  directoryAbiVersion = 2,
+  sharedGpu = null,
+  directArenaCount = 3
+} = {}) {
+  const gpu = sharedGpu ?? fakeDevice();
   const particleCount = 2;
   const stateBytes = particleCount
     * SPH_GPU_PARTICLE_STATE_FLOATS
@@ -302,15 +327,54 @@ function fixture({ positionEpoch = 12 } = {}) {
     chartId: 3,
     baseGridSpacingM: Math.fround(0.1)
   };
+  const ancestorActiveNodeList = {
+    schema: 'peercompute.ulg.schroeder-active-node-list-execution.v0',
+    status: 'schroeder-active-node-list-submitted',
+    spatialDirectorySourceSchema:
+      'peercompute.ulg.schroeder-spatial-directory-active-node-source.v1',
+    spatialDirectorySourceStatus: 'schroeder-spatial-directory-source-ready',
+    spatialDirectorySourceReady: true,
+    spatialEpochSourceSchema:
+      'peercompute.ulg.schroeder-spatial-active-node-source.v1',
+    spatialEpochSourceStatus: 'schroeder-spatial-active-node-source-ready',
+    spatialEpochSourceReady: true,
+    spatialEpochLevelSpacingMode: 'base-grid-spacing-times-pow2-level',
+    spatialEpochPositionAuthority: 'same-epoch-pre-integration-particle-state',
+    spatialEpochMinLevel: ancestorLevelAssignment.minLevel,
+    spatialEpochMaxLevel: ancestorLevelAssignment.maxLevel,
+    spatialEpochBaseGridSpacingM:
+      ancestorLevelAssignment.baseGridSpacingM,
+    spatialEpochChartId: ancestorLevelAssignment.chartId,
+    activeCandidateCount: particleCount,
+    activeNodeStrideFloats: 16,
+    activeNodeBuffer: ancestorLevelAssignment.assignmentBuffer,
+    sourceStateBuffer: ancestorState,
+    sourceStateBufferBorrowed: true,
+    spatialEpochStorageGeneration:
+      ancestorLevelAssignment.storageGeneration,
+    spatialEpochPhysicsTick: ancestorLevelAssignment.physicsTick,
+    spatialEpochPhysicsSubstep: ancestorLevelAssignment.physicsSubstep,
+    spatialEpochPositionEpoch: ancestorLevelAssignment.positionEpoch,
+    spatialEpochTopologyEpoch: ancestorLevelAssignment.topologyEpoch,
+    spatialEpochChartEpoch: ancestorLevelAssignment.chartEpoch,
+    spatialEpochLevelEpoch: ancestorLevelAssignment.levelEpoch,
+    spatialEpochSupportEpoch: ancestorLevelAssignment.supportEpoch,
+    phaseVolumeAssignmentOverlayEnabled: false
+  };
   const ancestor = runSchroederSpatialEpochGenerationWebGpu({
     device: gpu.device,
-    levelAssignment: ancestorLevelAssignment,
+    ...(directoryAbiVersion === 1
+      ? { activeNodeList: ancestorActiveNodeList }
+      : {
+          levelAssignment: ancestorLevelAssignment,
+          particleIdentityBuffer: identity,
+          particleIdentityStrideWords: SPH_GPU_PARTICLE_IDENTITY_UINTS
+        }),
     particleCount,
-    particleIdentityBuffer: identity,
-    particleIdentityStrideWords: SPH_GPU_PARTICLE_IDENTITY_UINTS,
-    laneId: 'placement-test-public-ancestor',
-    sourceFamily: 'placement-test-public-ancestor',
-    mechanicsLevels: []
+    laneId: `placement-test-public-ancestor-v${directoryAbiVersion}`,
+    sourceFamily: `placement-test-public-ancestor-v${directoryAbiVersion}`,
+    mechanicsLevels: [],
+    directArenaCount
   });
   const sphParticleState = {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -728,6 +792,90 @@ async function livePlacementContext() {
   });
   return { fx, discovery, family };
 }
+
+test('placement expectation arenas remain ABI-distinct on same-device V1 to V2 rotation', async () => {
+  const sharedGpu = fakeDevice();
+  const createAuthorityForDirectoryAbi = async (directoryAbiVersion) => {
+    const fx = fixture({
+      directoryAbiVersion,
+      sharedGpu,
+      directArenaCount: 1
+    });
+    const family = await runSchroederSpatialReactionPlacementEpochWebGpu({
+      device: fx.device,
+      ancestorPublicGeneration: fx.ancestor,
+      sphParticleState: fx.sphParticleState,
+      mlsMpmParticleState: fx.mlsMpmParticleState,
+      sphParticleUpload: fx.sphParticleUpload,
+      frozenSourceStateBuffer: fx.frozenState,
+      frozenSourceThermoBuffer: fx.frozenThermo,
+      frozenSourceMechanicsBuffer: fx.frozenMechanics,
+      positionInvariantCertificate: fx.positionInvariantCertificate
+    });
+    const sourceThermoBuffer = buffer(
+      fx.device,
+      `placement-v${directoryAbiVersion}-source-thermo`,
+      fx.thermoBytes
+    );
+    const authority =
+      createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
+        device: fx.device,
+        placementSourceFamily: family,
+        particleCount: fx.particleCount,
+        productEventCapacity: 2,
+        sourceStateBuffer: fx.reactionInputState,
+        sourceThermoBuffer
+      });
+    return { fx, family, authority };
+  };
+
+  const v1 = await createAuthorityForDirectoryAbi(1);
+  const v2 = await createAuthorityForDirectoryAbi(2);
+  assert.equal(v1.authority.spatialArenaIndex, 0);
+  assert.equal(v2.authority.spatialArenaIndex, 0);
+  assert.equal(v1.authority.directoryAbiVersion, 1);
+  assert.equal(v2.authority.directoryAbiVersion, 2);
+  assert.equal(
+    v1.authority.expectationBufferByteLength,
+    SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES
+  );
+  assert.equal(
+    v2.authority.expectationBufferByteLength,
+    SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+  );
+  assert.equal(
+    v1.authority.expectationBuffer.size,
+    SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES
+  );
+  assert.equal(
+    v2.authority.expectationBuffer.size,
+    SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+  );
+  assert.match(v1.authority.expectationBuffer.label, /expectation-v1-arena-0/);
+  assert.match(v2.authority.expectationBuffer.label, /expectation-v2-arena-0/);
+  assert.notEqual(
+    v1.authority.expectationBuffer,
+    v2.authority.expectationBuffer
+  );
+  assert.notEqual(
+    v1.authority.completionReceiptBuffer,
+    v2.authority.completionReceiptBuffer
+  );
+
+  for (const { fx, family } of [v1, v2]) {
+    assert.equal(
+      releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, {
+        abandon: true
+      }),
+      true
+    );
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(fx.ancestor, fx.device),
+      true
+    );
+    await fx.ancestor.releasePromise;
+  }
+});
 
 test('placement seal finishes exactly once and submit consumes only the sealed command buffer', async () => {
   const { fx, discovery, family } = await livePlacementContext();
@@ -1557,23 +1705,32 @@ test('genuine post-G2P discovery and one-shot placement establish a strict posit
     publicationReceipt.sourceFamily.positionAuthority,
     'authenticated-transactional-placement-epoch-floor-with-conservative-final-family'
   );
+  const queueFenceCountBeforeRetirement = fx.getQueueFenceCount();
+  assert.equal(placementArtifact.hostQueueFenceCount, 0);
+  assert.equal(placementArtifact.queueFence, null);
   assert.equal(
     releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, {
       placementArtifact
     }),
     true
   );
-  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
-  await placementArtifact.queueFence;
-  await Promise.resolve();
   assert.equal(
     schroederSpatialReactionPlacementSourceFamilyLiveness(family).releaseStatus,
-    'released-after-final-consumer'
+    'awaiting-explicit-destination-disposition'
+  );
+  assert.equal(family.placedDestinationStateBuffer.destroyCount, 0);
+  assert.equal(family.placedDestinationThermoBuffer.destroyCount, 0);
+  assert.equal(family.placedDestinationMechanicsBuffer.destroyCount, 0);
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  assert.equal(
+    schroederSpatialReactionPlacementSourceFamilyLiveness(family).releaseStatus,
+    'released-after-final-consumer-queue-ordered'
   );
   assert.equal(family.generation.execution.released, false);
   assert.equal(family.placedDestinationStateBuffer.destroyCount, 0);
   assert.equal(family.placedDestinationThermoBuffer.destroyCount, 0);
   assert.equal(family.placedDestinationMechanicsBuffer.destroyCount, 0);
+  assert.equal(fx.getQueueFenceCount(), queueFenceCountBeforeRetirement);
   discovery.proposal.destroy();
 });
 
@@ -1720,12 +1877,14 @@ test('mixed final component family preserves the authenticated placement positio
 
   assert.equal(
     releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, {
-      placementArtifact
+      placementArtifact,
+      retireDestinations: true
     }),
     true
   );
-  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
-  await placementArtifact.queueFence;
+  assert.equal(family.placedDestinationStateBuffer.destroyCount, 1);
+  assert.equal(family.placedDestinationThermoBuffer.destroyCount, 1);
+  assert.equal(family.placedDestinationMechanicsBuffer.destroyCount, 1);
   discovery.proposal.destroy();
 });
 
@@ -2059,6 +2218,7 @@ test('reaction warm arena carries 128 sequential resident substeps through bound
   const arenas = new Set();
   const releasePromises = [];
   let warmupCreateCount = null;
+  let hostQueueFenceAwaitCount = 0;
 
   for (let substep = 0; substep < 128; substep += 1) {
     const acquisition = acquireSphReactionWarmArenaWithBackpressureWebGpu({
@@ -2068,7 +2228,10 @@ test('reaction warm arena carries 128 sequential resident substeps through bound
       productTermCapacity: 2,
       packedParticleStrideFloats: 52,
       productEventStrideFloats: 32,
-      productPlacementSummaryStrideFloats: 32
+      productPlacementSummaryStrideFloats: 32,
+      onHostQueueFenceAwait() {
+        hostQueueFenceAwaitCount += 1;
+      }
     });
     if (pending.length === 3) {
       // This matches the production resident loop: each completed JS substep
@@ -2092,6 +2255,7 @@ test('reaction warm arena carries 128 sequential resident substeps through bound
   }
 
   assert.equal(arenas.size, 3);
+  assert.equal(hostQueueFenceAwaitCount, 125);
   assert.equal(warmupCreateCount, 3 * 15);
   for (const completion of pending) completion.resolve();
   assert.deepEqual(
@@ -2231,9 +2395,16 @@ test('shared-directory placement transfers warm destinations and returns them on
     true
   );
   assert.equal(
-    transferSchroederSpatialReactionPlacementDestinationOwnership(family),
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family, {
+      requestQueueOrderedCleanupClaim: true
+    }),
     true
   );
+  const destinationCleanupClaim =
+    schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(
+      family
+    );
+  assert.ok(destinationCleanupClaim);
   assert.equal(sphReactionWarmArenaStats(arena).inFlight, true);
   assert.throws(
     () => releaseSphReactionWarmArenaAfterQueue(lease, {
@@ -2254,6 +2425,23 @@ test('shared-directory placement transfers warm destinations and returns them on
     true
   );
   assert.equal(sphReactionWarmArenaStats(arena).status, 'idle');
+  const cancelledClaimSubmission = submitQueueOrderedWork(
+    fx.device,
+    [Object.freeze({
+      label: 'cancelled-transferred-destination-claim-command'
+    })]
+  );
+  assert.throws(
+    () => sealQueueOrderedFinalConsumerCapability(
+      cancelledClaimSubmission,
+      fx.device,
+      {
+        finalConsumerOwner: {},
+        producerClaims: [destinationCleanupClaim]
+      }
+    ),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' }
+  );
   assert.equal(arena.buffers.placedState.destroyCount, 0);
   assert.equal(arena.buffers.placedThermo.destroyCount, 0);
   assert.equal(arena.buffers.placedMechanics.destroyCount, 0);

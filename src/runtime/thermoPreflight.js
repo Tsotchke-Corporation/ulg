@@ -16,6 +16,10 @@ import {
   phaseOf,
   specificEnergyJPerKg
 } from './materials/referenceMaterials.js';
+import {
+  resolveSphThermalEnvironmentAuthority,
+  resolveSphWallReservoirAuthority
+} from './thermalEnvironmentAuthority.js';
 
 export const ULG_THERMODYNAMIC_PREFLIGHT_SCHEMA = 'peercompute.ulg.thermodynamic-preflight.v0';
 export const SPH_PHASE_SCENARIO_ID = 'sph-phase-ice-on-molten-iron';
@@ -39,21 +43,74 @@ function edgeFromVolume(volumeM3) {
  * material laws are not.
  */
 export function createSphPhaseScenario(overrides = {}) {
-  const iceEdgeM = overrides.iceEdgeM ?? 1;
+  const sceneLengthScale = Number(overrides.sceneLengthScale ?? 1);
+  if (!Number.isFinite(sceneLengthScale) || !(sceneLengthScale > 0)) {
+    throw new RangeError('sceneLengthScale must be a positive finite number');
+  }
+  const referenceIceEdgeM = Number(overrides.iceEdgeM ?? 1);
+  if (!Number.isFinite(referenceIceEdgeM) || !(referenceIceEdgeM > 0)) {
+    throw new RangeError('iceEdgeM must be a positive finite number');
+  }
+  const iceEdgeM = referenceIceEdgeM * sceneLengthScale;
   const iceVolumeM3 = cubeVolumeFromEdge(iceEdgeM);
   const ironVolumeFractionOfIce = overrides.ironVolumeFractionOfIce ?? 1 / 8;
-  const ironVolumeM3 = overrides.ironVolumeM3 ?? iceVolumeM3 * ironVolumeFractionOfIce;
-  const boxEdgeM = overrides.boxEdgeM ?? 10;
+  const referenceIronVolumeM3 = overrides.ironVolumeM3
+    ?? cubeVolumeFromEdge(referenceIceEdgeM) * ironVolumeFractionOfIce;
+  const ironVolumeM3 = referenceIronVolumeM3 * sceneLengthScale ** 3;
+  const referenceBoxEdgeM = Number(overrides.boxEdgeM ?? 10);
   // Box can be a rectangular cuboid [Lx, Ly, Lz]; a scalar edge keeps it cubic.
-  const boxDimensionsM = overrides.boxDimensionsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
+  const referenceBoxDimensionsM = overrides.boxDimensionsM
+    ?? [referenceBoxEdgeM, referenceBoxEdgeM, referenceBoxEdgeM];
+  if (
+    !Array.isArray(referenceBoxDimensionsM)
+    || referenceBoxDimensionsM.length !== 3
+    || referenceBoxDimensionsM.some((value) => (
+      !Number.isFinite(Number(value)) || !(Number(value) > 0)
+    ))
+  ) {
+    throw new RangeError('boxDimensionsM must contain three positive finite numbers');
+  }
+  const boxDimensionsM = referenceBoxDimensionsM.map(
+    (value) => Number(value) * sceneLengthScale
+  );
+  const resolvedReferenceBoxEdgeM =
+    Math.max(...referenceBoxDimensionsM.map(Number));
+  const boxEdgeM = Math.max(...boxDimensionsM);
   const wallModel = overrides.wallModel ?? 'infinite-fixed-temperature-reservoir';
   const defaultWallTempK = overrides.wallTemperatureK ?? FAHRENHEIT_MINUS_40_K;
   const wallFaces = {};
   for (const faceId of WALL_FACE_IDS) {
     wallFaces[faceId] = overrides.wallFaces?.[faceId] ?? defaultWallTempK;
   }
+  const gasInitialTemperatureK =
+    overrides.gasInitialTemperatureK ?? FAHRENHEIT_MINUS_40_K;
+  const ambientTemperatureOverrideProvided =
+    overrides.ambientTemperatureK !== undefined
+    && overrides.ambientTemperatureK !== null;
+  const thermalEnvironment = resolveSphThermalEnvironmentAuthority({
+    ambientTemperatureK: ambientTemperatureOverrideProvided
+      ? overrides.ambientTemperatureK
+      : gasInitialTemperatureK,
+    source: ambientTemperatureOverrideProvided
+      ? 'scenario-ambient-temperature-override'
+      : 'scenario-gas-initial-temperature',
+    sourceScenarioId: SPH_PHASE_SCENARIO_ID
+  });
+  const wallReservoir = resolveSphWallReservoirAuthority({
+    wallTemperaturesK: wallFaces,
+    wallModel,
+    source: 'scenario-wall-boundary',
+    sourceScenarioId: SPH_PHASE_SCENARIO_ID
+  });
   return {
     scenarioId: SPH_PHASE_SCENARIO_ID,
+    sceneLengthScale,
+    referenceGeometry: {
+      iceEdgeM: referenceIceEdgeM,
+      ironVolumeM3: referenceIronVolumeM3,
+      boxEdgeM: resolvedReferenceBoxEdgeM,
+      boxDimensionsM: referenceBoxDimensionsM.map(Number)
+    },
     box: { edgeM: boxEdgeM, dimensionsM: boxDimensionsM, volumeM3: boxDimensionsM[0] * boxDimensionsM[1] * boxDimensionsM[2] },
     gravityMPerS2: overrides.gravityMPerS2 ?? 9.80665,
     ice: {
@@ -75,9 +132,16 @@ export function createSphPhaseScenario(overrides = {}) {
     gas: {
       material: 'air',
       pressurePa: overrides.gasPressurePa ?? PHYSICAL_CONSTANTS.standardAtmospherePa,
-      initialTemperatureK: overrides.gasInitialTemperatureK ?? FAHRENHEIT_MINUS_40_K
+      initialTemperatureK: gasInitialTemperatureK
     },
-    walls: { model: wallModel, faces: wallFaces },
+    ambientTemperatureK: thermalEnvironment.ambientTemperatureK,
+    thermalEnvironment,
+    wallReservoirAuthority: wallReservoir,
+    walls: {
+      model: wallReservoir.model,
+      faces: wallReservoir.faces,
+      authority: wallReservoir
+    },
     particleResolution: {
       h2o: overrides.particleResolution?.h2o ?? 4096,
       fe: overrides.particleResolution?.fe ?? 2048,

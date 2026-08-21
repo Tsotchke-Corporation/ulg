@@ -1,0 +1,43 @@
+{
+  "schema": "peercompute.ulg.performance-baseline-normalization-policy.v1",
+  "policyId": "webgpu-portability-v1",
+  "status": "approved",
+  "claim": "approved-portability-normalized-historical-algorithm",
+  "historicalOriginGitHead": "6c20c32b814a0e4cb66ff973fb4cc225659f3f25",
+  "executionGitHead": "fbcfd6ed2e02420cbd5ab512a56b5a073d114af9",
+  "directParentGitHead": "6c20c32b814a0e4cb66ff973fb4cc225659f3f25",
+  "canonicalDiff": {
+    "algorithm": "git-diff-binary-full-index-v1",
+    "argv": [
+      "git",
+      "diff",
+      "--binary",
+      "--full-index",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--no-renames",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "<historical-origin>",
+      "<execution-head>",
+      "--"
+    ],
+    "sha256": "029d3c8c1e6ed4c6c7eb15fcbeacc58ebe8f08295de8895f4de0f2cefb58ce06"
+  },
+  "changedPaths": [
+    "src/runtime/sph/schroederCrossLevelCouplingGpu.js",
+    "src/runtime/sph/schroederSpatialEpochGpu.js",
+    "src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js",
+    "src/runtime/sph/schroederSpatialParentFieldViewGpu.js",
+    "src/services/ulgOffscreenRender.worker.js",
+    "tests/schroederSpatialParentFieldMechanicsWorkspaceGpu.test.mjs",
+    "tests/schroederSpatialParentFieldViewGpu.test.mjs",
+    "ulg-gpu-abi/src/schroederSpatialParentFieldMechanicsWorkspace.js",
+    "ulg-gpu-abi/src/schroederSpatialParentFieldMechanicsWorkspaceWgsl.js",
+    "ulg-gpu-abi/src/schroederSpatialParentFieldViewWgsl.js"
+  ],
+  "runtimeEnvironment": {
+    "VITE_ULG_SCHROEDER_SPATIAL_EPOCH_ARENA_COUNT": "4",
+    "VITE_ULG_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_COUNT": "1"
+  }
+}

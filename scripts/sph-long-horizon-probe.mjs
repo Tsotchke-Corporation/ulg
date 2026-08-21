@@ -14,6 +14,12 @@ import { reactionProgressEventCount } from './sph-probe-reaction-evidence.mjs';
 import {
   summarizeNativeSurfaceIndirectArgsReadback
 } from './sph-native-indirect-evidence.mjs';
+import {
+  normalizeProbeArtifactDetailMode
+} from './sph-probe-artifact-compaction.mjs';
+import {
+  createFailSentinelWriter
+} from './ss-release-evidence-common.mjs';
 
 const DEFAULT_URL = '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0';
 const DEFAULT_WALL_TEMPERATURE_K = 283.15;
@@ -56,6 +62,42 @@ const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'three'
 ]);
 const NATIVE_SURFACE_DEBUG_MODES = new Set(['none', 'clear-only']);
+const APPROVED_ZERO_GEOMETRY_RETENTION_REASON =
+  'a zero-geometry render-field handoff has no native consumer; '
+  + 'retain the runtime-admitted prior presentation until a real replacement is ready';
+
+export const SPH_PROBE_DURABLE_RELEASE_PUBLICATION_ENV =
+  'ULG_PROBE_DURABLE_RELEASE_PUBLICATION';
+
+export function durableProbeReleasePublicationEnabled(
+  value = process.env[SPH_PROBE_DURABLE_RELEASE_PUBLICATION_ENV]
+) {
+  return value === '1';
+}
+
+export async function publishProbeReleaseArtifact({
+  artifactPath,
+  repoDir,
+  bytes,
+  label = 'SPH long-horizon release artifact'
+}) {
+  if (!(Buffer.isBuffer(bytes) || bytes instanceof Uint8Array)) {
+    throw new TypeError(`${label} bytes must be a Buffer or Uint8Array`);
+  }
+  const writer = await createFailSentinelWriter({
+    outputPath: artifactPath,
+    repoDir,
+    sentinel: Buffer.from(`failed ${label} publication\n`, 'utf8'),
+    format: 'text',
+    label
+  });
+  await writer.replace(bytes);
+  return Object.freeze({
+    path: writer.outputPath,
+    byteLength: bytes.byteLength,
+    replacementCount: writer.replacementCount()
+  });
+}
 
 const BROWSER_CONSOLE_ISSUE_PATTERNS = [
   {
@@ -121,6 +163,51 @@ const BROWSER_CRITICAL_GPU_MESSAGE_PATTERNS = [
     pattern: /\[ulg-gpu-uncaptured-error|uncapturederror|uncaptured (?:WebGPU|GPU) error/i
   }
 ];
+
+export function summarizeResidentRenderSourceStaleRecovery(samples = []) {
+  const source = Array.isArray(samples) ? samples : [];
+  const staleSamples = source.filter((sample) => (
+    sample?.generationMatchesCurrent === false
+    || sample?.retainedPrevious === true
+    || sample?.sourceMarkedStale === true
+  ));
+  const transientRecoveredSamples = staleSamples.filter((sample) => {
+    if (
+      sample.retainedPrevious !== true
+      || sample.sourceMarkedStale !== true
+      || sample.retentionReason !== APPROVED_ZERO_GEOMETRY_RETENTION_REASON
+    ) {
+      return false;
+    }
+    return source.some((later) => (
+      Number(later?.index) > Number(sample?.index)
+      && later?.generationMatchesCurrent === true
+      && later?.retainedPrevious !== true
+      && later?.sourceMarkedStale !== true
+      && Number.isFinite(Number(later?.nextStep))
+      && Number.isFinite(Number(sample?.nextStep))
+      && Number(later.nextStep) > Number(sample.nextStep)
+    ));
+  });
+  const transientRecoveredSet = new Set(transientRecoveredSamples);
+  const unrecoveredSamples = staleSamples.filter(
+    (sample) => !transientRecoveredSet.has(sample)
+  );
+  return {
+    schema:
+      'peercompute.ulg.sph-resident-render-source-stale-recovery.v0',
+    status: unrecoveredSamples.length === 0
+      ? 'no-unrecovered-stale-source'
+      : 'unrecovered-stale-source',
+    staleSampleCount: staleSamples.length,
+    transientRecoveredSampleCount: transientRecoveredSamples.length,
+    unrecoveredSampleCount: unrecoveredSamples.length,
+    transientRecoveredSampleIndices:
+      transientRecoveredSamples.map((sample) => sample.index),
+    unrecoveredSampleIndices:
+      unrecoveredSamples.map((sample) => sample.index)
+  };
+}
 
 function incrementCount(target, key) {
   if (!key) return;
@@ -333,6 +420,28 @@ function probeChromiumLaunchReport() {
 
 async function launchProbeBrowser() {
   return chromium.launch(probeChromiumLaunchOptions());
+}
+
+async function closeOwnedProbeBrowser(browser) {
+  const closeTimeoutMs = 2_000;
+  let timeoutId = null;
+  const close = Promise.resolve().then(() => browser.close());
+  // Preserve the close rejection for the raced operation while preventing a
+  // late rejection after a timeout from becoming an unhandled promise.
+  close.catch(() => {});
+  try {
+    await Promise.race([
+      close,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`owned Chromium close timed out after ${closeTimeoutMs}ms`)),
+          closeTimeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
 }
 
 function booleanEnv(value, fallback = false) {
@@ -965,7 +1074,7 @@ function compareCapturedPngFrames(referenceFrame, candidateFrame, {
   };
 }
 
-function browserFrameValidationFromVisualFrame(
+export function browserFrameValidationFromVisualFrame(
   frame,
   { source = null, transparentBlackUnsupported = false } = {}
 ) {
@@ -1033,7 +1142,22 @@ function browserFrameValidationFromVisualFrame(
   };
 }
 
-async function persistCapturedFrames({ frames, frameDir }) {
+const NATIVE_WEBGPU_SURFACE_RENDERED_STATUSES = new Set([
+  'native-webgpu-surface-consumer-rendered',
+  'native-webgpu-surface-consumer-debug-clear-rendered',
+  'native-webgpu-surface-consumer-candidate-staged-composite-presented'
+]);
+
+function nativeWebGpuSurfaceRenderStatusIsRendered(status) {
+  return NATIVE_WEBGPU_SURFACE_RENDERED_STATUSES.has(String(status || ''));
+}
+
+export async function persistCapturedFrames({
+  frames,
+  frameDir,
+  repoDir = null,
+  durableReleasePublication = false
+}) {
   const capturedFrames = Array.isArray(frames) ? frames : [];
   if (!frameDir && capturedFrames.length === 0) {
     return {
@@ -1046,7 +1170,12 @@ async function persistCapturedFrames({ frames, frameDir }) {
     };
   }
   const shouldWriteFrames = Boolean(frameDir);
-  if (shouldWriteFrames) await mkdir(frameDir, { recursive: true });
+  if (durableReleasePublication && shouldWriteFrames && typeof repoDir !== 'string') {
+    throw new TypeError('durable SPH probe frame publication requires a repository directory');
+  }
+  if (shouldWriteFrames && !durableReleasePublication) {
+    await mkdir(frameDir, { recursive: true });
+  }
   const artifacts = [];
   let writtenFrameCount = 0;
   let analyzedFrameCount = 0;
@@ -1102,7 +1231,16 @@ async function persistCapturedFrames({ frames, frameDir }) {
         safeArtifactToken(frame.phase || 'frame')
       ].join('-') + '.png';
       filePath = path.join(frameDir, fileName);
-      await writeFile(filePath, bytes);
+      if (durableReleasePublication) {
+        await publishProbeReleaseArtifact({
+          artifactPath: filePath,
+          repoDir,
+          bytes,
+          label: `SPH long-horizon PNG frame ${index}`
+        });
+      } else {
+        await writeFile(filePath, bytes);
+      }
       writtenFrameCount += 1;
     }
     const png = analyzePngFrame(bytes);
@@ -1735,6 +1873,11 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       residentAutoSchedule: overlay?.__mlsMpmResidentAutoSchedule || null,
       probeProgress: overlay?.__sphProbeProgress || null,
       residentRefreshProgress: sceneUserData.mlsMpmResidentStepsProgress || null,
+      residentSchroederHierarchyHostTiming:
+        sceneUserData.schroederHierarchyHostTimingAccumulator
+          ?.snapshot?.()
+        ?? sceneUserData.schroederHierarchyHostTiming
+        ?? null,
       residentSteps: residentSteps ? {
         schema: residentSteps.schema ?? null,
         status: residentSteps.status ?? null,
@@ -1864,26 +2007,59 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
 }
 
 function startViteServer({ repoDir, port, viteBin, timeoutMs }) {
-  const proc = spawn(process.execPath, [viteBin, '--host', '127.0.0.1', '--port', String(port)], {
-    cwd: repoDir,
-    env: {
-      ...process.env,
-      FORCE_COLOR: '0',
-      NO_COLOR: '1'
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  const proc = spawn(
+    process.execPath,
+    [
+      viteBin,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--strictPort'
+    ],
+    {
+      cwd: repoDir,
+      env: {
+        ...process.env,
+        FORCE_COLOR: '0',
+        NO_COLOR: '1'
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    }
+  );
   const logs = [];
   proc.stdout.on('data', (chunk) => logs.push(String(chunk)));
   proc.stderr.on('data', (chunk) => logs.push(String(chunk)));
+  const closed = new Promise((resolve) => {
+    proc.once('close', (code, signal) => resolve({ code, signal }));
+    proc.once('error', (error) => resolve({
+      code: null,
+      signal: null,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+  });
   const baseUrl = `http://127.0.0.1:${port}`;
   return {
     proc,
     baseUrl,
     logs,
     ready: waitForHttp(baseUrl, timeoutMs),
-    stop() {
-      if (!proc.killed) proc.kill('SIGTERM');
+    async stop() {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        return closed;
+      }
+      proc.kill('SIGTERM');
+      const graceful = await Promise.race([
+        closed,
+        new Promise((resolve) => {
+          setTimeout(() => resolve(null), 5_000);
+        })
+      ]);
+      if (graceful) return graceful;
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGKILL');
+      }
+      return closed;
     }
   };
 }
@@ -1894,6 +2070,7 @@ async function runBrowserProbe({
   timeoutMs,
   batches,
   batchSteps,
+  interactiveCacheLifecycle = false,
   renderEvery,
   readbackMode,
   compactSummaryMode,
@@ -1917,6 +2094,9 @@ async function runBrowserProbe({
   measureGpuQueueFence = false,
   measureGpuTimestampInterval = false,
   measureGpuStageTimestamps = false,
+  measureGpuStageEncoderSpans = true,
+  traceResidentStageWall = false,
+  collectSchroederHierarchyHostTiming = false,
   materialInterfaceDiagnostic = false,
   materialInterfaceCandidateReadbackMode = 'compact-active-readback',
   nativeSurfaceDebugMode = 'none',
@@ -1927,25 +2107,33 @@ async function runBrowserProbe({
   captureH2VisibilityAblation = false,
   captureFrameEvery,
   captureFrameMax,
-  initialResidentWaitMs
+  initialResidentWaitMs,
+  artifactDetailMode,
+  phaseVolumeMaxImpulseFraction,
+  generatedGasTargetMaterial,
+  generatedGasMinimumMassKg,
+  generatedGasMinimumMassFractionOfSystem
 }) {
   const nativeSurfaceExtractionAtVisualIntervals =
     nativeSurfaceVisualIntervalExtractionEnabled({
       surfaceDrawMode: surfaceDrawDiagnosticMode,
       captureFrames: visualIntervalCaptureRequested
+  });
+  let browser = null;
+  let completedTimeline = null;
+  try {
+    browser = await launchProbeBrowser();
+    const page = await newProbePage(browser);
+    const preProbeSnapshots = [];
+    const consoleCapture = createBrowserConsoleCapture();
+    const pageConsole = consoleCapture.entries;
+    page.on('console', (message) => {
+      consoleCapture.recordConsole(message);
     });
-  const browser = await launchProbeBrowser();
-  const page = await newProbePage(browser);
-  const preProbeSnapshots = [];
-  const consoleCapture = createBrowserConsoleCapture();
-  const pageConsole = consoleCapture.entries;
-  page.on('console', (message) => {
-    consoleCapture.recordConsole(message);
-  });
-  page.on('pageerror', (error) => {
-    consoleCapture.recordPageError(error);
-  });
-  await page.exposeFunction('__ulgCaptureSphProbeCompositedFrame', async ({ clip = null } = {}) => {
+    page.on('pageerror', (error) => {
+      consoleCapture.recordPageError(error);
+    });
+    await page.exposeFunction('__ulgCaptureSphProbeCompositedFrame', async ({ clip = null } = {}) => {
     const viewport = page.viewportSize();
     const requested = clip && typeof clip === 'object'
       ? {
@@ -1984,8 +2172,21 @@ async function runBrowserProbe({
         dataUrl: null
       };
     }
-  });
-  try {
+    });
+    await page.addInitScript(({ stageSelector, bufferLabelSelector }) => {
+      globalThis.__ulgGpuQueueBoundaryStageSelector = stageSelector;
+      globalThis.__ulgGpuQueueBoundaryBufferLabelSelector =
+        bufferLabelSelector;
+    }, {
+      stageSelector: String(
+        process.env.ULG_PROBE_GPU_QUEUE_BOUNDARY_STAGE
+        || 'generation-pre-submit-boundary'
+      ),
+      bufferLabelSelector: String(
+        process.env.ULG_PROBE_GPU_QUEUE_BOUNDARY_BUFFER_LABEL
+        || ''
+      )
+    });
     if (process.env.ULG_PROBE_TRACE_NATIVE_QUEUE_FENCES === '1') {
       await page.addInitScript(() => {
         let queueFenceTraceInstallAttempts = 0;
@@ -2018,8 +2219,13 @@ async function runBrowserProbe({
             writable: true,
             value(...args) {
               const stack = new Error().stack || 'stack unavailable';
-              // Second frame is the caller; the first is this wrapper.
-              const site = (stack.split('\n')[2] || stack.split('\n')[1] || '?').trim();
+              // Preserve enough parents to identify the allocation owner.
+              // Generic cleanup and retirement helpers otherwise collapse
+              // every fence into one unhelpful webgpuComputeLayout.js bucket.
+              const frames = stack.split('\n').slice(2, 8)
+                .map((frame) => frame.trim())
+                .filter(Boolean);
+              const site = frames.length > 0 ? frames.join(' <- ') : '?';
               fenceTally.set(site, (fenceTally.get(site) ?? 0) + 1);
               if (globalThis.__ulgQueueFenceStackLog === true) {
                 console.error('[ulg-native-queue-fence-trace]', stack);
@@ -2027,6 +2233,11 @@ async function runBrowserProbe({
               return original.apply(this, args);
             }
           });
+          // The emitted probe metric uses this global as its installation
+          // witness. Publish it only after the real prototype wrapper is in
+          // place: a deferred or failed install must leave each sampled metric
+          // fail-closed rather than claiming tracing that did not exist.
+          globalThis.__ulgQueueFenceTraceInstalled = true;
         };
         installQueueFenceTrace();
       });
@@ -2141,6 +2352,194 @@ async function runBrowserProbe({
         installDagTrace();
       });
     }
+    // Queue writes happen outside command encoders, so same-encoder timestamp
+    // spans cannot attribute them. This opt-in trace counts their exact bytes
+    // and host call time while also exposing submit cadence. It is diagnostic
+    // only and never changes the production simulation route.
+    if (process.env.ULG_PROBE_TRACE_NATIVE_QUEUE_WRITES === '1') {
+      await page.addInitScript((captureOrderedEvents) => {
+        let queueWriteTraceInstallAttempts = 0;
+        const installQueueWriteTrace = () => {
+          const prototype = globalThis.GPUQueue?.prototype;
+          const encoderPrototype = globalThis.GPUCommandEncoder?.prototype;
+          if (
+            !prototype
+            || typeof prototype.writeBuffer !== 'function'
+            || typeof prototype.submit !== 'function'
+            || (
+              captureOrderedEvents
+              && (
+                !encoderPrototype
+                || typeof encoderPrototype.finish !== 'function'
+              )
+            )
+          ) {
+            queueWriteTraceInstallAttempts += 1;
+            if (queueWriteTraceInstallAttempts < 200) {
+              setTimeout(installQueueWriteTrace, 10);
+            }
+            return;
+          }
+          if (prototype.__ulgQueueWriteTraceInstalled) return;
+          Object.defineProperty(prototype, '__ulgQueueWriteTraceInstalled', {
+            value: true,
+            configurable: true
+          });
+          const originalWriteBuffer = prototype.writeBuffer;
+          const originalSubmit = prototype.submit;
+          const writesByBuffer = new Map();
+          const orderedEvents = [];
+          const commandBufferLabels = new WeakMap();
+          const maxOrderedEventCount = 8192;
+          let writeBufferCount = 0;
+          let writeBufferBytes = 0;
+          let writeBufferMs = 0;
+          let submitCount = 0;
+          let submittedCommandBufferCount = 0;
+          let submitMs = 0;
+          let orderedEventOverflowCount = 0;
+          const recordOrderedEvent = (event) => {
+            if (!captureOrderedEvents) return;
+            if (orderedEvents.length >= maxOrderedEventCount) {
+              orderedEventOverflowCount += 1;
+              return;
+            }
+            orderedEvents.push({
+              ordinal: orderedEvents.length,
+              atMs: performance.now(),
+              ...event
+            });
+          };
+          const resolvedWriteByteLength = (data, dataOffset, size) => {
+            const byteLength = Math.max(0, Number(data?.byteLength) || 0);
+            const offset = Math.max(0, Number(dataOffset) || 0);
+            if (size !== undefined) {
+              return Math.max(0, Number(size) || 0);
+            }
+            return Math.max(0, byteLength - offset);
+          };
+          if (captureOrderedEvents) {
+            const originalFinish = encoderPrototype.finish;
+            Object.defineProperty(encoderPrototype, 'finish', {
+              configurable: true,
+              writable: true,
+              value(descriptor) {
+                const commandBuffer = originalFinish.call(this, descriptor);
+                commandBufferLabels.set(
+                  commandBuffer,
+                  descriptor?.label || this.label || '(unlabelled-command-encoder)'
+                );
+                return commandBuffer;
+              }
+            });
+          }
+          Object.defineProperty(prototype, 'writeBuffer', {
+            configurable: true,
+            writable: true,
+            value(buffer, bufferOffset, data, dataOffset, size) {
+              const byteLength = resolvedWriteByteLength(data, dataOffset, size);
+              const label = buffer?.label || '(unlabelled)';
+              const startedAt = performance.now();
+              try {
+                return originalWriteBuffer.call(
+                  this,
+                  buffer,
+                  bufferOffset,
+                  data,
+                  dataOffset,
+                  size
+                );
+              } finally {
+                const elapsedMs = performance.now() - startedAt;
+                writeBufferCount += 1;
+                writeBufferBytes += byteLength;
+                writeBufferMs += elapsedMs;
+                const entry = writesByBuffer.get(label) || {
+                  count: 0,
+                  bytes: 0,
+                  ms: 0
+                };
+                entry.count += 1;
+                entry.bytes += byteLength;
+                entry.ms += elapsedMs;
+                writesByBuffer.set(label, entry);
+                recordOrderedEvent({
+                  kind: 'writeBuffer',
+                  bufferLabel: label,
+                  bufferOffset: Math.max(0, Number(bufferOffset) || 0),
+                  byteLength
+                });
+                const boundaryLabelSelector = String(
+                  globalThis.__ulgGpuQueueBoundaryBufferLabelSelector || ''
+                );
+                if (
+                  boundaryLabelSelector
+                  && label.includes(boundaryLabelSelector)
+                  && typeof globalThis.__ulgGpuQueueWriteBoundaryHook
+                    === 'function'
+                ) {
+                  globalThis.__ulgGpuQueueWriteBoundaryHook({
+                    queue: this,
+                    bufferLabel: label,
+                    bufferOffset: Math.max(0, Number(bufferOffset) || 0),
+                    byteLength
+                  });
+                }
+              }
+            }
+          });
+          Object.defineProperty(prototype, 'submit', {
+            configurable: true,
+            writable: true,
+            value(commandBuffers) {
+              const commandBufferCount = Number(commandBuffers?.length) || 0;
+              const startedAt = performance.now();
+              try {
+                return originalSubmit.call(this, commandBuffers);
+              } finally {
+                submitCount += 1;
+                submittedCommandBufferCount += commandBufferCount;
+                submitMs += performance.now() - startedAt;
+                recordOrderedEvent({
+                  kind: 'submit',
+                  commandBufferCount,
+                  commandBufferLabels: Array.from(
+                    commandBuffers || [],
+                    (commandBuffer) => (
+                      commandBufferLabels.get(commandBuffer)
+                      || commandBuffer?.label
+                      || '(unlabelled-command-buffer)'
+                    )
+                  )
+                });
+              }
+            }
+          });
+          globalThis.__ulgQueueWriteTrace = () => ({
+            writeBufferCount,
+            writeBufferBytes,
+            writeBufferMs,
+            submitCount,
+            submittedCommandBufferCount,
+            submitMs,
+            orderedEventCaptureRequested: Boolean(captureOrderedEvents),
+            orderedEventOverflowCount,
+            orderedEvents: captureOrderedEvents
+              ? orderedEvents.map((event) => ({ ...event }))
+              : [],
+            writesByBuffer: Object.fromEntries(
+              [...writesByBuffer.entries()]
+                .sort((left, right) => (
+                  right[1].bytes - left[1].bytes
+                  || right[1].count - left[1].count
+                ))
+                .slice(0, 96)
+            )
+          });
+        };
+        installQueueWriteTrace();
+      }, process.env.ULG_PROBE_TRACE_NATIVE_QUEUE_WRITE_EVENTS === '1');
+    }
     if (process.env.ULG_PROBE_TRACE_NATIVE_DEVICE_DESTROY === '1') {
       await page.addInitScript(() => {
         let deviceDestroyTraceInstallAttempts = 0;
@@ -2254,8 +2653,11 @@ async function runBrowserProbe({
     if (nativeSurfaceCaptureUiSuppressed) {
       await page.addStyleTag({
         content: [
+          '#sph-phase-overlay > :not(#sph-scene):not(style)',
           '#sph-phase-overlay #sph-panel',
           '#sph-phase-overlay #sph-toggle',
+          '#sph-phase-overlay #sph-lighting-toggle',
+          '#sph-phase-overlay #sph-pending-presentation',
           '#sph-phase-overlay #sph-warning-bar',
           '#sph-phase-overlay .sph-element-picker-overlay'
         ].join(',') + '{visibility:hidden!important;}'
@@ -2265,6 +2667,7 @@ async function runBrowserProbe({
     const inPageProbe = page.evaluate(async ({
       batches: requestedBatches,
       batchSteps: requestedBatchSteps,
+      interactiveCacheLifecycle: requestedInteractiveCacheLifecycle,
       renderEvery: requestedRenderEvery,
       readbackMode: requestedReadbackMode,
       compactSummaryMode: requestedCompactSummaryMode,
@@ -2290,6 +2693,10 @@ async function runBrowserProbe({
 	      measureGpuQueueFence: requestedMeasureGpuQueueFence,
 	      measureGpuTimestampInterval: requestedMeasureGpuTimestampInterval,
 	      measureGpuStageTimestamps: requestedMeasureGpuStageTimestamps,
+	      measureGpuStageEncoderSpans: requestedMeasureGpuStageEncoderSpans,
+	      traceResidentStageWall: requestedTraceResidentStageWall,
+	      collectSchroederHierarchyHostTiming:
+	        requestedCollectSchroederHierarchyHostTiming,
 	      materialInterfaceDiagnostic: requestedMaterialInterfaceDiagnostic,
 	      materialInterfaceCandidateReadbackMode: requestedMaterialInterfaceCandidateReadbackMode,
 	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
@@ -2302,10 +2709,182 @@ async function runBrowserProbe({
       captureFrameMax: requestedCaptureFrameMax,
       preProbeSnapshots: requestedPreProbeSnapshots,
       pageConsole: requestedPageConsole,
-      nativeSurfaceCaptureUiSuppressed: requestedNativeSurfaceCaptureUiSuppressed
+      nativeSurfaceCaptureUiSuppressed: requestedNativeSurfaceCaptureUiSuppressed,
+      artifactDetailMode: requestedArtifactDetailMode,
+      phaseVolumeMaxImpulseFraction:
+        requestedPhaseVolumeMaxImpulseFraction,
+      generatedGasTargetMaterial: requestedGeneratedGasTargetMaterial,
+      generatedGasMinimumMassKg: requestedGeneratedGasMinimumMassKg,
+      generatedGasMinimumMassFractionOfSystem:
+        requestedGeneratedGasMinimumMassFractionOfSystem
     }) => {
       const overlay = document.querySelector('#sph-phase-overlay');
       const sceneApi = overlay?.__sphScene || null;
+      const extractionPresentationCounterSourceKeys = [
+        'renderFieldCpuFallbackGeometryAvailable',
+        'surfaceDrawVisibleRenderSource',
+        'surfaceDrawDiagnosticFallbackReason',
+        'renderFieldReadback',
+        'renderRowsReadback',
+        'surfaceDrawReadback',
+        'fullSurfaceDrawReadback',
+        'renderFieldSurfaceSummaryReadback',
+        'surfaceDrawSummaryReadback',
+        'surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated',
+        'surfaceDrawNativeMarchingCubesExtractionStatus',
+        'surfaceDrawNativeMarchingCubesExtractionErrorName',
+        'surfaceDrawNativeMarchingCubesExtractionErrorStatus',
+        'surfaceDrawNativeMarchingCubesExtractionErrorStage',
+        'surfaceDrawNativeMarchingCubesExtractionErrorStack',
+        'surfaceDrawExtensionSurfaceAdapterExecutionStatus',
+        'surfaceDrawExtensionSurfaceRawExecutionStatus',
+        'surfaceDrawRenderBridgeStatus',
+        'surfaceDrawRenderBridgeReason',
+        'surfaceDrawRenderBridgeLastRenderStatus',
+        'surfaceDrawRenderBridgeLastRenderSkipReason',
+        'surfaceDrawRenderBridgeDeviceLost',
+        'surfaceDrawVisibleGpuConsumerStatus',
+        'surfaceDrawVisibleGpuConsumerReason',
+        'surfaceDrawRenderBridgeNativeSurfaceCandidateStagedPresentationStatus',
+        'surfaceDrawRenderBridgeNativeSurfaceCandidateStagedPresentationReason'
+      ];
+      const extractionPresentationCounters = (renderState) => {
+        const source = renderState && typeof renderState === 'object'
+          ? renderState
+          : null;
+        const observedSourceKeys = source
+          ? extractionPresentationCounterSourceKeys.filter(
+              (key) => Object.hasOwn(source, key)
+            )
+          : [];
+        const missingSourceKeys = extractionPresentationCounterSourceKeys
+          .filter((key) => !observedSourceKeys.includes(key));
+        const complete = missingSourceKeys.length === 0;
+        const value = (key) => source?.[key];
+        const nonEmpty = (candidate) => (
+          candidate !== null
+          && candidate !== undefined
+          && String(candidate).length > 0
+        );
+        const failedStatus = (candidate) => (
+          nonEmpty(candidate)
+          && /(?:blocked|skipped|error|failed|unavailable|device-lost)/iu
+            .test(String(candidate))
+        );
+        const count = (...signals) => signals.filter(Boolean).length;
+        return {
+          schema: 'peercompute.ulg.sph-extraction-presentation-counters.v1',
+          coverage: {
+            schema:
+              'peercompute.ulg.sph-extraction-presentation-counter-coverage.v1',
+            status: complete ? 'complete' : 'incomplete',
+            complete,
+            requiredSourceCount:
+              extractionPresentationCounterSourceKeys.length,
+            observedSourceCount: observedSourceKeys.length,
+            requiredSourceKeys: [...extractionPresentationCounterSourceKeys],
+            observedSourceKeys,
+            missingSourceKeys
+          },
+          cpuSurfaceFallbackCount: complete ? count(
+            value('renderFieldCpuFallbackGeometryAvailable') === true,
+            /(?:cpu|fallback)/iu.test(
+              String(value('surfaceDrawVisibleRenderSource') ?? '')
+            )
+          ) : null,
+          diagnosticFallbackCount: complete ? count(
+            nonEmpty(value('surfaceDrawDiagnosticFallbackReason'))
+          ) : null,
+          fullReadbackCount: complete ? count(
+            value('renderFieldReadback') === true,
+            value('renderRowsReadback') === true,
+            value('surfaceDrawReadback') === true,
+            value('fullSurfaceDrawReadback') === true
+          ) : null,
+          summaryReadbackCount: complete ? count(
+            value('renderFieldSurfaceSummaryReadback') === true,
+            value('surfaceDrawSummaryReadback') === true
+          ) : null,
+          nativeReadbackFallbackCount: complete ? count(
+            value(
+              'surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated'
+            ) === true
+          ) : null,
+          surfaceExtractionErrorCount: complete ? count(
+            failedStatus(
+              value('surfaceDrawNativeMarchingCubesExtractionStatus')
+            ),
+            nonEmpty(value('surfaceDrawNativeMarchingCubesExtractionErrorName')),
+            nonEmpty(
+              value('surfaceDrawNativeMarchingCubesExtractionErrorStatus')
+            ),
+            nonEmpty(value('surfaceDrawNativeMarchingCubesExtractionErrorStage')),
+            nonEmpty(value('surfaceDrawNativeMarchingCubesExtractionErrorStack')),
+            failedStatus(
+              value('surfaceDrawExtensionSurfaceAdapterExecutionStatus')
+            ),
+            failedStatus(
+              value('surfaceDrawExtensionSurfaceRawExecutionStatus')
+            )
+          ) : null,
+          presentationErrorCount: complete ? count(
+            failedStatus(value('surfaceDrawRenderBridgeStatus')),
+            nonEmpty(value('surfaceDrawRenderBridgeReason')),
+            failedStatus(value('surfaceDrawRenderBridgeLastRenderStatus')),
+            nonEmpty(value('surfaceDrawRenderBridgeLastRenderSkipReason')),
+            value('surfaceDrawRenderBridgeDeviceLost') === true,
+            failedStatus(value('surfaceDrawVisibleGpuConsumerStatus')),
+            nonEmpty(value('surfaceDrawVisibleGpuConsumerReason')),
+            failedStatus(value(
+              'surfaceDrawRenderBridgeNativeSurfaceCandidateStagedPresentationStatus'
+            )),
+            nonEmpty(value(
+              'surfaceDrawRenderBridgeNativeSurfaceCandidateStagedPresentationReason'
+            ))
+          ) : null
+        };
+      };
+      const interactivePageInstanceId = requestedInteractiveCacheLifecycle
+        ? (
+            globalThis.__ulgInteractiveCachePageInstanceId
+            || (
+              globalThis.__ulgInteractiveCachePageInstanceId =
+                globalThis.crypto?.randomUUID?.()
+                || `ulg-page-${performance.timeOrigin}-${Math.random()}`
+            )
+          )
+        : null;
+      let interactiveCacheResetOrdinal = null;
+      let interactiveCacheMeasurementClass = null;
+      let interactiveCacheLifecycleEvidence = null;
+      let retainProbeMetric = (metric) => metric;
+      let refreshVisualSettlementEvidence = null;
+      let releaseVisualSettlementReplayState = null;
+      if (requestedArtifactDetailMode === 'visual-compact') {
+        const artifactCompactionModule = await import(
+          '/scripts/sph-probe-artifact-compaction.mjs'
+        );
+        retainProbeMetric = (metric) => (
+          artifactCompactionModule.compactVisualProbeMetric(metric, {
+            detailMode: requestedArtifactDetailMode
+          })
+        );
+        refreshVisualSettlementEvidence =
+          artifactCompactionModule.refreshCompactedVisualSettlementEvidence;
+        releaseVisualSettlementReplayState =
+          artifactCompactionModule
+            .releaseCompactedVisualSettlementReplayState;
+        if (typeof refreshVisualSettlementEvidence !== 'function') {
+          throw new Error(
+            'Visual probe compaction settlement refresh export is unavailable'
+          );
+        }
+        if (typeof releaseVisualSettlementReplayState !== 'function') {
+          throw new Error(
+            'Visual probe compaction settlement replay release export is unavailable'
+          );
+        }
+      }
       let gpuTimestampMarkerModulePromise = null;
       const loadGpuTimestampMarkerEncoder = async () => {
         if (!gpuTimestampMarkerModulePromise) {
@@ -2420,6 +2999,477 @@ async function runBrowserProbe({
         if (value == null || value === '') return null;
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
+      };
+      const compactPageVisibleReadbackTelemetry = (telemetry) => {
+        const source = telemetry && typeof telemetry === 'object'
+          ? telemetry
+          : {};
+        const schema = 'peercompute.ulg.gpu-readback-telemetry.v1';
+        const observedCountFields = [
+          'observedMapAsyncCount',
+          'observedReadbackBytes',
+          'observedHostQueueFenceCount'
+        ];
+        const classifiedCountFields = [
+          'finalDiagnosticMapAsyncCount',
+          'finalDiagnosticReadbackBytes',
+          'deferredCleanupHostQueueFenceCount',
+          'awaitedBackpressureHostQueueFenceCount'
+        ];
+        const unclassifiedCountFields = [
+          'unclassifiedMapAsyncCount',
+          'unclassifiedReadbackBytes',
+          'unclassifiedHostQueueFenceCount'
+        ];
+        const publicAliasFields = [
+          'mapAsyncCount',
+          'readbackBytes',
+          'hostQueueFenceCount'
+        ];
+        const breakdownCountFields = [
+          ...observedCountFields,
+          ...classifiedCountFields,
+          ...unclassifiedCountFields
+        ];
+        const countFields = [
+          ...breakdownCountFields,
+          ...publicAliasFields
+        ];
+        const hasOwn = (value, field) => (
+          Object.prototype.hasOwnProperty.call(value, field)
+        );
+        const exactCount = (value) => (
+          typeof value === 'number'
+          && Number.isSafeInteger(value)
+          && value >= 0
+            ? value
+            : null
+        );
+        const requiredCounts = (value, fields) => {
+          const counts = {};
+          for (const field of fields) {
+            if (!hasOwn(value, field)) return null;
+            const count = exactCount(value[field]);
+            if (count == null) return null;
+            counts[field] = count;
+          }
+          return counts;
+        };
+        const classificationsConserve = (counts) => {
+          const mapCount = counts.finalDiagnosticMapAsyncCount
+            + counts.unclassifiedMapAsyncCount;
+          const byteCount = counts.finalDiagnosticReadbackBytes
+            + counts.unclassifiedReadbackBytes;
+          const fenceCount = counts.deferredCleanupHostQueueFenceCount
+            + counts.awaitedBackpressureHostQueueFenceCount
+            + counts.unclassifiedHostQueueFenceCount;
+          return Boolean(
+            Number.isSafeInteger(mapCount)
+            && Number.isSafeInteger(byteCount)
+            && Number.isSafeInteger(fenceCount)
+            && mapCount === counts.observedMapAsyncCount
+            && byteCount === counts.observedReadbackBytes
+            && fenceCount === counts.observedHostQueueFenceCount
+          );
+        };
+        const aliasesMatch = (counts) => Boolean(
+          counts.mapAsyncCount === counts.observedMapAsyncCount
+          && counts.readbackBytes === counts.observedReadbackBytes
+          && counts.hostQueueFenceCount === counts.observedHostQueueFenceCount
+        );
+        const expectedClaims = (counts) => ({
+          normalHotLoopReadbackFree: Boolean(
+            counts.observedMapAsyncCount === 0
+            && counts.observedReadbackBytes === 0
+            && counts.observedHostQueueFenceCount === 0
+          ),
+          productionHotLoopHostDependencyFree: Boolean(
+            counts.unclassifiedMapAsyncCount === 0
+            && counts.unclassifiedReadbackBytes === 0
+            && counts.unclassifiedHostQueueFenceCount === 0
+            && counts.awaitedBackpressureHostQueueFenceCount === 0
+          )
+        });
+        const normalizedBreakdown = (counts) => {
+          if (
+            !hasOwn(source, 'readbackTelemetrySourceBreakdown')
+            || !Array.isArray(source.readbackTelemetrySourceBreakdown)
+          ) {
+            return null;
+          }
+          const totals = Object.fromEntries(
+            breakdownCountFields.map((field) => [field, 0])
+          );
+          const canonicalSources = new Set();
+          const rows = [];
+          for (const row of source.readbackTelemetrySourceBreakdown) {
+            if (
+              !row
+              || typeof row !== 'object'
+              || Array.isArray(row)
+              || !hasOwn(row, 'source')
+            ) {
+              return null;
+            }
+            const rawSource = row.source;
+            const canonicalSource = typeof rawSource === 'string'
+              ? rawSource.trim()
+              : '';
+            if (!canonicalSource || canonicalSources.has(canonicalSource)) {
+              return null;
+            }
+            canonicalSources.add(canonicalSource);
+            const rowCounts = requiredCounts(row, breakdownCountFields);
+            if (!rowCounts || !classificationsConserve(rowCounts)) {
+              return null;
+            }
+            for (const field of breakdownCountFields) {
+              const next = totals[field] + rowCounts[field];
+              if (!Number.isSafeInteger(next)) return null;
+              totals[field] = next;
+            }
+            rows.push({
+              source: canonicalSource,
+              ...rowCounts
+            });
+          }
+          return breakdownCountFields.every(
+            (field) => totals[field] === counts[field]
+          )
+            ? rows
+            : null;
+        };
+        const declaredComplete =
+          typeof source.readbackTelemetryComplete === 'boolean'
+            ? source.readbackTelemetryComplete
+            : null;
+        const validation = (() => {
+          if (
+            declaredComplete !== true
+            || Array.isArray(source)
+            || !hasOwn(source, 'readbackTelemetrySchema')
+            || source.readbackTelemetrySchema !== schema
+            || !hasOwn(source, 'readbackTelemetryComplete')
+            || !hasOwn(source, 'readbackTelemetryUnknownSources')
+            || !Array.isArray(source.readbackTelemetryUnknownSources)
+            || source.readbackTelemetryUnknownSources.length !== 0
+          ) {
+            return null;
+          }
+          const counts = requiredCounts(source, countFields);
+          const sourceBreakdown = counts
+            ? normalizedBreakdown(counts)
+            : null;
+          if (
+            !counts
+            || !classificationsConserve(counts)
+            || !aliasesMatch(counts)
+            || !sourceBreakdown
+          ) {
+            return null;
+          }
+          const claims = expectedClaims(counts);
+          for (const [field, expected] of Object.entries(claims)) {
+            if (!hasOwn(source, field)) continue;
+            if (typeof source[field] !== 'boolean' || source[field] !== expected) {
+              return null;
+            }
+          }
+          return { counts, claims, sourceBreakdown };
+        })();
+        const complete = validation !== null;
+        const counts = Object.fromEntries(
+          countFields.map((field) => [
+            field,
+            complete ? validation.counts[field] : null
+          ])
+        );
+        const unknownSources =
+          Array.isArray(source.readbackTelemetryUnknownSources)
+          && source.readbackTelemetryUnknownSources.every(
+            (value) => typeof value === 'string' && value.trim()
+          )
+            ? [...source.readbackTelemetryUnknownSources]
+            : null;
+        const failClosedClaim = (field) => (
+          source[field] === false ? false : null
+        );
+        const legacyExactZeroProductionEvidence = (() => {
+          if (
+            complete
+            || Array.isArray(source)
+            || !hasOwn(source, 'readbackTelemetrySchema')
+            || source.readbackTelemetrySchema !== schema
+            || !hasOwn(source, 'readbackTelemetryComplete')
+            || source.readbackTelemetryComplete !== true
+            || !hasOwn(source, 'readbackTelemetryUnknownSources')
+            || !Array.isArray(source.readbackTelemetryUnknownSources)
+            || source.readbackTelemetryUnknownSources.length !== 0
+            || !hasOwn(source, 'normalHotLoopReadbackFree')
+            || source.normalHotLoopReadbackFree !== true
+            || hasOwn(source, 'productionHotLoopHostDependencyFree')
+          ) return null;
+          const observedCounts = requiredCounts(source, observedCountFields);
+          if (
+            !observedCounts
+            || !observedCountFields.every(
+              (field) => observedCounts[field] === 0
+            )
+            || !countFields.every(
+              (field) => !hasOwn(source, field) || exactCount(source[field]) === 0
+            )
+          ) return null;
+          if (hasOwn(source, 'readbackTelemetrySourceBreakdown')) {
+            const zeroBreakdownCounts = Object.fromEntries(
+              breakdownCountFields.map((field) => [field, 0])
+            );
+            if (normalizedBreakdown(zeroBreakdownCounts) == null) return null;
+          }
+          return true;
+        })();
+        return {
+          readbackTelemetryComplete: complete
+            ? true
+            : (declaredComplete == null ? null : false),
+          readbackTelemetryUnknownSources: unknownSources,
+          ...counts,
+          readbackTelemetrySourceBreakdown: complete
+            ? validation.sourceBreakdown.map(
+              (row) => ({ ...row })
+            )
+            : null,
+          normalHotLoopReadbackFree: complete
+            ? validation.claims.normalHotLoopReadbackFree
+            : failClosedClaim('normalHotLoopReadbackFree'),
+          productionHotLoopHostDependencyFree: complete
+            ? validation.claims.productionHotLoopHostDependencyFree
+            : failClosedClaim('productionHotLoopHostDependencyFree'),
+          legacyExactZeroProductionEvidence
+        };
+      };
+      const composePageVisibleReadbackTelemetry = (
+        primaryTelemetry,
+        certificationTelemetry = null
+      ) => {
+        const primary = compactPageVisibleReadbackTelemetry(primaryTelemetry);
+        const participants = [primary];
+        if (certificationTelemetry != null) {
+          participants.push(
+            compactPageVisibleReadbackTelemetry(certificationTelemetry)
+          );
+        }
+        const readbackTelemetryComplete = participants.every(
+          (participant) => participant.readbackTelemetryComplete === true
+        )
+          ? true
+          : (
+              participants.some(
+                (participant) => (
+                  participant.readbackTelemetryComplete === false
+                )
+              )
+                ? false
+                : null
+            );
+        const coupledClaim = (field) => {
+          if (participants.some((participant) => participant[field] === false)) {
+            return false;
+          }
+          return readbackTelemetryComplete === true
+            && participants.every((participant) => participant[field] === true)
+            ? true
+            : null;
+        };
+        const countFields = [
+          'observedMapAsyncCount',
+          'observedReadbackBytes',
+          'observedHostQueueFenceCount',
+          'finalDiagnosticMapAsyncCount',
+          'finalDiagnosticReadbackBytes',
+          'deferredCleanupHostQueueFenceCount',
+          'awaitedBackpressureHostQueueFenceCount',
+          'unclassifiedMapAsyncCount',
+          'unclassifiedReadbackBytes',
+          'unclassifiedHostQueueFenceCount',
+          'mapAsyncCount',
+          'readbackBytes',
+          'hostQueueFenceCount'
+        ];
+        return {
+          ...primary,
+          readbackTelemetryComplete,
+          readbackTelemetryUnknownSources: readbackTelemetryComplete === true
+            ? [...primary.readbackTelemetryUnknownSources]
+            : null,
+          ...Object.fromEntries(countFields.map((field) => [
+            field,
+            readbackTelemetryComplete === true ? primary[field] : null
+          ])),
+          readbackTelemetrySourceBreakdown: readbackTelemetryComplete === true
+            ? primary.readbackTelemetrySourceBreakdown.map(
+              (row) => ({ ...row })
+            )
+            : null,
+          normalHotLoopReadbackFree: coupledClaim(
+            'normalHotLoopReadbackFree'
+          ),
+          productionHotLoopHostDependencyFree: coupledClaim(
+            'productionHotLoopHostDependencyFree'
+          )
+        };
+      };
+      const createResidentStageWallTrace = (batchIndex) => {
+        const schema =
+          'peercompute.ulg.sph-probe-resident-stage-wall-trace.v0';
+        if (!requestedTraceResidentStageWall) {
+          return {
+            recorder: null,
+            evidence() {
+              return {
+                schema,
+                status: 'not-requested',
+                requested: false,
+                batchIndex,
+                spanCount: 0,
+                queryCount: 0,
+                markerSubmissionCount: 0,
+                mapAsyncCount: 0,
+                queueFenceCount: 0,
+                pointCount: 0,
+                points: [],
+                spans: []
+              };
+            }
+          };
+        }
+        const spans = [];
+        const points = [];
+        const activeEncoderSpans = new Set();
+        let startedOrdinal = 0;
+        const recorder = {
+          active: true,
+          recorderKind: 'host-await-wall-span',
+          encoderSpansSupported: true,
+          markHostPoint(descriptor = {}) {
+            points.push({
+              producerId: descriptor.producerId ?? null,
+              stage: descriptor.stage ?? null,
+              point: descriptor.point ?? null,
+              sequenceIndex: descriptor.sequenceIndex ?? null,
+              generationId: descriptor.generationId ?? null,
+              ordinal: points.length,
+              atMs: performance.now()
+            });
+          },
+          markQueueBoundary(descriptor = {}) {
+            points.push({
+              producerId: descriptor.producerId ?? null,
+              stage: descriptor.stage ?? null,
+              point: descriptor.point ?? 'queue-boundary',
+              sequenceIndex: descriptor.sequenceIndex ?? null,
+              generationId: descriptor.generationId ?? null,
+              ordinal: points.length,
+              atMs: performance.now()
+            });
+          },
+          beginEncoderSpan(encoder, descriptor = {}) {
+            const token = {
+              encoder,
+              producerId: descriptor.producerId ?? null,
+              stage: descriptor.stage ?? null,
+              spanClass: descriptor.spanClass ?? 'same-command-encoder',
+              sequenceIndex: descriptor.sequenceIndex ?? null,
+              generationId: descriptor.generationId ?? null,
+              startedOrdinal,
+              startedAtMs: performance.now()
+            };
+            startedOrdinal += 1;
+            activeEncoderSpans.add(token);
+            return token;
+          },
+          endEncoderSpan(encoder, token) {
+            if (!token || token.encoder !== encoder
+              || !activeEncoderSpans.delete(token)) return false;
+            const completedAtMs = performance.now();
+            spans.push({
+              producerId: token.producerId,
+              stage: token.stage,
+              spanClass: `${token.spanClass}-host-encode`,
+              sequenceIndex: token.sequenceIndex,
+              generationId: token.generationId,
+              startedOrdinal: token.startedOrdinal,
+              startedAtMs: token.startedAtMs,
+              completedAtMs,
+              durationMs: Math.max(0, completedAtMs - token.startedAtMs),
+              status: 'complete'
+            });
+            return true;
+          },
+          discardEncoderSpans(encoder) {
+            for (const token of activeEncoderSpans) {
+              if (token.encoder === encoder) activeEncoderSpans.delete(token);
+            }
+          },
+          async measureQueueStage(descriptor = {}, runner) {
+            const startedAtMs = performance.now();
+            const span = {
+              producerId: descriptor.producerId ?? null,
+              stage: descriptor.stage ?? null,
+              spanClass: descriptor.spanClass ?? null,
+              sequenceIndex: descriptor.sequenceIndex ?? null,
+              generationId: descriptor.generationId ?? null,
+              startedOrdinal,
+              startedAtMs,
+              completedAtMs: null,
+              durationMs: null,
+              status: 'started'
+            };
+            startedOrdinal += 1;
+            spans.push(span);
+            try {
+              const value = await runner();
+              span.status = 'complete';
+              return value;
+            } catch (error) {
+              span.status = 'failed';
+              span.errorName = error?.name ?? null;
+              span.errorMessage =
+                error instanceof Error ? error.message : String(error);
+              throw error;
+            } finally {
+              span.completedAtMs = performance.now();
+              span.durationMs = Math.max(
+                0,
+                span.completedAtMs - startedAtMs
+              );
+            }
+          }
+        };
+        return {
+          recorder,
+          evidence() {
+            return {
+              schema,
+              status: spans.some((span) => span.status === 'failed')
+                ? 'captured-with-failure'
+                : 'captured',
+              requested: true,
+              diagnosticOnly: true,
+              measurementKind: 'host-await-wall-span',
+              intervalSemantics:
+                'inclusive-host-wall-around-natural-stage-await-no-added-submit-query-map-or-fence',
+              batchIndex,
+              spanCount: spans.length,
+              queryCount: 0,
+              markerSubmissionCount: 0,
+              mapAsyncCount: 0,
+              queueFenceCount: 0,
+              pointCount: points.length,
+              points: points.map((point) => ({ ...point })),
+              spans: spans.map((span) => ({ ...span }))
+            };
+          }
+        };
       };
       const captureThermalCandidateCsrRouteEvidence = async (steps) => {
         const schema =
@@ -2931,15 +3981,41 @@ async function runBrowserProbe({
           schema,
           recorderKind: 'timestamp-query-span',
           active: true,
-          encoderSpansSupported: true,
+          encoderSpansSupported:
+            requestedMeasureGpuStageEncoderSpans === true,
           capabilities: Object.freeze({
             queueStageMeasurement: true,
             queueStageSummary: false,
-            encoderSpans: true
+            encoderSpans: requestedMeasureGpuStageEncoderSpans === true,
+            coarseEncoderSpans: true
           }),
+          encoderSpanSelection:
+            requestedMeasureGpuStageEncoderSpans === true
+              ? 'all'
+              : 'coarse-stage-only',
           device,
           beginEncoderSpan(encoder, descriptor = {}) {
             const tokenId = ++tokenSerial;
+            const queueBoundaryMeasurement =
+              descriptor?.measurementKind === 'elapsed-queue-interval'
+              || descriptor?.measurementKind
+                === 'ordered-queue-boundary-marker'
+              || descriptor?.coarseStage === true;
+            if (
+              requestedMeasureGpuStageEncoderSpans !== true
+              && !queueBoundaryMeasurement
+            ) {
+              return {
+                tokenId,
+                inactive: true,
+                descriptor: { ...descriptor },
+                startQueryIndex: null,
+                endQueryIndex: null,
+                beginEncoder: encoder,
+                endEncoder: null,
+                markerSubmissionMode: null
+              };
+            }
             const queryPair = allocateQueryPair();
             if (!queryPair) {
               return {
@@ -3045,6 +4121,40 @@ async function runBrowserProbe({
             encoderSpanTokens.delete(encoder);
             return encoderTokens.length;
           },
+          markQueueBoundary(descriptor = {}) {
+            const stageSelector = String(
+              globalThis.__ulgGpuQueueBoundaryStageSelector
+              || 'generation-pre-submit-boundary'
+            );
+            const descriptorStage = String(descriptor?.stage || '');
+            const descriptorSelector = descriptor?.selectedLevel == null
+              ? descriptorStage
+              : `${descriptorStage}:${descriptor.selectedLevel}`;
+            if (
+              stageSelector !== descriptorStage
+              && stageSelector !== descriptorSelector
+            ) {
+              return null;
+            }
+            const boundaryEncoder = device.createCommandEncoder({
+              label:
+                `ulg-sph-probe-queue-boundary-${batchIndex}-${tokenSerial + 1}`
+            });
+            const token = this.beginEncoderSpan(boundaryEncoder, {
+              ...descriptor,
+              spanClass: descriptor?.spanClass || 'queue-boundary-marker',
+              measurementKind: 'ordered-queue-boundary-marker',
+              intervalSemantics:
+                'standalone diagnostic marker submitted after preceding queue operations and before the following production submission'
+            });
+            if (token.inactive === true) return token;
+            token.markerSubmissionMode =
+              'standalone-diagnostic-queue-boundary-submission';
+            this.endEncoderSpan(boundaryEncoder, token);
+            device.queue.submit([boundaryEncoder.finish()]);
+            markerSubmissionCount += 1;
+            return token;
+          },
           async measureQueueStage(descriptor, runner) {
             if (typeof runner !== 'function') {
               throw new TypeError('GPU queue stage profiler requires a runner');
@@ -3077,6 +4187,32 @@ async function runBrowserProbe({
             }
           }
         };
+        const gpuQueueWriteBoundaryHook = ({
+          queue,
+          bufferLabel,
+          bufferOffset,
+          byteLength
+        } = {}) => {
+          if (queue !== device.queue) return null;
+          return recorder.markQueueBoundary({
+            producerId:
+              'sph-probe-selected-queue-write-boundary',
+            stage: 'after-selected-queue-write',
+            bufferLabel,
+            bufferOffset,
+            byteLength
+          });
+        };
+        globalThis.__ulgGpuQueueWriteBoundaryHook =
+          gpuQueueWriteBoundaryHook;
+        const clearGpuQueueWriteBoundaryHook = () => {
+          if (
+            globalThis.__ulgGpuQueueWriteBoundaryHook
+              === gpuQueueWriteBoundaryHook
+          ) {
+            globalThis.__ulgGpuQueueWriteBoundaryHook = null;
+          }
+        };
         const evidenceBase = {
           schema,
           requested: true,
@@ -3107,8 +4243,13 @@ async function runBrowserProbe({
           capabilities: {
             queueStageMeasurement: true,
             queueStageSummary: false,
-            encoderSpans: true
+            encoderSpans: requestedMeasureGpuStageEncoderSpans === true,
+            coarseEncoderSpans: true
           },
+          encoderSpanSelection:
+            requestedMeasureGpuStageEncoderSpans === true
+              ? 'all'
+              : 'coarse-stage-only',
           markerEncodingMode:
             GPU_STAGE_TIMESTAMP_MARKER_ENCODING_MODE,
           encoderSpanSemantics:
@@ -3137,6 +4278,7 @@ async function runBrowserProbe({
           async complete() {
             if (completed) return this.evidence;
             completed = true;
+            clearGpuQueueWriteBoundaryHook();
             if (queryCapacityExhausted) {
               this.evidence = {
                 ...evidenceBase,
@@ -3264,6 +4406,7 @@ async function runBrowserProbe({
           abort(reason = 'resident batch aborted before stage timestamp completion') {
             if (completed) return;
             completed = true;
+            clearGpuQueueWriteBoundaryHook();
             this.evidence = {
               ...evidenceBase,
               status: 'gpu-stage-timestamps-aborted',
@@ -3705,6 +4848,47 @@ async function runBrowserProbe({
         mechanicsRefreshRequested: stageTiming.mechanicsRefreshRequested ?? null,
         reactionRequested: stageTiming.reactionRequested ?? null
       } : null;
+      const compactSchroederHierarchyHostTiming = (timing) => timing ? {
+        schema: timing.schema ?? null,
+        status: timing.status ?? null,
+        requested: timing.requested === true,
+        diagnosticOnly: timing.diagnosticOnly === true,
+        measurementKind: timing.measurementKind ?? null,
+        intervalSemantics: timing.intervalSemantics ?? null,
+        hierarchyCallCount: timing.hierarchyCallCount ?? null,
+        hierarchyCallCompletedCount:
+          timing.hierarchyCallCompletedCount ?? null,
+        hierarchyCallFailedCount: timing.hierarchyCallFailedCount ?? null,
+        hierarchyCallTotalMs: finiteOrNull(timing.hierarchyCallTotalMs),
+        hierarchyCallMinMs: finiteOrNull(timing.hierarchyCallMinMs),
+        hierarchyCallMaxMs: finiteOrNull(timing.hierarchyCallMaxMs),
+        hierarchyCallLastMs: finiteOrNull(timing.hierarchyCallLastMs),
+        hierarchyCallMaxSequenceIndex:
+          timing.hierarchyCallMaxSequenceIndex ?? null,
+        namedStageTotalMs: finiteOrNull(timing.namedStageTotalMs),
+        unattributedOuterMs: finiteOrNull(timing.unattributedOuterMs),
+        namedStageOverlapMs: finiteOrNull(timing.namedStageOverlapMs),
+        active: timing.active ? { ...timing.active } : null,
+        stages: Object.fromEntries(
+          Object.entries(timing.stages || {}).slice(0, 64).map(
+            ([stage, summary]) => [stage, { ...summary }]
+          )
+        ),
+        queueStages: Object.fromEntries(
+          Object.entries(timing.queueStages || {}).slice(0, 64).map(
+            ([stage, summary]) => [stage, { ...summary }]
+          )
+        ),
+        stageOverflowCount: timing.stageOverflowCount ?? null,
+        maxStageCount: timing.maxStageCount ?? null,
+        queryCount: timing.queryCount ?? null,
+        markerSubmissionCount: timing.markerSubmissionCount ?? null,
+        mapAsyncCount: timing.mapAsyncCount ?? null,
+        queueFenceCount: timing.queueFenceCount ?? null,
+        readbackBytes: timing.readbackBytes ?? null,
+        sourceMutation: timing.sourceMutation === true,
+        scientificValidation: false
+      } : null;
       const compactGpuSummaryResult = (summary) => summary ? {
         schema: summary.schema ?? null,
         backend: summary.backend ?? null,
@@ -3824,6 +5008,8 @@ async function runBrowserProbe({
               schroederSimulationConfig.enableLawNeighborCandidates,
             schroederEnableTwoLevelMechanics:
               schroederSimulationConfig.enableTwoLevelMechanics,
+            schroederEnableMechanicsFieldPairV2:
+              schroederSimulationConfig.enableMechanicsFieldPairV2,
             schroederTwoLevelMechanicsAuthority:
               schroederSimulationConfig.twoLevelMechanicsAuthority,
             schroederTwoLevelFineSubstepCount:
@@ -4210,6 +5396,11 @@ async function runBrowserProbe({
       const shouldExtractNativeSurface = (batchIndex, phase) => Boolean(
         batchIndex === requestedBatches
         || (
+          requestedInteractiveCacheLifecycle
+          && batchIndex > 0
+          && phase === 'resident-batch'
+        )
+        || (
           requestedNativeSurfaceExtractionAtVisualIntervals
           && shouldCaptureFrame(batchIndex, phase)
         )
@@ -4361,11 +5552,21 @@ async function runBrowserProbe({
         }
       };
       let authoritativeGpuCheckpointModulePromise = null;
+      let authoritativeGeneratedGasCohortModulePromise = null;
+      let authoritativeGeneratedGasCohortTracker = null;
       const loadAuthoritativeGpuCheckpointModule = () => {
         if (!authoritativeGpuCheckpointModulePromise) {
           authoritativeGpuCheckpointModulePromise = import('/scripts/sph-authoritative-gpu-checkpoint.mjs');
         }
         return authoritativeGpuCheckpointModulePromise;
+      };
+      const loadAuthoritativeGeneratedGasCohortModule = () => {
+        if (!authoritativeGeneratedGasCohortModulePromise) {
+          authoritativeGeneratedGasCohortModulePromise = import(
+            '/src/runtime/sph/sphFrozenGeneratedGasCohortGpu.js'
+          );
+        }
+        return authoritativeGeneratedGasCohortModulePromise;
       };
       const captureAuthoritativeGpuCheckpoint = async ({ batchIndex, phase, sampleIndex }) => {
         const checkpointBase = {
@@ -4383,11 +5584,11 @@ async function runBrowserProbe({
           hotLoopParticipation: false,
           readbackCadence: 'visual-validation-checkpoint-only'
         };
-        if (!requestedCaptureFrames) {
+        if (!requestedVisualIntervalCaptureRequested) {
           return {
             ...checkpointBase,
             status: 'disabled',
-            reason: 'visual validation capture is disabled'
+            reason: 'authoritative GPU checkpoint capture was not requested'
           };
         }
 
@@ -4478,6 +5679,9 @@ async function runBrowserProbe({
         }));
         const selectedUploadPair = evaluatedUploadCandidates.find((candidate) => (
           candidate.validation.ready
+          && candidate.validation.sharedSlotIdentityVerified
+        )) ?? evaluatedUploadCandidates.find((candidate) => (
+          candidate.validation.ready
         ));
         if (!selectedUploadPair) {
           return {
@@ -4543,6 +5747,8 @@ async function runBrowserProbe({
         const mechanicsInputByteLength = particleCount * mechanicsStrideBytes;
         try {
           const viewState = overlay.__sphPhaseViewState || null;
+          const materialKeyById =
+            checkpointModule.materialKeyByIdFromSphViewState(viewState);
           const reduction = await checkpointModule.reduceAuthoritativeGpuMaterialPhaseEvidence({
             device,
             stateBuffer,
@@ -4552,9 +5758,67 @@ async function runBrowserProbe({
             stateStrideBytes,
             thermoStrideBytes,
             mechanicsStrideBytes,
-            materialKeyById: checkpointModule.materialKeyByIdFromSphViewState(viewState),
+            materialKeyById,
             label: `ulg-sph-authoritative-checkpoint-${batchIndex}`
           });
+          const cohortModule =
+            await loadAuthoritativeGeneratedGasCohortModule();
+          if (!authoritativeGeneratedGasCohortTracker) {
+            authoritativeGeneratedGasCohortTracker =
+              requestedGeneratedGasTargetMaterial
+                ? cohortModule.createAuthoritativeGeneratedGasCohortTracker({
+                    targetMaterial: requestedGeneratedGasTargetMaterial,
+                    minimumMassKg: requestedGeneratedGasMinimumMassKg,
+                    minimumMassFractionOfSystem:
+                      requestedGeneratedGasMinimumMassFractionOfSystem
+                  })
+                : null;
+          }
+          const generatedGasCohortCapture = authoritativeGeneratedGasCohortTracker
+            ? await authoritativeGeneratedGasCohortTracker.capture({
+              device,
+              stateBuffer,
+              thermoBuffer,
+              particleCount,
+              stateStrideBytes,
+              thermoStrideBytes,
+              sphPhaseCarrierPlan:
+                sphParticleUpload.phaseCarrierPlan
+                ?? currentSteps?.nextSphParticleState?.phaseCarrierPlan
+                ?? currentStep?.nextSphParticleState?.phaseCarrierPlan
+                ?? viewState?.sphGpuParticleState?.phaseCarrierPlan
+                ?? null,
+              mechanicsPhaseCarrierPlan:
+                mlsMpmParticleUpload.phaseCarrierPlan
+                ?? currentSteps?.nextMlsMpmParticleState?.phaseCarrierPlan
+                ?? currentStep?.nextMlsMpmParticleState?.phaseCarrierPlan
+                ?? viewState?.mlsMpmGpuParticleState?.phaseCarrierPlan
+                ?? null,
+              sharedSlotIdentityVerified:
+                uploadPairValidation.sharedSlotIdentityVerified,
+              sourceStep: uploadPairValidation.sourceStep,
+              sourceTimeS: uploadPairValidation.sourceTimeS,
+              topologyEpoch:
+                sphParticleUpload.topologyEpoch
+                ?? currentSteps?.nextSphParticleState?.topologyEpoch
+                ?? currentStep?.nextSphParticleState?.topologyEpoch
+                ?? null,
+              identityRevision:
+                sphParticleUpload.identityRevision
+                ?? currentSteps?.nextSphParticleState?.identityRevision
+                ?? currentStep?.nextSphParticleState?.identityRevision
+                ?? null,
+              checkpointIndex: sampleIndex,
+              materialPhaseReduction: reduction,
+              materialKeyById
+            })
+            : {
+                schema:
+                  'peercompute.ulg.sph-authoritative-generated-gas-cohort-capture.v0',
+                status: 'disabled',
+                reason: 'no generated-gas target material was requested',
+                cohorts: []
+              };
           return {
             ...checkpointBase,
             uploadSource,
@@ -4581,7 +5845,9 @@ async function runBrowserProbe({
                 stateInputByteLength + thermoInputByteLength + mechanicsInputByteLength,
               mappedByteLength: 0
             },
-            ...reduction
+            ...reduction,
+            generatedGasCohortCapture,
+            generatedGasCohorts: generatedGasCohortCapture.cohorts
           };
         } catch (error) {
           return {
@@ -4637,9 +5903,9 @@ async function runBrowserProbe({
             status: 'native-surface-validation-not-requested'
           };
         }
-        // A foreground-proved prior bridge is deliberately retained while a
-        // successor validates. It is visible, but it must never make the
-        // direct probe treat the current resident source as presented.
+        // A runtime-admitted prior bridge is deliberately retained while a
+        // successor validates. It remains display-owned, but it must never
+        // make the direct probe treat the current resident source as admitted.
         const sourceGenerationMatchesCurrent =
           surfaceDraw?.sourceResidentExecutionGenerationMatchesCurrent
           ?? renderState?.surfaceDrawSourceResidentExecutionGenerationMatchesCurrent
@@ -4661,11 +5927,21 @@ async function runBrowserProbe({
           && !sourceRetainedPrevious
           && !sourceMarkedStale
         );
-        const ready = Boolean(!candidateValidationPending && sourceCurrent && (
+        const consumerReadyClaim = (
           surfaceDraw?.visibleGpuConsumerReady
           ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
           ?? renderState?.surfaceDrawVisibleGpuConsumerReady
-        ));
+        ) === true;
+        const runtimePresentationAdmitted = (
+          surfaceDraw?.visibleGpuConsumerRuntimePresentationAdmitted
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+          ?? renderState?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+        ) === true;
+        const foregroundProofValidated = (
+          surfaceDraw?.visibleGpuConsumerForegroundProofValidated
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+          ?? renderState?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+        ) === true;
         const pixelValidationStatus =
           surfaceDraw?.visibleGpuConsumerPixelValidationStatus
           ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
@@ -4799,17 +6075,44 @@ async function runBrowserProbe({
           || [pixelValidationStatus, readbackSmokeValidationStatus, offscreenValidationStatus]
             .some((status) => status === 'pending')
         );
+        const admitted = Boolean(
+          sourceCurrent
+          && consumerReadyClaim
+          && gpuBufferHandoffReady
+          && runtimePresentationAdmitted
+        );
+        const foregroundProved = Boolean(
+          admitted
+          && foregroundProofValidated
+        );
+        // `ready` is retained as a compatibility alias for presentation
+        // admission. Pixel validation may remain pending without stalling the
+        // GPU-resident hot loop.
+        const ready = admitted;
         return {
           native: true,
           ready,
+          admitted,
+          foregroundProved,
+          runtimePresentationAdmitted,
+          foregroundProofValidated,
           pending,
           sourceGenerationMatchesCurrent,
           sourceRetainedPrevious,
           sourceMarkedStale,
           sourceCurrent,
           status: ready
-            ? 'native-surface-visible-consumer-ready'
-            : (pending ? 'native-surface-validation-pending' : 'native-surface-validation-settled-not-ready'),
+            ? 'native-surface-presentation-admitted'
+            : (
+              candidateValidationPending
+                ? 'native-surface-presentation-admission-pending'
+                : 'native-surface-presentation-not-admitted'
+            ),
+          foregroundStatus: foregroundProved
+            ? 'native-surface-foreground-proved'
+            : (pending
+              ? 'native-surface-foreground-proof-pending'
+              : 'native-surface-foreground-not-proved'),
           bridgeMode,
           renderBridgeStatus,
           renderBridgeLastRenderStatus,
@@ -5042,6 +6345,39 @@ async function runBrowserProbe({
           transaction.successorEpochEvidence
         )
       } : null;
+      const compactPhaseVolumeSurfaceStressSubmission = (submission) => (
+        submission && typeof submission === 'object'
+          ? {
+              schema: submission.schema ?? null,
+              status: submission.status ?? null,
+              requested: submission.requested === true,
+              submitted: submission.submitted === true,
+              dispatchCount: finiteOrNull(submission.dispatchCount),
+              entryPoints: Array.isArray(submission.entryPoints)
+                ? [...submission.entryPoints]
+                : [],
+              lifecycleDispatchCount:
+                finiteOrNull(submission.lifecycleDispatchCount),
+              lifecycleMode: submission.lifecycleMode ?? null,
+              ambientBuoyancyMode: submission.ambientBuoyancyMode ?? null,
+              generationId: submission.generationId ?? null,
+              selectedLevel: finiteOrNull(submission.selectedLevel),
+              levelRole: submission.levelRole ?? null,
+              twoLevel: submission.twoLevel === true,
+              fieldCompletionOrdinal:
+                finiteOrNull(submission.fieldCompletionOrdinal),
+              materialTableSchema: submission.materialTableSchema ?? null,
+              phaseRecordCount: finiteOrNull(submission.phaseRecordCount),
+              positiveSurfaceTensionPhaseRecordCount: finiteOrNull(
+                submission.positiveSurfaceTensionPhaseRecordCount
+              ),
+              surfaceTensionCoefficientStatus:
+                submission.surfaceTensionCoefficientStatus ?? null,
+              authority: submission.authority ?? null,
+              verification: submission.verification ?? null
+            }
+          : null
+      );
       const compactSchroederTelemetry = ({
         steps = null,
         residentStep = null,
@@ -5171,6 +6507,12 @@ async function runBrowserProbe({
             finalResidentStep?.twoLevelAuthoritativeCommitVerified === true,
           twoLevelAuthoritativeStepCount,
           twoLevelMechanicsCoverageComplete,
+          phaseVolumeSurfaceStressSubmission:
+            compactPhaseVolumeSurfaceStressSubmission(
+              finalResidentStep?.gridUpdate
+                ?.phaseVolumeSurfaceStressSubmission
+              ?? finalResidentStep?.phaseVolumeSurfaceStressSubmission
+            ),
           residentComputeManagerMode: steps?.residentComputeManagerMode ?? null,
           portableSummaryStatus: portableSummary?.status ?? null,
           renderLodStatus: portableSummary?.renderLodStatus ?? renderLod?.status ?? null,
@@ -5269,10 +6611,34 @@ async function runBrowserProbe({
       };
       const sample = (batchIndex, phase, batchMs = null) => {
         const steps = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || execution || null;
+        const readbackTelemetry =
+          composePageVisibleReadbackTelemetry(steps, steps?.finalStep);
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
         const sceneUserData = sceneApi?.scene?.userData || {};
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+        const currentSurfaceDrawConsumerValue = (key) => {
+          const suffix = key.startsWith('surfaceDraw')
+            ? key.slice('surfaceDraw'.length)
+            : '';
+          const directAlias = suffix
+            ? `${suffix[0].toLowerCase()}${suffix.slice(1)}`
+            : key;
+          for (const [source, sourceKey] of [
+            [surfaceDraw, key],
+            [surfaceDraw, directAlias],
+            [renderState, key]
+          ]) {
+            if (
+              source
+              && Object.prototype.hasOwnProperty.call(source, sourceKey)
+              && source[sourceKey] !== undefined
+            ) {
+              return source[sourceKey];
+            }
+          }
+          return null;
+        };
         const residentMaterialInterfaceState =
           overlay.__sphResidentMaterialInterfaceState
           || sceneUserData.sphResidentMaterialInterfaceState
@@ -5297,6 +6663,16 @@ async function runBrowserProbe({
           batchIndex,
           phase,
           capturedAtMs: performance.now(),
+          pageInstanceId: requestedInteractiveCacheLifecycle
+            ? interactivePageInstanceId
+            : null,
+          cacheResetOrdinal: requestedInteractiveCacheLifecycle
+            ? interactiveCacheResetOrdinal
+            : null,
+          interactiveCacheMeasurementClass:
+            requestedInteractiveCacheLifecycle
+              ? interactiveCacheMeasurementClass
+              : null,
           batchMs,
           sceneTimeS,
           initial: batchIndex === 0 ? {
@@ -5538,7 +6914,26 @@ async function runBrowserProbe({
             nextUploadActiveGridDispatchPlanHintSource: steps.nextParticleUploads?.activeGridDispatchPlanHint?.source ?? null,
             nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
             nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
-            normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
+            residentProductMassGridCouplingStatus:
+              steps.finalStep?.residentProductMassGridCouplingStatus ?? null,
+            residentProductMassInputProductEventCountAuthority:
+              steps.finalStep?.residentProductMassInputProductEventCountAuthority ?? null,
+            residentProductMassInputProductEventRowCapacity:
+              steps.finalStep?.residentProductMassInputProductEventRowCapacity ?? null,
+            residentProductMassInputProductEventCountHostKnown:
+              steps.finalStep?.residentProductMassInputProductEventCountHostKnown ?? null,
+            residentProductMassProductEventDispatchMode:
+              steps.finalStep?.residentProductMassProductEventDispatchMode ?? null,
+            readbackTelemetrySchema: steps.readbackTelemetrySchema ?? null,
+            readbackTelemetryScope: steps.readbackTelemetryScope ?? null,
+            ...readbackTelemetry,
+            fullParticleReadbackPerformed:
+              typeof steps.fullParticleReadbackPerformed === 'boolean'
+                ? steps.fullParticleReadbackPerformed
+                : null,
+            fullParticleReadbackFree: steps.fullParticleReadbackFree === true,
+            residentContinuationReady:
+              steps.residentContinuationReady === true,
             schroederTwoLevelAuthoritativeStepCount: Array.isArray(steps.stepSummaries)
               ? steps.stepSummaries.filter((summary) => (
                 summary?.status === 'schroeder-two-level-authoritative-step-executed'
@@ -5574,6 +6969,22 @@ async function runBrowserProbe({
               steps.schroederHierarchyArtifactLedgerSettlementCount ?? null,
             schroederHierarchyArtifactLedgerSettlementComplete:
               steps.schroederHierarchyArtifactLedgerSettlementComplete === true,
+            phaseVolumeSurfaceStressRequired:
+              steps.phaseVolumeSurfaceStressRequired === true,
+            phaseVolumeSurfaceStressExpectedSubmissionCount:
+              steps.phaseVolumeSurfaceStressExpectedSubmissionCount ?? null,
+            phaseVolumeSurfaceStressSubmissionCount:
+              steps.phaseVolumeSurfaceStressSubmissionCount ?? null,
+            phaseVolumeSurfaceStressSubmissionEvidenceComplete:
+              steps.phaseVolumeSurfaceStressSubmissionEvidenceComplete === true,
+            phaseVolumeSurfaceStressSubmissions:
+              Array.isArray(steps.stepSummaries)
+                ? steps.stepSummaries.map((summary) => (
+                    compactPhaseVolumeSurfaceStressSubmission(
+                      summary?.phaseVolumeSurfaceStressSubmission
+                    )
+                  ))
+                : [],
             schroederSpatialEpochGenerationSummaries: Array.isArray(
               steps.schroederSameLevelMechanicsSummaries
             )
@@ -5583,6 +6994,21 @@ async function runBrowserProbe({
                 } : null)
                 .filter(Boolean)
               : [],
+            schroederCanonicalEpochControllerSummaries: Array.isArray(
+              steps.schroederSameLevelMechanicsSummaries
+            )
+              ? steps.schroederSameLevelMechanicsSummaries
+                .map((summary) => (
+                  summary?.canonicalEpochControllerSummary
+                    ? { ...summary.canonicalEpochControllerSummary }
+                    : null
+                ))
+                .filter(Boolean)
+              : [],
+            schroederHierarchyHostTiming:
+              compactSchroederHierarchyHostTiming(
+                steps.schroederHierarchyHostTiming
+              ),
             fusedResidentSequence: steps.fusedResidentSequence ? {
               schema: steps.fusedResidentSequence.schema ?? null,
               status: steps.fusedResidentSequence.status ?? null,
@@ -5598,6 +7024,12 @@ async function runBrowserProbe({
             } : null,
             fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(steps.fusedResidentSequencePreflight),
             finalStepStageTiming: compactStageTiming(steps.finalStep?.stageTiming),
+            finalStepPhaseVolumeSurfaceStressSubmission:
+              compactPhaseVolumeSurfaceStressSubmission(
+                steps.finalStep?.gridUpdate
+                  ?.phaseVolumeSurfaceStressSubmission
+                ?? steps.finalStep?.phaseVolumeSurfaceStressSubmission
+              ),
             residentSourceMode: steps.residentSourceMode ?? null,
             nextStep: steps.nextSphParticleState?.step ?? null,
             nextTime: finiteOrNull(steps.nextSphParticleState?.time)
@@ -5628,6 +7060,8 @@ async function runBrowserProbe({
             // Per-stage mechanics snapshots. Null unless stageMechanicsTrace=1;
             // fixed-size per stage, not per particle.
             stageMechanicsTrace: residentStep.stageMechanicsTrace ?? null,
+            canonicalSpatialAuthorityTrace:
+              residentStep.canonicalSpatialAuthorityTrace ?? null,
             particlePingPong: residentStep.particlePingPong ? {
               sourceStep: residentStep.particlePingPong.sourceStep ?? null,
               nextStep: residentStep.particlePingPong.nextStep ?? null,
@@ -5638,11 +7072,31 @@ async function runBrowserProbe({
               compactSchroederSpatialEpochTransaction(
                 residentStep.schroederSpatialEpochTransaction
               ),
+            phaseVolumeSurfaceStressSubmission:
+              compactPhaseVolumeSurfaceStressSubmission(
+                residentStep.gridUpdate
+                  ?.phaseVolumeSurfaceStressSubmission
+                ?? residentStep.phaseVolumeSurfaceStressSubmission
+              ),
+            residentProductMassStatus:
+              residentStep.residentProductMassStatus ?? null,
+            residentProductMassProductEventRowCount:
+              residentStep.residentProductMassProductEventRowCount ?? null,
+            residentProductMassGridCouplingStatus:
+              residentStep.residentProductMassGridCouplingStatus ?? null,
+            residentProductMassInputProductEventCountAuthority:
+              residentStep.residentProductMassInputProductEventCountAuthority ?? null,
+            residentProductMassInputProductEventRowCapacity:
+              residentStep.residentProductMassInputProductEventRowCapacity ?? null,
+            residentProductMassInputProductEventCountHostKnown:
+              residentStep.residentProductMassInputProductEventCountHostKnown ?? null,
+            residentProductMassProductEventDispatchMode:
+              residentStep.residentProductMassProductEventDispatchMode ?? null,
             stageTiming: compactStageTiming(residentStep.stageTiming || steps?.finalStep?.stageTiming),
             compactGpuSummary: compactGpuSummaryResult(residentStep.compactGpuSummary || steps?.finalStep?.compactGpuSummary),
             diagnostics: compactDiagnostics(residentStep.diagnostics)
           } : null,
-            renderState: renderState ? {
+          renderState: renderState ? {
             schema: renderState.schema ?? null,
             status: renderState.status ?? null,
             source: renderState.source ?? null,
@@ -5720,11 +7174,17 @@ async function runBrowserProbe({
             nativeQueueFenceTotal: typeof globalThis.__ulgQueueFenceTotal === 'function'
               ? globalThis.__ulgQueueFenceTotal()
               : null,
+            nativeQueueFenceTraceInstalled:
+              globalThis.__ulgQueueFenceTraceInstalled === true,
             nativeDagBuildTally: typeof globalThis.__ulgDagBuildTally === 'function'
               ? globalThis.__ulgDagBuildTally()
               : null,
             nativeDagBuildMs: globalThis.__ulgDagBuildMs ?? null,
             nativeCreateBufferMs: globalThis.__ulgCreateBufferMs ?? null,
+            nativeQueueWriteTrace:
+              typeof globalThis.__ulgQueueWriteTrace === 'function'
+                ? globalThis.__ulgQueueWriteTrace()
+                : null,
             renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
             renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),
             renderRefreshRenderRowsMs: finiteOrNull(renderState.renderRefreshRenderRowsMs),
@@ -5739,6 +7199,9 @@ async function runBrowserProbe({
               finiteOrNull(renderState.renderRefreshWorkerOffscreenRenderRowsMs),
             renderRefreshRenderStateAssemblyMs:
               finiteOrNull(renderState.renderRefreshRenderStateAssemblyMs),
+            surfaceDrawExtractionPresentationCounters:
+              extractionPresentationCounters(renderState),
+            renderFieldBufferMode: renderState.renderFieldBufferMode ?? null,
             renderFieldReadback: renderState.renderFieldReadback ?? null,
             renderFieldStatus: renderState.renderFieldStatus ?? null,
             renderFieldReason: renderState.renderFieldReason ?? null,
@@ -5846,6 +7309,18 @@ async function runBrowserProbe({
             gasPressureSummarySource: renderState.gasPressureSummarySource ?? null,
             residentProductMassStatus: renderState.residentProductMassStatus ?? null,
             residentProductMassEosCouplingStatus: renderState.residentProductMassEosCouplingStatus ?? null,
+            productEventCount: renderState.productEventCount ?? null,
+            productEventCountAuthority: renderState.productEventCountAuthority ?? null,
+            productEventControlAuthentication:
+              renderState.productEventControlAuthentication ?? null,
+            productEventControlHostObserved:
+              renderState.productEventControlHostObserved ?? null,
+            productEventRowCapacity: renderState.productEventRowCapacity ?? null,
+            productEventCountHostKnown: renderState.productEventCountHostKnown ?? null,
+            productEventCountAuthorityGeneration:
+              renderState.productEventCountAuthorityGeneration ?? null,
+            productEventCountAuthoritySeal:
+              renderState.productEventCountAuthoritySeal ?? null,
             productEventBufferBound: renderState.productEventBufferBound ?? null,
             productEventBufferByteLength: renderState.productEventBufferByteLength ?? null,
             surfaceDrawStatus: renderState.surfaceDrawStatus ?? null,
@@ -5872,6 +7347,10 @@ async function runBrowserProbe({
               renderState.surfaceDrawCompactPositionRowsBufferRetained ?? null,
             surfaceDrawCompactPositionRowsBufferByteLength:
               renderState.surfaceDrawCompactPositionRowsBufferByteLength ?? null,
+            surfaceDrawCompactPositionRowsVertexCount:
+              renderState.surfaceDrawCompactPositionRowsVertexCount ?? null,
+            surfaceDrawCompactPositionRowsStrideFloats:
+              renderState.surfaceDrawCompactPositionRowsStrideFloats ?? null,
             surfaceDrawDirectCompactPositionDraw:
               renderState.surfaceDrawDirectCompactPositionDraw ?? null,
             surfaceDrawRenderBridgeExternalGpuBufferInputLayout:
@@ -5947,8 +7426,40 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount ?? null,
             surfaceDrawExtensionSurfaceTranslationElapsedMs:
               renderState.surfaceDrawExtensionSurfaceTranslationElapsedMs ?? null,
+            surfaceDrawExtensionSurfaceAdapterExecutionStatus:
+              renderState.surfaceDrawExtensionSurfaceAdapterExecutionStatus
+              ?? null,
+            surfaceDrawExtensionSurfaceRawExecutionStatus:
+              renderState.surfaceDrawExtensionSurfaceRawExecutionStatus
+              ?? null,
+            surfaceDrawExtensionSurfaceRawVertexCount:
+              renderState.surfaceDrawExtensionSurfaceRawVertexCount ?? null,
             surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus:
               renderState.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus ?? null,
+            surfaceDrawExtensionSurfaceTranslationPipelineCreated:
+              renderState.surfaceDrawExtensionSurfaceTranslationPipelineCreated ?? null,
+            surfaceDrawExtensionSurfaceTranslationBindGroupCreated:
+              renderState.surfaceDrawExtensionSurfaceTranslationBindGroupCreated ?? null,
+            surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated:
+              renderState.surfaceDrawExtensionSurfaceTranslationCommandEncoderCreated ?? null,
+            surfaceDrawExtensionSurfaceTranslationWorkgroupCountX:
+              renderState.surfaceDrawExtensionSurfaceTranslationWorkgroupCountX ?? null,
+            surfaceDrawExtensionSurfaceTranslationSubmissionObserved:
+              renderState.surfaceDrawExtensionSurfaceTranslationSubmissionObserved ?? null,
+            surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource:
+              renderState.surfaceDrawExtensionSurfaceDirectCompactPositionDrawIndirectSource ?? null,
+            surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership:
+              renderState.surfaceDrawExtensionSurfaceDrawIndirectRowsOwnership ?? null,
+            surfaceDrawExtensionSurfaceDrawIndirectBufferRetained:
+              renderState.surfaceDrawExtensionSurfaceDrawIndirectBufferRetained ?? null,
+            surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength:
+              renderState.surfaceDrawExtensionSurfaceDrawIndirectBufferByteLength ?? null,
+            surfaceDrawExtensionSurfaceQueueCompletionStatus:
+              renderState.surfaceDrawExtensionSurfaceQueueCompletionStatus ?? null,
+            surfaceDrawExtensionSurfaceQueueCompletionMethod:
+              renderState.surfaceDrawExtensionSurfaceQueueCompletionMethod ?? null,
+            surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired:
+              renderState.surfaceDrawExtensionSurfaceHotLoopGpuTranslationRequired ?? null,
             surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus:
               renderState.surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus ?? null,
             surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:
@@ -5972,6 +7483,74 @@ async function runBrowserProbe({
             surfaceDrawVisibleGpuConsumerInputKind: renderState.surfaceDrawVisibleGpuConsumerInputKind ?? null,
             surfaceDrawVisibleGpuConsumerInputStatus: renderState.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
             surfaceDrawVisibleGpuConsumerRuntimeReady: renderState.surfaceDrawVisibleGpuConsumerRuntimeReady ?? null,
+            surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted'
+              ),
+            surfaceDrawVisibleGpuConsumerForegroundProofValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerForegroundProofValidated'
+              ),
+            surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted'
+              ),
+            surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated'
+              ),
+            surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated'
+              ),
+            surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount'
+              ),
+            surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration'
+              ),
+            surfaceDrawVisibleGpuConsumerNativePixelValidationSource:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationSource'
+              ),
+            surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount'
+              ),
+            surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration'
+              ),
             surfaceDrawVisibleGpuConsumerRenderBridgeMode:
               renderState.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
             surfaceDrawVisibleGpuConsumerRenderBridgeStatus:
@@ -6024,6 +7603,9 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeSphereMetallicVisibilityProxyCount ?? null,
             surfaceDrawRenderBridgeVisibleNoReadbackSupported: renderState.surfaceDrawRenderBridgeVisibleNoReadbackSupported ?? null,
             surfaceDrawRenderBridgeLastRenderStatus: renderState.surfaceDrawRenderBridgeLastRenderStatus ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceReuseStatus:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceReuseStatus
+              ?? null,
             surfaceDrawRenderBridgeFrameCount: renderState.surfaceDrawRenderBridgeFrameCount ?? null,
             surfaceDrawRenderBridgeNativeSurfaceCandidateStageSubmissionCount:
               renderState.surfaceDrawRenderBridgeNativeSurfaceCandidateStageSubmissionCount ?? null,
@@ -6218,6 +7800,8 @@ async function runBrowserProbe({
                 : null,
             surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
             surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
+            surfaceDrawSource:
+              surfaceDraw?.source ?? renderState.surfaceDrawSource ?? null,
             surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
               renderState.surfaceDrawRenderBridgeSphereMaterialRendererProxyCount ?? null,
             surfaceDrawRenderBridgeSphereGeometryProxyCount:
@@ -6310,6 +7894,74 @@ async function runBrowserProbe({
             visibleGpuConsumerInputKind: surfaceDraw.surfaceDrawVisibleGpuConsumerInputKind ?? null,
             visibleGpuConsumerInputStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
             visibleGpuConsumerRuntimeReady: surfaceDraw.surfaceDrawVisibleGpuConsumerRuntimeReady ?? null,
+            visibleGpuConsumerRuntimePresentationAdmitted:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted'
+              ),
+            visibleGpuConsumerForegroundProofValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerForegroundProofValidated'
+              ),
+            visibleGpuConsumerSameQueueStructuralSubmissionAdmitted:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted'
+              ),
+            visibleGpuConsumerSameQueueForegroundSubmissionValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated'
+              ),
+            visibleGpuConsumerOffscreenForegroundValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated'
+              ),
+            visibleGpuConsumerBrowserFrameForegroundValidated:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated'
+              ),
+            visibleGpuConsumerNativeCandidateForegroundValidationStatus:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus'
+              ),
+            visibleGpuConsumerNativeCandidateForegroundProofKind:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind'
+              ),
+            visibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary'
+              ),
+            visibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount'
+              ),
+            visibleGpuConsumerNativeCandidateForegroundResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration'
+              ),
+            visibleGpuConsumerNativeActiveResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration'
+              ),
+            visibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount'
+              ),
+            visibleGpuConsumerNativeOffscreenValidationResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration'
+              ),
+            visibleGpuConsumerNativePixelValidationSource:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationSource'
+              ),
+            visibleGpuConsumerNativePixelValidationNonzeroPixelCount:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount'
+              ),
+            visibleGpuConsumerNativePixelValidationResourceGeneration:
+              currentSurfaceDrawConsumerValue(
+                'surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration'
+              ),
             visibleGpuConsumerRenderBridgeMode: surfaceDraw.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
             visibleGpuConsumerRenderBridgeStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
             visibleGpuConsumerRendererCapabilityStatus:
@@ -6653,30 +8305,42 @@ async function runBrowserProbe({
       };
       const appendMetricWithValidationCapture = async (metric) => {
         const sampleIndex = metrics.length;
-        if (!shouldCaptureFrame(metric.batchIndex, metric.phase)) {
-          metrics.push(metric);
-          return metric;
+        if (!requestedCaptureFrames) {
+          const retainedMetric = retainProbeMetric(metric);
+          metrics.push(retainedMetric);
+          return retainedMetric;
         }
-        markProbeProgress('authoritative-gpu-checkpoint-started', {
-          batchIndex: metric.batchIndex,
-          phase: metric.phase,
-          sampleIndex
-        });
-        metric.authoritativeGpuCheckpoint = await captureAuthoritativeGpuCheckpoint({
-          batchIndex: metric.batchIndex,
-          phase: metric.phase,
-          sampleIndex
-        });
-        metrics.push(metric);
+        if (requestedVisualIntervalCaptureRequested) {
+          // Compact authoritative checkpoints are physics acceptance evidence,
+          // not screenshots. Continue collecting them after the bounded visual
+          // frame budget is exhausted so long-horizon scenarios cannot silently
+          // lose their terminal phase-transition checkpoints.
+          markProbeProgress('authoritative-gpu-checkpoint-started', {
+            batchIndex: metric.batchIndex,
+            phase: metric.phase,
+            sampleIndex
+          });
+          metric.authoritativeGpuCheckpoint =
+            await captureAuthoritativeGpuCheckpoint({
+              batchIndex: metric.batchIndex,
+              phase: metric.phase,
+              sampleIndex
+            });
+        }
+        const retainedMetric = retainProbeMetric(metric);
+        metrics.push(retainedMetric);
         await captureFrame(metric.batchIndex, metric.phase, sampleIndex);
-        markProbeProgress('authoritative-gpu-checkpoint-completed', {
-          batchIndex: metric.batchIndex,
-          phase: metric.phase,
-          sampleIndex,
-          status: metric.authoritativeGpuCheckpoint?.status ?? null,
-          materialPhaseCount: metric.authoritativeGpuCheckpoint?.materialPhaseCount ?? null
-        });
-        return metric;
+        if (requestedVisualIntervalCaptureRequested) {
+          markProbeProgress('authoritative-gpu-checkpoint-completed', {
+            batchIndex: metric.batchIndex,
+            phase: metric.phase,
+            sampleIndex,
+            status: metric.authoritativeGpuCheckpoint?.status ?? null,
+            materialPhaseCount:
+              metric.authoritativeGpuCheckpoint?.materialPhaseCount ?? null
+          });
+        }
+        return retainedMetric;
       };
       const authoritativeGpuCheckpointCaptureSummary = () => {
         const checkpoints = metrics
@@ -6689,7 +8353,7 @@ async function runBrowserProbe({
         )).length;
         return {
           schema: 'peercompute.ulg.sph-authoritative-gpu-checkpoint-capture.v1',
-          status: !requestedCaptureFrames
+          status: !requestedVisualIntervalCaptureRequested
             ? 'disabled'
             : checkpoints.length === 0
             ? 'no-checkpoints'
@@ -6698,7 +8362,7 @@ async function runBrowserProbe({
             : capturedCount > 0
             ? 'captured-with-gaps'
             : 'unavailable',
-          enabled: Boolean(requestedCaptureFrames),
+          enabled: Boolean(requestedVisualIntervalCaptureRequested),
           trigger: 'visual-validation-checkpoint',
           diagnosticOnly: true,
           physicsReference: false,
@@ -6710,7 +8374,7 @@ async function runBrowserProbe({
           errorCount
         };
       };
-      if (requestedCaptureFrames) {
+      if (requestedVisualIntervalCaptureRequested) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         // The final-only compact-summary path does not otherwise need an
         // initial render refresh. Materialize its retained upload explicitly
@@ -6730,7 +8394,10 @@ async function runBrowserProbe({
           expectedStep: 0,
           expectedTimeS: 0
         });
-        if (!initialUploadPairValidation.ready) {
+        if (
+          !initialUploadPairValidation.ready
+          || !initialUploadPairValidation.sharedSlotIdentityVerified
+        ) {
           markProbeProgress('initial-authoritative-upload-started');
           try {
             overlay.__sphGpuParticleUpload = await sceneApi.refreshSphGpuParticleBuffers?.({
@@ -6748,6 +8415,8 @@ async function runBrowserProbe({
             });
             markProbeProgress('initial-authoritative-upload-completed', {
               ready: refreshedPairValidation.ready,
+              sharedSlotIdentityVerified:
+                refreshedPairValidation.sharedSlotIdentityVerified,
               blockers: [...refreshedPairValidation.blockers]
             });
           } catch (error) {
@@ -6806,6 +8475,587 @@ async function runBrowserProbe({
             reason: error instanceof Error ? error.message : String(error)
           });
         }
+      }
+      if (requestedInteractiveCacheLifecycle) {
+        if (requestedBatches !== 3) {
+          throw new Error(
+            'interactive cache lifecycle requires exactly three post-reset batches'
+          );
+        }
+        const waitForInteractiveState = async (
+          read,
+          ready,
+          label,
+          waitMs = 60_000,
+          summarize = null
+        ) => {
+          const startedAtMs = performance.now();
+          let current = read();
+          while (!ready(current)) {
+            if (performance.now() - startedAtMs >= waitMs) {
+              const summary = typeof summarize === 'function'
+                ? summarize(current)
+                : null;
+              throw new Error(
+                `interactive cache lifecycle timed out waiting for ${label}`
+                + (summary == null
+                  ? ''
+                  : `: ${JSON.stringify(summary)}`)
+              );
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            current = read();
+          }
+          return current;
+        };
+        const quiesceInteractivePlayback = async ({
+          label,
+          waitMs = 60_000
+        }) => {
+          const playButton = overlay.querySelector('#sph-play');
+          if (!playButton) {
+            throw new Error(
+              `interactive cache lifecycle could not find #sph-play while ${label}`
+            );
+          }
+          const startedAtMs = performance.now();
+          const initialButtonText = String(
+            playButton.textContent ?? ''
+          ).trim();
+          const pauseRequested = /Pause/i.test(initialButtonText);
+          if (pauseRequested) playButton.click();
+          let priorExecution = null;
+          let stableFrameCount = 0;
+          let currentExecution = null;
+          while (performance.now() - startedAtMs < waitMs) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            currentExecution =
+              sceneApi.getMlsMpmResidentSteps?.()
+              || overlay.__mlsMpmResidentSteps
+              || null;
+            const residentPending =
+              overlay.__mlsMpmResidentStepsPending != null;
+            const playbackActive = /Pause/i.test(
+              String(playButton.textContent ?? '')
+            );
+            if (
+              !residentPending
+              && !playbackActive
+              && currentExecution?.schema
+            ) {
+              stableFrameCount = currentExecution === priorExecution
+                ? stableFrameCount + 1
+                : 1;
+              priorExecution = currentExecution;
+              if (stableFrameCount >= 2) {
+                return {
+                  execution: currentExecution,
+                  evidence: {
+                    schema:
+                      'peercompute.ulg.sph-interactive-playback-quiescence.v0',
+                    status: 'resident-playback-quiescent',
+                    reason: label,
+                    initialButtonText,
+                    finalButtonText: String(
+                      playButton.textContent ?? ''
+                    ).trim(),
+                    pauseRequested,
+                    residentPending: false,
+                    stableFrameCount,
+                    completedStepCount:
+                      Number(currentExecution.completedStepCount ?? 0),
+                    elapsedMs: performance.now() - startedAtMs
+                  }
+                };
+              }
+            } else {
+              priorExecution = null;
+              stableFrameCount = 0;
+            }
+          }
+          throw new Error(
+            `interactive cache lifecycle timed out while ${label}: `
+            + JSON.stringify({
+              initialButtonText,
+              finalButtonText: String(
+                playButton.textContent ?? ''
+              ).trim(),
+              pauseRequested,
+              residentPending:
+                overlay.__mlsMpmResidentStepsPending != null,
+              completedStepCount:
+                currentExecution?.completedStepCount ?? null
+            })
+          );
+        };
+        const pageIdentity = {
+          pageInstanceId: interactivePageInstanceId,
+          performanceTimeOrigin: performance.timeOrigin,
+          documentUrl: location.href,
+          navigationEntryCount:
+            performance.getEntriesByType('navigation').length
+        };
+        const warmExecution = await waitForInteractiveState(
+          () => (
+            sceneApi.getMlsMpmResidentSteps?.()
+            || overlay.__mlsMpmResidentSteps
+            || execution
+            || null
+          ),
+          (candidate) => (
+            candidate?.schema
+            && Number(candidate?.completedStepCount) > 0
+          ),
+          'a completed warm resident execution'
+        );
+        const staticTableWrite = await waitForInteractiveState(
+          () => overlay.__sphPeerClosureCache?.staticTableWrite ?? null,
+          (candidate) => (
+            candidate?.schema
+              === 'peercompute.ulg.sph-static-table-cache-update.v0'
+            && candidate?.status === 'stored'
+            && Number(candidate?.counts?.tables) >= 4
+            && Number(candidate?.counts?.gpuWarmup) >= 1
+          ),
+          'the persisted static-table/GPU warmup bundle'
+        );
+        const warmupCompletedAtMs = performance.now();
+        const preResetGeneration = Number(
+          overlay.__sphResetStatus?.generation
+          ?? overlay.__sphResidentStageOrderTrace?.resetGeneration
+          ?? 0
+        );
+        const resetButton = overlay.querySelector('#sph-reset');
+        if (!resetButton) {
+          throw new Error(
+            'interactive cache lifecycle could not find #sph-reset'
+          );
+        }
+        resetButton.click();
+        const resetEvidence = await waitForInteractiveState(
+          () => {
+            const resetStatus = overlay.__sphResetStatus ?? null;
+            const staticTableRead =
+              overlay.__sphPeerClosureCache?.staticTableRead ?? null;
+            const setParticlesTiming = overlay.__sphSetParticlesTiming ?? null;
+            const nextExecution =
+              sceneApi.getMlsMpmResidentSteps?.()
+              || overlay.__mlsMpmResidentSteps
+              || null;
+            return {
+              resetStatus,
+              staticTableRead,
+              setParticlesTiming,
+              nextExecution
+            };
+          },
+          (candidate) => (
+            candidate?.resetStatus?.status
+              === 'particle-state-resynced-after-reset'
+            && Number(candidate?.resetStatus?.generation)
+              > preResetGeneration
+            && candidate?.setParticlesTiming?.staticTableCacheStatus
+              === 'static-table-cache-bundle-hit'
+            && candidate?.staticTableRead?.status
+              === 'static-table-cache-bundle-hit'
+            && Number(candidate?.staticTableRead?.hitCount) >= 4
+            && Number(candidate?.staticTableRead?.tableCount) >= 4
+            && Number(candidate?.staticTableRead?.gpuWarmupCount) >= 1
+            && candidate?.nextExecution?.schema
+            && Number(candidate?.nextExecution?.completedStepCount) > 0
+            && candidate.nextExecution !== warmExecution
+          ),
+          'the same-page reset/cache-hit resident rebuild',
+          60_000,
+          (candidate) => ({
+            resetStatus: candidate?.resetStatus == null
+              ? null
+              : {
+                  status: candidate.resetStatus.status ?? null,
+                  generation: candidate.resetStatus.generation ?? null,
+                  reason: candidate.resetStatus.reason ?? null
+                },
+            staticTableRead: candidate?.staticTableRead == null
+              ? null
+              : {
+                  status: candidate.staticTableRead.status ?? null,
+                  hitCount: candidate.staticTableRead.hitCount ?? null,
+                  tableCount: candidate.staticTableRead.tableCount ?? null,
+                  gpuWarmupCount:
+                    candidate.staticTableRead.gpuWarmupCount ?? null
+                },
+            staticTableCacheStatus:
+              candidate?.setParticlesTiming?.staticTableCacheStatus ?? null,
+            nextExecution: candidate?.nextExecution == null
+              ? null
+              : {
+                  schema: candidate.nextExecution.schema ?? null,
+                  status: candidate.nextExecution.status ?? null,
+                  completedStepCount:
+                    candidate.nextExecution.completedStepCount ?? null,
+                  identityChanged:
+                    candidate.nextExecution !== warmExecution
+                },
+            residentPending:
+              overlay.__mlsMpmResidentStepsPending != null,
+            residentError:
+              overlay.__mlsMpmResidentStepsError ?? null,
+            residentGenerationHandoff:
+              sceneApi.scene?.userData
+                ?.mlsMpmResidentExecutionGenerationHandoff == null
+                ? null
+                : {
+                    status:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff.status
+                      ?? null,
+                    reason:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff.reason
+                      ?? null,
+                    generation:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff.generation
+                      ?? null,
+                    handoffSerial:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff.handoffSerial
+                      ?? null,
+                    pendingExecutionCount:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff
+                        .pendingExecutionCount
+                      ?? null,
+                    publishedExecutionCount:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff
+                        .publishedExecutionCount
+                      ?? null,
+                    error:
+                      sceneApi.scene.userData
+                        .mlsMpmResidentExecutionGenerationHandoff.error
+                      ?? null
+                  },
+            residentProgress:
+              sceneApi.scene?.userData?.mlsMpmResidentStepsProgress == null
+                ? null
+                : {
+                    status:
+                      sceneApi.scene.userData.mlsMpmResidentStepsProgress.status
+                      ?? null,
+                    residentExecutionGeneration:
+                      sceneApi.scene.userData.mlsMpmResidentStepsProgress
+                        .residentExecutionGeneration
+                      ?? null,
+                    currentResidentExecutionGeneration:
+                      sceneApi.scene.userData.mlsMpmResidentStepsProgress
+                        .currentResidentExecutionGeneration
+                      ?? null,
+                    innerStatus:
+                      sceneApi.scene.userData.mlsMpmResidentStepsProgress
+                        .innerProgress?.status
+                      ?? null,
+                    error:
+                      sceneApi.scene.userData.mlsMpmResidentStepsProgress.error
+                      ?? null
+                  },
+            residentGpuWork:
+              sceneApi.scene?.userData?.sphResidentGpuWorkInFlight == null
+                ? null
+                : {
+                    status:
+                      sceneApi.scene.userData.sphResidentGpuWorkInFlight.status
+                      ?? null,
+                    residentGpuRefreshInFlightCount:
+                      sceneApi.scene.userData.sphResidentGpuWorkInFlight
+                        .residentGpuRefreshInFlightCount
+                      ?? null,
+                    residentGpuWorkInFlightCount:
+                      sceneApi.scene.userData.sphResidentGpuWorkInFlight
+                        .residentGpuWorkInFlightCount
+                      ?? null
+                  },
+            residentScheduleTrace:
+              Array.isArray(overlay.__sphResidentScheduleTrace)
+                ? overlay.__sphResidentScheduleTrace.slice(-8)
+                : [],
+            warmExecutionSettlement: {
+              spatialEpochStatus:
+                warmExecution
+                  ?.schroederSpatialEpochReleaseSettlementStatus
+                ?? null,
+              spatialEpochComplete:
+                warmExecution
+                  ?.schroederSpatialEpochReleaseSettlementComplete
+                ?? null,
+              spatialEpochScheduledCount:
+                warmExecution
+                  ?.schroederSpatialEpochReleaseSettlementScheduledCount
+                ?? null,
+              spatialEpochSettledCount:
+                warmExecution
+                  ?.schroederSpatialEpochReleaseSettlementCount
+                ?? null,
+              spatialEpochError:
+                warmExecution
+                  ?.schroederSpatialEpochReleaseSettlementError
+                ?? null,
+              successorStatus:
+                warmExecution
+                  ?.schroederSuccessorSourceFamilyRetirementStatus
+                ?? null,
+              successorComplete:
+                warmExecution
+                  ?.schroederSuccessorSourceFamilyRetirementComplete
+                ?? null,
+              successorScheduledCount:
+                warmExecution
+                  ?.schroederSuccessorSourceFamilyRetirementScheduledCount
+                ?? null,
+              successorSettledCount:
+                warmExecution
+                  ?.schroederSuccessorSourceFamilyRetirementCount
+                ?? null,
+              successorError:
+                warmExecution
+                  ?.schroederSuccessorSourceFamilyRetirementError
+                ?? null,
+              transactionState:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochTransactionSummary?.().state
+                ?? null,
+              transactionReleaseCount:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochTransactionSummary?.()
+                  .counters?.releaseCount
+                ?? null,
+              generationReleaseScheduled:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochGenerationSummary?.()
+                  .releaseScheduled
+                ?? null,
+              generationReleaseStatus:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochGenerationSummary?.()
+                  .releaseStatus
+                ?? null,
+              generationReleaseAttemptCount:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochGenerationSummary?.()
+                  .releaseAttemptCount
+                ?? null,
+              generationReleaseFailureCount:
+                warmExecution?.finalStep
+                  ?.currentSchroederSpatialEpochGenerationSummary?.()
+                  .releaseFailureCount
+                ?? null,
+              artifactLedgerStatus:
+                warmExecution?.finalStep
+                  ?.currentSchroederHierarchyArtifactLedgerSummary?.().status
+                ?? null,
+              artifactRetirementScheduled:
+                warmExecution?.finalStep
+                  ?.currentSchroederHierarchyArtifactLedgerSummary?.()
+                  .retirementScheduled
+                ?? null,
+              artifactRetirementCompleted:
+                warmExecution?.finalStep
+                  ?.currentSchroederHierarchyArtifactLedgerSummary?.()
+                  .retirementCompleted
+                ?? null,
+              artifactPendingTransferCount:
+                warmExecution?.finalStep
+                  ?.currentSchroederHierarchyArtifactLedgerSummary?.()
+                  .pendingTransferCount
+                ?? null,
+              artifactUnretiredOwnedResourceCount:
+                warmExecution?.finalStep
+                  ?.currentSchroederHierarchyArtifactLedgerSummary?.()
+                  .unretiredOwnedResourceCount
+                ?? null
+            },
+            residentAutoSchedule:
+              overlay.__mlsMpmResidentAutoSchedule == null
+                ? null
+                : {
+                    status:
+                      overlay.__mlsMpmResidentAutoSchedule.status ?? null,
+                    generation:
+                      overlay.__mlsMpmResidentAutoSchedule.generation ?? null,
+                    residentAuto:
+                      overlay.__mlsMpmResidentAutoSchedule.residentAuto ?? null
+                  },
+            startupPresentationGate:
+              overlay.__sphResidentStartupPresentationGate == null
+                ? null
+                : {
+                    status:
+                      overlay.__sphResidentStartupPresentationGate.status
+                        ?? null,
+                    active:
+                      overlay.__sphResidentStartupPresentationGate.active
+                        ?? null,
+                    generation:
+                      overlay.__sphResidentStartupPresentationGate.generation
+                        ?? null,
+                    reason:
+                      overlay.__sphResidentStartupPresentationGate.reason
+                        ?? null
+                  },
+            rebuildWorker: overlay.__sphPhaseRebuildWorker == null
+              ? null
+              : {
+                  status: overlay.__sphPhaseRebuildWorker.status ?? null,
+                  generation:
+                    overlay.__sphPhaseRebuildWorker.generation ?? null,
+                  reason: overlay.__sphPhaseRebuildWorker.reason ?? null
+                },
+            cpuClosureTask: overlay.__sphCpuClosureTask == null
+              ? null
+              : {
+                  active: overlay.__sphCpuClosureTask.active ?? null,
+                  label: overlay.__sphCpuClosureTask.label ?? null,
+                  reason: overlay.__sphCpuClosureTask.reason ?? null
+                }
+          })
+        );
+        const resetPlaybackQuiescence =
+          await quiesceInteractivePlayback({
+            label: 'reset-playback-before-direct-measurement'
+          });
+        const resetCompletedAtMs = performance.now();
+        interactiveCacheResetOrdinal = Number(
+          resetEvidence.resetStatus.generation
+        );
+        execution = resetPlaybackQuiescence.execution;
+        // The same-page reset publishes a new resident execution after the
+        // presentation prepared during page warmup. Refresh that exact reset
+        // execution before taking the initial post-reset sample. Otherwise the
+        // sample truthfully reports the pre-reset draw as retained/stale, and a
+        // later current draw cannot distinguish a healthy reset handoff from a
+        // probe that simply sampled the two generations out of order.
+        //
+        // This is presentation work only: the resident source remains on the
+        // GPU, the configured no-full-readback route is preserved, and the
+        // refresh occurs before both the post-reset warmup and measured cache
+        // intervals.
+        markProbeProgress('post-reset-initial-render-state-started');
+        overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
+          preferWebGpu: true,
+          residentSteps: execution,
+          renderFieldReadbackMode: requestedRenderReadbackMode,
+          renderRowsReadbackMode: requestedRenderRowsReadbackMode,
+          renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
+          surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
+          surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+          surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+          nativeMarchingCubesMaxVertexRowsBufferByteLength:
+            requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+          nativeMarchingCubesMaxResolution: requestedNativeMarchingCubesMaxResolution,
+          gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
+        });
+        overlay.__sphResidentSurfaceDraw =
+          sceneApi.getSphResidentSurfaceDraw?.()
+          || overlay.__sphResidentSurfaceDraw
+          || null;
+        sceneApi.refreshViewportAndOverlay?.({
+          reason: 'sph-long-horizon-probe-post-reset-initial-render-refresh'
+        });
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const postResetInitialNativeSurfaceValidation =
+          await waitForNativeSurfaceValidation(0);
+        overlay.__sphResidentRenderState =
+          sceneApi.getSphResidentRenderState?.()
+          || overlay.__sphResidentRenderState;
+        overlay.__sphResidentSurfaceDraw =
+          sceneApi.getSphResidentSurfaceDraw?.()
+          || overlay.__sphResidentSurfaceDraw;
+        markProbeProgress('post-reset-initial-render-state-completed', {
+          status: overlay.__sphResidentRenderState?.status ?? null,
+          nativeSurfaceValidationStatus:
+            postResetInitialNativeSurfaceValidation?.status ?? null,
+          sourceResidentExecutionGenerationMatchesCurrent:
+            overlay.__sphResidentSurfaceDraw
+              ?.sourceResidentExecutionGenerationMatchesCurrent
+            ?? null,
+          sourceResidentRetainedPrevious:
+            overlay.__sphResidentSurfaceDraw?.sourceResidentRetainedPrevious
+            ?? null
+        });
+        const resetPageIdentity = {
+          performanceTimeOrigin: performance.timeOrigin,
+          documentUrl: location.href,
+          navigationEntryCount:
+            performance.getEntriesByType('navigation').length
+        };
+        interactiveCacheLifecycleEvidence = {
+          schema: 'peercompute.ulg.sph-interactive-cache-lifecycle.v1',
+          status: 'same-page-warm-reset-cached-measurement-running',
+          sameBrowserProcess: true,
+          sameBrowserContext: true,
+          samePage: true,
+          pageInstanceId: interactivePageInstanceId,
+          pageIdentity,
+          warmup: {
+            completedAtMs: warmupCompletedAtMs,
+            completedResidentBatchCount: 1,
+            completedResidentStepCount:
+              Number(warmExecution.completedStepCount),
+            staticTableWrite: {
+              schema: staticTableWrite.schema,
+              status: staticTableWrite.status,
+              storageKey: staticTableWrite.storageKey ?? null,
+              backend: staticTableWrite.backend ?? null,
+              counts: {
+                tables: Number(staticTableWrite.counts.tables),
+                gpuWarmup: Number(staticTableWrite.counts.gpuWarmup)
+              }
+            }
+          },
+          reset: {
+            completedAtMs: resetCompletedAtMs,
+            resetOrdinal: interactiveCacheResetOrdinal,
+            control: 'sph-reset',
+            navigationPerformed: Boolean(
+              resetPageIdentity.performanceTimeOrigin
+                !== pageIdentity.performanceTimeOrigin
+              || resetPageIdentity.documentUrl !== pageIdentity.documentUrl
+              || resetPageIdentity.navigationEntryCount
+                !== pageIdentity.navigationEntryCount
+            ),
+            residentStateReset: true,
+            resetGenerationAdvanced: true,
+            residentExecutionIdentityChanged:
+              execution !== warmExecution,
+            playbackQuiescence: resetPlaybackQuiescence.evidence,
+            performanceTimeOrigin:
+              resetPageIdentity.performanceTimeOrigin,
+            documentUrl: resetPageIdentity.documentUrl,
+            navigationEntryCount:
+              resetPageIdentity.navigationEntryCount,
+            staticTableCacheStatus:
+              resetEvidence.setParticlesTiming.staticTableCacheStatus,
+            staticTableRead: {
+              schema: resetEvidence.staticTableRead.schema ?? null,
+              status: resetEvidence.staticTableRead.status,
+              hitCount: Number(resetEvidence.staticTableRead.hitCount),
+              tableCount: Number(resetEvidence.staticTableRead.tableCount),
+              gpuWarmupCount:
+                Number(resetEvidence.staticTableRead.gpuWarmupCount),
+              restoredFamilies: Array.isArray(
+                resetEvidence.staticTableRead.restoredFamilies
+              )
+                ? [...resetEvidence.staticTableRead.restoredFamilies]
+                : []
+            }
+          },
+          postResetMeasurement: {
+            warmupBatchIndices: [1],
+            measuredBatchIndices: [2, 3],
+            drain: null,
+            terminalHandoff: null
+          }
+        };
       }
       markProbeProgress('sampling-initial-state');
       await appendMetricWithValidationCapture(sample(0, 'initial', 0));
@@ -7011,7 +9261,156 @@ async function runBrowserProbe({
           fullPhysicsValidation: false
         };
       }
+      let pendingBackgroundSettlement = null;
+      const residentRefreshOptions = ({
+        sourceExecution,
+        stepCount,
+        schroederGpuTimestampRecorder = null
+      }) => ({
+        preferWebGpu: true,
+        gasPressureSummary: overlay.__sphResidentGasPressureSummary
+          || overlay.__sphPhaseViewState?.gasPressureSummary
+          || null,
+        stepCount,
+        readbackMode: requestedReadbackMode,
+        compactSummaryMode: requestedCompactSummaryMode,
+        compactSummaryScope: requestedCompactSummaryScope,
+        continueFromResidentState: Boolean(
+          sourceExecution?.continuationAvailable
+        ),
+        force: true,
+        // Stage progress remains available through the in-page progress
+        // object. Mirroring ~50 debug messages per physics step through
+        // Playwright/CDP materially distorts long-horizon timing while adding
+        // no acceptance evidence.
+        emitResidentProgressConsole: false,
+        pressureInterfaceForceSolver:
+          requestedDisablePressureInterface ? null : undefined,
+        pressureInterfaceForceRowsBuffer:
+          requestedDisablePressureInterface ? null : undefined,
+        contactKinematicsParticleBinMetadataReadback:
+          Boolean(requestedContactBinMetadataReadback),
+        reactionParticleBinMetadataReadback:
+          Boolean(requestedReactionBinMetadataReadback),
+        thermalStepOptions: Number.isFinite(requestedThermalWallRate)
+          ? { wallRate: requestedThermalWallRate }
+          : undefined,
+        ...residentExecutionPolicy,
+        ...schroederExecutionOptions,
+        collectSchroederHierarchyHostTiming: Boolean(
+          requestedCollectSchroederHierarchyHostTiming
+        ),
+        ...(Number.isFinite(requestedPhaseVolumeMaxImpulseFraction)
+          ? {
+              phaseVolumeMaxImpulseFraction:
+                Math.max(0, requestedPhaseVolumeMaxImpulseFraction)
+            }
+          : {}),
+        ...(schroederGpuTimestampRecorder
+          ? { schroederGpuTimestampRecorder }
+          : {}),
+        measureFusedSequenceQueueFence: Boolean(
+          requestedMeasureGpuQueueFence
+          || residentExecutionPolicy?.measureFusedSequenceQueueFence
+        )
+      });
+      const settlementIsPending = (candidate) => Boolean(
+        String(
+          candidate?.schroederSpatialEpochReleaseSettlementStatus ?? ''
+        ).startsWith('pending-')
+        || String(
+          candidate?.schroederHierarchyArtifactLedgerSettlementStatus ?? ''
+        ).startsWith('pending-')
+        || String(
+          candidate?.schroederSuccessorSourceFamilyRetirementStatus ?? ''
+        ).startsWith('pending-')
+      );
+      const refreshRetainedSettlementEvidence = (record) => {
+        const retainedMetric = record?.retainedMetric;
+        const settledExecution = record?.execution;
+        if (!retainedMetric?.residentSteps || !settledExecution) return;
+        if (requestedArtifactDetailMode === 'visual-compact') {
+          refreshVisualSettlementEvidence(
+            retainedMetric.residentSteps,
+            settledExecution
+          );
+          retainedMetric.residentSteps.artifactCompaction = {
+            ...retainedMetric.residentSteps.artifactCompaction,
+            settlementReplayRelease:
+              releaseVisualSettlementReplayState(settledExecution)
+          };
+          return;
+        }
+        retainedMetric.residentSteps.schroederSpatialEpochTransactionSummaries =
+          Array.isArray(
+            settledExecution.schroederSpatialEpochTransactionSummaries
+          )
+            ? settledExecution.schroederSpatialEpochTransactionSummaries.map(
+                compactSchroederSpatialEpochTransaction
+              )
+            : [];
+        retainedMetric.residentSteps.schroederSpatialEpochReleaseSettlementCount =
+          settledExecution.schroederSpatialEpochReleaseSettlementCount
+          ?? null;
+        retainedMetric.residentSteps.schroederSpatialEpochReleaseSettlementComplete =
+          settledExecution.schroederSpatialEpochReleaseSettlementComplete
+          === true;
+        retainedMetric.residentSteps.schroederHierarchyArtifactLedgerSummaries =
+          Array.isArray(
+            settledExecution.schroederHierarchyArtifactLedgerSummaries
+          )
+            ? settledExecution.schroederHierarchyArtifactLedgerSummaries.map(
+                (summary) => ({ ...summary })
+              )
+            : [];
+        retainedMetric.residentSteps
+          .schroederHierarchyArtifactLedgerSettlementCount =
+          settledExecution.schroederHierarchyArtifactLedgerSettlementCount
+          ?? null;
+        retainedMetric.residentSteps
+          .schroederHierarchyArtifactLedgerSettlementComplete =
+          settledExecution.schroederHierarchyArtifactLedgerSettlementComplete
+          === true;
+      };
+      const authenticatePendingBackgroundSettlement = async (
+        record,
+        { successorBatchIndex, terminalDrain = false }
+      ) => {
+        if (!record) return null;
+        const startedAtMs = performance.now();
+        const settled = await record.promise;
+        if (settled !== true) {
+          throw new Error(
+            `Schroeder resident batch ${record.batchIndex} background settlement was not confirmed`
+          );
+        }
+        const elapsedMs = performance.now() - startedAtMs;
+        record.timing.backgroundSettlementAwaitMs = elapsedMs;
+        record.timing.totalBeforeSampleMs = Math.max(
+          0,
+          Number(record.timing.totalBeforeSampleMs) || 0
+        ) + elapsedMs;
+        record.timing.backgroundSettlementStatus = terminalDrain
+          ? 'background-settlement-complete-after-unmeasured-terminal-consumer'
+          : 'background-settlement-complete-after-successor-consumer';
+        record.timing.backgroundSettlementSuccessorBatchIndex =
+          successorBatchIndex;
+        record.timing.backgroundSettlementTerminalDrain = terminalDrain;
+        refreshRetainedSettlementEvidence(record);
+        return {
+          sourceBatchIndex: record.batchIndex,
+          successorBatchIndex,
+          terminalDrain,
+          elapsedMs,
+          status: record.timing.backgroundSettlementStatus
+        };
+      };
       for (let batchIndex = 1; batchIndex <= requestedBatches; batchIndex += 1) {
+        interactiveCacheMeasurementClass = requestedInteractiveCacheLifecycle
+          ? (batchIndex === 1
+              ? 'post-reset-warmup'
+              : 'post-reset-measured')
+          : null;
         const started = performance.now();
         const probeResidentBatchTiming = {
           schema: 'peercompute.ulg.sph-probe-resident-batch-timing.v0',
@@ -7019,18 +9418,22 @@ async function runBrowserProbe({
           batchIndex,
           startedAtMs: started,
           residentStepsAwaitMs: null,
+          backgroundSettlementAwaitMs: null,
+          backgroundSettlementStatus: null,
           thermalCandidateCsrRouteReadbackMs: null,
-          renderRefreshAwaitMs: null,
-          materialInterfaceDiagnosticMs: null,
-          viewportRefreshMs: null,
-          viewportRafMs: null,
-          nativeSurfaceValidationWaitMs: null,
+          renderRefreshAwaitMs: 0,
+          materialInterfaceDiagnosticMs: 0,
+          viewportRefreshMs: 0,
+          viewportRafMs: 0,
+          nativeSurfaceValidationWaitMs: 0,
           gpuTimestampInterval: null,
           gpuStageTimestamps: null,
+          residentStageWallTrace: null,
           totalBeforeSampleMs: null
         };
         let residentGpuTimestampInterval = null;
         let residentGpuStageTimestampRecorder = null;
+        let residentStageWallTrace = null;
         try {
           markProbeProgress('resident-batch-started', { batchIndex, batchSteps: requestedBatchSteps });
           residentGpuTimestampInterval = await beginResidentGpuTimestampInterval(
@@ -7042,38 +9445,96 @@ async function runBrowserProbe({
             await beginResidentGpuStageTimestampRecorder(batchIndex);
           probeResidentBatchTiming.gpuStageTimestamps =
             residentGpuStageTimestampRecorder.evidence;
+          residentStageWallTrace =
+            createResidentStageWallTrace(batchIndex);
+          probeResidentBatchTiming.residentStageWallTrace =
+            residentStageWallTrace.evidence();
           const residentStepsAwaitStartedAtMs = performance.now();
-          execution = await sceneApi.refreshMlsMpmResidentSteps({
-            preferWebGpu: true,
-            gasPressureSummary: overlay.__sphResidentGasPressureSummary
-              || overlay.__sphPhaseViewState?.gasPressureSummary
-              || null,
-            stepCount: requestedBatchSteps,
-            readbackMode: requestedReadbackMode,
-            compactSummaryMode: requestedCompactSummaryMode,
-            compactSummaryScope: requestedCompactSummaryScope,
-            continueFromResidentState: Boolean(execution?.continuationAvailable),
-            force: true,
-            pressureInterfaceForceSolver: requestedDisablePressureInterface ? null : undefined,
-            pressureInterfaceForceRowsBuffer: requestedDisablePressureInterface ? null : undefined,
-            contactKinematicsParticleBinMetadataReadback:
-              Boolean(requestedContactBinMetadataReadback),
-            reactionParticleBinMetadataReadback:
-              Boolean(requestedReactionBinMetadataReadback),
-            thermalStepOptions: Number.isFinite(requestedThermalWallRate)
-            ? { wallRate: requestedThermalWallRate }
-            : undefined,
-            ...residentExecutionPolicy,
-            ...schroederExecutionOptions,
-            schroederGpuTimestampRecorder:
-              residentGpuStageTimestampRecorder.recorder,
-            measureFusedSequenceQueueFence: Boolean(
-              requestedMeasureGpuQueueFence
-              || residentExecutionPolicy?.measureFusedSequenceQueueFence
-            )
-          });
+          const sourceExecution = execution;
+          const currentExecution = await sceneApi.refreshMlsMpmResidentSteps(
+            residentRefreshOptions({
+              sourceExecution,
+              stepCount: requestedBatchSteps,
+              schroederGpuTimestampRecorder:
+                residentStageWallTrace.recorder
+                ?? residentGpuStageTimestampRecorder.recorder
+            })
+          );
+          const publishedExecutionAfterCompute =
+            sceneApi.getMlsMpmResidentSteps?.() || null;
+          probeResidentBatchTiming.executionPublicationAfterCompute = {
+            schema:
+              'peercompute.ulg.sph-probe-resident-execution-publication.v0',
+            status: currentExecution === publishedExecutionAfterCompute
+              ? 'computed-execution-published'
+              : 'computed-execution-not-published',
+            computedExecutionMatchesPublishedExecution:
+              currentExecution === publishedExecutionAfterCompute,
+            computedExecutionStale: currentExecution?.stale === true,
+            computedExecutionStaleReason:
+              currentExecution?.staleReason ?? null,
+            computedExecutionStatus: currentExecution?.status ?? null,
+            computedExecutionPublicationRevalidation:
+              currentExecution?.residentPublicationRevalidation ?? null,
+            computedExecutionSignature:
+              currentExecution?.signature ?? null,
+            publishedExecutionStatus:
+              publishedExecutionAfterCompute?.status ?? null,
+            publishedExecutionSignature:
+              publishedExecutionAfterCompute?.signature ?? null,
+            sourceExecutionMatchesPublishedExecution:
+              sourceExecution === publishedExecutionAfterCompute,
+            sourceExecutionContinuationAvailable:
+              sourceExecution?.continuationAvailable === true,
+            sourceExecutionNextSphParticleStateAvailable:
+              Boolean(sourceExecution?.nextSphParticleState),
+            sourceExecutionNextMlsMpmParticleStateAvailable:
+              Boolean(sourceExecution?.nextMlsMpmParticleState),
+            sourceExecutionSphUploadStatus:
+              sourceExecution?.nextParticleUploads?.sphParticleUpload?.status
+              ?? null,
+            sourceExecutionMlsMpmUploadStatus:
+              sourceExecution?.nextParticleUploads?.mlsMpmParticleUpload?.status
+              ?? null
+          };
           probeResidentBatchTiming.residentStepsAwaitMs =
             performance.now() - residentStepsAwaitStartedAtMs;
+          // A one-step Schroeder batch cannot settle its next-tick cleanup
+          // until the following useful hierarchy consumer seals the claim.
+          // Execute that successor first, then authenticate the prior promise;
+          // awaiting the current promise here deadlocks the exact ownership
+          // protocol and turns a healthy ~15 ms batch into a probe timeout.
+          if (pendingBackgroundSettlement) {
+            await authenticatePendingBackgroundSettlement(
+              pendingBackgroundSettlement,
+              { successorBatchIndex: batchIndex }
+            );
+            pendingBackgroundSettlement = null;
+          }
+          execution = currentExecution;
+          const backgroundSettlementPromise =
+            execution?.schroederBackgroundSettlementPromise ?? null;
+          if (
+            backgroundSettlementPromise
+            && typeof backgroundSettlementPromise.then === 'function'
+          ) {
+            probeResidentBatchTiming.backgroundSettlementStatus =
+              'pending-successor-consumer';
+            probeResidentBatchTiming.backgroundSettlementAwaitMs = 0;
+          } else {
+            if (settlementIsPending(execution)) {
+              throw new Error(
+                'Schroeder resident batch omitted its pending background settlement promise'
+              );
+            }
+            probeResidentBatchTiming.backgroundSettlementStatus =
+              execution?.schroederSimulation === true
+                ? 'already-settled-no-background-promise'
+                : 'not-required';
+            probeResidentBatchTiming.backgroundSettlementAwaitMs = 0;
+          }
+          probeResidentBatchTiming.residentStageWallTrace =
+            residentStageWallTrace.evidence();
           probeResidentBatchTiming.gpuTimestampInterval =
             await residentGpuTimestampInterval.complete();
           probeResidentBatchTiming.gpuStageTimestamps =
@@ -7082,7 +9543,11 @@ async function runBrowserProbe({
             batchIndex,
             batchMs: performance.now() - started,
             backend: execution?.backend || null,
-            completedStepCount: execution?.completedStepCount ?? null
+            completedStepCount: execution?.completedStepCount ?? null,
+            backgroundSettlementStatus:
+              probeResidentBatchTiming.backgroundSettlementStatus,
+            backgroundSettlementAwaitMs:
+              probeResidentBatchTiming.backgroundSettlementAwaitMs
           });
           overlay.__mlsMpmResidentSteps = execution;
           overlay.__mlsMpmResidentStep = sceneApi.getMlsMpmResidentStep?.() || execution?.finalStep || null;
@@ -7225,7 +9690,20 @@ async function runBrowserProbe({
           overlay.__sphProbeResidentBatchTiming = probeResidentBatchTiming;
           markProbeProgress('resident-batch-sampling-started', { batchIndex });
           const metric = sample(batchIndex, 'resident-batch', measuredBatchMs);
-          await appendMetricWithValidationCapture(metric);
+          const retainedMetric =
+            await appendMetricWithValidationCapture(metric);
+          if (
+            backgroundSettlementPromise
+            && typeof backgroundSettlementPromise.then === 'function'
+          ) {
+            pendingBackgroundSettlement = {
+              batchIndex,
+              execution,
+              promise: backgroundSettlementPromise,
+              timing: probeResidentBatchTiming,
+              retainedMetric
+            };
+          }
           if (shouldRunAnomalyRowReadback(metric)) {
             overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
               preferWebGpu: true,
@@ -7288,13 +9766,158 @@ async function runBrowserProbe({
           break;
         }
       }
+      let terminalDrainEvidence = null;
+      if (pendingBackgroundSettlement && errors.length === 0) {
+        const drainStartedAtMs = performance.now();
+        const drainSourceExecution = execution;
+        const sourceFamilyLiveness = async (candidate) => {
+          if (!candidate) return null;
+          try {
+            const module = await import(
+              '/src/runtime/sph/schroederSpatialSuccessorSourceFamily.js'
+            );
+            return module.schroederSpatialSuccessorSourceFamilyLiveness(
+              candidate
+            );
+          } catch (error) {
+            return {
+              status: 'successor-source-family-liveness-unavailable',
+              error: error instanceof Error ? error.message : String(error)
+            };
+          }
+        };
+        const sceneDrainSourceExecution =
+          sceneApi.getMlsMpmResidentSteps?.()
+          || overlay.__mlsMpmResidentSteps
+          || null;
+        const requestedSourceFamily =
+          drainSourceExecution?.nextParticleUploads
+            ?.schroederSpatialSuccessorSourceFamily
+          ?? drainSourceExecution?.finalStep?.nextParticleUploads
+            ?.schroederSpatialSuccessorSourceFamily
+          ?? null;
+        const sceneSourceFamily =
+          sceneDrainSourceExecution?.nextParticleUploads
+            ?.schroederSpatialSuccessorSourceFamily
+          ?? sceneDrainSourceExecution?.finalStep?.nextParticleUploads
+            ?.schroederSpatialSuccessorSourceFamily
+          ?? null;
+        terminalDrainEvidence = {
+          schema: 'peercompute.ulg.sph-probe-terminal-drain.v0',
+          status: 'unmeasured-terminal-consumer-started',
+          measured: false,
+          metricPublished: false,
+          sourceBatchIndex: pendingBackgroundSettlement.batchIndex,
+          successorBatchIndex: requestedBatches + 1,
+          sourceExecutionMatchesSceneExecution:
+            drainSourceExecution === sceneDrainSourceExecution,
+          sourceFamilyMatchesSceneSourceFamily:
+            requestedSourceFamily === sceneSourceFamily,
+          requestedSourceFamilyLiveness:
+            await sourceFamilyLiveness(requestedSourceFamily),
+          sceneSourceFamilyLiveness:
+            sceneSourceFamily === requestedSourceFamily
+              ? null
+              : await sourceFamilyLiveness(sceneSourceFamily),
+          elapsedMs: null,
+          error: null
+        };
+        try {
+          const drainExecution = await sceneApi.refreshMlsMpmResidentSteps(
+            residentRefreshOptions({
+              sourceExecution: drainSourceExecution,
+              stepCount: 1
+            })
+          );
+          const settlement = await authenticatePendingBackgroundSettlement(
+            pendingBackgroundSettlement,
+            {
+              successorBatchIndex: requestedBatches + 1,
+              terminalDrain: true
+            }
+          );
+          pendingBackgroundSettlement = null;
+          execution = drainExecution;
+          terminalDrainEvidence = {
+            ...terminalDrainEvidence,
+            status: 'unmeasured-terminal-consumer-complete',
+            completedStepCount:
+              Number(drainExecution?.completedStepCount ?? 0),
+            elapsedMs: performance.now() - drainStartedAtMs,
+            settledStatus: settlement.status
+          };
+          if (interactiveCacheLifecycleEvidence) {
+            globalThis.__ulgInteractiveCacheTerminalDrainExecution =
+              drainExecution;
+            interactiveCacheLifecycleEvidence.postResetMeasurement.drain = {
+              ...terminalDrainEvidence,
+              schema:
+                'peercompute.ulg.sph-interactive-cache-terminal-drain.v1'
+            };
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          terminalDrainEvidence = {
+            ...terminalDrainEvidence,
+            status: 'unmeasured-terminal-consumer-failed',
+            elapsedMs: performance.now() - drainStartedAtMs,
+            requestedSourceFamilyLivenessAfterFailure:
+              await sourceFamilyLiveness(requestedSourceFamily),
+            sceneSourceFamilyLivenessAfterFailure:
+              sceneSourceFamily === requestedSourceFamily
+                ? null
+                : await sourceFamilyLiveness(sceneSourceFamily),
+            error: message
+          };
+          errors.push({
+            batchIndex: requestedBatches + 1,
+            phase: 'terminal-drain',
+            message,
+            stack: error instanceof Error ? error.stack || null : null,
+            terminalDrainEvidence
+          });
+        }
+      }
+      if (interactiveCacheLifecycleEvidence) {
+        const residentMetrics = metrics.filter(
+          (metric) => metric?.phase === 'resident-batch'
+        );
+        interactiveCacheLifecycleEvidence.status = errors.length === 0
+          && residentMetrics.length === requestedBatches
+          && residentMetrics[0]?.interactiveCacheMeasurementClass
+            === 'post-reset-warmup'
+          && residentMetrics.slice(1).every(
+            (metric) => metric?.interactiveCacheMeasurementClass
+              === 'post-reset-measured'
+          )
+          && residentMetrics.every((metric) => (
+            metric?.pageInstanceId === interactivePageInstanceId
+            && metric?.cacheResetOrdinal === interactiveCacheResetOrdinal
+          ))
+          && interactiveCacheLifecycleEvidence.postResetMeasurement
+            .drain?.status === 'unmeasured-terminal-consumer-complete'
+          ? 'same-page-warm-reset-cached-measurement-awaiting-terminal-handoff'
+          : 'same-page-warm-reset-cached-measurement-incomplete';
+        interactiveCacheLifecycleEvidence.completedAtMs = performance.now();
+        interactiveCacheLifecycleEvidence.postResetMeasurement = {
+          ...interactiveCacheLifecycleEvidence.postResetMeasurement,
+          observedResidentBatchIndices: residentMetrics.map(
+            (metric) => metric.batchIndex
+          ),
+          observedMeasurementClasses: residentMetrics.map(
+            (metric) => metric.interactiveCacheMeasurementClass
+          )
+        };
+      }
       const continuationWaitStarted = performance.now();
       const retainedStateContinuation = await waitForWorkerOffscreenRetainedStateContinuation();
       if (retainedStateContinuation) {
-        metrics.push(sample(
-          requestedBatches,
-          'resident-batch-retained-continuation',
-          performance.now() - continuationWaitStarted
+        metrics.push(retainProbeMetric(
+          sample(
+            requestedBatches,
+            'resident-batch-retained-continuation',
+            performance.now() - continuationWaitStarted
+          )
         ));
       }
       if (
@@ -7304,10 +9927,12 @@ async function runBrowserProbe({
         const compactSnapshotWaitStarted = performance.now();
         const retainedCompactSnapshot = await waitForWorkerOffscreenRetainedCompactSnapshot();
         if (retainedCompactSnapshot) {
-          metrics.push(sample(
-            requestedBatches,
-            'resident-batch-retained-compact-snapshot',
-            performance.now() - compactSnapshotWaitStarted
+          metrics.push(retainProbeMetric(
+            sample(
+              requestedBatches,
+              'resident-batch-retained-compact-snapshot',
+              performance.now() - compactSnapshotWaitStarted
+            )
           ));
         }
       }
@@ -7317,9 +9942,15 @@ async function runBrowserProbe({
         batchCount: requestedBatches,
         batchStepCount: requestedBatchSteps,
         requestedSubsteps: requestedBatches * requestedBatchSteps,
+        terminalDrainEvidence,
         readbackMode: requestedReadbackMode,
         compactSummaryMode: requestedCompactSummaryMode,
         compactSummaryScope: requestedCompactSummaryScope,
+        artifactDetailMode: requestedArtifactDetailMode,
+        phaseVolumeMaxImpulseFractionOverride:
+          Number.isFinite(requestedPhaseVolumeMaxImpulseFraction)
+            ? requestedPhaseVolumeMaxImpulseFraction
+            : null,
         renderReadbackMode: requestedRenderReadbackMode,
         renderRowsReadbackMode: requestedRenderRowsReadbackMode,
         renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
@@ -7338,6 +9969,10 @@ async function runBrowserProbe({
         reactionBinMetadataReadback: Boolean(requestedReactionBinMetadataReadback),
         anomalyRowReadback: Boolean(requestedAnomalyRowReadback),
         residentBufferDebug: Boolean(requestedResidentBufferDebug),
+        traceResidentStageWall: Boolean(requestedTraceResidentStageWall),
+        collectSchroederHierarchyHostTiming: Boolean(
+          requestedCollectSchroederHierarchyHostTiming
+        ),
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         thermalCandidateCsrRouteEvidenceRequested:
           Boolean(requestedCaptureThermalCandidateCsrRouteEvidence),
@@ -7355,6 +9990,7 @@ async function runBrowserProbe({
           uiSuppressedForSurfaceEvidence: requestedNativeSurfaceCaptureUiSuppressed
         },
         authoritativeGpuCheckpointCapture: authoritativeGpuCheckpointCaptureSummary(),
+        interactiveCacheLifecycle: interactiveCacheLifecycleEvidence,
         visualFrames,
         errors,
         metrics,
@@ -7366,6 +10002,7 @@ async function runBrowserProbe({
     }, {
       batches,
       batchSteps,
+      interactiveCacheLifecycle,
       renderEvery,
       readbackMode,
       compactSummaryMode,
@@ -7389,6 +10026,9 @@ async function runBrowserProbe({
       measureGpuQueueFence,
       measureGpuTimestampInterval,
       measureGpuStageTimestamps,
+      measureGpuStageEncoderSpans,
+      traceResidentStageWall,
+      collectSchroederHierarchyHostTiming,
       materialInterfaceDiagnostic,
       materialInterfaceCandidateReadbackMode,
       nativeSurfaceDebugMode,
@@ -7400,7 +10040,12 @@ async function runBrowserProbe({
       captureFrameMax,
       preProbeSnapshots,
       pageConsole,
-      nativeSurfaceCaptureUiSuppressed
+      nativeSurfaceCaptureUiSuppressed,
+      artifactDetailMode,
+      phaseVolumeMaxImpulseFraction,
+      generatedGasTargetMaterial,
+      generatedGasMinimumMassKg,
+      generatedGasMinimumMassFractionOfSystem
     });
     let timeoutProbeTimer = null;
     const timeoutProbe = new Promise((resolve) => {
@@ -7489,14 +10134,13 @@ async function runBrowserProbe({
           const nativeBridgeRenderedBeforeBrowserFrameValidation = Boolean(
             surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
             && (
-              lastMetricBeforeBrowserFrameValidation?.surfaceDraw?.renderBridgeLastRenderStatus
-                === 'native-webgpu-surface-consumer-rendered'
-              || lastMetricBeforeBrowserFrameValidation?.surfaceDraw?.renderBridgeLastRenderStatus
-                === 'native-webgpu-surface-consumer-debug-clear-rendered'
-              || lastMetricBeforeBrowserFrameValidation?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
-                === 'native-webgpu-surface-consumer-rendered'
-              || lastMetricBeforeBrowserFrameValidation?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
-                === 'native-webgpu-surface-consumer-debug-clear-rendered'
+              nativeWebGpuSurfaceRenderStatusIsRendered(
+                lastMetricBeforeBrowserFrameValidation?.surfaceDraw?.renderBridgeLastRenderStatus
+              )
+              || nativeWebGpuSurfaceRenderStatusIsRendered(
+                lastMetricBeforeBrowserFrameValidation?.renderState
+                  ?.surfaceDrawRenderBridgeLastRenderStatus
+              )
             )
           );
           const browserFrameValidation = browserFrameValidationFromVisualFrame(canvasCenterFrame, {
@@ -7728,97 +10372,200 @@ async function runBrowserProbe({
                   };
                 }
               };
-              const nativeIndirectArgsValidation = await readNativeIndirectArgs();
+              const nativeIndirectArgsValidation =
+                validation.nativeIndirectArgsReadbackRequested === true
+                  ? await readNativeIndirectArgs()
+                  : {
+                      schema:
+                        'peercompute.ulg.sph-native-webgpu-indirect-args-readback.v0',
+                      status: 'not-requested',
+                      reason:
+                        'native indirect-argument readback is disabled outside explicit visual diagnostics',
+                      readbackByteLength: 0,
+                      queueSubmitCount: 0,
+                      mapAsyncCount: 0,
+                      draws: []
+                    };
+              const postValidationRenderState =
+                sceneApi?.getSphResidentRenderState?.() || renderState;
+              const postValidationSurfaceDraw =
+                sceneApi?.getSphResidentSurfaceDraw?.() || surfaceDraw;
               if (overlay && sceneApi) {
-                overlay.__sphResidentRenderState = renderState;
-                overlay.__sphResidentSurfaceDraw = surfaceDraw;
+                overlay.__sphResidentRenderState = postValidationRenderState;
+                overlay.__sphResidentSurfaceDraw = postValidationSurfaceDraw;
               }
-              const renderStatePatch = renderState ? {
-                surfaceDrawVisibleGpuConsumerReady: Boolean(renderState.surfaceDrawVisibleGpuConsumerReady),
-                surfaceDrawVisibleGpuConsumerStatus: renderState.surfaceDrawVisibleGpuConsumerStatus ?? null,
-                surfaceDrawVisibleGpuConsumerReason: renderState.surfaceDrawVisibleGpuConsumerReason ?? null,
+              const nativePresentationProofPatch = (state) => ({
+                surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted:
+                  state?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerForegroundProofValidated:
+                  state?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated:
+                  state?.surfaceDrawVisibleGpuConsumerBrowserFrameForegroundValidated
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated:
+                  state?.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus:
+                  state?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration:
+                  state?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativePixelValidationSource:
+                  state?.surfaceDrawVisibleGpuConsumerNativePixelValidationSource
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativePixelValidationNonzeroPixelCount
+                    ?? null,
+                surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration:
+                  state
+                    ?.surfaceDrawVisibleGpuConsumerNativePixelValidationResourceGeneration
+                    ?? null
+              });
+              const renderStatePatch = postValidationRenderState ? {
+                ...nativePresentationProofPatch(postValidationRenderState),
+                surfaceDrawVisibleGpuConsumerReady: Boolean(postValidationRenderState.surfaceDrawVisibleGpuConsumerReady),
+                surfaceDrawVisibleGpuConsumerStatus: postValidationRenderState.surfaceDrawVisibleGpuConsumerStatus ?? null,
+                surfaceDrawVisibleGpuConsumerReason: postValidationRenderState.surfaceDrawVisibleGpuConsumerReason ?? null,
                 surfaceDrawVisibleGpuConsumerPixelValidationStatus:
-                  renderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
                 surfaceDrawVisibleGpuConsumerValidated:
-                  Boolean(renderState.surfaceDrawVisibleGpuConsumerValidated),
+                  Boolean(postValidationRenderState.surfaceDrawVisibleGpuConsumerValidated),
                 surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated:
-                  Boolean(renderState.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
+                  Boolean(postValidationRenderState.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected:
-                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute:
-                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread:
-                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
-                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus:
-                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
                 surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
-                  renderState.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
+                  postValidationRenderState.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
                 surfaceDrawRenderBridgePixelValidationStatus:
-                  renderState.surfaceDrawRenderBridgePixelValidationStatus ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationStatus ?? null,
                 surfaceDrawRenderBridgePixelValidationReason:
-                  renderState.surfaceDrawRenderBridgePixelValidationReason ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationReason ?? null,
                 surfaceDrawRenderBridgePixelValidationSource:
-                  renderState.surfaceDrawRenderBridgePixelValidationSource ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationSource ?? null,
                 surfaceDrawRenderBridgePixelValidationWidth:
-                  renderState.surfaceDrawRenderBridgePixelValidationWidth ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationWidth ?? null,
                 surfaceDrawRenderBridgePixelValidationHeight:
-                  renderState.surfaceDrawRenderBridgePixelValidationHeight ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationHeight ?? null,
                 surfaceDrawRenderBridgePixelValidationNonzeroPixelCount:
-                  renderState.surfaceDrawRenderBridgePixelValidationNonzeroPixelCount ?? null,
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationNonzeroPixelCount ?? null,
                 surfaceDrawRenderBridgePixelValidationPixelCount:
-                  renderState.surfaceDrawRenderBridgePixelValidationPixelCount ?? null
+                  postValidationRenderState.surfaceDrawRenderBridgePixelValidationPixelCount ?? null
               } : null;
-              const surfaceDrawPatch = surfaceDraw ? {
-                surfaceDrawVisibleGpuConsumerReady: Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerReady),
-                surfaceDrawVisibleGpuConsumerStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null,
-                surfaceDrawVisibleGpuConsumerReason: surfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null,
+              const surfaceDrawPatch = postValidationSurfaceDraw ? {
+                ...nativePresentationProofPatch(postValidationSurfaceDraw),
+                surfaceDrawVisibleGpuConsumerReady: Boolean(postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerReady),
+                surfaceDrawVisibleGpuConsumerStatus: postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null,
+                surfaceDrawVisibleGpuConsumerReason: postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null,
                 surfaceDrawVisibleGpuConsumerPixelValidationStatus:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
                 surfaceDrawVisibleGpuConsumerValidated:
-                  Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerValidated),
+                  Boolean(postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerValidated),
                 surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated:
-                  Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
+                  Boolean(postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
                 surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
                 surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
-                  surfaceDraw.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
+                  postValidationSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
                 renderBridgePixelValidationStatus:
-                  surfaceDraw.renderBridgePixelValidationStatus ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationStatus ?? null,
                 renderBridgePixelValidationReason:
-                  surfaceDraw.renderBridgePixelValidationReason ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationReason ?? null,
                 renderBridgePixelValidationSource:
-                  surfaceDraw.renderBridgePixelValidationSource ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationSource ?? null,
                 renderBridgePixelValidationWidth:
-                  surfaceDraw.renderBridgePixelValidationWidth ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationWidth ?? null,
                 renderBridgePixelValidationHeight:
-                  surfaceDraw.renderBridgePixelValidationHeight ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationHeight ?? null,
                 renderBridgePixelValidationNonzeroPixelCount:
-                  surfaceDraw.renderBridgePixelValidationNonzeroPixelCount ?? null,
+                  postValidationSurfaceDraw.renderBridgePixelValidationNonzeroPixelCount ?? null,
                 renderBridgePixelValidationPixelCount:
-                  surfaceDraw.renderBridgePixelValidationPixelCount ?? null
+                  postValidationSurfaceDraw.renderBridgePixelValidationPixelCount ?? null
               } : null;
               const nativeSurfaceVisibleConsumerReady = Boolean(
-                surfaceDraw?.visibleGpuConsumerReady
-                ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
-                ?? renderState?.surfaceDrawVisibleGpuConsumerReady
+                postValidationSurfaceDraw?.visibleGpuConsumerReady
+                ?? postValidationSurfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+                ?? postValidationRenderState?.surfaceDrawVisibleGpuConsumerReady
               );
               const nativeSurfaceGpuBufferHandoffReady = Boolean(
-                surfaceDraw?.gpuBufferHandoffReady
-                ?? renderState?.surfaceDrawGpuBufferHandoffReady
+                postValidationSurfaceDraw?.gpuBufferHandoffReady
+                ?? postValidationRenderState?.surfaceDrawGpuBufferHandoffReady
               );
+              const nativeSurfaceRuntimePresentationAdmitted = (
+                postValidationSurfaceDraw
+                  ?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+                ?? postValidationRenderState
+                  ?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+              ) === true;
+              const nativeSurfaceForegroundProofValidated = (
+                postValidationSurfaceDraw
+                  ?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+                ?? postValidationRenderState
+                  ?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+              ) === true;
               const nativeSurfaceReady = Boolean(
                 nativeSurfaceVisibleConsumerReady
                 && nativeSurfaceGpuBufferHandoffReady
+                && nativeSurfaceRuntimePresentationAdmitted
+              );
+              const nativeSurfaceForegroundProved = Boolean(
+                nativeSurfaceReady
+                && nativeSurfaceForegroundProofValidated
               );
               return {
                 publishStatus,
@@ -7828,36 +10575,45 @@ async function runBrowserProbe({
                 nativeSurfaceValidation: {
                   native: true,
                   ready: nativeSurfaceReady,
+                  admitted: nativeSurfaceReady,
+                  foregroundProved: nativeSurfaceForegroundProved,
+                  runtimePresentationAdmitted:
+                    nativeSurfaceRuntimePresentationAdmitted,
+                  foregroundProofValidated:
+                    nativeSurfaceForegroundProofValidated,
                   pending: false,
                   status: nativeSurfaceReady
-                    ? 'native-surface-visible-consumer-ready'
-                    : 'native-surface-browser-frame-validation-settled-not-ready',
+                    ? 'native-surface-presentation-admitted'
+                    : 'native-surface-presentation-not-admitted',
+                  foregroundStatus: nativeSurfaceForegroundProved
+                    ? 'native-surface-foreground-proved'
+                    : 'native-surface-foreground-not-proved',
                   bridgeMode:
-                    surfaceDraw?.visibleRendererBridge
-                    ?? renderState?.surfaceDrawVisibleRendererBridge
+                    postValidationSurfaceDraw?.visibleRendererBridge
+                    ?? postValidationRenderState?.surfaceDrawVisibleRendererBridge
                     ?? null,
                   gpuBufferHandoffReady: nativeSurfaceGpuBufferHandoffReady,
                   gpuBufferHandoffStatus:
-                    surfaceDraw?.gpuBufferHandoffStatus
-                    ?? renderState?.surfaceDrawGpuBufferHandoffStatus
+                    postValidationSurfaceDraw?.gpuBufferHandoffStatus
+                    ?? postValidationRenderState?.surfaceDrawGpuBufferHandoffStatus
                     ?? null,
                   gpuBufferHandoffReason:
-                    surfaceDraw?.gpuBufferHandoffReason
-                    ?? renderState?.surfaceDrawGpuBufferHandoffReason
+                    postValidationSurfaceDraw?.gpuBufferHandoffReason
+                    ?? postValidationRenderState?.surfaceDrawGpuBufferHandoffReason
                     ?? null,
                   pixelValidationStatus:
-                    surfaceDraw?.visibleGpuConsumerPixelValidationStatus
-                    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
-                    ?? renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+                    postValidationSurfaceDraw?.visibleGpuConsumerPixelValidationStatus
+                    ?? postValidationSurfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+                    ?? postValidationRenderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
                     ?? null,
                   pixelValidationReason:
-                    surfaceDraw?.renderBridgePixelValidationReason
-                    ?? renderState?.surfaceDrawRenderBridgePixelValidationReason
+                    postValidationSurfaceDraw?.renderBridgePixelValidationReason
+                    ?? postValidationRenderState?.surfaceDrawRenderBridgePixelValidationReason
                     ?? null,
                   validationBlockerFamily:
-                    surfaceDraw?.visibleGpuConsumerNativeValidationBlockerFamily
-                    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
-                    ?? renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+                    postValidationSurfaceDraw?.visibleGpuConsumerNativeValidationBlockerFamily
+                    ?? postValidationSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+                    ?? postValidationRenderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
                     ?? null
                 }
               };
@@ -7868,7 +10624,10 @@ async function runBrowserProbe({
               width: browserFrameValidation.width ?? null,
               height: browserFrameValidation.height ?? null,
               nonzeroPixelCount: browserFrameValidation.nonzeroPixelCount ?? null,
-              pixelCount: browserFrameValidation.pixelCount ?? null
+              pixelCount: browserFrameValidation.pixelCount ?? null,
+              nativeIndirectArgsReadbackRequested: Boolean(
+                visualIntervalCaptureRequested || captureProductSurfacesOnly
+              )
             }).catch((error) => ({
               publishStatus: {
                 schema: 'peercompute.ulg.sph-native-webgpu-browser-frame-validation.v0',
@@ -7924,11 +10683,9 @@ async function runBrowserProbe({
             }
             if (lastMetric && publishResult.nativeSurfaceValidation) {
               // Browser-frame validation happens after the final batch has
-              // been sampled. Its mutable scene snapshot can lag or be
-              // replaced by diagnostic publication, so bind that validation
-              // to the last sampled direct surface record instead. This keeps
-              // the visible-pixel result and the GPU handoff proof on the
-              // same current resident publication.
+              // been sampled. Bind the post-validation proof fields to that
+              // last sampled direct surface record so pixel proof and runtime
+              // admission describe the same current resident publication.
               const sampledSurfaceDraw = lastMetric.surfaceDraw || null;
               const sampledRenderState = lastMetric.renderState || null;
               const sampledNativeVisibleConsumerReady = Boolean(
@@ -7940,17 +10697,43 @@ async function runBrowserProbe({
                 sampledSurfaceDraw?.gpuBufferHandoffReady
                 ?? sampledRenderState?.surfaceDrawGpuBufferHandoffReady
               );
+              const sampledNativeRuntimePresentationAdmitted = (
+                sampledSurfaceDraw
+                  ?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+                ?? sampledRenderState
+                  ?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+              ) === true;
+              const sampledNativeForegroundProofValidated = (
+                sampledSurfaceDraw
+                  ?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+                ?? sampledRenderState
+                  ?.surfaceDrawVisibleGpuConsumerForegroundProofValidated
+              ) === true;
               const sampledNativeReady = Boolean(
                 sampledNativeVisibleConsumerReady
                 && sampledNativeGpuBufferHandoffReady
+                && sampledNativeRuntimePresentationAdmitted
+              );
+              const sampledNativeForegroundProved = Boolean(
+                sampledNativeReady
+                && sampledNativeForegroundProofValidated
               );
               lastMetric.nativeSurfaceValidation = {
                 ...(lastMetric.nativeSurfaceValidation || {}),
                 ...publishResult.nativeSurfaceValidation,
                 ready: sampledNativeReady,
+                admitted: sampledNativeReady,
+                foregroundProved: sampledNativeForegroundProved,
+                runtimePresentationAdmitted:
+                  sampledNativeRuntimePresentationAdmitted,
+                foregroundProofValidated:
+                  sampledNativeForegroundProofValidated,
                 status: sampledNativeReady
-                  ? 'native-surface-visible-consumer-ready'
-                  : 'native-surface-browser-frame-validation-settled-not-ready',
+                  ? 'native-surface-presentation-admitted'
+                  : 'native-surface-presentation-not-admitted',
+                foregroundStatus: sampledNativeForegroundProved
+                  ? 'native-surface-foreground-proved'
+                  : 'native-surface-foreground-not-proved',
                 bridgeMode:
                   sampledSurfaceDraw?.visibleRendererBridge
                   ?? sampledRenderState?.surfaceDrawVisibleRendererBridge
@@ -8555,15 +11338,217 @@ async function runBrowserProbe({
           }
         }
       }
-      return attachBrowserConsoleTelemetry(timeline, consoleCapture);
+      if (
+        interactiveCacheLifecycle
+        && timeline?.interactiveCacheLifecycle?.postResetMeasurement
+      ) {
+        const terminalHandoff = await page.evaluate(async () => {
+          const schema =
+            'peercompute.ulg.sph-interactive-cache-terminal-handoff.v1';
+          const overlay = document.querySelector('#sph-phase-overlay');
+          const sceneApi = overlay?.__sphScene || null;
+          const recordedDrainExecution =
+            globalThis.__ulgInteractiveCacheTerminalDrainExecution || null;
+          const playButton = overlay?.querySelector('#sph-play') || null;
+          const quiescenceStartedAtMs = performance.now();
+          const initialPlayButtonText = String(
+            playButton?.textContent ?? ''
+          ).trim();
+          const pauseRequested = /Pause/i.test(initialPlayButtonText);
+          if (pauseRequested) playButton?.click();
+          let terminalExecution = null;
+          let priorTerminalExecution = null;
+          let stableFrameCount = 0;
+          while (performance.now() - quiescenceStartedAtMs < 10_000) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            terminalExecution =
+              sceneApi?.getMlsMpmResidentSteps?.()
+              || overlay?.__mlsMpmResidentSteps
+              || null;
+            const residentPending =
+              overlay?.__mlsMpmResidentStepsPending != null;
+            const playbackActive = /Pause/i.test(
+              String(playButton?.textContent ?? '')
+            );
+            if (
+              !residentPending
+              && !playbackActive
+              && terminalExecution?.schema
+            ) {
+              stableFrameCount = terminalExecution === priorTerminalExecution
+                ? stableFrameCount + 1
+                : 1;
+              priorTerminalExecution = terminalExecution;
+              if (stableFrameCount >= 2) break;
+            } else {
+              priorTerminalExecution = null;
+              stableFrameCount = 0;
+            }
+          }
+          const playbackQuiescence = {
+            schema:
+              'peercompute.ulg.sph-interactive-playback-quiescence.v0',
+            status: stableFrameCount >= 2
+              ? 'resident-playback-quiescent'
+              : 'resident-playback-quiescence-timeout',
+            reason: 'terminal-handoff-before-dispose',
+            initialButtonText: initialPlayButtonText,
+            finalButtonText: String(
+              playButton?.textContent ?? ''
+            ).trim(),
+            pauseRequested,
+            residentPending:
+              overlay?.__mlsMpmResidentStepsPending != null,
+            stableFrameCount,
+            completedStepCount:
+              terminalExecution?.completedStepCount ?? null,
+            elapsedMs: performance.now() - quiescenceStartedAtMs
+          };
+          const settlementPromise =
+            terminalExecution?.schroederBackgroundSettlementPromise ?? null;
+          const pendingBeforeDispose = [
+            terminalExecution?.schroederSpatialEpochReleaseSettlementStatus,
+            terminalExecution?.schroederHierarchyArtifactLedgerSettlementStatus,
+            terminalExecution?.schroederSuccessorSourceFamilyRetirementStatus
+          ].some((status) => String(status ?? '').startsWith('pending-'));
+          const base = {
+            schema,
+            terminalConsumerMethod: 'scene-api-dispose',
+            terminalConsumerContract:
+              'queue-ordered-overlay-clear-final-consumer-before-resident-artifact-retirement',
+            recordedDrainExecutionMatched:
+              Boolean(
+                terminalExecution
+                && terminalExecution === recordedDrainExecution
+              ),
+            backgroundSettlementPromisePresent:
+              Boolean(settlementPromise?.then),
+            playbackQuiescence,
+            pendingBeforeDispose,
+            disposeInvoked: false,
+            settlementAwaitMs: null,
+            completedAtMs: null
+          };
+          let disposeError = null;
+          try {
+            if (typeof sceneApi?.dispose !== 'function') {
+              throw new Error('scene API did not expose terminal dispose');
+            }
+            sceneApi.dispose();
+            base.disposeInvoked = true;
+          } catch (error) {
+            disposeError = error instanceof Error ? error.message : String(error);
+          }
+          let settlementOutcome = {
+            status: 'missing-background-settlement-promise',
+            value: null,
+            reason: 'terminal drain did not expose a background settlement promise'
+          };
+          if (settlementPromise?.then) {
+            const startedAtMs = performance.now();
+            settlementOutcome = await new Promise((resolve) => {
+              let settled = false;
+              const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(value);
+              };
+              const timer = setTimeout(() => finish({
+                status: 'terminal-settlement-timeout',
+                value: null,
+                reason: 'terminal drain settlement exceeded 10000ms'
+              }), 10_000);
+              Promise.resolve(settlementPromise).then(
+                (value) => finish({
+                  status: 'terminal-settlement-resolved',
+                  value,
+                  reason: null
+                }),
+                (error) => finish({
+                  status: 'terminal-settlement-rejected',
+                  value: null,
+                  reason: error instanceof Error ? error.message : String(error)
+                })
+              );
+            });
+            base.settlementAwaitMs = performance.now() - startedAtMs;
+          }
+          const spatialEpochSettlementComplete =
+            terminalExecution?.schroederSpatialEpochReleaseSettlementComplete
+            === true;
+          const hierarchyArtifactSettlementComplete =
+            terminalExecution
+              ?.schroederHierarchyArtifactLedgerSettlementComplete === true;
+          const successorSourceFamilyRetirementComplete =
+            terminalExecution
+              ?.schroederSuccessorSourceFamilyRetirementComplete === true;
+          const complete = Boolean(
+            playbackQuiescence.status === 'resident-playback-quiescent'
+            && base.recordedDrainExecutionMatched
+            && base.disposeInvoked
+            && base.backgroundSettlementPromisePresent
+            && settlementOutcome.status === 'terminal-settlement-resolved'
+            && settlementOutcome.value === true
+            && spatialEpochSettlementComplete
+            && hierarchyArtifactSettlementComplete
+            && successorSourceFamilyRetirementComplete
+          );
+          delete globalThis.__ulgInteractiveCacheTerminalDrainExecution;
+          return {
+            ...base,
+            status: complete
+              ? 'scene-terminal-consumer-settled'
+              : 'scene-terminal-consumer-incomplete',
+            reason: complete
+              ? null
+              : (
+                  playbackQuiescence.status
+                    !== 'resident-playback-quiescent'
+                    ? `terminal resident playback quiescence failed: ${playbackQuiescence.status}`
+                    : disposeError
+                  || settlementOutcome.reason
+                  || 'terminal drain ownership did not settle completely'
+                ),
+            settlementStatus: settlementOutcome.status,
+            settlementValue: settlementOutcome.value,
+            spatialEpochSettlementComplete,
+            hierarchyArtifactSettlementComplete,
+            successorSourceFamilyRetirementComplete,
+            completedAtMs: performance.now()
+          };
+        }).catch((error) => ({
+          schema: 'peercompute.ulg.sph-interactive-cache-terminal-handoff.v1',
+          status: 'scene-terminal-consumer-incomplete',
+          reason: error instanceof Error ? error.message : String(error),
+          terminalConsumerMethod: 'scene-api-dispose',
+          disposeInvoked: false
+        }));
+        timeline.interactiveCacheLifecycle.postResetMeasurement
+          .terminalHandoff = terminalHandoff;
+        timeline.interactiveCacheLifecycle.completedAtMs =
+          terminalHandoff.completedAtMs
+          ?? timeline.interactiveCacheLifecycle.completedAtMs;
+        timeline.interactiveCacheLifecycle.status = terminalHandoff.status
+          === 'scene-terminal-consumer-settled'
+          ? 'same-page-warm-reset-cached-measurement-complete'
+          : 'same-page-warm-reset-cached-measurement-incomplete';
+      }
+      completedTimeline = attachBrowserConsoleTelemetry(timeline, consoleCapture);
+      return completedTimeline;
     } finally {
       if (timeoutProbeTimer) clearTimeout(timeoutProbeTimer);
     }
   } finally {
-    await Promise.race([
-      browser.close(),
-      new Promise((resolve) => setTimeout(resolve, 2000))
-    ]).catch(() => null);
+    if (browser !== null) {
+      await closeOwnedProbeBrowser(browser);
+      if (completedTimeline !== null) {
+        completedTimeline.browserLifecycle = {
+          ownership: 'probe-launched-isolated-browser',
+          closeStatus: 'closed'
+        };
+      }
+    }
   }
 }
 
@@ -8585,21 +11570,23 @@ async function runDirectResidentProbe({
   contactBinMetadataReadback = false,
   reactionBinMetadataReadback = false
 }) {
-  const browser = await launchProbeBrowser();
-  const page = await newProbePage(browser);
-  const consoleCapture = createBrowserConsoleCapture();
-  page.on('console', (message) => {
-    consoleCapture.recordConsole(message);
-    if (process.env.ULG_PROBE_STREAM_BROWSER_CONSOLE === '1') {
-      const type = typeof message?.type === 'function' ? message.type() : 'console';
-      const text = typeof message?.text === 'function' ? message.text() : String(message || '');
-      process.stderr.write(`[browser:${type}] ${text}\n`);
-    }
-  });
-  page.on('pageerror', (error) => {
-    consoleCapture.recordPageError(error);
-  });
+  let browser = null;
+  let completedTimeline = null;
   try {
+    browser = await launchProbeBrowser();
+    const page = await newProbePage(browser);
+    const consoleCapture = createBrowserConsoleCapture();
+    page.on('console', (message) => {
+      consoleCapture.recordConsole(message);
+      if (process.env.ULG_PROBE_STREAM_BROWSER_CONSOLE === '1') {
+        const type = typeof message?.type === 'function' ? message.type() : 'console';
+        const text = typeof message?.text === 'function' ? message.text() : String(message || '');
+        process.stderr.write(`[browser:${type}] ${text}\n`);
+      }
+    });
+    page.on('pageerror', (error) => {
+      consoleCapture.recordPageError(error);
+    });
     const target = new URL(scenarioUrl || DEFAULT_URL, baseUrl).toString();
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     const timeline = await page.evaluate(async ({
@@ -8623,6 +11610,324 @@ async function runDirectResidentProbe({
         if (value == null || value === '') return null;
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
+      };
+      const compactPageVisibleReadbackTelemetry = (telemetry) => {
+        const source = telemetry && typeof telemetry === 'object'
+          ? telemetry
+          : {};
+        const schema = 'peercompute.ulg.gpu-readback-telemetry.v1';
+        const observedCountFields = [
+          'observedMapAsyncCount',
+          'observedReadbackBytes',
+          'observedHostQueueFenceCount'
+        ];
+        const classifiedCountFields = [
+          'finalDiagnosticMapAsyncCount',
+          'finalDiagnosticReadbackBytes',
+          'deferredCleanupHostQueueFenceCount',
+          'awaitedBackpressureHostQueueFenceCount'
+        ];
+        const unclassifiedCountFields = [
+          'unclassifiedMapAsyncCount',
+          'unclassifiedReadbackBytes',
+          'unclassifiedHostQueueFenceCount'
+        ];
+        const publicAliasFields = [
+          'mapAsyncCount',
+          'readbackBytes',
+          'hostQueueFenceCount'
+        ];
+        const breakdownCountFields = [
+          ...observedCountFields,
+          ...classifiedCountFields,
+          ...unclassifiedCountFields
+        ];
+        const countFields = [
+          ...breakdownCountFields,
+          ...publicAliasFields
+        ];
+        const hasOwn = (value, field) => (
+          Object.prototype.hasOwnProperty.call(value, field)
+        );
+        const exactCount = (value) => (
+          typeof value === 'number'
+          && Number.isSafeInteger(value)
+          && value >= 0
+            ? value
+            : null
+        );
+        const requiredCounts = (value, fields) => {
+          const counts = {};
+          for (const field of fields) {
+            if (!hasOwn(value, field)) return null;
+            const count = exactCount(value[field]);
+            if (count == null) return null;
+            counts[field] = count;
+          }
+          return counts;
+        };
+        const classificationsConserve = (counts) => {
+          const mapCount = counts.finalDiagnosticMapAsyncCount
+            + counts.unclassifiedMapAsyncCount;
+          const byteCount = counts.finalDiagnosticReadbackBytes
+            + counts.unclassifiedReadbackBytes;
+          const fenceCount = counts.deferredCleanupHostQueueFenceCount
+            + counts.awaitedBackpressureHostQueueFenceCount
+            + counts.unclassifiedHostQueueFenceCount;
+          return Boolean(
+            Number.isSafeInteger(mapCount)
+            && Number.isSafeInteger(byteCount)
+            && Number.isSafeInteger(fenceCount)
+            && mapCount === counts.observedMapAsyncCount
+            && byteCount === counts.observedReadbackBytes
+            && fenceCount === counts.observedHostQueueFenceCount
+          );
+        };
+        const aliasesMatch = (counts) => Boolean(
+          counts.mapAsyncCount === counts.observedMapAsyncCount
+          && counts.readbackBytes === counts.observedReadbackBytes
+          && counts.hostQueueFenceCount === counts.observedHostQueueFenceCount
+        );
+        const expectedClaims = (counts) => ({
+          normalHotLoopReadbackFree: Boolean(
+            counts.observedMapAsyncCount === 0
+            && counts.observedReadbackBytes === 0
+            && counts.observedHostQueueFenceCount === 0
+          ),
+          productionHotLoopHostDependencyFree: Boolean(
+            counts.unclassifiedMapAsyncCount === 0
+            && counts.unclassifiedReadbackBytes === 0
+            && counts.unclassifiedHostQueueFenceCount === 0
+            && counts.awaitedBackpressureHostQueueFenceCount === 0
+          )
+        });
+        const normalizedBreakdown = (counts) => {
+          if (
+            !hasOwn(source, 'readbackTelemetrySourceBreakdown')
+            || !Array.isArray(source.readbackTelemetrySourceBreakdown)
+          ) {
+            return null;
+          }
+          const totals = Object.fromEntries(
+            breakdownCountFields.map((field) => [field, 0])
+          );
+          const canonicalSources = new Set();
+          const rows = [];
+          for (const row of source.readbackTelemetrySourceBreakdown) {
+            if (
+              !row
+              || typeof row !== 'object'
+              || Array.isArray(row)
+              || !hasOwn(row, 'source')
+            ) {
+              return null;
+            }
+            const rawSource = row.source;
+            const canonicalSource = typeof rawSource === 'string'
+              ? rawSource.trim()
+              : '';
+            if (!canonicalSource || canonicalSources.has(canonicalSource)) {
+              return null;
+            }
+            canonicalSources.add(canonicalSource);
+            const rowCounts = requiredCounts(row, breakdownCountFields);
+            if (!rowCounts || !classificationsConserve(rowCounts)) {
+              return null;
+            }
+            for (const field of breakdownCountFields) {
+              const next = totals[field] + rowCounts[field];
+              if (!Number.isSafeInteger(next)) return null;
+              totals[field] = next;
+            }
+            rows.push({
+              source: canonicalSource,
+              ...rowCounts
+            });
+          }
+          return breakdownCountFields.every(
+            (field) => totals[field] === counts[field]
+          )
+            ? rows
+            : null;
+        };
+        const declaredComplete =
+          typeof source.readbackTelemetryComplete === 'boolean'
+            ? source.readbackTelemetryComplete
+            : null;
+        const validation = (() => {
+          if (
+            declaredComplete !== true
+            || Array.isArray(source)
+            || !hasOwn(source, 'readbackTelemetrySchema')
+            || source.readbackTelemetrySchema !== schema
+            || !hasOwn(source, 'readbackTelemetryComplete')
+            || !hasOwn(source, 'readbackTelemetryUnknownSources')
+            || !Array.isArray(source.readbackTelemetryUnknownSources)
+            || source.readbackTelemetryUnknownSources.length !== 0
+          ) {
+            return null;
+          }
+          const counts = requiredCounts(source, countFields);
+          const sourceBreakdown = counts
+            ? normalizedBreakdown(counts)
+            : null;
+          if (
+            !counts
+            || !classificationsConserve(counts)
+            || !aliasesMatch(counts)
+            || !sourceBreakdown
+          ) {
+            return null;
+          }
+          const claims = expectedClaims(counts);
+          for (const [field, expected] of Object.entries(claims)) {
+            if (!hasOwn(source, field)) continue;
+            if (typeof source[field] !== 'boolean' || source[field] !== expected) {
+              return null;
+            }
+          }
+          return { counts, claims, sourceBreakdown };
+        })();
+        const complete = validation !== null;
+        const counts = Object.fromEntries(
+          countFields.map((field) => [
+            field,
+            complete ? validation.counts[field] : null
+          ])
+        );
+        const unknownSources =
+          Array.isArray(source.readbackTelemetryUnknownSources)
+          && source.readbackTelemetryUnknownSources.every(
+            (value) => typeof value === 'string' && value.trim()
+          )
+            ? [...source.readbackTelemetryUnknownSources]
+            : null;
+        const failClosedClaim = (field) => (
+          source[field] === false ? false : null
+        );
+        const legacyExactZeroProductionEvidence = (() => {
+          if (
+            complete
+            || Array.isArray(source)
+            || !hasOwn(source, 'readbackTelemetrySchema')
+            || source.readbackTelemetrySchema !== schema
+            || !hasOwn(source, 'readbackTelemetryComplete')
+            || source.readbackTelemetryComplete !== true
+            || !hasOwn(source, 'readbackTelemetryUnknownSources')
+            || !Array.isArray(source.readbackTelemetryUnknownSources)
+            || source.readbackTelemetryUnknownSources.length !== 0
+            || !hasOwn(source, 'normalHotLoopReadbackFree')
+            || source.normalHotLoopReadbackFree !== true
+            || hasOwn(source, 'productionHotLoopHostDependencyFree')
+          ) return null;
+          const observedCounts = requiredCounts(source, observedCountFields);
+          if (
+            !observedCounts
+            || !observedCountFields.every(
+              (field) => observedCounts[field] === 0
+            )
+            || !countFields.every(
+              (field) => !hasOwn(source, field) || exactCount(source[field]) === 0
+            )
+          ) return null;
+          if (hasOwn(source, 'readbackTelemetrySourceBreakdown')) {
+            const zeroBreakdownCounts = Object.fromEntries(
+              breakdownCountFields.map((field) => [field, 0])
+            );
+            if (normalizedBreakdown(zeroBreakdownCounts) == null) return null;
+          }
+          return true;
+        })();
+        return {
+          readbackTelemetryComplete: complete
+            ? true
+            : (declaredComplete == null ? null : false),
+          readbackTelemetryUnknownSources: unknownSources,
+          ...counts,
+          readbackTelemetrySourceBreakdown: complete
+            ? validation.sourceBreakdown.map(
+              (row) => ({ ...row })
+            )
+            : null,
+          normalHotLoopReadbackFree: complete
+            ? validation.claims.normalHotLoopReadbackFree
+            : failClosedClaim('normalHotLoopReadbackFree'),
+          productionHotLoopHostDependencyFree: complete
+            ? validation.claims.productionHotLoopHostDependencyFree
+            : failClosedClaim('productionHotLoopHostDependencyFree'),
+          legacyExactZeroProductionEvidence
+        };
+      };
+      const composePageVisibleReadbackTelemetry = (
+        primaryTelemetry,
+        certificationTelemetry = null
+      ) => {
+        const primary = compactPageVisibleReadbackTelemetry(primaryTelemetry);
+        const participants = [primary];
+        if (certificationTelemetry != null) {
+          participants.push(
+            compactPageVisibleReadbackTelemetry(certificationTelemetry)
+          );
+        }
+        const readbackTelemetryComplete = participants.every(
+          (participant) => participant.readbackTelemetryComplete === true
+        )
+          ? true
+          : (
+              participants.some(
+                (participant) => (
+                  participant.readbackTelemetryComplete === false
+                )
+              )
+                ? false
+                : null
+            );
+        const coupledClaim = (field) => {
+          if (participants.some((participant) => participant[field] === false)) {
+            return false;
+          }
+          return readbackTelemetryComplete === true
+            && participants.every((participant) => participant[field] === true)
+            ? true
+            : null;
+        };
+        const countFields = [
+          'observedMapAsyncCount',
+          'observedReadbackBytes',
+          'observedHostQueueFenceCount',
+          'finalDiagnosticMapAsyncCount',
+          'finalDiagnosticReadbackBytes',
+          'deferredCleanupHostQueueFenceCount',
+          'awaitedBackpressureHostQueueFenceCount',
+          'unclassifiedMapAsyncCount',
+          'unclassifiedReadbackBytes',
+          'unclassifiedHostQueueFenceCount',
+          'mapAsyncCount',
+          'readbackBytes',
+          'hostQueueFenceCount'
+        ];
+        return {
+          ...primary,
+          readbackTelemetryComplete,
+          readbackTelemetryUnknownSources: readbackTelemetryComplete === true
+            ? [...primary.readbackTelemetryUnknownSources]
+            : null,
+          ...Object.fromEntries(countFields.map((field) => [
+            field,
+            readbackTelemetryComplete === true ? primary[field] : null
+          ])),
+          readbackTelemetrySourceBreakdown: readbackTelemetryComplete === true
+            ? primary.readbackTelemetrySourceBreakdown.map(
+              (row) => ({ ...row })
+            )
+            : null,
+          normalHotLoopReadbackFree: coupledClaim(
+            'normalHotLoopReadbackFree'
+          ),
+          productionHotLoopHostDependencyFree: coupledClaim(
+            'productionHotLoopHostDependencyFree'
+          )
+        };
       };
       const finiteNumber = (value, fallback) => {
         if (value == null || value === '') return fallback;
@@ -9267,7 +12572,11 @@ async function runDirectResidentProbe({
         pressureInterfaceAwareFusionRequired: preflight.pressureInterfaceAwareFusionRequired ?? null,
         residentProductMassAwareFusionRequired: preflight.residentProductMassAwareFusionRequired ?? null
       } : null;
-      const summarizeSteps = (steps) => steps ? {
+      const summarizeSteps = (steps) => {
+        if (!steps) return null;
+        const readbackTelemetry =
+          composePageVisibleReadbackTelemetry(steps, steps?.finalStep);
+        return {
         schema: steps.schema ?? null,
         backend: steps.backend ?? null,
         status: steps.status ?? null,
@@ -9276,6 +12585,9 @@ async function runDirectResidentProbe({
         compactSummaryMode: steps.compactSummaryMode ?? null,
         compactSummaryScope: steps.compactSummaryScope ?? null,
         readbackMode: steps.readbackMode ?? null,
+        readbackTelemetrySchema: steps.readbackTelemetrySchema ?? null,
+        readbackTelemetryScope: steps.readbackTelemetryScope ?? null,
+        ...readbackTelemetry,
         requestedReadbackMode: requestedReadbackMode,
         ambientPressurePa: finiteOrNull(steps.ambientPressurePa),
         ambientPressureAppliedInStressProjection:
@@ -9297,7 +12609,16 @@ async function runDirectResidentProbe({
         nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
         nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
         nextParticleBufferMode: steps.nextParticleBufferMode ?? null,
-        normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
+        residentProductMassGridCouplingStatus:
+          steps.finalStep?.residentProductMassGridCouplingStatus ?? null,
+        residentProductMassInputProductEventCountAuthority:
+          steps.finalStep?.residentProductMassInputProductEventCountAuthority ?? null,
+        residentProductMassInputProductEventRowCapacity:
+          steps.finalStep?.residentProductMassInputProductEventRowCapacity ?? null,
+        residentProductMassInputProductEventCountHostKnown:
+          steps.finalStep?.residentProductMassInputProductEventCountHostKnown ?? null,
+        residentProductMassProductEventDispatchMode:
+          steps.finalStep?.residentProductMassProductEventDispatchMode ?? null,
         renderStateReadbackAvailable: steps.renderStateReadbackAvailable ?? null,
         reactionProductPlacementAccumulatorStatus:
           steps.reactionProductPlacementAccumulatorStatus ?? null,
@@ -9340,6 +12661,27 @@ async function runDirectResidentProbe({
             } : null)
             .filter(Boolean)
           : [],
+        phaseVolumeSurfaceStressRequired:
+          steps.phaseVolumeSurfaceStressRequired === true,
+        phaseVolumeSurfaceStressExpectedSubmissionCount:
+          steps.phaseVolumeSurfaceStressExpectedSubmissionCount ?? null,
+        phaseVolumeSurfaceStressSubmissionCount:
+          steps.phaseVolumeSurfaceStressSubmissionCount ?? null,
+        phaseVolumeSurfaceStressSubmissionEvidenceComplete:
+          steps.phaseVolumeSurfaceStressSubmissionEvidenceComplete === true,
+        phaseVolumeSurfaceStressSubmissions:
+          Array.isArray(steps.stepSummaries)
+            ? steps.stepSummaries.map((summary) => (
+                compactPhaseVolumeSurfaceStressSubmission(
+                  summary?.phaseVolumeSurfaceStressSubmission
+                )
+              ))
+            : [],
+        finalStepPhaseVolumeSurfaceStressSubmission:
+          compactPhaseVolumeSurfaceStressSubmission(
+            steps.finalStep?.gridUpdate?.phaseVolumeSurfaceStressSubmission
+              ?? steps.finalStep?.phaseVolumeSurfaceStressSubmission
+          ),
         sidecarAwareResidentSequenceActive: steps.sidecarAwareResidentSequenceActive ?? null,
         sidecarAwareResidentSequenceMode: steps.sidecarAwareResidentSequenceMode ?? null,
         sidecarAwareResidentSequenceRunner: steps.sidecarAwareResidentSequenceRunner ?? null,
@@ -9373,12 +12715,26 @@ async function runDirectResidentProbe({
             thermalSidecarDirectRunnerStatus: summary.thermalSidecarDirectRunnerStatus ?? null,
             thermalSidecarDirectRunnerGenericEntrypointBypassed:
               summary.thermalSidecarDirectRunnerGenericEntrypointBypassed ?? null,
+            residentProductMassGridCouplingStatus:
+              summary.residentProductMassGridCouplingStatus ?? null,
+            residentProductMassInputProductEventCountAuthority:
+              summary.residentProductMassInputProductEventCountAuthority ?? null,
+            residentProductMassInputProductEventRowCapacity:
+              summary.residentProductMassInputProductEventRowCapacity ?? null,
+            residentProductMassInputProductEventCountHostKnown:
+              summary.residentProductMassInputProductEventCountHostKnown ?? null,
+            residentProductMassProductEventDispatchMode:
+              summary.residentProductMassProductEventDispatchMode ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
             activeGridDispatch: summary.stageTiming?.activeGridDispatch
               ? { ...summary.stageTiming.activeGridDispatch }
-              : null
+              : null,
+            phaseVolumeSurfaceStressSubmission:
+              compactPhaseVolumeSurfaceStressSubmission(
+                summary.phaseVolumeSurfaceStressSubmission
+              )
           }))
           : [],
         fusedResidentSequence: steps.fusedResidentSequence ? {
@@ -9395,7 +12751,8 @@ async function runDirectResidentProbe({
             : null
         } : null,
         fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(steps.fusedResidentSequencePreflight)
-      } : null;
+        };
+      };
       const compactSchroederSuccessorEpochIdentity = (identity) => (
         identity && typeof identity === 'object'
           ? {
@@ -9477,6 +12834,39 @@ async function runDirectResidentProbe({
           transaction.successorEpochEvidence
         )
       } : null;
+      const compactPhaseVolumeSurfaceStressSubmission = (submission) => (
+        submission && typeof submission === 'object'
+          ? {
+              schema: submission.schema ?? null,
+              status: submission.status ?? null,
+              requested: submission.requested === true,
+              submitted: submission.submitted === true,
+              dispatchCount: finiteOrNull(submission.dispatchCount),
+              entryPoints: Array.isArray(submission.entryPoints)
+                ? [...submission.entryPoints]
+                : [],
+              lifecycleDispatchCount:
+                finiteOrNull(submission.lifecycleDispatchCount),
+              lifecycleMode: submission.lifecycleMode ?? null,
+              ambientBuoyancyMode: submission.ambientBuoyancyMode ?? null,
+              generationId: submission.generationId ?? null,
+              selectedLevel: finiteOrNull(submission.selectedLevel),
+              levelRole: submission.levelRole ?? null,
+              twoLevel: submission.twoLevel === true,
+              fieldCompletionOrdinal:
+                finiteOrNull(submission.fieldCompletionOrdinal),
+              materialTableSchema: submission.materialTableSchema ?? null,
+              phaseRecordCount: finiteOrNull(submission.phaseRecordCount),
+              positiveSurfaceTensionPhaseRecordCount: finiteOrNull(
+                submission.positiveSurfaceTensionPhaseRecordCount
+              ),
+              surfaceTensionCoefficientStatus:
+                submission.surfaceTensionCoefficientStatus ?? null,
+              authority: submission.authority ?? null,
+              verification: submission.verification ?? null
+            }
+          : null
+      );
       const summarizeStep = (step) => step ? {
         schema: step.schema ?? null,
         backend: step.backend ?? null,
@@ -9495,6 +12885,8 @@ async function runDirectResidentProbe({
         // Per-stage mechanics snapshots. Null unless stageMechanicsTrace=1;
         // the record is fixed-size per stage, not per particle.
         stageMechanicsTrace: step.stageMechanicsTrace ?? null,
+        canonicalSpatialAuthorityTrace:
+          step.canonicalSpatialAuthorityTrace ?? null,
         stageStatus: step.stageStatus ? { ...step.stageStatus } : null,
         stageBackends: step.stageBackends ? { ...step.stageBackends } : null,
         particlePingPong: step.particlePingPong ? {
@@ -9506,6 +12898,11 @@ async function runDirectResidentProbe({
         schroederSpatialEpochTransaction:
           compactSchroederSpatialEpochTransaction(
             step.schroederSpatialEpochTransaction
+          ),
+        phaseVolumeSurfaceStressSubmission:
+          compactPhaseVolumeSurfaceStressSubmission(
+            step.gridUpdate?.phaseVolumeSurfaceStressSubmission
+              ?? step.phaseVolumeSurfaceStressSubmission
           ),
         diagnostics: compactDiagnostics(step.diagnostics),
         cohortDiagnostics: step.diagnostics?.cohortDiagnostics
@@ -9620,6 +13017,19 @@ async function runDirectResidentProbe({
         nextUploadActiveGridDispatchPlanHintSource: step.nextParticleUploads?.activeGridDispatchPlanHint?.source ?? null,
         nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: step.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
         nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: step.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
+        residentProductMassStatus: step.residentProductMassStatus ?? null,
+        residentProductMassProductEventRowCount:
+          step.residentProductMassProductEventRowCount ?? null,
+        residentProductMassGridCouplingStatus:
+          step.residentProductMassGridCouplingStatus ?? null,
+        residentProductMassInputProductEventCountAuthority:
+          step.residentProductMassInputProductEventCountAuthority ?? null,
+        residentProductMassInputProductEventRowCapacity:
+          step.residentProductMassInputProductEventRowCapacity ?? null,
+        residentProductMassInputProductEventCountHostKnown:
+          step.residentProductMassInputProductEventCountHostKnown ?? null,
+        residentProductMassProductEventDispatchMode:
+          step.residentProductMassProductEventDispatchMode ?? null,
         pressureInterfaceForceSolverSchema: step.pressureInterfaceForceSolverSchema ?? null,
         pressureInterfaceForceRowsBufferStatus: step.pressureInterfaceForceRowsBufferStatus ?? null
       } : null;
@@ -9861,7 +13271,11 @@ async function runDirectResidentProbe({
           viscosityEnabled: viewState.physicalLawGroups?.viscosity,
           mlsMpmArtificialViscosityAlpha: viewState.gpuMechanics?.mlsMpmArtificialViscosityAlpha,
           viscosityLengthM: viewState.gpuMechanics?.gridSpacingM ?? viewState.sphGpuParticleState?.smoothingLengthM,
-          surfaceTensionEnabled: viewState.physicalLawGroups?.surfaceTension
+          surfaceTensionEnabled: Boolean(
+            viewState.physicalLawGroups?.surfaceTension
+            && viewState.physicalLawGroups?.mechanics
+            && viewState.surfaceTensionLawAdmission?.admitted === true
+          )
         });
         const deviceResult = await requestOpticalGpuDevice(navigator);
         progress('device-request-complete', {
@@ -10321,16 +13735,22 @@ async function runDirectResidentProbe({
         directResidentProgressLog: process.env.ULG_PROBE_DIRECT_RESIDENT_PROGRESS === '1'
       }
     });
-    return attachBrowserConsoleTelemetry(timeline, consoleCapture);
+    completedTimeline = attachBrowserConsoleTelemetry(timeline, consoleCapture);
+    return completedTimeline;
   } finally {
-    await Promise.race([
-      browser.close(),
-      new Promise((resolve) => setTimeout(resolve, 2000))
-    ]).catch(() => null);
+    if (browser !== null) {
+      await closeOwnedProbeBrowser(browser);
+      if (completedTimeline !== null) {
+        completedTimeline.browserLifecycle = {
+          ownership: 'probe-launched-isolated-browser',
+          closeStatus: 'closed'
+        };
+      }
+    }
   }
 }
 
-function analyzeTimeline(timeline, {
+export function analyzeTimeline(timeline, {
   maxSpeedMPerS,
   minVolumeRatioJ,
   maxVolumeRatioJ,
@@ -10383,6 +13803,99 @@ function analyzeTimeline(timeline, {
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
   };
+  const exactNonNegativeInteger = (value) => (
+    typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 0
+      ? value
+      : null
+  );
+  const finalMetric = metrics.at(-1) || null;
+  const finalResidentStepReceipt = finalMetric?.residentStep || null;
+  const finalResidentStepsReceipt = finalMetric?.residentSteps || null;
+  const residentStepReceiptValue = (key) => (
+    finalResidentStepReceipt?.[key]
+    ?? finalResidentStepsReceipt?.[key]
+    ?? null
+  );
+  const productHistoryP2gGpuCountReceipt = {
+    gridCouplingStatus: residentStepReceiptValue(
+      'residentProductMassGridCouplingStatus'
+    ),
+    countAuthority: residentStepReceiptValue(
+      'residentProductMassInputProductEventCountAuthority'
+    ),
+    rowCapacity: exactNonNegativeInteger(residentStepReceiptValue(
+      'residentProductMassInputProductEventRowCapacity'
+    )),
+    countHostKnown: residentStepReceiptValue(
+      'residentProductMassInputProductEventCountHostKnown'
+    ),
+    dispatchMode: residentStepReceiptValue(
+      'residentProductMassProductEventDispatchMode'
+    )
+  };
+  const productHistoryP2gGpuCountReceiptRequired =
+    productHistoryP2gGpuCountReceipt.gridCouplingStatus
+      === 'resident-product-mass-bound-to-p2g-grid';
+  const productHistoryP2gGpuCountReceiptAccepted =
+    productHistoryP2gGpuCountReceiptRequired
+      ? Boolean(
+          productHistoryP2gGpuCountReceipt.countAuthority
+            === 'gpu-authored-filtered-live-prefix'
+          && productHistoryP2gGpuCountReceipt.rowCapacity > 0
+          && productHistoryP2gGpuCountReceipt.countHostKnown === false
+          && productHistoryP2gGpuCountReceipt.dispatchMode
+            === 'gpu-authored-indirect-live-count'
+        )
+      : null;
+  const finalRenderStateReceipt = finalMetric?.renderState || null;
+  const productHistoryRenderCommitGateReceipt = {
+    residentProductMassStatus:
+      finalRenderStateReceipt?.residentProductMassStatus ?? null,
+    productEventBufferBound:
+      finalRenderStateReceipt?.productEventBufferBound ?? null,
+    productEventBufferByteLength: exactNonNegativeInteger(
+      finalRenderStateReceipt?.productEventBufferByteLength
+    ),
+    countAuthority:
+      finalRenderStateReceipt?.productEventCountAuthority ?? null,
+    controlAuthentication:
+      finalRenderStateReceipt?.productEventControlAuthentication ?? null,
+    controlHostObserved:
+      finalRenderStateReceipt?.productEventControlHostObserved ?? null,
+    rowCapacity: exactNonNegativeInteger(
+      finalRenderStateReceipt?.productEventRowCapacity
+    ),
+    countHostKnown:
+      finalRenderStateReceipt?.productEventCountHostKnown ?? null,
+    generation: exactNonNegativeInteger(
+      finalRenderStateReceipt?.productEventCountAuthorityGeneration
+    ),
+    seal: exactNonNegativeInteger(
+      finalRenderStateReceipt?.productEventCountAuthoritySeal
+    )
+  };
+  const productHistoryRenderCommitGateReceiptRequired = Boolean(
+    productHistoryRenderCommitGateReceipt.residentProductMassStatus
+      === 'resident-product-mass-merged-gpu-resident'
+    && productHistoryRenderCommitGateReceipt.productEventBufferBound === true
+  );
+  const productHistoryRenderCommitGateReceiptAccepted =
+    productHistoryRenderCommitGateReceiptRequired
+      ? Boolean(
+          productHistoryRenderCommitGateReceipt.productEventBufferByteLength > 0
+          && productHistoryRenderCommitGateReceipt.countAuthority
+            === 'gpu-authored-filtered-live-prefix'
+          && productHistoryRenderCommitGateReceipt.controlAuthentication
+            === 'full-eight-word-gpu-commit-gate'
+          && productHistoryRenderCommitGateReceipt.controlHostObserved === false
+          && productHistoryRenderCommitGateReceipt.rowCapacity > 0
+          && productHistoryRenderCommitGateReceipt.countHostKnown === false
+          && productHistoryRenderCommitGateReceipt.generation !== null
+          && productHistoryRenderCommitGateReceipt.seal !== null
+        )
+      : null;
   const finiteSeries = (key) => diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.[key]))
     .filter(Number.isFinite);
@@ -10487,8 +14000,33 @@ function analyzeTimeline(timeline, {
     .length;
   const browserCanvasPixelValidated = nonblankCanvasFrameCount > 0;
   const nativeBrowserFrameValidation = timeline?.nativeSurfaceBrowserFrameValidation || null;
+  const nativeBrowserFramePublishStatus =
+    nativeBrowserFrameValidation?.publishStatus || null;
+  const nativeBrowserFrameMetric = finalMetric;
+  const nativeBrowserFrameActiveGeneration = exactNonNegativeInteger(
+    nativeBrowserFrameMetric?.surfaceDraw
+      ?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration
+    ?? nativeBrowserFrameMetric?.renderState
+      ?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration
+  );
+  const nativeBrowserFramePublishedGeneration = exactNonNegativeInteger(
+    nativeBrowserFramePublishStatus?.resourceGeneration
+  );
+  const nativeBrowserFrameNonzeroPixelCount = exactNonNegativeInteger(
+    nativeBrowserFramePublishStatus?.nonzeroPixelCount
+  );
   const nativeBrowserFramePixelValidated = Boolean(
     nativeBrowserFrameValidation?.status === 'passed'
+    && nativeBrowserFramePublishStatus?.status
+      === 'browser-frame-validation-passed'
+    && /browser-frame|playwright.*canvas|composited-frame/iu.test(
+      String(nativeBrowserFramePublishStatus?.source ?? '')
+    )
+    && nativeBrowserFrameNonzeroPixelCount !== null
+    && nativeBrowserFrameNonzeroPixelCount > 0
+    && nativeBrowserFrameActiveGeneration !== null
+    && nativeBrowserFramePublishedGeneration
+      === nativeBrowserFrameActiveGeneration
   );
   const visibleGpuConsumerBrowserPixelValidated =
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
@@ -10651,6 +14189,74 @@ function analyzeTimeline(timeline, {
     }
     return maxRate;
   };
+  const authoritativeCheckpointMotionSamples = metrics
+    .map((metric, index) => {
+      const checkpoint = metric?.authoritativeGpuCheckpoint;
+      const rows = Array.isArray(checkpoint?.materialPhases)
+        ? checkpoint.materialPhases
+        : [];
+      const checkpointComplete = Boolean(
+        checkpoint?.status === 'captured'
+        && checkpoint.materialPhaseCapacityStatus === 'within-capacity'
+        && checkpoint.materialMappingStatus === 'complete'
+        && Number(checkpoint.phaseFractionProblemParticleCount || 0) === 0
+        && Number(checkpoint.unclassifiedMassKg || 0) === 0
+        && checkpoint.mechanicsEvidenceStatus === 'complete'
+        && rows.length > 0
+        && rows.every((row) => (
+          Number(row?.mechanicsSampleCount) > 0
+          && Number(row?.mechanicsProblemParticleCount) === 0
+          && Number.isFinite(finiteMetric(row?.massKg))
+          && finiteMetric(row?.massKg) > 0
+          && Number.isFinite(finiteMetric(row?.yCenterMassWeightedM))
+        ))
+      );
+      if (!checkpointComplete) return null;
+      const totalMassKg = rows.reduce((sum, row) => sum + finiteMetric(row.massKg), 0);
+      if (!(totalMassKg > 0)) return null;
+      const globalMassWeightedYM = rows.reduce((sum, row) => (
+        sum + finiteMetric(row.massKg) * finiteMetric(row.yCenterMassWeightedM)
+      ), 0) / totalMassKg;
+      const timeS = finiteMetric(checkpoint.sourceTimeS) ?? metricTimeS(metric);
+      if (!Number.isFinite(globalMassWeightedYM) || !Number.isFinite(timeS)) return null;
+      return {
+        index,
+        batchIndex: finiteMetric(checkpoint.batchIndex ?? metric?.batchIndex),
+        phase: metric?.phase ?? checkpoint.phase ?? null,
+        timeS,
+        totalMassKg,
+        globalMassWeightedYM
+      };
+    })
+    .filter(Boolean);
+  const authoritativeCheckpointGlobalMassWeightedYSeriesM =
+    authoritativeCheckpointMotionSamples.map((sample) => sample.globalMassWeightedYM);
+  const authoritativeCheckpointMaxGlobalYDisplacementM = (() => {
+    const first = authoritativeCheckpointMotionSamples[0];
+    if (!first) return null;
+    return Math.max(...authoritativeCheckpointMotionSamples.map((sample) => (
+      Math.abs(sample.globalMassWeightedYM - first.globalMassWeightedYM)
+    )));
+  })();
+  const authoritativeCheckpointEstimatedMaxGlobalYSpeedMPerS = (() => {
+    let maxRate = null;
+    for (let index = 1; index < authoritativeCheckpointMotionSamples.length; index += 1) {
+      const previous = authoritativeCheckpointMotionSamples[index - 1];
+      const current = authoritativeCheckpointMotionSamples[index];
+      const dtS = current.timeS - previous.timeS;
+      if (!(dtS > 0)) continue;
+      const rate = Math.abs(
+        current.globalMassWeightedYM - previous.globalMassWeightedYM
+      ) / dtS;
+      if (Number.isFinite(rate)) maxRate = Math.max(maxRate ?? 0, rate);
+    }
+    return maxRate;
+  })();
+  const authoritativeCheckpointMotionEvidenceAvailable = Boolean(
+    authoritativeCheckpointMotionSamples.length >= 2
+    && Number.isFinite(authoritativeCheckpointMaxGlobalYDisplacementM)
+    && Number.isFinite(authoritativeCheckpointEstimatedMaxGlobalYSpeedMPerS)
+  );
   const renderRowMaxCenterDisplacementM = maxDisplacementFromFirst(renderRowMotionSamples, 'centerOfMassM');
   const renderRowMaxBoundsCenterDisplacementM = maxDisplacementFromFirst(renderRowMotionSamples, 'centerFromBoundsM');
   const renderRowMaxBoundsExtentDeltaM = maxDisplacementFromFirst(
@@ -10681,34 +14287,68 @@ function analyzeTimeline(timeline, {
   const renderRowEstimatedMaxSpeedMPerS = renderRowMotionSpeedsMPerS.length
     ? Math.max(...renderRowMotionSpeedsMPerS)
     : null;
-  const motionMaxSpeedObservedMPerS = maxSpeedObservedMPerS
-    ?? (compactSummaryDisabled ? renderRowEstimatedMaxSpeedMPerS : null)
-    ?? (directResidentNoReadbackActiveGridMotionEvidenceAvailable ? activeGridPredictedMaxSpeedMPerS : null);
-  const motionMaxDisplacementObservedM = maxDisplacementObservedM
-    ?? (compactSummaryDisabled ? renderRowMaxDisplacementM : null)
-    ?? (directResidentNoReadbackActiveGridMotionEvidenceAvailable ? activeGridPredictedMaxDisplacementM : null);
-  const motionSpeedEvidenceSource = maxSpeedObservedMPerS != null
-    ? residentMaxSpeedSeries.length > 0 && checkpointMaxSpeedSeries.length > 0
-      ? 'resident-compact-summary+authoritative-gpu-checkpoint'
-      : residentMaxSpeedSeries.length > 0
-        ? 'resident-compact-summary'
-        : 'authoritative-gpu-material-phase-checkpoint'
-    : (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null
-        ? 'decoded-render-rows'
-        : (
-          directResidentNoReadbackActiveGridMotionEvidenceAvailable && activeGridPredictedMaxSpeedMPerS != null
-            ? 'active-grid-predicted-motion'
-            : null
-        ));
-  const motionDisplacementEvidenceSource = maxDisplacementObservedM != null
-    ? 'resident-compact-summary'
-    : (compactSummaryDisabled && renderRowMaxDisplacementM != null
-        ? 'decoded-render-rows'
-        : (
-          directResidentNoReadbackActiveGridMotionEvidenceAvailable
-            ? 'active-grid-predicted-motion'
-            : null
-        ));
+  const finiteMaximum = (values) => {
+    const finiteValues = values.filter(Number.isFinite);
+    return finiteValues.length ? Math.max(...finiteValues) : null;
+  };
+  const motionMaxSpeedObservedMPerS = finiteMaximum([
+    maxSpeedObservedMPerS,
+    authoritativeCheckpointMotionEvidenceAvailable
+      ? authoritativeCheckpointEstimatedMaxGlobalYSpeedMPerS
+      : null,
+    compactSummaryDisabled ? renderRowEstimatedMaxSpeedMPerS : null,
+    directResidentNoReadbackActiveGridMotionEvidenceAvailable
+      ? activeGridPredictedMaxSpeedMPerS
+      : null
+  ]);
+  const motionMaxDisplacementObservedM = finiteMaximum([
+    maxDisplacementObservedM,
+    authoritativeCheckpointMotionEvidenceAvailable
+      ? authoritativeCheckpointMaxGlobalYDisplacementM
+      : null,
+    compactSummaryDisabled ? renderRowMaxDisplacementM : null,
+    directResidentNoReadbackActiveGridMotionEvidenceAvailable
+      ? activeGridPredictedMaxDisplacementM
+      : null
+  ]);
+  const motionSpeedEvidenceSources = [];
+  if (residentMaxSpeedSeries.length > 0) {
+    motionSpeedEvidenceSources.push('resident-compact-summary');
+  }
+  if (checkpointMaxSpeedSeries.length > 0) {
+    motionSpeedEvidenceSources.push('authoritative-gpu-material-phase-checkpoint');
+  }
+  if (authoritativeCheckpointMotionEvidenceAvailable) {
+    motionSpeedEvidenceSources.push('authoritative-gpu-global-mass-weighted-y-checkpoint');
+  }
+  if (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null) {
+    motionSpeedEvidenceSources.push('decoded-render-rows');
+  }
+  if (
+    directResidentNoReadbackActiveGridMotionEvidenceAvailable
+    && activeGridPredictedMaxSpeedMPerS != null
+  ) {
+    motionSpeedEvidenceSources.push('active-grid-predicted-motion');
+  }
+  const motionSpeedEvidenceSource = motionSpeedEvidenceSources.length
+    ? motionSpeedEvidenceSources.join('+')
+    : null;
+  const motionDisplacementEvidenceSources = [];
+  if (maxDisplacementObservedM != null) {
+    motionDisplacementEvidenceSources.push('resident-compact-summary');
+  }
+  if (authoritativeCheckpointMotionEvidenceAvailable) {
+    motionDisplacementEvidenceSources.push('authoritative-gpu-global-mass-weighted-y-checkpoint');
+  }
+  if (compactSummaryDisabled && renderRowMaxDisplacementM != null) {
+    motionDisplacementEvidenceSources.push('decoded-render-rows');
+  }
+  if (directResidentNoReadbackActiveGridMotionEvidenceAvailable) {
+    motionDisplacementEvidenceSources.push('active-grid-predicted-motion');
+  }
+  const motionDisplacementEvidenceSource = motionDisplacementEvidenceSources.length
+    ? motionDisplacementEvidenceSources.join('+')
+    : null;
   const renderRowMotionEvidenceAvailable = (
     compactSummaryDisabled
     && (renderRowEstimatedMaxSpeedMPerS != null || renderRowMaxDisplacementM != null)
@@ -10815,6 +14455,10 @@ function analyzeTimeline(timeline, {
     generationUnknown: residentRenderSourceSamples
       .filter((sample) => sample.generationMatchesCurrent == null).length
   };
+  const residentRenderSourceStaleRecovery =
+    summarizeResidentRenderSourceStaleRecovery(
+      residentRenderSourceSamples
+    );
   const residentRenderSourceRetentionReasonCounts = {};
   for (const sample of residentRenderSourceSamples) {
     const reason = String(sample.retentionReason || '').trim();
@@ -11083,7 +14727,7 @@ function analyzeTimeline(timeline, {
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'webgpu-render-row-spheres-rendered'
       )
       && vertexCount > 0;
-    const nativeWebGpuSurfaceConsumerVisible = bridge === 'native-webgpu-surface-consumer'
+    const nativeWebGpuSurfaceConsumerForegroundProved = bridge === 'native-webgpu-surface-consumer'
       && renderSource === 'resident-surface-draw-native-webgpu-consumer'
       && (
         status === 'resident-extension-surface-draw-buffers-retained'
@@ -11092,36 +14736,52 @@ function analyzeTimeline(timeline, {
       )
       && (
         renderBridgeStatus === 'native-webgpu-surface-consumer-ready'
-        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
-        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+        || nativeWebGpuSurfaceRenderStatusIsRendered(
+          metric?.surfaceDraw?.renderBridgeLastRenderStatus
+        )
+        || nativeWebGpuSurfaceRenderStatusIsRendered(
+          metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
+        )
       )
-      && residentSurfaceVisibleGpuConsumerReady(metric)
+      && residentSurfaceForegroundProved(metric)
       && (activeSurfaceCount > 0 || vertexCount > 0);
     return workerOffscreenResidentParticleStateVisible(metric)
       || webGpuIndirectOverlayVisible
       || threeRenderRowPointsVisible
       || webGpuRenderRowOverlayVisible
-      || nativeWebGpuSurfaceConsumerVisible;
+      || nativeWebGpuSurfaceConsumerForegroundProved;
   };
   const residentRenderFieldSummaryVisible = (metric) => (
     metric?.renderState?.source === 'resident-gpu-render-field'
     && metric?.renderState?.renderFieldSurfaceSummaryReadback === true
     && Number(metric?.renderState?.renderFieldSurfaceSummaryActiveSurfaceCount ?? 0) > 0
   );
-  const residentSurfaceBufferHandoffReady = (metric) => Boolean(
-    metric?.renderState?.surfaceDrawGpuBufferHandoffReady
-    || metric?.surfaceDraw?.gpuBufferHandoffReady
-    || metric?.surfaceDraw?.surfaceDrawGpuBufferHandoffReady
+  const residentSurfaceBufferHandoffReady = (metric) => (
+    metric?.renderState?.surfaceDrawGpuBufferHandoffReady === true
+    || metric?.surfaceDraw?.gpuBufferHandoffReady === true
+    || metric?.surfaceDraw?.surfaceDrawGpuBufferHandoffReady === true
   );
-  const residentSurfaceVisibleGpuConsumerReady = (metric) => Boolean(
-    metric?.renderState?.surfaceDrawVisibleGpuConsumerReady
-    || metric?.surfaceDraw?.visibleGpuConsumerReady
-    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+  const residentSurfaceVisibleGpuConsumerReady = (metric) => (
+    metric?.renderState?.surfaceDrawVisibleGpuConsumerReady === true
+    || metric?.surfaceDraw?.visibleGpuConsumerReady === true
+    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerReady === true
   );
-  const residentSurfaceVisibleGpuConsumerInputReady = (metric) => Boolean(
-    metric?.renderState?.surfaceDrawVisibleGpuConsumerInputReady
-    || metric?.surfaceDraw?.visibleGpuConsumerInputReady
-    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady
+  const residentSurfacePresentationAdmitted = (metric) => Boolean(
+    residentSurfaceBufferHandoffReady(metric)
+    && residentSurfaceVisibleGpuConsumerReady(metric)
+    && metric?.nativeSurfaceValidation?.sourceCurrent === true
+    && metric?.nativeSurfaceValidation?.admitted === true
+    && metric?.nativeSurfaceValidation?.runtimePresentationAdmitted === true
+  );
+  const residentSurfaceForegroundProved = (metric) => Boolean(
+    residentSurfacePresentationAdmitted(metric)
+    && metric?.nativeSurfaceValidation?.foregroundProved === true
+    && metric?.nativeSurfaceValidation?.foregroundProofValidated === true
+  );
+  const residentSurfaceVisibleGpuConsumerInputReady = (metric) => (
+    metric?.renderState?.surfaceDrawVisibleGpuConsumerInputReady === true
+    || metric?.surfaceDraw?.visibleGpuConsumerInputReady === true
+    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady === true
   );
   const residentSurfaceVisibleGpuConsumerNativeValidationBlockerFamily = (metric) => (
     metric?.renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
@@ -11163,6 +14823,12 @@ function analyzeTimeline(timeline, {
   const residentSurfaceVisibleGpuConsumerSampleCount = metrics.filter((metric) => (
     residentSurfaceVisibleGpuConsumerReady(metric)
   )).length;
+  const residentSurfacePresentationAdmissionSampleCount = metrics.filter((metric) => (
+    residentSurfacePresentationAdmitted(metric)
+  )).length;
+  const residentSurfaceForegroundProofSampleCount = metrics.filter((metric) => (
+    residentSurfaceForegroundProved(metric)
+  )).length;
   const residentSurfaceVisibleGpuConsumerInputReadySampleCount = metrics.filter((metric) => (
     residentSurfaceVisibleGpuConsumerInputReady(metric)
   )).length;
@@ -11186,21 +14852,34 @@ function analyzeTimeline(timeline, {
     residentSurfaceBufferHandoffProbe
     && residentSurfaceBufferHandoffSampleCount > 0
   );
-  const residentSurfaceVisibleGpuConsumerAccepted = Boolean(
+  const residentSurfacePresentationAdmissionAccepted = Boolean(
     residentSurfaceBufferHandoffProbe
-    && residentSurfaceVisibleGpuConsumerSampleCount > 0
+    && residentSurfacePresentationAdmissionSampleCount > 0
   );
+  const residentSurfaceForegroundProofAccepted = Boolean(
+    residentSurfaceBufferHandoffProbe
+    && (
+      residentSurfaceForegroundProofSampleCount > 0
+      || visibleGpuConsumerBrowserPixelValidated
+    )
+  );
+  // Compatibility field retained for existing artifact readers; its visible
+  // claim now follows foreground proof, not structural admission.
+  const residentSurfaceVisibleGpuConsumerAccepted =
+    residentSurfaceForegroundProofAccepted;
   const nativeWebGpuSurfaceConsumerAccepted = Boolean(
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
-    && residentSurfaceVisibleGpuConsumerAccepted
+    && residentSurfacePresentationAdmissionAccepted
   );
   const nativeWebGpuSurfaceConsumerRendered = Boolean(
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
     && metrics.some((metric) => (
-      metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
-      || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-debug-clear-rendered'
-      || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
-      || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-debug-clear-rendered'
+      nativeWebGpuSurfaceRenderStatusIsRendered(
+        metric?.surfaceDraw?.renderBridgeLastRenderStatus
+      )
+      || nativeWebGpuSurfaceRenderStatusIsRendered(
+        metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
+      )
     ))
   );
   const nativeWebGpuSurfaceConsumerTextureReadbackUnavailable = Boolean(
@@ -11231,7 +14910,7 @@ function analyzeTimeline(timeline, {
       residentSurfaceBufferHandoffProbe
       && compactSummaryDisabled
       && residentRenderSourceCurrentSampleCount > 0
-      && residentRenderSourceStaleSampleCount === 0
+      && residentRenderSourceStaleRecovery.unrecoveredSampleCount === 0
       && residentRenderSourceTimeAdvanced
       && (
         residentSurfaceVisibleGpuConsumerInputReadySampleCount > 0
@@ -11855,6 +15534,18 @@ function analyzeTimeline(timeline, {
   }
   const issues = [];
   if (timeline?.status !== 'complete') issues.push(`probe-status:${timeline?.status || 'missing'}`);
+  if (
+    productHistoryP2gGpuCountReceiptRequired
+    && productHistoryP2gGpuCountReceiptAccepted !== true
+  ) {
+    issues.push('resident-product-history-p2g-gpu-count-receipt-invalid');
+  }
+  if (
+    productHistoryRenderCommitGateReceiptRequired
+    && productHistoryRenderCommitGateReceiptAccepted !== true
+  ) {
+    issues.push('resident-product-history-render-commit-gate-receipt-invalid');
+  }
   if (authoritativeGpuCheckpointCapacityOverflowCount > 0) {
     issues.push('authoritative-gpu-checkpoint-capacity-overflow');
   }
@@ -11880,13 +15571,14 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('initial-preflight-blocked');
   }
-  if (residentRenderSourceStaleSampleCount > 0) {
+  if (residentRenderSourceStaleRecovery.unrecoveredSampleCount > 0) {
     issues.push('resident-render-source-stale');
   }
   if (!visualOnly) {
     if (
       diagnostics.length === 0
       && !renderRowMotionEvidenceAvailable
+      && !authoritativeCheckpointMotionEvidenceAvailable
       && !residentNoReadbackRenderSourceEvidenceAvailable
     ) {
       issues.push('missing-resident-diagnostics');
@@ -12112,10 +15804,14 @@ function analyzeTimeline(timeline, {
     issues.push('resident-surface-buffer-handoff-missing');
   }
   if (
-    (
-      requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
-      || requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
-    )
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && residentSurfaceBufferHandoffSampleCount > 0
+    && residentSurfacePresentationAdmissionSampleCount === 0
+  ) {
+    issues.push('native-surface-presentation-not-admitted');
+  }
+  if (
+    requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
     && residentSurfaceBufferHandoffSampleCount > 0
     && residentSurfaceVisibleGpuConsumerSampleCount === 0
     && !visibleGpuConsumerBrowserPixelValidated
@@ -12128,11 +15824,24 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('native-surface-browser-frame-validation-failed');
   }
+  const nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeBrowserFrameValidation?.status === 'unsupported'
+    && residentSurfaceForegroundProved(metrics.at(-1) || null)
+  );
   if (
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
     && nativeBrowserFrameValidation?.status === 'unsupported'
+    && !nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof
   ) {
     issues.push('native-surface-browser-frame-validation-unsupported');
+  }
+  if (
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeBrowserFrameValidation?.status === 'passed'
+    && !nativeBrowserFramePixelValidated
+  ) {
+    issues.push('native-surface-browser-frame-proof-incomplete');
   }
   if (capturedVisualFrames.length > 0 && pngAnalyzedVisualFrames.length === 0) {
     issues.push('visual-frames-not-png-analyzable');
@@ -12219,6 +15928,12 @@ function analyzeTimeline(timeline, {
     visibleBoundsToleranceM,
     particleBoundsToleranceM,
     issues,
+    productHistoryP2gGpuCountReceiptRequired,
+    productHistoryP2gGpuCountReceiptAccepted,
+    productHistoryP2gGpuCountReceipt,
+    productHistoryRenderCommitGateReceiptRequired,
+    productHistoryRenderCommitGateReceiptAccepted,
+    productHistoryRenderCommitGateReceipt,
     browserConsoleIssueCounts,
     browserConsoleWarningCounts,
     browserConsoleIssueCount: Object.values(browserConsoleIssueCounts).reduce((sum, count) => sum + Number(count || 0), 0),
@@ -12232,6 +15947,12 @@ function analyzeTimeline(timeline, {
     motionSpeedEvidenceSource,
     motionDisplacementEvidenceSource,
     compactSummaryDisabled,
+    authoritativeCheckpointMotionEvidenceAvailable,
+    authoritativeCheckpointMotionSampleCount: authoritativeCheckpointMotionSamples.length,
+    authoritativeCheckpointMotionSamples,
+    authoritativeCheckpointGlobalMassWeightedYSeriesM,
+    authoritativeCheckpointMaxGlobalYDisplacementM,
+    authoritativeCheckpointEstimatedMaxGlobalYSpeedMPerS,
     renderRowMotionEvidenceAvailable,
     directResidentNoReadbackActiveGridMotionEvidenceAvailable,
     activeGridPredictedMaxDisplacementM,
@@ -12253,6 +15974,11 @@ function analyzeTimeline(timeline, {
     // fix one. These attribute each stale sample to the condition that actually
     // fired, so a repair can be aimed rather than guessed.
     residentRenderSourceStaleBreakdown,
+    residentRenderSourceStaleRecovery,
+    residentRenderSourceTransientRecoveredSampleCount:
+      residentRenderSourceStaleRecovery.transientRecoveredSampleCount,
+    residentRenderSourceUnrecoveredStaleSampleCount:
+      residentRenderSourceStaleRecovery.unrecoveredSampleCount,
     residentRenderSourceRetentionReasonCounts,
     residentRenderSourceSampleTrace,
     residentRenderSourceNextStepSeries,
@@ -12322,6 +16048,7 @@ function analyzeTimeline(timeline, {
     nativeBrowserFrameValidationRgbChannelSpan: nativeBrowserFrameValidation?.png?.rgbChannelSpan ?? null,
     nativeBrowserFrameValidationDistinctRgbColorCount:
       nativeBrowserFrameValidation?.png?.distinctRgbColorCount ?? null,
+    nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof,
     browserCanvasCaptureUnsupportedByNativeWebGpu,
     nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired,
     visualFrameTimesS,
@@ -12351,13 +16078,38 @@ function analyzeTimeline(timeline, {
     residentSurfaceBufferHandoffSampleCount,
     residentSurfaceBufferHandoffAccepted,
     residentSurfaceVisibleGpuConsumerSampleCount,
+    residentSurfacePresentationAdmissionSampleCount,
+    residentSurfaceForegroundProofSampleCount,
     residentSurfaceVisibleGpuConsumerInputReadySampleCount,
     residentSurfaceVisibleGpuConsumerAccepted,
+    residentSurfacePresentationAdmissionAccepted,
+    residentSurfaceForegroundProofAccepted,
+    nativeWebGpuSurfaceConsumerAccepted,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length,
     workerOffscreenResidentParticleStateVisibleSampleCount,
     workerOffscreenResidentParticleStateReadyFrameCount
   };
+}
+
+export function probeStdoutPayload({
+  output,
+  stdoutMode,
+  result,
+  fullText
+}) {
+  if (!output || stdoutMode === 'full') return fullText;
+  if (stdoutMode === 'none') return null;
+  return `${JSON.stringify({
+    schema: 'peercompute.ulg.sph-history-probe-stdout-summary.v0',
+    status: result?.status ?? null,
+    output,
+    probeMode: result?.probeMode ?? null,
+    scenarioUrl: result?.scenarioUrl ?? null,
+    issueCount: Array.isArray(result?.analysis?.issues)
+      ? result.analysis.issues.length
+      : null
+  })}\n`;
 }
 
 async function main() {
@@ -12367,6 +16119,13 @@ async function main() {
   const depsDir = path.join(currentRepoDir, 'node_modules');
   const viteBin = process.env.ULG_PROBE_VITE_BIN || path.join(depsDir, 'vite', 'bin', 'vite.js');
   const output = process.env.ULG_PROBE_OUTPUT ? path.resolve(process.env.ULG_PROBE_OUTPUT) : null;
+  const durableReleasePublication = durableProbeReleasePublicationEnabled();
+  const requestedStdoutMode = String(
+    process.env.ULG_PROBE_STDOUT_MODE || 'full'
+  ).trim().toLowerCase();
+  const stdoutMode = ['full', 'summary', 'none'].includes(requestedStdoutMode)
+    ? requestedStdoutMode
+    : 'full';
   const port = positiveInteger(process.env.ULG_PROBE_PORT, 5177);
   const externalBaseUrl = String(process.env.ULG_PROBE_BASE_URL || '').trim();
   const timeoutMs = positiveInteger(process.env.ULG_PROBE_TIMEOUT_MS, 180_000);
@@ -12374,6 +16133,10 @@ async function main() {
   const probeMode = normalizedProbeMode(process.env.ULG_PROBE_MODE);
   const batches = positiveInteger(process.env.ULG_PROBE_BATCHES, 4);
   const batchSteps = positiveInteger(process.env.ULG_PROBE_BATCH_STEPS, 32);
+  const interactiveCacheLifecycle = booleanEnv(
+    process.env.ULG_PROBE_INTERACTIVE_CACHE_LIFECYCLE,
+    false
+  );
   const renderEvery = positiveInteger(process.env.ULG_PROBE_RENDER_EVERY, 1);
   const readbackMode = process.env.ULG_PROBE_READBACK_MODE === 'full-parity-readback'
     ? 'full-parity-readback'
@@ -12413,6 +16176,18 @@ async function main() {
   );
   const measureGpuStageTimestamps = booleanEnv(
     process.env.ULG_PROBE_MEASURE_GPU_STAGE_TIMESTAMPS,
+    false
+  );
+  const measureGpuStageEncoderSpans = booleanEnv(
+    process.env.ULG_PROBE_MEASURE_GPU_STAGE_ENCODER_SPANS,
+    true
+  );
+  const traceResidentStageWall = booleanEnv(
+    process.env.ULG_PROBE_TRACE_RESIDENT_STAGE_WALL,
+    false
+  );
+  const collectSchroederHierarchyHostTiming = booleanEnv(
+    process.env.ULG_PROBE_COLLECT_SCHROEDER_HIERARCHY_HOST_TIMING,
     false
   );
   const renderReadbackModeEnv = String(process.env.ULG_PROBE_RENDER_READBACK_MODE || '').toLowerCase();
@@ -12539,6 +16314,39 @@ async function main() {
     process.env.ULG_PROBE_INITIAL_RESIDENT_WAIT_MS,
     Math.min(timeoutMs, 5000)
   );
+  const artifactDetailMode = normalizeProbeArtifactDetailMode(
+    process.env.ULG_PROBE_ARTIFACT_DETAIL_MODE || 'full'
+  );
+  const phaseVolumeMaxImpulseFraction =
+    process.env.ULG_PROBE_PHASE_VOLUME_MAX_IMPULSE_FRACTION == null
+      ? null
+      : finiteNumber(
+          process.env.ULG_PROBE_PHASE_VOLUME_MAX_IMPULSE_FRACTION,
+          null
+        );
+  const generatedGasTargetMaterials = commaList(
+    process.env.ULG_PROBE_GENERATED_GAS_TARGET_MATERIAL
+  );
+  if (generatedGasTargetMaterials.length > 1) {
+    throw new RangeError(
+      'ULG_PROBE_GENERATED_GAS_TARGET_MATERIAL requires exactly one material'
+    );
+  }
+  const generatedGasTargetMaterial = generatedGasTargetMaterials[0] || null;
+  const generatedGasMinimumMassKg = Math.max(
+    0,
+    finiteNumber(
+      process.env.ULG_PROBE_GENERATED_GAS_MINIMUM_MASS_KG,
+      0
+    )
+  );
+  const generatedGasMinimumMassFractionOfSystem = Math.max(
+    0,
+    finiteNumber(
+      process.env.ULG_PROBE_GENERATED_GAS_MINIMUM_MASS_FRACTION_OF_SYSTEM,
+      1e-6
+    )
+  );
   const expectStatic = process.env.ULG_PROBE_EXPECT_STATIC === '1';
   const staticMaxDisplacementM = finiteNumber(process.env.ULG_PROBE_STATIC_MAX_DISPLACEMENT_M, 1e-6);
   const staticMaxCenterOfMassDeltaM = finiteNumber(process.env.ULG_PROBE_STATIC_MAX_COM_DELTA_M, 1e-6);
@@ -12617,7 +16425,7 @@ async function main() {
     ? {
       baseUrl: externalBaseUrl,
       ready: waitForHttp(externalBaseUrl, timeoutMs),
-      stop() {}
+      async stop() {}
     }
     : startViteServer({ repoDir, port, viteBin, timeoutMs });
   let result;
@@ -12648,6 +16456,7 @@ async function main() {
         timeoutMs,
         batches,
         batchSteps,
+        interactiveCacheLifecycle,
         renderEvery,
         readbackMode,
         compactSummaryMode,
@@ -12671,6 +16480,9 @@ async function main() {
         measureGpuQueueFence,
         measureGpuTimestampInterval,
         measureGpuStageTimestamps,
+        measureGpuStageEncoderSpans,
+        traceResidentStageWall,
+        collectSchroederHierarchyHostTiming,
         materialInterfaceDiagnostic,
         materialInterfaceCandidateReadbackMode,
         nativeSurfaceDebugMode,
@@ -12681,11 +16493,18 @@ async function main() {
         captureH2VisibilityAblation,
         captureFrameEvery,
         captureFrameMax,
-        initialResidentWaitMs
+        initialResidentWaitMs,
+        artifactDetailMode,
+        phaseVolumeMaxImpulseFraction,
+        generatedGasTargetMaterial,
+        generatedGasMinimumMassKg,
+        generatedGasMinimumMassFractionOfSystem
       });
     const visualFrameArtifacts = await persistCapturedFrames({
       frames: timeline?.visualFrames,
-      frameDir: captureFrames ? frameDir : null
+      frameDir: captureFrames ? frameDir : null,
+      repoDir,
+      durableReleasePublication
     });
     if (timeline && Array.isArray(timeline.visualFrames)) {
       timeline.visualFrames = visualFrameArtifacts.frames;
@@ -12775,14 +16594,29 @@ async function main() {
       analysis
     };
   } finally {
-    server.stop();
+    await server.stop();
   }
   const text = `${JSON.stringify(result, null, 2)}\n`;
   if (output) {
-    await mkdir(path.dirname(output), { recursive: true });
-    await writeFile(output, text, 'utf8');
+    if (durableReleasePublication) {
+      await publishProbeReleaseArtifact({
+        artifactPath: output,
+        repoDir,
+        bytes: Buffer.from(text, 'utf8'),
+        label: 'SPH long-horizon JSON output'
+      });
+    } else {
+      await mkdir(path.dirname(output), { recursive: true });
+      await writeFile(output, text, 'utf8');
+    }
   }
-  process.stdout.write(text);
+  const stdoutPayload = probeStdoutPayload({
+    output,
+    stdoutMode,
+    result,
+    fullText: text
+  });
+  if (stdoutPayload != null) process.stdout.write(stdoutPayload);
   if (process.env.ULG_PROBE_FAIL_ON_BAD === '1' && result.status === 'bad') {
     process.exitCode = 1;
   }

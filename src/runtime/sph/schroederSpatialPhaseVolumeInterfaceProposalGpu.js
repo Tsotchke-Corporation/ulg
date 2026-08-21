@@ -321,6 +321,7 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
       inUse: false,
       token: null,
       destroyedOwnedBuffers: new Set(),
+      bindGroupCache: new Map(),
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -644,11 +645,40 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
       // entry point.  Bind exactly each pass's live subset rather than a
       // superset: this keeps the artifact portable on native Vulkan/Dawn and
       // makes it impossible for a topology pass to acquire mutable state.
-      const bindGroup = (pipelineObject, suffix, bindings) => device.createBindGroup({
-        label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
-        layout: pipelineObject.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding, resource: resources.get(binding) }))
-      });
+      const bindGroup = (pipelineObject, suffix, bindings) => {
+        const resolvedResources = bindings.map((binding) => resources.get(binding));
+        const cached = arena.bindGroupCache.get(suffix);
+        const resourcesMatch = cached?.resources.length === resolvedResources.length
+          && cached.resources.every((left, index) => {
+            const right = resolvedResources[index];
+            return left?.buffer === right?.buffer
+              && (left?.offset ?? 0) === (right?.offset ?? 0)
+              && (left?.size ?? null) === (right?.size ?? null);
+          });
+        if (
+          cached?.pipeline === pipelineObject
+          && resourcesMatch
+          && cached.bindings.length === bindings.length
+          && cached.bindings.every((binding, index) => binding === bindings[index])
+        ) {
+          return cached.bindGroup;
+        }
+        const created = device.createBindGroup({
+          label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
+          layout: pipelineObject.getBindGroupLayout(0),
+          entries: bindings.map((binding, index) => ({
+            binding,
+            resource: resolvedResources[index]
+          }))
+        });
+        arena.bindGroupCache.set(suffix, {
+          pipeline: pipelineObject,
+          bindings: [...bindings],
+          resources: resolvedResources,
+          bindGroup: created
+        });
+        return created;
+      };
       const localBindGroup = bindGroup(
         pipelines.localHeads,
         'local-heads',
@@ -877,6 +907,27 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
     return finalizeRetirement(retirement);
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      const retirement = retirementFor(execution);
+      return !retirement.completed
+        && submittedExecutions.has(execution)
+        && execution.releaseScheduled !== true;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered phase-volume interface proposal release requires an exact submitted idle execution'
+      );
+    }
+    const retirement = retirementFor(execution);
+    return finalizeRetirement(retirement);
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -943,6 +994,7 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
         buffer.destroy?.();
         arena.destroyedOwnedBuffers.add(buffer);
       }
+      arena.bindGroupCache.clear();
     }
     runtime.status = 'schroeder-spatial-phase-volume-interface-proposal-runtime-destroyed';
     return true;
@@ -967,6 +1019,8 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     activeExecutionCount,

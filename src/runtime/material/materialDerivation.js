@@ -677,6 +677,7 @@ export function createReferenceAnchoredMaterialClosure(materialKey, options = {}
     units: {
       density: 'kg/m^3',
       heatCapacity: 'J/(kg*K)',
+      thermalConductivity: 'W/(m*K)',
       specificInternalEnergy: 'J/kg',
       latentHeat: 'J/kg',
       temperature: 'K'

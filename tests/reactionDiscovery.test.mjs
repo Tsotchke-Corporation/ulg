@@ -9,8 +9,15 @@ import {
   discoverReactions,
   reactionDiscoveryCacheInfo
 } from '../src/runtime/sph/reactionDiscovery.js';
-import { deriveMaterialProperties } from '../src/runtime/material/materialDerivation.js';
-import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
+import {
+  createReferenceAnchoredMaterialClosure,
+  deriveMaterialProperties
+} from '../src/runtime/material/materialDerivation.js';
+import {
+  materialDerivationSummary,
+  PROPERTY_DERIVATION_STATUS,
+  provenanceEntriesForPath
+} from '../src/runtime/material/propertyProvenance.js';
 
 test('active metal + water is discovered as exothermic, with a derived hydroxide product', () => {
   const r = discoverReactions('Na', 'h2o');
@@ -43,6 +50,82 @@ test('active metal + water is discovered as exothermic, with a derived hydroxide
   assert.equal(closure.properties.intrinsicColorSrgb.length, 3);
   assert.ok(closure.properties.phases[0].densityKgPerM3 > 0);
   assert.equal(materialDerivationSummary(closure.properties).fullyLowerLevelDerived, true);
+});
+
+test('anchored sodium-water discovery gives reduced NaOH a provenance-marked harmonic conductivity', () => {
+  clearReactionDiscoveryCache();
+  const sodium = createReferenceAnchoredMaterialClosure('Na').properties;
+  const water = createReferenceAnchoredMaterialClosure('h2o').properties;
+  const materialProperties = { Na: sodium, h2o: water };
+  const result = discoverReactions('Na', 'h2o', {
+    materialProperties,
+    allowReducedProductProperties: true
+  });
+  const phase = result.productClosures.naoh.properties.phases
+    .find((candidate) => candidate.name === 'liquid');
+  const sodiumConductivity = sodium.phases
+    .find((candidate) => candidate.name === 'solid').thermalConductivityWPerMK;
+  const waterConductivity = water.phases
+    .find((candidate) => candidate.name === 'liquid').thermalConductivityWPerMK;
+  const expected = 2 / (1 / sodiumConductivity + 1 / waterConductivity);
+
+  assert.ok(Number.isFinite(phase.thermalConductivityWPerMK));
+  assert.ok(phase.thermalConductivityWPerMK > 0);
+  assert.ok(Math.abs(phase.thermalConductivityWPerMK - expected) < 1e-12);
+  const provenance = provenanceEntriesForPath(
+    result.productClosures.naoh.properties,
+    'phases.liquid.thermalConductivityWPerMK'
+  );
+  assert.equal(provenance.length, 1);
+  assert.equal(provenance[0].status, PROPERTY_DERIVATION_STATUS.REDUCED_ESTIMATE);
+  assert.match(provenance[0].method, /harmonic-mean representative conductivity/);
+});
+
+test('reduced product conductivity fails closed when a reactant phase lacks conductivity', () => {
+  clearReactionDiscoveryCache();
+  const sodium = createReferenceAnchoredMaterialClosure('Na').properties;
+  const water = createReferenceAnchoredMaterialClosure('h2o').properties;
+  const waterWithoutConductivity = {
+    ...water,
+    phases: water.phases.map((phase) => (
+      phase.name === 'liquid'
+        ? { ...phase, thermalConductivityWPerMK: 0 }
+        : phase
+    ))
+  };
+  const result = discoverReactions('Na', 'h2o', {
+    materialProperties: { Na: sodium, h2o: waterWithoutConductivity },
+    allowReducedProductProperties: true
+  });
+
+  assert.equal(
+    result.productClosures.naoh.properties.phases[0].thermalConductivityWPerMK,
+    0
+  );
+});
+
+test('reaction discovery cache identity includes representative phase conductivity', () => {
+  const sodium = createReferenceAnchoredMaterialClosure('Na').properties;
+  const water = createReferenceAnchoredMaterialClosure('h2o').properties;
+  const changedWater = {
+    ...water,
+    phases: water.phases.map((phase) => (
+      phase.name === 'liquid'
+        ? { ...phase, thermalConductivityWPerMK: phase.thermalConductivityWPerMK * 2 }
+        : phase
+    ))
+  };
+  const options = { allowReducedProductProperties: true };
+  const first = createReactionDiscoveryCacheKey('Na', 'h2o', {
+    ...options,
+    materialProperties: { Na: sodium, h2o: water }
+  });
+  const second = createReactionDiscoveryCacheKey('Na', 'h2o', {
+    ...options,
+    materialProperties: { Na: sodium, h2o: changedWater }
+  });
+
+  assert.notEqual(first, second);
 });
 
 test('active metal + water discovery uses the general family in the SPH adapter', () => {

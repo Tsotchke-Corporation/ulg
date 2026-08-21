@@ -12,14 +12,30 @@ import {
 } from '../scripts/sph-native-indirect-evidence.mjs';
 import { validateAuthoritativeGpuUploadPair } from '../scripts/sph-authoritative-gpu-checkpoint.mjs';
 import {
+  GPU_READBACK_TELEMETRY_SCHEMA,
+  createGpuReadbackTelemetry
+} from '../src/runtime/sph/sphGpuReadbackTelemetry.js';
+import {
+  compactPageVisibleGpuReadbackTelemetry,
   createLatestSceneRefreshRequestGate,
   createResidentGpuArtifactRetirementBarrier,
+  createSphNativeSurfaceCommandFamilyAttestation,
+  normalizeResidentProductMassAuthorityForPublicationRevalidation,
+  pageVisibleProductionHotLoopHostDependencyEvidence,
   resolveSphMaterialInterfacePreIntegrationProvenance,
   resolveSphNativeSurfaceDiagnosticDrawPlan,
-  runSphNativeSurfaceCandidateValidationTransaction
+  runSphNativeSurfaceCandidateValidationTransaction,
+  sphResidentRenderRefreshPublicationIsCurrent
 } from '../src/visualization/sphPhaseScene.js';
 import {
-  createBrowserConsoleCapture
+  residentGpuResidencyWarningMessage,
+  summarizeResidentStageOrderExecution
+} from '../src/visualization/sphPhaseDemoMount.js';
+import {
+  analyzeTimeline,
+  browserFrameValidationFromVisualFrame,
+  createBrowserConsoleCapture,
+  summarizeResidentRenderSourceStaleRecovery
 } from '../scripts/sph-long-horizon-probe.mjs';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -31,6 +47,65 @@ import {
 function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 }
+
+test('iron native failure evidence preserves device-loss detail without adding a GPU wait', () => {
+  const source = readRepoFile(
+    'tests/sphIronIceContactImpactDiagnostic.native.test.mjs'
+  );
+  const failureStart = source.indexOf('const failureDiagnostics = {');
+  const failureEnd = source.indexOf(
+    "emitResidentProgress('resident-refresh-host-return-progress')",
+    failureStart
+  );
+  assert.ok(failureStart >= 0 && failureEnd > failureStart);
+  const failureBlock = source.slice(failureStart, failureEnd);
+  assert.match(
+    failureBlock,
+    /cause:\s*\{[\s\S]*reason:\s*error\?\.cause\?\.reason[\s\S]*message:\s*error\?\.cause\?\.message/
+  );
+  assert.match(failureBlock, /sceneDeviceLoss[\s\S]*info:[\s\S]*message:/);
+  assert.match(
+    failureBlock,
+    /renderBridge[\s\S]*deviceLostInfo:[\s\S]*reason:[\s\S]*message:/
+  );
+  assert.match(
+    failureBlock,
+    /resident-refresh-failure-diagnostics:[\s\S]*slice\(0, 4096\)/
+  );
+  assert.doesNotMatch(failureBlock, /mapAsync|onSubmittedWorkDone/);
+  const rejectionStart = source.indexOf('}).catch((error) => {', failureEnd);
+  const rejectionEnd = source.indexOf('\n    native = {', rejectionStart);
+  assert.ok(rejectionStart >= 0 && rejectionEnd > rejectionStart);
+  const rejectionBlock = source.slice(rejectionStart, rejectionEnd);
+  assert.match(rejectionBlock, /page-evaluate-rejected:/);
+  assert.match(rejectionBlock, /browserDiagnostics\.slice\(-64\)/);
+  assert.match(rejectionBlock, /throw error;/);
+});
+
+test('resident publication revalidation accepts only the expected consumed GPU-count authority transition', () => {
+  assert.equal(
+    normalizeResidentProductMassAuthorityForPublicationRevalidation(
+      'gpu-authored-filtered-live-prefix-revoked'
+    ),
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    normalizeResidentProductMassAuthorityForPublicationRevalidation(
+      'gpu-authored-filtered-live-prefix'
+    ),
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    normalizeResidentProductMassAuthorityForPublicationRevalidation(
+      'gpu-authored-filtered-live-prefix-failed'
+    ),
+    'gpu-authored-filtered-live-prefix-failed'
+  );
+  assert.equal(
+    normalizeResidentProductMassAuthorityForPublicationRevalidation(null),
+    null
+  );
+});
 
 function materialInterfacePreIntegrationFixture() {
   const stateBuffer = { label: 'sph-state' };
@@ -87,6 +162,116 @@ function materialInterfacePreIntegrationFixture() {
   };
 }
 
+test('long-horizon validation checkpoints continue after the visual frame budget is exhausted', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const appendCapture = probeSource.match(
+    /const appendMetricWithValidationCapture = async[\s\S]*?const authoritativeGpuCheckpointCaptureSummary/
+  )?.[0] || '';
+
+  assert.match(appendCapture, /if \(!requestedCaptureFrames\)/);
+  assert.doesNotMatch(
+    appendCapture,
+    /if \(!shouldCaptureFrame\(metric\.batchIndex, metric\.phase\)\)/
+  );
+  assert.match(
+    appendCapture,
+    /if \(requestedVisualIntervalCaptureRequested\)[\s\S]*?metric\.authoritativeGpuCheckpoint\s*=\s*await captureAuthoritativeGpuCheckpoint\([\s\S]*?const retainedMetric = retainProbeMetric\(metric\);[\s\S]*?metrics\.push\(retainedMetric\);[\s\S]*?await captureFrame\(metric\.batchIndex, metric\.phase, sampleIndex\)/,
+    'requested visual intervals must capture the authoritative checkpoint before retaining the metric or attempting bounded frame capture'
+  );
+});
+
+test('render-source staleness only clears after exact zero-geometry retention recovers to a newer current step', () => {
+  const reason =
+    'a zero-geometry render-field handoff has no native consumer; '
+    + 'retain the runtime-admitted prior presentation until a real replacement is ready';
+  const recovered = summarizeResidentRenderSourceStaleRecovery([
+    {
+      index: 0,
+      nextStep: 7680,
+      generationMatchesCurrent: true,
+      retainedPrevious: false,
+      sourceMarkedStale: false,
+      retentionReason: null
+    },
+    {
+      index: 1,
+      nextStep: 7680,
+      generationMatchesCurrent: false,
+      retainedPrevious: true,
+      sourceMarkedStale: true,
+      retentionReason: reason
+    },
+    {
+      index: 2,
+      nextStep: 9216,
+      generationMatchesCurrent: true,
+      retainedPrevious: false,
+      sourceMarkedStale: false,
+      retentionReason: null
+    }
+  ]);
+  assert.equal(recovered.status, 'no-unrecovered-stale-source');
+  assert.equal(recovered.transientRecoveredSampleCount, 1);
+  assert.equal(recovered.unrecoveredSampleCount, 0);
+
+  const neverRecovered = summarizeResidentRenderSourceStaleRecovery([
+    {
+      index: 0,
+      nextStep: 7680,
+      generationMatchesCurrent: false,
+      retainedPrevious: true,
+      sourceMarkedStale: true,
+      retentionReason: reason
+    }
+  ]);
+  assert.equal(neverRecovered.status, 'unrecovered-stale-source');
+  assert.equal(neverRecovered.unrecoveredSampleCount, 1);
+
+  const unapproved = summarizeResidentRenderSourceStaleRecovery([
+    {
+      index: 0,
+      nextStep: 7680,
+      generationMatchesCurrent: false,
+      retainedPrevious: true,
+      sourceMarkedStale: true,
+      retentionReason: 'unknown-stale-source'
+    },
+    {
+      index: 1,
+      nextStep: 9216,
+      generationMatchesCurrent: true,
+      retainedPrevious: false,
+      sourceMarkedStale: false,
+      retentionReason: null
+    }
+  ]);
+  assert.equal(unapproved.status, 'unrecovered-stale-source');
+  assert.equal(unapproved.unrecoveredSampleCount, 1);
+});
+
+test('interactive cache lifecycle refreshes the reset execution before its initial sample', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const resetMeasurement = probeSource.match(
+    /execution = resetPlaybackQuiescence\.execution;[\s\S]*?markProbeProgress\('sampling-initial-state'\)/
+  )?.[0] || '';
+
+  assert.match(
+    resetMeasurement,
+    /refreshSphResidentRenderState\(\{[\s\S]*?residentSteps: execution/,
+    'the post-reset presentation must consume the exact quiescent reset execution'
+  );
+  assert.match(
+    resetMeasurement,
+    /sph-long-horizon-probe-post-reset-initial-render-refresh/,
+    'the post-reset viewport refresh must occur before the initial measurement'
+  );
+  assert.match(
+    resetMeasurement,
+    /await waitForNativeSurfaceValidation\(0\)/,
+    'the initial sample must wait for its own prepared native candidate'
+  );
+});
+
 test('native WebGPU probe and benchmark flatten validation scope diagnostics', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
   const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
@@ -113,8 +298,49 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   );
   assert.match(
     probeSource,
-    /const sourceCurrent = Boolean\([\s\S]*?sourceGenerationMatchesCurrent === true[\s\S]*?!sourceRetainedPrevious[\s\S]*?!sourceMarkedStale[\s\S]*?const ready = Boolean\(!candidateValidationPending && sourceCurrent[\s\S]*?const pending = Boolean\([\s\S]*?candidateValidationPending/,
-    'a retained or marked-stale prior bridge cannot settle the current candidate checkpoint'
+    /const sourceCurrent = Boolean\([\s\S]*?sourceGenerationMatchesCurrent === true[\s\S]*?!sourceRetainedPrevious[\s\S]*?!sourceMarkedStale/,
+    'a retained or marked-stale prior bridge cannot represent the current candidate'
+  );
+  assert.match(
+    probeSource,
+    /const consumerReadyClaim =[\s\S]*?const runtimePresentationAdmitted =[\s\S]*?const foregroundProofValidated =/,
+    'the probe must keep readiness, presentation admission, and foreground proof separate'
+  );
+  assert.match(
+    probeSource,
+    /const currentSurfaceDrawConsumerValue =[\s\S]*?Object\.prototype\.hasOwnProperty\.call\(source, sourceKey\)[\s\S]*?source\[sourceKey\] !== undefined[\s\S]*?return source\[sourceKey\]/,
+    'sampled evidence must prefer defined exact direct surface-draw fields while allowing undefined values to fall through to the render-state snapshot'
+  );
+  for (const field of [
+    'surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted',
+    'surfaceDrawVisibleGpuConsumerForegroundProofValidated',
+    'surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted',
+    'surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated',
+    'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus',
+    'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind',
+    'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary',
+    'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount',
+    'surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration',
+    'surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration'
+  ]) {
+    const exactCaptureCalls = probeSource.match(new RegExp(
+      `currentSurfaceDrawConsumerValue\\(\\s*'${field}'\\s*\\)`,
+      'g'
+    )) || [];
+    assert.ok(
+      exactCaptureCalls.length >= 2,
+      `${field} must be retained in both canonical render-state and direct surface-draw samples`
+    );
+  }
+  assert.match(
+    probeSource,
+    /const admitted = Boolean\([\s\S]*?sourceCurrent[\s\S]*?consumerReadyClaim[\s\S]*?gpuBufferHandoffReady[\s\S]*?runtimePresentationAdmitted[\s\S]*?const foregroundProved = Boolean\([\s\S]*?admitted[\s\S]*?foregroundProofValidated/,
+    'current-source presentation admission must be necessary for foreground proof'
+  );
+  assert.match(
+    probeSource,
+    /const ready = admitted;[\s\S]*?native-surface-presentation-admitted[\s\S]*?native-surface-foreground-proved/,
+    'the hot-loop ready alias must mean admission without claiming foreground pixels'
   );
   assert.match(
     probeSource,
@@ -145,8 +371,28 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   );
   assert.match(
     probeSource,
-    /initialUploadPairValidation = checkpointModule\.validateAuthoritativeGpuUploadPair\(\{[\s\S]*?requireTimeZero: true[\s\S]*?if \(!initialUploadPairValidation\.ready\)/,
+    /initialUploadPairValidation = checkpointModule\.validateAuthoritativeGpuUploadPair\(\{[\s\S]*?requireTimeZero: true[\s\S]*?if \([\s\S]*?!initialUploadPairValidation\.ready[\s\S]*?!initialUploadPairValidation\.sharedSlotIdentityVerified/,
     'an existing initial pair is reusable only with exact paired zero-step and zero-time provenance'
+  );
+  assert.match(
+    probeSource,
+    /!initialUploadPairValidation\.ready[\s\S]*?!initialUploadPairValidation\.sharedSlotIdentityVerified[\s\S]*?sharedSlotIdentityVerified:[\s\S]*?refreshedPairValidation\.sharedSlotIdentityVerified/,
+    'the initial generated-cohort baseline must require and report shared logical-slot identity'
+  );
+  assert.match(
+    probeSource,
+    /candidate\.validation\.ready[\s\S]*?candidate\.validation\.sharedSlotIdentityVerified[\s\S]*?\?\? evaluatedUploadCandidates\.find/,
+    'checkpoint selection must prefer a ready shared-slot upload pair'
+  );
+  assert.match(
+    sceneSource,
+    /fresh CPU-packed SPH\/mechanics upload pair[\s\S]*?upload\.slot = 0;[\s\S]*?upload\.sourceSlot = 0;[\s\S]*?upload\.nextSlot = 0;/,
+    'fresh scene SPH uploads must publish their implicit logical source slot'
+  );
+  assert.match(
+    sceneSource,
+    /scene-issued CPU-packed mechanics upload[\s\S]*?upload\.slot = 0;[\s\S]*?upload\.sourceSlot = 0;[\s\S]*?upload\.nextSlot = 0;/,
+    'fresh scene mechanics uploads must publish the same logical source slot'
   );
   assert.match(
     sceneSource,
@@ -194,6 +440,36 @@ test('GPU stage timestamps discard only an unsubmitted encoder allocation suffix
   assert.match(
     spatialSource,
     /!submissionPerformed[\s\S]*?generationEncoder[\s\S]*?gpuTimestampRecorder\.discardEncoderSpans\(generationEncoder\)/
+  );
+});
+
+test('coarse GPU stage spans retain semantics when detailed encoder spans are disabled', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const crossLevelSource = readRepoFile(
+    'src/runtime/sph/schroederCrossLevelCouplingGpu.js'
+  );
+
+  assert.match(
+    probeSource,
+    /descriptor\?\.coarseStage === true[\s\S]*?!queueBoundaryMeasurement/
+  );
+  assert.match(probeSource, /coarseEncoderSpans: true/);
+  assert.match(
+    probeSource,
+    /encoderSpanSelection:[\s\S]*?'all'[\s\S]*?'coarse-stage-only'/
+  );
+  assert.match(
+    probeSource,
+    /encoderSpanSemantics:\s*GPU_STAGE_TIMESTAMP_ENCODER_SPAN_SEMANTICS/
+  );
+  assert.equal(
+    (
+      crossLevelSource.match(
+        /readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,\s*\.\.\.\(gpuTimestampRecorder == null \? \{\} : \{ gpuTimestampRecorder \}\),/g
+      ) || []
+    ).length,
+    4,
+    'fine and terminal G2P must retain inner timestamps on both two-level routes'
   );
 });
 
@@ -918,6 +1194,11 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(policySource, /retainedCompactSnapshotExportRequested/);
   assert.match(sceneSource, /sphWorkerOffscreenPresentation/);
   assert.match(sceneSource, /sphWorkerOffscreenRenderRows/);
+  assert.match(sceneSource, /emitResidentRenderProgressConsole = false/);
+  assert.match(
+    sceneSource,
+    /if \(emitResidentProgressConsole\) \{[\s\S]*?const progressSuffix = \[/
+  );
   assert.match(sceneSource, /sphWorkerOffscreenResidentStage/);
   assert.match(sceneSource, /runWorkerOffscreenResidentStageOnPresentationDevice/);
   assert.match(sceneSource, /runWorkerOffscreenMechanicsStageChainOnPresentationDevice/);
@@ -930,6 +1211,10 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /workerOffscreenResidentStageChainStatus/);
   assert.match(sceneSource, /workerOffscreenResidentStageChainAutoStatus/);
   assert.match(sceneSource, /presentation-worker-mechanics-stage-chain-auto\.v0/);
+  assert.match(
+    sceneSource,
+    /mainThreadSurfaceDrawRouteSelected[\s\S]*?isMainThreadResidentSurfaceDrawBridgeMode\([\s\S]*?residentSurfaceDrawDiagnosticModeDefault[\s\S]*?sphMainThreadSurfaceDrawDisplayOwnership\?\.requested[\s\S]*?presentation-worker-mechanics-stage-chain-auto-suppressed-main-thread-display-owner[\s\S]*?main-thread-surface-draw-display-owns-visible-output/
+  );
   assert.match(sceneSource, /presentation-worker-retained-state-promotion-candidate\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-state-promotion-admission\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-state-continuation\.v0/);
@@ -1262,6 +1547,57 @@ test('native WebGPU browser-frame validation publishes back into scene state', (
     /visibleCanvases\.find\(\(entry\) => entry\.sameAsNativeConsumerCanvas\)[\s\S]*?sameAsRenderBridgeCanvas/,
     'native validation should prefer the actual consumer or render-bridge canvas over overlay order'
   );
+  assert.match(
+    probeSource,
+    /'#sph-phase-overlay > :not\(#sph-scene\):not\(style\)'/,
+    'surface evidence should hide every overlay sibling except the scene so future controls cannot contaminate the canvas crop'
+  );
+  assert.match(
+    probeSource,
+    /'#sph-phase-overlay #sph-lighting-toggle'/,
+    'the lighting toggle must not supply false-positive surface pixels'
+  );
+  assert.match(
+    probeSource,
+    /'#sph-phase-overlay #sph-pending-presentation'/,
+    'the pending-presentation layer must not supply false-positive surface pixels'
+  );
+  assert.match(
+    probeSource,
+    /NATIVE_WEBGPU_SURFACE_RENDERED_STATUSES[\s\S]*?native-webgpu-surface-consumer-candidate-staged-composite-presented/,
+    'a successfully copied candidate composite is a rendered native canvas even when the headless compositor returns transparent pixels'
+  );
+  assert.match(
+    probeSource,
+    /nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof[\s\S]*?residentSurfaceForegroundProved\(metrics\.at\(-1\) \|\| null\)/,
+    'an unsupported headless screenshot may be covered only by current generation-bound GPU foreground proof'
+  );
+});
+
+test('transparent native WebGPU compositor capture is unsupported after a rendered candidate', () => {
+  const validation = browserFrameValidationFromVisualFrame({
+    status: 'captured',
+    captureSource: 'playwright-canvas-center-crop',
+    validationPng: {
+      status: 'ready',
+      width: 4,
+      height: 4,
+      pixelCount: 16,
+      nonzeroRgbPixelCount: 0,
+      nonzeroAlphaPixelCount: 0,
+      hasVisiblePixels: false,
+      hasSurfaceLikeVariation: false,
+      allTransparentBlack: true,
+      rgbChannelSpan: 0,
+      distinctRgbColorCount: 1
+    }
+  }, {
+    transparentBlackUnsupported: true
+  });
+
+  assert.equal(validation.status, 'unsupported');
+  assert.equal(validation.nonzeroPixelCount, 0);
+  assert.match(validation.reason, /capture as unsupported rather than a failed render/);
 });
 
 test('standard material matrix pins production native WebGPU visual evidence', () => {
@@ -1271,12 +1607,7 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   assert.match(matrixSource, /renderOwnership: 'main-thread-renderer'/);
   assert.match(matrixSource, /surfaceDraw: 'native-webgpu-surface-consumer'/);
   assert.match(matrixSource, /ss: '1'/);
-  // Slice 9 is the two-level/cross-level transport, so the matrix that gates it
-  // must actually execute it. These previously pinned '0', which kept every
-  // scenario green on a configuration that never ran the feature under test.
   for (const flag of [
-    'schroederTwoLevel',
-    'schroederCrossLevelCoupling',
     'schroederPhaseVolumeMigration',
     'schroederLawQueue',
     'schroederLawNeighborCandidates'
@@ -1291,9 +1622,15 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   assert.match(matrixSource, /params\.set\('renderOwnership', 'main-thread-renderer'\)/);
   assert.match(matrixSource, /params\.set\('surfaceDraw', 'native-webgpu-surface-consumer'\)/);
   assert.match(matrixSource, /params\.set\('ss', '1'\)/);
+  assert.match(matrixSource, /params\.set\('schroederLevel', '0'\)/);
+  assert.match(matrixSource, /params\.set\('schroederMinLevel', '0'\)/);
+  assert.match(matrixSource, /params\.set\('schroederMaxLevel', '0'\)/);
+  assert.match(matrixSource, /params\.set\('schroederTwoLevel', '0'\)/);
+  assert.match(
+    matrixSource,
+    /params\.set\('schroederCrossLevelCoupling', '0'\)/
+  );
   for (const flag of [
-    'schroederTwoLevel',
-    'schroederCrossLevelCoupling',
     'schroederPhaseVolumeMigration',
     'schroederLawQueue',
     'schroederLawNeighborCandidates'
@@ -1320,7 +1657,7 @@ test('standard material matrix pins production native WebGPU visual evidence', (
   );
   assert.match(
     matrixSource,
-    /effectiveRendererModes\.some\(\(mode\) => mode !== scenario\.visualRendererMode\)[\s\S]*?'visual-renderer-mode-mismatch'/,
+    /rendererModes\.some\([\s\S]*?mode !== scenario\.visualRendererMode[\s\S]*?'visual-renderer-mode-mismatch'/,
     'every standard visual interval must stay on the requested native surface bridge'
   );
   assert.match(
@@ -1814,6 +2151,204 @@ test('native successor validation closes GPU scopes before readback completion',
   ]);
 });
 
+test('native successor validation reuses only an exact scoped command-family attestation', async () => {
+  const activeFilters = [];
+  let pushCount = 0;
+  let popCount = 0;
+  let transactionCount = 0;
+  const device = {
+    pushErrorScope(filter) {
+      pushCount += 1;
+      activeFilters.push(filter);
+    },
+    async popErrorScope() {
+      popCount += 1;
+      activeFilters.pop();
+      return null;
+    }
+  };
+  const commandFamilyKey = 'test-native-command-family-v1';
+  const first = await runSphNativeSurfaceCandidateValidationTransaction({
+    device,
+    commandFamilyKey,
+    transaction: () => {
+      transactionCount += 1;
+      return { submitted: true };
+    }
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.commandFamilyAttestationUsed, false);
+  assert.equal(first.errorScopeMode, 'scoped-command-family-validation');
+  assert.equal(pushCount, 3);
+  assert.equal(popCount, 3);
+
+  const attestation = createSphNativeSurfaceCommandFamilyAttestation({
+    device,
+    commandFamilyKey,
+    validationTransaction: first
+  });
+  const cached = await runSphNativeSurfaceCandidateValidationTransaction({
+    device,
+    commandFamilyKey,
+    commandFamilyAttestation: attestation,
+    transaction: () => {
+      transactionCount += 1;
+      return { submitted: true };
+    }
+  });
+  assert.equal(cached.ok, true);
+  assert.equal(cached.commandFamilyAttestationUsed, true);
+  assert.equal(cached.errorScopeMode, 'validated-command-family-cache-hit');
+  assert.deepEqual(cached.pushedFilters, []);
+  assert.equal(pushCount, 3);
+  assert.equal(popCount, 3);
+  assert.equal(transactionCount, 2);
+
+  const mismatched = await runSphNativeSurfaceCandidateValidationTransaction({
+    device,
+    commandFamilyKey: `${commandFamilyKey}-foreign`,
+    commandFamilyAttestation: attestation,
+    transaction: () => {
+      transactionCount += 1;
+      return { submitted: true };
+    }
+  });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.errors[0]?.source, 'command-family-attestation');
+  assert.equal(transactionCount, 2);
+});
+
+test('native successor validation submits a prepared command only after every scope proves clean', async () => {
+  const order = [];
+  const activeFilters = [];
+  const pendingPops = [];
+  const prepared = { command: 'private-candidate-stage' };
+  const submitted = { submitted: true };
+  let submitCount = 0;
+  const resultPromise = runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+        order.push(`push:${filter}`);
+      },
+      popErrorScope() {
+        const filter = activeFilters.pop();
+        order.push(`pop:${filter}`);
+        return new Promise((resolve) => {
+          pendingPops.push({ filter, resolve });
+        });
+      }
+    },
+    transaction: () => {
+      order.push('encode-finish');
+      return prepared;
+    },
+    submitPreparedTransaction: (receipt) => {
+      assert.equal(receipt, prepared);
+      submitCount += 1;
+      order.push('liveness-submit');
+      return submitted;
+    },
+    completeTransaction: async (submission) => {
+      assert.equal(submission, submitted);
+      order.push('complete');
+      return { status: 'same-queue-submitted' };
+    }
+  });
+
+  assert.deepEqual(order, [
+    'push:validation',
+    'push:internal',
+    'push:out-of-memory',
+    'encode-finish',
+    'pop:out-of-memory',
+    'pop:internal',
+    'pop:validation'
+  ]);
+  assert.equal(submitCount, 0);
+
+  pendingPops.find(({ filter }) => filter === 'validation').resolve(null);
+  pendingPops.find(({ filter }) => filter === 'internal').resolve(null);
+  await Promise.resolve();
+  assert.equal(submitCount, 0, 'prepared submission waits for all scope reports');
+
+  pendingPops.find(({ filter }) => filter === 'out-of-memory').resolve(null);
+  const result = await resultPromise;
+  assert.equal(result.ok, true);
+  assert.equal(result.preparedTransactionRequested, true);
+  assert.equal(result.preparedTransactionSubmitted, true);
+  assert.equal(submitCount, 1);
+  assert.deepEqual(order.slice(-2), ['liveness-submit', 'complete']);
+});
+
+test('native successor validation discards an unsubmitted prepared command on a scope error', async () => {
+  const prepared = { command: 'must-never-submit' };
+  let submitCount = 0;
+  let discarded = null;
+  const activeFilters = [];
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      async popErrorScope() {
+        const filter = activeFilters.pop();
+        return filter === 'internal'
+          ? {
+              name: 'GPUInternalError',
+              message: 'injected prepared-command encode failure'
+            }
+          : null;
+      }
+    },
+    transaction: () => prepared,
+    submitPreparedTransaction: () => {
+      submitCount += 1;
+      return { submitted: true };
+    },
+    discardTransaction: (value) => {
+      discarded = value;
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.preparedTransactionRequested, true);
+  assert.equal(result.preparedTransactionSubmitted, false);
+  assert.equal(result.transactionValueDiscarded, true);
+  assert.equal(submitCount, 0);
+  assert.equal(discarded, prepared);
+  assert.match(result.reason, /prepared-command encode failure/);
+});
+
+test('native successor validation rejects an asynchronous prepared submitter', async () => {
+  const prepared = { command: 'sync-only' };
+  let discardCount = 0;
+  const activeFilters = [];
+  const result = await runSphNativeSurfaceCandidateValidationTransaction({
+    device: {
+      pushErrorScope(filter) {
+        activeFilters.push(filter);
+      },
+      async popErrorScope() {
+        activeFilters.pop();
+        return null;
+      }
+    },
+    transaction: () => prepared,
+    submitPreparedTransaction: () => Promise.resolve({ submitted: true }),
+    discardTransaction: (value) => {
+      assert.equal(value, prepared);
+      discardCount += 1;
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.preparedTransactionSubmitted, false);
+  assert.equal(discardCount, 1);
+  assert.equal(result.errors[0]?.source, 'candidate-prepared-submission');
+  assert.match(result.reason, /must settle synchronously/);
+});
+
 test('native successor validation may overlap a map request but never consumes it before clean scopes', async () => {
   const order = [];
   const activeFilters = [];
@@ -2139,15 +2674,20 @@ test('native composite staging validates asynchronously before a short irreversi
 
   assert.match(
     sceneSource,
-    /queue\.submit\(\[encoder\.finish\(\)\]\);\s*primaryFrameSubmitted = true;\s*if \(!stageOnly\) markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);/,
-    'only a visible normal submit may latch the transaction immediately after the primary submit returns'
+    /const submittedQueue = bridge\.device\.queue;[\s\S]*?const commandBuffer = encoder\.finish\(\);[\s\S]*?if \(stageOnly\) \{[\s\S]*?const validatePreparedStage = \(\) => \{[\s\S]*?preparedStagePublicationAdmission\?\.\(\)[\s\S]*?const submitCandidateStage = \(\) => \{[\s\S]*?registerQueueOrderedCleanupClaim\([\s\S]*?submittedQueue\.writeBuffer\([\s\S]*?submitQueueOrderedWork\([\s\S]*?\[commandBuffer\][\s\S]*?if \(deferStageSubmitUntilValidation\) \{[\s\S]*?createSphNativeSurfacePreparedCandidateSubmission\([\s\S]*?validate: validatePreparedStage,[\s\S]*?submit: submitCandidateStage[\s\S]*?submitCandidateStage\(\);[\s\S]*?return true;[\s\S]*?\}\s*submittedQueue\.submit\(\[commandBuffer\]\);\s*primaryFrameSubmitted = true;/,
+    'the private stage must prepare one exact single-use command and register its cleanup claim only in the post-scope submit turn; normal rendering still submits immediately'
+  );
+  assert.match(
+    sceneSource,
+    /const payloadIsView = ArrayBuffer\.isView\(data\);[\s\S]*?const payloadIsArrayBuffer = data instanceof ArrayBuffer;[\s\S]*?payloadIsView \? data\.buffer : data,[\s\S]*?payloadIsView \? data\.byteOffset : 0,/,
+    'deferred camera writes must freeze both ArrayBuffer and ArrayBufferView WebGPU BufferSource payloads'
   );
   const stagedPresenter = sceneSource.match(
     /function presentStagedSphNativeSurfaceCandidateComposite\([\s\S]*?\n  function prepareSphNativeWebGpuSurfaceForegroundValidationGeneration/
   )?.[0] || '';
   assert.match(
     stagedPresenter,
-    /encoder\.copyTextureToTexture\([\s\S]*?queue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);/,
+    /encoder\.copyTextureToTexture\([\s\S]*?const presentationCopyQueue = bridge\.device\.queue;\s*presentationCopyQueue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*targets\.presentationCopySubmittedQueue = presentationCopyQueue;[\s\S]*?cancelQueueOrderedCleanupClaim\([\s\S]*?markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);/,
     'the staged route may latch only after its private composite has been copied to the visible canvas'
   );
   assert.match(
@@ -2157,8 +2697,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
-    /const timing = \{[\s\S]*?schema: 'peercompute\.ulg\.sph-native-surface-candidate-presentation-timing\.v0',[\s\S]*?targetAllocationMs: null,[\s\S]*?stageRenderSubmitMs: null,[\s\S]*?errorScopesMs: null,[\s\S]*?mapMs: null,[\s\S]*?presentationCopySubmitMs: null,/,
-    'candidate proof telemetry must name the allocation, submit, scope, map, and final-copy phases explicitly'
+    /const timing = \{[\s\S]*?schema: 'peercompute\.ulg\.sph-native-surface-candidate-presentation-timing\.v0',[\s\S]*?targetAllocationMs: null,[\s\S]*?stageRenderEncodeMs: null,[\s\S]*?postScopeStageSubmitMs: null,[\s\S]*?stageRenderSubmitMs: null,[\s\S]*?errorScopesMs: null,[\s\S]*?queueFenceMs: null,[\s\S]*?mapMs: null,[\s\S]*?presentationCopySubmitMs: null,/,
+    'candidate proof telemetry must distinguish scoped encoding, post-scope submit, zero-duration host-fence, diagnostic MAP_READ, and final-copy phases'
   );
   assert.match(
     sceneSource,
@@ -2167,8 +2707,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
-    /const stageRenderSubmitStartedAtMs = nowMs\(\);[\s\S]*?renderSphResidentSurfaceDrawOverlay\([\s\S]*?\} finally \{[\s\S]*?timing\.stageRenderSubmitMs = Math\.max\(/,
-    'candidate proof telemetry must time the synchronous private-stage encode and submit path even when it throws'
+    /const stageRenderEncodeStartedAtMs = nowMs\(\);[\s\S]*?renderSphResidentSurfaceDrawOverlay\([\s\S]*?\} finally \{[\s\S]*?timing\.stageRenderEncodeMs = Math\.max\([\s\S]*?submitPreparedTransaction:[\s\S]*?const stageSubmitStartedAtMs = nowMs\(\);[\s\S]*?timing\.postScopeStageSubmitMs = Math\.max\([\s\S]*?timing\.stageRenderSubmitMs = Math\.max\(/,
+    'candidate proof telemetry must time scoped command encoding separately from the synchronous post-scope submit turn'
   );
   assert.match(
     sceneSource,
@@ -2182,8 +2722,13 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     stagedPresenter,
-    /queue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);\s*const presentationCopySubmittedAtMs = nowMs\(\);[\s\S]*?presentationCopySubmitMs: Math\.max\([\s\S]*?bridge\.nativeSurfaceCandidateStagedPresentationTiming = presentationTiming;/,
+    /presentationCopyQueue\.submit\(\[encoder\.finish\(\)\]\);\s*submitted = true;\s*targets\.presentationCopySubmittedQueue = presentationCopyQueue;[\s\S]*?cancelQueueOrderedCleanupClaim\([\s\S]*?markSphNativeSurfaceRenderBridgeFirstFrameSubmitted\(bridge\);\s*const presentationCopySubmittedAtMs = nowMs\(\);[\s\S]*?presentationCopySubmitMs: Math\.max\([\s\S]*?bridge\.nativeSurfaceCandidateStagedPresentationTiming = presentationTiming;/,
     'final-copy telemetry may be published only after the visible copy has submitted and the first-frame latch is irrevocable'
+  );
+  assert.match(
+    sceneSource,
+    /function discardStagedSphResidentSurfaceDrawCandidate\([\s\S]*?exactPreCopyStageFinalConsumer[\s\S]*?sealQueueOrderedFinalConsumerCapability\([\s\S]*?releaseSubmittedWorkCleanupQueueOrdered\([\s\S]*?producerFamily: 'sph-scene-native-surface-candidate-stage'/,
+    'a rejected pre-copy candidate must late-seal the exact private stage and retire it without a host queue fence'
   );
   assert.doesNotMatch(
     stagedPresenter,
@@ -2214,6 +2759,16 @@ test('native composite staging validates asynchronously before a short irreversi
     stagedPresenter,
     /nativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount = 0;/,
     'the publication receipt must report that no geometry was submitted after proof admission'
+  );
+  assert.match(
+    stagedPresenter,
+    /foregroundProofKind[\s\S]*?'base-composite-color-difference'[\s\S]*?changedPixelCount[\s\S]*?> 0/,
+    'diagnostic pixel-proof publication must still require a real nonzero color difference'
+  );
+  assert.match(
+    stagedPresenter,
+    /foregroundProofKind[\s\S]*?'same-queue-private-staged-composite-submission'[\s\S]*?sameQueueSubmissionBoundary === true[\s\S]*?targets\?\.submittedQueue === bridge\?\.device\?\.queue[\s\S]*?submittedDrawCount[\s\S]*?> 0/,
+    'default publication must require the exact same ordered queue and a positive staged draw count'
   );
   const stagedBasePassIndex = sceneSource.indexOf(
     'const basePass = encoder.beginRenderPass({'
@@ -2350,8 +2905,133 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
-    /stagedPresentationBytes: width \* height \* 12/,
-    'candidate staging telemetry must account for composite color/depth plus baseline color only'
+    /stagedPresentationBytes: width \* height\s*\* \(diagnosticPixelProofEnabled \? 12 : 8\)/,
+    'production candidate staging must account for composite color/depth only while the opt-in pixel diagnostic also accounts for baseline color'
+  );
+  const stagedCapabilitySource = sceneSource.slice(
+    sceneSource.indexOf(
+      'function resolveSphNativeSurfaceCandidatePresentationStagingCapability(bridge)'
+    ),
+    sceneSource.indexOf(
+      'function isolateSphNativeSurfaceCandidatePresentationResources(bridge)'
+    )
+  );
+  const stagedCapableExpression = stagedCapabilitySource.slice(
+    stagedCapabilitySource.indexOf('const capable = Boolean('),
+    stagedCapabilitySource.indexOf('return {')
+  );
+  assert.doesNotMatch(
+    stagedCapableExpression,
+    /bridge\?\.device\?\.(?:createBuffer|createComputePipeline|createShaderModule|createBindGroup)/,
+    'the production structural proof capability must not require diagnostic mapping or compute resources'
+  );
+  assert.doesNotMatch(
+    stagedCapableExpression,
+    /&&\s*!proxyEnabled/,
+    'an enabled Schroeder proxy must not veto candidate-private GPU staging'
+  );
+  assert.doesNotMatch(
+    stagedCapabilitySource,
+    /candidate staged presentation is disabled while the mutable Schroeder proxy overlay is enabled/,
+    'the old proxy-enabled validation-not-run deadlock must not remain reachable'
+  );
+  const candidateProxyPlanSource = sceneSource.slice(
+    sceneSource.indexOf(
+      'function createSphNativeSurfaceCandidateSchroederProxyPlan'
+    ),
+    sceneSource.indexOf(
+      'function snapshotSphNativeSurfaceCandidatePresentation'
+    )
+  );
+  assert.match(
+    candidateProxyPlanSource,
+    /candidateProxyInputs\?\.residentRenderSource[\s\S]*?candidateProxyInputs\?\.drawSource[\s\S]*?candidateProxyInputs\?\.residentExecution[\s\S]*?candidateProxyInputs\?\.finalStep/,
+    'candidate proxy staging must consume the scheduled candidate source and resident lineage'
+  );
+  assert.doesNotMatch(
+    candidateProxyPlanSource,
+    /scene\.userData\.schroederRenderProxyDrawSource|renderer\.userData\?*\.schroederRenderProxyDrawSource/,
+    'candidate proxy staging must never fall back to mutable global draw-source state'
+  );
+  assert.match(
+    candidateProxyPlanSource,
+    /candidateLocal:\s*true[\s\S]*?exactDrawSource:\s*drawSource[\s\S]*?exactResidentExecution:\s*residentExecution[\s\S]*?exactFinalStep:\s*finalStep[\s\S]*?exactResidentRenderSource:\s*residentRenderSource/,
+    'the candidate-local executor must be built from exact source identities'
+  );
+  assert.match(
+    candidateProxyPlanSource,
+    /const sourceDrawable = Boolean\([\s\S]*?sourceReady[\s\S]*?drawableBatchCount > 0[\s\S]*?\|\| drawableProxyCount > 0[\s\S]*?\|\| actualDrawBatchCount > 0[\s\S]*?const proxyRequired = Boolean\([\s\S]*?sourceDrawable[\s\S]*?if \(proxyRequired && !ready\) \{[\s\S]*?throw new TypeError/,
+    'any positive drawable signal must fail closed if its exact executor cannot bind, while an exactly empty ready source remains optional'
+  );
+  assert.match(
+    candidateProxyPlanSource,
+    /sourceReady\s*\?\s*'candidate-schroeder-proxy-not-required-source-empty'\s*:\s*'candidate-schroeder-proxy-not-required-source-not-ready'/,
+    'an exactly empty ready source must be distinct from a not-ready source'
+  );
+  assert.match(
+    sceneSource,
+    /const drawSource = candidateLocal[\s\S]*?\? \(exactDrawSource \?\? null\)[\s\S]*?const residentExecution = candidateLocal[\s\S]*?\? \(exactResidentExecution \?\? null\)[\s\S]*?if \(!candidateLocal\) \{[\s\S]*?scene\.userData\.schroederRenderProxyBackendSelection/,
+    'candidate-local executor refresh must avoid global source fallback and backend publication'
+  );
+  assert.match(
+    sceneSource,
+    /const candidateSchroederProxyPlan = stageOnly[\s\S]*?createSphNativeSurfaceCandidateSchroederProxyPlan[\s\S]*?const schroederProxyExecutor = stageOnly\s*\?\s*candidateSchroederProxyPlan\?\.executor/,
+    'stage-only rendering must encode the candidate-local proxy executor'
+  );
+  assert.match(
+    sceneSource,
+    /schroederProxyPlan:[\s\S]*?schroederProxyDrawSource:[\s\S]*?schroederProxyLocalResolver:[\s\S]*?schroederProxyRetainedBufferOwner:[\s\S]*?schroederProxyExecutor:[\s\S]*?schroederProxyExecutorSignature:[\s\S]*?schroederProxyCommandLineage:/,
+    'the pre-copy snapshot must retain exact proxy source, resolver, owner, executor, signature, and command lineage'
+  );
+  assert.match(
+    sceneSource,
+    /status: 'candidate-schroeder-proxy-submitted'[\s\S]*?commandLineage:[\s\S]*?drawCommandCount:[\s\S]*?drawInstanceCount:[\s\S]*?validateSphNativeSurfaceCandidateSchroederProxySubmission/,
+    'the staged proof must retain and validate an actual exact proxy submission receipt'
+  );
+  assert.match(
+    sceneSource,
+    /newDestroyableResources\.set\(\s*executor,[\s\S]*?candidate-schroeder-render-proxy-native-executor/,
+    'the private proxy executor must be owned by the candidate provisional receipt'
+  );
+  assert.match(
+    sceneSource,
+    /deferredDestroyableResources\.set\(\s*schroederProxyExecutor,[\s\S]*?superseded-schroeder-render-proxy-native-executor/,
+    'reuse candidates must defer retirement of the inherited proxy executor'
+  );
+  assert.match(
+    sceneSource,
+    /activeSchroederRenderProxyRetainedBufferLeases[\s\S]*?leasedSchroederProxyExecutorBuffers[\s\S]*?normalizedPreserveBuffers/,
+    'resident cleanup must preserve every retained SS buffer leased by an active or settling proxy candidate'
+  );
+  assert.match(
+    sceneSource,
+    /const retirementBridge =\s*record\?\.activation\?\.committedBridge\s*\?\? receipt\.retirementBridge\s*\?\? bridge;[\s\S]*?receipt\.retirementBridge = retirementBridge;[\s\S]*?deferSphNativeWebGpuSurfaceResourceRelease\(retirementBridge,[\s\S]*?retireSphResidentSurfaceRefractionTargetSet\(\s*retirementBridge,[\s\S]*?deferSphNativeWebGpuSurfaceResourceRelease\(retirementBridge,[\s\S]*?retirementBridge\.nativeSurfacePendingProvisionalResourceReceipt/,
+    'committed reuse retirement must follow the activated bridge instead of a detached candidate receipt'
+  );
+  assert.match(
+    sceneSource,
+    /retrySphNativeSurfacePendingProvisionalResourceReceipt\(bridge\)[\s\S]*?activation: \{ committedBridge: bridge \}[\s\S]*?\{ committed: receipt\.committed \}/,
+    'a failed committed retirement retry must preserve the active bridge target'
+  );
+  assert.match(
+    sceneSource,
+    /if \(ownerLease\.leaseCount <= 1 && !ownerLease\.released\) \{[\s\S]*?ownerLease\.releaseRetainedBuffers\(options\);[\s\S]*?\}\s*closed = true;[\s\S]*?ownerLease\.leaseCount = Math\.max/,
+    'the final retained-buffer lease must remain retryable until its owner release succeeds'
+  );
+  assert.doesNotMatch(
+    sceneSource,
+    /preserveRetainedBuffers/,
+    'executor destruction must not expose a terminal retained-buffer lease leak option'
+  );
+  assert.match(
+    sceneSource,
+    /nativeSurfaceConsumerCandidateForegroundValidationStatus:[\s\S]*?foregroundValidation\.status,[\s\S]*?nativeSurfaceConsumerCandidateForegroundSameQueueSubmissionBoundary:[\s\S]*?foregroundValidation\.sameQueueSubmissionBoundary[\s\S]*?nativeSurfaceConsumerCandidateSchroederProxySubmission:[\s\S]*?foregroundValidation\.schroederProxySubmission/,
+    'backend visible-ready publication must derive from the exact same-queue candidate proxy receipt'
+  );
+  assert.match(
+    sceneSource,
+    /presentationProofInUse: false[\s\S]*?targets\.presentationProofInUse = true;[\s\S]*?finally \{[\s\S]*?targets\.presentationProofInUse = false;/,
+    'one mode-neutral lease must retain private staging resources through either same-queue or diagnostic proof completion'
   );
   assert.match(
     sceneSource.slice(stagedBasePassIndex, stagedOpaquePassIndex),
@@ -2427,12 +3107,17 @@ test('native composite staging validates asynchronously before a short irreversi
   assert.match(
     sceneSource,
     /async function commitStagedSphResidentSurfaceDrawCandidate[\s\S]*?suppliedForegroundValidation[\s\S]*?resolveNativeSurfaceSuccessorPromotion\([\s\S]*?if \(!successorPromotion\.promoteCandidate\)[\s\S]*?activateSphNativeSurfaceRenderBridgeCandidate/,
-    'an exact-generation nonzero foreground proof must precede bridge activation and visible publication'
+    'exact-generation presentation admission must precede bridge activation and publication'
   );
   assert.match(
     sceneSource,
-    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\([\s\S]*?native surface successor is validating while the last committed presentation remains visible/,
-    'the refresh must enqueue validation and retain the prior presentation instead of awaiting the map'
+    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\([\s\S]*?native surface successor is validating while the last runtime-admitted presentation remains bound/,
+    'the refresh must enqueue validation and retain the prior presentation instead of awaiting its GPU completion proof'
+  );
+  assert.match(
+    sceneSource,
+    /expectedPublishedSurfaceDraw\s*=\s*committedNativeSurfacePresentationAvailable\s*\?\s*previousResidentSurfaceDraw\s*:\s*nextResidentSurfaceDraw;[\s\S]*?priorPresentationRetained:\s*committedNativeSurfacePresentationAvailable/,
+    'candidate CAS lineage may retain only a previously runtime-admitted native presentation'
   );
   assert.doesNotMatch(
     sceneSource,
@@ -2471,8 +3156,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     mountSource,
-    /currentNativeSurfaceCandidateCompletionHandoff\(\s*execution,\s*\{\s*allowSurfaceDrawRequestFallback:\s*false\s*\}\s*\)[\s\S]*?waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?resolveSphNativeSurfaceCandidateCompletionHandoff[\s\S]*?residentPresentationIsVisible\([\s\S]*?requireCurrentSource:\s*true/,
-    'mounted playback may use only an exact scheduler handoff with no retained-draw fallback, and only after it rechecks the unchanged current-source foreground proof'
+    /currentNativeSurfaceCandidateCompletionHandoff\(\s*execution,\s*\{\s*allowSurfaceDrawRequestFallback:\s*false\s*\}\s*\)[\s\S]*?waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?resolveSphNativeSurfaceCandidateCompletionHandoff[\s\S]*?residentPresentationIsAdmitted\([\s\S]*?requireCurrentSource:\s*true/,
+    'mounted playback may use only an exact scheduler handoff with no retained-draw fallback, and only after it rechecks unchanged current-source presentation admission'
   );
   assert.match(
     mountSource,
@@ -2481,8 +3166,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     mountSource,
-    /const scheduledScene = scene;[\s\S]*?const residentScheduleIsCurrent = \(\) => \([\s\S]*?scene === scheduledScene[\s\S]*?pendingMlsMpmResidentStepsToken[\s\S]*?await waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?if \(!residentScheduleIsCurrent\(\)\) \{[\s\S]*?discardStaleResidentPresentationContinuation\(\);[\s\S]*?return;/,
-    'a reset or superseding schedule must fail closed after a native completion await rather than publish an obsolete foreground proof'
+    /const scheduledScene = scene;[\s\S]*?const residentRenderScheduleIsCurrent = \(\) => \([\s\S]*?residentComputeManagerModeForSchedule[\s\S]*?selectedSurfaceDrawDiagnosticMode[\s\S]*?publicationGuard: residentRenderScheduleIsCurrent[\s\S]*?await waitForNativeSurfaceCandidateCompletionHandoff[\s\S]*?if \(!residentRenderScheduleIsCurrent\(\)\) \{[\s\S]*?discardStaleResidentPresentationContinuation\(\);[\s\S]*?return;/,
+    'a reset, superseding schedule, or mode change must fail closed after native completion awaits'
   );
   assert.match(
     mountSource,
@@ -2506,13 +3191,18 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     mountSource,
-    /initial-t0-resident-foreground-proof-ready[\s\S]*?requireCurrentSource:\s*nativeSurfaceConsumerRefresh,[\s\S]*?timeoutMs:\s*nativeSurfaceConsumerRefresh[\s\S]*?NATIVE_SURFACE_CURRENT_PRESENTATION_WAIT_MS/,
-    'native startup must require an exact current-source proof with the same bounded foreground deadline'
+    /initial-t0-resident-presentation-admission-ready[\s\S]*?requireCurrentSource:\s*nativeSurfaceConsumerRefresh,[\s\S]*?timeoutMs:\s*nativeSurfaceConsumerRefresh[\s\S]*?NATIVE_SURFACE_CURRENT_PRESENTATION_WAIT_MS/,
+    'native startup must require exact current-source admission with the same bounded deadline'
   );
   assert.match(
     mountSource,
-    /residentPostStepPresentationGate\s*=\s*Object\.freeze\([\s\S]*?active:\s*!postStepPresentationVisible,[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
-    'a failed post-step proof must hold both resident continuation paths before they can supersede its candidate'
+    /resolveSphNativeSurfacePostStepPresentationGateSettlement\(\{[\s\S]*?boundedAttemptComplete:\s*true,[\s\S]*?if \(residentPostStepPresentationGate\?\.active\) \{[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
+    'only a still-pending post-step proof may hold continuations; a terminal fail-open receipt must preserve playback'
+  );
+  assert.match(
+    mountSource,
+    /native-surface-post-step-presentation-timeout-fail-open[\s\S]*?active:\s*false,[\s\S]*?postStepPresentationAdmitted:\s*exactPresentationAdmitted,[\s\S]*?postStepPresentationProved:\s*exactForegroundProved,[\s\S]*?livenessFailOpen:\s*!exactPresentationAdmitted,[\s\S]*?residentPlaybackReleased:\s*true/,
+    'a bounded timeout must remain honestly unadmitted while releasing resident playback'
   );
   const playbackTickSource = mountSource.slice(
     mountSource.indexOf('function tick()'),
@@ -2521,7 +3211,7 @@ test('native composite staging validates asynchronously before a short irreversi
   assert.match(
     playbackTickSource,
     /residentPostStepPresentationGate\?\.active[\s\S]*?resident-auto-schedule-held-for-current-native-presentation[\s\S]*?window\.setTimeout/,
-    'the playback RAF must honor a failed post-step foreground gate instead of scheduling another physics batch'
+    'the playback RAF must honor only a still-active post-step foreground attempt'
   );
   assert.match(
     mountSource,
@@ -2535,7 +3225,7 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
-    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\(\{[\s\S]*?residentRenderSource[\s\S]*?applyResidentRenderSourceMetadata\(residentDraw, residentRenderSource\)[\s\S]*?preparation\.renderBridgeCandidate,[\s\S]*?residentRenderSource/,
+    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\(\{[\s\S]*?residentRenderSource[\s\S]*?applyResidentRenderSourceMetadata\(residentDraw, residentRenderSource\)[\s\S]*?stagedCandidateRecord\.renderBridgeCandidate,[\s\S]*?residentRenderSource[\s\S]*?const preparation = prepareStagedSphResidentSurfaceDrawCandidateCommit/,
     'the scheduled candidate and bridge must carry the exact source receipt captured by their refresh'
   );
   assert.match(
@@ -2601,6 +3291,80 @@ test('native composite staging validates asynchronously before a short irreversi
   const stagedValidation = sceneSource.match(
     /async function validateStagedSphNativeSurfaceCandidateForegroundLegacyReadback\([\s\S]*?\n  function resolveSphNativeSurfaceCandidatePresentationStagingCapability/
   )?.[0] || '';
+  const stagedForegroundValidationWrapper = sceneSource.match(
+    /async function validateStagedSphNativeSurfaceCandidateForeground\(args = \{\}\) \{[\s\S]*?\n  function retireStagedSphNativeSurfaceCandidatePresentationAfterCopy/
+  )?.[0] || '';
+  const stagedPresentationTargetAllocator = sceneSource.match(
+    /function ensureStagedSphNativeSurfaceCandidatePresentationTargets\([\s\S]*?\n  function releaseStagedSphNativeSurfaceCandidateForegroundValidationTargets/
+  )?.[0] || '';
+  const stagedPresentationRetirement = sceneSource.match(
+    /function retireStagedSphNativeSurfaceCandidatePresentationAfterCopy\([\s\S]*?\n  function presentStagedSphNativeSurfaceCandidateComposite/
+  )?.[0] || '';
+  assert.match(
+    stagedPresentationValidation,
+    /const diagnosticPixelProofEnabled\s*=\s*bridge\?\.enableRuntimePixelReadback === true;/,
+    'candidate presentation MAP_READ must have one explicit opt-in diagnostic gate'
+  );
+  assert.match(
+    stagedPresentationTargetAllocator,
+    /const diagnosticPixelProofEnabled\s*=\s*bridge\?\.enableRuntimePixelReadback === true;[\s\S]*?if \(diagnosticPixelProofEnabled\) \{[\s\S]*?readbackBuffer = device\.createBuffer\([\s\S]*?GPU_BUFFER_USAGE\.MAP_READ/,
+    'the default staged target must not allocate a MAP_READ buffer'
+  );
+  assert.match(
+    sceneSource,
+    /if \(stageOnly && diagnosticPixelProofEnabled\) \{[\s\S]*?encoder\.clearBuffer\([\s\S]*?diffPass\.dispatchWorkgroups\([\s\S]*?encoder\.copyBufferToBuffer\(/,
+    'the difference dispatch and 4-byte readback copy must be diagnostic-only'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /completeTransaction: async \(submission, completionStart\) => \{[\s\S]*?if \(!diagnosticPixelProofEnabled\) \{[\s\S]*?resolveNativeSurfaceSubmitSynchronization\([\s\S]*?sameQueueSubmissionBoundary !== true[\s\S]*?requiresCpuQueueFence === true[\s\S]*?targets\.submittedQueue !== queue[\s\S]*?submission\?\.submittedQueue !== queue[\s\S]*?timing\.queueFenceMs = 0;[\s\S]*?status: 'same-queue-submitted'[\s\S]*?sameQueueSubmissionBoundary: true,[\s\S]*?queueCompletionFenceRequested: false,[\s\S]*?hostQueueFenceCount: 0,[\s\S]*?gpuCompletionClaimed: false,[\s\S]*?gpuFenceSatisfied: false/,
+    'the default proof must record an exact ordered same-queue receipt without claiming GPU completion'
+  );
+  assert.doesNotMatch(
+    stagedPresentationValidation,
+    /onSubmittedWorkDone/,
+    'the successful staged-validation path must not install a CPU queue-completion fence'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /submittedTargets !== targets[\s\S]*?record\.candidatePresentationTargets !== targets[\s\S]*?targets\.candidateRecord !== record[\s\S]*?targets\.candidateBridge !== bridge[\s\S]*?targets\.resourceGeneration !== candidateGeneration[\s\S]*?targets\.presentationSerial !== serial/,
+    'same-queue admission must recheck the exact target, record, bridge, generation, and serial lineage'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /foregroundProofKind:\s*diagnosticPixelProofEnabled[\s\S]*?'base-composite-color-difference'[\s\S]*?'same-queue-private-staged-composite-submission'/,
+    'the staged receipt must distinguish diagnostic pixel evidence from the default structural same-queue proof'
+  );
+  assert.doesNotMatch(
+    stagedPresentationRetirement,
+    /onSubmittedWorkDone/,
+    'successful same-queue presentation retirement must not install a second CPU queue-completion fence'
+  );
+  assert.match(
+    stagedPresentationRetirement,
+    /targets\.submittedQueue === queue[\s\S]*?targets\.presentationCopySubmittedQueue === queue[\s\S]*?targets\.presentedAtMs != null[\s\S]*?presentationResourceRetirementBoundary = 'same-queue-submit';[\s\S]*?\{ force: true \}/,
+    'private staging resources may retire only after both submissions used the exact queue'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /changedPixelCount:\s*diagnosticPixelProofEnabled\s*\?\s*changedPixelCount\s*:\s*null/,
+    'the structural proof must not fabricate a nonzero pixel count'
+  );
+  assert.match(
+    stagedPresentationValidation,
+    /if \(diagnosticPixelProofEnabled\) \{[\s\S]*?readbackBuffer\.mapAsync\(/,
+    'the candidate color-difference map must remain available only under explicit pixel validation'
+  );
+  assert.match(
+    stagedValidation,
+    /if \(bridge\?\.enableRuntimePixelReadback !== true\) \{[\s\S]*?status: 'not-run'[\s\S]*?runtime pixel readback is disabled/,
+    'the legacy full-surface readback must fail closed when diagnostic pixel validation is disabled'
+  );
+  assert.match(
+    stagedForegroundValidationWrapper,
+    /if \(args\?\.bridge\?\.enableRuntimePixelReadback === true\) \{[\s\S]*?validateStagedSphNativeSurfaceCandidateForegroundLegacyReadback\(args\)[\s\S]*?\}[\s\S]*?status: 'not-run'/,
+    'a production staging refusal must retain the previous presentation instead of falling through to the legacy map'
+  );
   assert.match(
     sceneSource,
     /visibleCanvasTouched: false,[\s\S]*?currentTextureRequested: false,[\s\S]*?candidateLocal: true/,
@@ -2614,7 +3378,7 @@ test('native composite staging validates asynchronously before a short irreversi
   assert.match(
     stagedPresentationValidation,
     /presentationTarget: targets,[\s\S]*?stageOnly: true,[\s\S]*?onStageInputsFrozen: \(\) => \{[\s\S]*?snapshotSphNativeSurfaceCandidatePresentation\([\s\S]*?targets\.presentationSnapshot = snapshot;[\s\S]*?return snapshot;/,
-    'the full-resolution candidate proof must freeze its exact encode inputs synchronously before the asynchronous readback begins'
+    'the private candidate proof must freeze its exact encode inputs synchronously before asynchronous completion begins'
   );
   assert.doesNotMatch(
     stagedPresentationValidation,
@@ -2624,17 +3388,28 @@ test('native composite staging validates asynchronously before a short irreversi
   const rendererFreezeIndex = sceneSource.indexOf(
     "if (stageOnly && typeof onStageInputsFrozen === 'function')"
   );
-  const rendererCameraWriteIndex = sceneSource.indexOf(
-    'bridge.device.queue.writeBuffer(',
+  const rendererCameraPayloadIndex = sceneSource.indexOf(
+    'writeStageCameraBuffer(',
     rendererFreezeIndex
   );
+  const rendererPreparedLivenessIndex = sceneSource.indexOf(
+    'const validatePreparedStage = () => {',
+    rendererFreezeIndex
+  );
+  const rendererCameraWriteIndex = sceneSource.indexOf(
+    'submittedQueue.writeBuffer(',
+    rendererPreparedLivenessIndex
+  );
   const rendererStageSubmitIndex = sceneSource.indexOf(
-    'bridge.device.queue.submit([encoder.finish()]);',
+    'const submissionReceipt = submitQueueOrderedWork(',
     rendererFreezeIndex
   );
   assert.ok(
-    rendererFreezeIndex >= 0 && rendererCameraWriteIndex > rendererFreezeIndex,
-    'the staged input snapshot must be frozen before this renderer writes its camera uniforms'
+    rendererFreezeIndex >= 0
+      && rendererCameraPayloadIndex > rendererFreezeIndex
+      && rendererPreparedLivenessIndex > rendererCameraPayloadIndex
+      && rendererCameraWriteIndex > rendererPreparedLivenessIndex,
+    'the staged input snapshot must precede frozen camera payload capture, while the shared uniform write waits for the final prepared-command liveness gate'
   );
   assert.ok(
     rendererFreezeIndex >= 0 && rendererStageSubmitIndex > rendererFreezeIndex,
@@ -2643,11 +3418,11 @@ test('native composite staging validates asynchronously before a short irreversi
   assert.match(
     stagedPresentationValidation,
     /presentationSnapshot: stagedPresentationSnapshot[\s\S]*?startCompletion: \(submission\) => \{[\s\S]*?submittedPresentationSnapshot\s*=\s*submission\?\.presentationSnapshot[\s\S]*?submittedPresentationSnapshot !== targets\.presentationSnapshot/,
-    'the exact pre-submit snapshot identity must be retained by the prestarted-map handle'
+    'the exact pre-submit snapshot identity must be retained by the diagnostic completion handle'
   );
   assert.match(
     stagedPresentationValidation,
-    /startCompletion: \(submission\) => \{[\s\S]*?readbackBuffer\.mapAsync[\s\S]*?completeTransaction: async \(submission, completionStart\)[\s\S]*?submittedReadbackBuffer = completionStart\?\.readbackBuffer[\s\S]*?const mapOutcome = completionStart\?\.mapOutcome[\s\S]*?const mapOutcomeResult = await mapOutcome\.promise;[\s\S]*?mapOutcomeResult\?\.status === 'timeout'[\s\S]*?submittedReadbackBuffer\.getMappedRange/,
+    /startCompletion: \(submission\) => \{[\s\S]*?if \(!diagnosticPixelProofEnabled\) return null;[\s\S]*?readbackBuffer\.mapAsync[\s\S]*?completeTransaction: async \(submission, completionStart\)[\s\S]*?submittedReadbackBuffer = completionStart\?\.readbackBuffer[\s\S]*?const mapOutcome = completionStart\?\.mapOutcome[\s\S]*?const mapOutcomeResult = await mapOutcome\.promise;[\s\S]*?mapOutcomeResult\?\.status === 'timeout'[\s\S]*?submittedReadbackBuffer\.getMappedRange/,
     'the prestarted map request must reach mapped-byte access only through the scope-gated, timeout-first completion path'
   );
   assert.match(
@@ -2672,7 +3447,7 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
-    /const result = device\.popErrorScope\(\);[\s\S]*?pendingScopePops\.push\([\s\S]*?let completionStartValue = null;[\s\S]*?scopedErrorsByFilter\.size === 0[\s\S]*?completionStartValue = startCompletion\(submissionValue\);[\s\S]*?await Promise\.all\(pendingScopePops\)[\s\S]*?completeTransaction\(submissionValue, completionStartValue\)/,
+    /const result = device\.popErrorScope\(\);[\s\S]*?pendingScopePops\.push\([\s\S]*?let completionStartValue = null;[\s\S]*?scopedErrorsByFilter\.size === 0[\s\S]*?completionStartValue = startCompletion\(submissionValue\);[\s\S]*?await Promise\.all\(pendingScopePops\)[\s\S]*?completeTransaction\([\s\S]*?completionSubmissionValue,[\s\S]*?completionStartValue/,
     'a MAP_READ start hook must run only after every LIFO pop call, while mapped-byte access remains gated on all scope reports'
   );
   assert.match(
@@ -3065,20 +3840,30 @@ test('resident material-interface refresh defaults to publishing and supports ca
   assert.match(materialSource, /candidateReadbackMode = 'compact-active-readback',\s*publishState = true/);
   assert.match(
     materialSource,
-    /publishState === false\s*\? \(state \|\| null\)\s*:\s*publishSphResidentMaterialInterfaceState\(state\)/,
-    'explicit non-publishing refreshes must return caller-owned state without replacing scene state'
+    /const materialInterfacePublicationIsCurrent = \(\) => \{[\s\S]*?typeof publicationGuard !== 'function'[\s\S]*?publicationGuard\(\) === true[\s\S]*?const materialInterfacePublicationAllowed = \(\) => Boolean\([\s\S]*?publishState !== false[\s\S]*?materialInterfacePublicationIsCurrent\(\)/,
+    'publication must require both caller ownership and a current async publication token'
+  );
+  assert.match(
+    materialSource,
+    /const completeMaterialInterfaceState = \(state\) => \{[\s\S]*?!materialInterfacePublicationIsCurrent\(\)[\s\S]*?return staleMaterialInterfaceState\(\)[\s\S]*?publishState === false[\s\S]*?publishSphResidentMaterialInterfaceState\(state\)/,
+    'stale refreshes must return explicit stale state while non-publishing callers retain their candidate'
   );
   assert.equal(publisherCalls.length, 1, 'all refresh exits should use the publication gate');
   assert.equal(completionCalls.length, 6, 'success and every fail-closed exit should share the gate');
   assert.match(
     materialSource,
-    /seedResidentMaterialInterfaceSurfaceTable\(\{[\s\S]*?publishState[\s\S]*?\}\)/,
-    'cold-start surface-table seeding must receive the publication policy'
+    /seedResidentMaterialInterfaceSurfaceTable\(\{[\s\S]*?publishState: false[\s\S]*?\}\)/,
+    'cold-start surface-table seeding must remain caller-local across later GPU awaits'
   );
   assert.match(
     materialSource,
-    /if \(publishState === false\) \{[\s\S]*?readbackSurfaceState = createResidentRenderSurfaceState[\s\S]*?\} else \{[\s\S]*?captureResidentRenderSurfaceState/,
-    'non-published readback fallback must build a caller-local render surface state'
+    /readbackSurfaceState = createResidentRenderSurfaceState\([\s\S]*?const callerLocalSurfaceState = readbackSurfaceState \|\| surfaceTableSeedState[\s\S]*?materialInterfacePublicationAllowed\(\)[\s\S]*?rebuildOpticalStateForSurfaceBatches[\s\S]*?sphResidentRenderSurfaceState = callerLocalSurfaceState/,
+    'seed/readback surface state must commit optical and render globals only after the final guarded await'
+  );
+  assert.doesNotMatch(
+    materialSource,
+    /captureResidentRenderSurfaceState\(/,
+    'guarded material refresh must not publish render surface state from an intermediate await'
   );
   assert.match(
     sceneSource,
@@ -3113,6 +3898,66 @@ test('resident material-interface refresh defaults to publishing and supports ca
   ]) {
     assert.match(materialSource, new RegExp(`materialInterfaceField\\.${field}`), field);
   }
+});
+
+test('resident render publication guard rejects dispose, reset, request supersession, and caller mode drift', () => {
+  const current = {
+    running: true,
+    residentExecutionGeneration: 8,
+    currentResidentExecutionGeneration: 8,
+    requestSerial: 21,
+    currentRequestSerial: 21,
+    callerPublicationCurrent: true
+  };
+  assert.equal(sphResidentRenderRefreshPublicationIsCurrent(current), true);
+  for (const stale of [
+    { running: false },
+    { currentResidentExecutionGeneration: 9 },
+    { currentRequestSerial: 22 },
+    { callerPublicationCurrent: false }
+  ]) {
+    assert.equal(
+      sphResidentRenderRefreshPublicationIsCurrent({ ...current, ...stale }),
+      false
+    );
+  }
+  assert.equal(
+    sphResidentRenderRefreshPublicationIsCurrent({
+      running: true,
+      residentExecutionGeneration: 8,
+      currentResidentExecutionGeneration: 8,
+      callerPublicationCurrent: true
+    }),
+    true,
+    'request serial is optional for caller-local child publication checks'
+  );
+});
+
+test('resident render scheduler and native candidate carry the exact publication transaction', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const schedulerStart = sceneSource.indexOf('async function refreshSphResidentRenderState(options = {})');
+  const renderStart = sceneSource.indexOf('async function refreshSphResidentRenderStateUnserialized', schedulerStart);
+  const schedulerSource = sceneSource.slice(schedulerStart, renderStart);
+  assert.match(
+    schedulerSource,
+    /callerPublicationGuard[\s\S]*?if \(!sphResidentRenderRefreshPublicationIsCurrent\([\s\S]*?resident render request was stale before scheduler admission[\s\S]*?residentGpuArtifactRetirementBarrier\.acquire\(\)[\s\S]*?sphResidentRenderRefreshSerial \+ 1/,
+    'an already-stale caller must not acquire a lease or supersede the active request serial'
+  );
+  assert.match(
+    sceneSource,
+    /advanceMlsMpmResidentExecutionGeneration\(reason\);[\s\S]*?cancelQueuedSphResidentRenderRefresh\([\s\S]*?clearMlsMpmResidentExecutionArtifacts\(\)/,
+    'reset must immediately retire queued-latest render work while active GPU work settles'
+  );
+  assert.match(
+    sceneSource,
+    /scheduleStagedSphResidentSurfaceDrawCandidateValidation\(\{[\s\S]*?publicationGuard: renderRefreshPublicationIsCurrent/,
+    'native candidate scheduling must retain the originating render request/mode guard'
+  );
+  assert.match(
+    sceneSource,
+    /sphNativeSurfaceCandidateOriginPublicationIsCurrent\(item\)[\s\S]*?originating resident render transaction was superseded/,
+    'native candidate publication admission must reject a superseded originating render transaction'
+  );
 });
 
 test('resident GPU consumers lease captured buffers before asynchronous device acquisition', () => {
@@ -3185,6 +4030,23 @@ test('resident GPU consumers lease captured buffers before asynchronous device a
   );
 });
 
+test('resident no-readback rendering does not run the optical parity readback', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const renderStart = sceneSource.indexOf(
+    'async function refreshSphResidentRenderStateUnserialized'
+  );
+  const renderEnd = sceneSource.indexOf(
+    'async function debugSphResidentParticleUpload',
+    renderStart
+  );
+  const renderSource = sceneSource.slice(renderStart, renderEnd);
+  assert.match(
+    renderSource,
+    /refreshOpticalGpuLookup\(\{[\s\S]*?preferWebGpu:\s*Boolean\([\s\S]*?visibleRenderFieldReadbackMode\s*!==\s*RESIDENT_NO_FULL_READBACK_MODE/,
+    'the no-readback render route must consume the resident CPU optical reference without MAP_READ parity work'
+  );
+});
+
 test('scene lifecycle invalidates static uploads and rejects known-lost device reuse', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
@@ -3197,6 +4059,11 @@ test('scene lifecycle invalidates static uploads and rejects known-lost device r
     sceneSource,
     /resolveNativeSurfaceConsumerDeviceTransition\(\{[\s\S]*?deviceKnownLost:[\s\S]*?if \(deviceTransition\.deviceKnownLost\)/,
     'consumer recreation must reject an already-lost device'
+  );
+  assert.match(
+    sceneSource,
+    /const canReuseConsumer = Boolean\([\s\S]*?!needsConfigure[\s\S]*?previous\.device === device[\s\S]*?previous\.configuredDevice === device[\s\S]*?previous\.deviceLost !== true[\s\S]*?!nativeWebGpuKnownLostDeviceSet\?\.has\(device\)[\s\S]*?if \(canReuseConsumer\) \{[\s\S]*?return previous;/,
+    'an unchanged live native consumer should retain its exact context object'
   );
   assert.match(
     sceneSource,
@@ -3220,7 +4087,58 @@ test('scene lifecycle invalidates static uploads and rejects known-lost device r
   );
 });
 
-test('Schroeder scene samples one non-published pre-integration interface field per resident batch', () => {
+test('scene resident batches forward an explicit surface-stress impulse cap', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /async function refreshMlsMpmResidentSteps\(\{[\s\S]*?phaseVolumeMaxImpulseFraction = null/,
+    'the public resident-batch boundary must accept the optional diagnostic cap'
+  );
+  assert.match(
+    sceneSource,
+    /requestedPhaseVolumeMaxImpulseFraction[\s\S]*?phaseVolumeMaxImpulseFraction:\s*requestedPhaseVolumeMaxImpulseFraction[\s\S]*?const compactSchroederSuccessorEpochIdentityForScene/,
+    'the validated cap must reach residentStepsOptions without changing the null default'
+  );
+  assert.match(
+    sceneSource,
+    /phaseVolumeMaxImpulseFraction must be finite and nonnegative/,
+    'invalid diagnostic caps must fail closed'
+  );
+});
+
+test('long-horizon SS batches keep diagnostics final-only and do not mirror stage debug traffic through CDP', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(
+    sceneSource,
+    /phaseVolumeDiagnosticReadbackMode:\s*summarizeStep\s*\?\s*SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE\s*:\s*SCHROEDER_NO_FULL_READBACK_MODE/,
+    'phase-volume compact readback must follow the resident batch summary cadence'
+  );
+  assert.match(
+    sceneSource,
+    /compactSummaryReadbackClassification:\s*requestedCompactSummaryMode\s*===\s*MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY\s*&&\s*summarizeStep\s*\?\s*'final-diagnostic'\s*:\s*'unclassified'/,
+    'the Schroeder-owned loop must classify its final-only compact summary as a final diagnostic'
+  );
+  assert.match(
+    sceneSource,
+    /emitResidentProgressConsole = true[\s\S]*?if \(emitResidentProgressConsole\) \{[\s\S]*?\[sph-resident-progress\]/,
+    'ordinary interactive callers may retain progress logging behind an explicit option'
+  );
+  assert.match(
+    probeSource,
+    /const residentRefreshOptions\s*=\s*\(\{[\s\S]*?emitResidentProgressConsole:\s*false/,
+    'resident refresh options must disable CDP-mirrored progress logging'
+  );
+  assert.match(
+    probeSource,
+    /sceneApi\.refreshMlsMpmResidentSteps\(\s*residentRefreshOptions\(\{/,
+    'the long-horizon browser probe must pass its no-CDP resident refresh options to the scene API'
+  );
+});
+
+test('Schroeder owner-scope readback is explicit diagnostic-only and batch-bounded', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
   const loopStart = sceneSource.indexOf('const runSchroederSceneResidentSteps');
   const loopEnd = sceneSource.indexOf('const residentStepsRunner', loopStart);
@@ -3239,8 +4157,14 @@ test('Schroeder scene samples one non-published pre-integration interface field 
   assert.ok(fieldIndex > forIndex, 'the sampled field must be produced inside the resident loop');
   assert.ok(hierarchyIndex > fieldIndex, 'the field must be ready before canonical generation ownership runs');
   assert.match(
+    sceneSource,
+    /schroederPressureInterfaceOwnerScopeDiagnosticReadback = false/,
+    'ordinary resident playback must default the owner-scope host readback off'
+  );
+  assert.match(
     loopSource,
-    /pressureInterfaceOwnerScopeDiagnosticRequested[\s\S]*?index === pressureInterfaceOwnerScopeDiagnosticSampleIndex/
+    /pressureInterfaceOwnerScopeDiagnosticRequested[\s\S]*?schroederPressureInterfaceOwnerScopeDiagnosticReadback === true[\s\S]*?index === pressureInterfaceOwnerScopeDiagnosticSampleIndex/,
+    'the compact owner-scope map/readback must require an explicit diagnostic opt-in'
   );
   assert.match(
     loopSource,
@@ -3249,6 +4173,11 @@ test('Schroeder scene samples one non-published pre-integration interface field 
   assert.match(
     loopSource,
     /once-per-resident-batch-first-substep-before-integration/
+  );
+  assert.match(
+    loopSource,
+    /shouldBuildPreIntegrationMaterialInterfaceField[\s\S]*?pressureInterfaceOwnerScopeDiagnosticSampleSlot/,
+    'even diagnostic readback remains bounded to its one requested sample slot'
   );
   assert.match(
     loopSource,
@@ -3286,26 +4215,495 @@ test('Schroeder scene samples one non-published pre-integration interface field 
   );
   assert.match(
     loopSource,
-    /schroederStepSummaries\.every\([\s\S]*?normalHotLoopReadbackFree === true/
+    /mergeGpuReadbackTelemetry\([\s\S]*?schroederStepSummaries\.map\([\s\S]*?telemetry:\s*summary[\s\S]*?sph-phase-scene-schroeder-resident-sequence/,
+    'the outer SS envelope must merge exact per-step v1 telemetry'
   );
   assert.match(
     loopSource,
     /spatialEpochOwnerScopeCleanupScheduled !== true[\s\S]*?onSubmittedWorkDone[\s\S]*?then\([\s\S]*?cleanupOwnerScopeField,[\s\S]*?blockOwnerScopeCleanup/,
     'a hierarchy call rejected before ownership transfer must retire the ephemeral field only after a confirmed queue fence'
   );
-  assert.match(
+  assert.doesNotMatch(
     loopSource,
-    /await settleSchroederSpatialEpochBatchEvidence\(\{[\s\S]*?settlements: schroederSpatialEpochReleaseSettlements,[\s\S]*?expectedCount: count/,
-    'the resident batch must settle every generation-owner fence and resample released transactions before publication'
+    /await settleSchroederSpatialEpochBatchEvidence\(/,
+    'generation-owner cleanup proof must not block resident-step publication'
   );
   assert.match(
     loopSource,
-    /schroederSpatialEpochReleaseSettlementComplete:[\s\S]*?spatialEpochTransaction\?\.state === 'released'[\s\S]*?releaseCount === 1/,
-    'batch telemetry must publish exact release completion coverage'
+    /spatialEpochSettlementPromise\s*=[\s\S]*?settleSchroederSpatialEpochBatchEvidence\(\{[\s\S]*?settlements:\s*schroederSpatialEpochReleaseSettlements,[\s\S]*?expectedCount:\s*count/,
+    'the resident batch must retain background generation-owner settlement'
   );
   assert.match(
     loopSource,
-    /schroederHierarchyArtifactLedgerSettlementComplete:[\s\S]*?hierarchyArtifactLedger\?\.safe === true/,
-    'batch telemetry must publish safe artifact-ledger retirement coverage'
+    /schroederSpatialEpochReleaseSettlementStatus:[\s\S]*?pending-background-owner-settlement[\s\S]*?spatialEpochSettlementPromise\.then\([\s\S]*?spatialEpochTransaction\?\.state === 'released'[\s\S]*?releaseCount[\s\S]*?=== 1/,
+    'batch telemetry must publish pending cleanup and only later prove exact release coverage'
+  );
+  assert.match(
+    loopSource,
+    /schroederHierarchyArtifactLedgerSettlementStatus:[\s\S]*?pending-background-owner-settlement[\s\S]*?spatialEpochSettlementPromise\.then\([\s\S]*?hierarchyArtifactLedger\?\.safe === true/,
+    'artifact-ledger retirement must remain pending until background resampling proves it safe'
+  );
+  assert.match(
+    loopSource,
+    /Object\.defineProperties\(execution,[\s\S]*?schroederBackgroundSettlementPromise:[\s\S]*?enumerable:\s*false/,
+    'the returned execution must retain its non-enumerable background settlement promise'
+  );
+});
+
+test('page-visible GPU residency claims fail closed until telemetry is complete', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  assert.match(
+    sceneSource,
+    /compactSchroederSameLevelMechanicsForScene[\s\S]*?compactPageVisibleGpuReadbackTelemetry\(result\)[\s\S]*?\.\.\.readbackTelemetry/,
+    'the same-level scene serializer must publish the fail-closed compact telemetry record'
+  );
+  assert.match(
+    sceneSource,
+    /export function compactPageVisibleGpuReadbackTelemetry\([\s\S]*?return normalizePageVisibleGpuReadbackTelemetry\(telemetry\);/,
+    'the scene boundary must reuse the strict core telemetry normalizer'
+  );
+  const unproven = compactPageVisibleGpuReadbackTelemetry({
+    normalHotLoopReadbackFree: true,
+    productionHotLoopHostDependencyFree: true,
+    observedMapAsyncCount: 0,
+    observedReadbackBytes: 0,
+    observedHostQueueFenceCount: 0,
+    mapAsyncCount: 0,
+    readbackBytes: 0,
+    hostQueueFenceCount: 0
+  });
+  assert.equal(unproven.readbackTelemetryComplete, null);
+  assert.equal(unproven.normalHotLoopReadbackFree, null);
+  assert.equal(unproven.productionHotLoopHostDependencyFree, null);
+  assert.equal(unproven.observedMapAsyncCount, null);
+  assert.equal(unproven.observedReadbackBytes, null);
+  assert.equal(unproven.observedHostQueueFenceCount, null);
+  assert.equal(unproven.mapAsyncCount, null);
+  assert.equal(unproven.readbackBytes, null);
+  assert.equal(unproven.hostQueueFenceCount, null);
+
+  const explicitFailure = compactPageVisibleGpuReadbackTelemetry({
+    readbackTelemetryComplete: false,
+    normalHotLoopReadbackFree: false,
+    productionHotLoopHostDependencyFree: false,
+    observedMapAsyncCount: 1
+  });
+  assert.equal(explicitFailure.readbackTelemetryComplete, false);
+  assert.equal(explicitFailure.normalHotLoopReadbackFree, false);
+  assert.equal(explicitFailure.productionHotLoopHostDependencyFree, false);
+  assert.equal(explicitFailure.observedMapAsyncCount, null);
+
+  const completeSource = createGpuReadbackTelemetry({
+    scope: 'native-surface-page-visible-test'
+  });
+  const complete = compactPageVisibleGpuReadbackTelemetry(completeSource);
+  assert.equal(complete.readbackTelemetryComplete, true);
+  assert.equal(complete.normalHotLoopReadbackFree, true);
+  assert.equal(complete.productionHotLoopHostDependencyFree, true);
+  assert.equal(complete.observedMapAsyncCount, 0);
+  assert.equal(complete.observedReadbackBytes, 0);
+  assert.equal(complete.observedHostQueueFenceCount, 0);
+  assert.equal(
+    pageVisibleProductionHotLoopHostDependencyEvidence({
+      readbackTelemetrySchema: GPU_READBACK_TELEMETRY_SCHEMA,
+      readbackTelemetryComplete: true,
+      readbackTelemetryUnknownSources: [],
+      normalHotLoopReadbackFree: true,
+      observedMapAsyncCount: 0,
+      observedReadbackBytes: 0,
+      observedHostQueueFenceCount: 0
+    }),
+    true,
+    'a legacy strict-residency claim is production evidence only with complete exact-zero observations'
+  );
+  assert.equal(
+    pageVisibleProductionHotLoopHostDependencyEvidence({
+      readbackTelemetrySchema: GPU_READBACK_TELEMETRY_SCHEMA,
+      readbackTelemetryComplete: true,
+      readbackTelemetryUnknownSources: [],
+      normalHotLoopReadbackFree: true,
+      observedMapAsyncCount: 1,
+      observedReadbackBytes: 0,
+      observedHostQueueFenceCount: 0
+    }),
+    null
+  );
+  assert.equal(
+    summarizeResidentStageOrderExecution({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      normalHotLoopReadbackFree: true,
+      productionHotLoopHostDependencyFree: true
+    }).productionHotLoopHostDependencyFree,
+    null
+  );
+  assert.equal(
+    summarizeResidentStageOrderExecution({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: true,
+      productionHotLoopHostDependencyFree: true
+    }).productionHotLoopHostDependencyFree,
+    null,
+    'a claimed-complete record with missing v1 counts must remain unproven'
+  );
+  const participantUnboundSummary = summarizeResidentStageOrderExecution({
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    ...completeSource
+  });
+  assert.equal(participantUnboundSummary.readbackTelemetryComplete, false);
+  assert.equal(participantUnboundSummary.normalHotLoopReadbackFree, null);
+  assert.equal(
+    participantUnboundSummary.productionHotLoopHostDependencyFree,
+    null,
+    'complete counters cannot replace exact backend/readback/full-state controls'
+  );
+
+  for (const [name, malformed] of [
+    ['coercible count', {
+      ...completeSource,
+      observedMapAsyncCount: '0'
+    }],
+    ['negative count', {
+      ...completeSource,
+      observedReadbackBytes: -1
+    }],
+    ['unknown source', {
+      ...completeSource,
+      readbackTelemetryUnknownSources: ['missing-stage']
+    }],
+    ['nonconserving breakdown', {
+      ...completeSource,
+      readbackTelemetrySourceBreakdown: [{
+        source: 'forged-row',
+        observedMapAsyncCount: 1,
+        observedReadbackBytes: 0,
+        observedHostQueueFenceCount: 0,
+        finalDiagnosticMapAsyncCount: 0,
+        finalDiagnosticReadbackBytes: 0,
+        deferredCleanupHostQueueFenceCount: 0,
+        awaitedBackpressureHostQueueFenceCount: 0,
+        unclassifiedMapAsyncCount: 1,
+        unclassifiedReadbackBytes: 0,
+        unclassifiedHostQueueFenceCount: 0
+      }]
+    }],
+    ['contradictory claim', {
+      ...completeSource,
+      normalHotLoopReadbackFree: false
+    }]
+  ]) {
+    const compact = compactPageVisibleGpuReadbackTelemetry(malformed);
+    assert.equal(compact.readbackTelemetryComplete, false, name);
+    assert.equal(compact.observedMapAsyncCount, null, name);
+    assert.equal(
+      compact.normalHotLoopReadbackFree,
+      malformed.normalHotLoopReadbackFree === false ? false : null,
+      name
+    );
+    assert.equal(compact.productionHotLoopHostDependencyFree, null, name);
+  }
+  assert.equal(
+    pageVisibleProductionHotLoopHostDependencyEvidence({
+      readbackTelemetrySchema: GPU_READBACK_TELEMETRY_SCHEMA,
+      readbackTelemetryComplete: true,
+      readbackTelemetryUnknownSources: ['missing-stage'],
+      normalHotLoopReadbackFree: true,
+      observedMapAsyncCount: 0,
+      observedReadbackBytes: 0,
+      observedHostQueueFenceCount: 0
+    }),
+    null,
+    'legacy exact-zero inference must reject an unknown source'
+  );
+});
+
+test('GPU residency warnings distinguish pending, unproven, and observed evidence', () => {
+  const residentControls = {
+    backend: 'webgpu',
+    readbackMode: 'no-full-readback',
+    fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true
+  };
+  const observedHostDependency = {
+    ...residentControls,
+    ...createGpuReadbackTelemetry({
+      scope: 'native-surface-warning-observed-host-dependency',
+      mapAsyncCount: 1
+    })
+  };
+  const finalDiagnosticOnly = {
+    ...residentControls,
+    ...createGpuReadbackTelemetry({
+      scope: 'native-surface-warning-final-diagnostic-only',
+      mapAsyncCount: 1,
+      readbackBytes: 64,
+      hostQueueFenceCount: 1,
+      finalDiagnosticMapAsyncCount: 1,
+      finalDiagnosticReadbackBytes: 64,
+      deferredCleanupHostQueueFenceCount: 1
+    })
+  };
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      pending: true,
+      completedExecutionAvailable: true,
+      readbackTelemetryComplete: false,
+      productionHotLoopHostDependencyFree: false
+    }),
+    null,
+    'pending startup must not publish a false residency warning'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      readbackTelemetryComplete: false,
+      productionHotLoopHostDependencyFree: false
+    }),
+    'Hot-loop GPU residency telemetry is incomplete or unproven.'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      telemetrySources: [observedHostDependency],
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: false,
+      productionHotLoopHostDependencyFree: false
+    }),
+    'Hot loop has an observed awaited or unclassified host dependency.'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      telemetrySources: [finalDiagnosticOnly],
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: false,
+      productionHotLoopHostDependencyFree: true
+    }),
+    'Strict GPU residency is false only because final diagnostics or deferred cleanup callbacks were observed; no production hot-loop host dependency was observed.'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: null,
+      productionHotLoopHostDependencyFree: true
+    }),
+    'Hot-loop GPU residency telemetry is incomplete or unproven.',
+    'a production-only positive claim must not silence unproven strict residency'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: true,
+      productionHotLoopHostDependencyFree: 'true'
+    }),
+    'Hot-loop GPU residency telemetry is incomplete or unproven.',
+    'coercible production claims must remain unproven'
+  );
+  assert.equal(
+    residentGpuResidencyWarningMessage({
+      completedExecutionAvailable: true,
+      readbackTelemetryComplete: true,
+      normalHotLoopReadbackFree: 'true',
+      productionHotLoopHostDependencyFree: true
+    }),
+    'Hot-loop GPU residency telemetry is incomplete or unproven.',
+    'coercible strict claims must remain unproven'
+  );
+});
+
+test('SPH residency warnings require explicit classified results, not pending evidence', () => {
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const evidenceStart = mountSource.indexOf(
+    'function currentResidentReadbackTelemetryPending('
+  );
+  const evidenceEnd = mountSource.indexOf(
+    'function currentWarningMessages()',
+    evidenceStart
+  );
+  const evidenceSource = mountSource.slice(evidenceStart, evidenceEnd);
+  const warningStart = mountSource.indexOf('function currentWarningMessages()');
+  const warningEnd = mountSource.indexOf('function updateWarningBanner()', warningStart);
+  const warningSource = mountSource.slice(warningStart, warningEnd);
+  const statusStart = mountSource.indexOf('function renderStatus()');
+  const statusEnd = mountSource.indexOf('\n  let playing = false;', statusStart);
+  const statusSource = mountSource.slice(statusStart, statusEnd);
+
+  assert.match(
+    evidenceSource,
+    /__mlsMpmResidentStepsPending[\s\S]*?pending\.generation[\s\S]*?particleSyncGeneration[\s\S]*?pending\.scheduleToken[\s\S]*?pendingMlsMpmResidentStepsToken/,
+    'a current exact-generation resident schedule must report residency as pending instead of reusing an older completion'
+  );
+  assert.match(
+    evidenceSource,
+    /currentResidentReadbackTelemetryEvidence[\s\S]*?compositePageVisibleGpuReadbackTelemetryEvidence[\s\S]*?currentResidentReadbackTelemetrySources/,
+    'all live residency fields must come from one completeness-coupled consensus'
+  );
+  assert.match(
+    warningSource,
+    /currentResidentReadbackTelemetryEvidence\(\{[\s\S]*?residentSteps,[\s\S]*?residentStep[\s\S]*?\}\)/
+  );
+  assert.match(
+    warningSource,
+    /const \{[\s\S]*?readbackTelemetryComplete,[\s\S]*?normalHotLoopReadbackFree,[\s\S]*?productionHotLoopHostDependencyFree[\s\S]*?\} = readbackTelemetryEvidence;[\s\S]*?residentGpuResidencyWarningMessage\(\{[\s\S]*?readbackTelemetryComplete,[\s\S]*?normalHotLoopReadbackFree,[\s\S]*?productionHotLoopHostDependencyFree/
+  );
+  assert.doesNotMatch(
+    warningSource,
+    /normalHotLoopReadbackFree[\s\S]*?\?\? false/,
+    'startup/pending evidence must not be mislabeled as an observed residency failure'
+  );
+  assert.match(
+    statusSource,
+    /const \{[\s\S]*?normalHotLoopReadbackFree,[\s\S]*?productionHotLoopHostDependencyFree[\s\S]*?\} = currentResidentReadbackTelemetryEvidence\(\{[\s\S]*?residentSteps,[\s\S]*?residentStep[\s\S]*?\}\);/
+  );
+  assert.equal(
+    [...statusSource.matchAll(
+      /currentResidentReadbackTelemetryEvidence\(\{/g
+    )].length,
+    2,
+    'both live status branches must use the same coupled evidence helper'
+  );
+  assert.match(
+    statusSource,
+    /hot-loop-no-full=\$\{normalHotLoopReadbackFree == null\s*\?\s*'pending'\s*:\s*String\(normalHotLoopReadbackFree\)\}/,
+    'the status panel must distinguish pending residency evidence from an explicit false result'
+  );
+  assert.doesNotMatch(
+    statusSource,
+    /hot-loop-no-full=\$\{Boolean\(normalHotLoopReadbackFree\)\}/
+  );
+});
+
+test('the iron/ice preset selects canonical spatial authority before its SS-only surface law runs', () => {
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const presetSource = readRepoFile('src/runtime/sphPhaseScenarioPresets.js');
+
+  assert.match(
+    presetSource,
+    /id:\s*'iron-ice-quench'[\s\S]*?runtime:\s*\{[\s\S]*?ss:\s*'1'/
+  );
+  assert.match(
+    mountSource,
+    /initialSchroederSimulationUrlValue[\s\S]*?\?\? initialSchroederSimulationPolicyValue[\s\S]*?\?\? initialScenarioRuntime\.ss/
+  );
+  assert.match(
+    mountSource,
+    /initialScenarioRuntime\.ss != null \? 'scenario-preset' : 'default'/
+  );
+});
+
+test('resident GPU completions count as physics frames even when a CPU driver object exists', () => {
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+
+  assert.match(
+    mountSource,
+    /const completedResidentSteps = execution\?\.completedStepCount \|\| normalizedStepCount;\s*recordResidentFrame\(completedResidentSteps\);\s*recordPhysicsFrame\(completedResidentSteps\);/,
+    'the resident authority advances physics regardless of whether a dormant CPU driver is mounted'
+  );
+  assert.doesNotMatch(
+    mountSource,
+    /recordResidentFrame\(completedResidentSteps\);\s*if \(!driver[\s\S]{0,80}?recordPhysicsFrame\(completedResidentSteps\);/,
+    'driver presence must not suppress resident physics accounting'
+  );
+});
+
+test('product-history acceptance proves the GPU-count P2G and full render commit gates', () => {
+  const metric = {
+    residentStep: {
+      residentProductMassStatus: 'resident-product-mass-merged-gpu-resident',
+      residentProductMassGridCouplingStatus:
+        'resident-product-mass-bound-to-p2g-grid',
+      residentProductMassInputProductEventCountAuthority:
+        'gpu-authored-filtered-live-prefix',
+      residentProductMassInputProductEventRowCapacity: 32768,
+      residentProductMassInputProductEventCountHostKnown: false,
+      residentProductMassProductEventDispatchMode:
+        'gpu-authored-indirect-live-count'
+    },
+    renderState: {
+      residentProductMassStatus: 'resident-product-mass-merged-gpu-resident',
+      productEventBufferBound: true,
+      productEventBufferByteLength: 4 * 1024 * 1024,
+      productEventCountAuthority: 'gpu-authored-filtered-live-prefix',
+      productEventControlAuthentication: 'full-eight-word-gpu-commit-gate',
+      productEventControlHostObserved: false,
+      productEventRowCapacity: 32768,
+      productEventCountHostKnown: false,
+      productEventCountAuthorityGeneration: 73,
+      productEventCountAuthoritySeal: 0x7a51c30d
+    }
+  };
+  const analyze = (nextMetric) => analyzeTimeline({
+    status: 'complete',
+    probeMode: 'direct-resident',
+    metrics: [nextMetric]
+  }, {
+    visualOnly: true
+  });
+
+  const accepted = analyze(metric);
+  assert.equal(accepted.productHistoryP2gGpuCountReceiptRequired, true);
+  assert.equal(accepted.productHistoryP2gGpuCountReceiptAccepted, true);
+  assert.equal(accepted.productHistoryRenderCommitGateReceiptRequired, true);
+  assert.equal(accepted.productHistoryRenderCommitGateReceiptAccepted, true);
+  assert.equal(
+    accepted.issues.includes(
+      'resident-product-history-p2g-gpu-count-receipt-invalid'
+    ),
+    false
+  );
+  assert.equal(
+    accepted.issues.includes(
+      'resident-product-history-render-commit-gate-receipt-invalid'
+    ),
+    false
+  );
+
+  const hostObservedP2g = analyze({
+    ...metric,
+    residentStep: {
+      ...metric.residentStep,
+      residentProductMassInputProductEventCountHostKnown: true
+    }
+  });
+  assert.equal(hostObservedP2g.productHistoryP2gGpuCountReceiptAccepted, false);
+  assert.ok(hostObservedP2g.issues.includes(
+    'resident-product-history-p2g-gpu-count-receipt-invalid'
+  ));
+
+  const incompleteRenderGate = analyze({
+    ...metric,
+    renderState: {
+      ...metric.renderState,
+      productEventControlAuthentication: 'prefix-only'
+    }
+  });
+  assert.equal(
+    incompleteRenderGate.productHistoryRenderCommitGateReceiptAccepted,
+    false
+  );
+  assert.ok(incompleteRenderGate.issues.includes(
+    'resident-product-history-render-commit-gate-receipt-invalid'
+  ));
+
+  const mlsSource = readRepoFile('src/runtime/sph/sphMlsMpmGpuStep.js');
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  assert.match(
+    mlsSource,
+    /residentProductMassInputProductEventCountAuthority:[\s\S]*?p2gGridProjection\?\.residentProductMassInputProductEventCountAuthority/
+  );
+  assert.match(
+    sceneSource,
+    /productEventControlAuthentication:[\s\S]*?renderFieldExecution\?\.productEventControlAuthentication/
+  );
+  assert.match(
+    probeSource,
+    /residentSteps:\s*steps \? \{[\s\S]*?residentProductMassInputProductEventCountAuthority:[\s\S]*?steps\.finalStep\?\.residentProductMassInputProductEventCountAuthority/
+  );
+  assert.match(
+    probeSource,
+    /renderState:\s*renderState \? \{[\s\S]*?productEventControlAuthentication:[\s\S]*?renderState\.productEventControlAuthentication/
   );
 });

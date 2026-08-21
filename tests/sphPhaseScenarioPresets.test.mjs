@@ -35,12 +35,40 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
     }
   );
   assert.equal(water.controls.blob, '1');
+  assert.equal(water.validation.batches, 18);
+  assert.equal(water.validation.batchSteps, 512);
+  assert.equal(water.validation.timeoutMs, 1200000);
+  assert.equal(water.validation.minVisualFrameTimeSpanS, 4.5);
 
   const quench = sphPhaseScenarioPresetById('iron-ice-quench');
   assert.equal(quench.controls.drop, 'fe');
   assert.equal(quench.controls.base, 'h2o');
   assert.ok(Number(quench.controls.dropt) > 1811);
   assert.ok(Number(quench.controls.baset) < 273.15);
+  assert.equal(quench.controls.dropn, '6');
+  assert.equal(quench.controls.basen, '10');
+  assert.equal(quench.controls.boxx, '10');
+  assert.equal(quench.controls.boxy, '10');
+  assert.equal(quench.controls.boxz, '10');
+  assert.equal(quench.controls.ironh, '2');
+  assert.equal(quench.controls.lawst, '1');
+  assert.deepEqual(quench.runtime, {
+    sceneLengthScale: '0.014',
+    wallModel: 'adiabatic',
+    ss: '1'
+  });
+  assert.equal(quench.validation.batches, 16);
+  assert.equal(quench.validation.timeoutMs, 1200000);
+  assert.deepEqual(
+    SPH_PHASE_SCENARIO_PRESETS
+      .filter((entry) => entry.id !== 'iron-ice-quench')
+      .map((entry) => [entry.id, entry.controls.lawst]),
+    [
+      ['water-cycle', '0'],
+      ['sodium-water', '0'],
+      ['cesium-fluorine', '0']
+    ]
+  );
 
   const sodium = sphPhaseScenarioPresetById('sodium-water');
   assert.equal(sodium.controls.boxx, '3');
@@ -53,7 +81,9 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
     avAlpha: '0',
     residentStepsPerSchedule: '128',
     residentComputeManagerMode: 'direct',
-    residentInterfaceRefreshMode: 'pipelined'
+    residentInterfaceRefreshMode: 'pipelined',
+    cameraPositionNormalized: '0.78,0.31,1.55',
+    cameraTargetNormalized: '0.50,0.31,0.50'
   });
   assert.deepEqual(sodium.validation.expectedMaterialPresent, ['naoh', 'h2']);
   assert.equal(sodium.validation.initialMaxTemperatureK, 300);

@@ -17,14 +17,19 @@ export * from './schroederSpatialMechanicsViewWgsl.js';
 export * from './schroederSpatialMechanicalPairGraph.js';
 export * from './schroederSpatialMechanicsFieldView.js';
 export * from './schroederSpatialMechanicsFieldViewWgsl.js';
+export * from './schroederSpatialMechanicsFieldPairWgsl.js';
 export * from './schroederSpatialPhaseVolumeMoment.js';
 export * from './schroederSpatialPhaseVolumeMomentWgsl.js';
 export * from './schroederSpatialPhaseVolumeReceipt.js';
 export * from './schroederSpatialPhaseVolumeReceiptWgsl.js';
+export * from './schroederSpatialGasPressureBoundaryTransport.js';
+export * from './schroederSpatialGasPressureBoundaryTransportWgsl.js';
 export * from './schroederSpatialPhaseVolumeInterfaceProposal.js';
 export * from './schroederSpatialPhaseVolumeInterfaceProposalWgsl.js';
 export * from './schroederSpatialPhaseVolumeTransport.js';
 export * from './schroederSpatialPhaseVolumePressureDragOperatorWgsl.js';
+export * from './schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl.js';
+export * from './schroederSpatialPhaseVolumeSurfaceStressTransportWgsl.js';
 export * from './schroederSpatialPhaseVolumeTransportWgsl.js';
 export * from './schroederSpatialHierarchyView.js';
 export * from './schroederSpatialHierarchyViewWgsl.js';
@@ -32,6 +37,9 @@ export * from './schroederSpatialParentFieldView.js';
 export * from './schroederSpatialParentFieldViewWgsl.js';
 export * from './schroederSpatialParentFieldMechanicsWorkspace.js';
 export * from './schroederSpatialParentFieldMechanicsWorkspaceWgsl.js';
+export * from './sphSpatialGasFreeVolume.js';
+export * from './sphSpatialGasFreeVolumeWgsl.js';
+export * from './sphReactionStrictGate.js';
 export * from './schroederSpatialAggregateView.js';
 export * from './schroederSpatialAggregateViewWgsl.js';
 export * from './schroederFrozenLevelAssignmentRefreshWgsl.js';
@@ -378,8 +386,11 @@ export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
 // Stable structural identity is intentionally separate from the floating
 // state and thermodynamic rows.  Those rows have no semantically safe spare
 // lane, and a u32 domain id must not alias temperature, status, or phase data.
-// Domain 0 is unassigned (including spare/product slots); positive ids name
-// initial material-body cohorts and are consumed by resident rendering.
+// Domain 0 is unassigned. Positive ids name stable material-continuity
+// cohorts consumed by resident mechanics and rendering: initial bodies use
+// their declared domains, while each dormant reaction-product lineage is
+// preassigned a unique domain so activation as a solid never creates an
+// identity-less mechanics source.
 export const SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT = Object.freeze([
   'renderDomainId:u32'
 ]);
@@ -419,7 +430,9 @@ export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'densityFromKgPerM3:f32',
   'densityToKgPerM3:f32',
   'status:f32',
-  'pad0:f32'
+  // Phase-resolved bulk conductivity used by the CPU contact-conduction
+  // reference. The resident GPU proposal path does not consume this lane yet.
+  'thermalConductivityWPerMK:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

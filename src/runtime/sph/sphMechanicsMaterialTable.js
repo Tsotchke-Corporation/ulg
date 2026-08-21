@@ -199,6 +199,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
 } = {}) {
   const records = [];
   const metadata = [];
+  let positiveSurfaceTensionPhaseRecordCount = 0;
   const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
   let materialBankWarmInputMatchedMaterialCount = 0;
   const options = {
@@ -217,7 +218,14 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     const materialBankWarmInput = materialBankWarmInputs.get(String(material).toLowerCase()) || null;
     if (materialBankWarmInput) materialBankWarmInputMatchedMaterialCount += 1;
     for (const phase of properties.phases || []) {
-      records.push(...mechanicsMaterialPhaseRecord(material, properties, phase, options));
+      const record = mechanicsMaterialPhaseRecord(
+        material,
+        properties,
+        phase,
+        options
+      );
+      if (record[11] > 0) positiveSurfaceTensionPhaseRecordCount += 1;
+      records.push(...record);
       phases.push(phase.name);
     }
     metadata.push({
@@ -258,6 +266,12 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     mlsMpmArtificialViscosityAlpha,
     viscosityLengthM,
     surfaceTensionEnabled,
+    positiveSurfaceTensionPhaseRecordCount,
+    surfaceTensionCoefficientStatus: !surfaceTensionEnabled
+      ? 'surface-tension-disabled'
+      : positiveSurfaceTensionPhaseRecordCount > 0
+        ? 'positive-surface-tension-coefficient-ready'
+        : 'surface-tension-enabled-without-positive-coefficient',
     scientificValidation: false,
     materialValidation: false,
     sphValidation: false,

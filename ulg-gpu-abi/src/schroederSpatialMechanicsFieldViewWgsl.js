@@ -716,6 +716,230 @@ fn finalize_field_view() {
 }
 `;
 
+// A fine-level G2P copies every non-selected coarse particle bitwise.  The
+// successor coarse field can therefore retain the predecessor's immutable
+// descriptor/key topology while receiving a new, completely cleared mutable
+// tail.  The host copies only [header, descriptors, keys] and this one-thread
+// finalizer re-authenticates the copied topology against the new parent and
+// active-source authorities before publishing fresh generation identity.
+export const schroederSpatialMechanicsFieldTopologySuccessorWgsl = /* wgsl */ `
+struct MechanicsFieldViewParams {
+  source_count: u32,
+  source_capacity: u32,
+  source_stride_floats: u32,
+  source_row_layout_id: u32,
+  identity_stride_words: u32,
+  selected_level: i32,
+  grid_node_count: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  grid_shift: u32,
+  candidate_capacity: u32,
+  field_capacity: u32,
+  generation_id: u32,
+  device_ordinal: u32,
+  lane_ordinal: u32,
+  lease_token: u32,
+  source_family_id: u32,
+  storage_generation: u32,
+  physics_tick: u32,
+  physics_substep: u32,
+  position_epoch: u32,
+  topology_epoch: u32,
+  chart_epoch: u32,
+  level_epoch: u32,
+  support_epoch: u32,
+  completion_ordinal: u32,
+  descriptor_offset_words: u32,
+  descriptor_words: u32,
+  key_offset_words: u32,
+  key_words: u32,
+  accumulator_offset_words: u32,
+  accumulator_words: u32,
+  state_offset_words: u32,
+  state_words: u32,
+  capacity_words: u32,
+  grid_spacing_m: f32,
+  inv_grid_spacing_m: f32,
+  parent_capacity_words: u32,
+  parent_node_capacity: u32,
+  workgroup_size: u32,
+  stencil_size: u32,
+  source_dispatch_x: u32,
+  candidate_dispatch_x: u32,
+  dispatch_x_limit: u32,
+  source_dispatch_y: u32,
+  candidate_dispatch_y: u32,
+  source_authority_version: u32,
+};
+
+@group(0) @binding(0) var<storage, read> predecessor_field: array<u32>;
+@group(0) @binding(1) var<storage, read_write> successor_field: array<u32>;
+@group(0) @binding(2) var<storage, read> parent_mechanics_view: array<u32>;
+@group(0) @binding(3) var<storage, read> active_source_view: array<u32>;
+@group(0) @binding(4) var<uniform> params: MechanicsFieldViewParams;
+
+const FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
+const FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
+const FIELD_READY_ADMITTED: u32 = 3u;
+const FIELD_REJECTED_MASK: u32 = 28u;
+const FIELD_HEADER_WORDS: u32 = 64u;
+const FIELD_DESCRIPTOR_WORDS: u32 = 32u;
+const FIELD_KEY_WORDS: u32 = 4u;
+const FIELD_ACCUMULATOR_WORDS: u32 = 8u;
+const FIELD_STATE_WORDS: u32 = 8u;
+const FIELD_PRESSURE_WORDS: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_PRESSURE_WORDS}u;
+const PARENT_MAGIC: u32 = 0x534d5631u;
+const PARENT_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+
+fn successor_reject() {
+  successor_field[0u] = FIELD_MAGIC;
+  successor_field[1u] = FIELD_VERSION;
+  successor_field[2u] = 5u;
+  successor_field[44u] = 0u;
+  successor_field[45u] = 0u;
+  successor_field[46u] = 0u;
+  successor_field[60u] = 0u;
+  successor_field[61u] = 0u;
+  successor_field[62u] = 0u;
+  successor_field[59u] = 0u;
+  successor_field[63u] = 0u;
+}
+
+fn parent_admitted() -> bool {
+  return arrayLength(&parent_mechanics_view) == params.parent_capacity_words
+    && params.parent_capacity_words >= 64u
+    && parent_mechanics_view[20u] == PARENT_MAGIC
+    && parent_mechanics_view[21u] == PARENT_VERSION
+    && parent_mechanics_view[22u] == FIELD_READY_ADMITTED
+    && parent_mechanics_view[23u] == params.generation_id
+    && parent_mechanics_view[24u] == params.device_ordinal
+    && parent_mechanics_view[25u] == params.lane_ordinal
+    && parent_mechanics_view[26u] == params.lease_token
+    && parent_mechanics_view[27u] == params.source_family_id
+    && parent_mechanics_view[28u] == params.storage_generation
+    && parent_mechanics_view[29u] == params.physics_tick
+    && parent_mechanics_view[30u] == params.physics_substep
+    && parent_mechanics_view[31u] == params.position_epoch
+    && parent_mechanics_view[32u] == params.topology_epoch
+    && parent_mechanics_view[33u] == params.chart_epoch
+    && parent_mechanics_view[34u] == params.level_epoch
+    && parent_mechanics_view[35u] == params.support_epoch
+    && parent_mechanics_view[36u] == params.source_count
+    && bitcast<i32>(parent_mechanics_view[37u]) == params.selected_level
+    && parent_mechanics_view[38u] == params.grid_node_count
+    && parent_mechanics_view[39u] == params.grid_nx
+    && parent_mechanics_view[40u] == params.grid_ny
+    && parent_mechanics_view[41u] == params.grid_nz
+    && parent_mechanics_view[42u] == params.grid_shift
+    && parent_mechanics_view[43u] == bitcast<u32>(params.grid_spacing_m)
+    && parent_mechanics_view[45u] == params.parent_node_capacity
+    && parent_mechanics_view[52u] == params.completion_ordinal;
+}
+
+fn active_source_admitted() -> bool {
+  return arrayLength(&active_source_view) >= 64u
+    && active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && active_source_view[2u] == FIELD_READY_ADMITTED
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && active_source_view[16u] == params.source_count
+    && active_source_view[17u] == params.source_capacity
+    && active_source_view[19u] * 27u == params.candidate_capacity
+    && active_source_view[43u] == predecessor_field[33u]
+    && active_source_view[30u] == params.completion_ordinal;
+}
+
+fn copied_topology_admitted() -> bool {
+  let predecessor_status = predecessor_field[2u];
+  let field_count = predecessor_field[34u];
+  return arrayLength(&predecessor_field) == params.capacity_words
+    && arrayLength(&successor_field) == params.capacity_words
+    && predecessor_field[0u] == FIELD_MAGIC
+    && predecessor_field[1u] == FIELD_VERSION
+    && (predecessor_status & FIELD_READY_ADMITTED) == FIELD_READY_ADMITTED
+    && (predecessor_status & FIELD_REJECTED_MASK) == 0u
+    && predecessor_field[16u] == params.source_count
+    && bitcast<i32>(predecessor_field[17u]) == params.selected_level
+    && predecessor_field[18u] == params.grid_node_count
+    && predecessor_field[19u] == params.grid_nx
+    && predecessor_field[20u] == params.grid_ny
+    && predecessor_field[21u] == params.grid_nz
+    && predecessor_field[22u] == params.grid_shift
+    && predecessor_field[23u] == bitcast<u32>(params.grid_spacing_m)
+    && predecessor_field[24u] == params.descriptor_offset_words
+    && predecessor_field[25u] == FIELD_DESCRIPTOR_WORDS
+    && predecessor_field[26u] == params.key_offset_words
+    && predecessor_field[27u] == FIELD_KEY_WORDS
+    && predecessor_field[28u] == params.accumulator_offset_words
+    && predecessor_field[29u] == FIELD_ACCUMULATOR_WORDS
+    && predecessor_field[30u] == params.state_offset_words
+    && predecessor_field[31u] == FIELD_STATE_WORDS
+    && predecessor_field[32u] == params.field_capacity
+    && field_count > 0u
+    && field_count <= params.field_capacity
+    && predecessor_field[39u] == params.source_row_layout_id
+    && predecessor_field[40u] == params.identity_stride_words
+    && predecessor_field[42u] == params.capacity_words
+    && predecessor_field[54u] == params.source_count
+    && predecessor_field[55u] == 1u
+    && predecessor_field[56u] == 1u
+    && predecessor_field[57u] == 1u
+    && predecessor_field[58u] == 0u
+    && predecessor_field[12u] == params.topology_epoch
+    && predecessor_field[13u] == params.chart_epoch
+    && predecessor_field[14u] == params.level_epoch
+    && predecessor_field[15u] == params.support_epoch
+    && params.capacity_words == params.state_offset_words
+      + params.field_capacity * (FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS);
+}
+
+@compute @workgroup_size(1)
+fn finalize_topology_successor() {
+  if (!copied_topology_admitted() || !parent_admitted() || !active_source_admitted()) {
+    successor_reject();
+    return;
+  }
+  successor_field[2u] = FIELD_READY_ADMITTED;
+  successor_field[3u] = params.generation_id;
+  successor_field[4u] = params.device_ordinal;
+  successor_field[5u] = params.lane_ordinal;
+  successor_field[6u] = params.lease_token;
+  successor_field[7u] = params.source_family_id;
+  successor_field[8u] = params.storage_generation;
+  successor_field[9u] = params.physics_tick;
+  successor_field[10u] = params.physics_substep;
+  successor_field[11u] = params.position_epoch;
+  successor_field[12u] = params.topology_epoch;
+  successor_field[13u] = params.chart_epoch;
+  successor_field[14u] = params.level_epoch;
+  successor_field[15u] = params.support_epoch;
+  successor_field[38u] = params.completion_ordinal;
+  successor_field[43u] = 0u;
+  successor_field[47u] = PARENT_MAGIC;
+  successor_field[48u] = PARENT_VERSION;
+  successor_field[49u] = params.parent_node_capacity;
+  successor_field[50u] = params.generation_id;
+  successor_field[59u] = 0u;
+  successor_field[63u] = 0u;
+}
+`;
+
 function replaceV2Required(source, search, replacement, label) {
   if (!source.includes(search)) {
     throw new Error(`unable to derive mechanics-field v2 WGSL: ${label}`);
@@ -818,6 +1042,7 @@ fn field_active_source_view_admitted() -> bool {
     && physical_capacity == params.source_capacity
     && active_count <= active_capacity
     && active_capacity <= physical_capacity
+    && active_capacity <= 0xffffffffu / 27u
     && active_source_view[20u] == physical_count - active_count
     && active_source_view[21u] == 0u
     && active_source_view[22u] == 0u
@@ -842,6 +1067,7 @@ fn field_active_source_view_admitted() -> bool {
     && active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD]
       == active_count * 27u
     && active_source_view[44u] == active_capacity * 27u
+    && params.candidate_count == active_capacity * 27u
     && active_source_view[ACTIVE_SOURCE_SEAL_WORD] != 0u;
 }
 
@@ -1448,7 +1674,7 @@ fn materialize_stencil_field_indices_v2(
     && params.descriptor_words == FIELD_DESCRIPTOR_WORDS
     && params.accumulator_words == FIELD_ACCUMULATOR_WORDS
     && params.state_words == FIELD_STATE_WORDS
-    && params.candidate_count == params.source_count * 27u
+    && params.candidate_count == active_source_view[44u]
     && params.capacity_words == params.state_offset_words
       + params.field_capacity * (
         FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS

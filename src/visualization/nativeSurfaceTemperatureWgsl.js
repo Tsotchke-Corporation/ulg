@@ -25,6 +25,52 @@ const GPU_BUFFER_USAGE = {
 
 const UINT32_MAX = 0xffff_ffff;
 const FLOAT_BYTES = Float32Array.BYTES_PER_ELEMENT;
+const nativeSurfaceTemperaturePipelineBundlesByDevice = new WeakMap();
+
+function nativeSurfaceTemperaturePipelineBundle(device) {
+  const cached = nativeSurfaceTemperaturePipelineBundlesByDevice.get(device);
+  if (cached) {
+    return {
+      ...cached,
+      dispatchPlanPipelineCacheStatus: 'pipeline-cache-hit',
+      temperaturePipelineCacheStatus: 'pipeline-cache-hit'
+    };
+  }
+  const dispatchPlan = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-native-surface-temperature-dispatch-plan.v0',
+    label: 'ulg-native-surface-temperature-dispatch-plan',
+    code: ULG_NATIVE_SURFACE_TEMPERATURE_WGSL,
+    entryPoint: 'plan_dispatch',
+    bindings: [
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'storage')
+    ]
+  });
+  const temperature = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-native-surface-temperature-rows.v1-indirect',
+    label: 'ulg-native-surface-temperature-rows',
+    code: ULG_NATIVE_SURFACE_TEMPERATURE_WGSL,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage')
+    ]
+  });
+  const bundle = Object.freeze({
+    dispatchPlanPipeline: dispatchPlan.pipeline,
+    dispatchPlanBindGroupLayout: dispatchPlan.bindGroupLayout,
+    dispatchPlanPipelineCacheStatus: dispatchPlan.cacheStatus,
+    pipeline: temperature.pipeline,
+    bindGroupLayout: temperature.bindGroupLayout,
+    temperaturePipelineCacheStatus: temperature.cacheStatus
+  });
+  nativeSurfaceTemperaturePipelineBundlesByDevice.set(device, bundle);
+  return bundle;
+}
 
 /**
  * Encodes the legacy native-surface temperature sample once per GPU-counter
@@ -529,14 +575,15 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
     paramsBuffer = device.createBuffer({
       label: `${label}-params`,
       size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST,
-      mappedAtCreation: true
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     });
-    const mappedParams = paramsBuffer.getMappedRange();
-    new Uint8Array(mappedParams).set(
-      new Uint8Array(params.buffer, params.byteOffset, params.byteLength)
+    device.queue.writeBuffer(
+      paramsBuffer,
+      0,
+      params.buffer,
+      params.byteOffset,
+      params.byteLength
     );
-    paramsBuffer.unmap();
 
     dispatchArgsBuffer = device.createBuffer({
       label: `${label}-dispatch-indirect`,
@@ -545,38 +592,13 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
     });
 
     const {
-      pipeline: dispatchPlanPipeline,
-      bindGroupLayout: dispatchPlanBindGroupLayout,
-      cacheStatus: dispatchPlanPipelineCacheStatus
-    } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-native-surface-temperature-dispatch-plan.v0',
-      label: 'ulg-native-surface-temperature-dispatch-plan',
-      code: ULG_NATIVE_SURFACE_TEMPERATURE_WGSL,
-      entryPoint: 'plan_dispatch',
-      bindings: [
-        computeBufferBinding(3, 'uniform'),
-        computeBufferBinding(4, 'read-only-storage'),
-        computeBufferBinding(5, 'storage')
-      ]
-    });
-    const {
+      dispatchPlanPipeline,
+      dispatchPlanBindGroupLayout,
+      dispatchPlanPipelineCacheStatus,
       pipeline,
       bindGroupLayout,
-      cacheStatus: temperaturePipelineCacheStatus
-    } =
-      createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-native-surface-temperature-rows.v1-indirect',
-        label: 'ulg-native-surface-temperature-rows',
-        code: ULG_NATIVE_SURFACE_TEMPERATURE_WGSL,
-        entryPoint: 'main',
-        bindings: [
-          computeBufferBinding(0, 'read-only-storage'),
-          computeBufferBinding(1, 'read-only-storage'),
-          computeBufferBinding(2, 'storage'),
-          computeBufferBinding(3, 'uniform'),
-          computeBufferBinding(4, 'read-only-storage')
-        ]
-      });
+      temperaturePipelineCacheStatus
+    } = nativeSurfaceTemperaturePipelineBundle(device);
     const dispatchPlanBindGroup = device.createBindGroup({
       label: `${label}-dispatch-plan-bind-group`,
       layout: dispatchPlanBindGroupLayout,

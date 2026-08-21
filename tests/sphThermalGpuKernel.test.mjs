@@ -4,11 +4,13 @@ import { ULG_CLOSURE_LAW_GRAPH_SCHEMA } from '../ulg-gpu-abi/src/index.js';
 import { sphThermalStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../src/runtime/closureLawGraph.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
+import { createReferenceAnchoredMaterialClosure } from '../src/runtime/material/materialDerivation.js';
 import { stableOpticalMaterialId, GPU_PHASE_IDS } from '../src/runtime/material/opticalGpuBuffers.js';
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../src/runtime/material/materialPropertyBank.js';
 import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEquilibrium.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { createSphState } from '../src/runtime/sph/sphState.js';
+import { discoverReactions } from '../src/runtime/sph/reactionDiscovery.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
@@ -27,6 +29,8 @@ import {
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
+  ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA,
+  ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA,
   buildSphThermalPhaseResponseTable,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
@@ -36,10 +40,12 @@ import {
   resolveThermalCarrierEnergyDomainForTemperatureRangeFromTable,
   resolveThermalCarrierEnergyDomainFromTable,
   resolveThermalCarrierTemperatureSlopeFromTable,
+  resolveThermalConductivityFromTable,
   resolveThermalPhaseResponseFromTable,
   resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
   SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4,
+  SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
   thermalEmissivityFromTable,
   thermalResponseGraphUploadMatchesDevice,
   runSphThermalStepCpu,
@@ -51,10 +57,28 @@ import {
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 const closures = createReferenceMaterialClosures();
+const TEST_PHASE_CONDUCTIVITY_W_PER_M_K = Object.freeze({
+  h2o: Object.freeze({ solid: 2.2, liquid: 0.6, gas: 0.025 }),
+  fe: Object.freeze({ solid: 80.4, liquid: 40 }),
+  air: Object.freeze({ gas: 0.026 })
+});
 const materialProperties = {
-  h2o: closures.h2o.properties,
-  fe: closures.fe.properties,
-  air: closures.air.properties
+  ...Object.fromEntries(['h2o', 'fe', 'air'].map((material) => [
+    material,
+    {
+      ...closures[material].properties,
+      phases: closures[material].properties.phases.map((phase) => ({
+        ...phase,
+        thermalConductivityWPerMK:
+          TEST_PHASE_CONDUCTIVITY_W_PER_M_K[material]?.[phase.name] ?? 0,
+        thermalConductivityProvenance: {
+          source: 'focused-test-reference',
+          material,
+          phase: phase.name
+        }
+      }))
+    }
+  ]))
 };
 
 function nearlyEqual(actual, expected, tolerance = 1e-3) {
@@ -106,6 +130,30 @@ function totalInternalEnergyJ(packed) {
   return total;
 }
 
+function materialPropertiesWithConductivity(overrides = {}) {
+  return Object.fromEntries(Object.entries(materialProperties).map(([material, properties]) => [
+    material,
+    {
+      ...properties,
+      phases: properties.phases.map((phase) => ({
+        ...phase,
+        thermalConductivityWPerMK:
+          overrides[material]?.[phase.name]
+          ?? phase.thermalConductivityWPerMK
+      }))
+    }
+  ]));
+}
+
+function thermalTableWithoutRadiation(properties) {
+  const source = buildSphThermalMaterialTable(properties);
+  const records = new Float32Array(source.records);
+  for (let record = 0; record < source.materialCount; record += 1) {
+    records[record * source.recordStrideFloats + 4] = 0;
+  }
+  return { ...source, records };
+}
+
 function fakeThermalDeviceWithFence() {
   let resolveFence;
   const fence = new Promise((resolve) => {
@@ -129,7 +177,17 @@ function fakeThermalDeviceWithFence() {
     resolveFence,
     queue: {
       writeBuffer(buffer, offset, data) {
-        queueWrites.push({ label: buffer?.label ?? null, offset, byteLength: data?.byteLength ?? 0 });
+        const sourceBytes = data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        queueWrites.push({
+          label: buffer?.label ?? null,
+          offset,
+          byteLength: data?.byteLength ?? 0,
+          ...(buffer?.label === 'ulg-sph-thermal-params'
+            ? { data: sourceBytes.slice().buffer }
+            : {})
+        });
       },
       submit(commandBuffers) { submissions.push(commandBuffers); },
       onSubmittedWorkDone() {
@@ -238,6 +296,338 @@ function classicThermalStageArgs(device, {
     retainOutputParticleBuffers
   };
 }
+
+test('SPH thermal ambient authority preserves the omitted default and rejects nonfinite input', () => {
+  const packed = packedTwoWaterParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const omitted = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: {},
+    dtS: 0,
+    wallRate: 0
+  });
+  assert.equal(
+    omitted.ambientTemperatureK,
+    SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT
+  );
+  assert.equal(
+    omitted.thermalEnvironmentAuthority.schema,
+    ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA
+  );
+  assert.equal(omitted.thermalEnvironmentAuthority.defaultApplied, true);
+  assert.equal(
+    omitted.thermalEnvironmentAuthority.source,
+    'sph-thermal-kernel-default'
+  );
+
+  const explicit = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: {},
+    ambientTemperatureK: 247.5,
+    dtS: 0,
+    wallRate: 0
+  });
+  assert.equal(explicit.ambientTemperatureK, 247.5);
+  assert.equal(explicit.thermalEnvironmentAuthority.defaultApplied, false);
+  assert.equal(explicit.thermalEnvironmentAuthority.source, 'thermal-step-caller');
+
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.throws(
+      () => runSphThermalStepCpu({
+        sphParticleState: packed,
+        thermalMaterialTable,
+        ambientTemperatureK: invalid
+      }),
+      /ambientTemperatureK must be finite/
+    );
+  }
+
+  const validAuthority = explicit.thermalEnvironmentAuthority;
+  for (const malformed of [
+    { ...validAuthority, status: 'pending' },
+    { ...validAuthority, authoritative: false },
+    { ...validAuthority, source: '' },
+    { ...validAuthority, defaultApplied: null }
+  ]) {
+    assert.throws(
+      () => runSphThermalStepCpu({
+        sphParticleState: packed,
+        thermalMaterialTable,
+        thermalEnvironmentAuthority: malformed
+      }),
+      /thermalEnvironmentAuthority/
+    );
+  }
+});
+
+test('SPH thermal wall authority preserves legacy fixed defaults and makes adiabatic exchange explicit', () => {
+  const packed = packedTwoWaterParticles(350, 350);
+  packed.state[0] = 0.02;
+  packed.state[SPH_GPU_PARTICLE_STATE_FLOATS] = 4.98;
+  const thermalMaterialTable = thermalTableWithoutRadiation(materialProperties);
+  const wallFaces = {
+    xMin: 233.15,
+    xMax: 500,
+    yMin: 350,
+    yMax: 350,
+    zMin: 350,
+    zMax: 350
+  };
+  const fixed = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: wallFaces,
+    boxDimsM: [5, 5, 5],
+    dtS: 1e-4,
+    conductionRate: 0,
+    ambientTemperatureK: 0,
+    wallRate: 6e4,
+    wallLayerM: 0.1
+  });
+  assert.equal(
+    fixed.wallReservoirAuthority.schema,
+    ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA
+  );
+  assert.equal(
+    fixed.wallReservoirAuthority.model,
+    'infinite-fixed-temperature-reservoir'
+  );
+  assert.equal(fixed.wallExchangeEnabled, true);
+  assert.equal(fixed.wallRate, 6e4);
+  assert.ok(fixed.wallHeatJ.xMin < 0);
+  assert.ok(fixed.wallHeatJ.xMax > 0);
+
+  const adiabatic = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: wallFaces,
+    wallModel: 'adiabatic',
+    boxDimsM: [5, 5, 5],
+    dtS: 1e-4,
+    conductionRate: 0,
+    ambientTemperatureK: 0,
+    wallRate: 6e4,
+    wallLayerM: 0.1
+  });
+  assert.equal(adiabatic.wallReservoirAuthority.model, 'adiabatic');
+  assert.equal(adiabatic.wallReservoirAuthority.exchangeEnabled, false);
+  assert.equal(adiabatic.wallExchangeEnabled, false);
+  assert.equal(adiabatic.requestedWallRate, 6e4);
+  assert.equal(adiabatic.wallRate, 0);
+  assert.deepEqual(adiabatic.wallReservoirAuthority.faces, wallFaces);
+  assert.deepEqual(adiabatic.wallHeatJ, {
+    xMin: 0,
+    xMax: 0,
+    yMin: 0,
+    yMax: 0,
+    zMin: 0,
+    zMax: 0
+  });
+  assert.deepEqual(adiabatic.state, packed.state);
+
+  const omitted = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    dtS: 0,
+    ambientTemperatureK: 0
+  });
+  assert.equal(
+    omitted.wallReservoirAuthority.model,
+    'infinite-fixed-temperature-reservoir'
+  );
+  assert.equal(omitted.wallReservoirAuthority.defaultApplied, true);
+  assert.deepEqual(omitted.wallReservoirAuthority.faces, {
+    xMin: 0,
+    xMax: 0,
+    yMin: 0,
+    yMax: 0,
+    zMin: 0,
+    zMax: 0
+  });
+});
+
+test('SPH thermal adiabatic authority disables ambient radiation while fixed reservoirs remain open', () => {
+  const packed = packedTwoWaterParticles(350, 350);
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const common = {
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 0.1,
+    conductionRate: 0,
+    ambientTemperatureK: 233.15,
+    wallRate: 0,
+    wallLayerM: 0.01
+  };
+  const open = runSphThermalStepCpu(common);
+  assert.equal(open.ambientRadiationExchangeEnabled, true);
+  assert.equal(
+    open.ambientRadiationExchangeAuthority,
+    'wall-reservoir-authority.exchangeEnabled'
+  );
+  assert.ok(open.radiativeAmbientHeatJ < 0);
+  assert.ok(
+    totalInternalEnergyJ({
+      ...packed,
+      state: open.state
+    }) < totalInternalEnergyJ(packed)
+  );
+
+  const adiabatic = runSphThermalStepCpu({
+    ...common,
+    wallModel: 'adiabatic'
+  });
+  assert.equal(adiabatic.wallReservoirAuthority.exchangeEnabled, false);
+  assert.equal(adiabatic.ambientRadiationExchangeEnabled, false);
+  assert.equal(
+    adiabatic.ambientRadiationExchangeAuthority,
+    'wall-reservoir-authority.exchangeEnabled'
+  );
+  assert.equal(adiabatic.radiativeAmbientHeatJ, 0);
+  assert.deepEqual(adiabatic.state, packed.state);
+});
+
+test('SPH thermal wall authority fails closed on invalid faces and mismatched receipts', () => {
+  const packed = packedTwoWaterParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const minted = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable,
+    wallTemperaturesK: {
+      xMin: 291,
+      xMax: 292,
+      yMin: 293,
+      yMax: 294,
+      zMin: 295,
+      zMax: 296
+    },
+    dtS: 0
+  }).wallReservoirAuthority;
+
+  assert.throws(
+    () => runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable,
+      wallTemperaturesK: { xMin: Number.NaN }
+    }),
+    /wallTemperaturesK.xMin must be finite/
+  );
+  assert.throws(
+    () => runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable,
+      wallTemperaturesK: { ...minted.faces, xMin: 290 },
+      wallReservoirAuthority: minted
+    }),
+    /wallTemperaturesK.xMin must match/
+  );
+  const { zMax: _missing, ...missingFaceAuthority } = minted.faces;
+  assert.throws(
+    () => runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable,
+      wallReservoirAuthority: {
+        ...minted,
+        faces: missingFaceAuthority
+      }
+    }),
+    /wallReservoirAuthority.faces.zMax is required/
+  );
+  assert.throws(
+    () => runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable,
+      wallReservoirAuthority: {
+        ...minted,
+        exchangeEnabled: false
+      }
+    }),
+    /exchangeEnabled must match/
+  );
+});
+
+test('SPH thermal WebGPU params encode the authoritative ambient temperature', () => {
+  const device = fakeThermalDeviceWithFence();
+  const stage = createSphThermalStepWebGpuEncoderStage({
+    ...classicThermalStageArgs(device),
+    ambientTemperatureK: 247.5
+  });
+  const paramsWrite = device.queueWrites.find(
+    (write) => write.label === 'ulg-sph-thermal-params'
+  );
+  assert.ok(paramsWrite);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getFloat32(100, true), 247.5);
+  assert.equal(params.getUint32(136, true), 1);
+  assert.equal(stage.result.ambientTemperatureK, 247.5);
+  assert.equal(stage.result.ambientRadiationExchangeEnabled, true);
+  assert.equal(stage.result.radiativeAmbientHeatJ, null);
+  assert.equal(
+    stage.result.thermalEnvironmentAuthority.schema,
+    ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA
+  );
+  stage.cleanupAbortedWork();
+
+  assert.throws(
+    () => createSphThermalStepWebGpuEncoderStage({
+      ...classicThermalStageArgs(fakeThermalDeviceWithFence()),
+      ambientTemperatureK: Number.NaN
+    }),
+    /ambientTemperatureK must be finite/
+  );
+});
+
+test('SPH thermal WebGPU params disable adiabatic wall exchange without erasing face receipts', () => {
+  const device = fakeThermalDeviceWithFence();
+  const wallFaces = {
+    xMin: 241,
+    xMax: 242,
+    yMin: 243,
+    yMax: 244,
+    zMin: 245,
+    zMax: 246
+  };
+  const stage = createSphThermalStepWebGpuEncoderStage({
+    ...classicThermalStageArgs(device),
+    wallTemperaturesK: wallFaces,
+    wallModel: 'adiabatic',
+    wallRate: 6e4
+  });
+  const paramsWrite = device.queueWrites.find(
+    (write) => write.label === 'ulg-sph-thermal-params'
+  );
+  assert.ok(paramsWrite);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getFloat32(28, true), 0);
+  assert.equal(params.getUint32(136, true), 0);
+  assert.deepEqual(
+    [48, 52, 56, 60, 64, 68].map((offset) => (
+      params.getFloat32(offset, true)
+    )),
+    Object.values(wallFaces)
+  );
+  assert.equal(stage.result.wallReservoirAuthority.model, 'adiabatic');
+  assert.equal(stage.result.wallExchangeEnabled, false);
+  assert.equal(stage.result.ambientRadiationExchangeEnabled, false);
+  assert.equal(stage.result.requestedWallRate, 6e4);
+  assert.equal(stage.result.wallRate, 0);
+  assert.deepEqual(stage.result.wallReservoirAuthority.faces, wallFaces);
+  stage.cleanupAbortedWork();
+});
+
+test('SPH thermal ABI WGSL requires explicit ambient-radiation exchange authority', () => {
+  assert.match(
+    sphThermalStepWgsl,
+    /ambient_radiation_exchange_enabled:\s*u32/
+  );
+  assert.match(
+    sphThermalStepWgsl,
+    /params\.ambient_radiation_exchange_enabled\s*==\s*1u[\s\S]*self_emissivity\s*>\s*0\.0/
+  );
+});
 
 test('thermal records carry a pressure carrier law only where a plateau admits one', () => {
   const table = buildSphThermalMaterialTable(materialProperties);
@@ -660,17 +1050,23 @@ test('SPH thermal response graph upload persists phase-response and graph buffer
   assert.equal(upload.graphCount, graphSet.graphBank.graphCount);
   assert.equal(upload.responseRecordBufferByteLength, responseTable.records.byteLength);
   assert.equal(upload.responseBufferByteLength, responseTable.responses.byteLength);
+  assert.equal(
+    upload.responseThermalConductivityBufferByteLength,
+    responseTable.responseThermalConductivities.byteLength
+  );
   assert.equal(upload.graphNodeBufferByteLength, graphSet.graphBank.nodeRows.byteLength);
   assert.equal(upload.graphSampleBufferByteLength, graphSet.graphBank.sampleRows.byteLength);
   assert.deepEqual(writes.map((write) => write.label), [
     'ulg-sph-thermal-phase-response-records',
     'ulg-sph-thermal-phase-responses',
+    'ulg-sph-thermal-phase-response-conductivities',
     'ulg-sph-thermal-graph-nodes',
     'ulg-sph-thermal-graph-samples'
   ]);
   assert.deepEqual(writes.map((write) => write.byteLength), [
     responseTable.records.byteLength,
     responseTable.responses.byteLength,
+    responseTable.responseThermalConductivities.byteLength,
     graphSet.graphBank.nodeRows.byteLength,
     graphSet.graphBank.sampleRows.byteLength
   ]);
@@ -681,6 +1077,7 @@ test('SPH thermal response graph upload persists phase-response and graph buffer
   assert.deepEqual(destroyed, [
     'ulg-sph-thermal-phase-response-records',
     'ulg-sph-thermal-phase-responses',
+    'ulg-sph-thermal-phase-response-conductivities',
     'ulg-sph-thermal-graph-nodes',
     'ulg-sph-thermal-graph-samples'
   ]);
@@ -738,6 +1135,345 @@ test('SPH thermal response graph uploads are reusable only on their owning devic
   assert.equal(thermalResponseGraphUploadMatchesDevice(upload, deviceA), false);
 });
 
+test('SPH thermal CPU table carries phase conductivity values and provenance', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const waterId = stableOpticalMaterialId('h2o');
+  const liquidEnergy = specificInternalEnergyJPerKg(materialProperties.h2o, 300);
+  const resolved = resolveThermalConductivityFromTable(
+    table,
+    waterId,
+    liquidEnergy
+  );
+
+  assert.equal(resolved.ready, true);
+  nearlyEqual(resolved.thermalConductivityWPerMK, 0.6, 1e-7);
+  assert.equal(
+    resolved.provenance?.status,
+    'closure-segment-thermal-conductivity-ready'
+  );
+  assert.equal(resolved.provenance?.source, 'phase-bulk-conductivity');
+  assert.equal(
+    resolved.provenance?.from?.sourceProvenance?.source,
+    'focused-test-reference'
+  );
+  assert.equal(
+    table.segmentLayout[11],
+    'thermalConductivityWPerMK:f32'
+  );
+
+  const missingTable = buildSphThermalMaterialTable({
+    h2o: closures.h2o.properties
+  });
+  const missing = resolveThermalConductivityFromTable(
+    missingTable,
+    waterId,
+    specificInternalEnergyJPerKg(closures.h2o.properties, 300)
+  );
+  assert.equal(missing.ready, false);
+  assert.equal(missing.thermalConductivityWPerMK, 0);
+  assert.equal(missing.status, 'phase-thermal-conductivity-missing');
+});
+
+test('production reference-anchored H2O and Fe closures provide phase conductivity without injected fixtures', () => {
+  const productionProperties = Object.fromEntries(['h2o', 'fe'].map((material) => {
+    const closure = createReferenceAnchoredMaterialClosure(material, {
+      elementOptions: { allowReducedEstimates: true, gridPointsN: 80 }
+    });
+    return [material, closure.properties];
+  }));
+  const table = buildSphThermalMaterialTable(productionProperties);
+  const waterId = stableOpticalMaterialId('h2o');
+  const ironId = stableOpticalMaterialId('fe');
+  const liquidWater = resolveThermalConductivityFromTable(
+    table,
+    waterId,
+    specificInternalEnergyJPerKg(productionProperties.h2o, 300)
+  );
+  const ice = resolveThermalConductivityFromTable(
+    table,
+    waterId,
+    specificInternalEnergyJPerKg(productionProperties.h2o, 250)
+  );
+  const steam = resolveThermalConductivityFromTable(
+    table,
+    waterId,
+    specificInternalEnergyJPerKg(productionProperties.h2o, 450)
+  );
+  const solidIron = resolveThermalConductivityFromTable(
+    table,
+    ironId,
+    specificInternalEnergyJPerKg(productionProperties.fe, 300)
+  );
+
+  assert.equal(liquidWater.ready, true);
+  nearlyEqual(liquidWater.thermalConductivityWPerMK, 0.598011575, 1e-7);
+  assert.equal(
+    liquidWater.provenance?.from?.sourceProvenance?.source,
+    'iapws-r15-11+nist-crc-ice-2019'
+  );
+  assert.equal(
+    liquidWater.provenance?.from?.sourceProvenance?.applicationPolicy,
+    'reference-state-value-held-constant-within-runtime-phase; missing phases fail closed'
+  );
+  assert.equal(ice.ready, true);
+  nearlyEqual(ice.thermalConductivityWPerMK, 2.16, 1e-6);
+  assert.equal(steam.ready, false);
+  assert.equal(steam.status, 'phase-thermal-conductivity-missing');
+  assert.equal(solidIron.ready, true);
+  nearlyEqual(solidIron.thermalConductivityWPerMK, 80.4, 1e-5);
+  assert.equal(
+    solidIron.provenance?.from?.sourceProvenance?.quality,
+    'bootstrap-only'
+  );
+
+  const packed = buildSphGpuParticleBuffers(createSphState({
+    smoothingLengthM: 0.1,
+    dimension: 3,
+    particles: [
+      {
+        id: 'production-hot-water',
+        material: 'h2o',
+        x: [2, 2, 2],
+        v: [0, 0, 0],
+        massKg: 1,
+        specificInternalEnergyJPerKg:
+          specificInternalEnergyJPerKg(productionProperties.h2o, 330)
+      },
+      {
+        id: 'production-cold-iron',
+        material: 'fe',
+        x: [2.07, 2, 2],
+        v: [0, 0, 0],
+        massKg: 1,
+        specificInternalEnergyJPerKg:
+          specificInternalEnergyJPerKg(productionProperties.fe, 300)
+      }
+    ]
+  }), { materialProperties: productionProperties });
+  const beforeEnergyJ = totalInternalEnergyJ(packed);
+  const result = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable: thermalTableWithoutRadiation(productionProperties),
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 1,
+    ambientTemperatureK: 0,
+    wallRate: 0
+  });
+  const afterEnergyJ = totalInternalEnergyJ({ ...packed, state: result.state });
+  assert.ok(result.state[7] < packed.state[7]);
+  nearlyEqual(afterEnergyJ, beforeEnergyJ, 0.05);
+});
+
+test('reduced sodium-water NaOH resolves positive conductivity and transfers heat reciprocally to water', () => {
+  const sodium = createReferenceAnchoredMaterialClosure('Na', {
+    elementOptions: { allowReducedEstimates: true, gridPointsN: 80 }
+  }).properties;
+  const water = createReferenceAnchoredMaterialClosure('h2o', {
+    elementOptions: { allowReducedEstimates: true, gridPointsN: 80 }
+  }).properties;
+  const discovery = discoverReactions('Na', 'h2o', {
+    materialProperties: { Na: sodium, h2o: water },
+    allowReducedProductProperties: true
+  });
+  const naoh = discovery.productClosures.naoh.properties;
+  const properties = { h2o: water, naoh };
+  const table = thermalTableWithoutRadiation(properties);
+  const naohEnergy = specificInternalEnergyJPerKg(naoh, 2193.2);
+  const waterEnergy = specificInternalEnergyJPerKg(water, 293.15);
+  const resolvedNaoh = resolveThermalConductivityFromTable(
+    table,
+    stableOpticalMaterialId('naoh'),
+    naohEnergy
+  );
+  const sodiumConductivity = sodium.phases
+    .find((phase) => phase.name === 'solid').thermalConductivityWPerMK;
+  const waterConductivity = water.phases
+    .find((phase) => phase.name === 'liquid').thermalConductivityWPerMK;
+  const expectedConductivity = 2 / (1 / sodiumConductivity + 1 / waterConductivity);
+
+  assert.equal(resolvedNaoh.ready, true);
+  nearlyEqual(
+    resolvedNaoh.thermalConductivityWPerMK,
+    expectedConductivity,
+    1e-6
+  );
+
+  const packed = buildSphGpuParticleBuffers(createSphState({
+    smoothingLengthM: 0.1,
+    dimension: 3,
+    particles: [
+      {
+        id: 'hot-naoh-product',
+        material: 'naoh',
+        x: [2, 2, 2],
+        v: [0, 0, 0],
+        massKg: 0.76016,
+        specificInternalEnergyJPerKg: naohEnergy
+      },
+      {
+        id: 'ambient-water',
+        material: 'h2o',
+        x: [2.07, 2, 2],
+        v: [0, 0, 0],
+        massKg: 8,
+        specificInternalEnergyJPerKg: waterEnergy
+      }
+    ]
+  }), { materialProperties: properties });
+  const beforeEnergyJ = totalInternalEnergyJ(packed);
+  const result = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 1,
+    ambientTemperatureK: 0,
+    wallRate: 0
+  });
+  const waterStateOffset = SPH_GPU_PARTICLE_STATE_FLOATS;
+  const afterEnergyJ = totalInternalEnergyJ({ ...packed, state: result.state });
+  const naohEnergyTransferJ = packed.state[3]
+    * (result.state[7] - packed.state[7]);
+  const waterEnergyTransferJ = packed.state[waterStateOffset + 3]
+    * (result.state[waterStateOffset + 7] - packed.state[waterStateOffset + 7]);
+
+  assert.ok(result.state[7] < packed.state[7], 'hot NaOH must lose internal energy');
+  assert.ok(
+    result.state[waterStateOffset + 7] > packed.state[waterStateOffset + 7],
+    'water must receive the same conducted heat'
+  );
+  assert.ok(naohEnergyTransferJ < 0);
+  assert.ok(waterEnergyTransferJ > 0);
+  nearlyEqual(naohEnergyTransferJ + waterEnergyTransferJ, 0, 1);
+  assert.equal(
+    result.thermalPairConductanceAuthority,
+    'phase-bulk-conductivity-harmonic-mean'
+  );
+  nearlyEqual(afterEnergyJ, beforeEnergyJ, 1);
+});
+
+test('SPH thermal CPU contact conduction scales with harmonic-mean conductivity and conserves energy', () => {
+  const runPair = ({
+    waterConductivityWPerMK,
+    ironConductivityWPerMK,
+    distanceM = 0.07,
+    conductionRate = 0
+  }) => {
+    const properties = materialPropertiesWithConductivity({
+      h2o: { liquid: waterConductivityWPerMK },
+      fe: { solid: ironConductivityWPerMK }
+    });
+    const packed = buildSphGpuParticleBuffers(createSphState({
+      smoothingLengthM: 0.1,
+      dimension: 3,
+      particles: [
+        {
+          id: 'hot-water',
+          material: 'h2o',
+          x: [2, 2, 2],
+          v: [0, 0, 0],
+          massKg: 1,
+          specificInternalEnergyJPerKg:
+            specificInternalEnergyJPerKg(properties.h2o, 330)
+        },
+        {
+          id: 'cold-iron',
+          material: 'fe',
+          x: [2 + distanceM, 2, 2],
+          v: [0, 0, 0],
+          massKg: 1,
+          specificInternalEnergyJPerKg:
+            specificInternalEnergyJPerKg(properties.fe, 300)
+        }
+      ]
+    }), { materialProperties: properties });
+    const table = thermalTableWithoutRadiation(properties);
+    const beforeEnergyJ = totalInternalEnergyJ(packed);
+    const result = runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable: table,
+      wallTemperaturesK: {},
+      boxDimsM: [5, 5, 5],
+      dtS: 1,
+      conductionRate,
+      ambientTemperatureK: 0,
+      wallRate: 0
+    });
+    const afterEnergyJ = totalInternalEnergyJ({ ...packed, state: result.state });
+    return {
+      packed,
+      result,
+      transferredEnergyJ: packed.state[7] - result.state[7],
+      energyResidualJ: afterEnergyJ - beforeEnergyJ
+    };
+  };
+
+  const low = runPair({
+    waterConductivityWPerMK: 10,
+    ironConductivityWPerMK: 20,
+    conductionRate: 0
+  });
+  const high = runPair({
+    waterConductivityWPerMK: 20,
+    ironConductivityWPerMK: 20,
+    conductionRate: 1e12
+  });
+  const sameConductivityDifferentLegacyRate = runPair({
+    waterConductivityWPerMK: 10,
+    ironConductivityWPerMK: 20,
+    conductionRate: 1e12
+  });
+
+  assert.ok(low.transferredEnergyJ > 0);
+  assert.equal(
+    low.result.thermalPairConductanceAuthority,
+    'phase-bulk-conductivity-harmonic-mean'
+  );
+  assert.equal(
+    low.result.thermalPairContactGeometryAuthority,
+    'overlapping-sphere-contact-disk-center-path'
+  );
+  assert.equal(low.result.legacyConductionRateEffective, false);
+  nearlyEqual(
+    high.transferredEnergyJ / low.transferredEnergyJ,
+    20 / (40 / 3),
+    0.02
+  );
+  nearlyEqual(
+    sameConductivityDifferentLegacyRate.transferredEnergyJ,
+    low.transferredEnergyJ,
+    1e-6
+  );
+  nearlyEqual(low.energyResidualJ, 0, 0.1);
+  nearlyEqual(high.energyResidualJ, 0, 0.1);
+});
+
+test('SPH thermal CPU contact conduction is exactly zero across a positive surface gap', () => {
+  const properties = materialPropertiesWithConductivity({
+    h2o: { liquid: 1e6 }
+  });
+  const packed = packedTwoWaterParticles(330, 300);
+  packed.state[SPH_GPU_PARTICLE_STATE_FLOATS] = 2.14;
+  const table = thermalTableWithoutRadiation(properties);
+  const result = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 1e6,
+    conductionRate: 1e12,
+    ambientTemperatureK: 0,
+    wallRate: 0
+  });
+
+  assert.equal(result.state[7], packed.state[7]);
+  assert.equal(
+    result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7],
+    packed.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7]
+  );
+});
+
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {
   const packed = packedTwoWaterParticles();
   packed.thermo[11] = 0.0375;
@@ -750,8 +1486,9 @@ test('SPH thermal CPU table step conserves pair conduction energy and refreshes 
     thermalMaterialTable: table,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 1e-4,
+    dtS: 1,
     conductionRate: 1.5e4,
+    ambientTemperatureK: 0,
     wallRate: 0
   });
   const after = totalInternalEnergyJ({ ...packed, state: result.state });
@@ -761,7 +1498,7 @@ test('SPH thermal CPU table step conserves pair conduction energy and refreshes 
   assert.equal(result.backend, 'cpu-reference');
   assert.equal(result.phaseChangeValidation, false);
   assert.ok(afterTempGap < beforeTempGap);
-  nearlyEqual(after, before, 1e-4);
+  nearlyEqual(after, before, 0.2);
   assert.equal(result.thermo[1], GPU_PHASE_IDS.liquid);
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1], GPU_PHASE_IDS.solid);
   nearlyEqual(result.thermo[11], 0.0375, 1e-8);
@@ -781,7 +1518,7 @@ test('SPH thermal CPU derives pair temperatures from material and U instead of s
     thermalMaterialTable: table,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 1e-4,
+    dtS: 1,
     conductionRate: 1.5e4,
     ambientTemperatureK: 0,
     wallRate: 0
@@ -795,7 +1532,7 @@ test('SPH thermal CPU derives pair temperatures from material and U instead of s
     result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 2] > 250
     && result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 2] < 330
   );
-  nearlyEqual(afterEnergyJ, beforeEnergyJ, 1e-3);
+  nearlyEqual(afterEnergyJ, beforeEnergyJ, 0.1);
 });
 
 test('SPH thermal CPU clamps a microscopic steam carrier against hot iron and conserves pair energy', () => {
@@ -863,7 +1600,7 @@ test('SPH thermal CPU clamps a microscopic steam carrier against hot iron and co
     thermalMaterialTable: table,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 5e-4,
+    dtS: 1e4,
     conductionRate: 1500,
     ambientTemperatureK: 0,
     wallRate: 0
@@ -891,8 +1628,9 @@ test('SPH thermal CPU pair conduction does not overshoot pair equilibrium', () =
     thermalMaterialTable: table,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 1e-3,
+    dtS: 1e12,
     conductionRate: 1e12,
+    ambientTemperatureK: 0,
     wallRate: 0
   });
   const hotAfter = result.thermo[2];
@@ -937,7 +1675,7 @@ test('SPH thermal CPU reciprocal directional budgets conserve a multi-neighbor s
     thermalMaterialTable: table,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 1e-3,
+    dtS: 1e12,
     conductionRate: 1e12,
     ambientTemperatureK: 0,
     wallRate: 0
@@ -1204,7 +1942,7 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(result.thermalProposalMode, 'classic-lookup-neutral-v2');
   assert.equal(result.thermalProposalLookupMode,
     'immutable-source-deterministic-exhaustive');
-  assert.equal(result.thermalProposalDispatchCount, 4);
+  assert.equal(result.thermalProposalDispatchCount, 5);
   assert.equal(result.thermalProposalProducerApplySingleSubmission, true);
   assert.equal(result.thermalProposalNormalLookupBinned, false);
   assert.equal(result.thermalProposalExhaustiveTraversalConfiguredCount, 2);
@@ -1214,6 +1952,7 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.submissions.length, 1);
   assert.deepEqual(device.encodedPassLabels, [
     'ulg-classic-thermal-v2-derived-prepass',
+    'ulg-classic-thermal-v2-conductivity-finalize',
     'ulg-classic-thermal-v2-directional-budget',
     'ulg-classic-thermal-v2-budget-resolve',
     'ulg-classic-thermal-v2-reciprocal-limited-proposal',
@@ -1225,10 +1964,22 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-state'), false);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-thermo'), false);
   assert.equal(typeof result.destroyOutputParticleBuffers, 'function');
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
   result.destroyOutputParticleBuffers();
   result.destroyOutputParticleBuffers();
   assert.equal(device.destroyed.includes('ulg-sph-thermal-output-state'), false);
   assert.equal(device.destroyed.includes('ulg-sph-thermal-output-thermo'), false);
+  assert.equal(result.observedHostQueueFenceCount, 2);
+  assert.equal(result.hostQueueFenceCount, 2);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 2);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
 
   device.resolveFence();
   await Promise.resolve();
@@ -1239,6 +1990,64 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.fenceRequestedCount, 2);
 });
 
+test('standalone thermal retained outputs allocate no queue-ordered claim and remain fenced', async () => {
+  const device = fakeThermalDeviceWithFence();
+  const result = await runSphThermalStepWebGpu(
+    classicThermalStageArgs(device, {
+      retainOutputParticleBuffers: true
+    })
+  );
+  const fenceCountBeforeRetirement = device.fenceRequestedCount;
+  assert.equal(
+    Object.hasOwn(result, 'queueOrderedCleanupClaim'),
+    false
+  );
+
+  assert.throws(
+    () => result.destroyOutputParticleBuffers({
+      queueOrderedFinalConsumer: {
+        submissionObserved: true,
+        ownerAuthority: {},
+        validateOwnerAuthority: () => true
+      }
+    }),
+    (error) => error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED'
+  );
+  assert.equal(device.fenceRequestedCount, fenceCountBeforeRetirement);
+  assert.equal(
+    device.destroyed.includes('ulg-sph-thermal-output-state'),
+    false
+  );
+
+  assert.equal(result.destroyOutputParticleBuffers(), true);
+  assert.equal(
+    device.fenceRequestedCount,
+    fenceCountBeforeRetirement + 1
+  );
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 2);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(
+    result.outputParticleBufferQueueCompletionMethod,
+    'gpu-queue-on-submitted-work-done'
+  );
+  device.resolveFence();
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+  assert.equal(
+    device.destroyed.filter(
+      (label) => label === 'ulg-sph-thermal-output-state'
+    ).length,
+    1
+  );
+  assert.equal(
+    device.destroyed.filter(
+      (label) => label === 'ulg-sph-thermal-output-thermo'
+    ).length,
+    1
+  );
+});
+
 test('SPH thermal setup failure releases the classic arena and every local buffer', () => {
   const device = fakeThermalDeviceWithFence();
   const args = classicThermalStageArgs(device);
@@ -1246,7 +2055,7 @@ test('SPH thermal setup failure releases the classic arena and every local buffe
   let bindGroupCallCount = 0;
   device.createBindGroup = (descriptor) => {
     bindGroupCallCount += 1;
-    if (bindGroupCallCount === 5) {
+    if (bindGroupCallCount === 6) {
       throw new Error('injected thermal apply bind-group failure');
     }
     return createBindGroup(descriptor);

@@ -11,11 +11,18 @@ import {
   ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA,
   ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA,
   createSphPhaseCarrierTransferWebGpuEncoderStage,
+  runSphPhaseCarrierTransferWebGpu,
   sphPhaseCarrierTransferWgsl,
   validateSphPhaseCarrierPlan
 } from '../src/runtime/sph/sphPhaseCarrierTransferGpu.js';
 import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered,
+  submitQueueOrderedFinalConsumerWork
+} from '../src/runtime/webgpuComputeLayout.js';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_PHASE_CARRIER_TRANSFER === '1';
 const NATIVE_BASE_URL = process.env.ULG_PHASE_CARRIER_TRANSFER_BASE_URL
@@ -41,22 +48,48 @@ function createFakeDevice() {
   const pipelines = [];
   const bindGroups = [];
   const writes = [];
+  const submissions = [];
+  const mapAsyncCalls = [];
+  let queueFenceCount = 0;
   const device = {
     buffers,
     pipelines,
     bindGroups,
     writes,
+    submissions,
+    mapAsyncCalls,
+    get queueFenceCount() {
+      return queueFenceCount;
+    },
     queue: {
       writeBuffer(buffer, offset, data) {
         writes.push({ buffer, offset, byteLength: data.byteLength });
       },
-      async onSubmittedWorkDone() {}
+      async onSubmittedWorkDone() {
+        queueFenceCount += 1;
+      },
+      submit(commands) {
+        submissions.push(commands);
+      }
     },
     createBuffer(descriptor) {
       const buffer = {
         ...descriptor,
         destroyed: false,
-        destroy() { this.destroyed = true; }
+        async mapAsync(mode) {
+          mapAsyncCalls.push({ buffer: this, mode });
+        },
+        getMappedRange() {
+          return new ArrayBuffer(this.size);
+        },
+        unmap() {},
+        destroy() {
+          if (device.throwOnDestroyLabel === this.label) {
+            device.throwOnDestroyLabel = null;
+            throw new Error('injected-phase-local-cleanup-failure');
+          }
+          this.destroyed = true;
+        }
       };
       buffers.push(buffer);
       return buffer;
@@ -78,6 +111,12 @@ function createFakeDevice() {
     createBindGroup(descriptor) {
       bindGroups.push(descriptor);
       return descriptor;
+    },
+    createCommandEncoder() {
+      const encoder = createFakeEncoder();
+      encoder.copyBufferToBuffer = () => {};
+      encoder.finish = () => ({ passes: encoder.passes });
+      return encoder;
     }
   };
   return device;
@@ -274,6 +313,168 @@ test('encoder stage binds one immutable source set and orders global preflight b
   );
 
   stage.cleanupSubmittedWork();
+});
+
+test('runner omission defaults to no-full readback and preserves standalone fenced cleanup', async () => {
+  const device = createFakeDevice();
+  const fixture = fakeStageFixture(device, 2);
+  const { readbackMode: _omittedReadbackMode, ...args } = fixture;
+  const result = await runSphPhaseCarrierTransferWebGpu(args);
+
+  assert.equal(result.readbackMode, 'no-full-readback');
+  assert.equal(result.fullParticleReadbackPerformed, false);
+  assert.equal(result.fullParticleReadbackFree, true);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(device.mapAsyncCalls.length, 0);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(device.queueFenceCount, 1);
+  assert.equal(result.submittedWorkCleanupHostQueueFenceCount, 1);
+  assert.equal(
+    result.submittedWorkCleanupMethod,
+    'gpu-queue-on-submitted-work-done'
+  );
+});
+
+test('phase transfer publishes the cross-producer capability before local cleanup failure', async () => {
+  const device = createFakeDevice();
+  const fixture = fakeStageFixture(device, 2);
+  const producerOutput = {};
+  let upstreamCleanupCount = 0;
+  const upstreamCleanup = () => {
+    upstreamCleanupCount += 1;
+  };
+  const issuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-phase-upstream'
+  });
+  const producerClaim = registerQueueOrderedCleanupClaim(
+    issuer,
+    device,
+    { producerOutput, cleanup: upstreamCleanup }
+  );
+  device.throwOnDestroyLabel =
+    'ulg-sph-phase-carrier-transfer-params';
+  const result = await runSphPhaseCarrierTransferWebGpu({
+    ...fixture,
+    queueOrderedProducerClaims: [producerClaim]
+  });
+
+  assert.equal(
+    result.submittedWorkCleanupStatus,
+    'queue-ordered-local-cleanup-retry-deferred-after-host-queue-fence'
+  );
+  assert.ok(result.queueOrderedFinalConsumerCapability);
+  assert.equal(
+    Object.keys(result).includes(
+      'queueOrderedFinalConsumerCapability'
+    ),
+    false
+  );
+  const receipt = releaseSubmittedWorkCleanupQueueOrdered(
+    device,
+    upstreamCleanup,
+    {
+      queueOrderedFinalConsumer:
+        result.queueOrderedFinalConsumerCapability,
+      producerClaim,
+      producerOutput,
+      producerFamily: 'test-phase-upstream'
+    }
+  );
+  assert.equal(receipt.hostQueueFenceCount, 0);
+  assert.equal(upstreamCleanupCount, 1);
+  assert.equal(device.queueFenceCount, 1);
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    device.buffers.find((buffer) => (
+      buffer.label ===
+        'ulg-sph-phase-carrier-transfer-params'
+    ))?.destroyed,
+    true
+  );
+});
+
+test('phase transfer consumes its exact retained-output claim once and remains replay-safe', async () => {
+  const device = createFakeDevice();
+  const fixture = fakeStageFixture(device, 2);
+  const upstreamOutput = {};
+  const upstreamCleanup = () => {};
+  const upstreamIssuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-phase-retained-upstream'
+  });
+  const upstreamClaim = registerQueueOrderedCleanupClaim(
+    upstreamIssuer,
+    device,
+    { producerOutput: upstreamOutput, cleanup: upstreamCleanup }
+  );
+  const result = await runSphPhaseCarrierTransferWebGpu({
+    ...fixture,
+    retainOutputParticleBuffers: true,
+    queueOrderedProducerClaims: [upstreamClaim]
+  });
+  const outputBuffers = [
+    result.stateBuffer,
+    result.thermoBuffer,
+    result.mechanicsBuffer
+  ];
+  let outputDestroyCount = 0;
+  for (const buffer of outputBuffers) {
+    const destroy = buffer.destroy.bind(buffer);
+    buffer.destroy = () => {
+      outputDestroyCount += 1;
+      destroy();
+    };
+  }
+  const finalConsumer = submitQueueOrderedFinalConsumerWork(
+    device,
+    [{ label: 'phase-output-final-consumer-command' }],
+    {
+      finalConsumerOwner: {},
+      producerClaims: [result.queueOrderedCleanupClaim]
+    }
+  );
+
+  assert.equal(result.destroyOutputParticleBuffers({
+    queueOrderedFinalConsumer: finalConsumer
+  }), true);
+  assert.equal(outputDestroyCount, 3);
+  assert.ok(outputBuffers.every((buffer) => buffer.destroyed === true));
+  assert.equal(result.outputParticleBufferCleanupStatus,
+    'queue-ordered-submitted-work-cleanup-completed');
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(device.queueFenceCount, 0);
+
+  assert.equal(result.destroyOutputParticleBuffers({
+    queueOrderedFinalConsumer: finalConsumer
+  }), true);
+  assert.equal(outputDestroyCount, 3);
+  assert.equal(device.queueFenceCount, 0);
+
+  releaseSubmittedWorkCleanupQueueOrdered(
+    device,
+    upstreamCleanup,
+    {
+      queueOrderedFinalConsumer:
+        result.queueOrderedFinalConsumerCapability,
+      producerClaim: upstreamClaim,
+      producerOutput: upstreamOutput,
+      producerFamily: 'test-phase-retained-upstream'
+    }
+  );
 });
 
 test('encoder stage rejects an invalid plan before allocating transfer resources', () => {

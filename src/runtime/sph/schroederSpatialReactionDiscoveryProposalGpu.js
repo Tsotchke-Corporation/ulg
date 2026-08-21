@@ -1,15 +1,20 @@
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import {
-  createSchroederSpatialExactNearTraversalV1Wgsl
+  createSchroederSpatialExactNearTraversalV1Wgsl,
+  createSchroederSpatialExactNearTraversalV2Wgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js';
 import {
-  createSchroederSpatialExactNearCellTreeTraversalV1Wgsl
+  createSchroederSpatialExactNearCellTreeTraversalV1Wgsl,
+  createSchroederSpatialExactNearCellTreeTraversalV2Wgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearCellTreeWgsl.js';
 import {
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
@@ -30,6 +35,9 @@ import {
   webGpuBufferDevice,
   webGpuBufferMatchesDevice
 } from './sphGpuDeviceIdentity.js';
+import {
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export const ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-reaction-discovery-proposal.v1';
@@ -41,7 +49,7 @@ export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_CONSUMER_ID =
 // WebGPU device (including Vite HMR) from retaining the pre-aggregation
 // proposal module.
 export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION =
-  'v4-s9d-hot-counter-aggregation';
+  'v5-version-matched-exact-near-traversal';
 export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_ROW_LAYOUT =
   Object.freeze([
     'partnerParticleIndex:f32',
@@ -237,6 +245,8 @@ function destroyArenaEntry(entry) {
 function acquireReactionDiscoveryArenaResources({
   device,
   generation,
+  directoryAbiVersion,
+  expectationBufferByteLength,
   proposalBytes,
   localReactionRecordBytes,
   observeGpuEvidence = false
@@ -245,8 +255,27 @@ function acquireReactionDiscoveryArenaResources({
   if (!Number.isInteger(arenaIndex) || arenaIndex < 0) {
     throw new TypeError('reaction discovery requires a canonical generation arena index');
   }
+  if (
+    directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    && directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  ) {
+    throw new RangeError(
+      `unsupported reaction discovery arena ABI version: ${
+        directoryAbiVersion
+      }`
+    );
+  }
+  if (
+    !Number.isInteger(expectationBufferByteLength)
+    || expectationBufferByteLength < 4
+  ) {
+    throw new RangeError(
+      'reaction discovery expectation buffer byte length must be positive'
+    );
+  }
   const cache = arenaCacheForDevice(device);
-  let entry = cache.get(arenaIndex) || null;
+  const arenaKey = `${directoryAbiVersion}:${arenaIndex}`;
+  let entry = cache.get(arenaKey) || null;
   if (entry?.inUse === true) {
     if (entry.generation?.execution?.released === true) {
       entry.inUse = false;
@@ -269,7 +298,10 @@ function acquireReactionDiscoveryArenaResources({
   let bufferCreationCount = 0;
   if (!entry || entry.destroyed === true) {
     entry = {
+      arenaKey,
       arenaIndex,
+      directoryAbiVersion,
+      expectationBufferByteLength,
       proposalBuffer: null,
       proposalCapacityBytes: 0,
       evidenceBuffer: null,
@@ -285,7 +317,15 @@ function acquireReactionDiscoveryArenaResources({
       totalBufferCreationCount: 0,
       acquisitionCount: 0
     };
-    cache.set(arenaIndex, entry);
+    cache.set(arenaKey, entry);
+  }
+  if (
+    entry.directoryAbiVersion !== directoryAbiVersion
+    || entry.expectationBufferByteLength !== expectationBufferByteLength
+  ) {
+    throw new Error(
+      `reaction discovery arena ${arenaIndex} ABI identity mismatch`
+    );
   }
   if (entry.proposalCapacityBytes < proposalBytes) {
     entry.proposalBuffer?.destroy?.();
@@ -326,8 +366,10 @@ function acquireReactionDiscoveryArenaResources({
   if (!entry.expectationBuffer) {
     entry.expectationBuffer = createBuffer(
       device,
-      `ulg-schroeder-spatial-reaction-discovery-expectation-arena-${arenaIndex}`,
-      SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+      `ulg-schroeder-spatial-reaction-discovery-expectation-v${
+        directoryAbiVersion
+      }-arena-${arenaIndex}`,
+      expectationBufferByteLength,
       GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     );
     bufferCreationCount += 1;
@@ -441,6 +483,10 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     !authenticRecord
     || authenticRecord.proposal !== proposal
     || authenticRecord.generation !== generation
+    || authenticRecord.directoryAbiVersion
+      !== generation?.execution?.abiVersion
+    || authenticRecord.directoryAbiVersion
+      !== proposal?.directoryAbiVersion
     || authenticRecord.directoryBuffer !== generation?.execution?.directoryBuffer
     || authenticRecord.exactNearCellTree !== generation?.exactNearCellTree
     || authenticRecord.exactNearCellTree !== proposal?.exactNearCellTree
@@ -494,6 +540,12 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     || proposal.exhaustiveTraversalCount !== 0
     || proposal.candidateBudget !== null
     || proposal.fullReadbackPerformed !== false
+    || (
+      proposal.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+      && proposal.directoryAbiVersion
+        !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    )
+    || proposal.directoryAbiVersion !== generation?.execution?.abiVersion
   ) {
     return reject(
       'schroeder-spatial-reaction-discovery-proposal-rejected-invariants',
@@ -861,16 +913,39 @@ function createParamsArray({
   return data;
 }
 
-const exactNearTraversalWgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
-  directoryBindingName: 'spatial_directory'
-});
-const exactNearCellTreeTraversalWgsl =
-  createSchroederSpatialExactNearCellTreeTraversalV1Wgsl({
+function createReactionDiscoveryProposalWgsl(directoryAbiVersion) {
+  const directoryV2 =
+    directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  if (
+    !directoryV2
+    && directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+  ) {
+    throw new RangeError(
+      `unsupported reaction discovery directory ABI version: ${
+        directoryAbiVersion
+      }`
+    );
+  }
+  const exactNearTraversalWgsl = (
+    directoryV2
+      ? createSchroederSpatialExactNearTraversalV2Wgsl
+      : createSchroederSpatialExactNearTraversalV1Wgsl
+  )({
+    directoryBindingName: 'spatial_directory'
+  });
+  const exactNearCellTreeTraversalWgsl = (
+    directoryV2
+      ? createSchroederSpatialExactNearCellTreeTraversalV2Wgsl
+      : createSchroederSpatialExactNearCellTreeTraversalV1Wgsl
+  )({
     treeBindingName: 'exact_near_cell_tree',
     directoryBindingName: 'spatial_directory'
   });
+  const exactNearExpectationType = directoryV2
+    ? 'SchroederSpatialExactNearExpectationV2'
+    : 'SchroederSpatialExactNearExpectationV1';
 
-export const schroederSpatialReactionDiscoveryProposalWgsl = /* wgsl */ `
+  return /* wgsl */ `
 struct ReactionDiscoveryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -898,7 +973,7 @@ struct ReactionDiscoveryParams {
 @group(0) @binding(5) var<storage, read> exact_near_cell_tree: array<u32>;
 @group(0) @binding(6) var<storage, read_write> reaction_proposals: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
-@group(0) @binding(8) var<uniform> spatial_expectation: SchroederSpatialExactNearExpectationV1;
+@group(0) @binding(8) var<uniform> spatial_expectation: ${exactNearExpectationType};
 @group(0) @binding(9) var<uniform> params: ReactionDiscoveryParams;
 
 ${exactNearTraversalWgsl}
@@ -1878,6 +1953,70 @@ fn seal(@builtin(global_invocation_id) global_id: vec3<u32>) {
   reaction_discovery_increment_counter(7u);
 }
 `;
+}
+
+export const schroederSpatialReactionDiscoveryProposalWgsl =
+  createReactionDiscoveryProposalWgsl(SCHROEDER_SPATIAL_EPOCH_VERSION);
+export const schroederSpatialReactionDiscoveryProposalV2Wgsl =
+  createReactionDiscoveryProposalWgsl(SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
+
+function resolveReactionDiscoveryTraversalProgram(
+  authentication,
+  generation
+) {
+  const directoryAbiVersion = authentication?.directoryAbiVersion;
+  const generationAbiVersion = generation?.execution?.abiVersion;
+  const directoryV2 =
+    directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  if (
+    directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    && !directoryV2
+  ) {
+    const error = new TypeError(
+      `reaction discovery does not support directory ABI version ${
+        directoryAbiVersion
+      }`
+    );
+    error.code =
+      'ERR_SCHROEDER_REACTION_DISCOVERY_UNSUPPORTED_DIRECTORY_ABI';
+    throw error;
+  }
+  if (generationAbiVersion !== directoryAbiVersion) {
+    const error = new TypeError(
+      'reaction discovery authentication/generation directory ABI mismatch'
+    );
+    error.code =
+      'ERR_SCHROEDER_REACTION_DISCOVERY_DIRECTORY_ABI_MISMATCH';
+    throw error;
+  }
+  const expectationBufferByteLength = directoryV2
+    ? SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+    : SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES;
+  if (
+    authentication.expectationUniformBytes
+      !== expectationBufferByteLength
+    || authentication.expectationData?.byteLength
+      !== expectationBufferByteLength
+  ) {
+    const error = new TypeError(
+      'reaction discovery expectation ABI does not match the directory ABI'
+    );
+    error.code =
+      'ERR_SCHROEDER_REACTION_DISCOVERY_EXPECTATION_ABI_MISMATCH';
+    throw error;
+  }
+  return Object.freeze({
+    directoryAbiVersion,
+    expectationBufferByteLength,
+    shaderCode: directoryV2
+      ? schroederSpatialReactionDiscoveryProposalV2Wgsl
+      : schroederSpatialReactionDiscoveryProposalWgsl,
+    cacheKeySuffix: `directory-v${directoryAbiVersion}`,
+    exactNearCellTreeTraversal: directoryV2
+      ? 'canonical-complete-binary-cell-aabb-leaf-streaming-v2'
+      : 'canonical-complete-binary-cell-aabb-leaf-streaming-v1'
+  });
+}
 
 function createResidentGpuEvidence({
   authentication,
@@ -1941,7 +2080,8 @@ function createResidentGpuEvidence({
 
 /**
  * Discover at most one deterministic fully eligible candidate per particle
- * from the immutable canonical ss-spatial-epoch.v1 directory. The caller must
+ * from the immutable canonical version-matched ss-spatial-epoch directory.
+ * The caller must
  * supply the post-thermal state/thermo family. A GPU displacement certificate
  * expands the frozen E* lookup and rejects any intervening active-mask change;
  * the reaction stage still rechecks every predicate before mutating topology.
@@ -1957,10 +2097,16 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   reactionTable,
   reactionRecordBuffer = null,
   gpuTimestampRecorder = null,
+  collectGpuResidentDiagnosticEvidence = false,
   observeGpuEvidence = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer || !device.queue?.submit) {
     throw new TypeError('canonical reaction discovery requires a WebGPU-like device');
+  }
+  if (typeof collectGpuResidentDiagnosticEvidence !== 'boolean') {
+    throw new TypeError(
+      'collectGpuResidentDiagnosticEvidence must be a boolean'
+    );
   }
   const particleCount = exactPositiveU32(
     generation?.source?.sourceCount,
@@ -2062,6 +2208,10 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       authentication?.reason || 'reaction discovery could not authenticate the canonical generation'
     );
   }
+  const traversalProgram = resolveReactionDiscoveryTraversalProgram(
+    authentication,
+    generation
+  );
   const directoryBuffer = requireBuffer(
     device,
     authentication.directoryBuffer,
@@ -2104,6 +2254,9 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   const arenaResources = acquireReactionDiscoveryArenaResources({
     device,
     generation,
+    directoryAbiVersion: traversalProgram.directoryAbiVersion,
+    expectationBufferByteLength:
+      traversalProgram.expectationBufferByteLength,
     proposalBytes: proposalByteLength,
     localReactionRecordBytes: reactionRecordBuffer
       ? 0
@@ -2146,21 +2299,32 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   const displacementCertificateBuffer = evidenceBuffer;
   const expectationBuffer = arenaEntry.expectationBuffer;
   const paramsBuffer = arenaEntry.paramsBuffer;
+  requireMinimumBufferBytes(
+    expectationBuffer,
+    traversalProgram.expectationBufferByteLength,
+    'reaction discovery expectationBuffer'
+  );
   device.queue.writeBuffer(expectationBuffer, 0, authentication.expectationData);
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount,
     reactionCount,
     maximumContactRadiusM,
     reactionRuleIndex,
-    collectDiagnosticEvidence: observeGpuEvidence === true
+    collectDiagnosticEvidence:
+      collectGpuResidentDiagnosticEvidence === true
+      || observeGpuEvidence === true
   }));
   device.queue.writeBuffer(evidenceBuffer, 0, evidenceInitial);
 
   const displacementPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-displacement.${SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION}`,
-    label: 'ulg-schroeder-spatial-reaction-discovery-displacement',
-    code: schroederSpatialReactionDiscoveryProposalWgsl,
+      `ulg-schroeder-spatial-reaction-discovery-displacement.${
+        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+      }.${traversalProgram.cacheKeySuffix}`,
+    label: `ulg-schroeder-spatial-reaction-discovery-displacement-v${
+      traversalProgram.directoryAbiVersion
+    }`,
+    code: traversalProgram.shaderCode,
     entryPoint: 'prepare_displacement_certificate',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -2172,9 +2336,13 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
 
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-proposal.${SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION}`,
-    label: 'ulg-schroeder-spatial-reaction-discovery-proposal',
-    code: schroederSpatialReactionDiscoveryProposalWgsl,
+      `ulg-schroeder-spatial-reaction-discovery-proposal.${
+        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+      }.${traversalProgram.cacheKeySuffix}`,
+    label: `ulg-schroeder-spatial-reaction-discovery-proposal-v${
+      traversalProgram.directoryAbiVersion
+    }`,
+    code: traversalProgram.shaderCode,
     entryPoint: 'propose',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -2191,9 +2359,13 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   });
   const sealPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-proposal.${SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION}`,
-    label: 'ulg-schroeder-spatial-reaction-discovery-seal',
-    code: schroederSpatialReactionDiscoveryProposalWgsl,
+      `ulg-schroeder-spatial-reaction-discovery-proposal.${
+        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+      }.${traversalProgram.cacheKeySuffix}`,
+    label: `ulg-schroeder-spatial-reaction-discovery-seal-v${
+      traversalProgram.directoryAbiVersion
+    }`,
+    code: traversalProgram.shaderCode,
     entryPoint: 'seal',
     bindings: [
       computeBufferBinding(6, 'storage'),
@@ -2490,12 +2662,13 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     directoryBuffer,
     exactNearCellTree: exactNearCellTreeConsumer.tree,
     exactNearCellTreeBuffer,
+    directoryAbiVersion: traversalProgram.directoryAbiVersion,
     exactNearCellTreeTraversal:
-      'canonical-complete-binary-cell-aabb-leaf-streaming-v1',
+      traversalProgram.exactNearCellTreeTraversal,
     expectationBuffer,
     positionAuthorityStateBuffer: positionStateBuffer,
     expectationBufferByteLength:
-      SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+      traversalProgram.expectationBufferByteLength,
     evidenceLayout: SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_LAYOUT,
     observedEvidence,
     evidenceObservationRequested: observeGpuEvidence === true,
@@ -2529,6 +2702,15 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     candidateMaterialization: 'one-deterministic-best-row-per-source',
     fallbackObserved: false,
     fullReadbackPerformed: false,
+    fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'schroeder-spatial-reaction-discovery-proposal',
+      mapAsyncCount: observeGpuEvidence === true ? 1 : 0,
+      readbackBytes: observeGpuEvidence === true
+        ? evidenceInitial.byteLength
+        : 0
+    }),
     readbackMode: 'no-full-readback',
     cleanupTemporaryBuffersAfterSubmittedWork,
     destroy,
@@ -2539,6 +2721,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   reactionDiscoveryProposalRecords.set(proposalArtifact, {
     proposal: proposalArtifact,
     generation,
+    directoryAbiVersion: traversalProgram.directoryAbiVersion,
     directoryBuffer,
     exactNearCellTree: exactNearCellTreeConsumer.tree,
     exactNearCellTreeBuffer,

@@ -16,6 +16,7 @@ import {
   createSchroederSpatialEpochTransaction,
   quarantineSchroederSpatialEpochTransactionLawInputs,
   recordSchroederSpatialEpochTransactionLegacyLookup,
+  resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority,
   resolveSchroederSpatialPhaseVolumeTransportAuthority,
   scheduleSchroederSpatialEpochTransactionRelease,
   sealSchroederSpatialEpochTransactionProposals,
@@ -54,6 +55,7 @@ import {
 function createFakeEncoder() {
   return {
     clearBuffer() {},
+    copyBufferToBuffer() {},
     beginComputePass() {
       return {
         setPipeline() {},
@@ -201,7 +203,10 @@ function fixture({ generationId = 7, storageGeneration = 3 } = {}) {
 function twoLevelFixture({
   phaseVolume = false,
   phaseVolumeReceiptEnabled = true,
-  phaseVolumeInterfaceProposalEnabled = false
+  phaseVolumeInterfaceProposalEnabled = false,
+  aggregateViewEnabled = false,
+  mechanicsAuthorityEnabled = true,
+  mechanicsLevelCount = 2
 } = {}) {
   const device = createLiveFakeDevice();
   const particleCount = 2;
@@ -248,7 +253,7 @@ function twoLevelFixture({
     levelEpoch: 29,
     supportEpoch: 31,
     minLevel: 0,
-    maxLevel: 1,
+    maxLevel: mechanicsLevelCount > 1 ? 1 : 0,
     chartId: 0,
     baseGridSpacingM: 0.25
   };
@@ -274,10 +279,12 @@ function twoLevelFixture({
     device,
     levelAssignment,
     particleCount,
-    particleIdentityBuffer: sourceBuffers.identityBuffer,
+    particleIdentityBuffer: mechanicsAuthorityEnabled
+      ? sourceBuffers.identityBuffer
+      : null,
     particleIdentityStrideWords: 1,
-    particleBufferSet: sphParticleUpload,
-    mechanicsLevels: [
+    particleBufferSet: aggregateViewEnabled ? sphParticleUpload : null,
+    mechanicsLevels: mechanicsAuthorityEnabled ? [
       {
         selectedLevel: 0,
         mechanicsGrid: {
@@ -296,7 +303,8 @@ function twoLevelFixture({
           gridSpacingM: 0.5
         }
       }
-    ],
+    ].slice(0, mechanicsLevelCount) : [],
+    phaseVolumeSidecarsEnabled: mechanicsAuthorityEnabled,
     phaseVolumeReceiptEnabled,
     phaseVolumeInterfaceProposalEnabled
   });
@@ -738,6 +746,9 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
     twoLevelAuthoritative: true
   });
   assert.equal(transaction.twoLevelAuthoritative, true);
+  assert.equal(transaction.aggregateViewRequired, false);
+  assert.equal(transaction.aggregateView, null);
+  assert.equal(f.generation.aggregateView, null);
   assert.equal(transaction.mechanicsLevelCount, 2);
   assert.deepEqual(transaction.mechanicsLevels, [0, 1]);
   assert.equal(transaction.hierarchyView, f.generation.hierarchyView);
@@ -750,6 +761,8 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
   assert.equal(f.generation.execution.activeRankViewBuffer, null);
   const summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.twoLevelAuthoritative, true);
+  assert.equal(summary.aggregateViewRequired, false);
+  assert.equal(summary.aggregateViewStatus, null);
   assert.equal(summary.mechanicsLevelCount, 2);
   assert.deepEqual(summary.mechanicsLevels, [0, 1]);
   assert.equal(
@@ -762,6 +775,36 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
     sphParticleUpload: f.sphParticleUpload,
     mlsMpmParticleUpload: f.mlsMpmParticleUpload
   });
+});
+
+test('two-level aggregate construction matches the immutable FAR reader contract', () => {
+  const privateGeneration = twoLevelFixture();
+  assert.equal(privateGeneration.generation.aggregateView, null);
+  assert.throws(
+    () => createSchroederSpatialEpochTransaction({
+      ...privateGeneration,
+      twoLevelAuthoritative: true,
+      enabledConsumerReaderIds: [
+        SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE
+      ],
+      consumerSupportProfileIds: {}
+    }),
+    { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_AGGREGATE_IDENTITY' }
+  );
+
+  const surplusGeneration = twoLevelFixture({
+    aggregateViewEnabled: true
+  });
+  assert.ok(surplusGeneration.generation.aggregateView);
+  assert.throws(
+    () => createSchroederSpatialEpochTransaction({
+      ...surplusGeneration,
+      twoLevelAuthoritative: true,
+      enabledConsumerReaderIds: [],
+      consumerSupportProfileIds: {}
+    }),
+    { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_AGGREGATE_IDENTITY' }
+  );
 });
 
 test('two-level transaction exposes and freezes the submitted read-only phase-volume receipt', () => {
@@ -884,6 +927,110 @@ test('two-level transaction exposes and freezes an explicitly authorized read-on
   ), true);
   summary = summarizeSchroederSpatialEpochTransaction(transaction);
   assert.equal(summary.phaseVolumeInterfaceProposalReadOnly, true);
+});
+
+test('single-level S9-A/B surface-stress authority is exact between P2G and G2P', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    mechanicsLevelCount: 1
+  });
+  assert.equal(f.generation.ready, true, f.generation.reason);
+  assert.equal(f.generation.mechanicsLevelViews.length, 1);
+  assert.equal(f.generation.phaseVolumeInterfaceProposal, null);
+  const transaction = createSchroederSpatialEpochTransaction(f);
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  const fieldView = f.generation.mechanicsFieldView;
+
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+      transaction,
+      {
+        generation: f.generation,
+        selectedLevel: 0,
+        mechanicsFieldView: fieldView
+      }
+    ),
+    { code: 'ERR_SCHROEDER_SURFACE_STRESS_LIFECYCLE' }
+  );
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    ...readerInputs
+  }), true);
+
+  const surface = resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+    transaction,
+    {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fieldView
+    }
+  );
+  assert.equal(
+    surface.schema,
+    'peercompute.ulg.schroeder-spatial-phase-volume-surface-stress-authority.v1'
+  );
+  assert.equal(surface.levelRole, 'single');
+  assert.equal(surface.twoLevel, false);
+  assert.equal(surface.mechanicsFieldView, fieldView);
+  assert.equal(surface.phaseVolumeMoment, f.generation.phaseVolumeMoment);
+  assert.equal(surface.phaseVolumeReceipt, f.generation.phaseVolumeReceipt);
+  assert.equal(surface.fieldCapacity, f.generation.phaseVolumeReceipt.fieldCapacity);
+
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+      transaction,
+      {
+        generation: f.generation,
+        selectedLevel: 1,
+        mechanicsFieldView: fieldView
+      }
+    ),
+    { code: 'ERR_SCHROEDER_SURFACE_STRESS_LEVEL' }
+  );
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+      transaction,
+      {
+        generation: f.generation,
+        selectedLevel: 0,
+        mechanicsFieldView: { ...fieldView }
+      }
+    ),
+    { code: 'ERR_SCHROEDER_SURFACE_STRESS_IDENTITY' }
+  );
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+      transaction,
+      {
+        generation: { ...f.generation },
+        selectedLevel: 0,
+        mechanicsFieldView: fieldView
+      }
+    ),
+    { code: 'ERR_SCHROEDER_SURFACE_STRESS_IDENTITY' }
+  );
+
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT,
+    ...readerInputs
+  }), true);
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+      transaction,
+      {
+        generation: f.generation,
+        selectedLevel: 0,
+        mechanicsFieldView: fieldView
+      }
+    ),
+    { code: 'ERR_SCHROEDER_SURFACE_STRESS_LIFECYCLE' }
+  );
 });
 
 test('S9-C transport authority is exact and exists only between P2G and G2P', () => {
@@ -1128,13 +1275,15 @@ test('two-level transaction rejects a mutable ActiveSource layout', () => {
 });
 
 test('two-level transaction admits one exact post-mechanics far-aggregate receipt after G2P', async () => {
-  const f = twoLevelFixture();
+  const f = twoLevelFixture({ aggregateViewEnabled: true });
   const transaction = createSchroederSpatialEpochTransaction({
     ...f,
     twoLevelAuthoritative: true,
     enabledConsumerReaderIds: [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE],
     consumerSupportProfileIds: {}
   });
+  assert.equal(transaction.aggregateViewRequired, true);
+  assert.equal(transaction.aggregateView, f.generation.aggregateView);
   const readerInputs = {
     generation: f.generation,
     sphParticleUpload: f.sphParticleUpload,
@@ -1206,6 +1355,78 @@ test('two-level transaction admits one exact post-mechanics far-aggregate receip
   assert.equal(summary.counters.resultAuthenticatedAggregateTraversalCount, 0);
   assert.equal(summary.counters.authenticatedCandidateVisitCount, 0);
 
+  assert.equal(await traversalRuntime.releaseExecutionAfter(
+    traversal,
+    f.device.queue.onSubmittedWorkDone()
+  ), true);
+  assert.equal(traversalRuntime.destroy(), true);
+});
+
+test('terminal public transaction authenticates FAR without mechanics authority', async () => {
+  const f = twoLevelFixture({
+    aggregateViewEnabled: true,
+    mechanicsAuthorityEnabled: false
+  });
+  assert.equal(f.generation.mechanicsLevelCount, 0);
+  assert.deepEqual(f.generation.mechanicsLevelViews, []);
+  assert.equal(f.generation.hierarchyView, null);
+  assert.equal(f.generation.parentFieldView, null);
+  assert.ok(f.generation.aggregateView);
+
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    twoLevelAuthoritative: false,
+    requiredReaderIds: [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE],
+    enabledConsumerReaderIds: [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE],
+    consumerSupportProfileIds: {}
+  });
+  assert.equal(transaction.twoLevelAuthoritative, false);
+  assert.equal(transaction.mechanicsLevelCount, 0);
+  assert.equal(transaction.hierarchyView, null);
+  assert.equal(transaction.aggregateViewRequired, true);
+  assert.equal(transaction.aggregateView, f.generation.aggregateView);
+
+  const traversalRuntime = createSchroederSpatialAggregateTraversalGpu(
+    f.device,
+    { maxQueryCount: 2 }
+  );
+  const encoder = f.device.createCommandEncoder();
+  const traversal = traversalRuntime.encode(encoder, {
+    aggregateView: f.generation.aggregateView,
+    queryBuffer: f.generation.source.sourceBuffer,
+    queryCount: 2,
+    queryStrideFloats: 16,
+    querySourceLayoutId:
+      SCHROEDER_SPATIAL_AGGREGATE_TRAVERSAL_QUERY_SOURCE_LAYOUT
+        .LEVEL_ASSIGNMENT_V0,
+    nearFieldSupportScale: 1.5,
+    openingTheta: 0.5,
+    publicEpochIdentity: transaction.epochIdentity
+  });
+  f.device.queue.submit([encoder.finish()]);
+  assert.equal(traversalRuntime.markExecutionSubmitted(traversal), true);
+  const receipt = finalizeSchroederSpatialAggregateTraversalSubmissionReceipt(
+    traversal,
+    traversal.submissionEvidence
+  );
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.POST_MECHANICS_FAR_AGGREGATE,
+    consumerReceipt: receipt,
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  }), true);
+
+  const summary = summarizeSchroederSpatialEpochTransaction(transaction);
+  assert.equal(summary.twoLevelAuthoritative, false);
+  assert.equal(summary.mechanicsLevelCount, 0);
+  assert.equal(summary.hierarchyViewStatus, null);
+  assert.equal(summary.aggregateViewRequired, true);
+  assert.equal(
+    summary.aggregateViewStatus,
+    'schroeder-spatial-aggregate-view-gpu-build-submitted'
+  );
   assert.equal(await traversalRuntime.releaseExecutionAfter(
     traversal,
     f.device.queue.onSubmittedWorkDone()
@@ -1422,7 +1643,7 @@ test('private-advance receipts bind generation and source even when two transact
     particleCount: 2,
     particleIdentityBuffer: bIdentity,
     particleIdentityStrideWords: 1,
-    particleBufferSet: bSph,
+    particleBufferSet: null,
     mechanicsLevels: [
       {
         selectedLevel: 0,

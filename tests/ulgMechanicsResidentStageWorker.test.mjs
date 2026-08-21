@@ -4,6 +4,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -13,15 +14,23 @@ import {
   runUlgMechanicsResidentStageWorkerPayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 import {
+  releaseSchroederSpatialEpochGenerationAfterQueue,
+  runSchroederSpatialEpochGenerationWebGpu
+} from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
   ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA,
-  bindSphSpatialGasPressureAuthority,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
   isExactSphSpatialGasPressureAuthoritySource
 } from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
+import * as sphSpatialGasLedgerEosGpu from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
 import {
+  isExactSphPressureInterfaceCompletionReceipt,
   runSphPressureInterfaceForceRowsWebGpu
 } from '../src/runtime/sph/sphPressureInterfaceGpuKernel.js';
 import {
-  tagResidentProductMassDevice
+  tagResidentProductMassDevice,
+  tagWebGpuBufferDevice,
+  webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   publishUlgPressureInterfaceGasCellFieldAdmission,
@@ -158,6 +167,7 @@ class FakeGpuBuffer {
     this.usage = usage;
     this.bytes = new Uint8Array(this.size);
     this.destroyed = false;
+    this.destroyCount = 0;
   }
 
   mapAsync() {
@@ -175,6 +185,7 @@ class FakeGpuBuffer {
   unmap() {}
 
   destroy() {
+    this.destroyCount += 1;
     this.destroyed = true;
   }
 }
@@ -232,14 +243,18 @@ function createFakeGpuDevice() {
       };
     },
     queue: {
+      writeBufferCalls: [],
+      submitCalls: [],
       writeBuffer(buffer, offset, data) {
         if (buffer.destroyed) throw new Error(`${buffer.label || 'buffer'} was destroyed`);
         const bytes = data instanceof ArrayBuffer
           ? new Uint8Array(data)
           : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         buffer.bytes.set(bytes, Math.max(0, Math.round(Number(offset) || 0)));
+        this.writeBufferCalls.push({ buffer, offset, byteLength: bytes.byteLength });
       },
       submit(commandBuffers) {
+        this.submitCalls.push(commandBuffers);
         for (const commandBuffer of commandBuffers || []) {
           for (const op of commandBuffer || []) {
             if (op.type === 'clear') {
@@ -276,6 +291,87 @@ function fakeStorageBuffer(device, label, rows) {
   });
   device.queue.writeBuffer(buffer, 0, rows);
   return buffer;
+}
+
+function workerGasOccupancyGenerationFixture(device, {
+  particleCount,
+  storageGeneration,
+  physicsTick,
+  physicsSubstep,
+  positionEpoch,
+  topologyEpoch,
+  chartEpoch,
+  levelEpoch,
+  supportEpoch
+}) {
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const assignmentBuffer = taggedBuffer(
+    'worker-v4-gas-level-assignment',
+    particleCount * SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceStateBuffer = taggedBuffer(
+    'worker-v4-gas-state',
+    particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceMechanicsBuffer = taggedBuffer(
+    'worker-v4-gas-mechanics-v0j',
+    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const particleIdentityBuffer = taggedBuffer(
+    'worker-v4-gas-identity',
+    particleCount * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const levelAssignment = {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
+    minLevel: 0,
+    maxLevel: 0,
+    chartId: 0,
+    baseGridSpacingM: 1
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      selectedLevel: 0,
+      gridDims: [2, 2, 2],
+      gridNodeCount: 8,
+      gridShift: 1,
+      gridSpacingM: 1
+    },
+    exactNearCellTreeEnabled: false
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.mechanicsLevelViews.length, 1);
+  assert.ok(generation.mechanicsLevelViews[0].phaseVolumeMoment);
+  return generation;
 }
 
 test('ULG mechanics resident stage worker device resolver adopts a supplied worker device result', async () => {
@@ -542,8 +638,14 @@ test('ULG resident stage worker can run gas-cell EOS producer stage', async () =
   assert.equal(eos.value.retainedGasCellFieldSourceReady, false);
 });
 
-test('ULG resident stage worker resolves retained gas-cell import refs inside the same worker lane', async () => {
+test('ULG resident worker carries one exact CPU-seeded gas owner into pressure without a host fence', async () => {
   const device = createFakeGpuDevice();
+  const wrongDevice = createFakeGpuDevice();
+  let hostFenceCalls = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    hostFenceCalls += 1;
+    return new Promise(() => {});
+  };
   const spatialGasSpeciesLedger = {
     schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
     status: 'spatial-gas-species-ledger-ready',
@@ -570,92 +672,7 @@ test('ULG resident stage worker resolves retained gas-cell import refs inside th
       }
     ]
   };
-  const lane = {
-    laneId: 'ulg:test:worker-retained-gas-import-lane',
-    stateKey: 'ulg:test:worker-retained-gas-import-state'
-  };
-  const context = {
-    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
-    taskIdPrefix: 'ulg:test:worker-retained-gas-import',
-    preferWebGpu: true,
-    readbackMode: 'no-full-readback',
-    common: {
-      device,
-      boxDimsM: [2, 2, 2],
-      gasPressureSummary: {
-        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
-        status: 'gpu-resident-reaction-pressure-summary',
-        source: 'gpu-resident-product-mass-gas-species-ledger',
-        totalPressurePa: 180000,
-        boxVolumeM3: 8,
-        boxDimsM: [2, 2, 2],
-        bySpecies: {},
-        spatialGasSpeciesLedger
-      }
-    }
-  };
-
-  const eos = await runUlgMechanicsResidentStageWorkerPayload(payload(
-    stage('gasCellEosProducer', ['resident-spatial-gas-species-ledger', 'resident-product-mass'], ['resident-gas-pressure']),
-    context,
-    null,
-    lane
-  ));
-  const workerRefs = eos.value.workerRetainedGasPressureBufferRefs;
-  const queueFenceCountAfterEos = device.queue.submittedWorkDoneCount || 0;
-  assert.equal(eos.value.backend, 'webgpu');
-  assert.equal(eos.value.pressureInterfaceGasPressureCellRowsBufferRetained, true);
-  assert.ok(workerRefs.length > 0);
-  assert.equal(
-    eos.value.workerResidentStage.workerQueueFence.finalConsumerFenceDeferred,
-    true
-  );
-
-  const retainedGasCellFieldSource = {
-    schema: 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0',
-    status: 'pressure-interface-retained-gas-cell-field-source-ready',
-    sourceStage: 'gasCellEosProducer',
-    retainedGasPressureBufferRefs: eos.value.retainedGasPressureBufferRefs,
-    workerRetainedGasPressureBufferRefs: workerRefs,
-    pressureInterfaceGasPressureCellRowCount: eos.value.pressureInterfaceGasPressureCellRowCount,
-    pressureInterfaceGasPressureCellRowStrideFloats: eos.value.pressureInterfaceGasPressureCellRowStrideFloats,
-    pressureInterfaceGasPressureCellRowByteLength: eos.value.pressureInterfaceGasPressureCellRowByteLength,
-    pressureInterfaceGasPressureCellRowsBufferRetained: true,
-    pressureFieldMode: 'local-gas-cell-pressure-gradient',
-    pressureFieldResolution: 'structured-gas-cell-grid',
-    sourceFamilies: ['resident-gas-pressure']
-  };
-  const admission = {
-    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0',
-    status: 'pressure-interface-gas-cell-field-consumption-approved',
-    gasCellFieldConsumptionApproved: true,
-    retainedGasPressureBufferRefs: eos.value.retainedGasPressureBufferRefs,
-    workerRetainedGasPressureBufferRefs: workerRefs,
-    retainedGasCellFieldSource,
-    pressureInterfaceGasPressureCellRowCount: eos.value.pressureInterfaceGasPressureCellRowCount,
-    pressureInterfaceGasPressureCellRowStrideFloats: eos.value.pressureInterfaceGasPressureCellRowStrideFloats,
-    pressureInterfaceGasPressureCellRowByteLength: eos.value.pressureInterfaceGasPressureCellRowByteLength,
-    stateManagerAdmitted: true,
-    authoritativeStateMutation: false
-  };
-  const pressureInterfaceGasCellFieldImport = {
-    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
-    status: 'pressure-interface-gas-cell-field-import-ready',
-    retainedGasPressureBufferRefs: eos.value.retainedGasPressureBufferRefs,
-    workerRetainedGasPressureBufferRefs: workerRefs,
-    pressureInterfaceGasPressureCellRowCount: eos.value.pressureInterfaceGasPressureCellRowCount,
-    pressureInterfaceGasPressureCellRowStrideFloats: eos.value.pressureInterfaceGasPressureCellRowStrideFloats,
-    pressureInterfaceGasPressureCellRowByteLength: eos.value.pressureInterfaceGasPressureCellRowByteLength,
-    pressureInterfaceGasPressureCellRowsBufferRetained: true,
-    gasPressureCellsBuffer: eos.value.gasPressureCellsBuffer,
-    pressureInterfaceGasCellFieldAdmission: admission,
-    retainedGasCellFieldSource,
-    stateManagerAdmissionRequired: true,
-    authoritativeStateMutation: false
-  };
-  context.common.pressureInterfaceGasCellFieldImport = pressureInterfaceGasCellFieldImport;
-  context.common.pressureInterfaceGasCellFieldAdmission = admission;
-  context.common.materialInterfaceField = {
+  const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
     status: 'material-interface-field-ready',
     surfaceCount: 1,
@@ -691,49 +708,478 @@ test('ULG resident stage worker resolves retained gas-cell import refs inside th
       }
     ]
   };
+  let exactPressureResult = null;
+  let exactPressureReceipt = null;
+  let gridUpdateAttemptCount = 0;
+  let gridObservedExactForceRowsBuffer = null;
+  const mechanicsBuffers = manualBuffers({
+    position: [0.5, 0.5, 0.5],
+    smoothingLengthM: 1,
+    mechanicsDtS: 0.05
+  });
+  const lane = {
+    laneId: 'ulg:test:worker-cpu-seeded-gas-lane',
+    stateKey: 'ulg:test:worker-cpu-seeded-gas-state'
+  };
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:worker-cpu-seeded-gas',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentStagePlanStageOrder: [
+      'gasCellEosProducer',
+      'pressureInterface',
+      'gridUpdate'
+    ],
+    common: {
+      device,
+      ...mechanicsBuffers,
+      gridSpacingM: 1,
+      dt: 0.05,
+      gravityMPerS2: [0, 0, 0],
+      cflFactor: 10,
+      boxDimsM: [2, 2, 2],
+      gasPressureSummary: {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: 'gpu-resident-reaction-pressure-summary',
+        source: 'gpu-resident-product-mass-gas-species-ledger',
+        totalPressurePa: 180000,
+        boxVolumeM3: 8,
+        boxDimsM: [2, 2, 2],
+        bySpecies: {},
+        spatialGasSpeciesLedger
+      },
+      materialInterfaceField
+    },
+    stageOptions: {
+      pressureInterface: {
+        async pressureInterfaceForceRowsWebGpuRunner(args) {
+          exactPressureResult =
+            await runSphPressureInterfaceForceRowsWebGpu(args);
+          exactPressureReceipt =
+            exactPressureResult.pressureCompletionReceipt;
+          const copiedResult = {
+            ...exactPressureResult,
+            pressureCompletionReceipt: exactPressureReceipt
+          };
+          assert.equal(
+            isExactSphPressureInterfaceCompletionReceipt(
+              exactPressureReceipt,
+              wrongDevice,
+              exactPressureResult
+            ),
+            false
+          );
+          assert.equal(
+            isExactSphPressureInterfaceCompletionReceipt(
+              exactPressureReceipt,
+              device,
+              copiedResult
+            ),
+            false
+          );
+          return exactPressureResult;
+        }
+      },
+      gridUpdate: {
+        async webGpuRunner(args) {
+          gridUpdateAttemptCount += 1;
+          gridObservedExactForceRowsBuffer =
+            args.pressureInterfaceForceRowsBuffer;
+          assert.equal(
+            args.pressureInterfaceForceRowsBuffer,
+            exactPressureResult.forceRowsBuffer
+          );
+          assert.equal(
+            args.pressureInterfaceForceSolver.gridForceApplicationApproved,
+            true
+          );
+          assert.equal(
+            args.pressureInterfaceGridForceAdmission
+              .pressureInterfacePublication.schema,
+            'peercompute.ulg.worker-exact-pressure-interface-grid-handoff.v1'
+          );
+          if (gridUpdateAttemptCount === 1) {
+            throw new Error('synthetic gridUpdate failure before queue submit');
+          }
+          const updatedGridBuffer = tagWebGpuBufferDevice(
+            device.createBuffer({
+              label: 'worker-exact-pressure-grid-update-out',
+              size: Math.max(
+                4,
+                args.p2gGridProjection.gridNodeCount
+                  * 4
+                  * Float32Array.BYTES_PER_ELEMENT
+              ),
+              usage: 128 | 4
+            }),
+            device
+          );
+          device.queue.submit([[]]);
+          return {
+            backend: 'webgpu',
+            status: 'updated',
+            particleCount: args.p2gGridProjection.particleCount || 1,
+            gridSpacingM: args.p2gGridProjection.gridSpacingM,
+            gridDims: [...args.p2gGridProjection.gridDims],
+            gridNodeCount: args.p2gGridProjection.gridNodeCount,
+            gridNodeStrideFloats: 4,
+            gridNodeStrideBytes: 4 * Float32Array.BYTES_PER_ELEMENT,
+            updatedGridNodes: new Float32Array(0),
+            updatedGridBuffer,
+            updatedGridBufferByteLength: updatedGridBuffer.size,
+            pressureInterfaceForceSolver:
+              args.pressureInterfaceForceSolver,
+            pressureInterfaceGridForceAdmissionStatus:
+              'pressure-interface-grid-force-consumption-approved',
+            pressureInterfaceGridForceAdmissionApproved: true,
+            pressureInterfaceForceApplicationStatus:
+              'pressure-interface-grid-force-consumer-submitted-unverified',
+            pressureInterfaceForceConsumerStatus:
+              'grid-momentum-impulse-submitted-unverified-no-full-readback',
+            pressureInterfaceForceRowCount:
+              args.pressureInterfaceForceSolver.forceRowCount,
+            pressureInterfaceForceRowsBufferSubmitted: true,
+            pressureInterfaceImpulseProofStatus:
+              'submitted-retained-pressure-force-row-buffer-to-gpu-grid-update-no-full-readback',
+            pressureInterfaceAppliedImpulseMagnitudeNSeconds: 0,
+            readbackMode: 'no-full-readback',
+            fullReadbackPerformed: false,
+            normalHotLoopReadbackFree: true,
+            queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+            queueCompletionMethod: 'same-worker-webgpu-queue-in-order'
+          };
+        }
+      }
+    }
+  };
+  const settlesWithoutHostFence = async (promise, label) => {
+    let timeout;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error(`${label} awaited the never-resolving host fence`)),
+            250
+          );
+        })
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 
-  const pressure = await runUlgMechanicsResidentStageWorkerPayload(payload(
-    stage('pressureInterface', ['resident-gas-pressure', 'sph-material-interface-field'], ['pressure-interface-force-rows']),
-    context,
+  const p2gContext = {
+    ...context,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    stageOptions: {}
+  };
+  const p2g = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'p2g',
+      ['sph-particle-state', 'mls-mpm-mechanics'],
+      ['mls-mpm-grid']
+    ),
+    p2gContext,
     null,
     lane
   ));
+  assert.equal(p2g.value.mechanicsP2gStageTaskEvidence.passed, true);
 
-  assert.equal(
-    pressure.value.workerResidentStage.workerRetainedGasCellFieldImportInputStatus,
-    'applied-worker-retained-gas-cell-field-import'
+  const eos = await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'gasCellEosProducer',
+        ['resident-spatial-gas-species-ledger', 'resident-product-mass'],
+        ['resident-gas-pressure']
+      ),
+      context,
+      null,
+      lane
+    )),
+    'gasCellEosProducer'
   );
-  assert.equal(pressure.value.workerResidentStage.workerRetainedGasCellFieldImportApplied, true);
-  assert.equal(pressure.value.pressureInterfaceGasCellFieldImportReady, true);
-  assert.equal(pressure.value.pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer, true);
-  assert.equal(
-    pressure.value.pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowsBufferRetained,
-    true
+  assert.equal(eos.value.backend, 'webgpu');
+  assert.equal(eos.value.queueCompletionStatus, 'queue-submitted-same-worker-final-consumer-fence-deferred');
+  assert.equal(eos.value.gpuFence.fenceSatisfied, true);
+  assert.equal(eos.value.gasCellEosProducerStageTaskEvidence.passed, true);
+  assert.equal(eos.value.gasCellEosProducerStageTaskEvidence.gpuPressureAuthorityReady, true);
+  assert.equal(eos.value.gasCellEosProducerStageTaskAuthority.gpuFenceSatisfied, true);
+  assert.equal(eos.value.cpuSeededGasPressureAuthority, undefined);
+  assert.equal(eos.value.gasCellField, undefined);
+  assert.equal(eos.value.gasCellFieldSnapshot, undefined);
+  assert.equal(eos.value.gasPressureCellRows, undefined);
+  assert.equal(eos.value.gasPressureCellsBuffer, undefined);
+  assert.deepEqual(eos.value.retainedGasPressureBufferRefs, []);
+  assert.doesNotThrow(() => structuredClone(eos.value));
+
+  const pressure = await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'pressureInterface',
+        ['resident-gas-pressure', 'sph-material-interface-field'],
+        ['pressure-interface-force-rows']
+      ),
+      context,
+      null,
+      lane
+    )),
+    'pressureInterface'
   );
-  assert.deepEqual(
-    pressure.value.pressureInterfaceGasCellFieldImportWorkerRetainedGasPressureBufferRefs,
-    workerRefs
-  );
+  assert.equal(pressure.value.backend, 'webgpu');
   assert.equal(
     pressure.value.retainedGasPressureRowsStatus,
-    'retained-gas-pressure-rows-admitted-same-device'
+    'cpu-seeded-gas-pressure-authority-admitted-exact-source'
   );
   assert.equal(
-    pressure.value.workerResidentStage.workerRetainedGasCellEosReleaseScheduled,
+    pressure.value.workerResidentStage.workerQueueFence
+      .pressureCompletionReceiptValidated,
     true
+  );
+  assert.equal(
+    pressure.value.workerResidentStage.workerQueueFence.queueCompletionStatus,
+    'queue-submitted-same-worker-grid-update-handoff-no-host-wait'
   );
   assert.equal(
     pressure.value.workerResidentStage.workerRetainedGasCellEosReleaseStatus,
-    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-submit'
+    'gas-cell-eos-final-consumer-retired-queue-ordered-after-pressure-submit'
   );
   assert.equal(
-    pressure.value.workerResidentStage.workerQueueFence.finalConsumerReleaseFenceUsed,
+    pressure.value.pressureInterfaceStageTaskAuthority.gpuFenceSatisfied,
     true
   );
-  assert.equal(device.queue.submittedWorkDoneCount, queueFenceCountAfterEos + 2);
+  assert.equal(
+    pressure.value.pressureInterfaceStageTaskAuthority.gpuFenceStatus,
+    'gpu-fence-satisfied'
+  );
+  assert.equal(
+    pressure.value.pressureInterfaceStageTaskAuthority
+      .gpuFenceDelegationStatus,
+    'satisfied-worker-exact-pressure-completion-receipt'
+  );
+  assert.equal(Object.hasOwn(pressure.value, 'pressureCompletionReceipt'), false);
+  assert.equal(Object.hasOwn(pressure.value, 'cpuSeededGasPressureAuthority'), false);
+  assert.doesNotThrow(() => structuredClone(pressure.value));
+  assert.equal(hostFenceCalls, 0);
+  assert.equal(
+    device.queue.writeBufferCalls.filter(({ buffer }) => (
+      buffer.label === 'ulg-sph-gas-cell-eos-cpu-seeded-pressure-rows'
+    )).length,
+    1
+  );
+  assert.equal(
+    device.queue.writeBufferCalls.filter(({ buffer }) => (
+      buffer.label === 'ulg-sph-pressure-interface-gas-cells-in'
+    )).length,
+    0
+  );
+  assert.equal(device.queue.submitCalls.length, 1);
+  assert.equal(
+    isExactSphPressureInterfaceCompletionReceipt(
+      exactPressureReceipt,
+      device,
+      exactPressureResult
+    ),
+    false
+  );
+
+  await assert.rejects(
+    settlesWithoutHostFence(
+      runUlgMechanicsResidentStageWorkerPayload(payload(
+        stage('gridUpdate', ['mls-mpm-grid'], ['mls-mpm-grid']),
+        context,
+        p2g.value,
+        lane
+      )),
+      'failed gridUpdate'
+    ),
+    /synthetic gridUpdate failure before queue submit/
+  );
+  assert.equal(gridUpdateAttemptCount, 1);
+  assert.equal(gridObservedExactForceRowsBuffer, exactPressureResult.forceRowsBuffer);
+  assert.equal(exactPressureResult.forceRowsBuffer.destroyed, false);
+  assert.equal(exactPressureResult.forceRowsBuffer.destroyCount, 0);
+  assert.equal(hostFenceCalls, 0);
+
+  const gridUpdate = await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage('gridUpdate', ['mls-mpm-grid'], ['mls-mpm-grid']),
+      context,
+      p2g.value,
+      lane
+    )),
+    'gridUpdate'
+  );
+  assert.equal(gridUpdateAttemptCount, 2);
+  assert.equal(gridUpdate.value.backend, 'webgpu');
+  assert.equal(
+    gridUpdate.value.pressureInterfaceGridForceAdmissionApproved,
+    true
+  );
+  assert.equal(
+    gridUpdate.value.pressureInterfaceForceRowsBufferSubmitted,
+    undefined
+  );
+  assert.equal(
+    gridUpdate.value.gpuResult.pressureInterfaceForceRowsBufferSubmitted,
+    true
+  );
+  assert.equal(
+    gridUpdate.value.mechanicsGridUpdateStageTaskEvidence.passed,
+    true
+  );
+  assert.equal(
+    gridUpdate.value.mechanicsGridUpdateStageTaskEvidence.pressureInterface
+      .retainedBufferSubmittedAndApproved,
+    true
+  );
+  assert.equal(
+    gridUpdate.value.workerResidentStage.workerQueueFence
+      .pressureInterfaceForceRowsRetiredAfterGridSubmit,
+    true
+  );
+  assert.equal(
+    gridUpdate.value.workerResidentStage.workerQueueFence
+      .queueCompletionStatus,
+    'queue-submitted-worker-retained-grid-no-host-wait'
+  );
+  assert.equal(exactPressureResult.forceRowsBuffer.destroyed, true);
+  assert.equal(exactPressureResult.forceRowsBuffer.destroyCount, 1);
+  assert.equal(hostFenceCalls, 0);
+  assert.equal(device.queue.submitCalls.length, 2);
+
+  const replayContext = {
+    ...context,
+    stageOptions: {
+      ...context.stageOptions,
+      gridUpdate: {
+        async webGpuRunner(args) {
+          assert.notEqual(
+            args.pressureInterfaceGridForceAdmission
+              ?.pressureInterfacePublication?.schema,
+            'peercompute.ulg.worker-exact-pressure-interface-grid-handoff.v1'
+          );
+          throw new Error('replayed worker pressure-grid admission rejected');
+        }
+      }
+    }
+  };
+  const replayedGridUpdate = await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage('gridUpdate', ['mls-mpm-grid'], ['mls-mpm-grid']),
+      replayContext,
+      p2g.value,
+      lane
+    )),
+    'replayed gridUpdate'
+  );
+  assert.equal(replayedGridUpdate.value.backend, 'cpu-reference');
+  assert.equal(
+    replayedGridUpdate.value.pressureInterfaceGridForceAdmissionApproved,
+    false
+  );
+  assert.equal(
+    replayedGridUpdate.value.mechanicsGridUpdateStageTaskEvidence
+      .pressureInterface.retainedBufferSubmittedAndApproved,
+    false
+  );
+  assert.equal(exactPressureResult.forceRowsBuffer.destroyCount, 1);
+  assert.equal(hostFenceCalls, 0);
+
+  const rejectedLane = {
+    laneId: 'ulg:test:worker-cpu-seeded-gas-rejected-lane',
+    stateKey: 'ulg:test:worker-cpu-seeded-gas-rejected-state'
+  };
+  const rejectedContext = {
+    ...context,
+    taskIdPrefix: 'ulg:test:worker-cpu-seeded-gas-rejected',
+    stageOptions: {
+      pressureInterface: {
+        async pressureInterfaceForceRowsWebGpuRunner(args) {
+          const exactResult =
+            await runSphPressureInterfaceForceRowsWebGpu(args);
+          return {
+            ...exactResult,
+            pressureCompletionReceipt: Object.freeze({
+              schema: exactResult.pressureCompletionReceipt.schema,
+              status: exactResult.pressureCompletionReceipt.status,
+              forged: true
+            })
+          };
+        }
+      }
+    }
+  };
+  await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'gasCellEosProducer',
+        ['resident-spatial-gas-species-ledger', 'resident-product-mass'],
+        ['resident-gas-pressure']
+      ),
+      rejectedContext,
+      null,
+      rejectedLane
+    )),
+    'rejected gasCellEosProducer'
+  );
+  const rejectedPressure = await settlesWithoutHostFence(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'pressureInterface',
+        ['resident-gas-pressure', 'sph-material-interface-field'],
+        ['pressure-interface-force-rows']
+      ),
+      rejectedContext,
+      null,
+      rejectedLane
+    )),
+    'rejected pressureInterface'
+  );
+  assert.equal(
+    rejectedPressure.value.workerResidentStage.workerQueueFence
+      .pressureCompletionReceiptRejected,
+    true
+  );
+  assert.equal(
+    rejectedPressure.value.workerResidentStage.workerQueueFence
+      .fenceSatisfied,
+    false
+  );
+  assert.equal(
+    rejectedPressure.value.workerResidentStage
+      .workerRetainedGasCellEosReleaseStatus,
+    'gas-cell-eos-final-consumer-retired-queue-ordered-after-pressure-submit'
+  );
+  assert.equal(
+    rejectedPressure.value.pressureInterfaceStageTaskAuthority
+      .gpuFenceSatisfied,
+    false
+  );
+  assert.equal(
+    rejectedPressure.value.pressureInterfaceStageTaskAuthority.gpuFenceStatus,
+    'gpu-fence-unsatisfied'
+  );
+  assert.equal(
+    Object.hasOwn(rejectedPressure.value, 'pressureCompletionReceipt'),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(rejectedPressure.value, 'cpuSeededGasPressureAuthority'),
+    false
+  );
+  assert.equal(
+    rejectedPressure.retainedBufferRefs.some((ref) => (
+      /gas[-_ ]?pressure|gaspressure/i.test(ref)
+    )),
+    false
+  );
+  assert.equal(hostFenceCalls, 0);
 });
 
-test('ULG resident worker keeps exact v2 gas authority internal and exports non-bindable telemetry', async () => {
+test('ULG resident worker keeps exact v4 gas authority internal and exports non-bindable telemetry', async () => {
   const device = createFakeGpuDevice();
   const productRows = new Float32Array(2 * 32);
   for (let index = 0; index < 2; index += 1) {
@@ -758,7 +1204,7 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
   }
   const productEventBuffer = fakeStorageBuffer(
     device,
-    'worker-v2-spatial-gas-product-events',
+    'worker-v4-spatial-gas-product-events',
     productRows
   );
   const residentProductMass = tagResidentProductMassDevice({
@@ -770,6 +1216,21 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     productEventRowCount: 2,
     productEventStrideFloats: 32
   }, device);
+  const spatialGasEpochIdentity = {
+    storageGeneration: 91,
+    physicsTick: 90,
+    physicsSubstep: 1,
+    positionEpoch: 201,
+    topologyEpoch: 202,
+    chartEpoch: 203,
+    levelEpoch: 204,
+    supportEpoch: 205
+  };
+  const schroederSpatialEpochGeneration =
+    workerGasOccupancyGenerationFixture(device, {
+      particleCount: 2,
+      ...spatialGasEpochIdentity
+    });
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
     status: 'material-interface-field-ready',
@@ -813,8 +1274,8 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     ]
   };
   const lane = {
-    laneId: 'ulg:test:worker-v2-gas-authority-lane',
-    stateKey: 'ulg:test:worker-v2-gas-authority-state'
+    laneId: 'ulg:test:worker-v4-gas-authority-lane',
+    stateKey: 'ulg:test:worker-v4-gas-authority-state'
   };
   const hotBuffers = new Map();
   const warmDeltas = [];
@@ -834,7 +1295,7 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
   let hostBoundaryVerified = false;
   const context = {
     schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
-    taskIdPrefix: 'ulg:test:worker-v2-gas-authority',
+    taskIdPrefix: 'ulg:test:worker-v4-gas-authority',
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
     includePressureInterfaceStage: true,
@@ -847,16 +1308,8 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
       productEventStrideFloats: 32,
       spatialGasCellSizeM: 1,
       spatialGasSupportVolumeFallbackM3: 1,
-      spatialGasEpochIdentity: {
-        storageGeneration: 91,
-        physicsTick: 90,
-        physicsSubstep: 1,
-        positionEpoch: 201,
-        topologyEpoch: 202,
-        chartEpoch: 203,
-        levelEpoch: 204,
-        supportEpoch: 205
-      },
+      spatialGasEpochIdentity,
+      schroederSpatialEpochGeneration,
       gasPressureSummary: {
         schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
         status: 'gpu-resident-reaction-pressure-summary',
@@ -880,7 +1333,11 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
               .retainedGasCellFieldSource,
             source
           );
-          assert.equal(args.retainedGasPressureCellsBuffer, source.gasPressureCellsBuffer);
+          assert.equal(args.retainedGasPressureCellsBuffer ?? null, null);
+          assert.equal('gasPressureCellsBuffer' in source, false);
+          assert.equal('retainedGasPressureCellsBuffer' in source, false);
+          assert.equal('pressureInterfaceGasPressureCellsBuffer' in source, false);
+          assert.equal('gasAuthorityControlBuffer' in source, false);
           exactSourceObserved = source;
           if (!hostBoundaryVerified) {
             const admissionPublication =
@@ -955,8 +1412,193 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
                 pressureInterfaceGasCellFieldAdmission:
                   admissionPublication.pressureInterfaceGasCellFieldAdmission
               }),
-              /rejects mismatched gasPressureCellsBuffer/
+              /rejects raw gasPressureCellsBuffer/
             );
+            assert.throws(
+              () => publishUlgPressureInterfaceGasCellFieldImportSource({
+                stateManager,
+                cacheKey: `${lane.laneId}:legacy-mask`,
+                stateKey: lane.stateKey,
+                source: {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  status: 'retained-gas-cell-eos-source-submitted',
+                  ready: true,
+                  retainedGasCellFieldSource: source,
+                  admission: {
+                    retainedGasCellFieldSource: source,
+                    gasPressureCellsBuffer: {
+                      label: 'legacy-wrapper-forged-gas-pressure-buffer'
+                    }
+                  }
+                },
+                pressureInterfaceGasCellFieldAdmission:
+                  admissionPublication.pressureInterfaceGasCellFieldAdmission
+              }),
+              /rejects raw gasPressureCellsBuffer/
+            );
+            let browserWrapperGetterCount = 0;
+            const accessorWrapper = {};
+            Object.defineProperty(accessorWrapper, 'retainedGasCellFieldSource', {
+              enumerable: true,
+              get() {
+                browserWrapperGetterCount += 1;
+                return source;
+              }
+            });
+            assert.throws(
+              () => publishUlgPressureInterfaceGasCellFieldImportSource({
+                stateManager,
+                cacheKey: `${lane.laneId}:accessor-wrapper`,
+                stateKey: lane.stateKey,
+                source: accessorWrapper,
+                pressureInterfaceGasCellFieldAdmission:
+                  admissionPublication.pressureInterfaceGasCellFieldAdmission
+              }),
+              /must be an own data property/
+            );
+            assert.equal(browserWrapperGetterCount, 0);
+
+            const exactV1Wrapper = {
+              schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+              status: 'retained-gas-cell-eos-source-submitted',
+              ready: true,
+              retainedGasCellFieldSource: source
+            };
+            const wrappedAdmissionPublication =
+              publishUlgPressureInterfaceGasCellFieldAdmission({
+                stateManager,
+                cacheKey: `${lane.laneId}:exact-v1-wrapper`,
+                stateKey: lane.stateKey,
+                source: exactV1Wrapper
+              });
+            assert.equal(
+              wrappedAdmissionPublication.retainedGasCellFieldSource,
+              source
+            );
+            assert.equal(
+              wrappedAdmissionPublication.pressureInterfaceGasPressureCellRowCount,
+              0
+            );
+            assert.ok(
+              wrappedAdmissionPublication
+                .pressureInterfaceGasPressureCellRowCapacity > 0
+            );
+            const wrappedImportPublication =
+              publishUlgPressureInterfaceGasCellFieldImportSource({
+                stateManager,
+                cacheKey: `${lane.laneId}:exact-v1-wrapper`,
+                stateKey: lane.stateKey,
+                source: exactV1Wrapper,
+                pressureInterfaceGasCellFieldAdmission:
+                  wrappedAdmissionPublication
+                    .pressureInterfaceGasCellFieldAdmission
+              });
+            assert.equal(
+              wrappedImportPublication.retainedGasCellFieldSource,
+              source
+            );
+            assert.equal(
+              wrappedImportPublication.pressureInterfaceGasPressureCellRowCount,
+              0
+            );
+            assert.ok(
+              wrappedImportPublication
+                .pressureInterfaceGasPressureCellRowCapacity > 0
+            );
+
+            for (const [schema, message] of [
+              [
+                ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+                /forged current schema/
+              ],
+              [
+                'peercompute.ulg.sph-retained-gas-cell-eos-source.v2',
+                /retired v2\/v3 wrappers/
+              ],
+              [
+                'peercompute.ulg.sph-retained-gas-cell-eos-source.v3',
+                /retired v2\/v3 wrappers/
+              ]
+            ]) {
+              assert.throws(
+                () => publishUlgPressureInterfaceGasCellFieldAdmission({
+                  stateManager,
+                  cacheKey: `${lane.laneId}:protected-wrapper:${schema}`,
+                  stateKey: lane.stateKey,
+                  source: {
+                    schema,
+                    retainedGasCellFieldSource: source
+                  }
+                }),
+                message
+              );
+            }
+
+            assert.throws(
+              () => publishUlgPressureInterfaceGasCellFieldImportSource({
+                stateManager,
+                cacheKey: `${lane.laneId}:null-raw-alias`,
+                stateKey: lane.stateKey,
+                source: {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  gasPressureCellsBuffer: null
+                },
+                pressureInterfaceGasCellFieldAdmission:
+                  admissionPublication.pressureInterfaceGasCellFieldAdmission
+              }),
+              /rejects raw gasPressureCellsBuffer/
+            );
+            let browserControlGetterCount = 0;
+            const accessorControlAliasWrapper = {
+              schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+              retainedGasCellFieldSource: source
+            };
+            Object.defineProperty(
+              accessorControlAliasWrapper,
+              'gasAuthorityControlBuffer',
+              {
+                enumerable: true,
+                get() {
+                  browserControlGetterCount += 1;
+                  return null;
+                }
+              }
+            );
+            assert.throws(
+              () => publishUlgPressureInterfaceGasCellFieldImportSource({
+                stateManager,
+                cacheKey: `${lane.laneId}:accessor-control-alias`,
+                stateKey: lane.stateKey,
+                source: accessorControlAliasWrapper,
+                pressureInterfaceGasCellFieldAdmission:
+                  admissionPublication.pressureInterfaceGasCellFieldAdmission
+              }),
+              /must be an own data property/
+            );
+            assert.equal(browserControlGetterCount, 0);
+
+            let browserSchemaGetterCount = 0;
+            const accessorSchemaWrapper = {
+              retainedGasCellFieldSource: source
+            };
+            Object.defineProperty(accessorSchemaWrapper, 'schema', {
+              enumerable: true,
+              get() {
+                browserSchemaGetterCount += 1;
+                return ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA;
+              }
+            });
+            assert.throws(
+              () => publishUlgPressureInterfaceGasCellFieldAdmission({
+                stateManager,
+                cacheKey: `${lane.laneId}:accessor-schema`,
+                stateKey: lane.stateKey,
+                source: accessorSchemaWrapper
+              }),
+              /must be an own data property/
+            );
+            assert.equal(browserSchemaGetterCount, 0);
             assert.throws(
               () => publishUlgPressureInterfaceGasCellFieldImportSource({
                 stateManager,
@@ -986,7 +1628,9 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
                 .retainedGasCellFieldSource,
               source
             );
-            assert.equal(importPublication.gasPressureCellsBuffer, source.gasPressureCellsBuffer);
+            assert.equal('gasPressureCellsBuffer' in importPublication, false);
+            assert.equal('retainedGasPressureCellsBuffer' in importPublication, false);
+            assert.equal('gasAuthorityControlBuffer' in importPublication, false);
             assert.equal(
               importPublication.pressureInterfaceGasPressureCellRowCount,
               0
@@ -1005,10 +1649,9 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
                 .retainedGasCellFieldSource,
               source
             );
-            assert.equal(
-              importHot.gasPressureCellsBuffer,
-              source.gasPressureCellsBuffer
-            );
+            assert.equal('gasPressureCellsBuffer' in importHot, false);
+            assert.equal('retainedGasPressureCellsBuffer' in importHot, false);
+            assert.equal('gasAuthorityControlBuffer' in importHot, false);
             const importWarm = warmDeltas.at(-1);
             const importTelemetry =
               importWarm.payload.retainedGasCellFieldSource;
@@ -1035,6 +1678,204 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
             );
             assert.doesNotThrow(() => structuredClone(importWarm.payload));
             assertTransportHasNoGasCapability(importWarm.payload);
+
+            const secondEpochIdentity = Object.fromEntries(
+              Object.entries(spatialGasEpochIdentity).map(([key, value]) => (
+                [key, value + 100]
+              ))
+            );
+            const secondSpatialGeneration =
+              workerGasOccupancyGenerationFixture(device, {
+                particleCount: 2,
+                ...secondEpochIdentity
+              });
+            const secondMechanicsField = secondSpatialGeneration
+              .mechanicsLevelViews.at(-1).mechanicsFieldView;
+            const secondExecution = await sphSpatialGasLedgerEosGpu
+              .runSphSpatialGasLedgerEosRetainedWebGpu({
+                device,
+                residentProductMass,
+                epochIdentity: secondEpochIdentity,
+                schroederSpatialEpochGeneration: secondSpatialGeneration,
+                spatialGasGrid: {
+                  selectedLevel: secondMechanicsField.selectedLevel,
+                  gridDims: [...secondMechanicsField.gridDims],
+                  gridNodeCount: secondMechanicsField.gridNodeCount,
+                  gridShift: secondMechanicsField.gridShift,
+                  gridSpacingM: secondMechanicsField.gridSpacingM
+                },
+                boxMinM: [0, 0, 0],
+                boxMaxM: [2, 2, 2],
+                spatialGasCellSizeM: 1,
+                spatialGasSupportVolumeFallbackM3: 0,
+                level: 0,
+                laneId: `${lane.laneId}:second-exact-authority`
+              });
+            assert.equal(secondExecution.ready, true, secondExecution.reason);
+            const secondExactSource =
+              secondExecution.retainedGasCellFieldSource;
+            assert.equal(
+              isExactSphSpatialGasPressureAuthoritySource(secondExactSource),
+              true
+            );
+
+            const runAvailableExactWorkerImport = async (
+              suffix,
+              pressureImport,
+              workerDevice = device
+            ) => runUlgMechanicsResidentStageWorkerPayload(payload(
+              stage(
+                'pressureInterface',
+                ['resident-gas-pressure', 'sph-material-interface-field'],
+                ['pressure-interface-force-rows']
+              ),
+              {
+                schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+                taskIdPrefix: `ulg:test:worker-v4-available-hostile-${suffix}`,
+                preferWebGpu: false,
+                readbackMode: 'full-parity-readback',
+                common: {
+                  device: workerDevice,
+                  boxDimsM: [2, 2, 2],
+                  gasPressureSummary: context.common.gasPressureSummary,
+                  materialInterfaceField,
+                  pressureInterfaceGasCellFieldImport: pressureImport
+                }
+              },
+              null,
+              {
+                laneId: `ulg:test:worker-v4-available-hostile-${suffix}-lane`,
+                stateKey: `ulg:test:worker-v4-available-hostile-${suffix}-state`
+              }
+            ));
+            const assertRejectedWithoutPreflightPressureRef = (
+              result,
+              expectedStatus
+            ) => {
+              assert.equal(
+                result.value.workerResidentStage
+                  .workerRetainedGasCellFieldImportInputStatus,
+                expectedStatus
+              );
+              assert.equal(
+                result.value.workerResidentStage
+                  .workerRetainedGasCellFieldImportApplied,
+                false
+              );
+              assert.equal(
+                (result.value.gpuResidentLaneRequirement?.retainedBufferRefs
+                  || []).includes('resident-gas-pressure-cells-buffer'),
+                false
+              );
+            };
+            const primaryApprovedAdmission =
+              admissionPublication.pressureInterfaceGasCellFieldAdmission;
+            const secondaryApprovedAdmission = {
+              ...primaryApprovedAdmission,
+              retainedGasCellFieldSource: secondExactSource
+            };
+            const multipleExactRejected =
+              await runAvailableExactWorkerImport(
+                'multiple-exact-identities',
+                {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  pressureInterfaceGasCellFieldAdmission:
+                    primaryApprovedAdmission,
+                  admission: secondaryApprovedAdmission
+                }
+              );
+            assertRejectedWithoutPreflightPressureRef(
+              multipleExactRejected,
+              'blocked-ambiguous-exact-v4-gas-pressure-authority'
+            );
+
+            const mismatchedAdmissionRejected =
+              await runAvailableExactWorkerImport(
+                'mismatched-approved-admission',
+                {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  pressureInterfaceGasCellFieldAdmission: {
+                    ...primaryApprovedAdmission,
+                    retainedGasCellFieldSource: admissionTelemetry
+                  }
+                }
+              );
+            assertRejectedWithoutPreflightPressureRef(
+              mismatchedAdmissionRejected,
+              'blocked-exact-v4-gas-pressure-authority-admission-identity-mismatch'
+            );
+
+            const ambiguousAdmissionRejected =
+              await runAvailableExactWorkerImport(
+                'ambiguous-approved-admissions',
+                {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  pressureInterfaceGasCellFieldAdmission:
+                    primaryApprovedAdmission,
+                  admission: {
+                    ...primaryApprovedAdmission,
+                    retainedGasCellFieldSource: source
+                  }
+                }
+              );
+            assertRejectedWithoutPreflightPressureRef(
+              ambiguousAdmissionRejected,
+              'blocked-exact-v4-gas-pressure-authority-admission-ambiguous'
+            );
+
+            const forgedCapacityRejected =
+              await runAvailableExactWorkerImport(
+                'forged-public-capacity',
+                {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  pressureInterfaceGasPressureCellRowCapacity: 0x7fff_ffff,
+                  pressureInterfaceGasPressureCellRowStrideFloats: 1
+                }
+              );
+            assertRejectedWithoutPreflightPressureRef(
+              forgedCapacityRejected,
+              'blocked-exact-v4-gas-pressure-authority-admission-missing'
+            );
+
+            const wrongDevice = createFakeGpuDevice();
+            const wrongDeviceRejected =
+              await runAvailableExactWorkerImport(
+                'wrong-device-forged-capacity',
+                {
+                  schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+                  retainedGasCellFieldSource: source,
+                  pressureInterfaceGasCellFieldAdmission:
+                    primaryApprovedAdmission,
+                  pressureInterfaceGasPressureCellRowCapacity: 0x7fff_ffff,
+                  pressureInterfaceGasPressureCellRowStrideFloats: 1
+                },
+                wrongDevice
+              );
+            assertRejectedWithoutPreflightPressureRef(
+              wrongDeviceRejected,
+              'blocked-exact-v4-gas-pressure-authority-device-mismatch'
+            );
+            assert.equal(
+              sphSpatialGasLedgerEosGpu
+                .releaseSphSpatialGasLedgerEosAfterQueue(secondExecution),
+              true
+            );
+            assert.equal(await secondExecution.releasePromise, true);
+            assert.equal(
+              releaseSchroederSpatialEpochGenerationAfterQueue(
+                secondSpatialGeneration,
+                device
+              ),
+              true
+            );
+            assert.equal(
+              await secondSpatialGeneration.releasePromise,
+              true
+            );
             hostBoundaryVerified = true;
           }
           const result = await runSphPressureInterfaceForceRowsWebGpu(args);
@@ -1046,7 +1887,7 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
               stateKey: lane.stateKey,
               source
             }),
-            /rejects unavailable exact v2 authority lifecycle/
+            /rejects unavailable exact v4 authority lifecycle/
           );
           return result;
         }
@@ -1064,11 +1905,21 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     null,
     lane
   ));
-  assert.equal(spatial.value.retainedSpatialGasLedgerSourceReady, true);
+  const {
+    schroederSpatialEpochGeneration: _occupancyGeneration,
+    ...consumerCommon
+  } = context.common;
+  const consumerContext = {
+    ...context,
+    common: consumerCommon
+  };
+  assert.equal(spatial.value.retainedGasCellFieldSourceReady, true);
   assert.equal(
     spatial.value.retainedGasCellFieldSource.schema,
     ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA
   );
+  assert.equal(spatial.value.retainedSpatialGasLedgerSource ?? null, null);
+  assert.equal(spatial.value.spatialGasLedgerEosExecution ?? null, null);
 
   const eos = await runUlgMechanicsResidentStageWorkerPayload(payload(
     stage(
@@ -1076,7 +1927,7 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
       ['resident-spatial-gas-species-ledger', 'resident-product-mass'],
       ['resident-gas-pressure']
     ),
-    context,
+    consumerContext,
     null,
     lane
   ));
@@ -1093,11 +1944,21 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     eos.retainedBufferRefs.some((ref) => /gas[-_ ]?pressure/i.test(ref)),
     false
   );
-  assert.throws(
-    () => bindSphSpatialGasPressureAuthority(telemetry, { device }),
-    (error) => error?.code === 'ERR_SPH_GAS_PRESSURE_AUTHORITY_UNBRANDED'
+  assert.equal(
+    'bindSphSpatialGasPressureAuthority' in sphSpatialGasLedgerEosGpu,
+    false
   );
   const seen = new WeakSet();
+  const forbiddenTransportKeys = new Set([
+    'gasPressureCellsBuffer',
+    'retainedGasPressureCellsBuffer',
+    'pressureInterfaceGasPressureCellsBuffer',
+    'gasAuthorityControlBuffer',
+    'retainedGasAuthorityControlBuffer',
+    'pressureInterfaceGasAuthorityControlBuffer',
+    'releaseAfterFinalConsumerQueue',
+    'deferredCleanupReadbackTelemetrySnapshot'
+  ]);
   const assertTransportHasNoGasCapability = (value) => {
     if (value == null || typeof value !== 'object') {
       assert.notEqual(typeof value, 'function');
@@ -1110,11 +1971,17 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     if (value.schema === 'peercompute.ulg.worker-retained-buffer-ref.v0') {
       assert.equal(/gas[-_ ]?pressure|gaspressure/i.test(`${value.ref} ${value.path}`), false);
     }
-    for (const nested of Object.values(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      assert.equal(
+        forbiddenTransportKeys.has(key),
+        false,
+        `worker transport leaked forbidden gas authority key ${key}`
+      );
       assertTransportHasNoGasCapability(nested);
     }
   };
   assertTransportHasNoGasCapability(eos.value);
+  assert.doesNotThrow(() => structuredClone(eos.value));
 
   const pressure = await runUlgMechanicsResidentStageWorkerPayload(payload(
     stage(
@@ -1122,12 +1989,20 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
       ['resident-gas-pressure', 'sph-material-interface-field'],
       ['pressure-interface-force-rows']
     ),
-    context,
+    consumerContext,
     null,
     lane
   ));
   assert.ok(exactSourceObserved);
-  assert.equal(hostBoundaryVerified, true);
+  assert.equal(
+    hostBoundaryVerified,
+    true,
+    JSON.stringify({
+      status: pressure.value.status,
+      webgpuStatus: pressure.value.webgpuStatus,
+      retainedGasPressureRowsStatus: pressure.value.retainedGasPressureRowsStatus
+    })
+  );
   assert.equal(pressure.value.pressureInterfaceForceSolver.pressureModelId, 2);
   assert.equal(pressure.value.pressureInterfaceGasPressureCellRowCount, 0);
   assert.ok(pressure.value.pressureInterfaceGasPressureCellRowCapacity > 0);
@@ -1144,23 +2019,453 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     pressure.value.pressureInterfaceGasPressureAuthorityReady,
     true
   );
-  assert.ok(
+  assert.equal(
     pressure.value.gpuResidentLaneRequirement.retainedBufferRefs
-      .includes('resident-gas-pressure-cells-buffer')
+      .includes('resident-gas-pressure-cells-buffer'),
+    false
   );
   assert.equal(pressure.value.gasPressureAuthorityConsumerSubmitted, true);
   assert.equal(
-    pressure.value.workerResidentStage.workerRetainedGasCellEosReleaseStatus,
-    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-submit'
+    pressure.value.retainedGasPressureRowsStatus,
+    'retained-gas-pressure-authority-v4-admitted-exact-source'
   );
   assert.equal(
-    pressure.value.workerResidentStage.workerQueueFence.finalConsumerReleaseFenceUsed,
+    pressure.value.workerResidentStage.workerRetainedGasCellEosReleaseStatus,
+    'gas-cell-eos-final-consumer-retired-queue-ordered-after-pressure-submit'
+  );
+  assert.equal(
+    pressure.value.workerResidentStage.workerQueueFence.queueCompletionMethod,
+    'worker-device.queue.onSubmittedWorkDone'
+  );
+  assert.notEqual(
+    pressure.value.workerResidentStage.workerQueueFence
+      .finalConsumerReleaseFenceUsed,
     true
+  );
+  assertTransportHasNoGasCapability(pressure.value);
+  assert.doesNotThrow(() => structuredClone(pressure.value));
+
+  const runHostileExactWorkerImport = async (suffix, pressureImport) => (
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'pressureInterface',
+        ['resident-gas-pressure', 'sph-material-interface-field'],
+        ['pressure-interface-force-rows']
+      ),
+      {
+        schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+        taskIdPrefix: `ulg:test:worker-v4-hostile-${suffix}`,
+        preferWebGpu: false,
+        readbackMode: 'full-parity-readback',
+        common: {
+          device,
+          boxDimsM: [2, 2, 2],
+          gasPressureSummary: context.common.gasPressureSummary,
+          materialInterfaceField,
+          pressureInterfaceGasCellFieldImport: pressureImport
+        }
+      },
+      null,
+      {
+        laneId: `ulg:test:worker-v4-hostile-${suffix}-lane`,
+        stateKey: `ulg:test:worker-v4-hostile-${suffix}-state`
+      }
+    ))
+  );
+  const exactAdmission = {
+    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0',
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    retainedGasCellFieldSource: exactSourceObserved
+  };
+  let workerRawAliasGetterCount = 0;
+  const accessorRawAliasImport = {
+    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: exactSourceObserved,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  };
+  Object.defineProperty(accessorRawAliasImport, 'gasPressureCellsBuffer', {
+    enumerable: true,
+    get() {
+      workerRawAliasGetterCount += 1;
+      return { label: 'worker-accessor-forged-gas-pressure-buffer' };
+    }
+  });
+  const accessorRejected = await runHostileExactWorkerImport(
+    'accessor-raw-alias',
+    accessorRawAliasImport
+  );
+  assert.equal(
+    accessorRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-raw-alias-accessor'
+  );
+  assert.equal(
+    accessorRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportApplied,
+    false
+  );
+  assert.equal(workerRawAliasGetterCount, 0);
+
+  let workerWrapperGetterCount = 0;
+  const accessorWrapperImport = {
+    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
+    status: 'pressure-interface-gas-cell-field-import-ready'
+  };
+  Object.defineProperty(accessorWrapperImport, 'retainedGasCellFieldSource', {
+    enumerable: true,
+    get() {
+      workerWrapperGetterCount += 1;
+      return exactSourceObserved;
+    }
+  });
+  const accessorWrapperRejected = await runHostileExactWorkerImport(
+    'accessor-wrapper',
+    accessorWrapperImport
+  );
+  assert.equal(
+    accessorWrapperRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-gas-pressure-authority-wrapper-accessor'
+  );
+  assert.equal(workerWrapperGetterCount, 0);
+
+  const nestedAliasRejected = await runHostileExactWorkerImport(
+    'nested-legacy-mask',
+    {
+      schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+      status: 'retained-gas-cell-eos-source-submitted',
+      ready: true,
+      admission: {
+        retainedGasCellFieldSource: exactSourceObserved,
+        gasPressureCellsBuffer: {
+          label: 'worker-nested-forged-gas-pressure-buffer'
+        }
+      }
+    }
+  );
+  assert.equal(
+    nestedAliasRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-raw-alias'
+  );
+  assert.equal(
+    nestedAliasRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportApplied,
+    false
+  );
+
+  const nullAliasRejected = await runHostileExactWorkerImport(
+    'null-raw-alias',
+    {
+      schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+      status: 'retained-gas-cell-eos-source-submitted',
+      ready: true,
+      retainedGasCellFieldSource: exactSourceObserved,
+      gasAuthorityControlBuffer: null
+    }
+  );
+  assert.equal(
+    nullAliasRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-raw-alias'
+  );
+  assert.equal(
+    nullAliasRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportApplied,
+    false
+  );
+
+  const legacyRawSource = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    ready: true,
+    localPressureGradientReady: true,
+    gasPressureCellsBuffer: {
+      label: 'worker-protected-schema-legacy-pressure-buffer'
+    },
+    pressureInterfaceGasPressureCellRowCount: 1,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12
+  };
+  for (const [suffix, schema, expectedStatus] of [
+    [
+      'forged-current-v4',
+      ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+      'blocked-forged-exact-v4-gas-pressure-authority-schema'
+    ],
+    [
+      'retired-v2',
+      'peercompute.ulg.sph-retained-gas-cell-eos-source.v2',
+      'blocked-retired-gas-pressure-authority-schema'
+    ],
+    [
+      'retired-v3',
+      'peercompute.ulg.sph-retained-gas-cell-eos-source.v3',
+      'blocked-retired-gas-pressure-authority-schema'
+    ]
+  ]) {
+    const protectedSchemaRejected = await runHostileExactWorkerImport(
+      suffix,
+      {
+        schema,
+        retainedGasCellFieldSource: legacyRawSource
+      }
+    );
+    assert.equal(
+      protectedSchemaRejected.value.workerResidentStage
+        .workerRetainedGasCellFieldImportInputStatus,
+      expectedStatus
+    );
+    assert.equal(
+      protectedSchemaRejected.value.workerResidentStage
+        .workerRetainedGasCellFieldImportApplied,
+      false
+    );
+  }
+
+  const exactV1MaskRejectedAsUnavailable =
+    await runHostileExactWorkerImport(
+      'exact-v1-schema-mask',
+      {
+        schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+        retainedGasCellFieldSource: exactSourceObserved
+      }
+    );
+  assert.equal(
+    exactV1MaskRejectedAsUnavailable.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-unavailable'
+  );
+
+  let workerBorrowedGetterCount = 0;
+  const borrowedGetterWrapper = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    retainedGasCellFieldSource: exactSourceObserved
+  };
+  Object.defineProperty(
+    borrowedGetterWrapper,
+    'gasPressureAuthorityConsumerBorrowed',
+    {
+      enumerable: true,
+      get() {
+        workerBorrowedGetterCount += 1;
+        return false;
+      }
+    }
+  );
+  const borrowedGetterRejectedAsUnavailable =
+    await runHostileExactWorkerImport(
+      'public-borrowed-getter',
+      borrowedGetterWrapper
+    );
+  assert.equal(
+    borrowedGetterRejectedAsUnavailable.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-unavailable'
+  );
+  assert.equal(workerBorrowedGetterCount, 0);
+
+  let workerSchemaGetterCount = 0;
+  const schemaGetterWrapper = {
+    retainedGasCellFieldSource: exactSourceObserved
+  };
+  Object.defineProperty(schemaGetterWrapper, 'schema', {
+    enumerable: true,
+    get() {
+      workerSchemaGetterCount += 1;
+      return ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA;
+    }
+  });
+  const schemaGetterRejected = await runHostileExactWorkerImport(
+    'schema-getter',
+    schemaGetterWrapper
+  );
+  assert.equal(
+    schemaGetterRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-gas-pressure-authority-schema-accessor'
+  );
+  assert.equal(workerSchemaGetterCount, 0);
+
+  const descriptorTrapCounts = new Map();
+  const descriptorGetCounts = new Map();
+  const descriptorTrapAdmission = {
+    schema: 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0',
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    retainedGasCellFieldSource: exactSourceObserved
+  };
+  const descriptorTrapTarget = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    retainedGasCellFieldSource: exactSourceObserved,
+    pressureInterfaceGasCellFieldAdmission: descriptorTrapAdmission,
+    pressureInterfaceGasPressureCellRowCapacity:
+      exactSourceObserved.pressureInterfaceGasPressureCellRowCapacity,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12
+  };
+  const descriptorTrapImport = new Proxy(descriptorTrapTarget, {
+    getOwnPropertyDescriptor(target, key) {
+      const count = (descriptorTrapCounts.get(key) || 0) + 1;
+      descriptorTrapCounts.set(key, count);
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+      if (!descriptor || count === 1) return descriptor;
+      if (key === 'schema') {
+        return { ...descriptor, value: ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA };
+      }
+      if (key === 'retainedGasCellFieldSource') {
+        return { ...descriptor, value: legacyRawSource };
+      }
+      if (key === 'pressureInterfaceGasCellFieldAdmission') {
+        return {
+          ...descriptor,
+          value: {
+            ...descriptorTrapAdmission,
+            gasCellFieldConsumptionApproved: false,
+            retainedGasCellFieldSource: legacyRawSource
+          }
+        };
+      }
+      if (key === 'pressureInterfaceGasPressureCellRowCapacity') {
+        return { ...descriptor, value: 0 };
+      }
+      return descriptor;
+    },
+    get(target, key, receiver) {
+      descriptorGetCounts.set(key, (descriptorGetCounts.get(key) || 0) + 1);
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const descriptorTrapRejectedAsUnavailable =
+    await runHostileExactWorkerImport(
+      'descriptor-snapshot-toctou',
+      descriptorTrapImport
+    );
+  assert.equal(
+    descriptorTrapRejectedAsUnavailable.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-unavailable'
+  );
+  for (const key of [
+    'schema',
+    'retainedGasCellFieldSource',
+    'pressureInterfaceGasCellFieldAdmission',
+    'pressureInterfaceGasPressureCellRowCapacity',
+    'pressureInterfaceGasPressureCellRowStrideFloats'
+  ]) {
+    assert.equal(
+      descriptorTrapCounts.get(key),
+      1,
+      `worker graph must capture ${key} exactly once across preflight/apply`
+    );
+    assert.equal(
+      descriptorGetCounts.get(key) || 0,
+      0,
+      `worker graph must not invoke hostile ${key} reads`
+    );
+  }
+
+  const inheritedCurrentSchemaRejected =
+    await runHostileExactWorkerImport(
+      'inherited-current-schema',
+      Object.create(exactSourceObserved)
+    );
+  assert.equal(
+    inheritedCurrentSchemaRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-forged-exact-v4-gas-pressure-authority-schema'
+  );
+  const retiredSchemaPrototype = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v3'
+  };
+  const inheritedRetiredSchemaWrapper = Object.create(
+    retiredSchemaPrototype
+  );
+  Object.defineProperty(
+    inheritedRetiredSchemaWrapper,
+    'retainedGasCellFieldSource',
+    {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: legacyRawSource
+    }
+  );
+  const inheritedRetiredSchemaRejected =
+    await runHostileExactWorkerImport(
+      'inherited-retired-schema',
+      inheritedRetiredSchemaWrapper
+    );
+  assert.equal(
+    inheritedRetiredSchemaRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-retired-gas-pressure-authority-schema'
+  );
+
+  let prototypeSchemaGetterCount = 0;
+  const accessorSchemaPrototype = {};
+  Object.defineProperty(accessorSchemaPrototype, 'schema', {
+    get() {
+      prototypeSchemaGetterCount += 1;
+      return ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA;
+    }
+  });
+  const accessorSchemaPrototypeWrapper = Object.create(
+    accessorSchemaPrototype
+  );
+  Object.defineProperty(
+    accessorSchemaPrototypeWrapper,
+    'retainedGasCellFieldSource',
+    {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: exactSourceObserved
+    }
+  );
+  const inheritedSchemaAccessorRejected =
+    await runHostileExactWorkerImport(
+      'inherited-schema-accessor',
+      accessorSchemaPrototypeWrapper
+    );
+  assert.equal(
+    inheritedSchemaAccessorRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-gas-pressure-authority-schema-accessor'
+  );
+  assert.equal(prototypeSchemaGetterCount, 0);
+
+  const submittedReplayRejected = await runHostileExactWorkerImport(
+    'submitted-replay',
+    {
+      schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
+      status: 'pressure-interface-gas-cell-field-import-ready',
+      retainedGasCellFieldSource: exactSourceObserved,
+      pressureInterfaceGasCellFieldAdmission: exactAdmission
+    }
+  );
+  assert.equal(
+    submittedReplayRejected.value.workerResidentStage
+      .workerRetainedGasCellFieldImportInputStatus,
+    'blocked-exact-v4-gas-pressure-authority-unavailable'
+  );
+  assert.equal(Object.isFrozen(exactSourceObserved), true);
+  assert.equal(
+    Reflect.set(
+      exactSourceObserved,
+      'schema',
+      'peercompute.ulg.sph-retained-gas-cell-eos-source.v1'
+    ),
+    false
+  );
+  assert.equal(
+    exactSourceObserved.schema,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
   );
 
   const echoContext = {
     schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
-    taskIdPrefix: 'ulg:test:worker-v2-gas-authority-echo',
+    taskIdPrefix: 'ulg:test:worker-v4-gas-authority-echo',
     preferWebGpu: false,
     readbackMode: 'full-parity-readback',
     common: {
@@ -1189,8 +2494,8 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
     echoContext,
     null,
     {
-      laneId: 'ulg:test:worker-v2-gas-authority-echo-lane',
-      stateKey: 'ulg:test:worker-v2-gas-authority-echo-state'
+      laneId: 'ulg:test:worker-v4-gas-authority-echo-lane',
+      stateKey: 'ulg:test:worker-v4-gas-authority-echo-state'
     }
   ));
   assert.equal(
@@ -1203,6 +2508,14 @@ test('ULG resident worker keeps exact v2 gas authority internal and exports non-
       .workerRetainedGasCellFieldImportApplied,
     false
   );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      schroederSpatialEpochGeneration,
+      device
+    ),
+    false
+  );
+  assert.equal(await schroederSpatialEpochGeneration.releasePromise, true);
 });
 
 test('ULG resident stage worker retires gas-cell owners when pressure is omitted or the lane aborts', async () => {
@@ -1262,9 +2575,10 @@ test('ULG resident stage worker retires gas-cell owners when pressure is omitted
     true
   );
   assert.equal(
-    omitted.value.workerResidentStage.workerQueueFence.finalConsumerReleaseFenceUsed,
+    omitted.value.workerResidentStage.workerQueueFence.cpuQueueFenceBypassed,
     true
   );
+  assert.equal(omittedDevice.queue.submittedWorkDoneCount || 0, 0);
 
   const abortedDevice = createFakeGpuDevice();
   const abortedLane = {
@@ -1304,8 +2618,8 @@ test('ULG resident stage worker retires gas-cell owners when pressure is omitted
   );
   assert.equal(finalized.value.releaseConfirmed, true);
   assert.equal(
-    abortedDevice.queue.submittedWorkDoneCount,
-    queueFenceCountBeforeAbort + 1
+    abortedDevice.queue.submittedWorkDoneCount || 0,
+    queueFenceCountBeforeAbort
   );
   const repeated = await runUlgMechanicsResidentStageWorkerPayload(payload(
     stage('gasCellEosFinalizer', ['resident-gas-pressure'], []),
@@ -1316,8 +2630,8 @@ test('ULG resident stage worker retires gas-cell owners when pressure is omitted
   assert.equal(repeated.value.releaseScheduled, true);
   assert.equal(repeated.value.releaseAlreadyScheduled, true);
   assert.equal(
-    abortedDevice.queue.submittedWorkDoneCount,
-    queueFenceCountBeforeAbort + 1
+    abortedDevice.queue.submittedWorkDoneCount || 0,
+    queueFenceCountBeforeAbort
   );
 });
 

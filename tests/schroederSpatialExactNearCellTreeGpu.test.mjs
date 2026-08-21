@@ -75,9 +75,11 @@ function createFakeEncoder() {
 
 function createFakeDevice() {
   const buffers = [];
+  const bindGroups = [];
   const writes = [];
   const device = {
     buffers,
+    bindGroups,
     writes,
     limits: {
       maxBufferSize: 128 * 1024 * 1024,
@@ -109,7 +111,10 @@ function createFakeDevice() {
         getBindGroupLayout(index) { return { index, entryPoint: descriptor.compute.entryPoint }; }
       };
     },
-    createBindGroup(descriptor) { return descriptor; }
+    createBindGroup(descriptor) {
+      bindGroups.push(descriptor);
+      return descriptor;
+    }
   };
   return device;
 }
@@ -568,6 +573,25 @@ test('exact-cell tree builds once from an owned directory and fails closed for s
   const second = runtime.encode(createFakeEncoder(), { spatialExecution });
   assert.equal(runtime.markExecutionSubmitted(second), true);
   assert.equal(await runtime.releaseExecutionAfter(second, Promise.resolve()), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('exact-cell tree arenas reuse exact immutable bind groups', () => {
+  const device = createFakeDevice();
+  const spatialExecution = createSpatialExecution(device);
+  const runtime = createSchroederSpatialExactNearCellTreeGpu(device, {
+    maxSourceCount: 8,
+    cellCapacity: 8,
+    arenaCount: 1,
+    label: 'test-exact-cell-tree-bind-cache'
+  });
+  const first = runtime.encode(createFakeEncoder(), { spatialExecution });
+  const explicitBindGroupCount = device.bindGroups.length;
+  assert.equal(explicitBindGroupCount, 6);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(createFakeEncoder(), { spatialExecution });
+  assert.equal(device.bindGroups.length, explicitBindGroupCount);
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
   assert.equal(runtime.destroy(), true);
 });
 

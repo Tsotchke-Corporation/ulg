@@ -328,7 +328,7 @@ test('native Slice 9 production host path admits generated same-level pressure a
           particleCount,
           particleIdentityBuffer: sphParticleUpload.identityBuffer,
           particleIdentityStrideWords: 1,
-          particleBufferSet: sphParticleUpload,
+          particleBufferSet: null,
           mechanicsLevels: [
             { selectedLevel: 0, mechanicsGrid: fineGrid },
             { selectedLevel: 1, mechanicsGrid: coarseGrid }
@@ -340,6 +340,7 @@ test('native Slice 9 production host path admits generated same-level pressure a
         || generation.selected !== true
         || !generation.parentFieldView
         || !generation.phaseVolumeInterfaceProposal
+        || generation.aggregateView != null
       ) {
         return {
           status: 'generation-rejected',

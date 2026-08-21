@@ -1,8 +1,13 @@
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+  SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1,
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_GPU_EVIDENCE_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+} from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX,
@@ -53,7 +58,12 @@ import {
 } from '../../../ulg-gpu-abi/src/sphReactionProductPlacementSegmentedWgsl.js';
 import {
   computeBufferBinding,
-  createCachedExplicitComputePipeline
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedCleanupClaim,
+  submitQueueOrderedFinalConsumerWork,
+  releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
   createWebGpuStableRadixScanUnique,
@@ -89,6 +99,12 @@ const submittedPlacementArtifactRecords = new WeakMap();
 const submittedPlacementArtifacts = new WeakSet();
 const segmentedPlacementArenaCache = new WeakMap();
 const segmentedPlacementArenaRecords = new WeakMap();
+const segmentedPlacementQueueOrderedCleanupRecords = new WeakMap();
+const segmentedPlacementCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily:
+      'schroeder-reaction-placement-segmented-arena'
+  });
 const segmentedPlacementDiagnosticArenaBySubmissionArtifact = new WeakMap();
 const segmentedPlacementDiagnosticObservationOutcomes = new WeakMap();
 
@@ -189,6 +205,9 @@ function requireLivePlacementAuthority(
     || expectation.generation !== generation
     || expectation.generationId !== authority.generationId
     || expectation.arenaIndex !== authority.spatialArenaIndex
+    || expectation.directoryAbiVersion !== authority.directoryAbiVersion
+    || expectation.expectationBufferByteLength
+      !== authority.expectationBufferByteLength
     || expectation.acquisitionCount !== authority.arenaAcquisitionOrdinal
     || expectation.expectationBuffer !== record.bindings.expectationBuffer
     || expectation.completionReceiptBuffer
@@ -856,6 +875,33 @@ function requireSegmentedPlacementArenaCleanupLease(
   return record;
 }
 
+function createSegmentedPlacementQueueOrderedCleanup(record, encoding) {
+  return () => {
+    if (encoding) {
+      for (const [runtime, execution] of [
+        [record.captureRadix, encoding.captureRadixExecution],
+        [record.directRadix, encoding.directRadixExecution],
+        [record.summaryRadix, encoding.summaryRadixExecution]
+      ]) {
+        if (!runtime.canReleaseExecutionQueueOrdered(execution)) {
+          throw placementArenaError(
+            'placement radix execution lost exact queue-ordered ownership',
+            'ARENA_LEASE'
+          );
+        }
+        runtime.releaseExecutionQueueOrdered(execution);
+      }
+    }
+    record.activeEncoding = null;
+    record.inFlight = false;
+    record.authority = null;
+    record.diagnosticObservationGate = null;
+    if (record.terminal || record.deviceLost) {
+      destroySegmentedPlacementArenaRecord(record);
+    }
+  };
+}
+
 export function releaseSphReactionProductPlacementSegmentedArenaAfterQueue(
   lease,
   { device, authority, submissionArtifact } = {}
@@ -874,14 +920,23 @@ export function releaseSphReactionProductPlacementSegmentedArenaAfterQueue(
     );
   }
   const submitted = submittedPlacementArtifactRecords.get(submissionArtifact);
+  const queueOrderedRelease = Boolean(
+    submissionArtifact?.queueOrderedReleaseAuthorized === true
+    && submissionArtifact?.queueFenceStatus
+      === 'same-queue-submission-order'
+    && submissionArtifact?.hostQueueFenceCount === 0
+  );
   if (
     !submitted
     || submitted.authority !== authority
     || submitted.record.device !== device
-    || !submissionArtifact.queueFence?.then
+    || (
+      !queueOrderedRelease
+      && !submissionArtifact.queueFence?.then
+    )
   ) {
     throw placementArenaError(
-      'placement arena release requires the exact submitted artifact queue fence',
+      'placement arena release requires an exact submitted artifact cleanup authority',
       'ARENA_LEASE'
     );
   }
@@ -900,6 +955,57 @@ export function releaseSphReactionProductPlacementSegmentedArenaAfterQueue(
     if (segmentedPlacementDiagnosticObservationOutcomes.has(submissionArtifact)) {
       settlePlacementDiagnosticObservation(submissionArtifact);
     }
+  }
+  if (queueOrderedRelease) {
+    if (
+      diagnosticObservationRequired
+      && !segmentedPlacementDiagnosticObservationOutcomes.has(
+        submissionArtifact
+      )
+    ) {
+      throw placementArenaError(
+        'diagnostic placement arena release requires its completed observation',
+        'ARENA_LEASE'
+      );
+    }
+    const diagnosticObservationOutcome = diagnosticObservationRequired
+      ? segmentedPlacementDiagnosticObservationOutcomes.get(
+          submissionArtifact
+        )
+      : null;
+    const diagnosticObservationFailed =
+      diagnosticObservationOutcome?.succeeded === false;
+    if (diagnosticObservationFailed) {
+      // A failed map/copy/unmap leaves the diagnostic buffer's state
+      // untrustworthy. Preserve the established quarantine contract even on
+      // the host-fence-free cleanup route: queue order makes destruction safe,
+      // but it must never make this arena reusable.
+      record.terminal = true;
+    }
+    const queueOrderedCleanupRecord =
+      segmentedPlacementQueueOrderedCleanupRecords.get(encoding);
+    if (!queueOrderedCleanupRecord) {
+      throw placementArenaError(
+        'placement arena release requires its producer-issued cleanup claim',
+        'ARENA_LEASE'
+      );
+    }
+    const releaseReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+      device,
+      queueOrderedCleanupRecord.cleanup,
+      {
+        queueOrderedFinalConsumer:
+          submissionArtifact.queueOrderedFinalConsumerCapability,
+        producerClaim: queueOrderedCleanupRecord.claim,
+        producerOutput: encoding,
+        producerFamily:
+          'schroeder-reaction-placement-segmented-arena'
+      }
+    );
+    record.releaseFence = Promise.resolve(releaseReceipt).then(
+      () => !diagnosticObservationFailed
+    );
+    return record.releaseFence;
   }
   record.releaseFence = submissionArtifact.queueFence.then(
     async () => {
@@ -1794,7 +1900,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     + captureRadixExecution.encodedDispatchCount
     + directRadixExecution.encodedDispatchCount
     + summaryRadixExecution.encodedDispatchCount;
-  const result = Object.freeze({
+  const result = {
     schema: 'peercompute.ulg.sph-reaction-product-placement-segmented-encoding.v3',
     status: 'sph-reaction-product-placement-segmented-encoded',
     authority,
@@ -1831,13 +1937,89 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     }),
     deterministicApplyMode: SPH_REACTION_PRODUCT_PLACEMENT_LAW.mutationOrder,
     law: SPH_REACTION_PRODUCT_PLACEMENT_LAW
+  };
+  const segmentedArenaCleanup =
+    createSegmentedPlacementQueueOrderedCleanup(
+      arenaRecord,
+      result
+    );
+  const segmentedArenaCleanupClaim =
+    registerQueueOrderedCleanupClaim(
+      segmentedPlacementCleanupClaimIssuer,
+      device,
+      {
+        producerOutput: result,
+        cleanup: segmentedArenaCleanup
+      }
+    );
+  segmentedPlacementQueueOrderedCleanupRecords.set(result, {
+    claim: segmentedArenaCleanupClaim,
+    cleanup: segmentedArenaCleanup
   });
+  Object.defineProperty(
+    result,
+    'segmentedArenaCleanupClaim',
+    {
+      value: segmentedArenaCleanupClaim,
+      enumerable: false
+    }
+  );
+  Object.freeze(result);
   arenaRecord.activeEncoding = result;
   authorityRecord.segmentedEncoding = result;
   return result;
 }
 
-function expectationBufferForGeneration(device, generation) {
+function resolvePlacementExpectationAbi(authentication, generation) {
+  const directoryAbiVersion = authentication?.directoryAbiVersion;
+  const generationAbiVersion = generation?.execution?.abiVersion;
+  const directoryV2 =
+    directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  if (
+    directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+    && !directoryV2
+  ) {
+    throw placementError(
+      `placement does not support directory ABI version ${
+        directoryAbiVersion
+      }`,
+      'UNSUPPORTED_DIRECTORY_ABI'
+    );
+  }
+  if (generationAbiVersion !== directoryAbiVersion) {
+    throw placementError(
+      'placement authentication/generation directory ABI mismatch',
+      'DIRECTORY_ABI_MISMATCH'
+    );
+  }
+  const expectationBufferByteLength = directoryV2
+    ? SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+    : SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES;
+  if (
+    authentication.expectationUniformBytes
+      !== expectationBufferByteLength
+    || authentication.expectationData?.byteLength
+      !== expectationBufferByteLength
+  ) {
+    throw placementError(
+      'placement expectation ABI does not match the directory ABI',
+      'EXPECTATION_ABI_MISMATCH'
+    );
+  }
+  return Object.freeze({
+    directoryAbiVersion,
+    expectationBufferByteLength
+  });
+}
+
+function expectationBufferForGeneration(
+  device,
+  generation,
+  {
+    directoryAbiVersion,
+    expectationBufferByteLength
+  }
+) {
   const arenaIndex = generation?.execution?.arenaIndex;
   if (!Number.isInteger(arenaIndex) || arenaIndex < 0) {
     throw placementError(
@@ -1850,7 +2032,8 @@ function expectationBufferForGeneration(device, generation) {
     deviceCache = new Map();
     expectationCacheByDevice.set(device, deviceCache);
   }
-  let entry = deviceCache.get(arenaIndex) ?? null;
+  const arenaKey = `${directoryAbiVersion}:${arenaIndex}`;
+  let entry = deviceCache.get(arenaKey) ?? null;
   if (
     entry?.generation
     && entry.generation !== generation
@@ -1871,12 +2054,18 @@ function expectationBufferForGeneration(device, generation) {
   let bufferCreationCount = 0;
   if (!entry) {
     const expectationBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: `ulg-schroeder-spatial-reaction-product-placement-expectation-arena-${arenaIndex}`,
-      size: SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+      label:
+        `ulg-schroeder-spatial-reaction-product-placement-expectation-v${
+          directoryAbiVersion
+        }-arena-${arenaIndex}`,
+      size: expectationBufferByteLength,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     }), device);
     entry = {
+      arenaKey,
       arenaIndex,
+      directoryAbiVersion,
+      expectationBufferByteLength,
       expectationBuffer,
       completionReceiptBuffer: null,
       generation: null,
@@ -1885,8 +2074,17 @@ function expectationBufferForGeneration(device, generation) {
       totalBufferCreationCount: 1,
       inFlightAuthority: null
     };
-    deviceCache.set(arenaIndex, entry);
+    deviceCache.set(arenaKey, entry);
     bufferCreationCount = 1;
+  }
+  if (
+    entry.directoryAbiVersion !== directoryAbiVersion
+    || entry.expectationBufferByteLength !== expectationBufferByteLength
+  ) {
+    throw placementError(
+      `placement expectation arena ${arenaIndex} ABI identity mismatch`,
+      'EXPECTATION_ABI_MISMATCH'
+    );
   }
   if (entry.inFlightAuthority) {
     throw placementError(
@@ -1896,7 +2094,10 @@ function expectationBufferForGeneration(device, generation) {
   }
   if (!entry.completionReceiptBuffer) {
     entry.completionReceiptBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: `ulg-schroeder-spatial-reaction-product-placement-completion-receipt-arena-${arenaIndex}`,
+      label:
+        `ulg-schroeder-spatial-reaction-product-placement-completion-receipt-v${
+          directoryAbiVersion
+        }-arena-${arenaIndex}`,
       size: SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,
       usage:
         GPU_BUFFER_USAGE.STORAGE
@@ -2089,7 +2290,15 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     );
   }
 
-  const expectation = expectationBufferForGeneration(device, generation);
+  const expectationAbi = resolvePlacementExpectationAbi(
+    authentication,
+    generation
+  );
+  const expectation = expectationBufferForGeneration(device, generation, {
+    directoryAbiVersion: expectationAbi.directoryAbiVersion,
+    expectationBufferByteLength:
+      expectationAbi.expectationBufferByteLength
+  });
   device.queue.writeBuffer(
     expectation.entry.expectationBuffer,
     0,
@@ -2116,6 +2325,9 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     deviceId: webGpuDeviceId(device),
     generation,
     generationId: authentication.generationId,
+    directoryAbiVersion: expectationAbi.directoryAbiVersion,
+    expectationBufferByteLength:
+      expectationAbi.expectationBufferByteLength,
     epochIdentity: authentication.epochIdentity,
     directoryEpochIdentity:
       resolvedPlacementSourceFamily.directoryEpochIdentity,
@@ -2147,6 +2359,9 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     generation,
     placementSourceFamily: resolvedPlacementSourceFamily,
     authentication,
+    directoryAbiVersion: expectationAbi.directoryAbiVersion,
+    expectationBufferByteLength:
+      expectationAbi.expectationBufferByteLength,
     expectationEntry: expectation.entry,
     bindings: Object.freeze({
       directoryBuffer: authentication.directoryBuffer,
@@ -2201,6 +2416,15 @@ export function resolveSchroederSpatialReactionProductPlacementAuthority(
     || !Object.isFrozen(authority)
     || authority.generation !== generation
     || record.generation !== generation
+    || authority.directoryAbiVersion !== record.directoryAbiVersion
+    || authority.directoryAbiVersion !== record.authentication.directoryAbiVersion
+    || authority.directoryAbiVersion !== generation?.execution?.abiVersion
+    || authority.expectationBufferByteLength
+      !== record.expectationBufferByteLength
+    || authority.expectationBufferByteLength
+      !== record.authentication.expectationUniformBytes
+    || record.authentication.expectationData?.byteLength
+      !== record.expectationBufferByteLength
     || generation?.execution?.released === true
     || generation?.releaseScheduled === true
     || record.device !== device
@@ -2245,6 +2469,8 @@ export function resolveSchroederSpatialReactionProductPlacementAuthority(
     authority,
     generation,
     authentication: record.authentication,
+    directoryAbiVersion: record.directoryAbiVersion,
+    expectationBufferByteLength: record.expectationBufferByteLength,
     ...bindings
   });
 }
@@ -2513,7 +2739,8 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
 export function submitSchroederSpatialReactionProductPlacementWebGpu({
   authority,
   encoding,
-  completionReadbackBuffer
+  completionReadbackBuffer,
+  queueOrderedProducerClaims = []
 } = {}) {
   if (completionReadbackBuffer !== undefined) {
     throw placementError(
@@ -2542,36 +2769,57 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
   }
   const readback = encodingRecord.readback;
   const commandBuffer = encodingRecord.commandBuffer;
+  const segmentedEncoding = encoding.segmentedEncoding;
+  const segmentedCleanupRecord =
+    segmentedPlacementQueueOrderedCleanupRecords.get(
+      segmentedEncoding
+    );
+  const exactProducerClaims = [
+    record.placementSourceFamily?.queueOrderedCleanupClaim,
+    segmentedEncoding?.segmentedArenaCleanupClaim,
+    ...(Array.isArray(queueOrderedProducerClaims)
+      ? queueOrderedProducerClaims
+      : [])
+  ].filter(Boolean);
   encodingRecord.submissionAttempted = true;
+  let queueOrderedFinalConsumerCapability = null;
   try {
-    record.device.queue.submit([commandBuffer]);
+    if (
+      exactProducerClaims.length > 0
+    ) {
+      queueOrderedFinalConsumerCapability =
+        submitQueueOrderedFinalConsumerWork(
+          record.device,
+          [commandBuffer],
+          {
+            finalConsumerOwner: authority,
+            producerClaims: exactProducerClaims
+          }
+        );
+    } else {
+      record.device.queue.submit([commandBuffer]);
+    }
     encodingRecord.submitted = true;
   } catch (error) {
     record.submissionFailed = true;
+    if (segmentedCleanupRecord) {
+      try {
+        cancelQueueOrderedCleanupClaim(
+          segmentedCleanupRecord.claim,
+          record.device,
+          {
+            producerOutput: segmentedEncoding,
+            cleanup: segmentedCleanupRecord.cleanup
+          }
+        );
+      } catch {
+        // External claims remain with their exact producers for fenced
+        // submission-failure cleanup.
+      }
+    }
     throw error;
   }
-  let queueFence;
-  let queueFenceStatus = 'exact-queue-submission-fence';
-  try {
-    queueFence = record.device.queue?.onSubmittedWorkDone?.();
-    if (!queueFence?.then) {
-      throw new TypeError('queue completion fence is not thenable');
-    }
-  } catch {
-    // Submission already happened. Never fabricate completion: quarantine
-    // reuse until device loss (or forever on a nonconforming mock device)
-    // while still minting the truthful submitted artifact.
-    queueFenceStatus = 'terminal-quarantine-no-queue-fence';
-    queueFence = record.device.lost?.then
-      ? Promise.resolve(record.device.lost).then(() => {
-          throw placementError(
-            'placement queue completion became unobservable before device loss',
-            'DEVICE_LOSS'
-          );
-        })
-      : new Promise(() => {});
-  }
-  const artifact = Object.freeze({
+  const artifact = {
     schema:
       'peercompute.ulg.schroeder-spatial-reaction-product-placement-submission-artifact.v3',
     status: 'schroeder-spatial-reaction-product-placement-gpu-resident-submitted',
@@ -2589,6 +2837,8 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
     authority,
     generation: record.generation,
     generationId: authority.generationId,
+    directoryAbiVersion: record.directoryAbiVersion,
+    expectationBufferByteLength: record.expectationBufferByteLength,
     epochIdentity: authority.epochIdentity,
     directoryEpochIdentity: authority.directoryEpochIdentity,
     queryStateEpochIdentity: authority.queryStateEpochIdentity,
@@ -2621,10 +2871,24 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
     destinationPublicationMode:
       'gpu-terminal-safe-placed-or-exact-frozen-fallback',
     deterministicApplyMode: encoding.deterministicApplyMode,
-    queueFenceStatus,
-    arenaReuseAllowed: queueFenceStatus === 'exact-queue-submission-fence',
-    queueFence
-  });
+    queueFenceStatus: 'same-queue-submission-order',
+    queueOrderedReleaseAuthorized: true,
+    arenaReuseAllowed: true,
+    hostQueueFenceCount: 0,
+    queueCompletionMethod: 'same-gpu-queue-submission-order',
+    queueFence: null
+  };
+  if (queueOrderedFinalConsumerCapability) {
+    Object.defineProperty(
+      artifact,
+      'queueOrderedFinalConsumerCapability',
+      {
+        value: queueOrderedFinalConsumerCapability,
+        enumerable: false
+      }
+    );
+  }
+  Object.freeze(artifact);
   submittedPlacementArtifactRecords.set(artifact, {
     authority,
     record,
@@ -2661,6 +2925,13 @@ export function isSubmittedSchroederSpatialReactionProductPlacementArtifact(
     && artifact.transactionalAuxiliaryMaterializationEncoded === true
     && artifact.destinationPublicationMode
       === 'gpu-terminal-safe-placed-or-exact-frozen-fallback'
+    && artifact.queueFenceStatus === 'same-queue-submission-order'
+    && artifact.queueOrderedReleaseAuthorized === true
+    && artifact.arenaReuseAllowed === true
+    && artifact.hostQueueFenceCount === 0
+    && artifact.queueCompletionMethod
+      === 'same-gpu-queue-submission-order'
+    && artifact.queueFence == null
     && artifact.positionMayChange === true
     && artifact.topologyMayChange === true
     && artifact.authority === record.authority
@@ -2964,19 +3235,23 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
       'OBSERVATION'
     );
     error.receiptDiagnostic = Object.freeze({
-      status,
-      transactionalTerminalStatus,
-      classifierReadyCount,
-      classifierRejectedCount,
-      classifierUnknownCount,
-      rejectedEventCount,
-      unknownDispositionCount,
-      overflowFlags,
-      activeEventCount,
-      captureMergeEventCount,
-      destinationMutationCount,
-      transactionalCommittedParticleCount,
-      transactionalFallbackParticleCount
+      ...decoded,
+      dispositionCount,
+      expected: Object.freeze({
+        generationId: authority.generationId,
+        supportProfileId: authority.supportProfileId,
+        eventCapacity: authority.productEventCapacity,
+        particleCount: authority.particleCount,
+        mutationIntentCapacity: eventCapacity * 2,
+        destinationRadixPassCount: WEBGPU_RADIX_PASSES_PER_WORD * 3,
+        destinationSegmentReducePassCount:
+          reductionLevelCount(eventCapacity) * 2,
+        destinationIntentVisitedCount: eventCapacity * 2,
+        summaryRadixPassCount: WEBGPU_RADIX_PASSES_PER_WORD,
+        summarySegmentReducePassCount: reductionLevelCount(eventCapacity),
+        eventLedgerRowCount,
+        summaryLedgerRowCount
+      })
     });
     error.message += `: ${JSON.stringify(error.receiptDiagnostic)}`;
     throw error;
@@ -3197,6 +3472,8 @@ export function finalizeSchroederSpatialReactionProductPlacementAuthority(
     authority,
     generation: record.generation,
     generationId: authority.generationId,
+    directoryAbiVersion: record.directoryAbiVersion,
+    expectationBufferByteLength: record.expectationBufferByteLength,
     epochIdentity: authority.epochIdentity,
     consumerId: authority.consumerId,
     phase: authority.phase,

@@ -513,6 +513,43 @@ test('S9-B receipt binds only exact live S9-A evidence and never writes borrowed
   assert.equal(phase.moment.controlBuffer.destroyCount, 0);
 });
 
+test('S9-B receipt arenas reuse exact immutable bind groups', () => {
+  const fixture = createFakeDevice();
+  const authority = createAuthority(fixture.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const phase = buildS9aMoment(fixture.device, authority);
+  const runtime = createSchroederSpatialPhaseVolumeReceiptGpu(fixture.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1,
+    label: 'test-phase-volume-receipt-bind-cache'
+  });
+  const baselineBindGroupCount = fixture.bindGroups.length;
+  const first = runtime.encode(createFakeEncoder(), {
+    phaseVolumeMoment: phase.moment
+  });
+  const explicitBindGroupCount = fixture.bindGroups.length - baselineBindGroupCount;
+  assert.equal(explicitBindGroupCount, 3);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(createFakeEncoder(), {
+    phaseVolumeMoment: phase.moment
+  });
+  assert.equal(
+    fixture.bindGroups.length - baselineBindGroupCount,
+    explicitBindGroupCount
+  );
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+  assert.equal(phase.runtime.releaseExecution(
+    phase.moment,
+    { discardedEncoder: true }
+  ), true);
+  assert.equal(phase.runtime.destroy(), true);
+});
+
 test('S9-B v2 scans ActiveSource indirectly, retains physical rows, and never invents A', () => {
   const fixture = createFakeDevice();
   const authority = createAuthority(fixture.device, {

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { ELEMENT_MATERIAL_OPTIONS } from '../src/visualization/sphMaterialOptions.js';
 import {
@@ -8,10 +9,19 @@ import {
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
+  serializeSphInitialBodies,
+  sphInitialBodiesFromLegacyDropBase
+} from '../src/runtime/sphInitialBodies.js';
+import {
+  coldCeilingCondensationEvidence,
   condensedLaunchEvidence,
   generatedCohortTrajectoryEvidence,
   phaseAwareVolumeRatioEvidence
 } from './sph-visual-phase-acceptance.mjs';
+import {
+  assertArtifactPathOutsideRepo,
+  createFailSentinelWriter
+} from './ss-release-evidence-common.mjs';
 
 const DEFAULT_BASE_PORT = 5310;
 const DEFAULT_OUTPUT_DIR = '/tmp/ulg-visual-sanity-matrix';
@@ -21,6 +31,45 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_FRAME_MAX = 16;
 const DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION = 1e-6;
 
+export const SPH_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION_ENV =
+  'ULG_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION';
+
+export function durableVisualMatrixReleasePublicationEnabled(
+  value = process.env[SPH_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION_ENV]
+) {
+  return value === '1';
+}
+
+export async function persistVisualMatrixArtifact({
+  artifactPath,
+  repoDir,
+  value,
+  label = 'SPH visual matrix artifact',
+  durableReleasePublication = false
+}) {
+  const bytes = Buffer.isBuffer(value) || value instanceof Uint8Array
+    ? value
+    : Buffer.from(String(value), 'utf8');
+  if (!durableReleasePublication) {
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, bytes);
+    return Object.freeze({ path: artifactPath, byteLength: bytes.byteLength });
+  }
+  const writer = await createFailSentinelWriter({
+    outputPath: artifactPath,
+    repoDir,
+    sentinel: Buffer.from(`failed ${label} publication\n`, 'utf8'),
+    format: 'text',
+    label
+  });
+  await writer.replace(bytes);
+  return Object.freeze({
+    path: writer.outputPath,
+    byteLength: bytes.byteLength,
+    replacementCount: writer.replacementCount()
+  });
+}
+
 const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
   'water-cycle': Object.freeze({
     generatedGas: Object.freeze({
@@ -29,6 +78,16 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
       minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
       minimumSustainedRiseM: 0.05,
       tailSampleCount: 2
+    }),
+    coldCeilingCondensation: Object.freeze({
+      selector: Object.freeze({
+        materials: Object.freeze(['h2o']),
+        phases: Object.freeze(['gas'])
+      }),
+      minimumCeilingContactYM: 4.75,
+      minimumGasMassLossFraction: 0.02,
+      minimumGasMassLossFractionOfSystem: 1e-6,
+      minimumReturnDropM: 0.25
     })
   }),
   'iron-ice-quench': Object.freeze({
@@ -56,7 +115,121 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
   })
 });
 
-const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
+export function scaleStandardPhaseAcceptance(acceptance, sceneLengthScale = 1) {
+  if (acceptance == null) return null;
+  const scale = Number(sceneLengthScale);
+  if (!Number.isFinite(scale) || !(scale > 0)) {
+    throw new RangeError('sceneLengthScale must be a positive finite number');
+  }
+  return Object.freeze({
+    ...acceptance,
+    ...(acceptance.generatedGas
+      ? {
+          generatedGas: Object.freeze({
+            ...acceptance.generatedGas,
+            minimumSustainedRiseM:
+              acceptance.generatedGas.minimumSustainedRiseM * scale
+          })
+        }
+      : {}),
+    ...(acceptance.condensedLaunch
+      ? {
+          condensedLaunch: Object.freeze({
+            ...acceptance.condensedLaunch,
+            maxUpwardExcursionM:
+              acceptance.condensedLaunch.maxUpwardExcursionM * scale
+          })
+        }
+      : {}),
+    ...(acceptance.coldCeilingCondensation
+      ? {
+          coldCeilingCondensation: Object.freeze({
+            ...acceptance.coldCeilingCondensation,
+            minimumCeilingContactYM:
+              acceptance.coldCeilingCondensation
+                .minimumCeilingContactYM * scale,
+            minimumReturnDropM:
+              acceptance.coldCeilingCondensation.minimumReturnDropM
+              * scale
+          })
+        }
+      : {})
+  });
+}
+
+export function standardScenarioPhysicalLengthScale(entry) {
+  const sceneLengthScale = Number(entry?.runtime?.sceneLengthScale ?? 1);
+  const baseParticlesPerEdge = Number(entry?.controls?.basen ?? 5);
+  if (
+    !Number.isFinite(sceneLengthScale)
+    || !(sceneLengthScale > 0)
+    || !Number.isFinite(baseParticlesPerEdge)
+    || !(baseParticlesPerEdge > 0)
+  ) {
+    throw new RangeError('standard scenario geometry scale must be positive and finite');
+  }
+  // Legacy phase controls define the physical base edge as
+  // sceneLengthScale * basen / referenceBasen. This remains invariant when a
+  // preset raises resolution by increasing basen while reducing the scale.
+  return sceneLengthScale * baseParticlesPerEdge / 5;
+}
+
+export function resolveVisualMatrixScenarioTimeoutMs({
+  scenarioTimeoutMs,
+  matrixTimeoutMs,
+  matrixTimeoutExplicit = false
+}) {
+  return matrixTimeoutExplicit
+    ? matrixTimeoutMs
+    : scenarioTimeoutMs ?? matrixTimeoutMs;
+}
+
+const CESIUM_FLUORINE_TWO_LEVEL_BODIES = serializeSphInitialBodies(
+  sphInitialBodiesFromLegacyDropBase({
+    baseMaterial: 'F',
+    dropMaterial: 'Cs',
+    baseSizeM: [1, 1, 1],
+    dropSizeM: [0.6, 0.6, 0.6],
+    baseCenterM: [2, 0.5, 2],
+    dropCenterM: [2, 1.31, 2],
+    baseTemperatureK: 293.15,
+    dropTemperatureK: 293.15,
+    baseParticlesPerEdge: [5, 5, 5],
+    dropParticlesPerEdge: [5, 5, 5]
+  })
+);
+const CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M = Math.cbrt(
+  (3 * (0.6 / 5) ** 3) / (4 * Math.PI)
+);
+const CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M =
+  CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M / 1.5;
+
+function standardScenarioSchroederParams(entry) {
+  if (entry.id === 'cesium-fluorine') {
+    return {
+      bodies: CESIUM_FLUORINE_TWO_LEVEL_BODIES,
+      schroederLevel: '0',
+      schroederMinLevel: '0',
+      schroederMaxLevel: '1',
+      schroederBaseGridSpacingM:
+        String(CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M),
+      schroederTwoLevel: '1',
+      schroederTwoLevelAuthority: 'authoritative',
+      schroederTwoLevelSubsteps: '2',
+      schroederCrossLevelCoupling: '1',
+      schroederMechanicsFieldPairV2: '1'
+    };
+  }
+  return {
+    schroederLevel: '0',
+    schroederMinLevel: '0',
+    schroederMaxLevel: '0',
+    schroederTwoLevel: '0',
+    schroederCrossLevelCoupling: '0'
+  };
+}
+
+export const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
   label: `standard-${entry.id}`,
   presetId: entry.id,
   url: sphPhaseScenarioPresetUrl(entry.id, {
@@ -64,21 +237,24 @@ const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
     renderOwnership: 'main-thread-renderer',
     surfaceDraw: 'native-webgpu-surface-consumer',
     ss: '1',
-    schroederLevel: '1',
+    // Cs/F is the smallest standard arm with an explicit, preflight-admitted
+    // adjacent-level carrier fixture. Other standard arms remain single-level.
+    ...standardScenarioSchroederParams(entry),
     schroederPortableSummary: '1',
     schroederActiveNodeIndex: '1',
-    // Slice 9 puts the two-level/cross-level transport under test. Leaving
-    // these off runs the matrix around the feature it is supposed to gate.
-    schroederTwoLevel: '1',
-    schroederCrossLevelCoupling: '1',
     schroederPhaseVolumeMigration: '1',
     schroederLawQueue: '1',
     schroederLawNeighborCandidates: '1'
   }),
   visualRendererMode: 'native-webgpu-surface-consumer',
   ...entry.validation,
-  phaseAwareAcceptance: STANDARD_PHASE_ACCEPTANCE_BY_PRESET[entry.id] || null,
+  phaseAwareAcceptance: scaleStandardPhaseAcceptance(
+    STANDARD_PHASE_ACCEPTANCE_BY_PRESET[entry.id] || null,
+    standardScenarioPhysicalLengthScale(entry)
+  ),
   expectedCheckpoints: entry.validation.checkpoints,
+  expectAuthoritativeTwoLevelMechanics:
+    entry.id === 'cesium-fluorine',
   standardEnabled: true,
   defaultEnabled: false
 }));
@@ -275,6 +451,43 @@ function effectiveVisualRendererModes(probe) {
   )));
 }
 
+export function synthesizeStandardScenarioIssues(
+  scenario,
+  probe,
+  {
+    expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe),
+    mechanicsIntegrator = inferMechanicsIntegrator(probe),
+    rendererModes = effectiveVisualRendererModes(probe)
+  } = {}
+) {
+  const mechanicsMismatchIssues = scenario?.expectedMechanics
+    && mechanicsIntegrator
+    && mechanicsIntegrator !== scenario.expectedMechanics
+    ? ['mechanics-integrator-mismatch']
+    : [];
+  const rendererMismatchIssues = scenario?.visualRendererMode
+    && (
+      rendererModes.length === 0
+      || rendererModes.some(
+        (mode) => mode !== scenario.visualRendererMode
+      )
+    )
+    ? ['visual-renderer-mode-mismatch']
+    : [];
+  const expectedBehaviorIssues = expectedBehavior?.status === 'pass'
+    ? []
+    : expectedBehavior?.checks
+      ?.filter((check) => check.status !== 'pass')
+      .map((check) => `expected-behavior:${check.id}`) || [];
+  return uniqueStrings(
+    probe?.issues,
+    probe?.analysis?.issues,
+    mechanicsMismatchIssues,
+    rendererMismatchIssues,
+    expectedBehaviorIssues
+  );
+}
+
 function visualSurfaceIssueKey(issue) {
   const axes = Array.isArray(issue?.axes) ? issue.axes.join(',') : '';
   return [
@@ -344,7 +557,7 @@ function selectedScenarios() {
   return SCENARIOS.filter((scenario) => wanted.has(scenario.label));
 }
 
-function deterministicRandomPairScenarios() {
+export function deterministicRandomPairScenarios() {
   const count = positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_COUNT, 3);
   const rawSeed = Number(process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? 0x7a11d2026);
   let state = Number.isFinite(rawSeed) ? (Math.trunc(rawSeed) >>> 0) : 0x7a11d2026;
@@ -387,12 +600,15 @@ function deterministicRandomPairScenarios() {
     params.set('renderOwnership', 'main-thread-renderer');
     params.set('surfaceDraw', 'native-webgpu-surface-consumer');
     params.set('ss', '1');
-    params.set('schroederLevel', '1');
+    params.set('schroederLevel', '0');
+    params.set('schroederMinLevel', '0');
+    params.set('schroederMaxLevel', '0');
     params.set('schroederPortableSummary', '1');
     params.set('schroederActiveNodeIndex', '1');
-    // See STANDARD_SCENARIOS: the Slice 9 transport must be live here too.
-    params.set('schroederTwoLevel', '1');
-    params.set('schroederCrossLevelCoupling', '1');
+    // See STANDARD_SCENARIOS: these equal-spacing visual fixtures occupy one
+    // SS level. Cross-level mechanics is covered by populated native fixtures.
+    params.set('schroederTwoLevel', '0');
+    params.set('schroederCrossLevelCoupling', '0');
     params.set('schroederPhaseVolumeMigration', '1');
     params.set('schroederLawQueue', '1');
     params.set('schroederLawNeighborCandidates', '1');
@@ -557,6 +773,24 @@ function checkpointMaxTemperature(checkpoint, material = null, phase = null) {
   return values.length ? Math.max(...values) : null;
 }
 
+export function checkpointMassWeightedMeanTemperature(
+  checkpoint,
+  material = null,
+  phase = null
+) {
+  const rows = checkpointRows(checkpoint, material, phase);
+  const massKg = rows.reduce(
+    (sum, row) => sum + (finiteOrNull(row?.massKg) || 0),
+    0
+  );
+  if (!(massKg > 0)) return null;
+  return rows.reduce((sum, row) => (
+    sum
+    + (finiteOrNull(row?.temperatureMassWeightedMeanK) || 0)
+      * (finiteOrNull(row?.massKg) || 0)
+  ), 0) / massKg;
+}
+
 function checkpointYCenter(checkpoint, material = null, phase = null) {
   const rows = checkpointRows(checkpoint, material, phase);
   const totalMass = rows.reduce((sum, row) => sum + (finiteOrNull(row?.massKg) || 0), 0);
@@ -575,22 +809,170 @@ function behaviorCheck(id, expectation, passed, observed, { inconclusive = false
   };
 }
 
-function evaluateStandardScenarioBehavior(scenario, probe) {
+const SURFACE_STRESS_SUBMISSION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-surface-stress-submission.v2';
+const SURFACE_STRESS_SUBMISSION_STATUS =
+  'eighteen-pass-central-bond-surface-stress-submitted-unverified';
+const SURFACE_STRESS_STANDALONE_LIFECYCLE =
+  'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit';
+const SURFACE_STRESS_AMBIENT_BUOYANCY_MODE =
+  'field-local-s9ab-current-volume-ambient-source';
+
+function metricSurfaceStressSubmission(metric) {
+  return metric?.residentStep?.phaseVolumeSurfaceStressSubmission
+    ?? metric?.residentSteps?.finalStepPhaseVolumeSurfaceStressSubmission
+    ?? metric?.schroederTelemetry?.phaseVolumeSurfaceStressSubmission
+    ?? null;
+}
+
+function surfaceStressSubmissionExact(submission, selectedLevel) {
+  return Boolean(
+    submission?.schema === SURFACE_STRESS_SUBMISSION_SCHEMA
+    && submission?.status === SURFACE_STRESS_SUBMISSION_STATUS
+    && submission?.requested === true
+    && submission?.submitted === true
+    && Number(submission?.dispatchCount) === 18
+    && Number(submission?.lifecycleDispatchCount) === 21
+    && submission?.lifecycleMode === SURFACE_STRESS_STANDALONE_LIFECYCLE
+    && submission?.ambientBuoyancyMode
+      === SURFACE_STRESS_AMBIENT_BUOYANCY_MODE
+    && submission?.levelRole === 'single'
+    && submission?.twoLevel === false
+    && Number(submission?.positiveSurfaceTensionPhaseRecordCount) > 0
+    && submission?.surfaceTensionCoefficientStatus
+      === 'positive-surface-tension-coefficient-ready'
+    && submission?.verification === 'queue-submitted-no-full-readback'
+    && Number(submission?.selectedLevel) === selectedLevel
+  );
+}
+
+function metricSurfaceStressEvidenceExact(metric, selectedLevel) {
+  const finalSubmission = metricSurfaceStressSubmission(metric);
+  if (!surfaceStressSubmissionExact(finalSubmission, selectedLevel)) {
+    return false;
+  }
+  const steps = metric?.residentSteps;
+  if (!steps) return true;
+  const completedStepCount = Number(steps.completedStepCount);
+  const submissions = arrayOf(steps.phaseVolumeSurfaceStressSubmissions);
+  return Boolean(
+    steps.phaseVolumeSurfaceStressRequired === true
+    && steps.phaseVolumeSurfaceStressSubmissionEvidenceComplete === true
+    && Number.isInteger(completedStepCount)
+    && completedStepCount > 0
+    && Number(steps.phaseVolumeSurfaceStressExpectedSubmissionCount)
+      === completedStepCount
+    && Number(steps.phaseVolumeSurfaceStressSubmissionCount)
+      === completedStepCount
+    && submissions.length === completedStepCount
+    && submissions.every((submission) => (
+      surfaceStressSubmissionExact(submission, selectedLevel)
+    ))
+  );
+}
+
+/**
+ * Require queue-submission evidence from every retained resident execution
+ * sample when a standard scenario requests the surface-tension law.
+ */
+export function evaluateSurfaceStressExecutionEvidence(scenario, probe) {
+  const url = new URL(scenario?.url || '/', 'https://ulg.invalid');
+  const requested = /^(1|true|on|yes)$/i.test(
+    String(url.searchParams.get('lawst') || '')
+  );
+  if (!requested) return null;
+
+  const selectedLevel = Number(url.searchParams.get('schroederLevel'));
+  const metrics = arrayOf(probe?.timeline?.metrics);
+  const residentMetrics = metrics.filter((metric) => (
+    metric?.residentStep != null
+    || Number(metric?.residentSteps?.completedStepCount) > 0
+  ));
+  const submissions = residentMetrics.map(metricSurfaceStressSubmission);
+  const exactSubmissionCount = residentMetrics.filter((metric) => (
+    metricSurfaceStressEvidenceExact(metric, selectedLevel)
+  )).length;
+  const lastSubmission = submissions.at(-1) || null;
+  const passed = (
+    Number.isInteger(selectedLevel)
+    && residentMetrics.length > 0
+    && exactSubmissionCount === residentMetrics.length
+    && metricSurfaceStressEvidenceExact(residentMetrics.at(-1), selectedLevel)
+  );
+
+  return behaviorCheck(
+    'surface-stress-execution-evidence',
+    'every retained resident execution submits the exact single-level nine-dispatch surface-stress lifecycle',
+    passed,
+    {
+      requested,
+      selectedLevel: Number.isInteger(selectedLevel) ? selectedLevel : null,
+      residentExecutionSampleCount: residentMetrics.length,
+      exactSubmissionCount,
+      lastSubmission
+    }
+  );
+}
+
+export function evaluateAuthoritativeTwoLevelMechanicsEvidence(
+  scenario,
+  probe
+) {
+  if (scenario?.expectAuthoritativeTwoLevelMechanics !== true) return null;
+  const metrics = arrayOf(probe?.timeline?.metrics);
+  const residentMetrics = metrics.filter((metric) => (
+    metric?.residentStep != null
+    || Number(metric?.residentSteps?.completedStepCount) > 0
+  ));
+  const completeSampleCount = residentMetrics.filter((metric) => (
+    metric?.schroederTelemetry?.twoLevelMechanicsCoverageComplete === true
+  )).length;
+  return behaviorCheck(
+    'authoritative-two-level-mechanics-coverage',
+    'every retained resident execution completes authoritative adjacent-level mechanics',
+    (
+      residentMetrics.length > 0
+      && completeSampleCount === residentMetrics.length
+    ),
+    {
+      requested: true,
+      residentExecutionSampleCount: residentMetrics.length,
+      completeSampleCount,
+      lastSchroederTelemetry:
+        residentMetrics.at(-1)?.schroederTelemetry ?? null
+    }
+  );
+}
+
+export function evaluateStandardScenarioBehavior(scenario, probe) {
   if (!scenario.standardEnabled) return null;
+  const surfaceStressExecutionCheck =
+    evaluateSurfaceStressExecutionEvidence(scenario, probe);
+  const authoritativeTwoLevelMechanicsCheck =
+    evaluateAuthoritativeTwoLevelMechanicsEvidence(scenario, probe);
   const checkpoints = authoritativeCheckpointSeries(probe);
   if (checkpoints.length < 2) {
-    return {
-      schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
-      status: 'inconclusive',
-      presetId: scenario.presetId || null,
-      checkpointCount: checkpoints.length,
-      checks: [behaviorCheck(
+    const checks = [
+      behaviorCheck(
         'authoritative-checkpoint-series',
         'at least two authoritative GPU checkpoints are captured',
         false,
         { checkpointCount: checkpoints.length },
         { inconclusive: true }
-      )]
+      ),
+      ...(surfaceStressExecutionCheck ? [surfaceStressExecutionCheck] : []),
+      ...(authoritativeTwoLevelMechanicsCheck
+        ? [authoritativeTwoLevelMechanicsCheck]
+        : [])
+    ];
+    return {
+      schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
+      status: checks.some((check) => check.status === 'fail')
+        ? 'fail'
+        : 'inconclusive',
+      presetId: scenario.presetId || null,
+      checkpointCount: checkpoints.length,
+      checks
     };
   }
 
@@ -610,8 +992,24 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     checkpoints,
     phaseAwareConfig.volumeRatio || {}
   );
+  const condensationEvidence = phaseAwareConfig.coldCeilingCondensation
+    ? coldCeilingCondensationEvidence(
+        checkpoints,
+        phaseAwareConfig.coldCeilingCondensation
+      )
+    : null;
+  const generatedGasCheckpoints =
+    condensationEvidence?.ceilingContactCheckpointIndex != null
+      ? checkpoints.slice(
+          0,
+          condensationEvidence.ceilingContactCheckpointIndex + 1
+        )
+      : checkpoints;
   const generatedGasEvidence = phaseAwareConfig.generatedGas
-    ? generatedCohortTrajectoryEvidence(checkpoints, phaseAwareConfig.generatedGas)
+    ? generatedCohortTrajectoryEvidence(
+        generatedGasCheckpoints,
+        phaseAwareConfig.generatedGas
+      )
     : null;
   const launchEvidence = phaseAwareConfig.condensedLaunch
     ? condensedLaunchEvidence(checkpoints, phaseAwareConfig.condensedLaunch)
@@ -629,6 +1027,10 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     volumeRatioEvidence,
     { inconclusive: volumeRatioEvidence.status === 'inconclusive' }
   )];
+  if (surfaceStressExecutionCheck) checks.push(surfaceStressExecutionCheck);
+  if (authoritativeTwoLevelMechanicsCheck) {
+    checks.push(authoritativeTwoLevelMechanicsCheck);
+  }
   if (scenario.presetId) {
     checks.push(behaviorCheck(
       'initial-state-captured',
@@ -672,20 +1074,28 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
         generatedGasEvidence?.status === 'pass'
       ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true }),
       behaviorCheck('steam-condenses', 'cold-ceiling vapor later condenses', (
-        peakGasMass > 0 && significantGasMasses.at(-1) < peakGasMass * 0.98
+        condensationEvidence?.status === 'pass'
       ), {
         gasMassesKg: gasMasses,
         significantGasMassesKg: significantGasMasses,
-        minimumSignificantMassKg: generatedGasEvidence?.minimumMassKg ?? null
-      }, { inconclusive: generatedGasEvidence?.formed !== true })
+        minimumSignificantMassKg:
+          generatedGasEvidence?.minimumMassKg ?? null,
+        condensation: condensationEvidence
+      }, {
+        inconclusive:
+          generatedGasEvidence?.formed !== true
+          || condensationEvidence?.status === 'inconclusive'
+      })
     );
   } else if (scenario.presetId === 'iron-ice-quench') {
     const initialFeLiquid = checkpointMass(first, 'fe', 'liquid');
     const finalFeLiquid = checkpointMass(last, 'fe', 'liquid');
     const initialFeSolid = checkpointMass(first, 'fe', 'solid');
     const finalFeSolid = checkpointMass(last, 'fe', 'solid');
-    const initialFeTemperature = checkpointMaxTemperature(first, 'fe');
-    const finalFeTemperature = checkpointMaxTemperature(last, 'fe');
+    const initialFeTemperature =
+      checkpointMassWeightedMeanTemperature(first, 'fe');
+    const finalFeTemperature =
+      checkpointMassWeightedMeanTemperature(last, 'fe');
     checks.push(
       behaviorCheck('iron-starts-molten', 'the falling iron begins liquid', initialFeLiquid > 0, { initialFeLiquidKg: initialFeLiquid }),
       behaviorCheck('ice-melts', 'solid water creates a liquid-water population', checkpointMass(last, 'h2o', 'liquid') > 0, {
@@ -698,10 +1108,14 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
       behaviorCheck('iron-solidifies', 'liquid iron decreases while solid iron grows', (
         finalFeLiquid < initialFeLiquid && finalFeSolid > initialFeSolid
       ), { initialFeLiquidKg: initialFeLiquid, finalFeLiquidKg: finalFeLiquid, initialFeSolidKg: initialFeSolid, finalFeSolidKg: finalFeSolid }),
-      behaviorCheck('iron-cools', 'iron peak temperature decreases by at least 10 K', (
+      behaviorCheck('iron-cools', 'iron mass-weighted mean temperature decreases by at least 10 K', (
         Number.isFinite(initialFeTemperature) && Number.isFinite(finalFeTemperature)
         && finalFeTemperature <= initialFeTemperature - 10
-      ), { initialMaxTemperatureK: initialFeTemperature, finalMaxTemperatureK: finalFeTemperature }),
+      ), {
+        statistic: 'mass-weighted-mean-temperature',
+        initialMeanTemperatureK: initialFeTemperature,
+        finalMeanTemperatureK: finalFeTemperature
+      }),
       behaviorCheck('steam-rises', 'quench steam sustains an upward trajectory into the container headspace', (
         generatedGasEvidence?.status === 'pass'
       ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true })
@@ -795,6 +1209,7 @@ function evaluateStandardScenarioBehavior(scenario, probe) {
     phaseAwareEvidence: {
       volumeRatio: volumeRatioEvidence,
       generatedGas: generatedGasEvidence,
+      coldCeilingCondensation: condensationEvidence,
       condensedLaunch: launchEvidence
     },
     checks
@@ -864,27 +1279,42 @@ async function readJsonIfPresent(filePath) {
   }
 }
 
-function scenarioEnv({
+export function scenarioEnv({
   scenario,
   outputPath,
   frameDir,
   port,
   batches,
   batchSteps,
-  timeoutMs
+  timeoutMs,
+  durableReleasePublication = false
 }) {
   const captureFrames = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true);
   const env = {
     ...process.env,
     ULG_PROBE_URL: scenario.url,
     ULG_PROBE_OUTPUT: outputPath,
+    // The probe JSON is authoritative at outputPath. Re-emitting the same
+    // 100+ MiB payload through the child stdout pipe made the matrix retain a
+    // second full copy and then persist a duplicate .log.
+    ULG_PROBE_STDOUT_MODE: 'none',
+    // Visual acceptance consumes final/checkpoint evidence and exact CSS
+    // submissions, not replay-only per-step Schroeder transaction histories.
+    // Compact in the browser so Playwright never serializes the large arrays.
+    ULG_PROBE_ARTIFACT_DETAIL_MODE: 'visual-compact',
     ULG_PROBE_PORT: String(port),
     ULG_PROBE_BATCHES: String(scenario.batches ?? batches),
     ULG_PROBE_BATCH_STEPS: String(scenario.batchSteps ?? batchSteps),
     ULG_PROBE_RENDER_EVERY: String(scenario.renderEvery ?? 1),
-    ULG_PROBE_TIMEOUT_MS: String(scenario.timeoutMs ?? timeoutMs),
+    ULG_PROBE_TIMEOUT_MS: String(timeoutMs),
     ULG_PROBE_FAIL_ON_BAD: '1'
   };
+  // Child durability is controlled solely by the matrix's explicit opt-in,
+  // rather than an unrelated inherited probe setting.
+  delete env.ULG_PROBE_DURABLE_RELEASE_PUBLICATION;
+  if (durableReleasePublication) {
+    env.ULG_PROBE_DURABLE_RELEASE_PUBLICATION = '1';
+  }
   if (scenario.standardEnabled) {
     // The visual gate covers a desktop and a mobile preset. Without
     // ULG_VISUAL_MATRIX_MOBILE the matrix only ever ran 1280x800 at scale 1,
@@ -910,6 +1340,27 @@ function scenarioEnv({
     // expansion at J=0.1 as a condensed collapse.
     env.ULG_PROBE_MIN_J = '0.1';
     env.ULG_PROBE_MAX_J = '1000';
+  }
+  if (scenario.phaseAwareAcceptance?.generatedGas) {
+    const generatedGas = scenario.phaseAwareAcceptance.generatedGas;
+    const targetMaterials = Array.isArray(generatedGas.selector?.materials)
+      ? generatedGas.selector.materials.filter(Boolean)
+      : [];
+    if (targetMaterials.length !== 1) {
+      throw new RangeError(
+        `${scenario.label || 'visual scenario'} generated-gas acceptance requires exactly one target material`
+      );
+    }
+    env.ULG_PROBE_GENERATED_GAS_TARGET_MATERIAL = String(targetMaterials[0]);
+    env.ULG_PROBE_GENERATED_GAS_MINIMUM_MASS_KG = String(
+      Math.max(0, finiteOrNull(generatedGas.minimumMassKg) ?? 0)
+    );
+    env.ULG_PROBE_GENERATED_GAS_MINIMUM_MASS_FRACTION_OF_SYSTEM = String(
+      Math.max(
+        0,
+        finiteOrNull(generatedGas.minimumMassFractionOfSystem) ?? 0
+      )
+    );
   }
   if (scenario.visualRendererMode === 'native-webgpu-surface-consumer') {
     env.ULG_PROBE_READBACK_MODE = 'no-full-readback';
@@ -1012,17 +1463,33 @@ async function main() {
   const batches = positiveInteger(process.env.ULG_VISUAL_MATRIX_BATCHES, DEFAULT_BATCHES);
   const batchSteps = positiveInteger(process.env.ULG_VISUAL_MATRIX_BATCH_STEPS, DEFAULT_BATCH_STEPS);
   const timeoutMs = positiveInteger(process.env.ULG_VISUAL_MATRIX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const matrixTimeoutExplicit =
+    process.env.ULG_VISUAL_MATRIX_TIMEOUT_MS != null;
   const allowFailures = process.env.ULG_VISUAL_MATRIX_ALLOW_FAILURES === '1';
+  const durableReleasePublication = durableVisualMatrixReleasePublicationEnabled();
   const captureFrames = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true);
   const scenarios = selectedScenarios();
   if (!scenarios.length) {
     throw new Error('No SPH visual sanity matrix scenarios selected');
   }
-  await mkdir(outputRoot, { recursive: true });
+  if (durableReleasePublication) {
+    await assertArtifactPathOutsideRepo({
+      artifactPath: path.join(outputRoot, 'summary.json'),
+      repoDir,
+      label: 'SPH visual matrix durable output root'
+    });
+  } else {
+    await mkdir(outputRoot, { recursive: true });
+  }
 
   const results = [];
   for (let index = 0; index < scenarios.length; index += 1) {
     const scenario = scenarios[index];
+    const scenarioTimeoutMs = resolveVisualMatrixScenarioTimeoutMs({
+      scenarioTimeoutMs: scenario.timeoutMs,
+      matrixTimeoutMs: timeoutMs,
+      matrixTimeoutExplicit
+    });
     const outputPath = path.join(outputRoot, `${scenario.label}.json`);
     const logPath = path.join(outputRoot, `${scenario.label}.log`);
     const frameDir = path.join(outputRoot, `${scenario.label}-frames`);
@@ -1033,15 +1500,22 @@ async function main() {
       port: basePort + index,
       batches,
       batchSteps,
-      timeoutMs
+      timeoutMs: scenarioTimeoutMs,
+      durableReleasePublication
     });
     console.log(`[sph-visual-matrix] ${scenario.label}`);
     const run = await runCommand(process.execPath, ['scripts/sph-long-horizon-probe.mjs'], {
       cwd: repoDir,
       env,
-      timeoutMs: (scenario.timeoutMs ?? timeoutMs) + 30_000
+      timeoutMs: scenarioTimeoutMs + 30_000
     });
-    await writeFile(logPath, `${run.stdout}\n${run.stderr}`, 'utf8');
+    await persistVisualMatrixArtifact({
+      artifactPath: logPath,
+      repoDir,
+      value: `${run.stdout}\n${run.stderr}`,
+      label: `SPH visual matrix ${scenario.label} log`,
+      durableReleasePublication
+    });
     let probe = await readJsonIfPresent(outputPath);
     if (!probe) {
       probe = {
@@ -1063,36 +1537,23 @@ async function main() {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
-      await writeFile(outputPath, `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
+      await persistVisualMatrixArtifact({
+        artifactPath: outputPath,
+        repoDir,
+        value: `${JSON.stringify(probe, null, 2)}\n`,
+        label: `SPH visual matrix ${scenario.label} fallback JSON`,
+        durableReleasePublication
+      });
     }
     const analysis = probe?.analysis || {};
     const expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe);
     const mechanicsIntegrator = inferMechanicsIntegrator(probe);
     const effectiveRendererModes = effectiveVisualRendererModes(probe);
-    const mechanicsMismatchIssues = scenario.expectedMechanics
-      && mechanicsIntegrator
-      && mechanicsIntegrator !== scenario.expectedMechanics
-      ? ['mechanics-integrator-mismatch']
-      : [];
-    const rendererMismatchIssues = scenario.visualRendererMode
-      && (
-        effectiveRendererModes.length === 0
-        || effectiveRendererModes.some((mode) => mode !== scenario.visualRendererMode)
-      )
-      ? ['visual-renderer-mode-mismatch']
-      : [];
-    const expectedBehaviorIssues = expectedBehavior?.status === 'pass'
-      ? []
-      : expectedBehavior?.checks
-        ?.filter((check) => check.status !== 'pass')
-        .map((check) => `expected-behavior:${check.id}`) || [];
-    const issues = uniqueStrings(
-      probe?.issues,
-      probe?.analysis?.issues,
-      mechanicsMismatchIssues,
-      rendererMismatchIssues,
-      expectedBehaviorIssues
-    );
+    const issues = synthesizeStandardScenarioIssues(scenario, probe, {
+      expectedBehavior,
+      mechanicsIntegrator,
+      rendererModes: effectiveRendererModes
+    });
     const visualSurfaceIssues = uniqueVisualSurfaceIssues(
       probe?.visualSurfaceIssues,
       probe?.analysis?.visualSurfaceIssues
@@ -1198,14 +1659,25 @@ async function main() {
     results
   };
   const summaryPath = path.join(outputRoot, 'summary.json');
-  await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  await persistVisualMatrixArtifact({
+    artifactPath: summaryPath,
+    repoDir,
+    value: `${JSON.stringify(summary, null, 2)}\n`,
+    label: 'SPH visual matrix summary',
+    durableReleasePublication
+  });
   console.log(JSON.stringify(summary, null, 2));
   if (summary.failedCount > 0 && !allowFailures) {
     process.exitCode = 1;
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+if (
+  process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || String(error));
+    process.exitCode = 1;
+  });
+}

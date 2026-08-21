@@ -84,8 +84,12 @@ function activeMass(value) {
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 function dataBytes(data) {
@@ -685,10 +689,14 @@ function translateBoundSuccessorSurface(harness, extensionExecution, extra = {})
   });
 }
 
-test('successor render and material-interface submissions hold exact queue-fenced source leases', async () => {
+test('successor render rows retain their source lease while material-interface submissions use an exact queue fence', async () => {
   const fixture = await successorFixture();
   const renderFence = deferred();
-  fixture.device.queue.onSubmittedWorkDone = () => renderFence.promise;
+  let renderFenceCount = 0;
+  fixture.device.queue.onSubmittedWorkDone = () => {
+    renderFenceCount += 1;
+    return renderFence.promise;
+  };
   const rows = await retainedSuccessorRows(fixture);
   assert.equal(
     schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily, {
@@ -696,15 +704,7 @@ test('successor render and material-interface submissions hold exact queue-fence
     }).leaseCount,
     1
   );
-  renderFence.resolve();
-  await renderFence.promise;
-  await Promise.resolve();
-  assert.equal(
-    schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily, {
-      device: fixture.device
-    }).leaseCount,
-    0
-  );
+  assert.equal(renderFenceCount, 0);
 
   const materialFence = deferred();
   fixture.device.queue.onSubmittedWorkDone = () => materialFence.promise;
@@ -724,7 +724,7 @@ test('successor render and material-interface submissions hold exact queue-fence
     schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily, {
       device: fixture.device
     }).leaseCount,
-    1
+    2
   );
   materialFence.resolve();
   await materialFence.promise;
@@ -733,10 +733,16 @@ test('successor render and material-interface submissions hold exact queue-fence
     schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily, {
       device: fixture.device
     }).leaseCount,
-    0
+    1
   );
   field.destroyMaterialInterfaceSourceFieldBuffers?.({ releaseLeases: true });
   rows.destroyRenderRowsBuffer();
+  assert.equal(
+    schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily, {
+      device: fixture.device
+    }).leaseCount,
+    0
+  );
 });
 
 test('scene continuation consumption revokes stale lineage and retires after its exact compute fence', async () => {
@@ -756,14 +762,56 @@ test('scene continuation consumption revokes stale lineage and retires after its
     'resident cleanup must deduplicate the exact branded family'
   );
 
+  assert.throws(
+    () => beginSchroederSpatialSuccessorSourceFamilyConsumption({
+      sourceFamily: fixture.sourceFamily,
+      device: fixture.device,
+      particleCount: fixture.sphParticleUpload.particleCount,
+      stateBuffer: taggedBuffer(
+        fixture.device,
+        'foreign-successor-state',
+        fixture.sphParticleUpload.stateBuffer.size
+      ),
+      thermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+      identityBuffer: fixture.sphParticleUpload.identityBuffer,
+      mechanicsBuffer: fixture.mlsMpmParticleUpload.mechanicsBuffer
+    }),
+    /exact committed same-device continuation/
+  );
+  const livenessAfterRejectedResolution =
+    schroederSpatialSuccessorSourceFamilyLiveness(
+      fixture.sourceFamily,
+      { device: fixture.device }
+    );
+  assert.equal(livenessAfterRejectedResolution.active, true);
+  assert.equal(livenessAfterRejectedResolution.leaseCount, 0);
+  assert.equal(livenessAfterRejectedResolution.retirementRequested, false);
+  assert.equal(
+    livenessAfterRejectedResolution.status,
+    'schroeder-successor-source-family-active',
+    'failed exact resolution must release its provisional consumer lease'
+  );
+
   const consumption =
     beginSchroederSpatialSuccessorSourceFamilyConsumption({
       sourceFamily: fixture.sourceFamily,
       device: fixture.device,
+      particleCount: fixture.sphParticleUpload.particleCount,
+      stateBuffer: fixture.sphParticleUpload.stateBuffer,
+      thermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+      identityBuffer: fixture.sphParticleUpload.identityBuffer,
+      mechanicsBuffer: fixture.mlsMpmParticleUpload.mechanicsBuffer,
       consumerStage: 'scene-successor-consumption-test',
       retirementReason: 'test continuation superseded',
       ownerFence: Promise.resolve()
     });
+  assert.equal(consumption.levelAssignment, null);
+  assert.equal(consumption.levelAssignmentSeal, null);
+  assert.equal(Object.isFrozen(consumption.sourceFamilyLease), true);
+  assert.equal(
+    consumption.sourceFamilyLease.consumerStage,
+    'scene-successor-consumption-test'
+  );
   const requested = schroederSpatialSuccessorSourceFamilyLiveness(
     fixture.sourceFamily,
     { device: fixture.device }
@@ -785,9 +833,24 @@ test('scene continuation consumption revokes stale lineage and retires after its
     1
   );
 
-  consumerFence.resolve();
-  const [releaseReceipt, retirementReceipt] = await Promise.all([
+  consumerFence.reject(new Error('first scene consumer fence rejected'));
+  await assert.rejects(
     releasePromise,
+    /first scene consumer fence rejected/
+  );
+  assert.equal(
+    schroederSpatialSuccessorSourceFamilyLiveness(fixture.sourceFamily)
+      .leaseCount,
+    1,
+    'a rejected fence preserves the exact lease for an explicit retry'
+  );
+  const retryFence = deferred();
+  const retryReleasePromise =
+    consumption.releaseAfter(retryFence.promise);
+  assert.notEqual(retryReleasePromise, releasePromise);
+  retryFence.resolve();
+  const [releaseReceipt, retirementReceipt] = await Promise.all([
+    retryReleasePromise,
     consumption.retirementPromise
   ]);
   assert.equal(releaseReceipt.remainingLeaseCount, 0);

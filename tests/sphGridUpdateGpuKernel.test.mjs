@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { mlsMpmGridUpdateWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
@@ -16,6 +17,14 @@ import {
   ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_AUTHORITY,
   ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_SCHEMA,
   ULG_DIRECT_RESIDENT_PRESSURE_INTERFACE_PUBLICATION_STATUS,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS,
+  ULG_SCHROEDER_PHASE_VOLUME_AMBIENT_BUOYANCY_SUBMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_AMBIENT_BUOYANCY_SUBMISSION_STATUS,
+  ULG_SCHROEDER_GAS_PRESSURE_BOUNDARY_SUBMISSION_SCHEMA,
+  ULG_SCHROEDER_GAS_PRESSURE_BOUNDARY_SUBMISSION_STATUS,
+  SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS,
+  SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
   createDirectResidentPressureInterfaceGridForceAdmission,
   createMlsMpmGridUpdateParityReport,
   estimateMlsMpmWallBarrierElasticStiffness,
@@ -36,6 +45,14 @@ import {
 import {
   schroederSpatialPhaseVolumeTransportWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
+import {
+  schroederSpatialGasPressureBoundaryTransportWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialGasPressureBoundaryTransportWgsl.js';
+
+const gridUpdateModuleSource = readFileSync(
+  new URL('../src/runtime/sph/sphGridUpdateGpuKernel.js', import.meta.url),
+  'utf8'
+);
 
 test('mechanics-field grid and transport kernels consume authenticated 2D indirect rows', () => {
   for (const wgsl of [
@@ -76,6 +93,46 @@ test('mechanics-field grid and transport kernels consume authenticated 2D indire
       )
     );
   }
+});
+
+test('exact v4 gas-pressure boundary dispatch is capacity-shaped and ordered before S9/contact', () => {
+  assert.deepEqual(SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS, [
+    'prevalidate_field_boundary_transport',
+    'prevalidate_source_boundary_transport',
+    'initialize_boundary_transport',
+    'stage_boundary_transport',
+    'validate_boundary_transport',
+    'commit_boundary_transport'
+  ]);
+  for (const entryPoint of SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS) {
+    assert.match(
+      schroederSpatialGasPressureBoundaryTransportWgsl,
+      new RegExp(`fn ${entryPoint}\\(`)
+    );
+  }
+  const mainStart = gridUpdateModuleSource.indexOf(
+    'sequencePass.setPipeline(main.pipeline);'
+  );
+  const boundaryStart = gridUpdateModuleSource.indexOf(
+    'if (gasPressureBoundaryPipelines)',
+    mainStart
+  );
+  const s9Start = gridUpdateModuleSource.indexOf(
+    'if (transportStage)',
+    boundaryStart
+  );
+  const contactStart = gridUpdateModuleSource.indexOf(
+    'sequencePass.setPipeline(contact.pipeline);',
+    s9Start
+  );
+  assert.ok(mainStart >= 0);
+  assert.ok(boundaryStart > mainStart);
+  assert.ok(s9Start > boundaryStart);
+  assert.ok(contactStart > s9Start);
+  assert.match(
+    gridUpdateModuleSource,
+    /sequencePass\.dispatchWorkgroups\(\s*\.\.\.gasPressureBoundaryLayout\.dispatchWorkgroups/
+  );
 });
 
 test('direct resident pressure admission requires exact same-device queue authority', () => {
@@ -590,6 +647,11 @@ test('WebGPU MLS-MPM grid update binds a full pressure-force row for zero-force 
   assert.equal(update.readbackMode, 'no-full-readback');
   assert.equal(update.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
   assert.equal(update.queueCompletionMethod, 'deferred queue.onSubmittedWorkDone cleanup');
+  assert.equal(update.observedHostQueueFenceCount, 1);
+  assert.equal(update.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(update.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(update.normalHotLoopReadbackFree, false);
+  assert.equal(update.productionHotLoopHostDependencyFree, true);
   assert.equal(update.pressureInterfaceForceRowCount, 0);
   assert.ok(pressureForceBuffer);
   assert.equal(
@@ -757,6 +819,147 @@ test('optional MLS-MPM grid update accepts a parity-passing WebGPU result', asyn
   assert.equal(execution.webgpuStatus.status, 'webgpu-executed');
   assert.equal(execution.webgpuParity.schema, ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA);
   assert.equal(execution.webgpuParity.status, 'pass');
+});
+
+test('optional grid-update execution preserves exact surface-stress submission evidence', async () => {
+  const submission = Object.freeze({
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA,
+    status: ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS,
+    requested: true,
+    submitted: true,
+    dispatchCount: SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS.length,
+    entryPoints: SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS
+  });
+  const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
+    p2gGridProjection: manualP2gProjection(),
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    readbackMode: 'no-full-readback',
+    async webGpuRunner(args) {
+      const result = updateMlsMpmGridCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        phaseVolumeSurfaceStressRequested: true,
+        phaseVolumeSurfaceStressSubmitted: true,
+        phaseVolumeSurfaceStressSubmission: submission
+      };
+    }
+  });
+
+  assert.equal(execution.phaseVolumeSurfaceStressRequested, true);
+  assert.equal(execution.phaseVolumeSurfaceStressSubmitted, true);
+  assert.equal(execution.phaseVolumeSurfaceStressSubmission, submission);
+  assert.deepEqual(
+    execution.phaseVolumeSurfaceStressSubmission.entryPoints,
+    SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS
+  );
+});
+
+test('optional grid-update execution forwards and preserves ambient-buoyancy submission evidence', async () => {
+  const submission = Object.freeze({
+    schema:
+      ULG_SCHROEDER_PHASE_VOLUME_AMBIENT_BUOYANCY_SUBMISSION_SCHEMA,
+    status:
+      ULG_SCHROEDER_PHASE_VOLUME_AMBIENT_BUOYANCY_SUBMISSION_STATUS,
+    requested: true,
+    submitted: true,
+    dispatchCount: 3,
+    entryPoints: [
+      'initialize_surface_stress',
+      'validate_surface_stress',
+      'commit_surface_stress'
+    ],
+    surfaceStressDispatchCount: 0
+  });
+  const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
+    p2gGridProjection: manualP2gProjection(),
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    readbackMode: 'no-full-readback',
+    phaseVolumeAmbientBuoyancyRequired: true,
+    async webGpuRunner(args) {
+      assert.equal(args.phaseVolumeAmbientBuoyancyRequired, true);
+      const result = updateMlsMpmGridCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        phaseVolumeAmbientBuoyancyRequired: true,
+        phaseVolumeAmbientBuoyancySubmitted: true,
+        phaseVolumeAmbientBuoyancySubmission: submission
+      };
+    }
+  });
+
+  assert.equal(execution.phaseVolumeAmbientBuoyancyRequired, true);
+  assert.equal(execution.phaseVolumeAmbientBuoyancySubmitted, true);
+  assert.equal(execution.phaseVolumeAmbientBuoyancySubmission, submission);
+  assert.equal(
+    execution.phaseVolumeAmbientBuoyancySubmission.surfaceStressDispatchCount,
+    0
+  );
+});
+
+test('optional grid update forwards exact v4 mechanics authority and preserves resident evidence', async () => {
+  const source = Object.freeze({ opaque: 'exact-v4-source-sentinel' });
+  const submission = Object.freeze({
+    schema: ULG_SCHROEDER_GAS_PRESSURE_BOUNDARY_SUBMISSION_SCHEMA,
+    status: ULG_SCHROEDER_GAS_PRESSURE_BOUNDARY_SUBMISSION_STATUS,
+    requested: true,
+    submitted: true,
+    entryPoints: SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS,
+    hostQueueFenceCount: 0,
+    mapAsyncCount: 0,
+    hostLogicalCountReadCount: 0
+  });
+  const projection = {
+    ...manualP2gProjection(),
+    mechanicsFieldMode: 'required',
+    mechanicsFieldViewEnabled: true
+  };
+  const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
+    p2gGridProjection: projection,
+    mechanicsFieldMode: 'required',
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    readbackMode: 'no-full-readback',
+    gasPressureMechanicsAuthoritySource: source,
+    gasPressureMechanicsChartId: 7,
+    async webGpuRunner(args) {
+      assert.equal(args.gasPressureMechanicsAuthoritySource, source);
+      assert.equal(args.gasPressureMechanicsChartId, 7);
+      const result = updateMlsMpmGridCpu({
+        p2gGridProjection: manualP2gProjection()
+      });
+      return {
+        ...result,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        mechanicsFieldMode: 'required',
+        mechanicsFieldViewEnabled: true,
+        gasPressureBoundaryRequested: true,
+        gasPressureBoundarySubmitted: true,
+        gasPressureBoundarySubmission: submission
+      };
+    }
+  });
+
+  assert.equal(execution.gasPressureBoundaryRequested, true);
+  assert.equal(execution.gasPressureBoundarySubmitted, true);
+  assert.equal(execution.gasPressureBoundarySubmission, submission);
+  assert.equal(execution.gasPressureBoundarySubmission.hostQueueFenceCount, 0);
+});
+
+test('optional grid update rejects exact v4 mechanics authority outside required resident mode', async () => {
+  await assert.rejects(
+    runMlsMpmGridUpdateWithOptionalWebGpu({
+      p2gGridProjection: manualP2gProjection(),
+      gasPressureMechanicsAuthoritySource: Object.freeze({ opaque: true })
+    }),
+    /requires mechanicsFieldMode required/
+  );
 });
 
 test('optional MLS-MPM grid update rejects parity drift and keeps CPU output', async () => {

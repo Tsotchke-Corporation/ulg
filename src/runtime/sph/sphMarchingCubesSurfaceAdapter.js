@@ -3900,6 +3900,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactNormalRowsAdditionalSubmitCount: packedNormalSource.additionalSubmitCount,
     compactNormalRowsOwnership: 'extension-owned-retained-buffer'
   };
+  const translationWorkEvidence = {
+    translationPipelineCreated: Boolean(translationPipeline),
+    translationBindGroupCreated: Boolean(bindGroup),
+    translationCommandEncoderCreated: Boolean(encoder),
+    translationWorkgroupCountX: workgroupCountX,
+    translationSubmissionObserved
+  };
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
     backend: 'webgpu',
@@ -3962,6 +3969,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     ...compactNormalMetadata,
     vertexRowsBufferClearStatus,
     translationPipelineCacheStatus,
+    ...translationWorkEvidence,
     directCompactPositionDrawIndirectSource,
     drawIndirectRowsOwnership,
     extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
@@ -4005,6 +4013,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexCounterBufferByteLength,
     vertexRowsBufferClearStatus,
     translationPipelineCacheStatus,
+    ...translationWorkEvidence,
     directCompactPositionDrawIndirectSource,
     drawIndirectRowsOwnership,
     extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
@@ -4213,6 +4222,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     surfaceDraw,
     vertexRowsBufferClearStatus,
     translationPipelineCacheStatus,
+    ...translationWorkEvidence,
     directCompactPositionDrawIndirectSource,
     drawIndirectRowsOwnership,
     extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),

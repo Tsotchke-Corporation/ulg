@@ -6,12 +6,15 @@
   "justifications": [
     {
       "path_patterns": [
+        "src/runtime/peercomputeBrowserResidentHost.js",
+        "src/runtime/sphPhaseDemo.js",
         "src/visualization/sphPhaseScene.js",
         "src/visualization/sphPhaseDemoMount.js",
         "src/runtime/sph/sphRenderGpuKernel.js",
         "src/runtime/sph/sphReactionGpuKernel.js",
         "src/runtime/sph/sphMlsMpmGpuStep.js",
         "src/runtime/sph/sphThermalGpuKernel.js",
+        "src/services/ulgMechanicsResidentStage.worker.js",
         "ulg-gpu-abi/src/wgsl.js",
         "ulg-gpu-abi/src/index.js",
         "tests/demo.e2e.mjs",
@@ -25,28 +28,60 @@
       "status": "temporary_runtime_integration_boundary",
       "task_id": "ulg-webgpu-resident-hot-loop-modularization",
       "reason": "These files remain temporary architecture-bearing integration surfaces for the SPH/MLS-MPM resident chain, render-field ABI, browser demo mount, and long-running project evidence logs. They are allowed to remain large only while the GPU-resident hot-loop, reaction, and material closure contracts are still being stabilized.",
-      "mitigation": "New behavior should move into focused runtime modules, kernels, or tests when practical. Split these files behind existing public APIs as the WebGPU marching-cubes, closure graph, reaction, and material resolver boundaries stabilize."
+      "mitigation": "New behavior should move into focused runtime modules, kernels, or tests when practical. Split these files behind existing public APIs as the WebGPU marching-cubes, closure graph, reaction, and material resolver boundaries stabilize.",
+      "migration_evidence": "The SS campaign extracted GPU readback telemetry, resident product history, frozen generated-gas cohorts, gas free-volume authority, iron/ice energy-budget validation, and thermal-environment authority into focused modules. These remaining files retain orchestration and public integration boundaries while those extracted modules own the new leaf behavior."
     },
     {
       "path_patterns": [
         "src/runtime/sph/schroederCrossLevelCouplingGpu.js",
         "src/runtime/sph/schroederFusedFineSubstepGpu.js",
         "src/runtime/sph/schroederHierarchyGpu.js",
+        "src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js",
         "src/runtime/sph/schroederSpatialEpochGpu.js",
         "src/runtime/sph/schroederSpatialEpochTransaction.js",
         "src/runtime/sph/schroederSpatialMechanicsFieldViewGpu.js",
         "src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js",
+        "src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js",
+        "src/runtime/sph/schroederSpatialReactionPlacementEpochGpu.js",
+        "src/runtime/sph/schroederSpatialReactionProductPlacementGpu.js",
+        "src/runtime/sph/schroederSpatialSuccessorSourceFamily.js",
+        "src/runtime/sph/schroederSpatialThermalProposalsGpu.js",
         "src/runtime/sph/sphG2pGpuKernel.js",
         "src/runtime/sph/sphGridGpuKernel.js",
         "src/runtime/sph/sphGridUpdateGpuKernel.js",
         "src/runtime/sph/sphMarchingCubesSurfaceAdapter.js",
         "src/runtime/sph/sphPressureInterfaceGpuKernel.js",
-        "src/runtime/sph/sphReactionGpuSummary.js"
+        "src/runtime/sph/sphReactionGpuSummary.js",
+        "src/runtime/sph/sphSpatialGasLedgerEosGpu.js",
+        "src/runtime/webgpuRadixScanUnique.js",
+        "ulg-gpu-abi/src/schroederSpatialAggregateViewWgsl.js",
+        "ulg-gpu-abi/src/schroederSpatialParentFieldMechanicsWorkspaceWgsl.js"
       ],
       "status": "temporary_gpu_kernel_integration_boundary",
       "task_id": "ss-spatial-authority-slice8-source-family-cleanup",
       "reason": "These modules currently colocate host-side admission, same-device GPU resource lifetime, ABI validation, and embedded WGSL for one authoritative SPH or Schroeder operation. Keeping each operation together is temporary while the two-level hierarchy and shared spatial-view contracts stabilize, and avoids splitting queue ownership or fail-closed authentication across ambiguous boundaries during Slice 7 release verification.",
-      "mitigation": "Move stable shader sources and reusable lifecycle helpers into focused modules during Slice 8 source-family adapter cleanup, preserving the existing unit, native WebGPU, browser, generation-ledger, and performance gates. New unrelated behavior must not be added to these integration modules."
+      "mitigation": "Move stable shader sources and reusable lifecycle helpers into focused modules during Slice 8 source-family adapter cleanup, preserving the existing unit, native WebGPU, browser, generation-ledger, and performance gates. New unrelated behavior must not be added to these integration modules.",
+      "migration_evidence": "The SS campaign extracted paired mechanics-field construction, parent-field mechanics workspace contracts, phase-volume surface-stress operators and transport, spatial gas free-volume, and resident product-history authority into dedicated runtime and ABI modules. The retained per-operation integration files keep queue ownership, exact-successor authentication, and failure-atomic retirement together until the post-merge lifecycle adapter cleanup."
+    },
+    {
+      "path_patterns": [
+        "data/material-properties/elements.json"
+      ],
+      "status": "authoritative_reference_dataset",
+      "task_id": "ulg-material-property-provenance",
+      "reason": "This cohesive registry is a schema-validated authoritative element-property reference bank, not an executable source module. Keeping the records in one dataset preserves stable provenance, deterministic lookup, and whole-bank validation.",
+      "mitigation": "Validate the complete bank with `npm run validate:material-properties`; add provenance through the existing schema and derivation pipeline, and do not move executable behavior into the dataset. If operational size becomes material, extract generated lookup shards behind the existing resolver module while retaining this canonical bank.",
+      "migration_evidence": "Runtime material derivation and provenance logic remains in focused JavaScript modules; this JSON file contains data records only."
+    },
+    {
+      "path_patterns": [
+        "plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf"
+      ],
+      "status": "binary_document_artifact",
+      "task_id": "ulg-triad-documentation",
+      "reason": "ICC's document line estimate describes a cohesive versioned PDF design artifact rather than an executable source monolith. Splitting the binary would make the reviewed diagram set less usable without improving runtime modularity.",
+      "mitigation": "Keep it outside executable module boundaries and keep executable contracts in source and tests; replace or regenerate the complete document as one reviewed artifact when the triad design changes.",
+      "migration_evidence": "The PDF contains documentation only and is excluded from runtime, build, and browser execution paths."
     },
     {
       "path_patterns": [
@@ -60,6 +95,28 @@
       "task_id": "ulg-service-asset-staging",
       "reason": "These are generated Vite bundles or staged service assets copied from sibling repos for browser handoff and GitHub Pages demos.",
       "mitigation": "Regenerate through `npm run build:pages` or `npm run stage:service-assets`; avoid hand-editing generated assets."
+    },
+    {
+      "path_patterns": [
+        "scripts/ss-physical-pixel-mobile-liveness-receipt.mjs",
+        "scripts/ss-standard-visual-matrix-receipt.mjs",
+        "scripts/stage6-interactive-presentation-receipt.mjs"
+      ],
+      "status": "temporary_release_evidence_boundary",
+      "task_id": "ulg-device-aware-throughput-20260803",
+      "reason": "These release-evidence entry points are a temporary cohesive boundary for capture orchestration, artifact-path hardening, source binding, anti-tamper hashing, and fail-closed receipt evaluation while the six-stage campaign is being finalized. Splitting them during the campaign would change the evidence producers and invalidate the exact replay baseline that is required for merge readiness.",
+      "mitigation": "After the contained merge, extract shared artifact-graph and manifest helpers, ADB/CDP transport, and visual-review evaluation behind the existing command-line contracts. Preserve the current adversarial tests and exact source-binding checks throughout that refactor; do not add unrelated runtime behavior to these scripts.",
+      "migration_evidence": "The receipt entry points already share scripts/ss-release-evidence-common.mjs and have focused adversarial tests. The durable successor task ulg-device-aware-throughput-20260803 tracks decomposition of oversized files into cohesive, independently testable modules after the merge baseline is sealed."
+    },
+    {
+      "path_patterns": [
+        "src/runtime/sph/sphMlsMpmPostMechanicsClosure.js"
+      ],
+      "status": "temporary_post_mechanics_orchestration_boundary",
+      "task_id": "ulg-device-aware-throughput-20260803",
+      "reason": "This module currently owns the queue-ordered post-mechanics closure boundary, including admission, GPU resource lifetime, and fail-closed ownership transitions. Keeping that orchestration cohesive during the contained merge avoids changing same-device ordering or introducing a readback boundary while the exact six-stage replay is being sealed.",
+      "mitigation": "After the contained merge, split closure laws, telemetry, and ownership/admission orchestration behind the existing public contract, retaining queue ordering, zero-readback enforcement, and focused runtime tests. New unrelated behavior must not be added to this integration boundary.",
+      "migration_evidence": "Focused gas-ledger, reaction-product, phase-volume, energy-budget, and GPU-readback telemetry modules have already been extracted from the closure path. The durable successor task ulg-device-aware-throughput-20260803 tracks the remaining architecture decomposition and testability work."
     }
   ]
 }

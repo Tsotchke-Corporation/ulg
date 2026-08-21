@@ -25,6 +25,13 @@ import {
   SCHROEDER_SPATIAL_EPOCH_V2_ACTIVE_COUNT_AUTHORITY_WORD,
   SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
@@ -58,6 +65,7 @@ import {
   releaseSchroederSpatialEpochGenerationConsumerLeaseAfter,
   SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS,
   bindSchroederSpatialExactNearResidentConsumerEvidence,
+  isSchroederSpatialExactNearResidentConsumerBinding,
   resolveSchroederSpatialExactNearConsumerGeneration
 } from './schroederSpatialEpochGpu.js';
 import {
@@ -69,6 +77,13 @@ import {
 import {
   resolvePostSeparationThermalBinAuthority
 } from './sphPostSeparationThermalBinAuthority.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION,
+  ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA
+} from './schroederSpatialMechanicalProposalsGpu.js';
+import {
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export const ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-proposal.v3';
@@ -84,6 +99,10 @@ export const ULG_SCHROEDER_SPATIAL_MATCHED_TIME_THERMAL_ENCODER_STAGE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-matched-time-thermal-encoder-stage.v0';
 export const ULG_SCHROEDER_SPATIAL_THERMAL_CANDIDATE_CSR_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-candidate-csr.v1';
+export const ULG_SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-thermal-conductivity-sidecar.v1';
+export const ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-thermal-contact-geometry-authority.v1';
 export const ULG_SCHROEDER_SPATIAL_THERMAL_SOURCE_CELL_BATCH_SCHEMA =
   'peercompute.ulg.native-test.s9d5-thermal-source-cell-batch.v0';
 
@@ -128,8 +147,15 @@ export const SCHROEDER_SPATIAL_THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD = 7;
 export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD = 8;
 export const SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD = 9;
 export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS = 10;
-export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS = 8;
-export const SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES = 80;
+export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS = 10;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC =
+  0x544b_5331;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION = 1;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS = 12;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS = 2;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_READY = 1;
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING = 2;
+export const SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES = 96;
 export const SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES = 104;
 export const SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL = 1;
 export const CLASSIC_THERMAL_CANDIDATE_CAPACITY_DEFAULT = 256;
@@ -202,7 +228,9 @@ export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_LAYOUT = Object.freeze([
   'requestedGainScale:f32',
   'requestedLossScale:f32',
   'lowerSpecificInternalEnergyBoundJPerKg:f32',
-  'upperSpecificInternalEnergyBoundJPerKg:f32'
+  'upperSpecificInternalEnergyBoundJPerKg:f32',
+  'materialKey:u32',
+  'phaseKey:u32'
 ]);
 
 export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT = Object.freeze([
@@ -217,6 +245,28 @@ export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT = Object.freeze([
   'materializedActiveSourceRankCount:atomic<u32>',
   'physicalTopologyMismatchCount:atomic<u32>'
 ]);
+
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_LAYOUT =
+  Object.freeze([
+    'magic:u32',
+    'version:u32',
+    'generationId:u32',
+    'particleCount:u32',
+    'materialCount:u32',
+    'responseCount:u32',
+    'phaseResponseProvenanceToken:u32',
+    'storageGeneration:u32',
+    'physicsTick:u32',
+    'physicsSubstep:u32',
+    'publishedRowCount:atomic<u32>',
+    'missingConductivityCount:atomic<u32>'
+  ]);
+
+export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_LAYOUT =
+  Object.freeze([
+    'thermalConductivityWPerMK:f32',
+    'status:u32'
+  ]);
 
 export const SCHROEDER_SPATIAL_THERMAL_EVIDENCE_LAYOUT = Object.freeze([
   'sourceInvocationCount:atomic<u32>',
@@ -244,6 +294,7 @@ const PAIR_CONDUCTION_RELAXATION_LIMIT = 0.25;
 const PAIR_CONDUCTION_RATE_DEFAULT = 1500;
 const STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
 const RADIATION_PAIR_RANGE_RADII = 4;
+const EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE = 0.6203504908994;
 const CLASSIC_THERMAL_MAX_BIN_SCAN_RADIUS_CELLS = 5;
 const THERMAL_SOURCE_CELL_BATCH_HEADER_WORDS = 64;
 const THERMAL_SOURCE_CELL_BATCH_MAGIC = 0x5343_4231;
@@ -297,6 +348,18 @@ function exactU32(value, label, { positive = false } = {}) {
     || value > 0xffff_ffff
   ) {
     throw new RangeError(`${label} must be an exact ${positive ? 'positive ' : ''}u32`);
+  }
+  return value;
+}
+
+function exactI32(value, label) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < -0x8000_0000
+    || value > 0x7fff_ffff
+  ) {
+    throw new RangeError(`${label} must be an exact i32`);
   }
   return value;
 }
@@ -371,6 +434,88 @@ function radiativeViewAreaM2(radiusM, otherRadiusM, distanceM) {
   return Math.min(geometric, contactLimit);
 }
 
+function conductiveSphereContactGeometry(radiusM, otherRadiusM, distanceM) {
+  const leftRadius = Math.max(0, finiteNumber(radiusM, 0));
+  const rightRadius = Math.max(0, finiteNumber(otherRadiusM, 0));
+  const distance = Math.max(0, finiteNumber(distanceM, 0));
+  if (
+    !(leftRadius > 0)
+    || !(rightRadius > 0)
+    || distance >= leftRadius + rightRadius
+  ) {
+    return Object.freeze({
+      contact: false,
+      contactAreaM2: 0,
+      conductionPathLengthM: distance
+    });
+  }
+  const minRadius = Math.min(leftRadius, rightRadius);
+  let contactRadiusSquaredM2;
+  if (distance === 0 || distance <= Math.abs(leftRadius - rightRadius)) {
+    contactRadiusSquaredM2 = minRadius * minRadius;
+  } else {
+    const planeFromLeftM = (
+      distance * distance
+      + leftRadius * leftRadius
+      - rightRadius * rightRadius
+    ) / (2 * distance);
+    contactRadiusSquaredM2 = Math.max(
+      0,
+      leftRadius * leftRadius - planeFromLeftM * planeFromLeftM
+    );
+  }
+  return Object.freeze({
+    contact: contactRadiusSquaredM2 > 0,
+    contactAreaM2: Math.PI * contactRadiusSquaredM2,
+    conductionPathLengthM: distance > 0 ? distance : minRadius
+  });
+}
+
+function conductiveFiniteVolumeInterfaceGeometry(
+  radiusM,
+  otherRadiusM,
+  effectiveFaceAreaM2
+) {
+  const leftRadius = Math.max(0, finiteNumber(radiusM, 0));
+  const rightRadius = Math.max(0, finiteNumber(otherRadiusM, 0));
+  const contactAreaM2 = Math.max(
+    0,
+    finiteNumber(effectiveFaceAreaM2, 0)
+  );
+  const leftEdgeM =
+    leftRadius / EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE;
+  const rightEdgeM =
+    rightRadius / EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE;
+  const contactDistanceM = 0.5 * (leftEdgeM + rightEdgeM);
+  if (
+    !(leftEdgeM > 0)
+    || !(rightEdgeM > 0)
+    || !(contactAreaM2 > 0)
+  ) {
+    return Object.freeze({
+      contact: false,
+      contactAreaM2: 0,
+      conductionPathLengthM: contactDistanceM,
+      leftConductionPathLengthM: 0,
+      rightConductionPathLengthM: 0,
+      mode: 'axis-aligned-finite-volume-interface-face'
+    });
+  }
+  return Object.freeze({
+    contact: true,
+    contactAreaM2,
+    conductionPathLengthM: contactDistanceM,
+    leftConductionPathLengthM: 0.5 * leftEdgeM,
+    rightConductionPathLengthM: 0.5 * rightEdgeM,
+    mode: 'axis-aligned-finite-volume-interface-face'
+  });
+}
+
+function harmonicMeanPositive(left, right) {
+  if (!(left > 0) || !(right > 0)) return 0;
+  return (2 * left * right) / (left + right);
+}
+
 /** Small manufactured-pair oracle only; never a production neighbor fallback. */
 export function evaluateSchroederSpatialThermalPairProposal({
   distanceM,
@@ -383,6 +528,14 @@ export function evaluateSchroederSpatialThermalPairProposal({
   otherTemperatureK,
   temperatureSlopeKdPerJPerKg,
   otherTemperatureSlopeKdPerJPerKg,
+  thermalConductivityWPerMK = 0,
+  otherThermalConductivityWPerMK = 0,
+  materialId = null,
+  otherMaterialId = null,
+  phaseId = null,
+  otherPhaseId = null,
+  mechanicalInterfaceReceiptReady = false,
+  mechanicalInterfaceAreaM2 = 0,
   emissivity = 0,
   otherEmissivity = 0,
   dtS,
@@ -398,13 +551,60 @@ export function evaluateSchroederSpatialThermalPairProposal({
     pairRadiiM
   );
   const radiationSupportM = RADIATION_PAIR_RANGE_RADII * pairRadiiM;
+  const materialOrPhaseMismatch = (
+    materialId != null
+    && otherMaterialId != null
+    && Number(materialId) !== Number(otherMaterialId)
+  ) || (
+    phaseId != null
+    && otherPhaseId != null
+    && Number(phaseId) !== Number(otherPhaseId)
+  );
+  const interfacePair =
+    mechanicalInterfaceReceiptReady && materialOrPhaseMismatch;
+  const contact = interfacePair
+    ? conductiveFiniteVolumeInterfaceGeometry(
+        radiusM,
+        otherRadiusM,
+        mechanicalInterfaceReceiptReady
+          ? mechanicalInterfaceAreaM2
+          : 0
+      )
+    : conductiveSphereContactGeometry(
+        radiusM,
+        otherRadiusM,
+        distance
+      );
   let conductionEnergyJ = 0;
   let radiationEnergyJ = 0;
-  if (conductionSupportM > 0 && distance < conductionSupportM) {
-    const weight = 1 - distance / conductionSupportM;
+  const pairConductivityWPerMK = harmonicMeanPositive(
+    finiteNumber(thermalConductivityWPerMK, 0),
+    finiteNumber(otherThermalConductivityWPerMK, 0)
+  );
+  if (
+    contact.contact
+    && contact.conductionPathLengthM > 0
+    && pairConductivityWPerMK > 0
+  ) {
+    const interfaceResistanceKPerW = interfacePair
+      ? contact.leftConductionPathLengthM
+          / (
+            finiteNumber(thermalConductivityWPerMK, 0)
+            * contact.contactAreaM2
+          )
+        + contact.rightConductionPathLengthM
+          / (
+            finiteNumber(otherThermalConductivityWPerMK, 0)
+            * contact.contactAreaM2
+          )
+      : 0;
+    const pairConductanceWPerK = interfacePair
+      ? 1 / interfaceResistanceKPerW
+      : pairConductivityWPerMK
+        * contact.contactAreaM2 / contact.conductionPathLengthM;
     conductionEnergyJ = clampPairEnergy({
-      energyJ: finiteNumber(conductionRate, 0)
-        * (otherTemperatureK - temperatureK) * weight * finiteNumber(dtS, 0),
+      energyJ: pairConductanceWPerK
+        * (otherTemperatureK - temperatureK) * finiteNumber(dtS, 0),
       temperatureK,
       otherTemperatureK,
       temperatureSlopeKdPerJPerKg,
@@ -434,6 +634,11 @@ export function evaluateSchroederSpatialThermalPairProposal({
   }
   return Object.freeze({
     conductionSupportM,
+    contactAreaM2: contact.contactAreaM2,
+    conductionPathLengthM: contact.conductionPathLengthM,
+    contactGeometryMode:
+      contact.mode || 'overlapping-sphere-intersection-disk',
+    pairThermalConductivityWPerMK: pairConductivityWPerMK,
     radiationSupportM,
     conductionEnergyJ,
     radiationEnergyJ,
@@ -455,7 +660,9 @@ function createThermalParamsArray({
     SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_NONE,
   lookupMode = 0,
   neighborBins = null,
-  candidateCapacity = 0
+  candidateCapacity = 0,
+  mechanicalInterfaceReceiptRequired = false,
+  mechanicalInterfaceSelectedLevel = 0
 }) {
   const buffer = new ArrayBuffer(SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES);
   const view = new DataView(buffer);
@@ -506,6 +713,15 @@ function createThermalParamsArray({
     : 0, true);
   view.setFloat32(72, binsReady ? Number(neighborBins.cellSizeM) : 0, true);
   view.setUint32(76, CLASSIC_THERMAL_MAX_BIN_SCAN_RADIUS_CELLS, true);
+  view.setUint32(80, mechanicalInterfaceReceiptRequired ? 1 : 0, true);
+  view.setInt32(
+    84,
+    exactI32(
+      Number(mechanicalInterfaceSelectedLevel),
+      'mechanicalInterfaceSelectedLevel'
+    ),
+    true
+  );
   return buffer;
 }
 
@@ -552,6 +768,52 @@ function derivedBufferByteLength(capacity) {
     + capacity * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
     + capacity
   ) * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+function conductivitySidecarByteLength(capacity) {
+  return (
+    SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+    + capacity * SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS
+  ) * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+function stringFingerprintU32(value) {
+  let hash = 0x811c9dc5;
+  for (const codePoint of String(value || '')) {
+    hash = Math.imul(hash ^ codePoint.codePointAt(0), 0x01000193) >>> 0;
+  }
+  return hash || 1;
+}
+
+function createConductivitySidecarHeader(
+  execution,
+  particleCount,
+  responseUpload
+) {
+  const words = new Uint32Array(
+    SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+  );
+  words[0] = SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC;
+  words[1] = SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION;
+  words[2] = exactU32(execution.generationId, 'execution.generationId', {
+    positive: true
+  });
+  words[3] = exactU32(particleCount, 'particleCount', { positive: true });
+  words[4] = exactU32(responseUpload.materialCount, 'responseUpload.materialCount');
+  words[5] = exactU32(responseUpload.responseCount, 'responseUpload.responseCount');
+  words[6] = exactU32(
+    responseUpload.contentFingerprintToken,
+    'responseUpload.contentFingerprintToken',
+    { positive: true }
+  );
+  words[7] = exactU32(
+    execution.storageGeneration,
+    'execution.storageGeneration',
+    { positive: true }
+  );
+  words[8] = exactU32(execution.physicsTick, 'execution.physicsTick');
+  words[9] = exactU32(execution.physicsSubstep, 'execution.physicsSubstep');
+  return words;
 }
 
 function positiveSafeInteger(value, label) {
@@ -845,6 +1107,19 @@ function createRuntimeEntry(
   capacity,
   labelPrefix = 'ulg-schroeder-spatial-thermal'
 ) {
+  const conductivitySidecarBytes = conductivitySidecarByteLength(capacity);
+  const storageLimit = Math.min(
+    ...[
+      Number(device?.limits?.maxBufferSize),
+      Number(device?.limits?.maxStorageBufferBindingSize)
+    ].filter((value) => Number.isFinite(value) && value > 0),
+    Number.MAX_SAFE_INTEGER
+  );
+  if (conductivitySidecarBytes > storageLimit) {
+    throw new RangeError(
+      `thermal conductivity sidecar requires ${conductivitySidecarBytes} bytes, exceeding the WebGPU storage limit`
+    );
+  }
   const thermalCsrDummyBindingAlignment = Math.max(
     256,
     Math.floor(finiteNumber(
@@ -858,6 +1133,14 @@ function createRuntimeEntry(
       `${labelPrefix}-derived-${spatialCapacity}-arena-${arenaIndex}`,
       derivedBufferByteLength(capacity),
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    ),
+    conductivitySidecarBuffer: createBuffer(
+      device,
+      `${labelPrefix}-conductivity-sidecar-${spatialCapacity}-arena-${arenaIndex}`,
+      conductivitySidecarBytes,
+      GPU_BUFFER_USAGE.STORAGE
+        | GPU_BUFFER_USAGE.COPY_SRC
+        | GPU_BUFFER_USAGE.COPY_DST
     ),
     proposalBuffer: createBuffer(
       device,
@@ -905,13 +1188,19 @@ function createRuntimeEntry(
         | GPU_BUFFER_USAGE.COPY_DST
     ),
     // The exact shader keeps its CSR ABI declared even when the optional
-    // capture path is disabled. Bind three non-overlapping storage ranges so
-    // WebGPU's writable-alias validation remains satisfied without allocating
-    // a full CSR arena for a known-uniform CPU mirror.
-    thermalCsrDummyBuffer: createBuffer(
+    // capture path is disabled. WebGPU tracks storage usage per buffer, not
+    // per bound byte range, so the read-only interface receipt must not alias
+    // the writable CSR placeholders within one compute-pass usage scope.
+    thermalCsrWritableDummyBuffer: createBuffer(
       device,
-      `${labelPrefix}-csr-disabled-bindings-${spatialCapacity}-arena-${arenaIndex}`,
+      `${labelPrefix}-csr-disabled-writable-bindings-${spatialCapacity}-arena-${arenaIndex}`,
       thermalCsrDummyBindingAlignment * 3,
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    ),
+    thermalCsrReadOnlyDummyBuffer: createBuffer(
+      device,
+      `${labelPrefix}-csr-disabled-read-only-binding-${spatialCapacity}-arena-${arenaIndex}`,
+      Uint32Array.BYTES_PER_ELEMENT,
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
     )
   };
@@ -1192,6 +1481,8 @@ struct ThermalProposalParams {
   bin_cell_count: u32,
   bin_cell_size_m: f32,
   max_bin_scan_radius_cells: u32,
+  mechanical_interface_receipt_required: u32,
+  mechanical_interface_selected_level: i32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -1206,7 +1497,30 @@ struct ThermalProposalParams {
 @group(0) @binding(9) var<storage, read> preflight_spatial_directory: array<u32>;
 @group(0) @binding(10) var<storage, read> preflight_spatial_aggregate_view: array<u32>;
 @group(0) @binding(11) var<storage, read_write> thermal_active_dispatch: array<atomic<u32>>;
+@group(0) @binding(12) var<storage, read> response_thermal_conductivities: array<f32>;
+@group(0) @binding(13) var<storage, read_write> thermal_conductivity_sidecar: array<atomic<u32>>;
 
+const THERMAL_CONDUCTIVITY_SIDECAR_MAGIC: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC >>> 0}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_VERSION: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS}u;
+const THERMAL_CONDUCTIVITY_STATUS_READY: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_READY}u;
+const MECHANICAL_INTERFACE_RECEIPT_MAGIC: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC >>> 0}u;
+const MECHANICAL_INTERFACE_RECEIPT_VERSION: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION}u;
+const MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS}u;
+const MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_READY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+const THERMAL_CONDUCTIVITY_STATUS_MISSING: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING}u;
+const THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE: u32 = 3u;
 const THERMAL_PREFLIGHT_AGGREGATE_MAGIC: u32 = 0x53414731u;
 const THERMAL_PREFLIGHT_AGGREGATE_VERSION: u32 = 2u;
 const THERMAL_PREFLIGHT_AGGREGATE_STATUS_EXACT: u32 = 259u;
@@ -1274,6 +1588,30 @@ struct ThermalPrepassSourceLookup {
 
 fn thermal_prepass_finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
+}
+
+fn thermal_prepass_conductivity_sidecar_admitted() -> bool {
+  let required_words = THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+    + thermal_params.particle_count * THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS;
+  return arrayLength(&thermal_conductivity_sidecar) >= required_words
+    && atomicLoad(&thermal_conductivity_sidecar[0u])
+      == THERMAL_CONDUCTIVITY_SIDECAR_MAGIC
+    && atomicLoad(&thermal_conductivity_sidecar[1u])
+      == THERMAL_CONDUCTIVITY_SIDECAR_VERSION
+    && atomicLoad(&thermal_conductivity_sidecar[3u])
+      == thermal_params.particle_count
+    && atomicLoad(&thermal_conductivity_sidecar[4u])
+      == thermal_params.material_count
+    && atomicLoad(&thermal_conductivity_sidecar[5u])
+      == thermal_params.response_count
+    && atomicLoad(&thermal_conductivity_sidecar[6u]) != 0u;
+}
+
+fn thermal_prepass_conductivity_sidecar_row_offset(
+  particle_index: u32
+) -> u32 {
+  return THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+    + particle_index * THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS;
 }
 
 fn thermal_prepass_active_source_fold(value: u32, word: u32) -> u32 {
@@ -2708,6 +3046,12 @@ fn derive(
       &thermal_derived[THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMISSION_WORD]
     ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
   ) { return; }
+  if (!thermal_prepass_conductivity_sidecar_admitted()) {
+    if (global_id.x == 0u) {
+      atomicAdd(&thermal_derived[1u], 1u);
+    }
+    return;
+  }
   var source_rank = global_id.x;
   if (active_source_projection) {
     if (
@@ -2807,6 +3151,16 @@ fn derive(
   let particle_index = source_lookup.source_index;
   let row_offset = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u
     + particle_index * ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u;
+  let conductivity_row_offset =
+    thermal_prepass_conductivity_sidecar_row_offset(particle_index);
+  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset],
+    bitcast<u32>(0.0)
+  );
+  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset + 1u],
+    0u
+  );
   let pos_mass = source_state[particle_index * 2u];
   let directory_pos_mass = directory_position_state[particle_index * 2u];
   let current_active = pos_mass.w > 0.0;
@@ -2935,6 +3289,34 @@ fn derive(
   atomicStore(&thermal_derived[row_offset + 5u], 0u);
   atomicStore(&thermal_derived[row_offset + 6u], bitcast<u32>(temperature_k));
   atomicStore(&thermal_derived[row_offset + 7u], bitcast<u32>(temperature_k));
+  var material_key = 0xffffffffu;
+  var phase_key = 0xffffffffu;
+  if (
+    thermal_prepass_finite(thermo0.x)
+    && thermo0.x == trunc(thermo0.x)
+    && thermo0.x >= 0.0
+    && thermo0.x <= 16777215.0
+  ) {
+    material_key = u32(thermo0.x);
+  }
+  if (
+    thermal_prepass_finite(thermo0.y)
+    && thermo0.y == trunc(thermo0.y)
+    && thermo0.y >= 0.0
+    && thermo0.y <= 16777215.0
+  ) {
+    phase_key = u32(thermo0.y);
+  }
+  atomicStore(&thermal_derived[row_offset + 8u], material_key);
+  atomicStore(&thermal_derived[row_offset + 9u], phase_key);
+  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset],
+    selection.response_index
+  );
+  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset + 1u],
+    THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE
+  );
   if (radius_m > 0.0) {
     atomicMax(&thermal_derived[0u], bitcast<u32>(radius_m));
   }
@@ -2942,6 +3324,53 @@ fn derive(
     let temperature_bits = bitcast<u32>(temperature_k);
     atomicMax(&thermal_derived[2u], temperature_bits);
     atomicMax(&thermal_derived[3u], ~temperature_bits);
+  }
+}
+
+@compute @workgroup_size(64)
+fn finalize_conductivity(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let particle_index = global_id.x;
+  if (
+    particle_index >= thermal_params.particle_count
+    || !thermal_prepass_conductivity_sidecar_admitted()
+  ) { return; }
+  let row_offset =
+    thermal_prepass_conductivity_sidecar_row_offset(particle_index);
+  if (
+    atomicLoad(&thermal_conductivity_sidecar[row_offset + 1u])
+      != THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE
+  ) { return; }
+  let response_index =
+    atomicLoad(&thermal_conductivity_sidecar[row_offset]);
+  var conductivity = 0.0;
+  if (
+    response_index < thermal_params.response_count
+    && response_index < arrayLength(&response_thermal_conductivities)
+  ) {
+    let selected =
+      response_thermal_conductivities[response_index];
+    if (thermal_prepass_finite(selected) && selected > 0.0) {
+      conductivity = selected;
+    }
+  }
+  let status = select(
+    THERMAL_CONDUCTIVITY_STATUS_MISSING,
+    THERMAL_CONDUCTIVITY_STATUS_READY,
+    conductivity > 0.0
+  );
+  atomicStore(
+    &thermal_conductivity_sidecar[row_offset],
+    bitcast<u32>(conductivity)
+  );
+  atomicStore(
+    &thermal_conductivity_sidecar[row_offset + 1u],
+    status
+  );
+  atomicAdd(&thermal_conductivity_sidecar[10u], 1u);
+  if (status == THERMAL_CONDUCTIVITY_STATUS_MISSING) {
+    atomicAdd(&thermal_conductivity_sidecar[11u], 1u);
   }
 }
 
@@ -3277,8 +3706,9 @@ fn thermal_uniform_completion_workgroup_admitted(
       thermal_uniform_completion_admitted()
     );
   }
-  workgroupBarrier();
-  return thermal_uniform_completion_workgroup_flag != 0u;
+  return workgroupUniformLoad(
+    &thermal_uniform_completion_workgroup_flag
+  ) != 0u;
 }
 
 fn thermal_record_uniform_completion(budget_mode: bool) {
@@ -3467,6 +3897,7 @@ fn budget(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  thermal_prepare_pair_authority_flags(local_invocation_index);
   let source_ordinal = thermal_projection_work_ordinal(
     global_id,
     local_invocation_index,
@@ -3612,6 +4043,7 @@ fn propose(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  thermal_prepare_pair_authority_flags(local_invocation_index);
   let source_ordinal = thermal_projection_work_ordinal(
     global_id,
     local_invocation_index,
@@ -3785,7 +4217,8 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
 const thermalCandidateCsrBindingsWgsl = /* wgsl */ `
 // ULG_THERMAL_CANDIDATE_CSR_BINDINGS_BEGIN
 @group(0) @binding(11) var<storage, read_write> thermal_csr_source_row_states: array<atomic<u32>>;
-@group(0) @binding(12) var<storage, read_write> thermal_csr_unused: array<atomic<u32>>;
+@group(0) @binding(12) var<storage, read> mechanical_interface_receipt:
+  array<u32>;
 @group(0) @binding(13) var<storage, read_write> thermal_csr_control_and_peers: array<atomic<u32>>;
 // ULG_THERMAL_CANDIDATE_CSR_BINDINGS_END
 `;
@@ -4345,6 +4778,38 @@ function stripThermalCandidateCsrWgsl(source) {
     .replace(thermalCandidateCsrHelpersWgsl, '');
 }
 
+function stripThermalMechanicalInterfaceReceiptWgsl(source) {
+  const startNeedle = 'struct ThermalMechanicalInterfaceLookup {';
+  const endNeedle = 'fn thermal_conductivity_sidecar_admitted() -> bool {';
+  const start = source.indexOf(startNeedle);
+  const end = source.indexOf(endNeedle, start + startNeedle.length);
+  if (start < 0 || end < 0) {
+    throw new Error(
+      'Classic thermal mechanical-interface receipt markers drifted'
+    );
+  }
+  const inertLookup = /* wgsl */ `struct ThermalMechanicalInterfaceLookup {
+  classified: u32,
+  effective_face_area_m2: f32,
+};
+
+fn thermal_mechanical_interface_receipt_admitted() -> bool {
+  return false;
+}
+
+fn thermal_mechanical_interface_lookup(
+  self_index: u32,
+  other_index: u32
+) -> ThermalMechanicalInterfaceLookup {
+  _ = self_index;
+  _ = other_index;
+  return ThermalMechanicalInterfaceLookup(0u, 0.0);
+}
+
+`;
+  return source.slice(0, start) + inertLookup + source.slice(end);
+}
+
 export const schroederSpatialThermalProposalWgsl = /* wgsl */ `
 struct ThermalProposalParams {
   particle_count: u32,
@@ -4367,6 +4832,8 @@ struct ThermalProposalParams {
   bin_cell_count: u32,
   bin_cell_size_m: f32,
   max_bin_scan_radius_cells: u32,
+  mechanical_interface_receipt_required: u32,
+  mechanical_interface_selected_level: i32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -4381,6 +4848,7 @@ struct ThermalProposalParams {
 @group(0) @binding(9) var<storage, read> directory_position_state: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read> spatial_aggregate_view: array<u32>;
 ${thermalCandidateCsrBindingsWgsl}
+@group(0) @binding(15) var<storage, read> thermal_conductivity_sidecar: array<u32>;
 
 ${exactNearTraversalWgsl}
 
@@ -4388,6 +4856,25 @@ const THERMAL_PROPOSAL_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_PROPOSAL_
 const THERMAL_PROPOSAL_ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS}u;
 const THERMAL_DERIVED_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u;
 const THERMAL_DERIVED_ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_MAGIC: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC >>> 0}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_VERSION: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS}u;
+const THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS}u;
+const THERMAL_CONDUCTIVITY_STATUS_READY: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_READY}u;
+const MECHANICAL_INTERFACE_RECEIPT_MAGIC: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC >>> 0}u;
+const MECHANICAL_INTERFACE_RECEIPT_VERSION: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION}u;
+const MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS}u;
+const MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_READY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
 const THERMAL_PAIR_RELAXATION_LIMIT: f32 = 0.25;
 // A pair visit reports whether the exact reciprocal proposal needs to replay
 // it. The budget path still visits every authenticated candidate and counts
@@ -4911,6 +5398,267 @@ fn thermal_derived_value(particle_index: u32, component: u32) -> f32 {
   return bitcast<f32>(atomicLoad(&thermal_derived[offset]));
 }
 
+fn thermal_derived_word(particle_index: u32, component: u32) -> u32 {
+  let offset = THERMAL_DERIVED_HEADER_WORDS
+    + particle_index * THERMAL_DERIVED_ROW_WORDS + component;
+  return atomicLoad(&thermal_derived[offset]);
+}
+
+struct ThermalMechanicalInterfaceLookup {
+  classified: u32,
+  effective_face_area_m2: f32,
+};
+
+fn thermal_mechanical_interface_receipt_admitted() -> bool {
+  if (thermal_params.mechanical_interface_receipt_required == 0u) {
+    return false;
+  }
+  let particle_count = thermal_params.particle_count;
+  let offset_words = particle_count + 1u;
+  if (
+    arrayLength(&mechanical_interface_receipt)
+      < MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS + offset_words
+  ) { return false; }
+  let published_rows = mechanical_interface_receipt[13u];
+  let row_base = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS + offset_words;
+  let available_words = arrayLength(&mechanical_interface_receipt);
+  return mechanical_interface_receipt[0u]
+      == MECHANICAL_INTERFACE_RECEIPT_MAGIC
+    && mechanical_interface_receipt[1u]
+      == MECHANICAL_INTERFACE_RECEIPT_VERSION
+    && mechanical_interface_receipt[2u]
+      == atomicLoad(&thermal_proposals[2u])
+    && mechanical_interface_receipt[3u]
+      == atomicLoad(&thermal_proposals[12u])
+    && mechanical_interface_receipt[4u]
+      == atomicLoad(&thermal_proposals[13u])
+    && mechanical_interface_receipt[5u]
+      == atomicLoad(&thermal_proposals[14u])
+    && mechanical_interface_receipt[6u]
+      == atomicLoad(&thermal_proposals[10u])
+    && mechanical_interface_receipt[7u]
+      == atomicLoad(&thermal_proposals[11u])
+    && mechanical_interface_receipt[8u]
+      == atomicLoad(&thermal_proposals[3u])
+    && bitcast<i32>(mechanical_interface_receipt[9u])
+      == thermal_params.mechanical_interface_selected_level
+    && mechanical_interface_receipt[10u] == particle_count
+    && mechanical_interface_receipt[11u] >= published_rows
+    && mechanical_interface_receipt[12u] == offset_words
+    && mechanical_interface_receipt[15u]
+      == (
+        MECHANICAL_INTERFACE_RECEIPT_STATUS_READY
+          | MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED
+      )
+    && (
+      mechanical_interface_receipt[15u]
+        & MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    ) == 0u
+    && row_base <= available_words
+    && published_rows
+      <= (available_words - row_base) / MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+}
+
+fn thermal_mechanical_interface_lookup(
+  self_index: u32,
+  other_index: u32
+) -> ThermalMechanicalInterfaceLookup {
+  var result = ThermalMechanicalInterfaceLookup(0u, 0.0);
+  if (
+    !thermal_mechanical_interface_receipt_pair_admitted()
+    || self_index >= thermal_params.particle_count
+    || other_index >= thermal_params.particle_count
+  ) { return result; }
+  let offset_base = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS;
+  let begin = mechanical_interface_receipt[offset_base + self_index];
+  let end = mechanical_interface_receipt[offset_base + self_index + 1u];
+  let total = mechanical_interface_receipt[13u];
+  if (begin > end || end > total) { return result; }
+  let row_base = offset_base + thermal_params.particle_count + 1u;
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let row = row_base + cursor * MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+    if (mechanical_interface_receipt[row] != other_index) { continue; }
+    let signed_area_m2 = bitcast<f32>(
+      mechanical_interface_receipt[row + 1u]
+    );
+    if (!ss_exact_near_finite(signed_area_m2)) { return result; }
+    if (signed_area_m2 > 0.0) {
+      result.classified = 1u;
+      result.effective_face_area_m2 = signed_area_m2;
+    } else if (signed_area_m2 < 0.0) {
+      result.classified = 1u;
+    }
+    return result;
+  }
+  return result;
+}
+
+fn thermal_conductivity_sidecar_admitted() -> bool {
+  let required_words = THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+    + thermal_params.particle_count * THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS;
+  return arrayLength(&thermal_conductivity_sidecar) >= required_words
+    && thermal_conductivity_sidecar[0u]
+      == THERMAL_CONDUCTIVITY_SIDECAR_MAGIC
+    && thermal_conductivity_sidecar[1u]
+      == THERMAL_CONDUCTIVITY_SIDECAR_VERSION
+    && thermal_conductivity_sidecar[2u]
+      == atomicLoad(&thermal_proposals[2u])
+    && thermal_conductivity_sidecar[3u]
+      == thermal_params.particle_count
+    && thermal_conductivity_sidecar[3u]
+      == atomicLoad(&thermal_proposals[4u])
+    && thermal_conductivity_sidecar[4u]
+      == thermal_params.material_count
+    && thermal_conductivity_sidecar[5u]
+      == thermal_params.response_count
+    && thermal_conductivity_sidecar[6u] != 0u
+    && thermal_conductivity_sidecar[7u]
+      == atomicLoad(&thermal_proposals[12u])
+    && thermal_conductivity_sidecar[8u]
+      == atomicLoad(&thermal_proposals[13u])
+    && thermal_conductivity_sidecar[9u]
+      == atomicLoad(&thermal_proposals[14u])
+    && thermal_conductivity_sidecar[10u]
+      == atomicLoad(&thermal_derived[
+        THERMAL_CURRENT_ACTIVE_SOURCE_COUNT_WORD
+      ]);
+}
+
+// Directory-v2 dispatches one retained ActiveSource epoch. Its conductivity
+// and mechanical headers are immutable for the lifetime of this command
+// encoder, so authenticate them once per workgroup rather than once for every
+// candidate pair. Classic/non-ActiveSource routes retain the full per-call
+// checks below.
+var<workgroup> thermal_pair_authority_flags: vec2<u32>;
+
+fn thermal_prepare_pair_authority_flags(local_invocation_index: u32) {
+  if (local_invocation_index == 0u) {
+    thermal_pair_authority_flags = vec2<u32>(
+      select(0u, 1u, thermal_conductivity_sidecar_admitted()),
+      select(0u, 1u, thermal_mechanical_interface_receipt_admitted())
+    );
+  }
+  workgroupBarrier();
+}
+
+fn thermal_conductivity_sidecar_pair_admitted() -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return thermal_pair_authority_flags.x != 0u;
+  }
+  return thermal_conductivity_sidecar_admitted();
+}
+
+fn thermal_mechanical_interface_receipt_pair_admitted() -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return thermal_pair_authority_flags.y != 0u;
+  }
+  return thermal_mechanical_interface_receipt_admitted();
+}
+
+fn thermal_particle_conductivity_w_per_mk(particle_index: u32) -> f32 {
+  if (
+    particle_index >= thermal_params.particle_count
+    || !thermal_conductivity_sidecar_pair_admitted()
+  ) { return 0.0; }
+  let offset = THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS
+    + particle_index * THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS;
+  if (
+    offset + 1u >= arrayLength(&thermal_conductivity_sidecar)
+    || thermal_conductivity_sidecar[offset + 1u]
+      != THERMAL_CONDUCTIVITY_STATUS_READY
+  ) { return 0.0; }
+  let conductivity = bitcast<f32>(thermal_conductivity_sidecar[offset]);
+  return select(
+    0.0,
+    conductivity,
+    ss_exact_near_finite(conductivity) && conductivity > 0.0
+  );
+}
+
+fn thermal_harmonic_mean_positive(left: f32, right: f32) -> f32 {
+  if (left <= 0.0 || right <= 0.0) { return 0.0; }
+  return 2.0 * left * right / (left + right);
+}
+
+// Contact geometry is a thermal-law predicate over matched-time endpoints:
+// nominal spheres intersect in a disk, and Fourier conduction follows the
+// center distance. SS authenticates complete candidate enumeration only; it
+// does not issue or imply a per-pair contact-area receipt.
+fn thermal_conductive_sphere_contact_geometry(
+  radius_m: f32,
+  other_radius_m: f32,
+  distance_m: f32
+) -> vec2<f32> {
+  if (radius_m <= 0.0 || other_radius_m <= 0.0) {
+    return vec2<f32>(0.0);
+  }
+  let radius_sum_m = radius_m + other_radius_m;
+  if (distance_m >= radius_sum_m) {
+    return vec2<f32>(0.0);
+  }
+  let min_radius_m = min(radius_m, other_radius_m);
+  var contact_radius_squared_m2 = 0.0;
+  if (
+    distance_m == 0.0
+    || distance_m <= abs(radius_m - other_radius_m)
+  ) {
+    contact_radius_squared_m2 = min_radius_m * min_radius_m;
+  } else {
+    let plane_from_self_m = (
+      distance_m * distance_m
+      + radius_m * radius_m
+      - other_radius_m * other_radius_m
+    ) / (2.0 * distance_m);
+    contact_radius_squared_m2 = max(
+      0.0,
+      radius_m * radius_m - plane_from_self_m * plane_from_self_m
+    );
+  }
+  if (contact_radius_squared_m2 <= 0.0) {
+    return vec2<f32>(0.0);
+  }
+  return vec2<f32>(
+    3.14159265359 * contact_radius_squared_m2,
+    select(min_radius_m, distance_m, distance_m > 0.0)
+  );
+}
+
+// Unlike-material and unlike-phase carriers are adjacent finite-volume cells,
+// not deformable spheres whose heat-transfer area should vanish when the
+// non-penetration solve removes overlap. Use the exact candidate-scoped,
+// axis-aligned finite-volume face area from the mechanical receipt. The two
+// half-cell paths form the exact series resistance used below.
+fn thermal_finite_volume_interface_contact_geometry(
+  radius_m: f32,
+  other_radius_m: f32,
+  effective_face_area_m2: f32
+) -> vec4<f32> {
+  if (
+    radius_m <= 0.0
+    || other_radius_m <= 0.0
+    || effective_face_area_m2 <= 0.0
+  ) {
+    return vec4<f32>(0.0);
+  }
+  let radius_per_edge =
+    ${EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE};
+  let self_edge_m = radius_m / radius_per_edge;
+  let other_edge_m = other_radius_m / radius_per_edge;
+  let contact_distance_m = 0.5 * (self_edge_m + other_edge_m);
+  return vec4<f32>(
+    effective_face_area_m2,
+    contact_distance_m,
+    0.5 * self_edge_m,
+    0.5 * other_edge_m
+  );
+}
+
 fn thermal_pow4(value: f32) -> f32 {
   let squared = value * value;
   return squared * squared;
@@ -5073,8 +5821,57 @@ fn thermal_visit_fused_pair(
   ) {
     return THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY;
   }
+  // The retained mechanical receipt and conductivity sidecar both carry
+  // relatively expensive authenticated headers.  A candidate outside both
+  // thermal supports cannot observe either value, so reject that overwhelmingly
+  // common case before walking a mechanical CSR row or revalidating the
+  // conductivity header.  This only changes the order of pure reads; the
+  // support-boundary path below remains bit-for-bit identical.
+  let material_or_phase_interface =
+    thermal_derived_word(self_index, 8u)
+      != thermal_derived_word(other_index, 8u)
+    || thermal_derived_word(self_index, 9u)
+      != thermal_derived_word(other_index, 9u);
+  let mechanical_interface = thermal_mechanical_interface_lookup(
+    self_index,
+    other_index
+  );
+  let interface_pair =
+    thermal_params.mechanical_interface_receipt_required != 0u
+    && (
+      material_or_phase_interface
+      || mechanical_interface.classified != 0u
+    );
+  let self_thermal_conductivity_w_per_mk =
+    thermal_particle_conductivity_w_per_mk(self_index);
+  let other_thermal_conductivity_w_per_mk =
+    thermal_particle_conductivity_w_per_mk(other_index);
   let distance_m = sqrt(max(distance_squared_m2, 0.0));
-  let conduction_hit = distance_m < conduction_support_m;
+  let sphere_contact_geometry = thermal_conductive_sphere_contact_geometry(
+    self_radius_m,
+    other_radius_m,
+    distance_m
+  );
+  let interface_contact_geometry =
+    thermal_finite_volume_interface_contact_geometry(
+      self_radius_m,
+      other_radius_m,
+      mechanical_interface.effective_face_area_m2
+    );
+  let contact_area_m2 = select(
+    sphere_contact_geometry.x,
+    interface_contact_geometry.x,
+    interface_pair
+  );
+  let conduction_path_m = select(
+    sphere_contact_geometry.y,
+    interface_contact_geometry.y,
+    interface_pair
+  );
+  let conduction_hit = contact_area_m2 > 0.0
+    && conduction_path_m > 0.0
+    && self_thermal_conductivity_w_per_mk > 0.0
+    && other_thermal_conductivity_w_per_mk > 0.0;
   let radiation_hit = distance_m < radiation_support_m;
   if (!conduction_hit && !radiation_hit) {
     return THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY;
@@ -5084,9 +5881,41 @@ fn thermal_visit_fused_pair(
   var conduction_energy_j = 0.0;
   var radiation_energy_j = 0.0;
   if (conduction_hit) {
-    let weight = 1.0 - distance_m / conduction_support_m;
-    let raw_energy_j = thermal_params.conduction_rate
-      * (other_temperature - self_temperature) * weight * thermal_params.dt_s;
+    var pair_conductance_w_per_k = 0.0;
+    if (interface_pair) {
+      let interface_resistance_k_per_w =
+        interface_contact_geometry.z
+          / (
+            self_thermal_conductivity_w_per_mk
+            * contact_area_m2
+          )
+        + interface_contact_geometry.w
+          / (
+            other_thermal_conductivity_w_per_mk
+            * contact_area_m2
+          );
+      if (interface_resistance_k_per_w > 0.0) {
+        pair_conductance_w_per_k =
+          1.0 / interface_resistance_k_per_w;
+      }
+    } else {
+      let pair_thermal_conductivity_w_per_mk =
+        thermal_harmonic_mean_positive(
+          self_thermal_conductivity_w_per_mk,
+          other_thermal_conductivity_w_per_mk
+        );
+      pair_conductance_w_per_k =
+        pair_thermal_conductivity_w_per_mk
+          * contact_area_m2 / conduction_path_m;
+    }
+    if (
+      !ss_exact_near_finite(pair_conductance_w_per_k)
+      || pair_conductance_w_per_k < 0.0
+    ) {
+      return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    }
+    let raw_energy_j = pair_conductance_w_per_k
+      * (other_temperature - self_temperature) * thermal_params.dt_s;
     conduction_energy_j = thermal_clamp_pair_energy(
       raw_energy_j,
       self_temperature,
@@ -5199,6 +6028,16 @@ ${thermalCandidateCsrAdmissionWgsl}
   if (!conduction_admitted) { thermal_evidence_add(2u, 1u, true); }
   if (!radiation_admitted) { thermal_evidence_add(2u, 1u, false); }
   if (!conduction_admitted || !radiation_admitted) {
+    thermal_mark_invalid(true);
+    thermal_mark_invalid(false);
+    return;
+  }
+  if (
+    thermal_params.mechanical_interface_receipt_required != 0u
+    && !thermal_mechanical_interface_receipt_admitted()
+  ) {
+    thermal_evidence_add(5u, 1u, true);
+    thermal_evidence_add(5u, 1u, false);
     thermal_mark_invalid(true);
     thermal_mark_invalid(false);
     return;
@@ -5467,7 +6306,69 @@ ${thermalCandidateCsrRoutePreludeWgsl}
       }
     }
   } else {
-${thermalCandidateCsrExactTraversalPrefixWgsl}  for (
+${thermalCandidateCsrExactTraversalPrefixWgsl}  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    // Directory-v2 already authenticates a dense active-ordinal map before
+    // this pass. Stream that map directly and apply the exact pair predicate;
+    // this is a complete active-source superset of the near directory and
+    // avoids repeating three nested cell-key searches for every source.
+    let active_source_count = atomicLoad(
+      &thermal_derived[THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD]
+    );
+    let active_to_physical_offset = spatial_aggregate_view[25u];
+    if (
+      active_to_physical_offset > arrayLength(&spatial_aggregate_view)
+      || active_source_count
+        > arrayLength(&spatial_aggregate_view) - active_to_physical_offset
+    ) {
+      malformed = true;
+    }
+    for (
+      var active_ordinal = 0u;
+      active_ordinal < active_source_count && !malformed;
+      active_ordinal = active_ordinal + 1u
+    ) {
+      // The preceding ActiveSource preflight authenticated both maps for
+      // every ordinal and sealed the projection admission. Reuse its dense
+      // forward map here instead of repeating the inverse-map proof for every
+      // pair in both law passes.
+      let other_index = spatial_aggregate_view[
+        active_to_physical_offset + active_ordinal
+      ];
+      if (other_index >= thermal_params.particle_count) {
+        malformed = true;
+        break;
+      }
+      let thermal_pair_visit_outcome = thermal_visit_fused_pair(
+        budget_mode,
+        particle_index,
+        other_index,
+        self_pos_mass.xyz,
+        self_mass,
+        self_temperature,
+        self_temperature_slope,
+        self_radius_m,
+        self_emissivity,
+        self_gain_scale,
+        self_loss_scale,
+        &requested_gain_j,
+        &requested_loss_j,
+        &conduction_specific_energy_delta,
+        &radiation_specific_energy_delta,
+        &neighbor_min_temperature,
+        &neighbor_max_temperature,
+        &conduction_candidate_visit_count,
+        &radiation_candidate_visit_count,
+        &conduction_mask_hit_count,
+        &radiation_mask_hit_count,
+        &local_count_overflow
+      );
+${thermalCandidateCsrCaptureCandidateWgsl}
+    }
+  } else {
+  for (
     var level_ordinal = 0u;
     level_ordinal < conduction_expectation.level_count;
     level_ordinal = level_ordinal + 1u
@@ -5770,6 +6671,7 @@ ${thermalCandidateCsrCaptureCandidateWgsl}
       x_cursor = x_end;
     }
     if (malformed || x_cursor < level_end) { malformed = true; break; }
+  }
   }
 ${thermalCandidateCsrFinalizeCaptureWgsl}${thermalCandidateCsrExactTraversalSuffixWgsl}  }
   let conduction_candidate_count_admitted = thermal_flush_evidence(
@@ -6200,6 +7102,7 @@ ${memberTraversalWgsl}${memberCounter}
   if (tree_stack_size != 0u) {
     malformed = true;
   }${counterFlush}
+  }
 `;
 }
 
@@ -6244,13 +7147,17 @@ export function createSchroederSpatialThermalTreeShadowWgslForNativeTest({
     + source.slice(directorySection.end);
 
   const unusedBinding =
-    '@group(0) @binding(12) var<storage, read_write> thermal_csr_unused: array<atomic<u32>>;';
+    '@group(0) @binding(12) var<storage, read> mechanical_interface_receipt:\n  array<u32>;';
   if (!source.includes(unusedBinding)) {
     throw new Error('Unable to bind the native thermal tree shadow');
   }
   source = source.replace(
     unusedBinding,
     '@group(0) @binding(12) var<storage, read> exact_near_cell_tree: array<u32>;'
+  );
+  source = source.replaceAll(
+    'mechanical_interface_receipt',
+    'exact_near_cell_tree'
   );
   if (observeTraversalCounters) {
     const binding13 =
@@ -7619,7 +8526,7 @@ export function createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTe
         })
   );
   const unusedBinding =
-    '@group(0) @binding(12) var<storage, read_write> thermal_csr_unused: array<atomic<u32>>;';
+    '@group(0) @binding(12) var<storage, read> mechanical_interface_receipt:\n  array<u32>;';
   const binding13 =
     '@group(0) @binding(13) var<storage, read_write> thermal_csr_control_and_peers: array<atomic<u32>>;';
   if (!source.includes(unusedBinding) || !source.includes(binding13)) {
@@ -7628,6 +8535,10 @@ export function createSchroederSpatialThermalSourceCellTreeShadowWgslForNativeTe
   source = source.replace(
     unusedBinding,
     '@group(0) @binding(12) var<storage, read> exact_near_cell_tree: array<u32>;'
+  );
+  source = source.replaceAll(
+    'mechanical_interface_receipt',
+    'exact_near_cell_tree'
   );
   source = source.replace(
     binding13,
@@ -7792,7 +8703,9 @@ function createClassicThermalProposalWgsl() {
   ) {
     throw new Error('Classic thermal proposal WGSL source markers drifted');
   }
-  let source = stripThermalCandidateCsrWgsl(schroederSpatialThermalProposalWgsl)
+  let source = stripThermalMechanicalInterfaceReceiptWgsl(
+    stripThermalCandidateCsrWgsl(schroederSpatialThermalProposalWgsl)
+  )
     .replace(exactNearTraversalWgsl, classicThermalExactNearExpectationPreludeWgsl)
     .replace(
       spatialThermalExactEntryPointsWgsl,
@@ -7899,7 +8812,9 @@ function createClassicThermalBinnedProposalWgsl() {
   ) {
     throw new Error('Classic binned thermal proposal WGSL source markers drifted');
   }
-  let source = stripThermalCandidateCsrWgsl(schroederSpatialThermalProposalWgsl)
+  let source = stripThermalMechanicalInterfaceReceiptWgsl(
+    stripThermalCandidateCsrWgsl(schroederSpatialThermalProposalWgsl)
+  )
     .replace(exactNearTraversalWgsl, classicThermalExactNearExpectationPreludeWgsl)
     .replace(admissionBlock, `  let exact_near_lookup = false;
   let binned_lookup = lookup_mode == 1u
@@ -8261,6 +9176,8 @@ struct ThermalProposalParams {
   bin_cell_count: u32,
   bin_cell_size_m: f32,
   max_bin_scan_radius_cells: u32,
+  mechanical_interface_receipt_required: u32,
+  mechanical_interface_selected_level: i32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -8498,9 +9415,16 @@ function resolveThermalResponseUpload(device, upload) {
   }
   const materialCount = exactU32(upload.materialCount, 'thermalResponseGraphUpload.materialCount');
   const responseCount = exactU32(upload.responseCount, 'thermalResponseGraphUpload.responseCount');
+  if (typeof upload.contentFingerprint !== 'string' || upload.contentFingerprint.length === 0) {
+    throw new TypeError(
+      'Canonical thermal proposals require phase-response content provenance'
+    );
+  }
   return Object.freeze({
     materialCount,
     responseCount,
+    contentFingerprint: upload.contentFingerprint,
+    contentFingerprintToken: stringFingerprintU32(upload.contentFingerprint),
     responseRecordBuffer: requireBuffer(
       device,
       upload.responseRecordBuffer,
@@ -8512,6 +9436,12 @@ function resolveThermalResponseUpload(device, upload) {
       upload.responseBuffer,
       'thermalResponseGraphUpload.responseBuffer',
       responseCount * 4 * 4 * Float32Array.BYTES_PER_ELEMENT
+    ),
+    responseThermalConductivityBuffer: requireBuffer(
+      device,
+      upload.responseThermalConductivityBuffer,
+      'thermalResponseGraphUpload.responseThermalConductivityBuffer',
+      responseCount * Float32Array.BYTES_PER_ELEMENT
     ),
     graphNodeBuffer: requireBuffer(
       device,
@@ -8652,6 +9582,50 @@ export function isLiveThermalProposalSourceAuthority(authority, {
  * the exact current state over the retained immutable-x_n directory and the
  * caller encodes that producer immediately before canonical apply.
  */
+function resolveMechanicalContactInterfaceReceipt({
+  device,
+  generation,
+  receipt,
+  particleCount,
+  thermoBuffer
+}) {
+  if (receipt == null) return null;
+  const execution = generation?.execution;
+  const admitted = Boolean(
+    receipt?.schema
+      === ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA
+    && receipt.ready === true
+    && receipt.failClosed === true
+    && receipt.generation === generation
+    && receipt.device === device
+    && receipt.released !== true
+    && receipt.releaseScheduled !== true
+    && receipt.generationId === execution?.generationId
+    && receipt.storageGeneration === execution?.storageGeneration
+    && receipt.physicsTick === execution?.physicsTick
+    && receipt.physicsSubstep === execution?.physicsSubstep
+    && receipt.positionEpoch === execution?.positionEpoch
+    && receipt.topologyEpoch === execution?.topologyEpoch
+    && receipt.supportEpoch === execution?.supportEpoch
+    && receipt.particleCount === particleCount
+    && receipt.headerWords
+      === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
+    && receipt.rowWords
+      === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+    && receipt.sourceThermoBuffer === thermoBuffer
+    && webGpuBufferMatchesDevice(receipt.buffer, device)
+  );
+  if (!admitted) {
+    const error = new TypeError(
+      'Canonical thermal interface conduction requires the live exact mechanical contact-interface receipt'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_THERMAL_MECHANICAL_INTERFACE_RECEIPT';
+    throw error;
+  }
+  return receipt;
+}
+
 export function runSchroederSpatialThermalProposalWebGpu({
   device,
   generation,
@@ -8659,6 +9633,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   sphParticleState,
   sphParticleUpload,
   mlsMpmParticleUpload,
+  mechanicalContactInterfaceReceipt = null,
   thermalResponseGraphUpload,
   dtS = 0,
   smoothingLengthM = sphParticleState?.smoothingLengthM ?? 0,
@@ -8700,6 +9675,13 @@ export function runSchroederSpatialThermalProposalWebGpu({
     'sphParticleUpload.thermoBuffer',
     particleCount * 3 * 4 * Float32Array.BYTES_PER_ELEMENT
   );
+  const contactInterfaceReceipt = resolveMechanicalContactInterfaceReceipt({
+    device,
+    generation,
+    receipt: mechanicalContactInterfaceReceipt,
+    particleCount,
+    thermoBuffer
+  });
   const responseUpload = resolveThermalResponseUpload(device, thermalResponseGraphUpload);
   const preparedLawConfig = normalizeThermalLawConfig({
     dtS,
@@ -8952,6 +9934,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   const candidateCsrEnabled = thermalCandidateCsr.available === true;
   const {
     derivedBuffer,
+    conductivitySidecarBuffer,
     proposalBuffer,
     conductionEvidenceBuffer,
     radiationEvidenceBuffer,
@@ -8959,13 +9942,19 @@ export function runSchroederSpatialThermalProposalWebGpu({
     radiationExpectationBuffer,
     paramsBuffer,
     activeDispatchBuffer,
-    thermalCsrDummyBuffer
+    thermalCsrWritableDummyBuffer,
+    thermalCsrReadOnlyDummyBuffer
   } = entry.buffers;
 
   device.queue.writeBuffer(
     proposalBuffer,
     0,
     createProposalHeader(execution, particleCount)
+  );
+  device.queue.writeBuffer(
+    conductivitySidecarBuffer,
+    0,
+    createConductivitySidecarHeader(execution, particleCount, responseUpload)
   );
   device.queue.writeBuffer(
     conductionEvidenceBuffer,
@@ -9012,6 +10001,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
     candidateCapacity: candidateCsrEnabled
       ? thermalCandidateCsr.candidateCapacity
       : 0,
+    mechanicalInterfaceReceiptRequired: Boolean(contactInterfaceReceipt),
+    mechanicalInterfaceSelectedLevel:
+      contactInterfaceReceipt?.selectedLevel ?? 0,
     ...preparedLawConfig
   }));
 
@@ -9021,7 +10013,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     : schroederSpatialThermalProposalWgsl;
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-derived-prepass.v10.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-derived-prepass.v12.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',
@@ -9037,12 +10029,25 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(8, 'read-only-storage'),
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
-      computeBufferBinding(11, 'storage')
+      computeBufferBinding(11, 'storage'),
+      computeBufferBinding(13, 'storage')
+    ]
+  });
+  const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey:
+      `ulg-schroeder-spatial-thermal-conductivity-finalize.v2.${directoryAbiCacheKey}`,
+    label: 'ulg-schroeder-spatial-thermal-conductivity-finalize',
+    code: schroederSpatialThermalDerivedPrepassWgsl,
+    entryPoint: 'finalize_conductivity',
+    bindings: [
+      computeBufferBinding(7, 'uniform'),
+      computeBufferBinding(12, 'read-only-storage'),
+      computeBufferBinding(13, 'storage')
     ]
   });
   const activeDispatchFinalizePipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-active-dispatch-finalize.v4.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-active-dispatch-finalize.v6.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'finalize_active_dispatch',
@@ -9058,13 +10063,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(8, 'read-only-storage'),
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
-      computeBufferBinding(11, 'storage')
+      computeBufferBinding(11, 'storage'),
+      computeBufferBinding(13, 'storage')
     ]
   });
   const physicalTopologyPreflightPipeline = directoryV2
     ? createCachedExplicitComputePipeline(device, {
         cacheKey:
-          `ulg-schroeder-spatial-thermal-physical-topology-preflight.v1.${directoryAbiCacheKey}`,
+          `ulg-schroeder-spatial-thermal-physical-topology-preflight.v3.${directoryAbiCacheKey}`,
         label: 'ulg-schroeder-spatial-thermal-physical-topology-preflight',
         code: schroederSpatialThermalDerivedPrepassWgsl,
         entryPoint: 'preflight_physical_topology',
@@ -9080,14 +10086,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
           computeBufferBinding(8, 'read-only-storage'),
           computeBufferBinding(9, 'read-only-storage'),
           computeBufferBinding(10, 'read-only-storage'),
-          computeBufferBinding(11, 'storage')
+          computeBufferBinding(11, 'storage'),
+          computeBufferBinding(13, 'storage')
         ]
       })
     : null;
   const activeTopologyFinalizePipeline = directoryV2
     ? createCachedExplicitComputePipeline(device, {
         cacheKey:
-          `ulg-schroeder-spatial-thermal-active-topology-finalize.v1.${directoryAbiCacheKey}`,
+          `ulg-schroeder-spatial-thermal-active-topology-finalize.v3.${directoryAbiCacheKey}`,
         label: 'ulg-schroeder-spatial-thermal-active-topology-finalize',
         code: schroederSpatialThermalDerivedPrepassWgsl,
         entryPoint: 'finalize_active_topology',
@@ -9103,13 +10110,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
           computeBufferBinding(8, 'read-only-storage'),
           computeBufferBinding(9, 'read-only-storage'),
           computeBufferBinding(10, 'read-only-storage'),
-          computeBufferBinding(11, 'storage')
+          computeBufferBinding(11, 'storage'),
+          computeBufferBinding(13, 'storage')
         ]
       })
     : null;
   const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-budget-resolve.v10.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-budget-resolve.v12.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-budget-resolve',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'resolve_budget',
@@ -9125,12 +10133,13 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(8, 'read-only-storage'),
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
-      computeBufferBinding(11, 'storage')
+      computeBufferBinding(11, 'storage'),
+      computeBufferBinding(13, 'storage')
     ]
   });
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-budget.v22.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-budget.v24.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-budget',
     code: thermalProposalWgsl,
     entryPoint: 'budget',
@@ -9147,13 +10156,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
       computeBufferBinding(11, 'storage'),
-      computeBufferBinding(12, 'storage'),
-      computeBufferBinding(13, 'storage')
+      computeBufferBinding(12, 'read-only-storage'),
+      computeBufferBinding(13, 'storage'),
+      computeBufferBinding(15, 'read-only-storage')
     ]
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-proposal.v23.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-proposal.v25.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-proposal',
     code: thermalProposalWgsl,
     entryPoint: 'propose',
@@ -9170,14 +10180,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
       computeBufferBinding(11, 'storage'),
-      computeBufferBinding(12, 'storage'),
-      computeBufferBinding(13, 'storage')
+      computeBufferBinding(12, 'read-only-storage'),
+      computeBufferBinding(13, 'storage'),
+      computeBufferBinding(15, 'read-only-storage')
     ]
   });
   const zeroActiveProjectionFinalizePipeline = directoryV2
     ? createCachedExplicitComputePipeline(device, {
         cacheKey:
-          `ulg-schroeder-spatial-thermal-zero-active-finalize.v1.${directoryAbiCacheKey}`,
+          `ulg-schroeder-spatial-thermal-zero-active-finalize.v3.${directoryAbiCacheKey}`,
         label: 'ulg-schroeder-spatial-thermal-zero-active-finalize',
         code: thermalProposalWgsl,
         entryPoint: 'finalize_zero_active_projection',
@@ -9194,8 +10205,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
           computeBufferBinding(9, 'read-only-storage'),
           computeBufferBinding(10, 'read-only-storage'),
           computeBufferBinding(11, 'storage'),
-          computeBufferBinding(12, 'storage'),
-          computeBufferBinding(13, 'storage')
+          computeBufferBinding(12, 'read-only-storage'),
+          computeBufferBinding(13, 'storage'),
+          computeBufferBinding(15, 'read-only-storage')
         ]
       })
     : null;
@@ -9212,14 +10224,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
     computeBufferBinding(9, 'read-only-storage'),
     computeBufferBinding(10, 'read-only-storage'),
     computeBufferBinding(11, 'storage'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(13, 'storage')
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'read-only-storage')
   ];
   const createThermalCandidateCsrControlPipeline = (entryPoint, suffix) => (
     candidateCsrEnabled
       ? createCachedExplicitComputePipeline(device, {
           cacheKey:
-            `ulg-schroeder-spatial-thermal-csr-${suffix}.v6.${directoryAbiCacheKey}`,
+            `ulg-schroeder-spatial-thermal-csr-${suffix}.v8.${directoryAbiCacheKey}`,
           label: `ulg-schroeder-spatial-thermal-csr-${suffix}`,
           code: thermalProposalWgsl,
           entryPoint,
@@ -9300,11 +10313,25 @@ export function runSchroederSpatialThermalProposalWebGpu({
       { binding: 8, resource: { buffer: stateBuffer } },
       { binding: 9, resource: { buffer: execution.directoryBuffer } },
       { binding: 10, resource: { buffer: activeProjectionViewBuffer } },
-      { binding: 11, resource: { buffer: activeDispatchBuffer } }
+      { binding: 11, resource: { buffer: activeDispatchBuffer } },
+      { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
     ];
     const derivedBindGroup = device.createBindGroup({
       layout: derivedPipeline.bindGroupLayout,
       entries: derivedEntries
+    });
+    const conductivityFinalizeBindGroup = device.createBindGroup({
+      layout: conductivityFinalizePipeline.bindGroupLayout,
+      entries: [
+        { binding: 7, resource: { buffer: paramsBuffer } },
+        {
+          binding: 12,
+          resource: {
+            buffer: responseUpload.responseThermalConductivityBuffer
+          }
+        },
+        { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
+      ]
     });
     const activeDispatchFinalizeBindGroup = device.createBindGroup({
       layout: activeDispatchFinalizePipeline.bindGroupLayout,
@@ -9337,27 +10364,34 @@ export function runSchroederSpatialThermalProposalWebGpu({
       { binding: 7, resource: { buffer: radiationExpectationBuffer } },
       { binding: 8, resource: { buffer: paramsBuffer } },
       { binding: 9, resource: { buffer: stateBuffer } },
-      { binding: 10, resource: { buffer: activeProjectionViewBuffer } }
+      { binding: 10, resource: { buffer: activeProjectionViewBuffer } },
+      { binding: 15, resource: { buffer: conductivitySidecarBuffer } }
     ];
     const candidateCsrDummyEntries = [
       {
         binding: 11,
-        resource: { buffer: thermalCsrDummyBuffer, offset: 0, size: 4 }
+        resource: {
+          buffer: thermalCsrWritableDummyBuffer,
+          offset: 0,
+          size: Uint32Array.BYTES_PER_ELEMENT
+        }
       },
       {
         binding: 12,
         resource: {
-          buffer: thermalCsrDummyBuffer,
-          offset: entry.thermalCsrDummyBindingAlignment,
-          size: 4
+          buffer:
+            contactInterfaceReceipt?.buffer ?? thermalCsrReadOnlyDummyBuffer,
+          ...(contactInterfaceReceipt ? {} : {
+            size: Uint32Array.BYTES_PER_ELEMENT
+          })
         }
       },
       {
         binding: 13,
         resource: {
-          buffer: thermalCsrDummyBuffer,
+          buffer: thermalCsrWritableDummyBuffer,
           offset: entry.thermalCsrDummyBindingAlignment * 2,
-          size: 4
+          size: Uint32Array.BYTES_PER_ELEMENT
         }
       }
     ];
@@ -9370,9 +10404,12 @@ export function runSchroederSpatialThermalProposalWebGpu({
           {
             binding: 12,
             resource: {
-              buffer: thermalCsrDummyBuffer,
-              offset: entry.thermalCsrDummyBindingAlignment,
-              size: 4
+              buffer:
+                contactInterfaceReceipt?.buffer
+                  ?? thermalCsrReadOnlyDummyBuffer,
+              ...(contactInterfaceReceipt ? {} : {
+                size: Uint32Array.BYTES_PER_ELEMENT
+              })
             }
           },
           { binding: 13, resource: { buffer: thermalCandidateCsr.replayBuffer } }
@@ -9439,6 +10476,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     );
     return Object.freeze({
       derivedBindGroup,
+      conductivityFinalizeBindGroup,
       activeDispatchFinalizeBindGroup,
       physicalTopologyPreflightBindGroup,
       activeTopologyFinalizeBindGroup,
@@ -9504,10 +10542,12 @@ export function runSchroederSpatialThermalProposalWebGpu({
     submissionObserved: false,
     releaseScheduled: false,
     released: false,
+    queueOrderedCanonicalApplyAuthority: null,
     terminalDisposition: null,
     terminalReason: null,
     currentStateBuffer: null,
     currentThermoBuffer: null,
+    contactGeometryAuthority: null,
     encoderStage: null,
     device,
     generation,
@@ -9519,7 +10559,11 @@ export function runSchroederSpatialThermalProposalWebGpu({
     frozenThermoBuffer: thermoBuffer,
     responseUpload,
     preparedLawConfig,
+    contactInterfaceReceipt,
+    consumerAuthentications: authentications,
+    consumerReceipts,
     derivedBuffer,
+    conductivitySidecarBuffer,
     proposalBuffer,
     conductionEvidenceBuffer,
     radiationEvidenceBuffer,
@@ -9554,6 +10598,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     candidateCsrEnabled,
     thermalCandidateCsr,
     derivedPipeline,
+    conductivityFinalizePipeline,
     activeDispatchFinalizePipeline,
     physicalTopologyPreflightPipeline,
     activeTopologyFinalizePipeline,
@@ -9571,7 +10616,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     workgroups,
     artifact: null
   };
-  const releaseLease = () => {
+  const releaseLease = ({ queueOrdered = false } = {}) => {
     if (artifactRecord.released) return false;
     artifactRecord.released = true;
     artifactRecord.lifecycleStatus = 'released';
@@ -9620,7 +10665,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
         artifactRecord.submissionObserved
         && !lostThermalProposalDevices.has(device)
       ) {
-        const submissionFence = device.queue.onSubmittedWorkDone();
+        const submissionFence = queueOrdered
+          ? Promise.resolve(true)
+          : device.queue.onSubmittedWorkDone();
         if (treeLeaseActive) {
           treeRuntime.releaseExecutionConsumerLeaseAfter(
             treeConsumerLease,
@@ -9664,6 +10711,46 @@ export function runSchroederSpatialThermalProposalWebGpu({
     entry.releaseScheduled = false;
     return true;
   };
+  const authorizeQueueOrderedCanonicalApplyRetirement = ({
+    generation: authorityGeneration,
+    execution: authorityExecution
+  } = {}) => {
+    if (
+      artifactRecord.released
+      || artifactRecord.releaseScheduled
+      || artifactRecord.queueOrderedCanonicalApplyAuthority
+      || artifactRecord.encoded
+      || artifactRecord.submissionObserved
+      || authorityGeneration !== generation
+      || authorityExecution !== execution
+    ) {
+      const error = new Error(
+        'queue-ordered thermal proposal retirement authority is stale'
+      );
+      error.code =
+        'ERR_SCHROEDER_SPATIAL_THERMAL_QUEUE_ORDERED_RETIREMENT_AUTHORITY';
+      throw error;
+    }
+    artifactRecord.queueOrderedCanonicalApplyAuthority = Object.freeze({
+      generation,
+      execution,
+      generationId: execution.generationId
+    });
+    return true;
+  };
+  const hasQueueOrderedCanonicalApplyRetirementAuthority = ({
+    generation: authorityGeneration,
+    execution: authorityExecution
+  } = {}) => (
+    artifactRecord.released !== true
+    && artifactRecord.releaseScheduled !== true
+    && artifactRecord.queueOrderedCanonicalApplyAuthority?.generation
+      === authorityGeneration
+    && artifactRecord.queueOrderedCanonicalApplyAuthority?.execution
+      === authorityExecution
+    && authorityGeneration === generation
+    && authorityExecution === execution
+  );
   const scheduleArtifactRelease = (terminalDisposition, terminalReason) => {
     if (artifactRecord.released || entry.releaseScheduled) return false;
     artifactRecord.releaseScheduled = true;
@@ -9673,6 +10760,15 @@ export function runSchroederSpatialThermalProposalWebGpu({
       ? 'release-scheduled'
       : 'abandonment-release-scheduled';
     entry.releaseScheduled = true;
+    if (
+      artifactRecord.submissionObserved
+      && artifactRecord.queueOrderedCanonicalApplyAuthority?.generation
+        === generation
+      && artifactRecord.queueOrderedCanonicalApplyAuthority?.execution
+        === execution
+    ) {
+      return releaseLease({ queueOrdered: true });
+    }
     deferSubmittedWorkCleanup(device, releaseLease);
     return true;
   };
@@ -9749,6 +10845,35 @@ export function runSchroederSpatialThermalProposalWebGpu({
       : thermalCandidateCsr.reason,
     proposalBuffer,
     thermalDerivedBudgetBuffer: derivedBuffer,
+    thermalConductivitySidecarBuffer: conductivitySidecarBuffer,
+    thermalConductivitySidecarSchema:
+      ULG_SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_SCHEMA,
+    thermalConductivitySidecarHeaderLayout:
+      SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_LAYOUT,
+    thermalConductivitySidecarRowLayout:
+      SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_LAYOUT,
+    thermalConductivitySidecarHeaderWords:
+      SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS,
+    thermalConductivitySidecarRowWords:
+      SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS,
+    thermalConductivitySidecarProvenanceToken:
+      responseUpload.contentFingerprintToken,
+    thermalConductivitySidecarByteLength:
+      conductivitySidecarByteLength(entry.capacity),
+    activeThermalConductivitySidecarByteLength:
+      conductivitySidecarByteLength(particleCount),
+    thermalConductionPairLaw:
+      contactInterfaceReceipt
+        ? 'mechanical-interface-receipt-tpfa-series-resistance-or-same-continuum-overlap-disk'
+        : 'harmonic-mean-conductivity-times-sphere-contact-disk-area-over-center-distance',
+    thermalConductionContactAreaStatus:
+      'matched-time-law-local-sphere-intersection-over-ss-authenticated-candidates',
+    thermalConductionSpatialAuthorityScope:
+      contactInterfaceReceipt
+        ? 'exact-near-candidates-with-post-commit-mechanical-interface-receipt'
+        : 'candidate-enumeration-only-no-per-pair-geometry-receipt',
+    mechanicalContactInterfaceReceipt: contactInterfaceReceipt,
+    legacyConductionRateEffective: false,
     activeDispatchBuffer,
     directoryAbiVersion,
     sourceWorkIdentity: directoryV2
@@ -9846,6 +10971,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     exhaustiveTraversalCount: 0,
     candidateBudget: null,
     fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'schroeder-spatial-thermal-proposal'
+    }),
     readbackMode: 'no-full-readback',
     bufferOwnership: 'device-arena-runtime-cache',
     ownsProposalBuffer: false,
@@ -9854,11 +10983,16 @@ export function runSchroederSpatialThermalProposalWebGpu({
     runtimeCapacity: entry.capacity,
     spatialRuntimeCapacity: entry.spatialCapacity,
     runtimeAllocationCount: runtime.allocationCount,
+    authorizeQueueOrderedCanonicalApplyRetirement,
+    hasQueueOrderedCanonicalApplyRetirementAuthority,
     releaseAfterCanonicalApplySubmittedWork,
     abandonPreparedWork,
     get lifecycleStatus() { return artifactRecord.lifecycleStatus; },
     get matchedTimeStateBuffer() { return artifactRecord.currentStateBuffer; },
     get matchedTimeThermoBuffer() { return artifactRecord.currentThermoBuffer; },
+    get thermalContactGeometryAuthority() {
+      return artifactRecord.contactGeometryAuthority;
+    },
     get matchedTimeProducerEncoded() { return artifactRecord.encoded; },
     get matchedTimeProducerSubmissionObserved() {
       return artifactRecord.submissionObserved;
@@ -10027,7 +11161,8 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     computeBufferBinding(11, 'storage'),
     computeBufferBinding(12, 'read-only-storage'),
     computeBufferBinding(13, 'storage'),
-    ...(observed ? [computeBufferBinding(14, 'storage')] : [])
+    ...(observed ? [computeBufferBinding(14, 'storage')] : []),
+    computeBufferBinding(15, 'read-only-storage')
   ];
   let treeBudgetPipeline = null;
   let treeProposalPipeline = null;
@@ -10035,7 +11170,7 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     treeBudgetPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: `ulg-native-test-s9d4-thermal-tree-shadow-budget.${
         observed ? 'observed' : 'unobserved'
-      }.v1`,
+      }.v3`,
       label: 'ulg-native-test-s9d4-thermal-tree-shadow-budget',
       code,
       entryPoint: 'budget',
@@ -10044,7 +11179,7 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     treeProposalPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: `ulg-native-test-s9d4-thermal-tree-shadow-proposal.${
         observed ? 'observed' : 'unobserved'
-      }.v1`,
+      }.v3`,
       label: 'ulg-native-test-s9d4-thermal-tree-shadow-proposal',
       code,
       entryPoint: 'propose',
@@ -10229,7 +11364,8 @@ export function armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
     computeBufferBinding(11, 'storage'),
     computeBufferBinding(12, 'read-only-storage'),
     computeBufferBinding(13, 'storage'),
-    computeBufferBinding(14, 'storage')
+    computeBufferBinding(14, 'storage'),
+    computeBufferBinding(15, 'read-only-storage')
   ];
   const pipelineSpecs = [
     ['initializePipeline', 'initialize_source_cell_batch', 'initialize'],
@@ -10262,7 +11398,7 @@ export function armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
       pipelines[field] = createCachedExplicitComputePipeline(device, {
         cacheKey: `ulg-native-test-s9d5-thermal-source-cell-${label}.${
           observed ? 'observed' : 'unobserved'
-        }.v1.${sourceCapacity}.${cellCapacity}.${nodeCapacity}`,
+        }.v3.${sourceCapacity}.${cellCapacity}.${nodeCapacity}`,
         label: `ulg-native-test-s9d5-thermal-source-cell-${label}`,
         code,
         entryPoint,
@@ -10431,18 +11567,19 @@ export function armSchroederSpatialThermalExhaustiveShadowForNativeTest({
     computeBufferBinding(9, 'read-only-storage'),
     computeBufferBinding(10, 'read-only-storage'),
     computeBufferBinding(11, 'storage'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(13, 'storage')
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'read-only-storage')
   ];
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget.v1',
+    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget.v3',
     label: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget',
     code,
     entryPoint: 'budget',
     bindings: traversalBindings
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal.v1',
+    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal.v3',
     label: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal',
     code,
     entryPoint: 'propose',
@@ -10461,6 +11598,166 @@ export function armSchroederSpatialThermalExhaustiveShadowForNativeTest({
   });
   record.nativeTestExhaustiveShadow = receipt;
   return receipt;
+}
+
+function createMatchedTimeThermalContactGeometryAuthority({
+  device,
+  artifact,
+  record,
+  currentStateBuffer
+}) {
+  const conductionAuthentication = record.consumerAuthentications.find(
+    ({ consumerId }) => (
+      consumerId === SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION
+    )
+  );
+  const conductionReceipt = record.consumerReceipts[
+    SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION
+  ];
+  const execution = record.execution;
+  const mechanicalReceipt = record.contactInterfaceReceipt ?? null;
+  const epochFields = [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ];
+  let runtimeOwnsExecution = false;
+  let runtimeSubmittedExecution = false;
+  try {
+    runtimeOwnsExecution =
+      record.generation.runtime?.ownsExecution?.(execution) === true;
+    runtimeSubmittedExecution =
+      record.generation.runtime?.isExecutionSubmitted?.(execution) === true;
+  } catch {
+    runtimeOwnsExecution = false;
+    runtimeSubmittedExecution = false;
+  }
+  const epochMatches = epochFields.every((field) => (
+    Object.is(conductionAuthentication?.epochIdentity?.[field], execution[field])
+    && Object.is(conductionReceipt?.epochIdentity?.[field], execution[field])
+    && Object.is(
+      artifact.thermalProposalSourceAuthority?.epochIdentity?.[field],
+      execution[field]
+    )
+  ));
+  const admitted = Boolean(
+    conductionAuthentication?.ready === true
+    && conductionAuthentication.authenticated === true
+    && conductionAuthentication.consumerId
+      === SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION
+    && conductionAuthentication.supportProfileId
+      === SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1
+    && conductionAuthentication.generation === record.generation
+    && conductionAuthentication.execution === execution
+    && conductionAuthentication.directoryBuffer === execution.directoryBuffer
+    && artifact.consumerAuthentications.includes(conductionAuthentication)
+    && artifact.consumerReceipt(
+      SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION
+    ) === conductionReceipt
+    && isSchroederSpatialExactNearResidentConsumerBinding(conductionReceipt)
+    && conductionReceipt.consumerId
+      === SCHROEDER_SPATIAL_THERMAL_CONSUMER.CONDUCTION
+    && conductionReceipt.supportProfileId
+      === SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1
+    && conductionReceipt.generationId === execution.generationId
+    && conductionReceipt.residentEvidence?.evidenceBuffer
+      === record.conductionEvidenceBuffer
+    && conductionReceipt.residentEvidence?.controlBuffer
+      === record.proposalBuffer
+    && conductionReceipt.residentEvidence?.failClosedOnOverflow === true
+    && conductionReceipt.residentEvidence?.partialPublicationAllowed === false
+    && artifact.thermalProposalSourceAuthority?.generation === record.generation
+    && artifact.thermalProposalSourceAuthority?.device === device
+    && artifact.thermalProposalSourceAuthority?.stateBuffer
+      === record.frozenStateBuffer
+    && record.generation.execution === execution
+    && execution.released !== true
+    && runtimeOwnsExecution
+    && runtimeSubmittedExecution
+    && epochMatches
+    && webGpuBufferMatchesDevice(execution.directoryBuffer, device)
+    && webGpuBufferMatchesDevice(record.frozenStateBuffer, device)
+    && webGpuBufferMatchesDevice(currentStateBuffer, device)
+    && webGpuBufferMatchesDevice(record.derivedBuffer, device)
+    && webGpuBufferMatchesDevice(record.conductivitySidecarBuffer, device)
+    && (
+      !mechanicalReceipt
+      || (
+        mechanicalReceipt.schema
+          === ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA
+        && mechanicalReceipt.generation === record.generation
+        && mechanicalReceipt.device === device
+        && mechanicalReceipt.released !== true
+        && mechanicalReceipt.releaseScheduled !== true
+        && mechanicalReceipt.generationId === execution.generationId
+        && mechanicalReceipt.storageGeneration === execution.storageGeneration
+        && mechanicalReceipt.physicsTick === execution.physicsTick
+        && mechanicalReceipt.physicsSubstep === execution.physicsSubstep
+        && mechanicalReceipt.positionEpoch === execution.positionEpoch
+        && mechanicalReceipt.topologyEpoch === execution.topologyEpoch
+        && mechanicalReceipt.supportEpoch === execution.supportEpoch
+        && mechanicalReceipt.particleCount === record.particleCount
+        && webGpuBufferMatchesDevice(mechanicalReceipt.buffer, device)
+      )
+    )
+  );
+  if (!admitted) {
+    const error = new Error(
+      'Matched-time thermal contact geometry lost its exact candidate, epoch, or buffer authority'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY';
+    throw error;
+  }
+  return Object.freeze({
+    schema:
+      ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA,
+    status: 'schroeder-spatial-thermal-contact-geometry-authority-bound',
+    ready: true,
+    generation: record.generation,
+    generationId: execution.generationId,
+    epochIdentity: conductionAuthentication.epochIdentity,
+    device,
+    ssAuthorityScope: 'candidate-enumeration-only',
+    candidateEnumerationAuthority:
+      'gpu-authenticated-exact-near-thermal-conduction-consumer',
+    conductionAuthentication,
+    conductionConsumerReceipt: conductionReceipt,
+    exactNearDirectoryBuffer: execution.directoryBuffer,
+    frozenDirectoryStateBuffer: record.frozenStateBuffer,
+    matchedTimeStateBuffer: currentStateBuffer,
+    phaseDerivedRadiusBuffer: record.derivedBuffer,
+    phaseConductivitySidecarBuffer: record.conductivitySidecarBuffer,
+    contactPredicateAuthority:
+      mechanicalReceipt
+        ? 'post-commit-mechanical-interface-receipt-or-same-continuum-overlap-disk-v1'
+        : 'law-local-same-continuum-overlap-disk-v1',
+    interfaceContactGeometryAuthority:
+      mechanicalReceipt
+        ? 'mechanical-final-residual-effective-face-area-receipt-v1'
+        : null,
+    interfaceThermalResistanceAuthority:
+      'two-half-cell-series-resistance-with-zero-added-interface-resistance-v1',
+    mechanicalPositionResidualToleranceFraction:
+      SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION,
+    conductionPathAuthority:
+      mechanicalReceipt
+        ? 'matched-time-center-distance-or-two-half-cell-series-path'
+        : 'law-local-matched-time-center-distance',
+    perPairSsGeometryReceipt: mechanicalReceipt,
+    pairGeometryBuffer: mechanicalReceipt?.buffer ?? null,
+    mechanicalContactReceipt: mechanicalReceipt,
+    hostContactGeometrySummary: null,
+    hostSummaryReadbackPerformed: false,
+    fullParticleReadbackPerformed: false,
+    broadAbiExpansionPerformed: false,
+    failClosedOnAuthorityMismatch: true
+  });
 }
 
 /**
@@ -10543,7 +11840,8 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       'responseRecordBuffer',
       'responseBuffer',
       'graphNodeBuffer',
-      'graphSampleBuffer'
+      'graphSampleBuffer',
+      'responseThermalConductivityBuffer'
     ];
     if (
       bufferFields.some(
@@ -10551,6 +11849,8 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       )
       || thermalResponseGraphUpload.materialCount !== record.responseUpload.materialCount
       || thermalResponseGraphUpload.responseCount !== record.responseUpload.responseCount
+      || thermalResponseGraphUpload.contentFingerprint
+        !== record.responseUpload.contentFingerprint
     ) {
       throw new Error(
         'Matched-time thermal producer and apply must share the prepared response graph family'
@@ -10569,6 +11869,13 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       );
     }
   }
+  const contactGeometryAuthority =
+    createMatchedTimeThermalContactGeometryAuthority({
+      device,
+      artifact,
+      record,
+      currentStateBuffer: stateBuffer
+    });
   const bindGroups = record.createMatchedTimeBindGroups({
     currentStateBuffer: stateBuffer,
     currentThermoBuffer: thermoBuffer
@@ -10576,6 +11883,7 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
   record.materialized = true;
   record.currentStateBuffer = stateBuffer;
   record.currentThermoBuffer = thermoBuffer;
+  record.contactGeometryAuthority = contactGeometryAuthority;
   record.lifecycleStatus = 'current-state-bound';
   let encodeAttempted = false;
   const timestampActive = Boolean(
@@ -10617,12 +11925,14 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
     currentStateBuffer: stateBuffer,
     currentThermoBuffer: thermoBuffer,
     frozenDirectoryStateBuffer: record.frozenStateBuffer,
+    contactGeometryAuthority,
     proposalBuffer: record.proposalBuffer,
     proposalDispatchCount: (
       record.candidateCsrEnabled
         ? (localActiveProjection ? 7 : 6)
         : (localActiveProjection ? 5 : 4)
-    ) + (activeSourceProjection ? 4 : 0)
+    ) + 1
+      + (activeSourceProjection ? 4 : 0)
       + (record.nativeTestSourceCellTreeShadow ? 4 : 0),
     hierarchyTraversalCount: 2,
     preferredHierarchyTraversalCount: record.candidateCsrEnabled ? 1 : 2,
@@ -10681,6 +11991,12 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           record.derivedBuffer,
           0,
           derivedBufferByteLength(record.entry.capacity)
+        );
+        encoder.clearBuffer(
+          record.conductivitySidecarBuffer,
+          10 * Uint32Array.BYTES_PER_ELEMENT,
+          conductivitySidecarByteLength(record.entry.capacity)
+            - 10 * Uint32Array.BYTES_PER_ELEMENT
         );
         encoder.clearBuffer(
           record.proposalBuffer,
@@ -10802,6 +12118,13 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           record.derivedPipeline,
           bindGroups.derivedBindGroup,
           { activeProjectionIndirect: activeSourceProjection }
+        );
+        encodePass(
+          'ulg-schroeder-spatial-thermal-conductivity-finalize',
+          'conductivity-finalize',
+          record.conductivityFinalizePipeline,
+          bindGroups.conductivityFinalizeBindGroup,
+          { dispatchWorkgroups: record.workgroups }
         );
         if (localActiveProjection) {
           encodePass(
@@ -10987,7 +12310,14 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
         || sourceCellGenerationLeaseActive
         || proposalGenerationLeaseActive
       ) {
-        const submissionFence = device.queue.onSubmittedWorkDone();
+        const queueOrderedAuthority =
+          record.queueOrderedCanonicalApplyAuthority?.generation
+            === record.generation
+          && record.queueOrderedCanonicalApplyAuthority?.execution
+            === record.execution;
+        const submissionFence = queueOrderedAuthority
+          ? Promise.resolve(true)
+          : device.queue.onSubmittedWorkDone();
         if (treeLeaseActive) {
           sourceCellTreeShadow.tree.ownerRuntime
             .releaseExecutionConsumerLeaseAfter(
@@ -11123,6 +12453,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
   } = acquireClassicThermalRuntimeEntry(device, particleCount);
   const {
     derivedBuffer,
+    conductivitySidecarBuffer,
     proposalBuffer,
     conductionEvidenceBuffer,
     radiationEvidenceBuffer,
@@ -11138,6 +12469,11 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       proposalBuffer,
       0,
       createProposalHeader(execution, particleCount)
+    );
+    device.queue.writeBuffer(
+      conductivitySidecarBuffer,
+      0,
+      createConductivitySidecarHeader(execution, particleCount, responseUpload)
     );
     device.queue.writeBuffer(
       conductionEvidenceBuffer,
@@ -11168,7 +12504,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     }));
 
     const derivedPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v6',
+      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v8',
       label: 'ulg-classic-thermal-v2-derived-prepass',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'derive',
@@ -11184,11 +12520,23 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         computeBufferBinding(8, 'read-only-storage'),
         computeBufferBinding(9, 'read-only-storage'),
         computeBufferBinding(10, 'read-only-storage'),
-        computeBufferBinding(11, 'storage')
+        computeBufferBinding(11, 'storage'),
+        computeBufferBinding(13, 'storage')
+      ]
+    });
+    const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-classic-thermal-v2-conductivity-finalize.v2',
+      label: 'ulg-classic-thermal-v2-conductivity-finalize',
+      code: schroederSpatialThermalDerivedPrepassWgsl,
+      entryPoint: 'finalize_conductivity',
+      bindings: [
+        computeBufferBinding(7, 'uniform'),
+        computeBufferBinding(12, 'read-only-storage'),
+        computeBufferBinding(13, 'storage')
       ]
     });
     const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v6',
+      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v8',
       label: 'ulg-classic-thermal-v2-budget-resolve',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'resolve_budget',
@@ -11204,13 +12552,14 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         computeBufferBinding(8, 'read-only-storage'),
         computeBufferBinding(9, 'read-only-storage'),
         computeBufferBinding(10, 'read-only-storage'),
-        computeBufferBinding(11, 'storage')
+        computeBufferBinding(11, 'storage'),
+        computeBufferBinding(13, 'storage')
       ]
     });
     const budgetPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: normalLookupBinned
-        ? 'ulg-classic-thermal-v2-candidate-budget.v14'
-        : 'ulg-classic-thermal-v2-exhaustive-budget.v11',
+        ? 'ulg-classic-thermal-v2-candidate-budget.v16'
+        : 'ulg-classic-thermal-v2-exhaustive-budget.v13',
       label: normalLookupBinned
         ? 'ulg-classic-thermal-v2-binned-budget'
         : 'ulg-classic-thermal-v2-exhaustive-budget',
@@ -11227,13 +12576,14 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         computeBufferBinding(7, 'uniform'),
         computeBufferBinding(8, 'uniform'),
         computeBufferBinding(9, 'read-only-storage'),
-        computeBufferBinding(10, 'read-only-storage')
+        computeBufferBinding(10, 'read-only-storage'),
+        computeBufferBinding(15, 'read-only-storage')
       ]
     });
     const proposalPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: normalLookupBinned
-        ? 'ulg-classic-thermal-v2-candidate-proposal.v14'
-        : 'ulg-classic-thermal-v2-exhaustive-proposal.v11',
+        ? 'ulg-classic-thermal-v2-candidate-proposal.v16'
+        : 'ulg-classic-thermal-v2-exhaustive-proposal.v13',
       label: normalLookupBinned
         ? 'ulg-classic-thermal-v2-binned-proposal'
         : 'ulg-classic-thermal-v2-exhaustive-proposal',
@@ -11250,7 +12600,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         computeBufferBinding(7, 'uniform'),
         computeBufferBinding(8, 'uniform'),
         computeBufferBinding(9, 'read-only-storage'),
-        computeBufferBinding(10, 'read-only-storage')
+        computeBufferBinding(10, 'read-only-storage'),
+        computeBufferBinding(15, 'read-only-storage')
       ]
     });
     const derivedEntries = [
@@ -11265,11 +12616,25 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       { binding: 8, resource: { buffer: sourceStateBuffer } },
       { binding: 9, resource: { buffer: sourceStateBuffer } },
       { binding: 10, resource: { buffer: sourceStateBuffer } },
-      { binding: 11, resource: { buffer: activeDispatchBuffer } }
+      { binding: 11, resource: { buffer: activeDispatchBuffer } },
+      { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
     ];
     const derivedBindGroup = device.createBindGroup({
       layout: derivedPipeline.bindGroupLayout,
       entries: derivedEntries
+    });
+    const conductivityFinalizeBindGroup = device.createBindGroup({
+      layout: conductivityFinalizePipeline.bindGroupLayout,
+      entries: [
+        { binding: 7, resource: { buffer: paramsBuffer } },
+        {
+          binding: 12,
+          resource: {
+            buffer: responseUpload.responseThermalConductivityBuffer
+          }
+        },
+        { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
+      ]
     });
     const budgetResolveBindGroup = device.createBindGroup({
       layout: budgetResolvePipeline.bindGroupLayout,
@@ -11316,7 +12681,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       { binding: 7, resource: { buffer: radiationExpectationBuffer } },
       { binding: 8, resource: { buffer: paramsBuffer } },
       { binding: 9, resource: { buffer: sourceStateBuffer } },
-      { binding: 10, resource: { buffer: sourceStateBuffer } }
+      { binding: 10, resource: { buffer: sourceStateBuffer } },
+      { binding: 15, resource: { buffer: conductivitySidecarBuffer } }
     ];
     const budgetBindGroup = device.createBindGroup({
       layout: budgetPipeline.bindGroupLayout,
@@ -11335,6 +12701,12 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       encoded = true;
       encoder.clearBuffer(derivedBuffer, 0, derivedBufferByteLength(entry.capacity));
       encoder.clearBuffer(
+        conductivitySidecarBuffer,
+        10 * Uint32Array.BYTES_PER_ELEMENT,
+        conductivitySidecarByteLength(entry.capacity)
+          - 10 * Uint32Array.BYTES_PER_ELEMENT
+      );
+      encoder.clearBuffer(
         proposalBuffer,
         SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT,
         particleCount * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
@@ -11347,6 +12719,15 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       derivedPass.setBindGroup(0, derivedBindGroup);
       derivedPass.dispatchWorkgroups(workgroups);
       derivedPass.end();
+      const conductivityFinalizePass = encoder.beginComputePass({
+        label: 'ulg-classic-thermal-v2-conductivity-finalize'
+      });
+      conductivityFinalizePass.setPipeline(
+        conductivityFinalizePipeline.pipeline
+      );
+      conductivityFinalizePass.setBindGroup(0, conductivityFinalizeBindGroup);
+      conductivityFinalizePass.dispatchWorkgroups(workgroups);
+      conductivityFinalizePass.end();
       if (candidateBuildPipeline) {
         const candidateBuildPass = encoder.beginComputePass({
           label: 'ulg-classic-thermal-v2-candidate-build'
@@ -11393,6 +12774,28 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       particleCount,
       execution,
       proposalBuffer,
+      thermalConductivitySidecarBuffer: conductivitySidecarBuffer,
+      thermalConductivitySidecarSchema:
+        ULG_SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_SCHEMA,
+      thermalConductivitySidecarHeaderLayout:
+        SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_LAYOUT,
+      thermalConductivitySidecarRowLayout:
+        SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_LAYOUT,
+      thermalConductivitySidecarHeaderWords:
+        SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS,
+      thermalConductivitySidecarRowWords:
+        SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS,
+      thermalConductivitySidecarProvenanceToken:
+        responseUpload.contentFingerprintToken,
+      thermalConductivitySidecarByteLength:
+        conductivitySidecarByteLength(entry.capacity),
+      activeThermalConductivitySidecarByteLength:
+        conductivitySidecarByteLength(particleCount),
+      thermalConductionPairLaw:
+        'harmonic-mean-conductivity-times-sphere-contact-disk-area-over-center-distance',
+      thermalConductionContactAreaStatus:
+        'partial-slice-sphere-intersection-proxy-pending-ss-receipt',
+      legacyConductionRateEffective: false,
       activeProposalByteLength: proposalBufferByteLength(particleCount),
       proposalHeaderWords: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
       proposalRowWords: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
@@ -11410,7 +12813,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         : null,
       fallbackEvidenceWord: 15,
       fallbackEvidenceUnit: 'particle-pass',
-      proposalDispatchCount: normalLookupBinned ? 5 : 4,
+      proposalDispatchCount: normalLookupBinned ? 6 : 5,
       producerApplySubmissionPolicy: 'caller-single-command-buffer',
       binnedTraversalCount: normalLookupBinned ? 2 : 0,
       exhaustiveTraversalConfiguredCount: normalLookupBinned ? 0 : 2,

@@ -9,7 +9,19 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_FAIL_CLOSED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY,
+  createSchroederSpatialParentFieldMechanicsWorkspaceLayout
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   SCHROEDER_CROSS_LEVEL_INVARIANT_EVIDENCE_BYTES,
@@ -19,6 +31,51 @@ import {
 import {
   schroederCrossLevelInvariantEvidenceWgsl
 } from '../../../ulg-gpu-abi/src/schroederCrossLevelInvariantEvidenceWgsl.js';
+import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+} from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT
+} from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY
+} from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
+import {
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_READY
+} from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeInterfaceProposal.js';
+import {
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_READY
+} from '../../../ulg-gpu-abi/src/schroederSpatialParentFieldView.js';
+import {
+  SCHROEDER_SPATIAL_HIERARCHY_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_HIERARCHY_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_HIERARCHY_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_HIERARCHY_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_HIERARCHY_STATUS_READY
+} from '../../../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
 import {
   validateSchroederSpatialHierarchyViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
@@ -33,9 +90,15 @@ import {
   schroederSameGridMomentumAccumulationWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
+  abortQueueOrderedSubmissionBatch,
+  cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
   createCachedExplicitComputePipeline,
-  deferSubmittedWorkCleanup
+  createQueueOrderedCleanupClaimIssuer,
+  createQueueOrderedSubmissionBatch,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import { webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
 import {
@@ -75,6 +138,10 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
+import {
+  createGpuReadbackTelemetry,
+  createGpuReadbackTelemetryAccumulator
+} from './sphGpuReadbackTelemetry.js';
 
 export {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -104,6 +171,61 @@ export const SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST = 'z-fastest';
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE =
   'compact-grid-conservation-summary-readback';
+export const SCHROEDER_PARENT_FIELD_MECHANICS_DEFAULT_ARENA_COUNT = 3;
+export const SCHROEDER_PARENT_FIELD_MECHANICS_MIN_OVERLAP_ARENA_COUNT = 2;
+export const SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_AUXILIARY_BYTES =
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
+  + 9 * Uint32Array.BYTES_PER_ELEMENT;
+const twoLevelTrackedTemporaryCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'schroeder-two-level-tracked-temporaries'
+  });
+
+export function resolveSchroederParentFieldMechanicsWorkspaceArenaCount({
+  device,
+  parentFieldCapacity,
+  fineFieldCapacity = parentFieldCapacity,
+  requestedArenaCount =
+    SCHROEDER_PARENT_FIELD_MECHANICS_DEFAULT_ARENA_COUNT,
+  externalRefluxLedgerByteLength = 0
+} = {}) {
+  const requested = positiveInteger(
+    requestedArenaCount,
+    SCHROEDER_PARENT_FIELD_MECHANICS_DEFAULT_ARENA_COUNT
+  );
+  const layout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
+    parentFieldCapacity,
+    fineFieldCapacity
+  });
+  const retainedBudgetBytes = Number(device?.limits?.maxBufferSize);
+  if (!Number.isFinite(retainedBudgetBytes) || retainedBudgetBytes <= 0) {
+    return requested;
+  }
+  const ledgerBytes = Math.max(
+    0,
+    finiteNumber(externalRefluxLedgerByteLength, 0)
+  );
+  const affordableArenaCount = Math.floor(
+    Math.max(0, retainedBudgetBytes - ledgerBytes)
+      / (
+        layout.byteLength
+        + SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_AUXILIARY_BYTES
+      )
+  );
+  // maxBufferSize is a per-allocation limit, not an aggregate device-memory
+  // budget. Keep it as a conservative depth hint, but never let the canonical
+  // direct controller collapse its default request below two arenas: the
+  // terminal execution from one outer step remains fence-owned after that call
+  // returns, so the next step needs one independent overlap arena.
+  const requiredOverlapArenaCount = Math.min(
+    requested,
+    SCHROEDER_PARENT_FIELD_MECHANICS_MIN_OVERLAP_ARENA_COUNT
+  );
+  return Math.max(
+    requiredOverlapArenaCount,
+    Math.min(requested, affordableArenaCount)
+  );
+}
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -116,6 +238,509 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+
+function decodeGpuAbiWords(words, layout) {
+  const signed = new Int32Array(1);
+  const unsigned = new Uint32Array(signed.buffer);
+  const floating = new Float32Array(signed.buffer);
+  return Object.fromEntries(layout.map((field, index) => {
+    const [name, type = 'u32'] = String(field).split(':');
+    const bits = words[index] >>> 0;
+    unsigned[0] = bits;
+    return [
+      name,
+      type === 'i32-bits'
+        ? signed[0]
+        : (type === 'f32-bits' ? floating[0] : bits)
+    ];
+  }));
+}
+
+function summarizeMechanicsFieldTraceWords(words) {
+  const header = decodeGpuAbiWords(
+    words.subarray(0, SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS),
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT
+  );
+  const receiptOffset = Number(header.stateOffsetWords)
+    - SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS;
+  if (
+    !Number.isSafeInteger(receiptOffset)
+    || receiptOffset < 0
+    || receiptOffset + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+      > words.length
+  ) {
+    return Object.freeze({
+      status: 'mechanics-field-row-summary-unavailable',
+      reason: 'receipt-out-of-bounds'
+    });
+  }
+  const receipt = decodeGpuAbiWords(
+    words.subarray(
+      receiptOffset,
+      receiptOffset + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+    ),
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT
+  );
+  const fieldCount = Math.min(
+    Number(receipt.fieldCount) >>> 0,
+    Number(header.fieldCapacity) >>> 0
+  );
+  const keyOffset = Number(header.keyOffsetWords) >>> 0;
+  const keyWords = Number(header.keyWords) >>> 0;
+  const accumulatorOffset = Number(header.accumulatorOffsetWords) >>> 0;
+  const accumulatorWords = Number(header.accumulatorWords) >>> 0;
+  const stateOffset = Number(header.stateOffsetWords) >>> 0;
+  const stateWords = Number(header.stateWords) >>> 0;
+  const floatWord = new Uint32Array(1);
+  const floatValue = new Float32Array(floatWord.buffer);
+  const asFloat = (bits) => {
+    floatWord[0] = bits >>> 0;
+    return floatValue[0];
+  };
+  let invalidKeyCount = 0;
+  let firstInvalidKey = null;
+  let nonfiniteStateValueCount = 0;
+  let firstNonfiniteStateValue = null;
+  let nonfiniteAccumulatorValueCount = 0;
+  let firstNonfiniteAccumulatorValue = null;
+  let negativeMassCount = 0;
+  let zeroMassCount = 0;
+  let negativeHeatCount = 0;
+  let nonzeroHeatRowCount = 0;
+  let maxAbsStateValue = 0;
+  let maxAbsAccumulatorValue = 0;
+  const phaseFieldCounts = {};
+  for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
+    const key = keyOffset + fieldIndex * keyWords;
+    const accumulator = accumulatorOffset + fieldIndex * accumulatorWords;
+    const state = stateOffset + fieldIndex * stateWords;
+    if (
+      keyWords < 4
+      || accumulatorWords < 8
+      || stateWords < 8
+      || key + keyWords > words.length
+      || accumulator + accumulatorWords > words.length
+      || state + stateWords > words.length
+    ) {
+      return Object.freeze({
+        status: 'mechanics-field-row-summary-unavailable',
+        reason: 'field-row-out-of-bounds',
+        fieldIndex,
+        fieldCount
+      });
+    }
+    const nodeIndex = words[key] >>> 0;
+    const phaseId = words[key + 1] >>> 0;
+    const materialId = words[key + 2] >>> 0;
+    const continuityDomainId = words[key + 3] >>> 0;
+    const keyAdmitted = nodeIndex < (Number(header.gridNodeCount) >>> 0)
+      && phaseId >= 1
+      && phaseId <= 4
+      && materialId !== 0
+      && (phaseId === 1
+        ? continuityDomainId !== 0
+        : continuityDomainId === 0);
+    if (!keyAdmitted) {
+      invalidKeyCount += 1;
+      firstInvalidKey ??= Object.freeze({
+        fieldIndex,
+        nodeIndex,
+        phaseId,
+        materialId,
+        continuityDomainId
+      });
+    }
+    phaseFieldCounts[phaseId] = (phaseFieldCounts[phaseId] ?? 0) + 1;
+    for (let component = 0; component < 7; component += 1) {
+      const value = asFloat(words[state + component]);
+      if (!Number.isFinite(value)) {
+        nonfiniteStateValueCount += 1;
+        firstNonfiniteStateValue ??= Object.freeze({
+          fieldIndex,
+          component,
+          bits: words[state + component] >>> 0
+        });
+      } else {
+        maxAbsStateValue = Math.max(maxAbsStateValue, Math.abs(value));
+      }
+    }
+    const mass = asFloat(words[state]);
+    if (mass < 0) negativeMassCount += 1;
+    if (mass === 0) zeroMassCount += 1;
+    for (const component of [0, 2, 3, 4, 5, 6, 7]) {
+      const value = asFloat(words[accumulator + component]);
+      if (!Number.isFinite(value)) {
+        nonfiniteAccumulatorValueCount += 1;
+        firstNonfiniteAccumulatorValue ??= Object.freeze({
+          fieldIndex,
+          component,
+          bits: words[accumulator + component] >>> 0
+        });
+      } else {
+        maxAbsAccumulatorValue = Math.max(
+          maxAbsAccumulatorValue,
+          Math.abs(value)
+        );
+      }
+    }
+    const heat = asFloat(words[accumulator]);
+    if (heat < 0) negativeHeatCount += 1;
+    if (heat !== 0) nonzeroHeatRowCount += 1;
+  }
+  return Object.freeze({
+    status: 'mechanics-field-row-summary-ready',
+    fieldCount,
+    invalidKeyCount,
+    firstInvalidKey,
+    nonfiniteStateValueCount,
+    firstNonfiniteStateValue,
+    nonfiniteAccumulatorValueCount,
+    firstNonfiniteAccumulatorValue,
+    negativeMassCount,
+    zeroMassCount,
+    negativeHeatCount,
+    nonzeroHeatRowCount,
+    maxAbsStateValue,
+    maxAbsAccumulatorValue,
+    phaseFieldCounts: Object.freeze({ ...phaseFieldCounts })
+  });
+}
+
+function compactAuthorityHeaderStatus(
+  statusFlags,
+  { readyFlag, admittedFlag, failClosedFlag }
+) {
+  const flags = Number(statusFlags) >>> 0;
+  const ready = (flags & readyFlag) !== 0;
+  const admitted = (flags & admittedFlag) !== 0;
+  const failClosed = (flags & failClosedFlag) !== 0;
+  return Object.freeze({
+    statusFlags: flags,
+    ready,
+    admitted,
+    failClosed,
+    status: ready && admitted && !failClosed
+      ? 'gpu-authority-admitted'
+      : 'gpu-authority-fail-closed'
+  });
+}
+
+async function readTwoLevelCanonicalAuthorityTrace({
+  device,
+  generation,
+  stage,
+  selectedLevel = null,
+  refluxLedger = null,
+  workspaceExecution = null,
+  readbackTelemetry = null
+} = {}) {
+  const activeSourceView = generation?.activeSourceView
+    ?? generation?.execution?.activeSourceView
+    ?? null;
+  const activeSourceBuffer = activeSourceView?.activeSourceViewBuffer
+    ?? generation?.execution?.activeSourceViewBuffer
+    ?? null;
+  const levelViews = Array.isArray(generation?.mechanicsLevelViews)
+    ? generation.mechanicsLevelViews
+    : [];
+  const sources = [];
+  const addSource = ({ id, buffer, offsetWords = 0, wordCount, decode }) => {
+    if (
+      !Number.isSafeInteger(offsetWords)
+      || offsetWords < 0
+      || !Number.isSafeInteger(wordCount)
+      || wordCount < 1
+    ) return false;
+    const offsetBytes = offsetWords * Uint32Array.BYTES_PER_ELEMENT;
+    const byteLength = wordCount * Uint32Array.BYTES_PER_ELEMENT;
+    if (
+      !buffer
+      || !Number.isFinite(Number(buffer.size))
+      || Number(buffer.size) < offsetBytes + byteLength
+    ) return false;
+    sources.push({ id, buffer, offsetBytes, byteLength, wordCount, decode });
+    return true;
+  };
+  addSource({
+    id: 'active-source-header',
+    buffer: activeSourceBuffer,
+    wordCount: SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag: SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY,
+          admittedFlag: SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED,
+          failClosedFlag:
+            SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  const phaseVolumeInterfaceProposal =
+    generation?.phaseVolumeInterfaceProposal ?? null;
+  const hierarchyView = generation?.hierarchyView ?? null;
+  addSource({
+    id: 'hierarchy-view-header',
+    buffer: hierarchyView?.hierarchyViewBuffer,
+    wordCount: SCHROEDER_SPATIAL_HIERARCHY_VIEW_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_SPATIAL_HIERARCHY_VIEW_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag: SCHROEDER_SPATIAL_HIERARCHY_STATUS_READY,
+          admittedFlag: SCHROEDER_SPATIAL_HIERARCHY_STATUS_ADMITTED,
+          failClosedFlag: SCHROEDER_SPATIAL_HIERARCHY_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  const parentFieldView = phaseVolumeInterfaceProposal?.parentFieldView ?? null;
+  addSource({
+    id: 'parent-field-view-header',
+    buffer: parentFieldView?.parentFieldViewBuffer,
+    wordCount: SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag: SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_READY,
+          admittedFlag: SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_ADMITTED,
+          failClosedFlag: SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  addSource({
+    id: 'phase-volume-interface-proposal-header',
+    buffer: phaseVolumeInterfaceProposal?.controlBuffer,
+    wordCount:
+      SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_PROPOSAL_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag: SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_READY,
+          admittedFlag:
+            SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_ADMITTED,
+          failClosedFlag:
+            SCHROEDER_SPATIAL_PHASE_VOLUME_INTERFACE_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  addSource({
+    id: 'cross-level-reflux-ledger-header',
+    buffer: refluxLedger?.buffer,
+    wordCount: SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag: SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY,
+          admittedFlag: SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED,
+          failClosedFlag: SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  addSource({
+    id: 'parent-field-mechanics-workspace-header',
+    buffer: workspaceExecution?.workspaceBuffer,
+    wordCount:
+      SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
+    decode: (words) => {
+      const header = decodeGpuAbiWords(
+        words,
+        SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT
+      );
+      return Object.freeze({
+        ...compactAuthorityHeaderStatus(header.statusFlags, {
+          readyFlag:
+            SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY,
+          admittedFlag:
+            SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED,
+          failClosedFlag:
+            SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_FAIL_CLOSED
+        }),
+        header
+      });
+    }
+  });
+  for (const levelView of levelViews) {
+    const level = Number(levelView?.selectedLevel);
+    const mechanicsView = levelView?.mechanicsView ?? null;
+    const mechanicsFieldView = levelView?.mechanicsFieldView ?? null;
+    addSource({
+      id: `level-${level}-mechanics-view-header`,
+      buffer: mechanicsView?.mechanicsViewBuffer,
+      offsetWords: SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_OFFSET_WORDS,
+      wordCount: SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_WORDS,
+      decode: (words) => {
+        const header = decodeGpuAbiWords(
+          words,
+          SCHROEDER_SPATIAL_MECHANICS_VIEW_HEADER_LAYOUT
+        );
+        return Object.freeze({
+          ...compactAuthorityHeaderStatus(header.statusFlags, {
+            readyFlag: SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_READY,
+            admittedFlag: SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_ADMITTED,
+            failClosedFlag: SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED
+          }),
+          header
+        });
+      }
+    });
+    addSource({
+      id: `level-${level}-mechanics-field-header`,
+      buffer: mechanicsFieldView?.fieldViewBuffer,
+      wordCount: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
+      decode: (words) => {
+        const header = decodeGpuAbiWords(
+          words,
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT
+        );
+        return Object.freeze({
+          ...compactAuthorityHeaderStatus(header.statusFlags, {
+            readyFlag: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY,
+            admittedFlag:
+              SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+            failClosedFlag:
+              SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
+          }),
+          header
+        });
+      }
+    });
+    addSource({
+      id: `level-${level}-mechanics-field-receipt`,
+      buffer: mechanicsFieldView?.fieldViewBuffer,
+      offsetWords: mechanicsFieldView?.layout?.receiptControlOffsetWords,
+      wordCount: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+      decode: (words) => Object.freeze({
+        receipt: decodeGpuAbiWords(
+          words,
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT
+        )
+      })
+    });
+  }
+  const selectedLevelView = levelViews.find(
+    (levelView) => Number(levelView?.selectedLevel) === Number(selectedLevel)
+  ) ?? null;
+  const selectedFieldBuffer = selectedLevelView?.mechanicsFieldView
+    ?.fieldViewBuffer ?? null;
+  const fixedSourceCount = sources.length;
+  addSource({
+    id: `level-${Number(selectedLevel)}-mechanics-field-row-summary`,
+    buffer: selectedFieldBuffer,
+    wordCount: Math.floor(Number(selectedFieldBuffer?.size) / 4),
+    decode: summarizeMechanicsFieldTraceWords
+  });
+  if (
+    !activeSourceBuffer
+    || levelViews.length !== 2
+    || fixedSourceCount !== 12
+    || sources.length !== 13
+  ) {
+    return Object.freeze({
+      schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
+      stage: String(stage ?? 'unspecified'),
+      selectedLevel,
+      generationId: generation?.execution?.generationId ?? null,
+      status: 'canonical-authority-trace-unavailable',
+      expectedSourceCount: 13,
+      availableSourceCount: sources.length
+    });
+  }
+  let targetOffsetBytes = 0;
+  for (const source of sources) {
+    source.targetOffsetBytes = targetOffsetBytes;
+    targetOffsetBytes += source.byteLength;
+  }
+  const readbackBuffer = device.createBuffer({
+    label: `ulg-schroeder-two-level-authority-trace-${String(stage ?? 'stage')}`,
+    size: targetOffsetBytes,
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  let mapped = false;
+  try {
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-schroeder-two-level-authority-trace-copy'
+    });
+    for (const source of sources) {
+      encoder.copyBufferToBuffer(
+        source.buffer,
+        source.offsetBytes,
+        readbackBuffer,
+        source.targetOffsetBytes,
+        source.byteLength
+      );
+    }
+    device.queue.submit([encoder.finish()]);
+    readbackTelemetry?.recordFinalDiagnosticMapAsync?.(
+      targetOffsetBytes,
+      `canonical-authority-trace:${String(stage ?? 'unspecified')}`
+    );
+    await readbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    mapped = true;
+    const allWords = new Uint32Array(readbackBuffer.getMappedRange()).slice();
+    const decoded = Object.fromEntries(sources.map((source) => {
+      const start = source.targetOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+      return [
+        source.id,
+        source.decode(allWords.subarray(start, start + source.wordCount))
+      ];
+    }));
+    const failClosedSources = Object.entries(decoded)
+      .filter(([, value]) => value?.failClosed === true)
+      .map(([id]) => id);
+    return Object.freeze({
+      schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
+      stage: String(stage ?? 'unspecified'),
+      selectedLevel,
+      generationId: generation?.execution?.generationId ?? null,
+      status: failClosedSources.length === 0
+        ? 'canonical-authority-trace-admitted'
+        : 'canonical-authority-trace-fail-closed',
+      readbackBytes: targetOffsetBytes,
+      failClosedSources: Object.freeze(failClosedSources),
+      sources: Object.freeze(decoded)
+    });
+  } catch (error) {
+    return Object.freeze({
+      schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
+      stage: String(stage ?? 'unspecified'),
+      selectedLevel,
+      generationId: generation?.execution?.generationId ?? null,
+      status: 'canonical-authority-trace-readback-failed',
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    if (mapped) readbackBuffer.unmap();
+    readbackBuffer.destroy?.();
+  }
+}
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -988,7 +1613,14 @@ export async function runSchroederCrossLevelInvariantEvidenceWebGpu({
         : SCHROEDER_NO_FULL_READBACK_MODE,
       compactEvidenceReadbackPerformed: Boolean(readBuffer),
       fullParticleReadbackPerformed: false,
-      normalHotLoopReadbackFree: !readBuffer,
+      fullParticleReadbackFree: true,
+      ...createGpuReadbackTelemetry({
+        scope: 'schroeder-cross-level-invariant-evidence',
+        mapAsyncCount: readBuffer ? 1 : 0,
+        readbackBytes: readBuffer
+          ? SCHROEDER_CROSS_LEVEL_INVARIANT_EVIDENCE_BYTES
+          : 0
+      }),
       evidenceWords,
       evidence,
       retainedEvidenceBuffer: retainEvidenceBuffer,
@@ -1108,7 +1740,12 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
         : SCHROEDER_NO_FULL_READBACK_MODE,
       fullReadbackPerformed: false,
       fullParticleReadbackPerformed: false,
-      normalHotLoopReadbackFree: !compactReadback,
+      fullParticleReadbackFree: true,
+      ...createGpuReadbackTelemetry({
+        scope: 'schroeder-cross-level-grid-conservation-summary',
+        mapAsyncCount: compactReadback ? 1 : 0,
+        readbackBytes: compactReadback ? resolvedPlan.summaryByteLength : 0
+      }),
       compactSummaryReadbackPerformed: compactReadback,
       summaryRow,
       conservation: compactReadback
@@ -1775,15 +2412,32 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   compactSummaryRunner = runMlsMpmResidentSummaryWebGpu,
   parentFieldMechanicsWorkspaceRuntimeFactory =
     directSchroederSpatialParentFieldMechanicsWorkspaceGpu,
+  gpuTimestampRecorder = null,
   canonicalEpochController = null,
   postMechanicsConsumerReaderIds = [],
   postMechanicsConsumerSupportProfileIds = {},
   retainOutputParticleBuffers = true,
   conservationSummaryReadback = false,
   invariantEvidenceReadback = conservationSummaryReadback,
-  compactSummaryReadback = false
+  compactSummaryReadback = false,
+  canonicalSpatialAuthorityTrace = false
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederTwoLevelMechanicsStepWebGpu');
+  const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
+    scope: 'schroeder-two-level-mechanics-step'
+  });
+  const canonicalSpatialAuthorityTraceStages = [];
+  const mergeSuccessorEpochReadbackTelemetry = (epoch, source) => {
+    if (!epoch) return;
+    readbackTelemetry.merge(
+      epoch.levelAssignment,
+      `${source}:level-assignment`
+    );
+    readbackTelemetry.merge(
+      epoch.generation,
+      `${source}:spatial-generation`
+    );
+  };
   if (typeof gridSpecFactory !== 'function'
     || typeof p2gRunner !== 'function'
     || typeof gridUpdateRunner !== 'function'
@@ -1830,8 +2484,30 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   const epochProposal = () => activeCanonicalEpoch?.mechanicalProposal ?? null;
   const canonicalMechanicsArgs = () => activeCanonicalEpoch ? {
     schroederSpatialEpochGeneration: epochGeneration(),
-    canonicalSpatialRequired: true
+    canonicalSpatialRequired: true,
+    observeCanonicalSpatialAuthority:
+      canonicalSpatialAuthorityTrace === true
   } : {};
+  const captureCanonicalSpatialAuthorityTrace = async ({
+    stage,
+    selectedLevel,
+    generation = epochGeneration(),
+    refluxLedger = null,
+    workspaceExecution = null
+  } = {}) => {
+    if (canonicalSpatialAuthorityTrace !== true || !generation) return null;
+    const trace = await readTwoLevelCanonicalAuthorityTrace({
+      device,
+      generation,
+      stage,
+      selectedLevel,
+      refluxLedger,
+      workspaceExecution,
+      readbackTelemetry
+    });
+    canonicalSpatialAuthorityTraceStages.push(trace);
+    return trace;
+  };
   if (activeCanonicalEpoch && (
     activeCanonicalEpoch.levelAssignment !== levelAssignment
     || !epochGeneration()
@@ -1862,6 +2538,32 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_TRANSPORT_AUTHORITY';
     throw error;
   }
+  const runGpuQueueStage = async (stage, runner, metadata = {}) => {
+    const result = await (
+      gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.measureQueueStage === 'function'
+        ? gpuTimestampRecorder.measureQueueStage({
+            producerId: `schroeder-two-level-mechanics:${stage}`,
+            stage,
+            spanClass: 'two-level-mechanics-queue-stage',
+            ...metadata
+          }, runner)
+        : runner()
+    );
+    return result;
+  };
+  const markHostPoint = (point, metadata = {}) => {
+    if (
+      gpuTimestampRecorder?.active !== true
+      || typeof gpuTimestampRecorder.markHostPoint !== 'function'
+    ) return;
+    gpuTimestampRecorder.markHostPoint({
+      producerId: 'schroeder-two-level-mechanics:post-terminal-host',
+      stage: 'post-terminal-host',
+      point,
+      ...metadata
+    });
+  };
   const identityRequired = sphParticleUpload?.identityRequired === true
     || sphParticleStateRequiresExplicitIdentity(sphParticleState);
   const identityBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
@@ -1927,6 +2629,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   let cleanupScheduled = false;
   let cleanupAttemptPromise = null;
   let cleanupAttemptDeviceLost = false;
+  let trackedCleanupQueueOrderedReceipt = null;
+  const trackedCleanupProducerOutput = Object.freeze({});
+  let trackedCleanupProducerClaim = null;
+  let trackedCleanupFinalConsumerCapability = null;
   let deviceLossCleanupEvidencePromise = null;
   let resolveTrackedCleanupCompletion;
   const trackedCleanupCompletionPromise = new Promise((resolve) => {
@@ -1956,7 +2662,32 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     }
     return deviceLossCleanupEvidencePromise;
   };
-  const scheduleTrackedCleanup = ({ deviceLost = false } = {}) => {
+  const completeTrackedCleanup = () => {
+    const errors = [];
+    for (const [resource, destroy] of cleanupEntries) {
+      try {
+        destroy?.();
+        cleanupEntries.delete(resource);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      throw errors.length === 1
+        ? errors[0]
+        : new AggregateError(
+          errors,
+          'two-level mechanics submitted cleanup was incomplete'
+        );
+    }
+    cleanupScheduled = true;
+    resolveTrackedCleanupCompletion(true);
+    return true;
+  };
+  const scheduleTrackedCleanup = ({
+    deviceLost = false,
+    queueOrderedAuthority = null
+  } = {}) => {
     if (deviceLost === true) exactTwoLevelDeviceLossEvidence();
     if (cleanupScheduled) {
       return deviceLost === true
@@ -1972,13 +2703,63 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       // otherwise replace the newer loss-gated attempt below.
       cleanupAttemptPromise.catch(() => {});
     }
+    if (deviceLost !== true && queueOrderedAuthority != null) {
+      if (
+        queueOrderedAuthority !== fusedPendingClosure
+        || trackedCleanupProducerClaim == null
+        || trackedCleanupFinalConsumerCapability == null
+      ) {
+        const error = new Error(
+          'two-level queue-ordered cleanup requires the exact terminal G2P final-consumer capability'
+        );
+        error.code = 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED';
+        throw error;
+      }
+      trackedCleanupQueueOrderedReceipt =
+        releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          completeTrackedCleanup,
+          {
+            queueOrderedFinalConsumer:
+              trackedCleanupFinalConsumerCapability,
+            producerClaim: trackedCleanupProducerClaim,
+            producerOutput: trackedCleanupProducerOutput,
+            producerFamily:
+              'schroeder-two-level-tracked-temporaries'
+          }
+        );
+      return Promise.resolve(
+        trackedCleanupQueueOrderedReceipt.completed === true
+      );
+    }
     let ownerFence;
+    if (
+      trackedCleanupProducerClaim != null
+      && trackedCleanupFinalConsumerCapability == null
+    ) {
+      try {
+        cancelQueueOrderedCleanupClaim(
+          trackedCleanupProducerClaim,
+          device,
+          {
+            producerOutput: trackedCleanupProducerOutput,
+            cleanup: completeTrackedCleanup
+          }
+        );
+      } catch {
+        // A concurrently sealed claim remains unusable without its exact
+        // final-consumer capability; the conservative fence still owns cleanup.
+      }
+    }
     try {
       ownerFence = deviceLost === true
         ? exactTwoLevelDeviceLossEvidence()
         : typeof device?.queue?.onSubmittedWorkDone === 'function'
-        ? device.queue.onSubmittedWorkDone()
-        : Promise.resolve(true);
+          ? (
+              readbackTelemetry.recordHostQueueFence(),
+              device.queue.onSubmittedWorkDone()
+            )
+          : Promise.resolve(true);
     } catch (error) {
       throw error;
     }
@@ -1989,29 +2770,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     }
     let handled = null;
     handled = Promise.resolve(ownerFence).then(() => {
-      const errors = [];
-      for (const [resource, destroy] of cleanupEntries) {
-        try {
-          destroy?.();
-          cleanupEntries.delete(resource);
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-      if (errors.length > 0) {
-        throw errors.length === 1
-          ? errors[0]
-          : new AggregateError(
-            errors,
-            'two-level mechanics queue-fenced cleanup was incomplete'
-          );
-      }
-      cleanupScheduled = true;
+      completeTrackedCleanup();
       if (cleanupAttemptPromise === handled) {
         cleanupAttemptPromise = null;
         cleanupAttemptDeviceLost = false;
       }
-      resolveTrackedCleanupCompletion(true);
       return true;
     }).catch((error) => {
       if (cleanupAttemptPromise === handled) {
@@ -2195,10 +2958,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     };
 
     const workspaceRuntimeFor = (parentFieldView) => {
+      const arenaCount =
+        resolveSchroederParentFieldMechanicsWorkspaceArenaCount({
+          device,
+          parentFieldCapacity: parentFieldView.parentFieldCapacity,
+          fineFieldCapacity: parentFieldView.fineFieldCapacity,
+          externalRefluxLedgerByteLength: macroRefluxLedger.byteLength
+        });
       const runtime = parentFieldMechanicsWorkspaceRuntimeFactory(device, {
         parentFieldCapacity: parentFieldView.parentFieldCapacity,
         fineFieldCapacity: parentFieldView.fineFieldCapacity,
-        arenaCount: 3
+        arenaCount,
+        externalRefluxLedgerRequired: true,
+        gpuTimestampRecorder
       });
       if (
         !runtime?.encodePredictors
@@ -2211,6 +2983,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         || !runtime?.ownsExecution
         || !runtime?.isExecutionSubmitted
         || !runtime?.isTerminalSubmitted
+        || !runtime?.releaseExecutionQueueOrdered
       ) {
         throw new TypeError(
           'Canonical sparse mechanics requires a phased parent-field workspace runtime'
@@ -2273,6 +3046,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             );
           }
           if (runtime.isExecutionSubmitted?.(execution)) {
+            if (runtime.isTerminalSubmitted?.(execution)) {
+              return runtime.releaseExecutionQueueOrdered(execution);
+            }
             const ownerFence = device.queue.onSubmittedWorkDone();
             if (!ownerFence || typeof ownerFence.then !== 'function') {
               throw new Error(
@@ -2350,41 +3126,48 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       selectedLevel,
       gridSpacingM,
       projectionDt,
+      timestampStage,
       currentSphUpload,
       currentMlsUpload,
       particleContinuation = null,
       fineTransaction = null,
       terminalTransaction = null,
-      crossLevelPressureConsumer = false
+      crossLevelPressureConsumer = false,
+      queueOrderedSubmissionBatch = null
     }) => {
-      const projection = await p2gRunner({
-        device,
-        sphParticleState,
-        mlsMpmParticleState,
-        sphParticleUpload: currentSphUpload,
-        mlsMpmParticleUpload: currentMlsUpload,
-        schroederLevelAssignment: epochAssignment(),
-        schroederSelectedLevel: selectedLevel,
-        gridSpacingM,
-        boxDimsM,
-        dt: projectionDt,
-        internalPressureScale,
-        ambientPressurePa,
-        mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
-        pressureCrossLevelConsumerRequired: crossLevelPressureConsumer,
-        retainGridBuffer: false,
-        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-        ...canonicalMechanicsArgs(),
-        ...(particleContinuation
-          ? { canonicalParticleContinuation: particleContinuation }
-          : {}),
-        ...(fineTransaction
-          ? { fusedFineSubstepTransaction: fineTransaction }
-          : {}),
-        ...(terminalTransaction
-          ? { fusedCoarseTerminalTransaction: terminalTransaction }
-          : {})
-      });
+      const projection = await runGpuQueueStage(
+        timestampStage,
+        () => p2gRunner({
+          device,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload: currentSphUpload,
+          mlsMpmParticleUpload: currentMlsUpload,
+          schroederLevelAssignment: epochAssignment(),
+          schroederSelectedLevel: selectedLevel,
+          gridSpacingM,
+          boxDimsM,
+          dt: projectionDt,
+          internalPressureScale,
+          ambientPressurePa,
+          mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+          pressureCrossLevelConsumerRequired: crossLevelPressureConsumer,
+          queueOrderedSubmissionBatch,
+          retainGridBuffer: false,
+          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+          ...canonicalMechanicsArgs(),
+          ...(particleContinuation
+            ? { canonicalParticleContinuation: particleContinuation }
+            : {}),
+          ...(fineTransaction
+            ? { fusedFineSubstepTransaction: fineTransaction }
+            : {}),
+          ...(terminalTransaction
+            ? { fusedCoarseTerminalTransaction: terminalTransaction }
+            : {})
+        }),
+        { selectedLevel }
+      );
       p2gProjections.push(projection);
       return projection;
     };
@@ -2408,6 +3191,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
                 === 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_CACHE_BACKPRESSURE'
               && pendingWorkspaceRetirements.size > 0
             ) {
+              readbackTelemetry.recordHostQueueFence();
               await Promise.race(pendingWorkspaceRetirements);
               continue;
             }
@@ -2466,6 +3250,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             error?.code === 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_EXHAUSTED'
             && pendingWorkspaceRetirements.size > 0
           ) {
+            readbackTelemetry.recordHostQueueFence();
             await Promise.race(pendingWorkspaceRetirements);
             continue;
           }
@@ -2532,6 +3317,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
                 === 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_CACHE_BACKPRESSURE'
               && pendingWorkspaceRetirements.size > 0
             ) {
+              readbackTelemetry.recordHostQueueFence();
               await Promise.race(pendingWorkspaceRetirements);
               continue;
             }
@@ -2582,6 +3368,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             error?.code === 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_EXHAUSTED'
             && pendingWorkspaceRetirements.size > 0
           ) {
+            readbackTelemetry.recordHostQueueFence();
             await Promise.race(pendingWorkspaceRetirements);
             continue;
           }
@@ -2659,101 +3446,140 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         substepOrdinal: substep
       });
       canonicalEpochController.admitP2g(priorCanonicalEpoch);
-      const fineProjection = await runProjection({
-        selectedLevel: resolvedFineLevel,
-        gridSpacingM: fineDx,
-        projectionDt: dtFine,
-        currentSphUpload,
-        currentMlsUpload,
-        particleContinuation: activeParticleContinuation,
-        fineTransaction,
-        // The parent workspace claims and consumes CROSS_LEVEL on this fine
-        // field during the fine correction.
-        crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
+      const p2gSubmissionBatch = createQueueOrderedSubmissionBatch(device, {
+        expectedCommandBufferCount: 2
       });
-      const coarsePredictorProjection = await runProjection({
-        selectedLevel: coarseLevel,
-        gridSpacingM: coarseDx,
-        projectionDt: predictorThetaDt,
-        currentSphUpload,
-        currentMlsUpload,
-        // The parent workspace authenticates and claims these coarse pressure
-        // rows for the cross-level operator, so they must be published with
-        // CROSS_LEVEL declared required.
-        crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
-      });
-      const workspace = await submitWorkspacePredictors({
-        parentFieldView,
-        fineProjection,
-        coarseProjection: coarsePredictorProjection,
-        predictorDt: predictorThetaDt,
-        fineSubstepOrdinal: substep,
-        fineTransaction
-      });
-      const fineGridUpdate = await gridUpdateRunner({
-        device,
-        p2gGridProjection: fineProjection,
-        mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
-        fusedFineSubstepTransaction: fineTransaction,
-        dt: dtFine,
-        gravityMPerS2,
-        boxDimsM,
-        ambientPressurePa,
-        ambientReferenceDensityKgPerM3,
-        mechanicsMaterialTable,
-        mechanicsMaterialPhaseUpload,
-        schroederSpatialEpochTransaction:
-          phaseVolumeInterfaceTransportEnabled
-            ? priorCanonicalEpoch.transaction
-            : null,
-        phaseVolumePressureScale,
-        phaseVolumeDragScale,
-        phaseVolumeMaxImpulseFraction,
-        phaseVolumeInterfaceTransportRequired:
-          phaseVolumeInterfaceTransportEnabled,
-        mechanicsFieldEnergyReceipt: { deferSeal: true },
-        retainUpdatedGridBuffer: false,
-        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
-      });
+      let fineProjection;
+      let coarsePredictorProjection;
+      try {
+        [fineProjection, coarsePredictorProjection] = await Promise.all([
+          runProjection({
+            selectedLevel: resolvedFineLevel,
+            gridSpacingM: fineDx,
+            projectionDt: dtFine,
+            timestampStage: `fine-${substep}-p2g`,
+            currentSphUpload,
+            currentMlsUpload,
+            particleContinuation: activeParticleContinuation,
+            fineTransaction,
+            // The parent workspace claims and consumes CROSS_LEVEL on this fine
+            // field during the fine correction.
+            crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled,
+            queueOrderedSubmissionBatch: p2gSubmissionBatch
+          }),
+          runProjection({
+            selectedLevel: coarseLevel,
+            gridSpacingM: coarseDx,
+            projectionDt: predictorThetaDt,
+            timestampStage: `fine-${substep}-coarse-predictor-p2g`,
+            currentSphUpload,
+            currentMlsUpload,
+            // The parent workspace authenticates and claims these coarse pressure
+            // rows for the cross-level operator.
+            crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled,
+            queueOrderedSubmissionBatch: p2gSubmissionBatch
+          })
+        ]);
+      } catch (error) {
+        abortQueueOrderedSubmissionBatch(p2gSubmissionBatch, device, error);
+        throw error;
+      }
+      const workspace = await runGpuQueueStage(
+        `fine-${substep}-parent-predictor`,
+        () => submitWorkspacePredictors({
+          parentFieldView,
+          fineProjection,
+          coarseProjection: coarsePredictorProjection,
+          predictorDt: predictorThetaDt,
+          fineSubstepOrdinal: substep,
+          fineTransaction
+        }),
+        { fineSubstepOrdinal: substep }
+      );
+      const fineGridUpdate = await runGpuQueueStage(
+        `fine-${substep}-grid-update`,
+        () => gridUpdateRunner({
+          device,
+          p2gGridProjection: fineProjection,
+          mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+          fusedFineSubstepTransaction: fineTransaction,
+          dt: dtFine,
+          gravityMPerS2,
+          boxDimsM,
+          ambientPressurePa,
+          ambientReferenceDensityKgPerM3,
+          mechanicsMaterialTable,
+          mechanicsMaterialPhaseUpload,
+          schroederSpatialEpochTransaction:
+            phaseVolumeInterfaceTransportEnabled
+              ? priorCanonicalEpoch.transaction
+              : null,
+          phaseVolumePressureScale,
+          phaseVolumeDragScale,
+          phaseVolumeMaxImpulseFraction,
+          phaseVolumeInterfaceTransportRequired:
+            phaseVolumeInterfaceTransportEnabled,
+          mechanicsFieldEnergyReceipt: { deferSeal: true },
+          retainUpdatedGridBuffer: false,
+          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+        }),
+        { fineSubstepOrdinal: substep }
+      );
       fineGridUpdates.push(fineGridUpdate);
-      const correctedFineGridUpdate = submitFineCorrection({
-        ...workspace,
-        fineGridUpdate,
-        fineTransaction,
-        schroederSpatialEpochTransaction:
-          phaseVolumeInterfaceTransportEnabled
-            ? priorCanonicalEpoch.transaction
-            : null
-      });
+      const correctedFineGridUpdate = await runGpuQueueStage(
+        `fine-${substep}-correction`,
+        () => submitFineCorrection({
+          ...workspace,
+          fineGridUpdate,
+          fineTransaction,
+          schroederSpatialEpochTransaction:
+            phaseVolumeInterfaceTransportEnabled
+              ? priorCanonicalEpoch.transaction
+              : null
+        }),
+        { fineSubstepOrdinal: substep }
+      );
       lastFineGridUpdate = correctedFineGridUpdate;
       canonicalEpochController.admitG2p(priorCanonicalEpoch);
-      const fineG2p = await g2pRunner({
-        device,
-        sphParticleState,
-        mlsMpmParticleState,
-        sphParticleUpload: currentSphUpload,
-        mlsMpmParticleUpload: currentMlsUpload,
-        gridUpdate: correctedFineGridUpdate,
-        mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
-        dt: dtFine,
-        boxDimsM,
-        internalPressureScale,
-        liquidWallDampingAlpha: 0,
-        liquidWallDampingDistanceM: 0,
-        schroederLevelAssignment: epochAssignment(),
-        schroederSelectedLevel: resolvedFineLevel,
-        fusedFineSubstepTransaction: fineTransaction,
-        retainOutputParticleBuffers: true,
-        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-        ...canonicalMechanicsArgs(),
-        schroederSpatialMechanicalProposal: null
-      });
+      const fineG2p = await runGpuQueueStage(
+        `fine-${substep}-g2p`,
+        () => g2pRunner({
+          device,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload: currentSphUpload,
+          mlsMpmParticleUpload: currentMlsUpload,
+          gridUpdate: correctedFineGridUpdate,
+          mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+          dt: dtFine,
+          boxDimsM,
+          internalPressureScale,
+          liquidWallDampingAlpha: 0,
+          liquidWallDampingDistanceM: 0,
+          schroederLevelAssignment: epochAssignment(),
+          schroederSelectedLevel: resolvedFineLevel,
+          fusedFineSubstepTransaction: fineTransaction,
+          retainOutputParticleBuffers: true,
+          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+          ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
+          ...canonicalMechanicsArgs(),
+          schroederSpatialMechanicalProposal: null
+        }),
+        { fineSubstepOrdinal: substep }
+      );
       trackCleanup(fineG2p.stateBuffer, () => fineG2p.stateBuffer?.destroy?.());
       trackCleanup(
         fineG2p.mechanicsBuffer,
         () => fineG2p.mechanicsBuffer?.destroy?.()
       );
       lastFineG2p = fineG2p;
+      await captureCanonicalSpatialAuthorityTrace({
+        stage: `fine-${substep}-post-g2p`,
+        selectedLevel: resolvedFineLevel,
+        generation: priorCanonicalEpoch.generation,
+        refluxLedger: macroRefluxLedger,
+        workspaceExecution: workspace.execution
+      });
 
       const nextUploads = createCanonicalTwoLevelSubstepUploads({
         sphParticleState,
@@ -2796,11 +3622,26 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       let successorCanonicalEpoch = null;
       for (;;) {
         try {
-          successorCanonicalEpoch = await canonicalEpochController.refresh({
-            priorEpoch: priorCanonicalEpoch,
-            currentSphParticleUpload: currentSphUpload,
-            currentMlsMpmParticleUpload: currentMlsUpload
-          });
+          successorCanonicalEpoch = await runGpuQueueStage(
+            `fine-${substep}-epoch-refresh`,
+            () => canonicalEpochController.refresh({
+              priorEpoch: priorCanonicalEpoch,
+              currentSphParticleUpload: currentSphUpload,
+              currentMlsMpmParticleUpload: currentMlsUpload,
+              ...(
+                phaseVolumeInterfaceTransportEnabled
+                || priorCanonicalEpoch.generation
+                  ?.mechanicsFieldPairV2Enabled === true
+                ? {}
+                : {
+                    mechanicsFieldTopologyPredecessors:
+                      priorCanonicalEpoch.generation?.mechanicsLevelViews
+                        ?.map((levelView) => levelView.mechanicsFieldView)
+                        ?? null
+                  })
+            }),
+            { fineSubstepOrdinal: substep }
+          );
           break;
         } catch (error) {
           const retryableBackpressure = [
@@ -2813,12 +3654,17 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           if (!retryableBackpressure || retryableRetirements.length === 0) {
             throw error;
           }
+          readbackTelemetry.recordHostQueueFence();
           const released = await Promise.any(
             retryableRetirements.map((record) => record.attempt())
           );
           if (released !== true) throw error;
         }
       }
+      mergeSuccessorEpochReadbackTelemetry(
+        successorCanonicalEpoch,
+        `fine-${substep}-successor-epoch`
+      );
       activeCanonicalEpoch = successorCanonicalEpoch;
       activeLifecycleCanonicalEpoch = Object.freeze({
         generation: successorCanonicalEpoch.generation,
@@ -2988,67 +3834,117 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       selectedLevel: coarseLevel,
       gridSpacingM: coarseDx,
       projectionDt: dtSeconds,
+      timestampStage: 'terminal-coarse-p2g',
       currentSphUpload,
       currentMlsUpload,
       particleContinuation: activeParticleContinuation,
       terminalTransaction,
-      // Terminal publication folds the reflux correction into this coarse
-      // field, so it is a cross-level pressure consumer and must declare it.
-      crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled
+      // The cross-level operator reads the fine and coarse-predictor fields.
+      // This terminal P2G field is consumed only by the terminal coarse G2P;
+      // declaring CROSS_LEVEL here creates a required consumer that no stage
+      // can legitimately claim or consume.
+      crossLevelPressureConsumer: false
     });
-    const terminalGridUpdate = await gridUpdateRunner({
-      device,
-      p2gGridProjection: finalCoarseProjection,
-      mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
-      fusedCoarseTerminalTransaction: terminalTransaction,
-      dt: dtSeconds,
-      gravityMPerS2,
-      boxDimsM,
-      ambientPressurePa,
-      ambientReferenceDensityKgPerM3,
-      mechanicsMaterialTable,
-      mechanicsMaterialPhaseUpload,
-      schroederSpatialEpochTransaction:
-        phaseVolumeInterfaceTransportEnabled
-          ? activeCanonicalEpoch.transaction
-          : null,
-      phaseVolumePressureScale,
-      phaseVolumeDragScale,
-      phaseVolumeMaxImpulseFraction,
-      phaseVolumeInterfaceTransportRequired:
-        phaseVolumeInterfaceTransportEnabled,
-      mechanicsFieldEnergyReceipt: { deferSeal: true },
-      retainUpdatedGridBuffer: false,
-      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
-    });
-    const finalWorkspace = await submitCoarseTerminal({
-      parentFieldView: finalParentFieldView,
-      coarseGridUpdate: terminalGridUpdate,
-      terminalTransaction
-    });
+    const terminalGridUpdate = await runGpuQueueStage(
+      'terminal-coarse-grid-update',
+      () => gridUpdateRunner({
+        device,
+        p2gGridProjection: finalCoarseProjection,
+        mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+        fusedCoarseTerminalTransaction: terminalTransaction,
+        dt: dtSeconds,
+        gravityMPerS2,
+        boxDimsM,
+        ambientPressurePa,
+        ambientReferenceDensityKgPerM3,
+        mechanicsMaterialTable,
+        mechanicsMaterialPhaseUpload,
+        schroederSpatialEpochTransaction:
+          phaseVolumeInterfaceTransportEnabled
+            ? activeCanonicalEpoch.transaction
+            : null,
+        phaseVolumePressureScale,
+        phaseVolumeDragScale,
+        phaseVolumeMaxImpulseFraction,
+        phaseVolumeInterfaceTransportRequired:
+          phaseVolumeInterfaceTransportEnabled,
+        mechanicsFieldEnergyReceipt: { deferSeal: true },
+        retainUpdatedGridBuffer: false,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+      })
+    );
+    const finalWorkspace = await runGpuQueueStage(
+      'terminal-coarse-correction',
+      () => submitCoarseTerminal({
+        parentFieldView: finalParentFieldView,
+        coarseGridUpdate: terminalGridUpdate,
+        terminalTransaction
+      })
+    );
     const finalCoarseGridUpdate = finalWorkspace.artifact;
     canonicalEpochController.admitG2p(activeCanonicalEpoch);
-    const coarseG2p = await g2pRunner({
+    trackedCleanupProducerClaim = registerQueueOrderedCleanupClaim(
+      twoLevelTrackedTemporaryCleanupClaimIssuer,
       device,
-      sphParticleState,
-      mlsMpmParticleState,
-      sphParticleUpload: currentSphUpload,
-      mlsMpmParticleUpload: currentMlsUpload,
-      gridUpdate: finalCoarseGridUpdate,
-      mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
-      dt: dtSeconds,
-      boxDimsM,
-      internalPressureScale,
-      liquidWallDampingAlpha: 0,
-      liquidWallDampingDistanceM: 0,
-      schroederLevelAssignment: epochAssignment(),
-      schroederSelectedLevel: coarseLevel,
-      fusedCoarseTerminalTransaction: terminalTransaction,
-      retainOutputParticleBuffers: true,
-      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-      ...canonicalMechanicsArgs(),
-      schroederSpatialMechanicalProposal: null
+      {
+        producerOutput: trackedCleanupProducerOutput,
+        cleanup: completeTrackedCleanup
+      }
+    );
+    const coarseG2p = await runGpuQueueStage(
+      'terminal-coarse-g2p',
+      () => g2pRunner({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload: currentSphUpload,
+        mlsMpmParticleUpload: currentMlsUpload,
+        gridUpdate: finalCoarseGridUpdate,
+        mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+        dt: dtSeconds,
+        boxDimsM,
+        internalPressureScale,
+        liquidWallDampingAlpha: 0,
+        liquidWallDampingDistanceM: 0,
+        schroederLevelAssignment: epochAssignment(),
+        schroederSelectedLevel: coarseLevel,
+        fusedCoarseTerminalTransaction: terminalTransaction,
+        queueOrderedProducerClaims: [
+          trackedCleanupProducerClaim
+        ],
+        retainOutputParticleBuffers: true,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+        ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
+        ...canonicalMechanicsArgs(),
+        schroederSpatialMechanicalProposal: null
+      })
+    );
+    await captureCanonicalSpatialAuthorityTrace({
+      stage: 'terminal-coarse-post-g2p',
+      selectedLevel: coarseLevel,
+      generation: activeCanonicalEpoch.generation,
+      refluxLedger: macroRefluxLedger,
+      workspaceExecution: finalWorkspace.execution
     });
+    trackedCleanupFinalConsumerCapability =
+      coarseG2p?.queueOrderedFinalConsumerCapability ?? null;
+    if (trackedCleanupFinalConsumerCapability == null) {
+      try {
+        cancelQueueOrderedCleanupClaim(
+          trackedCleanupProducerClaim,
+          device,
+          {
+            producerOutput: trackedCleanupProducerOutput,
+            cleanup: completeTrackedCleanup
+          }
+        );
+      } catch {
+        // A noncanonical injected runner cannot authorize queue-ordered
+        // cleanup; the conservative owner fence below remains required.
+      }
+      trackedCleanupProducerClaim = null;
+    }
+    markHostPoint('terminal-g2p-complete');
     trackCleanup(coarseG2p.stateBuffer, () => coarseG2p.stateBuffer?.destroy?.());
     trackCleanup(
       coarseG2p.mechanicsBuffer,
@@ -3060,6 +3956,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     // construction or terminal private advancement fails.
     releaseCleanup(coarseG2p.stateBuffer);
     releaseCleanup(coarseG2p.mechanicsBuffer);
+    markHostPoint('terminal-output-cleanup-transferred');
 
     const compactSummary = compactSummaryReadback
       ? await compactSummaryRunner({
@@ -3074,6 +3971,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           readCompactSummary: true
         })
       : null;
+    if (compactSummaryReadback) {
+      readbackTelemetry.merge(
+        compactSummary,
+        'canonical-compact-summary'
+      );
+    }
+    markHostPoint('compact-summary-complete');
     const rawFinalCanonicalUploads = createCanonicalTwoLevelSubstepUploads({
       sphParticleState,
       mlsMpmParticleState,
@@ -3119,6 +4023,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         ownsMechanicsBuffer: true
       })
     });
+    markHostPoint('final-canonical-uploads-created');
     // Every workspace already owns a stable completion/retry record. Keep the
     // terminal record live until the synchronous S* claim below: merely
     // scheduling release marks its runtime release-in-flight and would make
@@ -3187,12 +4092,14 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         })
       )
     });
+    markHostPoint('retirement-capabilities-created');
     const terminalControllerReceipt =
       canonicalEpochController.commitAndRelease(activeCanonicalEpoch, {
         nextParticleUploads: finalCanonicalUploads,
         terminal: true,
         status: 'two-level-fused-terminal-s-star-private-advanced-pending-closure'
       });
+    markHostPoint('terminal-controller-committed');
     fusedPendingClosure = createSchroederFusedMechanicsPendingClosure({
         device,
         terminalTransaction,
@@ -3228,6 +4135,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           controllerRetirementCapability
         ]
       });
+    markHostPoint('pending-closure-created');
     // S* is now owned by the authenticated pending token, so the terminal
     // workspace can begin queue-fenced retirement without invalidating claim
     // provenance. A scheduling failure is recovered through that same token.
@@ -3236,7 +4144,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     // generic cleanup ledger before any later controller/publication step can
     // fail; only the fused lifecycle may retire these buffers from here on.
     if (transferThermoOwnership) releaseCleanup(thermoBuffer);
-    scheduleTrackedCleanup();
+    scheduleTrackedCleanup({
+      queueOrderedAuthority:
+        trackedCleanupFinalConsumerCapability != null
+          ? fusedPendingClosure
+          : null
+    });
+    markHostPoint('terminal-retirements-scheduled');
     const pendingPostMechanicsClosure = fusedPendingClosure;
     currentSphUpload = finalCanonicalUploads.sphParticleUpload;
     currentMlsUpload = finalCanonicalUploads.mlsMpmParticleUpload;
@@ -3250,6 +4164,20 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       verified: false,
       verificationStatus: 'pending-post-mechanics-closure'
     });
+    const canonicalAuthorityTrace = canonicalSpatialAuthorityTrace === true
+      ? Object.freeze({
+          schema:
+            'peercompute.ulg.schroeder-two-level-canonical-authority-trace-sequence.v0',
+          status: canonicalSpatialAuthorityTraceStages.length > 0
+            && canonicalSpatialAuthorityTraceStages.every(
+              (stage) => stage?.status === 'canonical-authority-trace-admitted'
+            )
+              ? 'canonical-authority-trace-sequence-admitted'
+              : 'canonical-authority-trace-sequence-fail-closed',
+          stageCount: canonicalSpatialAuthorityTraceStages.length,
+          stages: Object.freeze([...canonicalSpatialAuthorityTraceStages])
+        })
+      : null;
 
     const retiredGridUpdateSummary = (update, role) => update
       ? Object.freeze({
@@ -3334,6 +4262,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         (execution) => execution.status
       ),
       canonicalMacroStatus,
+      canonicalSpatialAuthorityTrace: canonicalAuthorityTrace,
       authoritativeCommitVerified: false,
       authoritativeCommitStatus: 'pending-post-mechanics-closure',
       internalEnergyTransferStatus:
@@ -3370,7 +4299,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         ? SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE
         : SCHROEDER_NO_FULL_READBACK_MODE,
       fullParticleReadbackPerformed: false,
-      normalHotLoopReadbackFree: true,
+      fullParticleReadbackFree: true,
+      ...readbackTelemetry.snapshot(),
       mandatoryMacroStatusReadbackPerformed: false,
       conservation: null,
       compactSummary,
@@ -3381,6 +4311,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       intermediateContinuationRetirementPromise,
       diagnosticArtifactRetirementPromise,
       genericArtifactRetirementPromise: trackedCleanupCompletionPromise,
+      queueOrderedCleanupReceipt: trackedCleanupQueueOrderedReceipt,
       fineGridUpdate: retiredGridUpdateSummary(
         lastFineGridUpdate,
         'last-fine-substep'
@@ -3391,12 +4322,16 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         'final-coarse'
       ),
       diagnosticArtifactsRetired: false,
-      diagnosticArtifactRetirementStatus: 'queue-fenced-retirement-pending',
+      diagnosticArtifactRetirementStatus:
+        trackedCleanupQueueOrderedReceipt?.completed === true
+          ? 'queue-ordered-temporary-retirement-completed'
+          : 'queue-fenced-retirement-pending',
       conservativeTransferStatus:
         'gpu-resident-parent-field-transfer-complete-keyed-reflux-measured',
       scientificValidation: false,
       fullPhysicsValidation: false
     };
+    markHostPoint('result-envelope-created');
 
     if (retainOutputParticleBuffers) {
       result.outputParticleBufferOwnership =
@@ -3433,6 +4368,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       // Exact S*/owned-thermo/H7 ownership was already transferred to the
       // pending fused lifecycle before terminal controller advancement.
     }
+    markHostPoint('result-ready');
     return result;
   };
 
@@ -3545,7 +4481,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   // grid. This is the actual cross-scale transfer invariant; comparing the
   // fine cohort against the later combined grid would incorrectly count the
   // native coarse cohort as a residual.
-  const invariantEvidenceExecution = epochHierarchy()
+  const invariantEvidenceEnabled = Boolean(epochHierarchy());
+  const invariantEvidenceExecution = invariantEvidenceEnabled
     ? await invariantEvidenceRunner({
         device,
         plan: couplingPlan,
@@ -3729,6 +4666,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       schroederSelectedLevel: resolvedFineLevel,
       retainOutputParticleBuffers: true,
       readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
       ...canonicalMechanicsArgs(),
       ...(activeCanonicalEpoch ? {
         schroederSpatialMechanicalProposal: epochProposal()
@@ -3786,6 +4724,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         currentSphParticleUpload: currentSphUpload,
         currentMlsMpmParticleUpload: currentMlsUpload
       });
+      mergeSuccessorEpochReadbackTelemetry(
+        activeCanonicalEpoch,
+        `legacy-fine-${substep}-successor-epoch`
+      );
     } else {
       currentSphUpload = {
         status: 'webgpu-uploaded',
@@ -3922,6 +4864,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     schroederSelectedLevel: coarseLevel,
     retainOutputParticleBuffers: true,
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+    ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
     ...canonicalMechanicsArgs(),
     ...(activeCanonicalEpoch ? {
       schroederSpatialMechanicalProposal: epochProposal()
@@ -3976,6 +4919,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         enabledConsumerReaderIds: postMechanicsConsumerReaderIds,
         consumerSupportProfileIds: postMechanicsConsumerSupportProfileIds
       });
+      mergeSuccessorEpochReadbackTelemetry(
+        postMechanicsEpoch,
+        'legacy-post-mechanics-epoch'
+      );
       activeCanonicalEpoch = postMechanicsEpoch;
     }
   }
@@ -4013,6 +4960,24 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       readCompactSummary: true
     })
     : null;
+  if (invariantEvidenceEnabled) {
+    readbackTelemetry.merge(
+      invariantEvidenceExecution,
+      'legacy-invariant-evidence'
+    );
+  }
+  if (conservationSummaryReadback) {
+    readbackTelemetry.merge(
+      conservation,
+      'legacy-conservation-summary'
+    );
+  }
+  if (compactSummaryReadback) {
+    readbackTelemetry.merge(
+      compactSummary,
+      'legacy-compact-summary'
+    );
+  }
 
   // Intermediates remain in the identity-deduplicated cleanup ledger. The
   // caller owns only the retained final G2P family (and an internally packed
@@ -4066,10 +5031,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       ? SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE
       : SCHROEDER_NO_FULL_READBACK_MODE,
     fullParticleReadbackPerformed: false,
-    normalHotLoopReadbackFree:
-      !conservationSummaryReadback
-        && !invariantEvidenceReadback
-        && !compactSummaryReadback,
+    fullParticleReadbackFree: true,
+    ...readbackTelemetry.snapshot(),
     conservation: conservation?.conservation ?? null,
     compactSummary,
     postMechanicsEpoch,

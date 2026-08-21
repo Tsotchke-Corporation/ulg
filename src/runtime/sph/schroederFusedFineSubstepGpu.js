@@ -1266,7 +1266,11 @@ export async function retireSchroederFineMicroepochAfter(
   }
   origin.status = 'retiring';
   const macroOrigin = macroAuthorityOrigins.get(origin.macroAuthority);
-  const retirementPromise = origin.fineFieldRuntime.retireStatePublicationLockAfter(
+  const retirePublicationLock =
+    origin.fineFieldRuntime.retireStatePublicationLockQueueOrdered
+    ?? origin.fineFieldRuntime.retireStatePublicationLockAfter;
+  const retirementPromise = retirePublicationLock.call(
+    origin.fineFieldRuntime,
     origin.fineFieldView,
     origin.publicationLock
   );
@@ -4029,10 +4033,15 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
     closureOrigin.macroOrigin,
     controllerFence
   );
+  const terminalContinuationRetirement = retireContinuationOutputAfterFence(
+    closureOrigin.continuationOrigin,
+    controllerFence
+  );
   const publicationRetirementPromise = Promise.all([
     controllerFence,
     closureOrigin.retirementPrerequisitePromise,
-    refluxLedgerRetirement
+    refluxLedgerRetirement,
+    terminalContinuationRetirement
   ]).then((confirmed) => {
     if (confirmed.some((value) => value !== true)) {
       throw new Error(

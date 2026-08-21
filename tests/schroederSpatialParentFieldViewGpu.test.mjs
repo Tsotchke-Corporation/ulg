@@ -35,6 +35,16 @@ function createFakeEncoder() {
     clearBuffer(buffer, offset = 0, size = null) {
       events.push({ kind: 'clear', label: buffer.label, offset, size });
     },
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      events.push({
+        kind: 'copy',
+        source: source.label,
+        sourceOffset,
+        destination: destination.label,
+        destinationOffset,
+        size
+      });
+    },
     beginComputePass(descriptor = {}) {
       const event = { kind: 'pass', descriptor, commands: [] };
       events.push(event);
@@ -80,7 +90,13 @@ function createFakeDevice() {
     },
     queue: {
       writeBuffer(buffer, offset, data) {
-        writes.push({ buffer, offset, byteLength: data.byteLength });
+        const bytes = data instanceof ArrayBuffer
+          ? data.slice(0)
+          : data.buffer.slice(
+              data.byteOffset,
+              data.byteOffset + data.byteLength
+            );
+        writes.push({ buffer, offset, byteLength: data.byteLength, data: bytes });
       },
       onSubmittedWorkDone() { return Promise.resolve(); }
     },
@@ -155,7 +171,11 @@ function createOwnedExecution(value, {
   return value;
 }
 
-function createExactInputs(device, { submitted = false } = {}) {
+function createExactInputs(device, {
+  submitted = false,
+  fineFieldCapacity = 4,
+  coarseFieldCapacity = 3
+} = {}) {
   const ids = identity();
   const sourceBuffer = device.createBuffer({
     label: 'parent-field-source',
@@ -208,14 +228,14 @@ function createExactInputs(device, { submitted = false } = {}) {
   const fineFieldView = field({
     level: 0,
     grid: fineGrid,
-    capacity: 4,
+    capacity: fineFieldCapacity,
     parentMechanicsView: fineMechanicsView,
     label: 'fine-field-view'
   });
   const coarseFieldView = field({
     level: 1,
     grid: coarseGrid,
-    capacity: 3,
+    capacity: coarseFieldCapacity,
     parentMechanicsView: coarseMechanicsView,
     label: 'coarse-field-view'
   });
@@ -347,6 +367,7 @@ test('CPU parent-field oracle preserves partition and first moment while dedupli
 });
 
 test('parent-field shader consumes hierarchy edges and has no arbitrary candidate budget', () => {
+  assert.match(schroederSpatialParentFieldViewWgsl, /fn prepare_candidate_count/);
   assert.match(schroederSpatialParentFieldViewWgsl, /fn hierarchy_fine_compact_index/);
   assert.match(schroederSpatialParentFieldViewWgsl, /fn hierarchy_edge_range/);
   assert.match(schroederSpatialParentFieldViewWgsl, /fn emit_fine_parent_candidates/);
@@ -355,8 +376,82 @@ test('parent-field shader consumes hierarchy edges and has no arbitrary candidat
   assert.match(schroederSpatialParentFieldViewWgsl, /fn scatter_fine_field_edges/);
   assert.match(schroederSpatialParentFieldViewWgsl, /weight_sum - 1\.0/);
   assert.match(schroederSpatialParentFieldViewWgsl, /length\(reproduced - fine_position\)/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /@builtin\(num_workgroups\)/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /fn flattened_invocation_index/);
+  assert.match(schroederSpatialParentFieldViewWgsl, /fn bounded_dispatch_shape/);
   assert.doesNotMatch(schroederSpatialParentFieldViewWgsl, /candidate_budget/i);
   assert.doesNotMatch(schroederSpatialParentFieldViewWgsl, /readback/i);
+});
+
+test('parent-field runtime shapes direct and published work over two dimensions', () => {
+  const device = createFakeDevice();
+  device.limits.maxComputeWorkgroupsPerDimension = 2;
+  const inputs = createExactInputs(device, {
+    fineFieldCapacity: 17,
+    coarseFieldCapacity: 1
+  });
+  const runtime = createSchroederSpatialParentFieldViewGpu(device, {
+    fineGrid: inputs.fineGrid,
+    coarseGrid: inputs.coarseGrid,
+    fineFieldCapacity: 17,
+    coarseFieldCapacity: 1
+  });
+  const encoder = createFakeEncoder();
+  const execution = runtime.encode(encoder, inputs);
+  assert.equal(execution.maxComputeWorkgroupsPerDimension, 2);
+  const dispatchByPipeline = new Map(
+    encoder.events
+      .filter((event) => event.kind === 'pass')
+      .flatMap((event) => event.commands)
+      .filter(({ dispatch }) => dispatch)
+      .map(({ pipeline, dispatch }) => [pipeline, dispatch])
+  );
+  const indirectByPipeline = new Map(
+    encoder.events
+      .filter((event) => event.kind === 'pass')
+      .flatMap((event) => event.commands)
+      .filter(({ dispatchIndirect }) => dispatchIndirect)
+      .map(({ pipeline, dispatchIndirect }) => [pipeline, dispatchIndirect])
+  );
+  assert.deepEqual(
+    indirectByPipeline.get(
+      'ulg-schroeder-spatial-parent-field-view-materialize-candidate-union-indices-pipeline'
+    ),
+    {
+      label: 'ulg-schroeder-spatial-parent-field-view-arena-0-candidate-dispatch',
+      byteOffset: 0
+    }
+  );
+  assert.match(
+    indirectByPipeline.get(
+      'ulg-schroeder-spatial-parent-field-view-assemble-parent-field-keys-pipeline'
+    )?.label ?? '',
+    /radix-dispatch-indirect/
+  );
+  for (const dispatch of dispatchByPipeline.values()) {
+    assert.ok(dispatch[0] <= 2);
+    assert.ok(dispatch[1] <= 2);
+  }
+  const paramsWrite = device.writes.find(
+    ({ buffer }) => buffer.label.endsWith('-params')
+  );
+  assert.equal(new DataView(paramsWrite.data).getUint32(204, true), 2);
+  assert.equal(runtime.releaseExecution(execution, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+
+  const rejectedInputs = createExactInputs(device, {
+    fineFieldCapacity: 33,
+    coarseFieldCapacity: 1
+  });
+  assert.throws(
+    () => createSchroederSpatialParentFieldViewGpu(device, {
+      fineGrid: rejectedInputs.fineGrid,
+      coarseGrid: rejectedInputs.coarseGrid,
+      fineFieldCapacity: 33,
+      coarseFieldCapacity: 1
+    }),
+    /maxComputeWorkgroupsPerDimension squared/
+  );
 });
 
 test('parent-field runtime encodes persistent union topology and retires after a fence', async () => {
@@ -393,6 +488,7 @@ test('parent-field runtime encodes persistent union topology and retires after a
     .filter((event) => event.kind === 'pass')
     .flatMap((event) => event.commands);
   for (const fragment of [
+    'prepare-candidate-count',
     'emit-fine-parent-candidates',
     'emit-coarse-native-candidates',
     'materialize-candidate-union-indices',
@@ -402,6 +498,7 @@ test('parent-field runtime encodes persistent union topology and retires after a
   ]) {
     assert.ok(commands.some(({ pipeline }) => pipeline.includes(fragment)), fragment);
   }
+  assert.equal(execution.radixElementCountSource, 'authenticated-gpu-authority');
   assert.throws(
     () => runtime.markExecutionSubmitted(execution),
     /parents must be marked submitted/
@@ -422,6 +519,18 @@ test('parent-field runtime encodes persistent union topology and retires after a
   assert.equal(await runtime.releaseExecutionAfter(execution, Promise.resolve()), true);
   assert.equal(execution.released, true);
   assert.equal(runtime.activeExecutionCount(), 0);
+  const explicitBindGroupCount = device.bindGroups.filter(
+    (group) => group.label?.endsWith('-bindings')
+  ).length;
+  const cachedExecution = runtime.encode(createFakeEncoder(), inputs);
+  assert.equal(
+    device.bindGroups.filter((group) => group.label?.endsWith('-bindings')).length,
+    explicitBindGroupCount
+  );
+  assert.equal(
+    runtime.releaseExecution(cachedExecution, { discardedEncoder: true }),
+    true
+  );
   assert.equal(runtime.destroy(), true);
 });
 
@@ -755,7 +864,7 @@ test('native Vulkan parent-field union admits exact keys, CSR, maps, and residua
   }
   assert.equal(native.status, 'complete', native.reason || 'native WebGPU did not run');
   assert.equal(native.schema, ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA);
-  assert.equal(native.flags, 3);
+  assert.equal(native.flags, 3, JSON.stringify(native));
   assert.ok(native.fineCount > 0);
   assert.ok(native.coarseCount > 0);
   assert.ok(native.parentCount > 0);

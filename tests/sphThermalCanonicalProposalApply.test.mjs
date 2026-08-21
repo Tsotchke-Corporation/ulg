@@ -356,6 +356,13 @@ test('thermal apply WGSL validates the complete canonical header before pair row
 
 test('thermal WebGPU consumes one authenticated canonical proposal without legacy lookup', () => {
   const fixture = liveCanonicalThermalFixture();
+  assert.equal(
+    fixture.proposal.authorizeQueueOrderedCanonicalApplyRetirement({
+      generation: fixture.generation,
+      execution: fixture.generation.execution
+    }),
+    true
+  );
   const postMechanicsStateBuffer = taggedBuffer(
     fixture.device,
     'canonical-thermal-post-mechanics-apply-state',
@@ -475,18 +482,32 @@ test('thermal WebGPU consumes one authenticated canonical proposal without legac
   );
   assert.equal(
     stage.result.canonicalThermalProposal.producerStage.proposalDispatchCount,
-    7
+    8
   );
   const encoder = fixture.device.createCommandEncoder({
     label: 'canonical-matched-time-producer-and-apply'
   });
   stage.encode(encoder);
+  assert.equal(
+    Object.hasOwn(stage.result, 'queueOrderedCleanupClaim'),
+    false,
+    'the retained-output claim cannot exist before primary submission'
+  );
   fixture.device.queue.submit([encoder.finish()]);
   assert.equal(stage.markSubmittedWork(), true);
+  assert.equal(
+    Object.hasOwn(stage.result, 'queueOrderedCleanupClaim'),
+    true
+  );
+  assert.equal(
+    Object.keys(stage.result).includes('queueOrderedCleanupClaim'),
+    false
+  );
   assert.deepEqual(
     fixture.device.encoders.at(-1).passes.map((pass) => pass.descriptor.label),
     [
       'ulg-schroeder-spatial-thermal-derived-prepass',
+      'ulg-schroeder-spatial-thermal-conductivity-finalize',
       'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
       'ulg-schroeder-spatial-thermal-directional-budget',
       'ulg-schroeder-spatial-thermal-csr-validate-rows',

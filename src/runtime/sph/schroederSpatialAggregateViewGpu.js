@@ -49,6 +49,70 @@ const GPU_BUFFER_USAGE = {
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
 
+function aggregateSignificantDigitRows(spatialExecution) {
+  const rows = [];
+  const cellMin = Array.from(spatialExecution?.atlas?.cellMin || []);
+  const cellCount = Array.from(spatialExecution?.atlas?.cellCount || []);
+  const boundedCells = cellMin.length === 3
+    && cellCount.length === 3
+    && cellMin.every((value) => Number.isInteger(value))
+    && cellCount.every((value) => Number.isInteger(value) && value > 0)
+    && cellMin.every((value, axis) => (
+      value >= -0x8000_0000
+      && value + cellCount[axis] - 1 <= 0x7fff_ffff
+    ));
+  if (boundedCells) {
+    for (const axis of [2, 1, 0]) {
+      const minOrder = (cellMin[axis] ^ 0x8000_0000) >>> 0;
+      const maxOrder = (
+        (cellMin[axis] + cellCount[axis] - 1) ^ 0x8000_0000
+      ) >>> 0;
+      const rowBase = (2 - axis) * 8;
+      for (let digit = 0; digit < 8; digit += 1) {
+        const divisor = 2 ** (digit * 4);
+        if (
+          Math.floor(minOrder / divisor)
+          !== Math.floor(maxOrder / divisor)
+        ) {
+          rows.push(rowBase + digit);
+        }
+      }
+    }
+  } else {
+    rows.push(...Array.from({ length: 24 }, (_, index) => index));
+  }
+  const minLevel = Number(spatialExecution?.queryMinLevel);
+  const maxLevel = Number(spatialExecution?.queryMaxLevel);
+  if (
+    Number.isInteger(minLevel)
+    && Number.isInteger(maxLevel)
+    && minLevel >= -0x8000_0000
+    && maxLevel <= 0x7fff_ffff
+    && minLevel <= maxLevel
+  ) {
+    const minOrder = (minLevel ^ 0x8000_0000) >>> 0;
+    const maxOrder = (maxLevel ^ 0x8000_0000) >>> 0;
+    for (let digit = 0; digit < 8; digit += 1) {
+      const divisor = 2 ** (digit * 4);
+      if (
+        Math.floor(minOrder / divisor)
+        !== Math.floor(maxOrder / divisor)
+      ) {
+        rows.push(24 + digit);
+      }
+    }
+  } else {
+    rows.push(...Array.from({ length: 8 }, (_, index) => 24 + index));
+  }
+  // Exact-near directories admit one query chart, so word zero is uniform
+  // and contributes no ordering information. Retain it only for a malformed
+  // or legacy execution that lacks that host-side query proof.
+  if (!Number.isInteger(Number(spatialExecution?.queryChartId))) {
+    rows.push(...Array.from({ length: 8 }, (_, index) => 32 + index));
+  }
+  return Object.freeze(rows);
+}
+
 function aggregateError(message, code, ErrorType = Error) {
   const error = new ErrorType(message);
   error.code = code;
@@ -318,6 +382,7 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       destroyedOwnedBuffers: new Set(),
       radixDeviceLossRetired: false,
       token: null,
+      bindGroupCache: new Map(),
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -449,11 +514,30 @@ export function createSchroederSpatialAggregateViewGpu(device, {
   }
 
   function bindGroup(pipelineObject, entries, suffix, arenaIndex) {
-    return device.createBindGroup({
+    const arena = arenas[arenaIndex];
+    const cached = arena.bindGroupCache.get(suffix);
+    const entriesMatch = cached?.entries.length === entries.length
+      && cached.entries.every((left, index) => {
+        const right = entries[index];
+        return left.binding === right.binding
+          && left.resource?.buffer === right.resource?.buffer
+          && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
+          && (left.resource?.size ?? null) === (right.resource?.size ?? null);
+      });
+    if (cached?.pipeline === pipelineObject && entriesMatch) {
+      return cached.bindGroup;
+    }
+    const created = device.createBindGroup({
       label: `${label}-arena-${arenaIndex}-${suffix}-bindings`,
       layout: pipelineObject.getBindGroupLayout(0),
       entries
     });
+    arena.bindGroupCache.set(suffix, {
+      pipeline: pipelineObject,
+      entries: entries.map(({ binding, resource }) => ({ binding, resource })),
+      bindGroup: created
+    });
+    return created;
   }
 
   function assertSpatialExecution(spatialExecution) {
@@ -810,6 +894,8 @@ export function createSchroederSpatialAggregateViewGpu(device, {
               SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
             keyStrideWords:
               SCHROEDER_SPATIAL_AGGREGATE_VIEW_MORTON_KEY_WORDS,
+            significantDigitRows:
+              aggregateSignificantDigitRows(spatialExecution),
             generationId: plan.generationId,
             consumerWorkgroupSize:
               SCHROEDER_SPATIAL_AGGREGATE_VIEW_WORKGROUP_SIZE,
@@ -1270,6 +1356,42 @@ export function createSchroederSpatialAggregateViewGpu(device, {
     return finishRetirement(record);
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      const record = retirementFor(execution);
+      return Boolean(
+        !record.completed
+        && !deviceLossObserved
+        && submittedExecutions.has(execution)
+        && !record.activeAttempt
+        && record.ownership.arena.radix.canReleaseExecutionQueueOrdered?.(
+          record.ownership.radixSort
+        ) === true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered spatial aggregate release requires an exact submitted idle execution'
+      );
+    }
+    const record = retirementFor(execution);
+    const radixReleased =
+      record.ownership.arena.radix.releaseExecutionQueueOrdered?.(
+        record.ownership.radixSort
+      );
+    if (radixReleased !== true) {
+      throw new Error(
+        'queue-ordered spatial aggregate radix owner did not confirm release'
+      );
+    }
+    return finishRetirement(record, { radixReleased: true });
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -1427,6 +1549,7 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         arena.destroyedOwnedBuffers.add(buffer);
       }
       if (!arena.radixDeviceLossRetired) arena.radix.destroy();
+      arena.bindGroupCache.clear();
     }
     runtime.status = 'schroeder-spatial-aggregate-view-gpu-runtime-destroyed';
     return true;
@@ -1462,6 +1585,8 @@ export function createSchroederSpatialAggregateViewGpu(device, {
     markExecutionSubmissionUncertain,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     executionRetirementCompletionPromise,

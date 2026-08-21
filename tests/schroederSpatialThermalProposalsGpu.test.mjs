@@ -21,6 +21,10 @@ import {
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
   SCHROEDER_SPATIAL_THERMAL_CONSUMER,
   SCHROEDER_SPATIAL_THERMAL_CONSUMERS,
+  SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS,
   SCHROEDER_SPATIAL_THERMAL_CURRENT_ACTIVE_SOURCE_COUNT_WORD,
   SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS,
   SCHROEDER_SPATIAL_THERMAL_CSR_DEFAULT_ROW_STRIDE,
@@ -37,6 +41,7 @@ import {
   SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY,
   SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS,
   SCHROEDER_SPATIAL_THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD,
   SCHROEDER_SPATIAL_THERMAL_EVIDENCE_LAYOUT,
   SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD,
@@ -48,6 +53,8 @@ import {
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION,
   SCHROEDER_SPATIAL_THERMAL_TREE_SHADOW_DIAGNOSTIC_WORDS,
   ULG_SCHROEDER_SPATIAL_THERMAL_CANDIDATE_CSR_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA,
   armSchroederSpatialThermalExhaustiveShadowForNativeTest,
   armSchroederSpatialThermalSourceCellTreeShadowForNativeTest,
   armSchroederSpatialThermalTreeShadowForNativeTest,
@@ -145,6 +152,7 @@ function createFakeDevice() {
     encoders: [],
     shaderModules: [],
     bindGroups: [],
+    queueFenceCalls: [],
     limits: {
       maxBufferSize: 256 * 1024 * 1024,
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -158,7 +166,10 @@ function createFakeDevice() {
         device.writes.push({ buffer, offset, bytes: copyBytes(data) });
       },
       submit(commandBuffers) { device.submissions.push(commandBuffers); },
-      onSubmittedWorkDone() { return Promise.resolve(); }
+      onSubmittedWorkDone() {
+        device.queueFenceCalls.push(device.submissions.length);
+        return Promise.resolve();
+      }
     },
     createBuffer(descriptor) {
       const buffer = {
@@ -243,6 +254,10 @@ function liveFixture(particleCount = 2, sharedDevice = null) {
   }), device);
   const responseRecordBuffer = buffer('thermal-response-records', 2 * 8 * 4);
   const responseBuffer = buffer('thermal-responses', 2 * 16 * 4);
+  const responseThermalConductivityBuffer = buffer(
+    'thermal-response-conductivities',
+    2 * 4
+  );
   const graphNodeBuffer = buffer('thermal-graph-nodes', 8 * 16);
   const graphSampleBuffer = buffer('thermal-graph-samples', 8 * 16);
   const sphParticleUpload = {
@@ -289,8 +304,10 @@ function liveFixture(particleCount = 2, sharedDevice = null) {
       graphCount: 1,
       nodeCount: 8,
       sampleCount: 8,
+      contentFingerprint: `fixture-thermal-response-${particleCount}`,
       responseRecordBuffer,
       responseBuffer,
+      responseThermalConductivityBuffer,
       graphNodeBuffer,
       graphSampleBuffer
     }
@@ -457,6 +474,25 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
     SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT[9],
     'physicalTopologyMismatchCount:atomic<u32>'
   );
+  assert.equal(
+    ULG_SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_SCHEMA,
+    'peercompute.ulg.schroeder-spatial-thermal-conductivity-sidecar.v1'
+  );
+  assert.equal(
+    ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA,
+    'peercompute.ulg.schroeder-spatial-thermal-contact-geometry-authority.v1'
+  );
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS, 10);
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS, 12);
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS, 2);
+  assert.equal(
+    SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_LAYOUT[6],
+    'phaseResponseProvenanceToken:u32'
+  );
+  assert.deepEqual(
+    SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_LAYOUT,
+    Object.freeze(['thermalConductivityWPerMK:f32', 'status:u32'])
+  );
 });
 
 test('thermal proposal WGSL shares one pair-law core across exact-near and classic bins', () => {
@@ -622,8 +658,43 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     /ss_exact_near_directory_admitted\(radiation_expectation\)/);
   assert.match(schroederSpatialThermalProposalWgsl,
     /ss_exact_near_cell_member_range/);
-  assert.match(schroederSpatialThermalProposalWgsl,
-    /thermal_params\.conduction_rate[\s\S]*other_temperature - self_temperature/);
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /@binding\(12\) var<storage, read> response_thermal_conductivities/
+  );
+  assert.match(
+    schroederSpatialThermalDerivedPrepassWgsl,
+    /@binding\(13\) var<storage, read_write> thermal_conductivity_sidecar/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /@binding\(15\) var<storage, read> thermal_conductivity_sidecar/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /if \(interface_pair\) \{[\s\S]*interface_resistance_k_per_w[\s\S]*1\.0 \/ interface_resistance_k_per_w[\s\S]*\} else \{[\s\S]*thermal_harmonic_mean_positive\([\s\S]*contact_area_m2 \/ conduction_path_m/
+  );
+  const pairLaw = schroederSpatialThermalProposalWgsl.slice(
+    schroederSpatialThermalProposalWgsl.indexOf('fn thermal_visit_fused_pair('),
+    schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle(')
+  );
+  assert.match(
+    pairLaw,
+    /let interface_pair =\s*thermal_params\.mechanical_interface_receipt_required != 0u\s*&&\s*\(\s*material_or_phase_interface\s*\|\|\s*mechanical_interface\.classified != 0u\s*\);/
+  );
+  assert.doesNotMatch(pairLaw, /thermal_params\.conduction_rate/);
+  const traversalLaw = schroederSpatialThermalProposalWgsl.slice(
+    schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle('),
+    schroederSpatialThermalProposalWgsl.indexOf(
+      '@compute @workgroup_size(64)',
+      schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle(')
+    )
+  );
+  assert.ok(
+    traversalLaw.indexOf(
+      'if (!conduction_admitted || !radiation_admitted)'
+    ) < traversalLaw.indexOf('thermal_visit_fused_pair(')
+  );
   assert.match(schroederSpatialThermalProposalWgsl,
     /stefan_boltzmann_w_per_m2_k4[\s\S]*thermal_pow4\(other_temperature\) - thermal_pow4\(self_temperature\)/);
   assert.match(schroederSpatialThermalProposalWgsl,
@@ -642,7 +713,7 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /@binding\(12\) var<storage, read_write> thermal_csr_unused/
+    /@binding\(12\) var<storage, read> mechanical_interface_receipt/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -787,7 +858,7 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /fn thermal_uniform_completion_workgroup_admitted\([\s\S]*workgroupBarrier\(\)/
+    /fn thermal_uniform_completion_workgroup_admitted\([\s\S]*workgroupUniformLoad\([\s\S]*thermal_uniform_completion_workgroup_flag/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
@@ -1030,6 +1101,8 @@ test('manufactured thermal pair proposals are symmetric and energy conserving', 
     otherTemperatureK: 900,
     temperatureSlopeKdPerJPerKg: 0.002,
     otherTemperatureSlopeKdPerJPerKg: 0.003,
+    thermalConductivityWPerMK: 0.6,
+    otherThermalConductivityWPerMK: 80,
     emissivity: 0.8,
     otherEmissivity: 0.6,
     dtS: 0.01
@@ -1045,6 +1118,8 @@ test('manufactured thermal pair proposals are symmetric and energy conserving', 
     otherTemperatureK: common.temperatureK,
     temperatureSlopeKdPerJPerKg: common.otherTemperatureSlopeKdPerJPerKg,
     otherTemperatureSlopeKdPerJPerKg: common.temperatureSlopeKdPerJPerKg,
+    thermalConductivityWPerMK: common.otherThermalConductivityWPerMK,
+    otherThermalConductivityWPerMK: common.thermalConductivityWPerMK,
     emissivity: common.otherEmissivity,
     otherEmissivity: common.emissivity
   });
@@ -1076,6 +1151,8 @@ test('manufactured microscopic steam and hot-iron proposal is bounded and conser
     otherTemperatureK: 1850,
     temperatureSlopeKdPerJPerKg: 0.000501002,
     otherTemperatureSlopeKdPerJPerKg: 0.0002,
+    thermalConductivityWPerMK: 0.025,
+    otherThermalConductivityWPerMK: 35,
     emissivity: 0,
     otherEmissivity: 0,
     dtS: 5e-4
@@ -1090,7 +1167,9 @@ test('manufactured microscopic steam and hot-iron proposal is bounded and conser
     temperatureK: common.otherTemperatureK,
     otherTemperatureK: common.temperatureK,
     temperatureSlopeKdPerJPerKg: common.otherTemperatureSlopeKdPerJPerKg,
-    otherTemperatureSlopeKdPerJPerKg: common.temperatureSlopeKdPerJPerKg
+    otherTemperatureSlopeKdPerJPerKg: common.temperatureSlopeKdPerJPerKg,
+    thermalConductivityWPerMK: common.otherThermalConductivityWPerMK,
+    otherThermalConductivityWPerMK: common.thermalConductivityWPerMK
   });
 
   assert.ok(steam.conductionEnergyJ > 0);
@@ -1102,6 +1181,154 @@ test('manufactured microscopic steam and hot-iron proposal is bounded and conser
     steam.conductionSpecificEnergyDeltaJPerKg * steamMassKg
       + iron.conductionSpecificEnergyDeltaJPerKg * ironMassKg
   ) < 1e-12);
+});
+
+test('manufactured contact conduction scales with k, ignores legacy rate, and fails closed across a gap', () => {
+  const common = {
+    distanceM: 0.075,
+    smoothingLengthM: 0.05,
+    radiusM: 0.04,
+    otherRadiusM: 0.04,
+    massKg: 10,
+    otherMassKg: 10,
+    temperatureK: 300,
+    otherTemperatureK: 400,
+    temperatureSlopeKdPerJPerKg: 1e-6,
+    otherTemperatureSlopeKdPerJPerKg: 1e-6,
+    thermalConductivityWPerMK: 2,
+    otherThermalConductivityWPerMK: 2,
+    dtS: 1e-3,
+    emissivity: 0,
+    otherEmissivity: 0
+  };
+  const base = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    conductionRate: 0
+  });
+  const scaled = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    thermalConductivityWPerMK: 4,
+    otherThermalConductivityWPerMK: 4,
+    conductionRate: 1500
+  });
+  const hugeLegacyRate = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    conductionRate: 1.5e12
+  });
+  const positiveGap = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    distanceM: common.radiusM + common.otherRadiusM + 1e-6
+  });
+  const missingConductivity = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    thermalConductivityWPerMK: 0
+  });
+  assert.ok(base.conductionEnergyJ > 0);
+  assert.ok(
+    Math.abs(scaled.conductionEnergyJ / base.conductionEnergyJ - 2) < 1e-12
+  );
+  assert.equal(hugeLegacyRate.conductionEnergyJ, base.conductionEnergyJ);
+  assert.equal(positiveGap.contactAreaM2, 0);
+  assert.equal(positiveGap.conductionEnergyJ, 0);
+  assert.equal(missingConductivity.conductionEnergyJ, 0);
+});
+
+test('manufactured interface conduction falls back to sphere contact without a receipt and admitted faces are reciprocal', () => {
+  const common = {
+    distanceM: 0.075,
+    smoothingLengthM: 0.05,
+    radiusM: 0.04,
+    otherRadiusM: 0.04,
+    massKg: 10,
+    otherMassKg: 20,
+    temperatureK: 300,
+    otherTemperatureK: 400,
+    temperatureSlopeKdPerJPerKg: 1e-6,
+    otherTemperatureSlopeKdPerJPerKg: 2e-6,
+    thermalConductivityWPerMK: 2,
+    otherThermalConductivityWPerMK: 4,
+    materialId: 1,
+    otherMaterialId: 2,
+    phaseId: 1,
+    otherPhaseId: 1,
+    dtS: 1e-3,
+    emissivity: 0,
+    otherEmissivity: 0
+  };
+  const absent = evaluateSchroederSpatialThermalPairProposal(common);
+  const zeroArea = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    mechanicalInterfaceReceiptReady: true,
+    mechanicalInterfaceAreaM2: 0
+  });
+  const areaM2 = 1e-3;
+  const forward = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    mechanicalInterfaceReceiptReady: true,
+    mechanicalInterfaceAreaM2: areaM2
+  });
+  const reverse = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    radiusM: common.otherRadiusM,
+    otherRadiusM: common.radiusM,
+    massKg: common.otherMassKg,
+    otherMassKg: common.massKg,
+    temperatureK: common.otherTemperatureK,
+    otherTemperatureK: common.temperatureK,
+    temperatureSlopeKdPerJPerKg: common.otherTemperatureSlopeKdPerJPerKg,
+    otherTemperatureSlopeKdPerJPerKg: common.temperatureSlopeKdPerJPerKg,
+    thermalConductivityWPerMK: common.otherThermalConductivityWPerMK,
+    otherThermalConductivityWPerMK: common.thermalConductivityWPerMK,
+    materialId: common.otherMaterialId,
+    otherMaterialId: common.materialId,
+    mechanicalInterfaceReceiptReady: true,
+    mechanicalInterfaceAreaM2: areaM2
+  });
+  assert.equal(
+    absent.contactGeometryMode,
+    'overlapping-sphere-intersection-disk'
+  );
+  assert.ok(Math.abs(absent.contactAreaM2 - 0.0006086835766330225) < 1e-15);
+  assert.ok(Math.abs(absent.conductionEnergyJ - 0.002164208272472969) < 1e-15);
+  assert.equal(zeroArea.contactAreaM2, 0);
+  assert.equal(zeroArea.conductionEnergyJ, 0);
+  assert.equal(
+    forward.contactGeometryMode,
+    'axis-aligned-finite-volume-interface-face'
+  );
+  assert.equal(forward.contactAreaM2, areaM2);
+  assert.ok(forward.conductionEnergyJ > 0);
+  assert.ok(Math.abs(
+    forward.conductionEnergyJ + reverse.conductionEnergyJ
+  ) < 1e-12);
+  assert.ok(Math.abs(
+    forward.conductionSpecificEnergyDeltaJPerKg * common.massKg
+      + reverse.conductionSpecificEnergyDeltaJPerKg * common.otherMassKg
+  ) < 1e-12);
+
+  const sameContinuum = evaluateSchroederSpatialThermalPairProposal({
+    ...common,
+    otherMaterialId: common.materialId,
+    mechanicalInterfaceReceiptReady: true,
+    mechanicalInterfaceAreaM2: 1e-12
+  });
+  const sameContinuumWithoutReceipt =
+    evaluateSchroederSpatialThermalPairProposal({
+      ...common,
+      otherMaterialId: common.materialId
+    });
+  assert.equal(
+    sameContinuum.contactGeometryMode,
+    'overlapping-sphere-intersection-disk'
+  );
+  assert.equal(
+    sameContinuum.contactAreaM2,
+    sameContinuumWithoutReceipt.contactAreaM2
+  );
+  assert.equal(
+    sameContinuum.conductionEnergyJ,
+    sameContinuumWithoutReceipt.conductionEnergyJ
+  );
 });
 
 test('thermal proposal selects the authenticated directory-v2 ActiveSource view', async () => {
@@ -1137,6 +1364,14 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
     result.activeSourceViewAdmissionStatus,
     'schroeder-spatial-active-source-view-admitted-host-descriptor'
   );
+  assert.equal(result.fullParticleReadbackPerformed, false);
+  assert.equal(result.fullParticleReadbackFree, true);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.deepEqual(result.readbackTelemetryUnknownSources, []);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, true);
   assert.equal(
     result.activeProjectionViewBuffer,
     fixture.generation.activeSourceView.activeSourceViewBuffer
@@ -1217,7 +1452,7 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
     schroederSpatialThermalProposal: result
   });
   assert.equal(fixture.device.buffers.length, bufferCountBeforeStage);
-  assert.equal(stage.proposalDispatchCount, 10);
+  assert.equal(stage.proposalDispatchCount, 11);
   const encoder = fixture.device.createCommandEncoder({
     label: 'thermal-directory-v2-active-source-unit-encoder'
   });
@@ -1237,6 +1472,7 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
     'ulg-schroeder-spatial-thermal-physical-topology-preflight',
     'ulg-schroeder-spatial-thermal-active-topology-finalize',
     'ulg-schroeder-spatial-thermal-derived-prepass',
+    'ulg-schroeder-spatial-thermal-conductivity-finalize',
     'ulg-schroeder-spatial-thermal-directional-budget',
     'ulg-schroeder-spatial-thermal-csr-validate-rows',
     'ulg-schroeder-spatial-thermal-csr-seal',
@@ -1270,7 +1506,7 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
       ?.resource.buffer,
     fixture.generation.activeSourceView.activeSourceViewBuffer
   );
-  for (const index of [3, 4, 7, 8]) {
+  for (const index of [3, 5, 8, 9]) {
     assert.deepEqual(passes[index].commands[0].dispatchIndirect, {
       buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
       offset: fixture.generation.activeSourceView.activeDispatchOffsetBytes
@@ -1278,7 +1514,8 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
   }
   assert.deepEqual(passes[0].commands[0].dispatch, [1, 1, 1]);
   assert.deepEqual(passes[2].commands[0].dispatch, [1, 1, 1]);
-  assert.deepEqual(passes[9].commands[0].dispatch, [1, 1, 1]);
+  assert.deepEqual(passes[4].commands[0].dispatch, [1, 1, 1]);
+  assert.deepEqual(passes[10].commands[0].dispatch, [1, 1, 1]);
   const thermalV2Modules = fixture.device.shaderModules.filter(
     ({ label }) => label?.startsWith('ulg-schroeder-spatial-thermal-')
   );
@@ -1291,6 +1528,79 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
   assert.deepEqual(thermalEncoder.copies, []);
   assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
   await fixture.device.queue.onSubmittedWorkDone();
+});
+
+test('canonical queue-ordered thermal retirement avoids a host queue fence while standalone retirement retains one', async () => {
+  const runSubmittedProposal = ({
+    fixture,
+    queueOrdered
+  }) => {
+    const result = runSchroederSpatialThermalProposalWebGpu({
+      ...fixture,
+      dtS: 0.001
+    });
+    if (queueOrdered) {
+      assert.equal(
+        result.authorizeQueueOrderedCanonicalApplyRetirement({
+          generation: fixture.generation,
+          execution: fixture.generation.execution
+        }),
+        true
+      );
+      assert.equal(
+        result.hasQueueOrderedCanonicalApplyRetirementAuthority({
+          generation: fixture.generation,
+          execution: fixture.generation.execution
+        }),
+        true
+      );
+    }
+    const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+      device: fixture.device,
+      currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+      currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+      thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+      ...result.preparedLawConfig,
+      schroederSpatialThermalProposal: result
+    });
+    const encoder = fixture.device.createCommandEncoder({
+      label: queueOrdered
+        ? 'thermal-queue-ordered-retirement-unit-encoder'
+        : 'thermal-standalone-retirement-unit-encoder'
+    });
+    stage.encode(encoder);
+    fixture.device.queue.submit([encoder.finish()]);
+    assert.equal(stage.markSubmittedWork(), true);
+    assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+    return result;
+  };
+
+  const queueOrderedFixture = liveFixture(2);
+  const queueOrderedResult = runSubmittedProposal({
+    fixture: queueOrderedFixture,
+    queueOrdered: true
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(queueOrderedResult.released, true);
+  assert.equal(
+    queueOrderedResult.hasQueueOrderedCanonicalApplyRetirementAuthority({
+      generation: queueOrderedFixture.generation,
+      execution: queueOrderedFixture.generation.execution
+    }),
+    false
+  );
+  assert.deepEqual(queueOrderedFixture.device.queueFenceCalls, []);
+
+  const standaloneFixture = liveFixture(2);
+  const standaloneResult = runSubmittedProposal({
+    fixture: standaloneFixture,
+    queueOrdered: false
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(standaloneResult.released, true);
+  assert.ok(standaloneFixture.device.queueFenceCalls.length > 0);
 });
 
 test('native-only thermal tree shadow binds the submitted same-generation tree and diagnostics', async () => {
@@ -1434,6 +1744,7 @@ test('native-only source-cell tree shadow binds a sealed batch and dispatches 2D
   const event = fixture.device.encoders.at(-1);
   assert.deepEqual(event.passes.map(({ descriptor }) => descriptor.label), [
     'ulg-schroeder-spatial-thermal-derived-prepass',
+    'ulg-schroeder-spatial-thermal-conductivity-finalize',
     'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
     'ulg-native-test-s9d5-thermal-source-cell-initialize',
     'ulg-native-test-s9d5-thermal-source-cell-projection',
@@ -1538,6 +1849,12 @@ test('native-only thermal exhaustive shadow runs through the production bind ABI
       ({ descriptor }) => descriptor.label === label
     );
     assert.equal(pass.pipeline.label, pipelineLabel);
+    assert.equal(
+      pass.pipeline.layout.bindGroupLayouts[0].entries.find(
+        ({ binding }) => binding === 12
+      ).buffer.type,
+      'read-only-storage'
+    );
     assert.equal(
       pass.bindGroup.bindGroup.entries.some(({ binding }) => binding === 14),
       false
@@ -2361,6 +2678,72 @@ test('a stale uniform CPU mirror cannot suppress the thermal candidate receipt',
   await new Promise((resolve) => setImmediate(resolve));
 });
 
+test('fresh uniform thermal state keeps read-only and writable disabled-CSR bindings distinct', async () => {
+  const fixture = liveFixture(2);
+  const state = new Float32Array(2 * 8);
+  const thermo = new Float32Array(2 * 12);
+  for (let index = 0; index < 2; index += 1) {
+    state[index * 8 + 3] = 1;
+    state[index * 8 + 7] = 1234;
+  }
+  const result = runSchroederSpatialThermalProposalWebGpu({
+    ...fixture,
+    sphParticleState: {
+      ...fixture.sphParticleState,
+      state,
+      thermo,
+      cpuStateStale: false
+    },
+    dtS: 0.001
+  });
+  assert.equal(result.thermalCandidateCsr, null);
+  assert.equal(
+    result.thermalCandidateCsrUnavailableReason,
+    'cpu-state-may-already-be-thermally-uniform'
+  );
+
+  const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+    device: fixture.device,
+    currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+    currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+    ...result.preparedLawConfig,
+    schroederSpatialThermalProposal: result
+  });
+  assert.equal(stage.thermalCandidateCsrEnabled, false);
+  assert.equal(stage.fullParticleReadbackPerformed, false);
+  const encoder = fixture.device.createCommandEncoder({
+    label: 'uniform-disabled-csr-binding-scope'
+  });
+  stage.encode(encoder);
+  const encoded = encoder.finish();
+  assert.deepEqual(encoded.passes.map((pass) => pass.descriptor.label), [
+    'ulg-schroeder-spatial-thermal-derived-prepass',
+    'ulg-schroeder-spatial-thermal-conductivity-finalize',
+    'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
+    'ulg-schroeder-spatial-thermal-directional-budget',
+    'ulg-schroeder-spatial-thermal-budget-resolve',
+    'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal'
+  ]);
+  for (const pass of [encoded.passes[3], encoded.passes[5]]) {
+    const entries = new Map(
+      pass.bindGroup.bindGroup.entries.map((entry) => [entry.binding, entry])
+    );
+    const writableSource = entries.get(11).resource.buffer;
+    const readOnlyInterface = entries.get(12).resource.buffer;
+    const writableReplay = entries.get(13).resource.buffer;
+    assert.equal(writableSource, writableReplay);
+    assert.notEqual(readOnlyInterface, writableSource);
+    assert.match(writableSource.label, /csr-disabled-writable-bindings/);
+    assert.match(readOnlyInterface.label, /csr-disabled-read-only-binding/);
+  }
+  fixture.device.queue.submit([encoded]);
+  assert.equal(stage.markSubmittedWork(), true);
+  assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+  await fixture.device.queue.onSubmittedWorkDone();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
 test('thermal proposal preparation defers matched-time work and returns resident bindings with cached ownership', async () => {
   const fixture = liveFixture();
   const beforeBufferCount = fixture.device.buffers.length;
@@ -2443,7 +2826,14 @@ test('thermal proposal preparation defers matched-time work and returns resident
   assert.ok(result.thermalCandidateCsr?.candidateCapacity >= result.particleCount);
   assert.equal(result.fullParticleReadbackPerformed, false);
   assert.equal(result.derivedHeaderWords, 10);
-  assert.equal(result.activeDerivedByteLength, (10 + 2 * 8 + 2) * 4);
+  assert.equal(
+    result.activeDerivedByteLength,
+    (
+      SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
+        + 2 * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
+        + 2
+    ) * 4
+  );
   assert.equal(result.activeDispatchBuffer.size, 12);
   assert.equal(result.activeDispatchBuffer.usage, 396);
   assert.equal(
@@ -2453,6 +2843,15 @@ test('thermal proposal preparation defers matched-time work and returns resident
   assert.equal(result.bufferOwnership, 'device-arena-runtime-cache');
   assert.equal(result.ownsProposalBuffer, false);
   assert.ok(fixture.device.buffers.length > beforeBufferCount);
+  assert.equal(
+    result.thermalConductionContactAreaStatus,
+    'matched-time-law-local-sphere-intersection-over-ss-authenticated-candidates'
+  );
+  assert.equal(
+    result.thermalConductionSpatialAuthorityScope,
+    'candidate-enumeration-only-no-per-pair-geometry-receipt'
+  );
+  assert.equal(result.thermalContactGeometryAuthority, null);
 
   const currentStateBuffer = tagWebGpuBufferDevice(fixture.device.createBuffer({
     label: 'thermal-current-post-mechanics-state',
@@ -2505,6 +2904,62 @@ test('thermal proposal preparation defers matched-time work and returns resident
       schroederSpatialThermalProposal: result,
       gpuTimestampRecorder
     });
+  const contactGeometryAuthority =
+    producerStage.contactGeometryAuthority;
+  assert.equal(
+    contactGeometryAuthority.schema,
+    ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA
+  );
+  assert.equal(
+    contactGeometryAuthority.status,
+    'schroeder-spatial-thermal-contact-geometry-authority-bound'
+  );
+  assert.equal(
+    contactGeometryAuthority.ssAuthorityScope,
+    'candidate-enumeration-only'
+  );
+  assert.equal(
+    contactGeometryAuthority.conductionAuthentication,
+    result.consumerAuthentications.find(
+      ({ consumerId }) => consumerId === 'thermal-conduction'
+    )
+  );
+  assert.equal(
+    contactGeometryAuthority.conductionConsumerReceipt,
+    result.consumerReceipt('thermal-conduction')
+  );
+  assert.equal(
+    contactGeometryAuthority.exactNearDirectoryBuffer,
+    fixture.generation.execution.directoryBuffer
+  );
+  assert.equal(
+    contactGeometryAuthority.frozenDirectoryStateBuffer,
+    fixture.sphParticleUpload.stateBuffer
+  );
+  assert.equal(
+    contactGeometryAuthority.matchedTimeStateBuffer,
+    currentStateBuffer
+  );
+  assert.equal(
+    contactGeometryAuthority.phaseDerivedRadiusBuffer,
+    result.thermalDerivedBudgetBuffer
+  );
+  assert.equal(
+    contactGeometryAuthority.phaseConductivitySidecarBuffer,
+    result.thermalConductivitySidecarBuffer
+  );
+  assert.equal(contactGeometryAuthority.perPairSsGeometryReceipt, null);
+  assert.equal(contactGeometryAuthority.pairGeometryBuffer, null);
+  assert.equal(contactGeometryAuthority.mechanicalContactReceipt, null);
+  assert.equal(contactGeometryAuthority.hostContactGeometrySummary, null);
+  assert.equal(contactGeometryAuthority.hostSummaryReadbackPerformed, false);
+  assert.equal(contactGeometryAuthority.fullParticleReadbackPerformed, false);
+  assert.equal(contactGeometryAuthority.broadAbiExpansionPerformed, false);
+  assert.equal(contactGeometryAuthority.failClosedOnAuthorityMismatch, true);
+  assert.equal(
+    result.thermalContactGeometryAuthority,
+    contactGeometryAuthority
+  );
   assert.equal(result.matchedTimeStateBuffer, currentStateBuffer);
   assert.equal(result.matchedTimeProducerEncoded, false);
   const encoder = fixture.device.createCommandEncoder({
@@ -2517,6 +2972,7 @@ test('thermal proposal preparation defers matched-time work and returns resident
   const thermalEncoder = fixture.device.encoders.at(-1);
   assert.deepEqual(thermalEncoder.passes.map((pass) => pass.descriptor.label), [
     'ulg-schroeder-spatial-thermal-derived-prepass',
+    'ulg-schroeder-spatial-thermal-conductivity-finalize',
     'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
     'ulg-schroeder-spatial-thermal-directional-budget',
     'ulg-schroeder-spatial-thermal-csr-validate-rows',
@@ -2526,10 +2982,25 @@ test('thermal proposal preparation defers matched-time work and returns resident
   ]);
   assert.deepEqual(
     thermalEncoder.passes[0].bindGroup.bindGroup.entries.map(({ binding }) => binding),
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13]
+  );
+  assert.equal(
+    thermalEncoder.passes[1].bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 12).resource.buffer,
+    fixture.thermalResponseGraphUpload.responseThermalConductivityBuffer
+  );
+  assert.equal(
+    thermalEncoder.passes[0].bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 13).resource.buffer,
+    result.thermalConductivitySidecarBuffer
+  );
+  assert.equal(
+    thermalEncoder.passes.at(-1).bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 15).resource.buffer,
+    result.thermalConductivitySidecarBuffer
   );
   assert.deepEqual(thermalEncoder.passes[0].commands[0], { dispatch: [1, 1, 1] });
-  assert.deepEqual(thermalEncoder.passes[2].commands[0], { dispatch: [1, 1, 1] });
+  assert.deepEqual(thermalEncoder.passes[3].commands[0], { dispatch: [1, 1, 1] });
   assert.deepEqual(thermalEncoder.passes.at(-1).commands[0], { dispatch: [1, 1, 1] });
   assert.deepEqual(thermalEncoder.copies, []);
   assert.equal(
@@ -2545,6 +3016,7 @@ test('thermal proposal preparation defers matched-time work and returns resident
     })),
     [
       'derived-prepass',
+      'conductivity-finalize',
       'active-dispatch-finalize',
       'directional-budget',
       'candidate-csr-validate-rows',
@@ -2684,7 +3156,7 @@ test('classic thermal v2 stage rejects unauthenticated bins and reuses its exhau
   assert.equal(first.normalLookupBinned, false);
   assert.equal(first.lookupMode,
     'immutable-source-deterministic-exhaustive');
-  assert.equal(first.proposalDispatchCount, 4);
+  assert.equal(first.proposalDispatchCount, 5);
   assert.equal(first.producerApplySubmissionPolicy,
     'caller-single-command-buffer');
   assert.equal(first.binnedTraversalCount, 0);
@@ -2701,6 +3173,7 @@ test('classic thermal v2 stage rejects unauthenticated bins and reuses its exhau
     (pass) => pass.descriptor.label
   ), [
     'ulg-classic-thermal-v2-derived-prepass',
+    'ulg-classic-thermal-v2-conductivity-finalize',
     'ulg-classic-thermal-v2-directional-budget',
     'ulg-classic-thermal-v2-budget-resolve',
     'ulg-classic-thermal-v2-reciprocal-limited-proposal'
@@ -2708,7 +3181,22 @@ test('classic thermal v2 stage rejects unauthenticated bins and reuses its exhau
   assert.deepEqual(
     fixture.device.encoders.at(-1).passes[0].bindGroup.bindGroup.entries
       .map(({ binding }) => binding),
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13]
+  );
+  assert.equal(
+    fixture.device.encoders.at(-1).passes[1].bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 12).resource.buffer,
+    fixture.thermalResponseGraphUpload.responseThermalConductivityBuffer
+  );
+  assert.equal(
+    fixture.device.encoders.at(-1).passes[0].bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 13).resource.buffer,
+    first.thermalConductivitySidecarBuffer
+  );
+  assert.equal(
+    fixture.device.encoders.at(-1).passes.at(-1).bindGroup.bindGroup.entries
+      .find(({ binding }) => binding === 15).resource.buffer,
+    first.thermalConductivitySidecarBuffer
   );
   assert.ok(fixture.device.encoders.at(-1).passes.every(
     (pass) => pass.commands.every((command) => 'dispatch' in command)
@@ -2757,7 +3245,7 @@ test('classic thermal v2 consumes only a runtime-issued post-separation bin auth
     'authenticated-post-separation-binned-with-resident-overflow-fallback'
   );
   assert.equal(stage.binnedTraversalCount, 2);
-  assert.equal(stage.proposalDispatchCount, 5);
+  assert.equal(stage.proposalDispatchCount, 6);
   assert.equal(stage.fixedCandidateBuildCount, 1);
   assert.equal(stage.exhaustiveTraversalConfiguredCount, 0);
   assert.equal(stage.exhaustiveTraversalPotentialCount, 2);
@@ -2782,6 +3270,7 @@ test('classic thermal v2 consumes only a runtime-issued post-separation bin auth
     (pass) => pass.descriptor.label
   ), [
     'ulg-classic-thermal-v2-derived-prepass',
+    'ulg-classic-thermal-v2-conductivity-finalize',
     'ulg-classic-thermal-v2-candidate-build',
     'ulg-classic-thermal-v2-directional-budget',
     'ulg-classic-thermal-v2-budget-resolve',

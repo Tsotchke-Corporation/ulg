@@ -4,7 +4,8 @@ import {
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_PARAMS_BYTES,
   SCHROEDER_SPATIAL_HIERARCHY_VIEW_WORKGROUP_SIZE,
   ULG_SCHROEDER_SPATIAL_HIERARCHY_VIEW_SCHEMA,
-  createSchroederSpatialHierarchyViewPlan
+  createSchroederSpatialHierarchyViewPlan,
+  resolveSchroederSpatialFirstMomentToleranceM
 } from '../../../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
 import {
   SCHROEDER_SPATIAL_MECHANICS_VIEW_ACTIVE_WORK_IDENTITY,
@@ -123,7 +124,11 @@ function hierarchyParamsData(plan, fineMechanicsView, coarseMechanicsView) {
   f32(48, fine.gridSpacingM);
   f32(52, coarse.gridSpacingM);
   f32(56, Math.max(16 * Number.EPSILON, 2 ** -20));
-  f32(60, Math.max(fine.gridSpacingM * 2 ** -18, 1e-8));
+  f32(60, plan.firstMomentToleranceM
+    ?? resolveSchroederSpatialFirstMomentToleranceM({
+      fineGrid: fine,
+      coarseGrid: coarse
+    }));
   u32(64, layout.fineNodeCapacity);
   u32(68, layout.coarseNodeCapacity);
   u32(72, layout.edgeCapacity);
@@ -295,6 +300,7 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
       arenaIndex,
       inUse: false,
       token: null,
+      bindGroupCache: new Map(),
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -387,15 +393,33 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
     return true;
   }
 
-  function createBindings(pipelineObject, resources, bindings, bindLabel) {
-    return device.createBindGroup({
+  function createBindings(arena, cacheKey, pipelineObject, resources, bindings, bindLabel) {
+    const resolvedResources = bindings.map((binding) => resources.get(binding));
+    const cached = arena.bindGroupCache.get(cacheKey);
+    if (
+      cached?.pipeline === pipelineObject
+      && cached.bindings.length === bindings.length
+      && cached.bindings.every((binding, index) => binding === bindings[index])
+      && cached.resources.length === resolvedResources.length
+      && cached.resources.every((resource, index) => resource === resolvedResources[index])
+    ) {
+      return cached.bindGroup;
+    }
+    const created = device.createBindGroup({
       label: bindLabel,
       layout: pipelineObject.getBindGroupLayout(0),
-      entries: bindings.map((binding) => ({
+      entries: bindings.map((binding, index) => ({
         binding,
-        resource: { buffer: resources.get(binding) }
+        resource: { buffer: resolvedResources[index] }
       }))
     });
+    arena.bindGroupCache.set(cacheKey, {
+      pipeline: pipelineObject,
+      bindings: [...bindings],
+      resources: resolvedResources,
+      bindGroup: created
+    });
+    return created;
   }
 
   function assertEncodedMechanicsView(view, spatialExecution, expectedLevel, expectedGrid) {
@@ -601,6 +625,8 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
         [11, arena.paramsBuffer]
       ]);
       const group = (pipelineObject, bindings, suffix) => createBindings(
+        arena,
+        suffix,
         pipelineObject,
         resources,
         bindings,
@@ -891,6 +917,26 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
     return finalizeRelease(execution, ownershipFor(execution));
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      ownershipFor(execution);
+      return submittedExecutions.has(execution)
+        && !releaseInFlight.has(execution);
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered spatial hierarchy release requires an exact submitted idle execution'
+      );
+    }
+    const ownership = ownershipFor(execution);
+    return finalizeRelease(execution, ownership);
+  }
+
   async function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -940,6 +986,7 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
       arena.occupancyScan.destroy();
       arena.edgeScan.destroy();
       arena.childScan.destroy();
+      arena.bindGroupCache.clear();
     }
     return true;
   }
@@ -965,6 +1012,8 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     activeExecutionCount,
     allocationEntries,

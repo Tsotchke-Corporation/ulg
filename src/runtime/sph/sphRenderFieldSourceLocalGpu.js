@@ -25,6 +25,12 @@ import {
 import {
   resolveSchroederSpatialSuccessorSourceFamily
 } from './schroederSpatialSuccessorSourceFamily.js';
+import {
+  SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+  productEventLiveCountCopyDescriptor,
+  residentProductEventCountAuthorityRegistered,
+  validateProductEventLiveCountCopyDescriptor
+} from './sphResidentProductHistoryGpu.js';
 
 /**
  * A deliberately non-production source-local render-field builder.
@@ -57,11 +63,12 @@ export const SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION = 'production';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const SOURCE_LOCAL_KERNEL_SCOPE = 'sph-render-field-source-local-shadow-splat';
-// Accumulator lanes per field cell. 0 density, 1-3 palette RGB, 4-5
-// temperature-weighted and weight, 6-11 velocity moments split into positive
-// and negative halves per axis (the accumulator is unsigned), 12 weighted
-// speed-squared. Must match ACCUM_LANES in both shader strings.
-export const SOURCE_LOCAL_ACCUM_LANES = 14;
+// Accumulator lanes per field cell. 0 density, 1-3 palette RGB, 4 low-range
+// temperature numerator, 5 temperature weight, 6-11 velocity moments split
+// into positive and negative halves per axis (the accumulator is unsigned),
+// 12 weighted speed-squared, 13 velocity weight, and 14 high-range temperature
+// residual. Must match ACCUM_LANES in both shader strings.
+export const SOURCE_LOCAL_ACCUM_LANES = 15;
 
 // Splat phases. See the splat_phase comment in SourceLocalParams.
 export const SPLAT_PHASE_SINGLE = 0;
@@ -92,11 +99,17 @@ function createPhaseParamsBuffer(device, device_label, baseParams, phase) {
 const SOURCE_LOCAL_VELOCITY_SCALE = 4_096;
 const SOURCE_LOCAL_DENSITY_SCALE = 16_384;
 const SOURCE_LOCAL_PALETTE_SCALE = 16_384;
-// Temperature is a ratio of two atomically accumulated quantities.  A coarse
-// scale creates a visible emission drift even when density/palette agree, so
-// retain sub-kelvin resolution and let the overflow flag fail the shadow
-// closed on pathological high-energy accumulation.
-const SOURCE_LOCAL_TEMPERATURE_SCALE = 1_024;
+// Temperature is encoded as two bounded additive ratios multiplied by the same
+// metaball weight as their shared denominator. The low range preserves the
+// sub-kelvin precision of ordinary/hot chemistry surfaces; the residual range
+// keeps parity with the canonical 1,000,000 K thermo domain. Every numerator is
+// <= its denominator, so none can overflow before the density/weight field.
+const SOURCE_LOCAL_TEMPERATURE_SCALE = 16_384;
+const SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K = 8_192;
+// Reference-backed thermo closures currently admit temperatures through
+// 1,000,000 K. Use the next power of two so source-local presentation never
+// clamps a temperature that the canonical dense field can represent.
+const SOURCE_LOCAL_TEMPERATURE_RANGE_K = 1_048_576;
 const DEFAULT_MAX_SPLAT_CELLS_PER_SOURCE = 4_913;
 
 const GPU_BUFFER_USAGE = {
@@ -110,6 +123,23 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+
+const sphRenderProductHistoryGateWgsl = `
+fn source_local_product_history_ready() -> bool {
+  if (product_history_gate.gate_required == 0u) {
+    return true;
+  }
+  return arrayLength(&product_history_control) >= 8u
+    && product_history_control[0u] == product_history_gate.expected_magic
+    && product_history_control[1u] == product_history_gate.expected_version
+    && product_history_control[2u] == product_history_gate.expected_ready_status
+    && product_history_control[3u] <= product_history_control[4u]
+    && product_history_control[4u] == product_history_gate.expected_row_capacity
+    && product_history_control[5u] == product_history_gate.expected_row_stride_vec4
+    && product_history_control[6u] == product_history_gate.expected_generation
+    && product_history_control[7u] == product_history_gate.expected_seal;
+}
+`;
 
 const sphRenderFieldSourceLocalSplatWgsl = `
 struct SourceLocalParams {
@@ -132,6 +162,17 @@ struct SourceLocalParams {
   splat_phase: u32,
 };
 
+struct RenderProductHistoryGateParams {
+  gate_required: u32,
+  expected_magic: u32,
+  expected_version: u32,
+  expected_ready_status: u32,
+  expected_generation: u32,
+  expected_seal: u32,
+  expected_row_capacity: u32,
+  expected_row_stride_vec4: u32,
+};
+
 @group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> accum: array<atomic<u32>>;
@@ -140,10 +181,16 @@ struct SourceLocalParams {
 // Phase 2 reads the smear offset the resolve pass published per cell. Bound in
 // every phase so one bind-group layout serves all of them.
 @group(0) @binding(5) var<storage, read> published_field: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> product_history_control: array<u32>;
+@group(0) @binding(7) var<uniform> product_history_gate: RenderProductHistoryGateParams;
+
+${sphRenderProductHistoryGateWgsl}
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MAX_U32_SAFE: u32 = 4294967040u;
-const ACCUM_LANES: u32 = 14u;
+const SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K: f32 = 8192.0;
+const SOURCE_LOCAL_TEMPERATURE_RANGE_K: f32 = 1048576.0;
+const ACCUM_LANES: u32 = 15u;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_ROW_VEC4_STRIDE];
@@ -252,6 +299,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   let surface_index = global_id.y;
   if (particle_index >= params.particle_count || surface_index >= params.surface_count) {
+    return;
+  }
+  // The particle and product sources are one visible step. Never splat a
+  // particle from that step until the immutable product-history control view
+  // authenticates in full on the GPU.
+  if (!source_local_product_history_ready()) {
     return;
   }
 
@@ -368,8 +421,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         saturating_add(&accum[accum_index(out_index, 1u)], &overflow_state[0u], quantize(color.x * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 2u)], &overflow_state[0u], quantize(color.y * palette_weight, params.palette_scale));
         saturating_add(&accum[accum_index(out_index, 3u)], &overflow_state[0u], quantize(color.z * palette_weight, params.palette_scale));
-        saturating_add(&accum[accum_index(out_index, 4u)], &overflow_state[0u], quantize(row1.z * value, params.temperature_scale));
+        let admitted_temperature_k = select(
+          0.0,
+          clamp(row1.z, 0.0, SOURCE_LOCAL_TEMPERATURE_RANGE_K),
+          row1.z > 0.0 && row1.z == row1.z && abs(row1.z) <= 3.402823e38
+        );
+        let normalized_temperature_low = clamp(
+          admitted_temperature_k / SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K,
+          0.0,
+          1.0
+        );
+        let normalized_temperature_high = clamp(
+          (admitted_temperature_k - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K)
+            / (SOURCE_LOCAL_TEMPERATURE_RANGE_K - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K),
+          0.0,
+          1.0
+        );
+        saturating_add(&accum[accum_index(out_index, 4u)], &overflow_state[0u], quantize(normalized_temperature_low * value, params.temperature_scale));
         saturating_add(&accum[accum_index(out_index, 5u)], &overflow_state[0u], quantize(value, params.temperature_scale));
+        // Avoid a contended atomicAdd(0) on every ordinary-temperature splat.
+        // Sodium-water's ~2193 K products stay on the original two writes;
+        // only genuinely high-temperature sources pay for the residual lane.
+        if (admitted_temperature_k > SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K) {
+          saturating_add(&accum[accum_index(out_index, 14u)], &overflow_state[0u], quantize(normalized_temperature_high * value, params.temperature_scale));
+        }
         }
         // Velocity moments for the splash-shard smear, weighted by the same
         // positive metaball value the gather uses. The accumulator is
@@ -401,9 +476,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // Product events are a second source family feeding the same field. Each
 // admitted event contributes one metaball at the surface's own strength -- not
-// radius-scaled like a particle -- into density and palette only. The gather
-// adds them after its particle pass and never gives them temperature or
-// velocity, so neither does this.
+// radius-scaled like a particle -- into density and palette only. Event row4.x
+// is not yet closure-resolved from product_u for every route, so it cannot be
+// used as authoritative render temperature. Events also carry no smear
+// velocity moments.
 const sphRenderFieldSourceLocalProductSplatWgsl = `
 struct SourceLocalProductParams {
   product_event_count: u32,
@@ -416,15 +492,30 @@ struct SourceLocalProductParams {
   palette_scale: f32,
 };
 
+struct RenderProductHistoryGateParams {
+  gate_required: u32,
+  expected_magic: u32,
+  expected_version: u32,
+  expected_ready_status: u32,
+  expected_generation: u32,
+  expected_seal: u32,
+  expected_row_capacity: u32,
+  expected_row_stride_vec4: u32,
+};
+
 @group(0) @binding(0) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> accum: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> overflow_state: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> params: SourceLocalProductParams;
+@group(0) @binding(5) var<storage, read> product_history_control: array<u32>;
+@group(0) @binding(6) var<uniform> product_history_gate: RenderProductHistoryGateParams;
+
+${sphRenderProductHistoryGateWgsl}
 
 const PRODUCT_EVENT_VEC4_STRIDE: u32 = 8u;
 const MAX_U32_SAFE: u32 = 4294967040u;
-const ACCUM_LANES: u32 = 14u;
+const ACCUM_LANES: u32 = 15u;
 
 fn accum_index(field_cell_index: u32, lane: u32) -> u32 {
   return field_cell_index * ACCUM_LANES + lane;
@@ -459,7 +550,18 @@ fn saturating_add(
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let event_index = global_id.x;
   let surface_index = global_id.y;
-  if (event_index >= params.product_event_count || surface_index >= params.surface_count) {
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+  if (!source_local_product_history_ready()) {
+    return;
+  }
+  let authenticated_product_event_count = select(
+    params.product_event_count,
+    product_history_control[3u],
+    product_history_gate.gate_required != 0u
+  );
+  if (event_index >= authenticated_product_event_count) {
     return;
   }
   let e0 = product_events[event_index * PRODUCT_EVENT_VEC4_STRIDE];
@@ -562,12 +664,29 @@ struct SourceLocalParams {
   splat_phase: u32,
 };
 
+struct RenderProductHistoryGateParams {
+  gate_required: u32,
+  expected_magic: u32,
+  expected_version: u32,
+  expected_ready_status: u32,
+  expected_generation: u32,
+  expected_seal: u32,
+  expected_row_capacity: u32,
+  expected_row_stride_vec4: u32,
+};
+
 @group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> accum: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SourceLocalParams;
+@group(0) @binding(4) var<storage, read> product_history_control: array<u32>;
+@group(0) @binding(5) var<uniform> product_history_gate: RenderProductHistoryGateParams;
 
-const ACCUM_LANES: u32 = 14u;
+${sphRenderProductHistoryGateWgsl}
+
+const ACCUM_LANES: u32 = 15u;
+const SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K: f32 = 8192.0;
+const SOURCE_LOCAL_TEMPERATURE_RANGE_K: f32 = 1048576.0;
 
 fn surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -589,6 +708,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let out_index = field_offset + cell_index;
   if (out_index >= params.total_field_cells) { return; }
 
+  // The field may be a caller-owned pool containing the previous frame. A
+  // non-READY, FAILED, forged, or mismatched product-history view therefore
+  // has to overwrite both rows explicitly; merely skipping splats would let
+  // stale presentation data survive.
+  if (!source_local_product_history_ready()) {
+    render_field_cells[out_index * 2u] = vec4<f32>(0.0);
+    render_field_cells[out_index * 2u + 1u] = vec4<f32>(0.0);
+    return;
+  }
+
   let density = f32(atomicLoad(&accum[accum_index(out_index, 0u)])) / max(params.density_scale, 1.0);
   let palette = vec3<f32>(
     f32(atomicLoad(&accum[accum_index(out_index, 1u)])) / max(params.palette_scale, 1.0),
@@ -596,10 +725,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     f32(atomicLoad(&accum[accum_index(out_index, 3u)])) / max(params.palette_scale, 1.0)
   );
   let temperature_weight = f32(atomicLoad(&accum[accum_index(out_index, 5u)])) / max(params.temperature_scale, 1.0);
-  let temperature_weighted = f32(atomicLoad(&accum[accum_index(out_index, 4u)])) / max(params.temperature_scale, 1.0);
+  let temperature_low_weighted = f32(atomicLoad(&accum[accum_index(out_index, 4u)])) / max(params.temperature_scale, 1.0);
+  let temperature_high_weighted = f32(atomicLoad(&accum[accum_index(out_index, 14u)])) / max(params.temperature_scale, 1.0);
   let mean_temperature_k = select(
     0.0,
-    temperature_weighted / max(temperature_weight, 1.0e-6),
+    (
+      SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K * temperature_low_weighted
+      + (SOURCE_LOCAL_TEMPERATURE_RANGE_K - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K)
+        * temperature_high_weighted
+    ) / max(temperature_weight, 1.0e-6),
     temperature_weight > 0.0
   );
   // Splash-shard smear: per-cell velocity dispersion from the moment lanes.
@@ -654,9 +788,9 @@ function assertRenderFieldSurfaceTable(surfaceTable) {
   }
 }
 
-// The atomic accumulator is totalFieldCells * ACCUM_LANES u32 -- about 49 MB
-// at 884,736 cells and 14 lanes. Allocating it from a zero-filled Uint32Array
-// per build meant a 49 MB host allocation and a 49 MB host-to-device upload
+// The atomic accumulator is totalFieldCells * ACCUM_LANES u32 -- about 53 MB
+// at 884,736 cells and 15 lanes. Allocating it from a zero-filled Uint32Array
+// per build meant a 53 MB host allocation and a 53 MB host-to-device upload
 // every frame, which is the opposite of keeping the field GPU-resident, and it
 // got worse each time a lane was added. The buffer is now created once per
 // device and zeroed on the device with clearBuffer.
@@ -784,6 +918,24 @@ function createSourceLocalProductParamsArray({
   view.setFloat32(24, SOURCE_LOCAL_DENSITY_SCALE, true);
   view.setFloat32(28, SOURCE_LOCAL_PALETTE_SCALE, true);
   return buffer;
+}
+
+function createSourceLocalProductHistoryGateParamsArray(descriptor = null) {
+  // This 32-byte expected-values record is shared unchanged by particle splat,
+  // product splat, and resolve. The host/nonresident path is intentionally all
+  // zero with gateRequired=0; only a module-authenticated resident descriptor
+  // may enable the GPU commit gate.
+  const words = new Uint32Array(8);
+  if (!descriptor) return words;
+  words[0] = 1;
+  words[1] = descriptor.expectedMagic;
+  words[2] = descriptor.expectedVersion;
+  words[3] = descriptor.expectedReadyStatus;
+  words[4] = descriptor.expectedGeneration;
+  words[5] = descriptor.expectedSeal;
+  words[6] = descriptor.expectedRowCapacity;
+  words[7] = descriptor.expectedRowStrideVec4;
+  return words;
 }
 
 async function readBuffer(device, sourceBuffer, byteLength, label) {
@@ -1068,6 +1220,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     schroederSpatialSourceFamily = renderRowsSource?.schroederSpatialSourceFamily ?? null,
     productEventRows = null,
     productEventBuffer = null,
+    productEventSource = null,
     surfaceTable,
     particleCount = null,
     productEventCount = null,
@@ -1109,6 +1262,51 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       : 0),
     0
   )));
+  const productEventLiveCountDescriptor = productEventBuffer
+    && productEventSource
+    ? productEventLiveCountCopyDescriptor(productEventSource, device)
+    : null;
+  if (
+    (
+      productEventSource?.productEventLiveCountAuthority
+      || residentProductEventCountAuthorityRegistered(productEventSource)
+    )
+    && !productEventLiveCountDescriptor
+  ) {
+    throw new TypeError(
+      'Source-local render field rejected a torn product-event live-count authority'
+    );
+  }
+  if (
+    productEventLiveCountDescriptor
+    && (
+      !validateProductEventLiveCountCopyDescriptor(
+        productEventLiveCountDescriptor,
+        { handle: productEventSource, device }
+      )
+      || !(Number(productEventBuffer?.size)
+        >= resolvedProductEventCount
+          * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+          * Float32Array.BYTES_PER_ELEMENT)
+      || productEventSource.productEventBuffer !== productEventBuffer
+      || productEventLiveCountDescriptor.controlBuffer == null
+      || productEventLiveCountDescriptor.controlPrefixByteLength
+        !== SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+      || productEventLiveCountDescriptor.hostObserved !== false
+      || productEventLiveCountDescriptor.expectedRowCapacity
+        !== resolvedProductEventCount
+      || productEventLiveCountDescriptor.expectedRowStrideVec4
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+      || productEventLiveCountDescriptor.rowCapacity
+        !== resolvedProductEventCount
+      || productEventLiveCountDescriptor.rowStrideFloats
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    )
+  ) {
+    throw new TypeError(
+      'Source-local render field GPU live-count authority does not match its product-event buffer capacity and row ABI'
+    );
+  }
   const reason = fallbackReason({
     sourceLocalMode,
     readbackMode,
@@ -1145,6 +1343,30 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     renderRows,
     GPU_BUFFER_USAGE.COPY_SRC
   );
+  const productHistoryControlBufferOwned = !productEventLiveCountDescriptor;
+  const productHistoryControlBuffer = productEventLiveCountDescriptor?.controlBuffer
+    || createZeroedStorageBuffer(
+      device,
+      'ulg-sph-render-field-source-local-product-history-control-disabled',
+      SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+    );
+  const productHistoryGateParamsBuffer = device.createBuffer({
+    label: 'ulg-sph-render-field-source-local-product-history-gate-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(
+    productHistoryGateParamsBuffer,
+    0,
+    createSourceLocalProductHistoryGateParamsArray(
+      productEventLiveCountDescriptor
+    )
+  );
+  const productHistoryControlResource = {
+    buffer: productHistoryControlBuffer,
+    offset: productEventLiveCountDescriptor?.controlOffsetBytes ?? 0,
+    size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+  };
   const surfaceBuffer = writeStorageBuffer(
     device,
     'ulg-sph-render-field-source-local-surfaces',
@@ -1232,7 +1454,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   device.queue.writeBuffer(paramsBuffer, 0, baseParamsBytes);
 
   const splatPipelineState = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-render-field-source-local-shadow-splat-v2',
+    cacheKey: 'ulg-sph-render-field-source-local-shadow-splat-v6-dual-temperature-range',
     label: 'ulg-sph-render-field-source-local-shadow-splat',
     code: sphRenderFieldSourceLocalSplatWgsl,
     entryPoint: 'main',
@@ -1242,7 +1464,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'uniform'),
-      computeBufferBinding(5, 'read-only-storage')
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'uniform')
     ]
   });
   const splatBindGroup = device.createBindGroup({
@@ -1253,11 +1477,13 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       { binding: 2, resource: { buffer: accumBuffer } },
       { binding: 3, resource: { buffer: overflowBuffer } },
       { binding: 4, resource: { buffer: paramsBuffer } },
-      { binding: 5, resource: { buffer: fieldRowsBuffer } }
+      { binding: 5, resource: { buffer: fieldRowsBuffer } },
+      { binding: 6, resource: productHistoryControlResource },
+      { binding: 7, resource: { buffer: productHistoryGateParamsBuffer } }
     ]
   });
   const resolvePipelineState = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-render-field-source-local-shadow-resolve-v1',
+    cacheKey: 'ulg-sph-render-field-source-local-shadow-resolve-v5-dual-temperature-range',
     label: 'ulg-sph-render-field-source-local-shadow-resolve',
     code: sphRenderFieldSourceLocalResolveWgsl,
     entryPoint: 'main',
@@ -1265,7 +1491,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'uniform')
     ]
   });
   const resolveBindGroup = device.createBindGroup({
@@ -1274,7 +1502,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       { binding: 0, resource: { buffer: surfaceBuffer } },
       { binding: 1, resource: { buffer: accumBuffer } },
       { binding: 2, resource: { buffer: fieldRowsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 3, resource: { buffer: paramsBuffer } },
+      { binding: 4, resource: productHistoryControlResource },
+      { binding: 5, resource: { buffer: productHistoryGateParamsBuffer } }
     ]
   });
 
@@ -1296,7 +1526,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       { binding: 2, resource: { buffer: accumBuffer } },
       { binding: 3, resource: { buffer: overflowBuffer } },
       { binding: 4, resource: { buffer: phaseParamsBuffer } },
-      { binding: 5, resource: { buffer: fieldRowsBuffer } }
+      { binding: 5, resource: { buffer: fieldRowsBuffer } },
+      { binding: 6, resource: productHistoryControlResource },
+      { binding: 7, resource: { buffer: productHistoryGateParamsBuffer } }
     ]
   });
   const phaseBuffers = resolvedRenderSmearDtS > 0
@@ -1332,14 +1564,18 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
   // here is built only when there is at least one event, so a scene without
   // reactions allocates no buffer and compiles no pipeline for them.
   let encodeProductSplat = () => {};
+  let productSourceBuffer = null;
+  let productSourceBufferOwned = false;
+  let productParamsBuffer = null;
   if (resolvedProductEventCount > 0) {
-    const productSourceBuffer = productEventBuffer || writeStorageBuffer(
+    productSourceBuffer = productEventBuffer || writeStorageBuffer(
       device,
       'ulg-sph-render-field-source-local-product-events',
       productEventRows,
       GPU_BUFFER_USAGE.COPY_SRC
     );
-    const productParamsBuffer = device.createBuffer({
+    productSourceBufferOwned = !productEventBuffer;
+    productParamsBuffer = device.createBuffer({
       label: 'ulg-sph-render-field-source-local-product-params',
       size: 32,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -1353,7 +1589,7 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       refEdgeM
     }));
     const productPipelineState = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-render-field-source-local-product-splat-v1',
+      cacheKey: 'ulg-sph-render-field-source-local-product-splat-v3-fifteen-lane-accum',
       label: 'ulg-sph-render-field-source-local-product-splat',
       code: sphRenderFieldSourceLocalProductSplatWgsl,
       entryPoint: 'main',
@@ -1362,7 +1598,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
         computeBufferBinding(1, 'read-only-storage'),
         computeBufferBinding(2, 'storage'),
         computeBufferBinding(3, 'storage'),
-        computeBufferBinding(4, 'uniform')
+        computeBufferBinding(4, 'uniform'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'uniform')
       ]
     });
     const productBindGroup = device.createBindGroup({
@@ -1372,7 +1610,9 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
         { binding: 1, resource: { buffer: surfaceBuffer } },
         { binding: 2, resource: { buffer: accumBuffer } },
         { binding: 3, resource: { buffer: overflowBuffer } },
-        { binding: 4, resource: { buffer: productParamsBuffer } }
+        { binding: 4, resource: { buffer: productParamsBuffer } },
+        { binding: 5, resource: productHistoryControlResource },
+        { binding: 6, resource: { buffer: productHistoryGateParamsBuffer } }
       ]
     });
     encodeProductSplat = () => {
@@ -1427,8 +1667,14 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       releaseSourceLocalAccumBuffer(device, accumHandle);
       overflowBuffer.destroy?.();
       paramsBuffer.destroy?.();
-    phaseBuffers?.moments?.destroy?.();
-    phaseBuffers?.primary?.destroy?.();
+      if (productHistoryControlBufferOwned) {
+        productHistoryControlBuffer.destroy?.();
+      }
+      productHistoryGateParamsBuffer.destroy?.();
+      if (productSourceBufferOwned) productSourceBuffer?.destroy?.();
+      productParamsBuffer?.destroy?.();
+      phaseBuffers?.moments?.destroy?.();
+      phaseBuffers?.primary?.destroy?.();
     };
     const cleanupAllBuffers = () => {
       cleanupTransientBuffers();
@@ -1489,9 +1735,25 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       schroederSpatialLineageMode: 'non-schroeder-source-local-diagnostic',
       schroederSpatialSourceFamily: null,
       particleCount: resolvedParticleCount,
-      productEventCount: 0,
-      productEventBufferBound: false,
-      productEventBufferByteLength: 0,
+      productEventCount: resolvedProductEventCount,
+      productEventCountAuthority: productEventLiveCountDescriptor
+        ? 'gpu-authored-filtered-live-prefix'
+        : 'host-exact-or-sparse-scan-bound',
+      productEventControlAuthentication: productEventLiveCountDescriptor
+        ? 'full-eight-word-gpu-commit-gate'
+        : 'not-required-zero-control',
+      productEventControlHostObserved:
+        productEventLiveCountDescriptor?.hostObserved ?? false,
+      productEventCountHostKnown: !productEventLiveCountDescriptor,
+      productEventRowCapacity:
+        productEventLiveCountDescriptor?.expectedRowCapacity
+        ?? resolvedProductEventCount,
+      productEventBufferBound: Boolean(
+        productEventBuffer || productEventRows
+      ),
+      productEventBufferByteLength: Number(
+        productEventBuffer?.size ?? productEventRows?.byteLength ?? 0
+      ),
       surfaceCount: surfaceTable.surfaceCount,
       totalFieldCells: surfaceTable.totalFieldCells,
       maxFieldCellCount: surfaceTable.maxFieldCellCount,
@@ -1596,6 +1858,12 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     overflowBuffer.destroy?.();
     if (ownsFieldRowsBuffer) fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
+    if (productHistoryControlBufferOwned) {
+      productHistoryControlBuffer.destroy?.();
+    }
+    productHistoryGateParamsBuffer.destroy?.();
+    if (productSourceBufferOwned) productSourceBuffer?.destroy?.();
+    productParamsBuffer?.destroy?.();
     phaseBuffers?.moments?.destroy?.();
     phaseBuffers?.primary?.destroy?.();
   }
@@ -1639,9 +1907,25 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
       resolveY: Math.max(1, surfaceTable.surfaceCount)
     },
     particleCount: resolvedParticleCount,
-    productEventCount: 0,
-    productEventBufferBound: false,
-    productEventBufferByteLength: 0,
+    productEventCount: resolvedProductEventCount,
+    productEventCountAuthority: productEventLiveCountDescriptor
+      ? 'gpu-authored-filtered-live-prefix'
+      : 'host-exact-or-sparse-scan-bound',
+    productEventControlAuthentication: productEventLiveCountDescriptor
+      ? 'full-eight-word-gpu-commit-gate'
+      : 'not-required-zero-control',
+    productEventControlHostObserved:
+      productEventLiveCountDescriptor?.hostObserved ?? false,
+    productEventCountHostKnown: !productEventLiveCountDescriptor,
+    productEventRowCapacity:
+      productEventLiveCountDescriptor?.expectedRowCapacity
+      ?? resolvedProductEventCount,
+    productEventBufferBound: Boolean(
+      productEventBuffer || productEventRows
+    ),
+    productEventBufferByteLength: Number(
+      productEventBuffer?.size ?? productEventRows?.byteLength ?? 0
+    ),
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
     maxFieldCellCount: surfaceTable.maxFieldCellCount,
@@ -1699,6 +1983,11 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
 export const SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING = Object.freeze({
   FULL_READBACK_MODE,
   NO_FULL_READBACK_MODE,
+  SOURCE_LOCAL_TEMPERATURE_SCALE,
+  SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K,
+  SOURCE_LOCAL_TEMPERATURE_RANGE_K,
+  sphRenderProductHistoryGateWgsl,
   sphRenderFieldSourceLocalSplatWgsl,
+  sphRenderFieldSourceLocalProductSplatWgsl,
   sphRenderFieldSourceLocalResolveWgsl
 });

@@ -167,7 +167,7 @@ test('SPH local closure cache persistence prepares material and reaction snapsho
   assert.equal(lookup.sphColdStartCacheLookup.status, 'reaction-cache-hit');
 });
 
-test('SPH product closure reuse preserves same-tier misses and rejects strict/reduced cross-tier records', () => {
+test('SPH product closure reuse binds reduced compounds to the exact reaction input key', () => {
   const materialWrite = createPeerClosureCacheWrite({
     materialProperties,
     generatorFingerprint
@@ -209,8 +209,12 @@ test('SPH product closure reuse preserves same-tier misses and rejects strict/re
   const reducedReuse = lookupForTier(reducedSnapshot, true);
   const reducedIntoStrict = lookupForTier(reducedSnapshot, false);
   assert.equal(reducedReuse.sphColdStartCacheLookup.status, 'reaction-cache-miss');
-  assert.equal(reducedReuse.sphColdStartCacheLookup.productClosures.naoh.properties.formula, 'NaOH');
-  assert.equal(reducedReuse.sphColdStartCacheLookup.productClosures.naoh.properties.phases[0].name, 'liquid');
+  assert.equal(reducedReuse.sphColdStartCacheLookup.productClosures.naoh, undefined);
+  assert.equal(
+    reducedReuse.sphColdStartCacheLookup.productClosures.h2.properties.formula,
+    'H2',
+    'source-independent molecular products remain reusable across reaction keys'
+  );
   assert.deepEqual(reducedIntoStrict.sphColdStartCacheLookup.productClosures, {});
 
   const reducedCacheKey = createReactionDiscoveryCacheKey('Na', 'h2o', {
@@ -243,4 +247,118 @@ test('SPH product closure reuse preserves same-tier misses and rejects strict/re
   assert.equal(exactReducedLookup.sphColdStartCacheLookup.record, null);
   assert.equal(exactReducedLookup.sphColdStartCacheLookup.productClosures.naoh, undefined);
   assert.equal(exactReducedLookup.sphColdStartCacheLookup.productClosures.h2.properties.formula, 'H2');
+});
+
+test('SPH reduced product reuse rejects a stale NaOH closure after water conductivity changes', () => {
+  const inputsWithWaterConductivity = (waterConductivityWPerMK) => ({
+    ...materialProperties,
+    Na: {
+      ...materialProperties.Na,
+      phases: materialProperties.Na.phases.map((phase) => ({
+        ...phase,
+        thermalConductivityWPerMK: 142
+      }))
+    },
+    h2o: {
+      ...materialProperties.h2o,
+      phases: materialProperties.h2o.phases.map((phase) => ({
+        ...phase,
+        thermalConductivityWPerMK: waterConductivityWPerMK
+      }))
+    }
+  });
+  const oldInputs = inputsWithWaterConductivity(0.598011575);
+  const oldReactants = { Na: oldInputs.Na, h2o: oldInputs.h2o };
+  const oldKey = createReactionDiscoveryCacheKey('Na', 'h2o', {
+    materialProperties: oldReactants,
+    allowReducedProductProperties: true
+  });
+  const oldDiscovery = fakeReactionDiscovery(oldKey, {
+    allowReducedProductProperties: true
+  });
+  oldDiscovery.productClosures.naoh = {
+    properties: {
+      ...reducedNaohProperties,
+      phases: reducedNaohProperties.phases.map((phase) => ({
+        ...phase,
+        thermalConductivityWPerMK: 2 / (1 / 142 + 1 / 0.598011575)
+      }))
+    }
+  };
+  const oldSnapshot = createSphColdStartReactionCacheWrite({
+    reactionDiscovery: oldDiscovery,
+    materialProperties: oldInputs,
+    generatorFingerprint
+  }).cacheSnapshot;
+
+  const changedInputs = inputsWithWaterConductivity(1.19602315);
+  const changedMaterialWrite = createPeerClosureCacheWrite({
+    materialProperties: changedInputs,
+    generatorFingerprint
+  });
+  const lookup = createSphLocalCacheLookup({
+    materialCacheSnapshot: changedMaterialWrite.cacheSnapshot,
+    coldStartCacheSnapshot: oldSnapshot,
+    materials: ['Na', 'h2o'],
+    options: {
+      dropMaterial: 'Na',
+      baseMaterial: 'h2o',
+      allowReducedProductProperties: true
+    },
+    generatorFingerprint
+  });
+
+  assert.equal(lookup.sphColdStartCacheLookup.status, 'reaction-cache-miss');
+  assert.equal(lookup.sphColdStartCacheLookup.productClosures.naoh, undefined);
+  assert.equal(
+    lookup.sphColdStartCacheLookup.productClosures.h2.properties.formula,
+    'H2'
+  );
+});
+
+test('SPH local cache invalidates material and reduced-product records across the v3 to v4 method bump', () => {
+  const oldMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v3';
+  const newMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v4';
+  const oldGeneratorFingerprint = 'test-generator-v3';
+  const newGeneratorFingerprint = 'test-generator-v4';
+  const oldMaterialWrite = createPeerClosureCacheWrite({
+    materialProperties,
+    methodVersion: oldMethodVersion,
+    generatorFingerprint: oldGeneratorFingerprint
+  });
+  const oldCacheKey = createReactionDiscoveryCacheKey('Na', 'h2o', {
+    materialProperties: reactantMaterialProperties,
+    allowReducedProductProperties: true
+  });
+  const oldColdWrite = createSphColdStartReactionCacheWrite({
+    reactionDiscovery: fakeReactionDiscovery(oldCacheKey, {
+      allowReducedProductProperties: true
+    }),
+    materialProperties,
+    generatorFingerprint: oldGeneratorFingerprint
+  });
+
+  const lookup = createSphLocalCacheLookup({
+    materialCacheSnapshot: oldMaterialWrite.cacheSnapshot,
+    coldStartCacheSnapshot: oldColdWrite.cacheSnapshot,
+    materials: ['Na', 'h2o'],
+    options: {
+      dropMaterial: 'Na',
+      baseMaterial: 'h2o',
+      allowReducedProductProperties: true
+    },
+    methodVersion: newMethodVersion,
+    generatorFingerprint: newGeneratorFingerprint
+  });
+
+  assert.equal(lookup.peerClosureCacheLookup.hitCount, 0);
+  assert.equal(lookup.peerClosureCacheLookup.missCount, 2);
+  assert.ok(
+    lookup.peerClosureCacheLookup.stale.every((entry) => (
+      entry.reason === 'method-version-mismatch'
+      || entry.reason === 'generator-fingerprint-mismatch'
+    ))
+  );
+  assert.equal(lookup.sphColdStartCacheLookup.status, 'reaction-cache-miss');
+  assert.deepEqual(lookup.sphColdStartCacheLookup.productClosures, {});
 });

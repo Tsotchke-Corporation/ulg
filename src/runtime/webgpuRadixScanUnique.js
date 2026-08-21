@@ -64,6 +64,25 @@ function nonNegativeInteger(value, label, { max = Number.MAX_SAFE_INTEGER } = {}
   return number;
 }
 
+function exactThenablePromise(value, errorMessage) {
+  let then;
+  try {
+    then = value?.then;
+  } catch (error) {
+    throw error;
+  }
+  if (typeof then !== 'function') {
+    throw new TypeError(errorMessage);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      Reflect.apply(then, value, [resolve, reject]);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
 function alignedBytes(byteLength, alignment = 4) {
   return Math.max(4, Math.ceil(byteLength / alignment) * alignment);
 }
@@ -254,6 +273,59 @@ function createBuffer(device, label, wordCount, extraUsage = 0) {
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
       | GPU_BUFFER_USAGE.COPY_DST | extraUsage
   });
+}
+
+function destroyBuffersExactlyOnce(buffers) {
+  const destroyedBuffers = new Set();
+  for (let index = buffers.length - 1; index >= 0; index -= 1) {
+    const buffer = buffers[index];
+    if (!buffer || destroyedBuffers.has(buffer)) continue;
+    destroyedBuffers.add(buffer);
+    try {
+      buffer.destroy?.();
+    } catch {
+      // Rollback must keep visiting every successfully created buffer.  The
+      // construction error remains the useful failure when a hostile test
+      // double also throws from destroy().
+    }
+  }
+}
+
+function createOwnedBufferConstruction() {
+  const buffers = [];
+  const childRuntimes = [];
+  let active = true;
+  return {
+    ownBuffer(buffer) {
+      buffers.push(buffer);
+      return buffer;
+    },
+    ownRuntime(runtime) {
+      childRuntimes.push(runtime);
+      return runtime;
+    },
+    commit() {
+      active = false;
+      buffers.length = 0;
+      childRuntimes.length = 0;
+    },
+    rollback() {
+      if (!active) return false;
+      active = false;
+      for (let index = childRuntimes.length - 1; index >= 0; index -= 1) {
+        try {
+          childRuntimes[index]?.destroy?.();
+        } catch {
+          // A child owns its buffer cleanup. Continue rolling back siblings and
+          // direct allocations even if a hostile destroy implementation fails.
+        }
+      }
+      destroyBuffersExactlyOnce(buffers);
+      buffers.length = 0;
+      childRuntimes.length = 0;
+      return true;
+    }
+  };
 }
 
 function profiledPassDescriptor(timestampProfiler, label, metadata = {}) {
@@ -1023,6 +1095,8 @@ struct GpuCountScanStatic {
 @group(0) @binding(3) var<storage, read> scan_parent_offsets: array<u32>;
 @group(0) @binding(4) var<storage, read> gpu_count_control: array<u32>;
 @group(0) @binding(5) var<uniform> scan_static: GpuCountScanStatic;
+@group(0) @binding(6) var<storage, read_write> scan_fused_lower_values: array<u32>;
+@group(0) @binding(7) var<uniform> scan_fused_lower_static: GpuCountScanStatic;
 
 const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
 const CONTROL_EXPECTED_SEAL: u32 =
@@ -1123,6 +1197,87 @@ fn add_gpu_count_block_offsets(
   scan_output[first] = scan_output[first] + block_offset;
   if (second < count) {
     scan_output[second] = scan_output[second] + block_offset;
+  }
+}
+
+// The fixed GPU-count hierarchy retains every possible scan level so a
+// GPU-authored live count can select its depth without a readback.  Whenever
+// the top live level is one workgroup, that workgroup can scan the top block
+// sums and apply the resulting offsets to the already-scanned lower level
+// before it exits.  This is the GPU-count counterpart of the direct-count
+// scan_top_and_add_lower path: the top dispatch remains indirect, so A=0,
+// invalid seals, overflow, and shallower live hierarchies all stay fail-closed.
+@compute @workgroup_size(256)
+fn scan_gpu_count_top_and_add_lower(
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let count = sealed_count();
+  let first = local_id.x * 2u;
+  let second = first + 1u;
+  var first_value = 0u;
+  var second_value = 0u;
+  if (first < count) {
+    first_value = scan_input[first];
+  }
+  if (second < count) {
+    second_value = scan_input[second];
+  }
+  scan_values[first] = first_value;
+  scan_values[second] = second_value;
+
+  var offset = 1u;
+  for (var width = 256u; width > 0u; width = width >> 1u) {
+    workgroupBarrier();
+    if (local_id.x < width) {
+      let left = offset * (2u * local_id.x + 1u) - 1u;
+      let right = offset * (2u * local_id.x + 2u) - 1u;
+      scan_values[right] = scan_values[right] + scan_values[left];
+    }
+    offset = offset << 1u;
+  }
+
+  if (local_id.x == 0u) {
+    scan_block_sums[0] = scan_values[511u];
+    scan_values[511u] = 0u;
+  }
+
+  for (var width = 1u; width < 512u; width = width << 1u) {
+    offset = offset >> 1u;
+    workgroupBarrier();
+    if (local_id.x < width) {
+      let left = offset * (2u * local_id.x + 1u) - 1u;
+      let right = offset * (2u * local_id.x + 2u) - 1u;
+      let prior = scan_values[left];
+      scan_values[left] = scan_values[right];
+      scan_values[right] = scan_values[right] + prior;
+    }
+  }
+
+  workgroupBarrier();
+  if (first < count) {
+    scan_output[first] = scan_values[first];
+  }
+  if (second < count) {
+    scan_output[second] = scan_values[second];
+  }
+
+  let lower_status = gpu_count_control[CONTROL_STATUS];
+  let lower_sealed =
+    (lower_status & STATUS_ADMITTED) != 0u
+    && (lower_status & STATUS_FAIL_CLOSED) == 0u
+    && gpu_count_control[CONTROL_COMPLETION_SEAL]
+      == gpu_count_control[CONTROL_EXPECTED_SEAL];
+  let lower_count = select(
+    0u,
+    gpu_count_control[scan_fused_lower_static.count_word],
+    lower_sealed
+  );
+  for (var lower_index = local_id.x;
+    lower_index < lower_count;
+    lower_index = lower_index + 256u) {
+    let block_index = lower_index / 512u;
+    scan_fused_lower_values[lower_index] =
+      scan_fused_lower_values[lower_index] + scan_values[block_index];
   }
 }
 `;
@@ -1697,21 +1852,27 @@ export function createWebGpuU32ExclusiveScan(device, {
       })
     : 0;
   const retainedParamsSlotStrideBytes = retainedParamsPlan.levelCount * UNIFORM_ROW_BYTES;
+  const construction = createOwnedBufferConstruction();
+  try {
   const pipelines = createScanPipelines(device, label);
   const persistentParamsBuffer = retainParamsBuffer
-    ? device.createBuffer({
+    ? construction.ownBuffer(device.createBuffer({
         label: `${label}-params-retained`,
         size: retainedParamsSlotStrideBytes * resolvedRetainedParamsSlotCount,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      })
+      }))
     : null;
-  const blockSums = maxPlan.levels.map((level) => createBuffer(
+  const blockSums = maxPlan.levels.map((level) => construction.ownBuffer(createBuffer(
     device,
     `${label}-level-${level.level}-block-sums`,
     level.groupCount
-  ));
+  )));
   const blockOffsets = maxPlan.levels.map((level) => level.groupCount > 1
-    ? createBuffer(device, `${label}-level-${level.level}-block-offsets`, level.groupCount)
+    ? construction.ownBuffer(createBuffer(
+        device,
+        `${label}-level-${level.level}-block-offsets`,
+        level.groupCount
+      ))
     : null);
   const transients = new Set();
   const retainedPreparedScans = persistentParamsBuffer ? new WeakMap() : null;
@@ -1721,6 +1882,9 @@ export function createWebGpuU32ExclusiveScan(device, {
   );
   const retainedVariableParamsLeaseOwner = {};
   const retainedVariableParamsLeaseByPrepared = new WeakMap();
+  const ownedPreparedScans = new WeakSet();
+  const releasedPreparedScans = new WeakSet();
+  const ownedTransientBuffersByPrepared = new WeakMap();
   const retainedVariableParamsSlots = persistentParamsBuffer
     && resolvedFixedElementCount === null
     ? Array.from(
@@ -1762,53 +1926,104 @@ export function createWebGpuU32ExclusiveScan(device, {
     };
   }
 
-  function releasePreparedLease(value) {
+  function canFinalizePrepared(value) {
+    if (
+      destroyed
+      || !value
+      || typeof value !== 'object'
+      || !ownedPreparedScans.has(value)
+      || releasedPreparedScans.has(value)
+    ) return false;
     const lease = value && typeof value === 'object'
       ? retainedVariableParamsLeaseByPrepared.get(value) ?? null
       : null;
-    if (lease?.owner !== retainedVariableParamsLeaseOwner) return false;
-    const released = lease.release();
-    if (released) retainedVariableParamsLeaseByPrepared.delete(value);
-    return released;
+    return retainedVariableParamsSlots === null
+      || lease?.owner === retainedVariableParamsLeaseOwner;
+  }
+
+  function releasePreparedLease(value) {
+    if (!canFinalizePrepared(value)) return false;
+    const lease = retainedVariableParamsLeaseByPrepared.get(value) ?? null;
+    if (lease && lease.release() !== true) return false;
+    if (lease) retainedVariableParamsLeaseByPrepared.delete(value);
+    releasedPreparedScans.add(value);
+    return true;
+  }
+
+  function destroyPreparedTransientBufferSnapshot(ownedBuffers) {
+    const ownedTransientBuffers = [];
+    for (const buffer of ownedBuffers || []) {
+      if (!transients.has(buffer)) continue;
+      transients.delete(buffer);
+      ownedTransientBuffers.push(buffer);
+    }
+    destroyBuffersExactlyOnce(ownedTransientBuffers);
+  }
+
+  function finalizePrepared(value, {
+    destroyTransientBuffers = true,
+    ownedTransientBuffers = null
+  } = {}) {
+    if (!canFinalizePrepared(value)) return false;
+    const authenticatedTransientBuffers = ownedTransientBuffers
+      ?? ownedTransientBuffersByPrepared.get(value)
+      ?? Object.freeze([]);
+    const released = releasePreparedLease(value);
+    if (!released) return false;
+    ownedTransientBuffersByPrepared.delete(value);
+    if (destroyTransientBuffers) {
+      destroyPreparedTransientBufferSnapshot(authenticatedTransientBuffers);
+    }
+    return true;
   }
 
   function releasePrepared(value, { discardedEncoder = false } = {}) {
-    const lease = value && typeof value === 'object'
-      ? retainedVariableParamsLeaseByPrepared.get(value) ?? null
-      : null;
-    if (lease?.owner !== retainedVariableParamsLeaseOwner) return false;
+    if (!canFinalizePrepared(value)) return false;
     if (discardedEncoder !== true) {
       throw new TypeError(
         `${label} releasePrepared requires { discardedEncoder: true }; `
         + 'use releasePreparedAfter with a submission-fence thenable after submission'
       );
     }
-    return releasePreparedLease(value);
+    return finalizePrepared(value);
   }
 
   function releasePreparedAfter(value, submissionFence) {
-    if (!submissionFence?.then) {
-      throw new TypeError('submissionFence must be a thenable that resolves after GPU completion');
-    }
-    return Promise.resolve(submissionFence).then(() => releasePreparedLease(value));
+    const authenticatedTransientBuffers = canFinalizePrepared(value)
+      ? ownedTransientBuffersByPrepared.get(value) ?? Object.freeze([])
+      : null;
+    const fencePromise = exactThenablePromise(
+      submissionFence,
+      'submissionFence must be a thenable that resolves after GPU completion'
+    );
+    return fencePromise.then(() => (
+      authenticatedTransientBuffers === null
+        ? false
+        : finalizePrepared(value, {
+            ownedTransientBuffers: authenticatedTransientBuffers
+          })
+    ));
+  }
+
+  function canReleasePreparedQueueOrdered(value) {
+    return persistentParamsBuffer !== null && canFinalizePrepared(value);
+  }
+
+  function releasePreparedQueueOrdered(value) {
+    if (!canReleasePreparedQueueOrdered(value)) return false;
+    return finalizePrepared(value, { destroyTransientBuffers: false });
   }
 
   function releasePreparedResources(value, options = {}) {
-    const lease = value && typeof value === 'object'
-      ? retainedVariableParamsLeaseByPrepared.get(value) ?? null
-      : null;
+    if (!canFinalizePrepared(value)) return false;
+    const lease = retainedVariableParamsLeaseByPrepared.get(value) ?? null;
     if (lease?.owner === retainedVariableParamsLeaseOwner && options.discardedEncoder !== true) {
       throw new TypeError(
         `${label} retained variable params require { discardedEncoder: true }; `
         + 'use releasePreparedAfter with a submission-fence thenable after submission'
       );
     }
-    for (const buffer of value?.transientBuffers || []) {
-      if (!transients.has(buffer)) continue;
-      transients.delete(buffer);
-      buffer.destroy?.();
-    }
-    return releasePreparedLease(value);
+    return finalizePrepared(value);
   }
 
   function prepare({
@@ -1851,6 +2066,9 @@ export function createWebGpuU32ExclusiveScan(device, {
       ?.get(outputBuffer)
       ?.[resolvedSlotIndex] ?? null;
     const preparedScanCacheHit = cachedTopology?.topologyKey === topologyKey;
+    let transientParamsBuffer = null;
+    let retainedVariableParamsSlotLease = null;
+    try {
     const paramsBuffer = persistentParamsBuffer || device.createBuffer({
       label: `${label}-params-${resolvedCount}`,
       size: plan.levelCount * UNIFORM_ROW_BYTES,
@@ -1863,7 +2081,10 @@ export function createWebGpuU32ExclusiveScan(device, {
     }
     const paramsWritePerformed = !persistentParamsBuffer
       || retainedParamsLastCount[resolvedSlotIndex] !== resolvedCount;
-    if (!persistentParamsBuffer) transients.add(paramsBuffer);
+    if (!persistentParamsBuffer) {
+      transients.add(paramsBuffer);
+      transientParamsBuffer = paramsBuffer;
+    }
 
     const levels = [];
     let levelInput = inputBuffer;
@@ -1951,12 +2172,14 @@ export function createWebGpuU32ExclusiveScan(device, {
           });
     }
     const encodedDispatchCount = webGpuU32ScanEncodedDispatchCount(plan);
-    const retainedVariableParamsSlotLease = acquireRetainedVariableParamsSlot(resolvedSlotIndex);
-    try {
+    retainedVariableParamsSlotLease = acquireRetainedVariableParamsSlot(resolvedSlotIndex);
       if (paramsWritePerformed) {
         device.queue.writeBuffer(paramsBuffer, paramsBaseOffset, paramsData);
         if (persistentParamsBuffer) retainedParamsLastCount[resolvedSlotIndex] = resolvedCount;
       }
+      const ownedTransientBuffers = Object.freeze(
+        persistentParamsBuffer ? [] : [paramsBuffer]
+      );
       const prepared = {
         plan,
         paramsBuffer,
@@ -1971,7 +2194,7 @@ export function createWebGpuU32ExclusiveScan(device, {
         paramsWritePerformed,
         paramsWriteCount: paramsWritePerformed ? 1 : 0,
         preparedScanCacheHit,
-        transientBuffers: persistentParamsBuffer ? [] : [paramsBuffer],
+        transientBuffers: [...ownedTransientBuffers],
         paramsBufferResidency: persistentParamsBuffer ? 'retained-reused' : 'transient-per-encode'
       };
       if (retainedVariableParamsSlotLease) {
@@ -1997,9 +2220,14 @@ export function createWebGpuU32ExclusiveScan(device, {
           }))
         };
       }
+      ownedTransientBuffersByPrepared.set(prepared, ownedTransientBuffers);
+      ownedPreparedScans.add(prepared);
       return prepared;
     } catch (error) {
       retainedVariableParamsSlotLease?.release();
+      if (transientParamsBuffer && transients.delete(transientParamsBuffer)) {
+        destroyBuffersExactlyOnce([transientParamsBuffer]);
+      }
       throw error;
     }
   }
@@ -2128,17 +2356,14 @@ export function createWebGpuU32ExclusiveScan(device, {
         encodePrepared(encoder, prepared, options);
         return prepared;
       } catch (error) {
-        for (const buffer of prepared.transientBuffers || []) {
-          if (!transients.has(buffer)) continue;
-          transients.delete(buffer);
-          buffer.destroy?.();
-        }
-        releasePreparedLease(prepared);
+        finalizePrepared(prepared);
         throw error;
       }
     },
     releasePrepared,
     releasePreparedAfter,
+    canReleasePreparedQueueOrdered,
+    releasePreparedQueueOrdered,
     releaseTransientBuffers: releasePreparedResources,
     allocationEntries() {
       return [
@@ -2155,10 +2380,12 @@ export function createWebGpuU32ExclusiveScan(device, {
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      persistentParamsBuffer?.destroy?.();
-      for (const buffer of blockSums) buffer.destroy?.();
-      for (const buffer of blockOffsets) buffer?.destroy?.();
-      for (const buffer of transients) buffer.destroy?.();
+      destroyBuffersExactlyOnce([
+        persistentParamsBuffer,
+        ...blockSums,
+        ...blockOffsets,
+        ...transients
+      ]);
       transients.clear();
       retainedParamsLastCount.fill(null);
       for (const slot of retainedVariableParamsSlots || []) slot.inUse = false;
@@ -2168,9 +2395,17 @@ export function createWebGpuU32ExclusiveScan(device, {
     hasPreparedLease(value) {
       return retainedVariableParamsLeaseByPrepared.has(value);
     },
-    releasePreparedLease
+    releasePreparedLease,
+    finalizePreparedFromParent(value) {
+      return finalizePrepared(value);
+    }
   });
+  construction.commit();
   return runtime;
+  } catch (error) {
+    construction.rollback();
+    throw error;
+  }
 }
 
 function createRadixPipelines(device, label, { serialHistogramScanEnabled = false } = {}) {
@@ -2238,6 +2473,11 @@ function createRadixGpuCountPipelines(device, label) {
     prepare: pipeline('prepare', prepareModule, 'prepare_gpu_count'),
     scanBlocks: pipeline('scan-blocks', scanModule, 'scan_gpu_count_blocks'),
     scanAdd: pipeline('scan-add', scanModule, 'add_gpu_count_block_offsets'),
+    scanFusedTopAdd: pipeline(
+      'scan-fused-top-add',
+      scanModule,
+      'scan_gpu_count_top_and_add_lower'
+    ),
     initialize: pipeline(
       'initialize',
       radixModule,
@@ -2339,51 +2579,77 @@ export function createWebGpuStableRadixScanUnique(device, {
     maxElementCount: resolvedMaxElementCount,
     maxComputeWorkgroupsPerDimension
   });
+  const construction = createOwnedBufferConstruction();
+  try {
   const pipelines = createRadixPipelines(device, label, {
     serialHistogramScanEnabled: resolvedSerialHistogramScanMaxElementCount > 0
   });
-  const sortedIndicesA = createBuffer(device, `${label}-sorted-indices-a`, resolvedMaxElementCount);
-  const sortedIndicesB = createBuffer(device, `${label}-sorted-indices-b`, resolvedMaxElementCount);
-  const histogramBuffer = createBuffer(device, `${label}-histograms`, maxHistogramElements);
-  const histogramOffsetsBuffer = createBuffer(
+  const sortedIndicesA = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-sorted-indices-a`,
+    resolvedMaxElementCount
+  ));
+  const sortedIndicesB = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-sorted-indices-b`,
+    resolvedMaxElementCount
+  ));
+  const histogramBuffer = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-histograms`,
+    maxHistogramElements
+  ));
+  const histogramOffsetsBuffer = construction.ownBuffer(createBuffer(
     device,
     `${label}-histogram-offsets`,
     maxHistogramElements
-  );
-  const headFlagsBuffer = createBuffer(device, `${label}-head-flags`, resolvedMaxElementCount);
-  const headOffsetsBuffer = createBuffer(device, `${label}-head-offsets`, resolvedMaxElementCount);
-  const uniqueKeysBuffer = createBuffer(
+  ));
+  const headFlagsBuffer = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-head-flags`,
+    resolvedMaxElementCount
+  ));
+  const headOffsetsBuffer = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-head-offsets`,
+    resolvedMaxElementCount
+  ));
+  const uniqueKeysBuffer = construction.ownBuffer(createBuffer(
     device,
     `${label}-unique-keys`,
     resolvedMaxElementCount * resolvedMaxKeyWordCount
-  );
-  const uniqueOffsetsBuffer = createBuffer(
+  ));
+  const uniqueOffsetsBuffer = construction.ownBuffer(createBuffer(
     device,
     `${label}-unique-offsets`,
     resolvedMaxElementCount + 1
-  );
-  const evidenceBuffer = createBuffer(device, `${label}-evidence`, 8);
-  const dispatchIndirectBuffer = createBuffer(
+  ));
+  const evidenceBuffer = construction.ownBuffer(createBuffer(
+    device,
+    `${label}-evidence`,
+    8
+  ));
+  const dispatchIndirectBuffer = construction.ownBuffer(createBuffer(
     device,
     `${label}-dispatch-indirect`,
     3,
     GPU_BUFFER_USAGE.INDIRECT
-  );
+  ));
   const radixParamsArena = retainControlParams
-    ? device.createBuffer({
+    ? construction.ownBuffer(device.createBuffer({
         label: `${label}-radix-params-retained-arena`,
         size: checkedArenaByteLength(radixParamsSlotStrideBytes, 'radix'),
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      })
+      }))
     : null;
   const uniqueParamsArena = retainControlParams
-    ? device.createBuffer({
+    ? construction.ownBuffer(device.createBuffer({
         label: `${label}-unique-params-retained-arena`,
         size: checkedArenaByteLength(uniqueParamsSlotStrideBytes, 'unique'),
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      })
+      }))
     : null;
-  const histogramScan = createWebGpuU32ExclusiveScan(device, {
+  const histogramScan = construction.ownRuntime(createWebGpuU32ExclusiveScan(device, {
     maxElementCount: maxHistogramElements,
     label: `${label}-histogram-scan`,
     maxComputeWorkgroupsPerDimension,
@@ -2392,8 +2658,8 @@ export function createWebGpuStableRadixScanUnique(device, {
     retainedParamsSlotCount: retainVariableScanParamsBuffers
       ? (resolvedRetainedParamsSlotCount || 1)
       : 1
-  });
-  const headScan = createWebGpuU32ExclusiveScan(device, {
+  }));
+  const headScan = construction.ownRuntime(createWebGpuU32ExclusiveScan(device, {
     maxElementCount: resolvedMaxElementCount,
     label: `${label}-head-scan`,
     maxComputeWorkgroupsPerDimension,
@@ -2402,7 +2668,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     retainedParamsSlotCount: retainVariableScanParamsBuffers
       ? (resolvedRetainedParamsSlotCount || 1)
       : 1
-  });
+  }));
   const attachPreparedScanLease = (parentLease, scanRuntime, prepared) => {
     const internals = WEBGPU_SCAN_RUNTIME_INTERNALS.get(scanRuntime);
     if (!parentLease || !internals?.hasPreparedLease(prepared)) return false;
@@ -2423,19 +2689,23 @@ export function createWebGpuStableRadixScanUnique(device, {
   );
   const retainedParamsLeaseByExecution = new WeakMap();
   const ownedExecutions = new WeakSet();
+  const ownedTransientBuffersByExecution = new WeakMap();
+  const childPreparedScansByExecution = new WeakMap();
   let gpuCountResources = null;
   let destroyed = false;
 
   function ensureGpuCountResources() {
     if (gpuCountResources) return gpuCountResources;
     if (destroyed) throw new Error(`${label} is destroyed`);
+    const resourceConstruction = createOwnedBufferConstruction();
+    try {
     const gpuCountPipelines = createRadixGpuCountPipelines(device, label);
-    const controlBuffer = createBuffer(
+    const controlBuffer = resourceConstruction.ownBuffer(createBuffer(
       device,
       `${label}-gpu-count-control`,
       gpuCountControlLayout.controlWordCount,
       GPU_BUFFER_USAGE.INDIRECT
-    );
+    ));
     // The radix output, histograms, scan scratch, evidence, and control row are
     // shared. One retained config row therefore deliberately enforces the
     // primitive's single-flight ownership contract.
@@ -2449,24 +2719,25 @@ export function createWebGpuStableRadixScanUnique(device, {
         + `${gpuCountConfigArenaByteLength} bytes beyond device capacity`
       );
     }
-    const configArena = device.createBuffer({
+    const configArena = resourceConstruction.ownBuffer(device.createBuffer({
       label: `${label}-gpu-count-config-retained-arena`,
       size: gpuCountConfigArenaByteLength,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    });
+    }));
     const configSlots = Array.from(
       { length: gpuCountConfigSlotCount },
       (_, slotIndex) => ({
         slotIndex,
         byteOffset: slotIndex * paramsOffsetAlignment,
-        inUse: false
+        inUse: false,
+        bindGroups: new Map()
       })
     );
-    const digitStaticBuffer = device.createBuffer({
+    const digitStaticBuffer = resourceConstruction.ownBuffer(device.createBuffer({
       label: `${label}-gpu-count-digit-static`,
       size: maxRadixPassCount * paramsOffsetAlignment,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    });
+    }));
     const digitStaticData = new Uint32Array(
       maxRadixPassCount * paramsOffsetAlignment / UINT32_BYTES
     );
@@ -2484,11 +2755,11 @@ export function createWebGpuStableRadixScanUnique(device, {
     const totalScanStaticRows =
       gpuCountControlLayout.histogramScanLevelCount
       + gpuCountControlLayout.headScanLevelCount;
-    const scanStaticBuffer = device.createBuffer({
+    const scanStaticBuffer = resourceConstruction.ownBuffer(device.createBuffer({
       label: `${label}-gpu-count-scan-static`,
       size: totalScanStaticRows * paramsOffsetAlignment,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    });
+    }));
     const scanStaticData = new Uint32Array(
       totalScanStaticRows * paramsOffsetAlignment / UINT32_BYTES
     );
@@ -2538,19 +2809,21 @@ export function createWebGpuStableRadixScanUnique(device, {
     }) => {
       const sums = [];
       const offsets = [];
+      const levelMaximumElementCounts = [];
       let count = maximumElementCount;
       for (let level = 0; level < levelCount; level += 1) {
+        levelMaximumElementCounts.push(count);
         const groupCount = groupCountFor(count);
-        const sumsBuffer = createBuffer(
+        const sumsBuffer = resourceConstruction.ownBuffer(createBuffer(
           device,
           `${label}-gpu-count-${prefix}-level-${level}-sums`,
           groupCount
-        );
-        const offsetsBuffer = createBuffer(
+        ));
+        const offsetsBuffer = resourceConstruction.ownBuffer(createBuffer(
           device,
           `${label}-gpu-count-${prefix}-level-${level}-offsets`,
           groupCount
-        );
+        ));
         sums.push(sumsBuffer);
         offsets.push(offsetsBuffer);
         allocationEntries.push(
@@ -2559,6 +2832,11 @@ export function createWebGpuStableRadixScanUnique(device, {
         );
         count = groupCount;
       }
+      const fusedTopLevelIndex = levelCount >= 2
+        && levelMaximumElementCounts[levelCount - 2]
+          <= WEBGPU_SCAN_FUSED_TOP_ADD_MAX_ELEMENT_COUNT
+        ? levelCount - 1
+        : null;
       const levels = [];
       for (let level = 0; level < levelCount; level += 1) {
         const inputBuffer = level === 0 ? sourceInputBuffer : sums[level - 1];
@@ -2600,8 +2878,48 @@ export function createWebGpuStableRadixScanUnique(device, {
             }
           ]
         });
+        const fusedTopAddBindGroup = level === fusedTopLevelIndex
+          ? device.createBindGroup({
+              label: `${label}-gpu-count-${prefix}-scan-fused-top-${level}`,
+              layout:
+                gpuCountPipelines.scanFusedTopAdd.getBindGroupLayout(0),
+              entries: [
+                { binding: 0, resource: { buffer: inputBuffer } },
+                { binding: 1, resource: { buffer: outputBuffer } },
+                { binding: 2, resource: { buffer: sums[level] } },
+                { binding: 4, resource: { buffer: controlBuffer } },
+                {
+                  binding: 5,
+                  resource: {
+                    buffer: scanStaticBuffer,
+                    offset: staticOffset,
+                    size: 16
+                  }
+                },
+                {
+                  binding: 6,
+                  resource: {
+                    buffer: level === 1
+                      ? sourceOutputBuffer
+                      : offsets[level - 2]
+                  }
+                },
+                {
+                  binding: 7,
+                  resource: {
+                    buffer: scanStaticBuffer,
+                    offset:
+                      (firstStaticRow + level - 1)
+                        * paramsOffsetAlignment,
+                    size: 16
+                  }
+                }
+              ]
+            })
+          : null;
         levels.push(Object.freeze({
           level,
+          maximumElementCount: levelMaximumElementCounts[level],
           countOffsetWords: countOffsetWords + level,
           blockDispatchOffsetWords: dispatchOffsetWords + level * 6,
           blockDispatchOffsetBytes:
@@ -2610,10 +2928,17 @@ export function createWebGpuStableRadixScanUnique(device, {
           addDispatchOffsetBytes:
             (dispatchOffsetWords + level * 6 + 3) * UINT32_BYTES,
           blockBindGroup,
-          addBindGroup
+          addBindGroup,
+          fusedTopAddBindGroup
         }));
       }
-      return Object.freeze({ levels });
+      return Object.freeze({
+        levels,
+        fusedTopLevelIndex,
+        fusedTopAddEnabled: fusedTopLevelIndex !== null,
+        encodedDispatchCount:
+          levels.length * 2 - 1 - (fusedTopLevelIndex === null ? 0 : 1)
+      });
     };
 
     const histogramScanPopulation = createScanPopulation({
@@ -2638,7 +2963,7 @@ export function createWebGpuStableRadixScanUnique(device, {
       sourceOutputBuffer: headOffsetsBuffer
     });
 
-    gpuCountResources = {
+    const resources = {
       pipelines: gpuCountPipelines,
       controlBuffer,
       configArena,
@@ -2682,14 +3007,53 @@ export function createWebGpuStableRadixScanUnique(device, {
         };
       },
       destroy() {
-        for (const { buffer } of allocationEntries) buffer.destroy?.();
-        for (const slot of configSlots) slot.inUse = false;
+        destroyBuffersExactlyOnce(
+          allocationEntries.map(({ buffer }) => buffer)
+        );
+        for (const slot of configSlots) {
+          slot.inUse = false;
+          slot.bindGroups.clear();
+        }
       }
     };
-    return gpuCountResources;
+    resourceConstruction.commit();
+    gpuCountResources = resources;
+    return resources;
+    } catch (error) {
+      resourceConstruction.rollback();
+      throw error;
+    }
   }
 
-  function attachRetainedParamsLease(execution, lease) {
+  function attachRetainedParamsLease(execution, lease, {
+    ownedTransientBuffers = [],
+    childPreparedScans = []
+  } = {}) {
+    const authenticatedTransientBuffers = Object.freeze([
+      ...ownedTransientBuffers
+    ]);
+    const authenticatedChildPreparedScans = Object.freeze(
+      childPreparedScans.map(({
+        scanRuntime,
+        internals: providedInternals,
+        prepared
+      }) => {
+        const internals = providedInternals
+          ?? WEBGPU_SCAN_RUNTIME_INTERNALS.get(scanRuntime);
+        if (!internals?.finalizePreparedFromParent) {
+          throw new Error(`${label} child scan cleanup capability is unavailable`);
+        }
+        return Object.freeze({ internals, prepared });
+      })
+    );
+    ownedTransientBuffersByExecution.set(
+      execution,
+      authenticatedTransientBuffers
+    );
+    childPreparedScansByExecution.set(
+      execution,
+      authenticatedChildPreparedScans
+    );
     ownedExecutions.add(execution);
     if (lease) retainedParamsLeaseByExecution.set(execution, lease);
     return execution;
@@ -2783,6 +3147,8 @@ export function createWebGpuStableRadixScanUnique(device, {
           size: Math.max(paramsOffsetAlignment, passCount * paramsOffsetAlignment),
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
         });
+    const transientBuffer = retainedSlot ? null : buffer;
+    try {
     const byteOffset = retainedSlot?.radixByteOffset ?? 0;
     const data = new Uint32Array(
       Math.max(paramsOffsetAlignment, passCount * paramsOffsetAlignment) / UINT32_BYTES
@@ -2808,14 +3174,21 @@ export function createWebGpuStableRadixScanUnique(device, {
       }
     }
     device.queue.writeBuffer(buffer, byteOffset, data);
-    if (!retainedSlot) transients.add(buffer);
+    if (transientBuffer) transients.add(transientBuffer);
     return {
       buffer,
       byteOffset,
-      transientBuffer: retainedSlot ? null : buffer,
+      transientBuffer,
       paramsSlotIndex: retainedSlot?.slotIndex ?? null,
       paramsBufferResidency: retainedSlot ? 'retained-slot-arena' : 'transient-per-encode'
     };
+    } catch (error) {
+      if (transientBuffer) {
+        transients.delete(transientBuffer);
+        destroyBuffersExactlyOnce([transientBuffer]);
+      }
+      throw error;
+    }
   }
 
   function encodeSortInternal(encoder, {
@@ -2844,13 +3217,16 @@ export function createWebGpuStableRadixScanUnique(device, {
         elementCount: 0,
         sortedIndicesBuffer: sortedIndicesA,
         transientBuffers: []
-      }, retainedParamsLease);
+      }, retainedParamsLease, { ownedTransientBuffers: [] });
     }
     const generation = nonNegativeInteger(generationId, 'generationId', { max: 0xffffffff });
     if (retainControlParams && !retainedParamsLease?.slot?.inUse) {
       throw new Error(`${label} retained radix encoding requires an active params slot lease`);
     }
-    const params = createRadixParams(
+    let params = null;
+    let histogramScanEncoding = null;
+    try {
+    params = createRadixParams(
       { count, words, stride, generationId: generation },
       retainedParamsLease
     );
@@ -2865,7 +3241,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     const serialHistogramScanEnabled = resolvedSerialHistogramScanMaxElementCount > 0
       && histogramElementCount > WEBGPU_SCAN_ELEMENTS_PER_WORKGROUP
       && histogramElementCount <= resolvedSerialHistogramScanMaxElementCount;
-    const histogramScanEncoding = serialHistogramScanEnabled
+    histogramScanEncoding = serialHistogramScanEnabled
       ? null
       : histogramScan.prepare({
           inputBuffer: histogramBuffer,
@@ -3103,7 +3479,23 @@ export function createWebGpuStableRadixScanUnique(device, {
       paramsBufferResidency: params.paramsBufferResidency,
       readbackPerformed: false,
       transientBuffers
-    }, retainedParamsLease);
+    }, retainedParamsLease, {
+      ownedTransientBuffers: transientBuffers,
+      childPreparedScans: histogramScanEncoding
+        ? [{ scanRuntime: histogramScan, prepared: histogramScanEncoding }]
+        : []
+    });
+    } catch (error) {
+      if (histogramScanEncoding) {
+        WEBGPU_SCAN_RUNTIME_INTERNALS
+          .get(histogramScan)
+          ?.finalizePreparedFromParent(histogramScanEncoding);
+      }
+      if (params?.transientBuffer && transients.delete(params.transientBuffer)) {
+        destroyBuffersExactlyOnce([params.transientBuffer]);
+      }
+      throw error;
+    }
   }
 
   function createUniqueParams({
@@ -3122,6 +3514,8 @@ export function createWebGpuStableRadixScanUnique(device, {
           size: paramsOffsetAlignment,
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
         });
+    const transientBuffer = retainedSlot ? null : buffer;
+    try {
     const byteOffset = retainedSlot?.uniqueByteOffset ?? 0;
     device.queue.writeBuffer(buffer, byteOffset, new Uint32Array([
       count,
@@ -3133,14 +3527,21 @@ export function createWebGpuStableRadixScanUnique(device, {
       0,
       0
     ]));
-    if (!retainedSlot) transients.add(buffer);
+    if (transientBuffer) transients.add(transientBuffer);
     return {
       buffer,
       byteOffset,
-      transientBuffer: retainedSlot ? null : buffer,
+      transientBuffer,
       paramsSlotIndex: retainedSlot?.slotIndex ?? null,
       paramsBufferResidency: retainedSlot ? 'retained-slot-arena' : 'transient-per-encode'
     };
+    } catch (error) {
+      if (transientBuffer) {
+        transients.delete(transientBuffer);
+        destroyBuffersExactlyOnce([transientBuffer]);
+      }
+      throw error;
+    }
   }
 
   function encodeUniqueInternal(encoder, {
@@ -3178,7 +3579,10 @@ export function createWebGpuStableRadixScanUnique(device, {
     if (retainControlParams && !retainedParamsLease?.slot?.inUse) {
       throw new Error(`${label} retained unique encoding requires an active params slot lease`);
     }
-    const params = createUniqueParams({
+    let params = null;
+    let headScanEncoding = null;
+    try {
+    params = createUniqueParams({
       count,
       words,
       stride,
@@ -3195,7 +3599,6 @@ export function createWebGpuStableRadixScanUnique(device, {
     encoder.clearBuffer(uniqueOffsetsBuffer, 0, UINT32_BYTES);
 
     let markBindGroup = null;
-    let headScanEncoding = null;
     let scatterBindGroup = null;
     if (count > 0) {
       const markEntries = [
@@ -3376,7 +3779,23 @@ export function createWebGpuStableRadixScanUnique(device, {
       paramsBufferResidency: params.paramsBufferResidency,
       readbackPerformed: false,
       transientBuffers
-    }, retainedParamsLease);
+    }, retainedParamsLease, {
+      ownedTransientBuffers: transientBuffers,
+      childPreparedScans: headScanEncoding
+        ? [{ scanRuntime: headScan, prepared: headScanEncoding }]
+        : []
+    });
+    } catch (error) {
+      if (headScanEncoding) {
+        WEBGPU_SCAN_RUNTIME_INTERNALS
+          .get(headScan)
+          ?.finalizePreparedFromParent(headScanEncoding);
+      }
+      if (params?.transientBuffer && transients.delete(params.transientBuffer)) {
+        destroyBuffersExactlyOnce([params.transientBuffer]);
+      }
+      throw error;
+    }
   }
 
   function encodeSortUniqueGpuCount(encoder, args = {}) {
@@ -3492,6 +3911,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     const configLease = resources.acquireConfigSlot(
       args.retainedParamsSlotIndex
     );
+    const bindGroupTelemetry = { created: 0, reused: 0 };
     const configOffset = configLease.slot.byteOffset;
     const configData = new Uint32Array(paramsOffsetAlignment / UINT32_BYTES);
     configData[0] = countByteOffset / UINT32_BYTES;
@@ -3517,10 +3937,12 @@ export function createWebGpuStableRadixScanUnique(device, {
     device.queue.writeBuffer(configArena, configOffset, configData);
 
     try {
-      const prepareBindGroup = device.createBindGroup({
-        label: `${label}-gpu-count-prepare-bind-group`,
-        layout: gpuCountPipelines.prepare.getBindGroupLayout(0),
-        entries: [
+      const prepareBindGroup = retainedBindGroup(
+        configLease.slot,
+        'gpu-count-prepare',
+        gpuCountPipelines.prepare,
+        `${label}-gpu-count-prepare-bind-group`,
+        [
           { binding: 0, resource: { buffer: authorityBuffer } },
           { binding: 1, resource: { buffer: controlBuffer } },
           {
@@ -3531,72 +3953,115 @@ export function createWebGpuStableRadixScanUnique(device, {
               size: 80
             }
           }
-        ]
-      });
-      const initializeBindGroup = device.createBindGroup({
-        label: `${label}-gpu-count-initialize-bind-group`,
-        layout: gpuCountPipelines.initialize.getBindGroupLayout(0),
-        entries: [
+        ],
+        bindGroupTelemetry
+      );
+      const initializeBindGroup = retainedBindGroup(
+        configLease.slot,
+        'gpu-count-initialize',
+        gpuCountPipelines.initialize,
+        `${label}-gpu-count-initialize-bind-group`,
+        [
           { binding: 2, resource: { buffer: sortedIndicesA } },
           { binding: 5, resource: { buffer: controlBuffer } }
-        ]
-      });
+        ],
+        bindGroupTelemetry
+      );
       const skipDigitRows =
         (resolvedMaxKeyWordCount - words) * WEBGPU_RADIX_PASSES_PER_WORD;
+      const fullDigitRows = Array.from(
+        { length: words * WEBGPU_RADIX_PASSES_PER_WORD },
+        (_, index) => skipDigitRows + index
+      );
+      const requestedDigitRows = args.significantDigitRows;
+      const digitRows = requestedDigitRows == null
+        ? fullDigitRows
+        : Array.from(requestedDigitRows, (value, index) => {
+            const row = nonNegativeInteger(
+              value,
+              `significantDigitRows[${index}]`,
+              { max: maxRadixPassCount - 1 }
+            );
+            if (row < skipDigitRows) {
+              throw new RangeError(
+                'significantDigitRows must address only active key words'
+              );
+            }
+            return row;
+          });
+      if (digitRows.length === 0) {
+        throw new RangeError('significantDigitRows must retain at least one digit');
+      }
+      for (let index = 1; index < digitRows.length; index += 1) {
+        if (digitRows[index] <= digitRows[index - 1]) {
+          throw new RangeError(
+            'significantDigitRows must be strictly increasing in LSD radix order'
+          );
+        }
+      }
       let input = sortedIndicesA;
       let output = sortedIndicesB;
       const digitCommands = [];
-      for (let passIndex = 0;
-        passIndex < words * WEBGPU_RADIX_PASSES_PER_WORD;
-        passIndex += 1) {
-        const digitOffset =
-          (skipDigitRows + passIndex) * paramsOffsetAlignment;
+      for (let passIndex = 0; passIndex < digitRows.length; passIndex += 1) {
+        const digitRow = digitRows[passIndex];
+        const digitOffset = digitRow * paramsOffsetAlignment;
         const digitResource = {
           buffer: digitStaticBuffer,
           offset: digitOffset,
           size: 16
         };
-        const histogramBindGroup = device.createBindGroup({
-          label: `${label}-gpu-count-histogram-${passIndex}`,
-          layout: gpuCountPipelines.histogram.getBindGroupLayout(0),
-          entries: [
+        const histogramBindGroup = retainedBindGroup(
+          configLease.slot,
+          `gpu-count-histogram-${digitRow}`,
+          gpuCountPipelines.histogram,
+          `${label}-gpu-count-histogram-${passIndex}`,
+          [
             { binding: 0, resource: { buffer: keyBuffer } },
             { binding: 1, resource: { buffer: input } },
             { binding: 3, resource: { buffer: histogramBuffer } },
             { binding: 5, resource: { buffer: controlBuffer } },
             { binding: 6, resource: digitResource }
-          ]
-        });
-        const scatterBindGroup = device.createBindGroup({
-          label: `${label}-gpu-count-scatter-${passIndex}`,
-          layout: gpuCountPipelines.scatter.getBindGroupLayout(0),
-          entries: [
+          ],
+          bindGroupTelemetry
+        );
+        const scatterBindGroup = retainedBindGroup(
+          configLease.slot,
+          `gpu-count-scatter-${digitRow}`,
+          gpuCountPipelines.scatter,
+          `${label}-gpu-count-scatter-${passIndex}`,
+          [
             { binding: 0, resource: { buffer: keyBuffer } },
             { binding: 1, resource: { buffer: input } },
             { binding: 2, resource: { buffer: output } },
             { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
             { binding: 5, resource: { buffer: controlBuffer } },
             { binding: 6, resource: digitResource }
-          ]
-        });
+          ],
+          bindGroupTelemetry
+        );
         digitCommands.push({ histogramBindGroup, scatterBindGroup });
         [input, output] = [output, input];
       }
       const sortedIndicesBuffer = input;
-      const markBindGroup = device.createBindGroup({
-        label: `${label}-gpu-count-mark-heads-bind-group`,
-        layout: gpuCountPipelines.markHeads.getBindGroupLayout(0),
-        entries: [
+      const markBindGroup = retainedBindGroup(
+        configLease.slot,
+        'gpu-count-mark-heads',
+        gpuCountPipelines.markHeads,
+        `${label}-gpu-count-mark-heads-bind-group`,
+        [
           { binding: 0, resource: { buffer: keyBuffer } },
           { binding: 1, resource: { buffer: sortedIndicesBuffer } },
           { binding: 2, resource: { buffer: headFlagsBuffer } },
           { binding: 8, resource: { buffer: controlBuffer } }
-        ]
-      });
-      const scatterUniqueBindGroup = device.createBindGroup({
-        label: `${label}-gpu-count-scatter-unique-bind-group`,
-        layout: gpuCountPipelines.scatterUnique.getBindGroupLayout(0),
-        entries: [
+        ],
+        bindGroupTelemetry
+      );
+      const scatterUniqueBindGroup = retainedBindGroup(
+        configLease.slot,
+        'gpu-count-scatter-unique',
+        gpuCountPipelines.scatterUnique,
+        `${label}-gpu-count-scatter-unique-bind-group`,
+        [
           { binding: 0, resource: { buffer: keyBuffer } },
           { binding: 1, resource: { buffer: sortedIndicesBuffer } },
           { binding: 2, resource: { buffer: headFlagsBuffer } },
@@ -3604,12 +4069,15 @@ export function createWebGpuStableRadixScanUnique(device, {
           { binding: 4, resource: { buffer: uniqueKeysBuffer } },
           { binding: 5, resource: { buffer: uniqueOffsetsBuffer } },
           { binding: 8, resource: { buffer: controlBuffer } }
-        ]
-      });
-      const finalizeBindGroup = device.createBindGroup({
-        label: `${label}-gpu-count-finalize-unique-bind-group`,
-        layout: gpuCountPipelines.finalizeUnique.getBindGroupLayout(0),
-        entries: [
+        ],
+        bindGroupTelemetry
+      );
+      const finalizeBindGroup = retainedBindGroup(
+        configLease.slot,
+        'gpu-count-finalize-unique',
+        gpuCountPipelines.finalizeUnique,
+        `${label}-gpu-count-finalize-unique-bind-group`,
+        [
           { binding: 2, resource: { buffer: headFlagsBuffer } },
           { binding: 3, resource: { buffer: headOffsetsBuffer } },
           { binding: 5, resource: { buffer: uniqueOffsetsBuffer } },
@@ -3617,8 +4085,9 @@ export function createWebGpuStableRadixScanUnique(device, {
           { binding: 7, resource: { buffer: dispatchIndirectBuffer } },
           { binding: 8, resource: { buffer: controlBuffer } },
           { binding: 9, resource: { buffer: authorityBuffer } }
-        ]
-      });
+        ],
+        bindGroupTelemetry
+      );
       const gpuTimestampRecorder = args.gpuTimestampRecorder ?? null;
       const timestampProducerId =
         typeof args.timestampProducerId === 'string'
@@ -3667,6 +4136,14 @@ export function createWebGpuStableRadixScanUnique(device, {
       };
       const encodeScan = (population) => {
         for (const level of population.levels) {
+          if (level.level === population.fusedTopLevelIndex) {
+            encodeIndirect(
+              gpuCountPipelines.scanFusedTopAdd,
+              level.fusedTopAddBindGroup,
+              level.blockDispatchOffsetBytes
+            );
+            continue;
+          }
           encodeIndirect(
             gpuCountPipelines.scanBlocks,
             level.blockBindGroup,
@@ -3677,6 +4154,7 @@ export function createWebGpuStableRadixScanUnique(device, {
         // still encoded at their fixed maximum depth and GPU-gated to zero
         // whenever the authored live count does not reach that recursion.
         for (let level = population.levels.length - 2; level >= 0; level -= 1) {
+          if (level === population.fusedTopLevelIndex - 1) continue;
           const entry = population.levels[level];
           encodeIndirect(
             gpuCountPipelines.scanAdd,
@@ -3727,16 +4205,10 @@ export function createWebGpuStableRadixScanUnique(device, {
       const indirectDispatchCount =
         1
         + radixPassCount * (
-          2
-          + gpuCountControlLayout.histogramScanLevelCount
-          + Math.max(
-            0,
-            gpuCountControlLayout.histogramScanLevelCount - 1
-          )
+          2 + histogramScanPopulation.encodedDispatchCount
         )
         + 1
-        + gpuCountControlLayout.headScanLevelCount
-        + Math.max(0, gpuCountControlLayout.headScanLevelCount - 1)
+        + headScanPopulation.encodedDispatchCount
         + 1;
       return attachRetainedParamsLease({
         schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
@@ -3754,6 +4226,7 @@ export function createWebGpuStableRadixScanUnique(device, {
         keyWordCount: words,
         keyStrideWords: stride,
         radixPassCount,
+        significantDigitRows: Object.freeze([...digitRows]),
         sortedIndicesBuffer,
         uniqueHeadFlagsBuffer: headFlagsBuffer,
         uniqueGroupIndexBySortedPositionBuffer: headOffsetsBuffer,
@@ -3765,9 +4238,21 @@ export function createWebGpuStableRadixScanUnique(device, {
         uniqueOffsetCapacity: resolvedMaxElementCount + 1,
         gpuCountControlBuffer: controlBuffer,
         gpuCountControlLayout,
-        histogramScanMode: 'gpu-count-fixed-hierarchical',
+        histogramScanMode:
+          histogramScanPopulation.fusedTopAddEnabled
+            ? 'gpu-count-fixed-hierarchical-fused-top'
+            : 'gpu-count-fixed-hierarchical',
+        histogramScanFusedTopAddEnabled:
+          histogramScanPopulation.fusedTopAddEnabled,
+        headScanFusedTopAddEnabled:
+          headScanPopulation.fusedTopAddEnabled,
+        histogramScanEncodedDispatchCount:
+          histogramScanPopulation.encodedDispatchCount,
+        headScanEncodedDispatchCount:
+          headScanPopulation.encodedDispatchCount,
         encodedDispatchCount: indirectDispatchCount + 2,
         encodedIndirectDispatchCount: indirectDispatchCount,
+        encodedDirectDispatchCount: 2,
         encodedComputePassCount: 2,
         fixedMaximumTopology: true,
         timestampProducerId,
@@ -3775,6 +4260,8 @@ export function createWebGpuStableRadixScanUnique(device, {
         inactiveDispatchPolicy: 'zero-workgroup-indirect-row',
         paramsBufferCreationCount: 0,
         gpuBufferCreationCountDuringEncode: 0,
+        bindGroupCreationCount: bindGroupTelemetry.created,
+        bindGroupReuseCount: bindGroupTelemetry.reused,
         paramsWriteCount: 1,
         paramsSlotIndex: configLease.slot.slotIndex,
         paramsBufferResidency: 'retained-gpu-count-config-arena',
@@ -3783,7 +4270,7 @@ export function createWebGpuStableRadixScanUnique(device, {
           gpuCountControlLayout.controlWordCount,
         readbackPerformed: false,
         transientBuffers: []
-      }, configLease);
+      }, configLease, { ownedTransientBuffers: [] });
     } catch (error) {
       configLease.release();
       throw error;
@@ -3791,6 +4278,34 @@ export function createWebGpuStableRadixScanUnique(device, {
   }
 
   const releasedExecutions = new WeakSet();
+
+  function executionReleaseRecord(value) {
+    return Object.freeze({
+      ownedTransientBuffers:
+        ownedTransientBuffersByExecution.get(value) ?? Object.freeze([]),
+      childPreparedScans:
+        childPreparedScansByExecution.get(value) ?? Object.freeze([])
+    });
+  }
+
+  function destroyExecutionTransientBuffers(value, releaseRecord = null) {
+    if (!value || !ownedExecutions.has(value)) return false;
+    const authenticatedReleaseRecord = releaseRecord
+      ?? executionReleaseRecord(value);
+    for (const { internals, prepared } of
+      authenticatedReleaseRecord.childPreparedScans) {
+      internals.finalizePreparedFromParent(prepared);
+    }
+    const ownedTransientBuffers = [];
+    for (const buffer of authenticatedReleaseRecord.ownedTransientBuffers) {
+      if (!transients.delete(buffer)) continue;
+      ownedTransientBuffers.push(buffer);
+    }
+    destroyBuffersExactlyOnce(ownedTransientBuffers);
+    ownedTransientBuffersByExecution.delete(value);
+    childPreparedScansByExecution.delete(value);
+    return true;
+  }
 
   function assertOwnedExecution(value) {
     if (!value || typeof value !== 'object' || value.schema !== ULG_WEBGPU_RADIX_UNIQUE_SCHEMA) {
@@ -3803,16 +4318,10 @@ export function createWebGpuStableRadixScanUnique(device, {
     }
   }
 
-  function finalizeReleaseExecution(value) {
+  function finalizeReleaseExecution(value, releaseRecord = null) {
     assertOwnedExecution(value);
     if (releasedExecutions.has(value)) return false;
-    histogramScan.releaseTransientBuffers(value);
-    headScan.releaseTransientBuffers(value);
-    for (const buffer of value.transientBuffers || []) {
-      if (!transients.has(buffer)) continue;
-      transients.delete(buffer);
-      buffer.destroy?.();
-    }
+    destroyExecutionTransientBuffers(value, releaseRecord);
     retainedParamsLeaseByExecution.get(value)?.release?.();
     retainedParamsLeaseByExecution.delete(value);
     releasedExecutions.add(value);
@@ -3829,17 +4338,38 @@ export function createWebGpuStableRadixScanUnique(device, {
     return finalizeReleaseExecution(value);
   }
 
-  async function releaseExecutionAfter(value, submissionFence) {
-    if (!submissionFence?.then) {
-      throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
-    }
-    assertOwnedExecution(value);
-    if (releasedExecutions.has(value)) return false;
-    await submissionFence;
+  function releaseExecutionQueueOrdered(value) {
+    // The caller has submitted the execution and every consumer to the same
+    // GPUQueue before relinquishing it. Releasing retained parameter slots and
+    // destroying one-use buffers here is safe: later queue writes/submissions
+    // are ordered after the submitted consumers, while GPUBuffer.destroy()
+    // defers physical reclamation until those earlier uses finish.
     return finalizeReleaseExecution(value);
   }
 
-  return {
+  function canReleaseExecutionQueueOrdered(value) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && value.schema === ULG_WEBGPU_RADIX_UNIQUE_SCHEMA
+      && ownedExecutions.has(value)
+      && !releasedExecutions.has(value)
+    );
+  }
+
+  async function releaseExecutionAfter(value, submissionFence) {
+    assertOwnedExecution(value);
+    if (releasedExecutions.has(value)) return false;
+    const authenticatedReleaseRecord = executionReleaseRecord(value);
+    const fencePromise = exactThenablePromise(
+      submissionFence,
+      'releaseExecutionAfter requires a submission-fence thenable'
+    );
+    await fencePromise;
+    return finalizeReleaseExecution(value, authenticatedReleaseRecord);
+  }
+
+  const runtime = {
     schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
     status: 'webgpu-stable-radix-scan-unique-ready',
     get pipelineCount() {
@@ -3907,6 +4437,8 @@ export function createWebGpuStableRadixScanUnique(device, {
       const lease = retainControlParams
         ? acquireRetainedParamsSlot(args.retainedParamsSlotIndex)
         : null;
+      let sorted = null;
+      let unique = null;
       try {
         const gpuTimestampRecorder = args.gpuTimestampRecorder ?? null;
         const sortTimestampProducerId = typeof args.sortTimestampProducerId === 'string'
@@ -3928,7 +4460,7 @@ export function createWebGpuStableRadixScanUnique(device, {
               keyWordCount: Number(args.keyWordCount) || 0
             })
           : null;
-        const sorted = encodeSortInternal(encoder, args, lease);
+        sorted = encodeSortInternal(encoder, args, lease);
         if (sortTimestampSpan) {
           gpuTimestampRecorder.endEncoderSpan(encoder, sortTimestampSpan);
         }
@@ -3943,13 +4475,21 @@ export function createWebGpuStableRadixScanUnique(device, {
               keyWordCount: Number(args.keyWordCount) || 0
             })
           : null;
-        const unique = encodeUniqueInternal(encoder, {
+        unique = encodeUniqueInternal(encoder, {
           ...args,
           sortedIndicesBuffer: sorted.sortedIndicesBuffer
         }, lease);
         if (uniqueTimestampSpan) {
           gpuTimestampRecorder.endEncoderSpan(encoder, uniqueTimestampSpan);
         }
+        const combinedOwnedTransientBuffers = [
+          ...(ownedTransientBuffersByExecution.get(sorted) ?? []),
+          ...(ownedTransientBuffersByExecution.get(unique) ?? [])
+        ];
+        const combinedChildPreparedScans = [
+          ...(childPreparedScansByExecution.get(sorted) ?? []),
+          ...(childPreparedScansByExecution.get(unique) ?? [])
+        ];
         const execution = {
           ...unique,
           status: 'webgpu-stable-radix-sort-unique-csr-encoded',
@@ -3969,16 +4509,23 @@ export function createWebGpuStableRadixScanUnique(device, {
           paramsWriteCount: (sorted.paramsWriteCount ?? 0)
             + (unique.paramsWriteCount ?? 0),
           clearedWordCount: unique.clearedWordCount ?? 0,
-          transientBuffers: [...sorted.transientBuffers, ...unique.transientBuffers]
+          transientBuffers: [...combinedOwnedTransientBuffers]
         };
-        return attachRetainedParamsLease(execution, lease);
+        return attachRetainedParamsLease(execution, lease, {
+          ownedTransientBuffers: combinedOwnedTransientBuffers,
+          childPreparedScans: combinedChildPreparedScans
+        });
       } catch (error) {
+        destroyExecutionTransientBuffers(sorted);
+        destroyExecutionTransientBuffers(unique);
         lease?.release();
         throw error;
       }
     },
     encodeSortUniqueGpuCount,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     allocationEntries() {
       return [
@@ -4007,7 +4554,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      for (const buffer of [
+      destroyBuffersExactlyOnce([
         sortedIndicesA,
         sortedIndicesB,
         histogramBuffer,
@@ -4020,12 +4567,12 @@ export function createWebGpuStableRadixScanUnique(device, {
         dispatchIndirectBuffer,
         radixParamsArena,
         uniqueParamsArena
-      ]) buffer?.destroy?.();
+      ]);
       histogramScan.destroy();
       headScan.destroy();
       gpuCountResources?.destroy();
       gpuCountResources = null;
-      for (const buffer of transients) buffer.destroy?.();
+      destroyBuffersExactlyOnce([...transients]);
       transients.clear();
       for (const slot of retainedParamsSlots) {
         slot.inUse = false;
@@ -4033,4 +4580,10 @@ export function createWebGpuStableRadixScanUnique(device, {
       }
     }
   };
+  construction.commit();
+  return runtime;
+  } catch (error) {
+    construction.rollback();
+    throw error;
+  }
 }

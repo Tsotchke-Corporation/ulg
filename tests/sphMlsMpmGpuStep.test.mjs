@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -48,6 +49,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_SPH_REACTION_PLACEMENT_CONTINUATION_ADOPTION_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RESOLVER_SCHEMA,
@@ -81,11 +83,15 @@ import {
   createSphSpatialGasLedgerProducerStageComputeTask,
   createSphGasCellEosProducerStageComputeTask,
   createSphPressureInterfaceStageComputeTask,
+  createMlsMpmMechanicsP2gStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
+  createMlsMpmMechanicsG2pStageComputeTask,
   createMlsMpmResidentStepComputeTask,
   createMlsMpmResidentStepsComputeTask,
+  createMlsMpmResidentStepsCommitDelta,
   createMlsMpmResidentStepGpuFenceReport,
   compactResidentProductEventBufferWebGpu,
+  adoptSphReactionPlacementContinuationWebGpu,
   mergeResidentProductMassBuffersWebGpu,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
@@ -116,6 +122,7 @@ import {
   runSphThermalPhaseStageComputeTask,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
+  normalizePressureInterfaceGasCellFieldImport,
   scheduleSphGasCellEosFinalConsumerRelease,
   runSphPressureInterfaceStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -132,7 +139,12 @@ import {
   submitMlsMpmResidentStepComputeTask,
   submitMlsMpmResidentStepsComputeTask,
   summarizeGpuTimestampRecorderQueueStages,
-  summarizeMlsMpmResidentHotLoopBudget
+  summarizeMlsMpmResidentHotLoopBudget,
+  thermalAuthorityTaskPayloadFromStepOptions,
+  phaseVolumeAmbientBuoyancyExecutionRequired,
+  phaseVolumeAmbientBuoyancyRequired,
+  residentProductMassRequiresProductAwareP2g,
+  resolvePhaseVolumeAmbientBuoyancyExecution
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
   schroederSpatialPhaseVolumeTransportWgsl
@@ -148,11 +160,22 @@ import {
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
+import {
+  runSphPressureInterfaceForceRowsWebGpu
+} from '../src/runtime/sph/sphPressureInterfaceGpuKernel.js';
 import { reconstructMlsMpmG2pCpu } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
   runMlsMpmResidentSummaryWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
+import {
+  createGpuReadbackTelemetry
+} from '../src/runtime/sph/sphGpuReadbackTelemetry.js';
+import {
+  createResidentProductEventCountControlWords,
+  registerResidentProductEventCountAuthority,
+  resolveResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA
@@ -164,8 +187,13 @@ import {
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+  describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource
 } from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
+import {
+  describeSphCpuSeededGasPressureAuthorityGpu,
+  isExactSphCpuSeededGasPressureAuthorityGpu
+} from '../src/runtime/sph/sphCpuSeededGasPressureAuthorityGpu.js';
 import {
   SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID,
@@ -179,6 +207,9 @@ import {
 import {
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_MODE,
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_STATUS,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
   SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   SCHROEDER_SPATIAL_MECHANICAL_SOURCE_POSITION_AUTHORITY,
   SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
@@ -193,12 +224,22 @@ import {
 } from '../src/runtime/residentStateAuthority.js';
 import {
   createSchroederHierarchyArtifactLedger,
+  prepareSchroederHierarchyArtifactTransferCleanupClaims,
+  registerSchroederHierarchyArtifact,
   registerSchroederHierarchyArtifactFamily,
   releaseSchroederHierarchyArtifactTransfers,
   scheduleSchroederHierarchyArtifactRetirement,
+  transferSchroederHierarchyArtifact,
   transferSchroederHierarchyArtifactFamily,
   summarizeSchroederHierarchyArtifactLedger
 } from '../src/runtime/sph/schroederHierarchyArtifactLedger.js';
+import {
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered,
+  submitQueueOrderedFinalConsumerWork
+} from '../src/runtime/webgpuComputeLayout.js';
 
 const RUN_NATIVE_PHASE_LINEAGE_SUMMARY =
   process.env.ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY === '1';
@@ -208,6 +249,83 @@ const RUN_NATIVE_ACTIVE_SOURCE_P2G =
   process.env.ULG_RUN_NATIVE_ACTIVE_SOURCE_P2G === '1';
 const NATIVE_ACTIVE_SOURCE_P2G_BASE_URL =
   process.env.ULG_ACTIVE_SOURCE_P2G_BASE_URL || 'https://127.0.0.1:5174/';
+const RUN_NATIVE_PRODUCT_HISTORY_PROMOTION =
+  process.env.ULG_RUN_NATIVE_PRODUCT_HISTORY_PROMOTION === '1';
+const NATIVE_PRODUCT_HISTORY_PROMOTION_BASE_URL =
+  process.env.ULG_PRODUCT_HISTORY_PROMOTION_BASE_URL
+  || 'https://127.0.0.1:5174/';
+
+test('reaction-placement continuation adoption fails closed before minting copied lineage or lifecycle authority', () => {
+  assert.equal(
+    ULG_SPH_REACTION_PLACEMENT_CONTINUATION_ADOPTION_SCHEMA,
+    'peercompute.ulg.sph-reaction-placement-continuation-adoption.v1'
+  );
+  const device = {
+    queue: {
+      onSubmittedWorkDone: () => Promise.resolve(true)
+    }
+  };
+  const positionEpochFloorReceipt = {};
+  const baseResult = {
+    schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+    backend: 'webgpu',
+    status: 'reaction-step-executed',
+    readbackMode: 'no-full-readback',
+    retainedOutputParticleBuffers: true,
+    canonicalReactionPlacementSourceFamily: true,
+    reactionPlacementPositionEpochFloorReceipt: positionEpochFloorReceipt,
+    reactionPlacementDestinationOwnershipTransferred: true,
+    reactionPlacementDestinationReturnScheduled: false,
+    destroyOutputParticleBuffers: () => true
+  };
+  const baseInputs = {
+    device,
+    reactionStep: baseResult,
+    sphParticleState: { particleCount: 1 },
+    mlsMpmParticleState: { particleCount: 1 },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 1
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 1
+    },
+    placementArtifact: {},
+    positionEpochFloorReceipt
+  };
+
+  assert.throws(
+    () => adoptSphReactionPlacementContinuationWebGpu({
+      ...baseInputs,
+      reactionStep: {
+        ...baseResult,
+        reactionPlacementDestinationOwnershipTransferred: false
+      }
+    }),
+    (error) => (
+      error?.code
+        === 'ERR_SPH_REACTION_PLACEMENT_CONTINUATION_OWNERSHIP'
+    )
+  );
+  assert.throws(
+    () => adoptSphReactionPlacementContinuationWebGpu({
+      ...baseInputs,
+      mlsMpmParticleState: { particleCount: 2 }
+    }),
+    (error) => (
+      error?.code
+        === 'ERR_SPH_REACTION_PLACEMENT_CONTINUATION_SOURCE_LINEAGE'
+    )
+  );
+  assert.throws(
+    () => adoptSphReactionPlacementContinuationWebGpu(baseInputs),
+    (error) => (
+      error?.code
+        === 'ERR_SPH_REACTION_PLACEMENT_CONTINUATION_ARTIFACT'
+    )
+  );
+});
 
 test('mechanics-field indirect consumers authenticate and flatten public x/y dispatches', () => {
   for (const wgsl of [
@@ -1006,6 +1124,7 @@ function fakeBufferTracker() {
 }
 
 function canonicalMechanicalProposalFixture({
+  device,
   generation,
   makeBuffer,
   encodeApply,
@@ -1029,6 +1148,7 @@ function canonicalMechanicalProposalFixture({
   const scaleBuffer = makeBuffer(`${labelPrefix}-scales`);
   const proposalBuffer = makeBuffer(`${labelPrefix}-rows`);
   const energyLedgerBuffer = proposalBuffer;
+  const particleCount = 2;
   const evidence = Object.freeze({
     buffer: traversalBuffers[0],
     traversalBuffers,
@@ -1036,7 +1156,7 @@ function canonicalMechanicalProposalFixture({
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
   });
   const contactGraph = Object.freeze({
-    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v3',
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v8',
     status: 'schroeder-spatial-mechanical-pair-graph-prepared',
     selectedLevel: 0,
     directedPairCapacity: 4,
@@ -1045,6 +1165,9 @@ function canonicalMechanicalProposalFixture({
     sourceCountBuffer,
     sourceOffsetBuffer,
     appendStagingBuffer,
+    interfaceReceiptBuffer: appendStagingBuffer,
+    interfaceReceiptSchema:
+      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2',
     directedPeerBuffer,
     scratchStateABuffer,
     scratchStateBBuffer,
@@ -1059,6 +1182,24 @@ function canonicalMechanicalProposalFixture({
       energyLedgerAliasByteOffset: 64
     })
   });
+  const contactInterfaceReceipt = Object.freeze({
+    schema:
+      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2',
+    status: 'schroeder-spatial-mechanical-interface-receipt-deferred',
+    ready: true,
+    generation,
+    device,
+    generationId: generation.execution.generationId,
+    supportEpoch: generation.execution.supportEpoch,
+    selectedLevel: 0,
+    particleCount,
+    buffer: appendStagingBuffer,
+    fullParticleReadbackPerformed: false,
+    hostSummaryReadbackPerformed: false,
+    failClosed: true,
+    released: false,
+    releaseScheduled: false
+  });
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_SCHEMA,
     status: SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_STATUS,
@@ -1072,6 +1213,7 @@ function canonicalMechanicalProposalFixture({
     generation,
     generationId: generation.execution.generationId,
     supportEpoch: generation.execution.supportEpoch,
+    particleCount,
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
     solverIterationCount: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
     encodedDispatchCount: SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT,
@@ -1089,6 +1231,7 @@ function canonicalMechanicalProposalFixture({
     proposalRowWords: 8,
     proposalRowStrideFloats: 8,
     contactGraph,
+    contactInterfaceReceipt,
     graphControlBuffer,
     indirectDispatchBuffer,
     sourceCountBuffer,
@@ -1251,6 +1394,11 @@ function noFullReadbackResidentStepFixture() {
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-no-full-p2g',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyGridBuffer() {
           this.gridBuffer.destroy();
         }
@@ -1276,6 +1424,11 @@ function noFullReadbackResidentStepFixture() {
         normalHotLoopReadbackFree: true,
         queueCompletionStatus: 'queue-work-completed',
         queueCompletionMethod: 'queue.onSubmittedWorkDone',
+        ...createGpuReadbackTelemetry({
+          scope: 'test-no-full-grid-update',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyUpdatedGridBuffer() {
           this.updatedGridBuffer.destroy();
         }
@@ -1304,6 +1457,11 @@ function noFullReadbackResidentStepFixture() {
         retainedOutputParticleBuffers: true,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-no-full-g2p',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyOutputParticleBuffers() {
           this.stateBuffer.destroy();
           this.mechanicsBuffer.destroy();
@@ -1396,6 +1554,23 @@ function residentSpatialEpochTransactionFixture({
     })
   };
 }
+
+test('resident step forwards the exact surface-stress impulse cap to grid update', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const baseGridUpdateRunner = options.gridUpdateRunner;
+  let observedMaxImpulseFraction = null;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    phaseVolumeMaxImpulseFraction: 0,
+    gridUpdateRunner(args) {
+      observedMaxImpulseFraction = args.phaseVolumeMaxImpulseFraction;
+      return baseGridUpdateRunner(args);
+    }
+  });
+
+  assert.equal(observedMaxImpulseFraction, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+});
 
 test('MLS-MPM spatial epoch transaction admits non-fused readers and quarantines nested stale reaction views', async () => {
   const { buffers, tracker, options } = noFullReadbackResidentStepFixture();
@@ -1757,7 +1932,9 @@ function fakeSummaryDevice(summaryValues) {
         size,
         usage,
         destroyed: false,
+        destroyCount: 0,
         destroy() {
+          this.destroyCount += 1;
           this.destroyed = true;
         },
         async mapAsync() {},
@@ -1953,6 +2130,203 @@ function fakeSummaryDevice(summaryValues) {
       };
     }
   };
+}
+
+function ownDataPropertyGraph(root) {
+  const pending = [root];
+  const seen = new Set();
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (
+      !value
+      || (typeof value !== 'object' && typeof value !== 'function')
+      || seen.has(value)
+    ) continue;
+    seen.add(value);
+    for (const key of Reflect.ownKeys(value)) {
+      let descriptor;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(value, key);
+      } catch {
+        continue;
+      }
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+      const nested = descriptor.value;
+      if (
+        nested
+        && (typeof nested === 'object' || typeof nested === 'function')
+      ) pending.push(nested);
+    }
+  }
+  return seen;
+}
+
+function retainedGasOccupancyGenerationFixture(device, {
+  particleCount = 2,
+  storageGeneration = 301,
+  physicsTick = 302,
+  physicsSubstep = 0,
+  positionEpoch = 303,
+  topologyEpoch = 304,
+  chartEpoch = 305,
+  levelEpoch = 306,
+  supportEpoch = 307
+} = {}) {
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const assignmentBuffer = taggedBuffer(
+    'retained-gas-occupancy-level-assignment',
+    particleCount * SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceStateBuffer = taggedBuffer(
+    'retained-gas-occupancy-source-state',
+    particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceMechanicsBuffer = taggedBuffer(
+    'retained-gas-occupancy-source-mechanics-v0j',
+    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const particleIdentityBuffer = taggedBuffer(
+    'retained-gas-occupancy-source-identity',
+    particleCount * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const epochIdentity = Object.freeze({
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment: {
+      schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+      status: 'schroeder-level-assignment-submitted',
+      bufferFamilyGenerationStatus:
+        'schroeder-particle-buffer-family-generation-ready',
+      particleCount,
+      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+      assignmentBuffer,
+      assignmentBufferByteLength: assignmentBuffer.size,
+      sourceStateBuffer,
+      sourceStateBufferBorrowed: true,
+      sourceMechanicsBuffer,
+      sourceMechanicsBufferBorrowed: true,
+      sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+      ...epochIdentity,
+      minLevel: 0,
+      maxLevel: 0,
+      chartId: 0,
+      baseGridSpacingM: 1
+    },
+    particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      selectedLevel: 0,
+      gridDims: [2, 2, 2],
+      gridNodeCount: 8,
+      gridShift: 1,
+      gridSpacingM: 1
+    },
+    exactNearCellTreeEnabled: false
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.ok(generation.mechanicsLevelViews[0].phaseVolumeMoment);
+  return { generation, epochIdentity };
+}
+
+let retainedGasActiveNodeFixtureSerial = 0;
+
+function retainedGasActiveNodeGenerationFixture(device, {
+  particleCount = 2,
+  gridSpacingM = 1
+} = {}) {
+  const serial = ++retainedGasActiveNodeFixtureSerial;
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label: `${label}-${serial}`, size, usage: 128 | 4 | 8 }),
+    device
+  );
+  const activeNodeBuffer = taggedBuffer(
+    'retained-gas-active-node-source',
+    particleCount * 16 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const logicalCountBuffer = taggedBuffer(
+    'retained-gas-active-node-count',
+    128
+  );
+  const epoch = {
+    storageGeneration: 400 + serial,
+    physicsTick: 500 + serial,
+    physicsSubstep: 0,
+    positionEpoch: 600 + serial,
+    topologyEpoch: 700 + serial,
+    chartEpoch: 800 + serial,
+    levelEpoch: 900 + serial,
+    supportEpoch: 1000 + serial
+  };
+  const activeNodeList = {
+    schema: 'peercompute.ulg.sph-spatial-gas-active-node-adapter.v2',
+    status: 'sph-spatial-gas-active-node-adapter-submitted',
+    spatialDirectorySourceSchema:
+      'peercompute.ulg.schroeder-spatial-directory-active-node-source.v1',
+    spatialDirectorySourceStatus: 'schroeder-spatial-directory-source-ready',
+    spatialDirectorySourceReady: true,
+    spatialEpochSourceSchema:
+      'peercompute.ulg.sph-product-event-capacity-spatial-source.v1',
+    spatialEpochSourceStatus: 'sph-product-event-capacity-spatial-source-ready',
+    spatialEpochSourceReady: true,
+    spatialEpochPositionAuthority: 'reaction-product-event-birth-position',
+    spatialEpochLevelSpacingMode: 'uniform-gas-cell-size',
+    spatialEpochBaseGridSpacingM: Math.fround(gridSpacingM),
+    spatialEpochMinLevel: 0,
+    spatialEpochMaxLevel: 0,
+    spatialEpochChartId: 0,
+    activeCandidateCount: particleCount,
+    activeNodeCount: particleCount,
+    activeNodeStrideFloats: 16,
+    activeNodeBuffer,
+    buffer: activeNodeBuffer,
+    logicalSourceCountAuthority: Object.freeze({
+      schema: 'peercompute.ulg.schroeder-spatial-gpu-logical-count-source.v1',
+      status: 'schroeder-spatial-gpu-logical-count-source-ready',
+      ready: true,
+      buffer: logicalCountBuffer,
+      byteOffset: 0,
+      sourceCapacity: particleCount,
+      storageGeneration: epoch.storageGeneration,
+      executionGeneration: serial
+    }),
+    logicalSourceCountGpuAuthored: true,
+    spatialEpochStorageGeneration: epoch.storageGeneration,
+    spatialEpochPhysicsTick: epoch.physicsTick,
+    spatialEpochPhysicsSubstep: epoch.physicsSubstep,
+    spatialEpochPositionEpoch: epoch.positionEpoch,
+    spatialEpochTopologyEpoch: epoch.topologyEpoch,
+    spatialEpochChartEpoch: epoch.chartEpoch,
+    spatialEpochLevelEpoch: epoch.levelEpoch,
+    spatialEpochSupportEpoch: epoch.supportEpoch,
+    phaseVolumeAssignmentOverlayEnabled: false,
+    sourceValidityAuthority:
+      'stable-gpu-residual-compaction-with-authenticated-logical-prefix-count'
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    activeNodeList,
+    particleCount,
+    laneId: `retained-gas-active-node-fixture-${serial}`,
+    sourceFamily: 'sph-reaction-product-event-capacity-gas-ledger',
+    allowPhaseVolumeOverlay: false
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  return generation;
 }
 
 function deferredTestPromise() {
@@ -2230,6 +2604,40 @@ test('resident product-event compaction rejects legacy or torn row strides befor
   );
 });
 
+test('resident product-event compaction reports its count map and awaited queue fence', async () => {
+  const device = fakeSummaryDevice(new Uint32Array([1]));
+  let queueFenceCount = 0;
+  const originalOnSubmittedWorkDone =
+    device.queue.onSubmittedWorkDone;
+  device.queue.onSubmittedWorkDone = async () => {
+    queueFenceCount += 1;
+    return originalOnSubmittedWorkDone.call(device.queue);
+  };
+  const sourceBuffer = device.createBuffer({
+    label: 'resident-product-event-compaction-source',
+    size: 128,
+    usage: 4 | 128
+  });
+  const compacted = await compactResidentProductEventBufferWebGpu({
+    device,
+    sourceBuffer,
+    rowCount: 1,
+    strideFloats: 32,
+    strideBytes: 128
+  });
+
+  assert.equal(compacted.rowCount, 1);
+  assert.equal(compacted.byteLength, 128);
+  assert.equal(compacted.mapAsyncCount, 1);
+  assert.equal(compacted.readbackBytes, 4);
+  assert.equal(compacted.hostQueueFenceCount, 1);
+  assert.equal(compacted.normalHotLoopReadbackFree, false);
+  assert.equal(queueFenceCount, 1);
+
+  compacted.buffer.destroy?.();
+  sourceBuffer.destroy?.();
+});
+
 test('reaction mutation authority exposes independent state thermo and mechanics components', () => {
   const stateBuffer = { label: 'reaction-state' };
   const thermoBuffer = { label: 'reaction-thermo' };
@@ -2348,6 +2756,13 @@ test('Schroeder far-force delta fusion emits retained state without full readbac
   assert.equal(fusion.status, 'schroeder-far-force-delta-fusion-submitted');
   assert.equal(fusion.readbackMode, 'no-full-readback');
   assert.equal(fusion.fullReadbackPerformed, false);
+  assert.equal(fusion.fullParticleReadbackPerformed, false);
+  assert.equal(fusion.fullParticleReadbackFree, true);
+  assert.equal(fusion.readbackTelemetryComplete, true);
+  assert.deepEqual(fusion.readbackTelemetryUnknownSources, []);
+  assert.equal(fusion.mapAsyncCount, 0);
+  assert.equal(fusion.readbackBytes, 0);
+  assert.equal(fusion.hostQueueFenceCount, 0);
   assert.equal(fusion.normalHotLoopReadbackFree, true);
   assert.equal(fusion.forceApplicationRowCount, 1);
   assert.equal(fusion.stateBufferByteLength, buffers.sphParticleState.state.byteLength);
@@ -2362,6 +2777,25 @@ test('Schroeder far-force delta fusion emits retained state without full readbac
     device.createdBuffers.some((buffer) => String(buffer.label).includes('schroeder-far-force-delta-fusion-readback')),
     false
   );
+
+  const fullReadbackFusion = await runSchroederFarForceDeltaFusionWebGpu({
+    device,
+    sphParticleState: buffers.sphParticleState,
+    sourceStateBuffer,
+    schroederFarAggregateForceApplication,
+    readbackMode: 'full-parity-readback'
+  });
+  assert.equal(fullReadbackFusion.fullReadbackPerformed, true);
+  assert.equal(fullReadbackFusion.fullParticleReadbackPerformed, true);
+  assert.equal(fullReadbackFusion.fullParticleReadbackFree, false);
+  assert.equal(fullReadbackFusion.readbackTelemetryComplete, true);
+  assert.equal(fullReadbackFusion.mapAsyncCount, 1);
+  assert.equal(
+    fullReadbackFusion.readbackBytes,
+    buffers.sphParticleState.state.byteLength
+  );
+  assert.equal(fullReadbackFusion.hostQueueFenceCount, 0);
+  assert.equal(fullReadbackFusion.normalHotLoopReadbackFree, false);
 });
 
 test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not requested', async () => {
@@ -2767,6 +3201,11 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(summary.compactReadbackFloatCount, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
   assert.equal(summary.queueCompletionStatus, 'readback-map-completed');
   assert.equal(summary.queueCompletionMethod, 'mapAsync(readback-buffer)');
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 1);
+  assert.equal(summary.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.hostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
   assert.equal(summary.timing.schema, 'peercompute.ulg.mls-mpm-resident-summary-timing.v0');
   assert.equal(summary.timing.queueFenceAttribution, 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work');
   assert.equal(summary.timing.compactReadbackByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
@@ -3166,6 +3605,10 @@ test('native WebGPU executes ActiveSource-v2 sparse/A=0 P2G and compiles physica
         const step = await import(
           `/src/runtime/sph/sphMlsMpmGpuStep.js?nativeActiveSourceP2g=${nonce}`
         );
+        const denseCompatibility = await import(
+          '/ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js'
+            + `?nativeActiveSourceDense=${nonce}`
+        );
         const definitions = [
           [
             'p2g-observed',
@@ -3212,6 +3655,40 @@ test('native WebGPU executes ActiveSource-v2 sparse/A=0 P2G and compiles physica
               'consume_g2p_fine_reflux_receipt',
               'consume_g2p_coarse_reflux_receipt'
             ]
+          ],
+          [
+            'p2g-dense-single-level-observed',
+            denseCompatibility
+              .mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl,
+            [
+              'preflight_active_source_dense_single_level',
+              'main',
+              'scatter_product_events',
+              'finalize_grid'
+            ]
+          ],
+          [
+            'p2g-dense-single-level-unobserved',
+            denseCompatibility
+              .mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl,
+            [
+              'preflight_active_source_dense_single_level',
+              'main',
+              'scatter_product_events',
+              'finalize_grid'
+            ]
+          ],
+          [
+            'g2p-dense-single-level-observed',
+            denseCompatibility
+              .mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl,
+            ['main', 'finalize_canonical_spatial_authority']
+          ],
+          [
+            'g2p-dense-single-level-unobserved',
+            denseCompatibility
+              .mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl,
+            ['main', 'finalize_canonical_spatial_authority']
           ]
         ];
         const compilationErrors = [];
@@ -3607,7 +4084,19 @@ test('native WebGPU executes ActiveSource-v2 sparse/A=0 P2G and compiles physica
     'g2p-cross-level-unobserved:measure_g2p_energy_receipt',
     'g2p-cross-level-unobserved:consume_g2p_energy_receipt',
     'g2p-cross-level-unobserved:consume_g2p_fine_reflux_receipt',
-    'g2p-cross-level-unobserved:consume_g2p_coarse_reflux_receipt'
+    'g2p-cross-level-unobserved:consume_g2p_coarse_reflux_receipt',
+    'p2g-dense-single-level-observed:preflight_active_source_dense_single_level',
+    'p2g-dense-single-level-observed:main',
+    'p2g-dense-single-level-observed:scatter_product_events',
+    'p2g-dense-single-level-observed:finalize_grid',
+    'p2g-dense-single-level-unobserved:preflight_active_source_dense_single_level',
+    'p2g-dense-single-level-unobserved:main',
+    'p2g-dense-single-level-unobserved:scatter_product_events',
+    'p2g-dense-single-level-unobserved:finalize_grid',
+    'g2p-dense-single-level-observed:main',
+    'g2p-dense-single-level-observed:finalize_canonical_spatial_authority',
+    'g2p-dense-single-level-unobserved:main',
+    'g2p-dense-single-level-unobserved:finalize_canonical_spatial_authority'
   ]);
   assert.deepEqual(native.executionCases, [
     {
@@ -4003,7 +4492,14 @@ test('MLS-MPM resident summary can emit active-grid dispatch plan buffers withou
   assert.equal(summary.timing.mapAsyncWaitMs, null);
   assert.equal(summary.timing.decodeMs, 0);
   assert.equal(summary.timing.compactReadbackByteLength, 0);
-  assert.equal(summary.normalHotLoopReadbackFree, true);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 0);
+  assert.equal(summary.readbackBytes, 0);
+  assert.equal(summary.hostQueueFenceCount, 1);
+  assert.equal(summary.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, true);
   assert.equal(summary.activeGridDispatchPlan.status, 'gpu-active-grid-summary-dispatch-plan-ready');
   assert.equal(summary.activeGridDispatchPlan.source, 'compact-summary-gpu-sidecar');
   assert.equal(summary.activeGridDispatchPlanBuffersRetained, true);
@@ -4187,7 +4683,14 @@ test('MLS-MPM resident step treats one exact mechanics field as retained stage s
         backend: 'webgpu',
         readbackMode: 'no-full-readback',
         fullReadbackPerformed: false,
+        fullParticleReadbackPerformed: false,
+        fullParticleReadbackFree: true,
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-mechanics-field-p2g',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         gridBuffer: null,
         gridBufferByteLength: 0,
         denseGridAuthoritative: false,
@@ -4210,7 +4713,14 @@ test('MLS-MPM resident step treats one exact mechanics field as retained stage s
         backend: 'webgpu',
         readbackMode: 'no-full-readback',
         fullReadbackPerformed: false,
+        fullParticleReadbackPerformed: false,
+        fullParticleReadbackFree: true,
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-mechanics-field-grid-update',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         sourceProjection: projection,
         updatedGridBuffer: null,
         updatedGridBufferByteLength: 0,
@@ -4234,7 +4744,14 @@ test('MLS-MPM resident step treats one exact mechanics field as retained stage s
         backend: 'webgpu',
         readbackMode: 'no-full-readback',
         fullReadbackPerformed: false,
+        fullParticleReadbackPerformed: false,
+        fullParticleReadbackFree: true,
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-mechanics-field-g2p',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         stateBuffer: tracker.buffer('field-g2p-state'),
         mechanicsBuffer: tracker.buffer('field-g2p-mechanics'),
         stateBufferByteLength: result.state.byteLength,
@@ -4250,7 +4767,33 @@ test('MLS-MPM resident step treats one exact mechanics field as retained stage s
 
   assert.equal(step.stageBuffersRetained, true);
   assert.equal(step.residentBuffersRetained, true);
-  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.readbackMode, 'no-full-readback', JSON.stringify({
+    readbackDowngradeReasons: step.readbackDowngradeReasons,
+    p2g: {
+      readbackMode: step.p2gGridProjection?.readbackMode,
+      fullReadbackPerformed: step.p2gGridProjection?.fullReadbackPerformed,
+      fullParticleReadbackPerformed:
+        step.p2gGridProjection?.fullParticleReadbackPerformed,
+      fullParticleReadbackFree:
+        step.p2gGridProjection?.fullParticleReadbackFree
+    },
+    gridUpdate: {
+      readbackMode: step.gridUpdate?.readbackMode,
+      fullReadbackPerformed: step.gridUpdate?.fullReadbackPerformed,
+      fullParticleReadbackPerformed:
+        step.gridUpdate?.fullParticleReadbackPerformed,
+      fullParticleReadbackFree:
+        step.gridUpdate?.fullParticleReadbackFree
+    },
+    g2p: {
+      readbackMode: step.g2pReconstruction?.readbackMode,
+      fullReadbackPerformed: step.g2pReconstruction?.fullReadbackPerformed,
+      fullParticleReadbackPerformed:
+        step.g2pReconstruction?.fullParticleReadbackPerformed,
+      fullParticleReadbackFree:
+        step.g2pReconstruction?.fullParticleReadbackFree
+    }
+  }));
   assert.equal(step.readbackDowngradeReasons.includes('stage-buffers-not-retained'), false);
   assert.equal(step.p2gGridProjection.gridBuffer ?? null, null);
   assert.equal(step.gridUpdate.updatedGridBuffer ?? null, null);
@@ -4524,6 +5067,198 @@ test('MLS-MPM resident step cleanup preserves a live level overlay until its con
   assert.equal(overlayReleases[0].submitted, true);
 });
 
+test('MLS-MPM resident cleanup preserves every member of a coalesced queue-ordered class', async () => {
+  const device = {
+    submitCount: 0,
+    fenceCount: 0,
+    queue: {
+      submit(commandBuffers) {
+        assert.ok(Array.isArray(commandBuffers));
+        assert.ok(commandBuffers.length > 0);
+        device.submitCount += 1;
+      },
+      onSubmittedWorkDone() {
+        device.fenceCount += 1;
+        return Promise.resolve();
+      }
+    }
+  };
+  const issuerByFamily = new Map(
+    ['render', 'next-tick'].map((transferClass) => {
+      const producerFamily =
+        `schroeder-hierarchy-artifact-transfer:${transferClass}`;
+      return [
+        producerFamily,
+        createQueueOrderedCleanupClaimIssuer({ producerFamily })
+      ];
+    })
+  );
+  const ledger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'resident-coalesced-preservation',
+    deferCleanup() {
+      throw new Error('coalesced preservation must not host-fence');
+    },
+    registerQueueOrderedTransferCleanup(
+      cleanup,
+      { producerOutput, producerFamily }
+    ) {
+      return registerQueueOrderedCleanupClaim(
+        issuerByFamily.get(producerFamily),
+        device,
+        { producerOutput, cleanup }
+      );
+    },
+    cancelQueueOrderedTransferCleanup(
+      producerClaim,
+      cleanup,
+      { producerOutput }
+    ) {
+      return cancelQueueOrderedCleanupClaim(
+        producerClaim,
+        device,
+        { producerOutput, cleanup }
+      );
+    },
+    releaseQueueOrderedCleanup(
+      cleanup,
+      queueOrderedFinalConsumer,
+      { producerClaim, producerOutput, producerFamily }
+    ) {
+      return releaseSubmittedWorkCleanupQueueOrdered(
+        device,
+        cleanup,
+        {
+          queueOrderedFinalConsumer,
+          producerClaim,
+          producerOutput,
+          producerFamily
+        }
+      );
+    }
+  });
+  const makeTracked = (label) => ({
+    label,
+    destroyCount: 0,
+    destroy() {
+      this.destroyCount += 1;
+    }
+  });
+  const buffers = {
+    preservedRender: makeTracked('coalesced-preserved-render'),
+    siblingRender: makeTracked('coalesced-sibling-render'),
+    preservedNextTick: makeTracked('coalesced-preserved-next-tick'),
+    siblingNextTick: makeTracked('coalesced-sibling-next-tick')
+  };
+  const registrations = [
+    ['preserved-render', 'active-node-list', 'render', buffers.preservedRender],
+    ['sibling-render', 'aggregate-view', 'render', buffers.siblingRender],
+    [
+      'preserved-next-tick',
+      'phase-volume-level-update',
+      'next-tick',
+      buffers.preservedNextTick
+    ],
+    [
+      'sibling-next-tick',
+      'far-aggregate-gas-cell-import',
+      'next-tick',
+      buffers.siblingNextTick
+    ]
+  ];
+  for (const [resourceKey, family, transferClass, tracked] of registrations) {
+    registerSchroederHierarchyArtifact(ledger, {
+      resourceKey,
+      family,
+      buffer: tracked,
+      destroy: () => tracked.destroy()
+    });
+    transferSchroederHierarchyArtifact(ledger, resourceKey, {
+      transferClass
+    });
+  }
+  const claims = prepareSchroederHierarchyArtifactTransferCleanupClaims(
+    ledger
+  );
+  assert.equal(claims.length, 2);
+  const queueOrderedFinalConsumer =
+    submitQueueOrderedFinalConsumerWork(
+      device,
+      [Object.freeze({ label: 'coalesced-preservation-consumer-command' })],
+      {
+        finalConsumerOwner: {},
+        producerClaims: claims
+      }
+    );
+  const step = {
+    schroederHierarchyArtifactLedger: ledger,
+    schroederPhaseVolumeNextTickAssignmentOverlay: {
+      levelUpdateBuffer: buffers.preservedNextTick
+    },
+    schroederFarAggregateGasCellImport: {
+      gasPressureCellsBuffer: buffers.siblingNextTick
+    },
+    localRetainedRenderBuffers: {
+      scopedFamilyRelease: true,
+      buffers: [
+        {
+          family: 'active-node-list',
+          buffer: buffers.preservedRender
+        },
+        {
+          family: 'aggregate-view',
+          buffer: buffers.siblingRender
+        }
+      ],
+      destroyRetainedBuffers({ families, queueOrderedFinalConsumer: cap }) {
+        return releaseSchroederHierarchyArtifactTransfers(ledger, {
+          transferClass: 'render',
+          families,
+          submitted: true,
+          queueOrderedFinalConsumer: cap
+        });
+      }
+    },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      return releaseSchroederHierarchyArtifactTransfers(ledger, options);
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    preserveBuffers: [
+      buffers.preservedRender,
+      buffers.preservedNextTick
+    ],
+    queueOrderedFinalConsumer
+  });
+
+  assert.ok(
+    Object.values(buffers).every((tracked) => tracked.destroyCount === 0)
+  );
+  assert.equal(
+    summarizeSchroederHierarchyArtifactLedger(ledger).pendingTransferCount,
+    4
+  );
+  await releaseSchroederHierarchyArtifactTransfers(ledger, {
+    transferClass: 'render',
+    submitted: true,
+    queueOrderedFinalConsumer
+  });
+  await releaseSchroederHierarchyArtifactTransfers(ledger, {
+    transferClass: 'next-tick',
+    submitted: true,
+    queueOrderedFinalConsumer
+  });
+  assert.ok(
+    Object.values(buffers).every((tracked) => tracked.destroyCount === 1)
+  );
+  assert.equal(device.submitCount, 1);
+  assert.equal(device.fenceCount, 0);
+  assert.equal(
+    summarizeSchroederHierarchyArtifactLedger(ledger).pendingTransferCount,
+    0
+  );
+});
+
 test('MLS-MPM resident step cleanup releases intermediate gas but preserves a published gas owner', () => {
   const gasPressureCellsBuffer = { label: 'next-tick-gas-pressure-cells' };
   const transferReleases = [];
@@ -4552,6 +5287,282 @@ test('MLS-MPM resident step cleanup releases intermediate gas but preserves a pu
   assert.equal(gasReleases.length, 1);
   assert.equal(gasReleases[0].transferClass, 'next-tick');
   assert.equal(gasReleases[0].submitted, true);
+});
+
+test('MLS-MPM resident cleanup propagates only an explicitly supplied queue-ordered final consumer', () => {
+  const queueOrderedFinalConsumer = Object.freeze({
+    submissionObserved: true,
+    ownerAuthority: Object.freeze({ id: 'resident-successor-submit' }),
+    validateOwnerAuthority: () => true
+  });
+  const releaseOptions = [];
+  const renderReleaseOptions = [];
+  const createStep = () => ({
+    schroederPhaseVolumeNextTickAssignmentOverlay: {
+      levelUpdateBuffer: { label: 'queue-ordered-level-update' }
+    },
+    schroederFarAggregateGasCellImport: {
+      gasPressureCellsBuffer: { label: 'queue-ordered-gas-cells' }
+    },
+    localRetainedRenderBuffers: {
+      buffers: [{
+        family: 'schroeder-active-node-list',
+        buffer: { label: 'queue-ordered-render-nodes' }
+      }],
+      scopedFamilyRelease: true,
+      destroyRetainedBuffers(options) {
+        renderReleaseOptions.push(options);
+        return true;
+      }
+    },
+    releaseSchroederHierarchyArtifactTransfers(options) {
+      releaseOptions.push(options);
+      return Promise.resolve(true);
+    }
+  });
+
+  destroyMlsMpmResidentStepBuffers(createStep(), {
+    queueOrderedFinalConsumer
+  });
+  assert.equal(releaseOptions.length, 2);
+  assert.ok(releaseOptions.every(
+    (options) => (
+      options.submitted === true
+      && options.queueOrderedFinalConsumer === queueOrderedFinalConsumer
+    )
+  ));
+  assert.equal(renderReleaseOptions.length, 1);
+  assert.equal(
+    renderReleaseOptions[0].queueOrderedFinalConsumer,
+    queueOrderedFinalConsumer
+  );
+
+  releaseOptions.length = 0;
+  renderReleaseOptions.length = 0;
+  destroyMlsMpmResidentStepBuffers(createStep());
+  assert.equal(releaseOptions.length, 2);
+  assert.ok(releaseOptions.every(
+    (options) => options.queueOrderedFinalConsumer == null
+  ));
+  assert.equal(renderReleaseOptions.length, 1);
+  assert.equal(
+    renderReleaseOptions[0].queueOrderedFinalConsumer,
+    null
+  );
+});
+
+test('MLS-MPM resident cleanup preserves each retained output claim final consumer', () => {
+  const hierarchyFinalConsumer = Object.freeze({
+    schema: 'opaque-hierarchy-final-consumer-test-token'
+  });
+  const thermalFinalConsumer = Object.freeze({
+    schema: 'opaque-thermal-final-consumer-test-token'
+  });
+  const observed = [];
+  const stateBuffer = { label: 'thermal-exact-cap-state' };
+  const thermoBuffer = { label: 'thermal-exact-cap-thermo' };
+  const thermalOutput = {
+    stateBuffer,
+    thermoBuffer,
+    queueOrderedRetainedOutputFinalConsumerCapability:
+      thermalFinalConsumer,
+    destroyOutputParticleBuffers(options) {
+      observed.push(options);
+      return true;
+    }
+  };
+  const step = {
+    thermalStep: { result: thermalOutput },
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer,
+        thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        ownsIdentityBuffer: false
+      },
+      mlsMpmParticleUpload: {
+        ownsMechanicsBuffer: false
+      }
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    queueOrderedFinalConsumer: hierarchyFinalConsumer
+  });
+
+  assert.deepEqual(observed, [{
+    preserveResidentProductMass: false,
+    queueOrderedFinalConsumer: thermalFinalConsumer
+  }]);
+});
+
+test('MLS-MPM resident cleanup returns a phase-carrier continuation through its exact output owner', () => {
+  const hierarchyFinalConsumer = Object.freeze({
+    schema: 'opaque-hierarchy-final-consumer-phase-test-token'
+  });
+  const phaseFinalConsumer = Object.freeze({
+    schema: 'opaque-phase-final-consumer-test-token'
+  });
+  const rawDestroyCounts = { state: 0, thermo: 0, mechanics: 0 };
+  const trackedBuffer = (component) => ({
+    label: `phase-exact-cap-${component}`,
+    destroy() { rawDestroyCounts[component] += 1; }
+  });
+  const stateBuffer = trackedBuffer('state');
+  const thermoBuffer = trackedBuffer('thermo');
+  const mechanicsBuffer = trackedBuffer('mechanics');
+  const ownerCalls = [];
+  const step = {
+    phaseCarrierTransferStep: {
+      result: {
+        stateBuffer,
+        thermoBuffer,
+        mechanicsBuffer,
+        queueOrderedRetainedOutputFinalConsumerCapability:
+          phaseFinalConsumer,
+        destroyOutputParticleBuffers(options) {
+          ownerCalls.push(options);
+          return true;
+        }
+      }
+    },
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer,
+        thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        ownsIdentityBuffer: false
+      },
+      mlsMpmParticleUpload: {
+        mechanicsBuffer,
+        ownsMechanicsBuffer: true
+      }
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    queueOrderedFinalConsumer: hierarchyFinalConsumer
+  });
+
+  assert.deepEqual(ownerCalls, [{
+    preserveResidentProductMass: false,
+    queueOrderedFinalConsumer: phaseFinalConsumer
+  }]);
+  assert.deepEqual(rawDestroyCounts, { state: 0, thermo: 0, mechanics: 0 });
+});
+
+test('MLS-MPM claimless phase-carrier cleanup delegates exactly one host fence to its owner', async () => {
+  const hierarchyFinalConsumer = Object.freeze({
+    schema: 'opaque-unrelated-hierarchy-final-consumer-test-token'
+  });
+  const rawDestroyCounts = { state: 0, thermo: 0, mechanics: 0 };
+  const trackedBuffer = (component) => ({
+    label: `phase-claimless-${component}`,
+    destroy() { rawDestroyCounts[component] += 1; }
+  });
+  const stateBuffer = trackedBuffer('state');
+  const thermoBuffer = trackedBuffer('thermo');
+  const mechanicsBuffer = trackedBuffer('mechanics');
+  const ownerCalls = [];
+  let hostQueueFenceCount = 0;
+  const step = {
+    phaseCarrierTransferStep: {
+      result: {
+        stateBuffer,
+        thermoBuffer,
+        mechanicsBuffer,
+        destroyOutputParticleBuffers(options) {
+          ownerCalls.push(options);
+          hostQueueFenceCount += 1;
+          return Promise.resolve(true);
+        }
+      }
+    },
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer,
+        thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        ownsIdentityBuffer: false
+      },
+      mlsMpmParticleUpload: {
+        mechanicsBuffer,
+        ownsMechanicsBuffer: true
+      }
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    queueOrderedFinalConsumer: hierarchyFinalConsumer
+  });
+  await step.residentOutputOwnerReleaseCompletion;
+
+  assert.deepEqual(ownerCalls, [{ preserveResidentProductMass: false }]);
+  assert.equal(hostQueueFenceCount, 1);
+  assert.deepEqual(rawDestroyCounts, { state: 0, thermo: 0, mechanics: 0 });
+  assert.equal(
+    step.residentOutputOwnerReleaseReceipt.status,
+    'owner-release-confirmed'
+  );
+});
+
+test('MLS-MPM plural resident cleanup preserves exact per-step hierarchy capabilities', () => {
+  const retainedFinalConsumers = [0, 1].map((index) => Object.freeze({
+    schema: `opaque-retained-final-consumer-${index}-test-token`
+  }));
+  const terminalFinalConsumer = Object.freeze({
+    schema: 'opaque-terminal-final-consumer-test-token'
+  });
+  const observed = [];
+  const step = (id, finalConsumer = null) => {
+    const value = {
+      localRetainedRenderBuffers: {
+      buffers: [{ buffer: { label: `${id}-render-buffer` } }],
+      destroyRetainedBuffers(options) {
+        observed.push({ id, options });
+        return true;
+      }
+      }
+    };
+    if (finalConsumer) {
+      Object.defineProperty(
+        value,
+        'queueOrderedHierarchyFinalConsumerCapability',
+        { value: finalConsumer, enumerable: false }
+      );
+    }
+    return value;
+  };
+  destroyMlsMpmResidentStepsBuffers({
+    retainedSteps: [
+      step('retained-0', retainedFinalConsumers[0]),
+      step('retained-1', retainedFinalConsumers[1])
+    ],
+    finalStep: step('final')
+  }, {
+    queueOrderedFinalConsumer: terminalFinalConsumer
+  });
+
+  assert.deepEqual(
+    observed.map(({ id }) => id),
+    ['retained-0', 'retained-1', 'final']
+  );
+  assert.deepEqual(
+    observed.map(({ options }) => options.queueOrderedFinalConsumer),
+    [...retainedFinalConsumers, terminalFinalConsumer]
+  );
+
+  observed.length = 0;
+  destroyMlsMpmResidentStepsBuffers({
+    retainedSteps: [step('default-retained')],
+    finalStep: step('default-final')
+  });
+  assert.ok(observed.every(
+    ({ options }) => options.queueOrderedFinalConsumer == null
+  ));
 });
 
 test('MLS-MPM resident step cleanup preserves continuation buffers requested by the next owner', async () => {
@@ -4703,6 +5714,11 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-compact-summary-p2g',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyGridBuffer() {
           this.gridBuffer.destroy();
         }
@@ -4730,6 +5746,11 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
         normalHotLoopReadbackFree: true,
         queueCompletionStatus: 'queue-work-completed',
         queueCompletionMethod: 'queue.onSubmittedWorkDone',
+        ...createGpuReadbackTelemetry({
+          scope: 'test-retained-grid-update',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyUpdatedGridBuffer() {
           this.updatedGridBuffer.destroy();
         }
@@ -4761,6 +5782,11 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
         retainedOutputParticleBuffers: true,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-retained-g2p',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyOutputParticleBuffers() {
           this.stateBuffer.destroy();
           this.mechanicsBuffer.destroy();
@@ -5026,7 +6052,13 @@ test('MLS-MPM resident step keeps no-full mode when optional Schroeder materiali
     readbackMode: 'no-full-readback',
     fullReadbackPerformed: false,
     fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
     normalHotLoopReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'test-blocked-particle-storage',
+      mapAsyncCount: 0,
+      readbackBytes: 0
+    }),
     particleStorageMaterializationAdmissionApproved: false,
     retainedParticleBuffers: false,
     retainedMaterializationBuffer: false,
@@ -5056,7 +6088,13 @@ test('MLS-MPM resident step strictly downgrades admitted Schroeder materializati
     readbackMode: 'no-full-readback',
     fullReadbackPerformed: false,
     fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
     normalHotLoopReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'test-incomplete-particle-storage',
+      mapAsyncCount: 0,
+      readbackBytes: 0
+    }),
     particleStorageMaterializationAdmissionApproved: true,
     retainedParticleBuffers: false,
     retainedMaterializationBuffer: false,
@@ -5069,8 +6107,10 @@ test('MLS-MPM resident step strictly downgrades admitted Schroeder materializati
     schroederParticleStorageMaterialization
   });
 
-  assert.equal(step.readbackMode, 'full-parity-readback');
-  assert.equal(step.normalHotLoopReadbackFree, false);
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.fullParticleReadbackFree, true);
+  assert.equal(step.residentContinuationReady, false);
+  assert.equal(step.normalHotLoopReadbackFree, true);
   assert.deepEqual(step.readbackDowngradeReasons, [
     'schroeder-particle-storage-not-adopted'
   ]);
@@ -5457,6 +6497,7 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
   const proposalApplyCalls = [];
   const canonicalMechanicalProposalRunner = async ({ generation }) => (
     canonicalMechanicalProposalFixture({
+      device,
       generation,
       makeBuffer: (label) => tracker.buffer(label),
       encodeApply(encoder, options = {}) {
@@ -5582,6 +6623,23 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     step.stageTiming.dispatchTopology.spatialMechanicalProposalApply;
   assert.equal(proposalTopology.enabled, true);
   assert.equal(
+    SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT,
+    18
+      + 3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+      + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+  );
+  assert.deepEqual(
+    [
+      'initialize_matching_cleanup_constraints',
+      'initialize_contact_interface_receipt',
+      'materialize_contact_interface_receipt',
+      'seal_contact_interface_receipt'
+    ].filter((entryPoint) => (
+      !SCHROEDER_MECHANICAL_DEFERRED_ENTRY_POINTS.includes(entryPoint)
+    )),
+    []
+  );
+  assert.equal(
     proposalTopology.dispatchCountPerSubstep,
     SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT
   );
@@ -5592,11 +6650,41 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     'post-encode-proposal-artifact');
   assert.equal(proposalTopology.dispatchWorkgroupsPerSubstep, null);
   assert.equal(proposalTopology.dispatchWorkgroupsPerSubstepExact, false);
+  assert.equal(
+    proposalTopology.particleParallelDispatchCountPerSubstep,
+    12
+      + 3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+  );
+  assert.equal(
+    proposalTopology.particleParallelDispatchCountPerSubstepExact,
+    true
+  );
+  assert.equal(proposalTopology.particleParallelWorkgroupsPerSubstep, null);
+  assert.equal(
+    proposalTopology.particleParallelWorkgroupsPerSubstepExact,
+    false
+  );
+  assert.equal(
+    proposalTopology.particleParallelWorkgroupsPerSubstepUpperBound,
+    proposalTopology.particleParallelDispatchCountPerSubstep
+  );
   assert.equal(step.stageTiming.dispatchTopology.workgroupsPerSubstep, null);
   assert.equal(step.stageTiming.dispatchTopology.totalWorkgroups, null);
   assert.deepEqual(
     proposalTopology.entryPoints,
     SCHROEDER_MECHANICAL_DEFERRED_ENTRY_POINTS
+  );
+  assert.equal(
+    proposalTopology.matchingCleanupLogicalPassCount,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+  );
+  assert.equal(
+    proposalTopology.matchingCleanupEncodedPassCount,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES
+  );
+  assert.equal(
+    proposalTopology.matchingCleanupDispatchCount,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
   );
   assert.equal(
     proposalTopology.proposalStatus,
@@ -5647,6 +6735,20 @@ test('MLS-MPM resident fused mechanics uses one canonical directory in P2G and G
     'shader-validates-at-dispatch-no-host-readback'
   );
   assert.equal(step.p2gGridProjection.schroederSpatialGpuFallbackObserved, null);
+  for (const stage of [
+    step.p2gGridProjection,
+    step.gridUpdate,
+    step.g2pReconstruction
+  ]) {
+    assert.equal(stage.fullParticleReadbackPerformed, false);
+    assert.equal(stage.fullParticleReadbackFree, true);
+    assert.equal(stage.readbackTelemetryComplete, true);
+    assert.deepEqual(stage.readbackTelemetryUnknownSources, []);
+    assert.equal(stage.mapAsyncCount, 0);
+    assert.equal(stage.readbackBytes, 0);
+    assert.equal(stage.hostQueueFenceCount, 0);
+    assert.equal(stage.normalHotLoopReadbackFree, true);
+  }
   assert.equal(step.p2gGridProjection.schroederSpatialDirectory.generationId, 17);
   assert.equal(step.p2gGridProjection.schroederSpatialDirectory.storageGeneration, 23);
   assert.equal(step.p2gGridProjection.schroederSpatialDirectory.retainedDirectoryBuffer, true);
@@ -5862,16 +6964,22 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
   assert.ok(generation.mechanicsView);
   const mechanicsViewBuffer = generation.mechanicsView.mechanicsViewBuffer;
   const spatialDirectoryBuffer = generation.execution.directoryBuffer;
-  const spatialMechanicalProposalRunner = async ({
-    generation: proposalGeneration
-  }) => canonicalMechanicalProposalFixture({
-    generation: proposalGeneration,
-    makeBuffer: (label) => taggedBuffer(label, Math.max(64, particleCount * 16)),
-    labelPrefix: 'compact-mechanical-proposal',
-    encodeApply(encoder) {
-      encodeCanonicalMechanicalFixtureBundle(encoder);
-    }
+  const spatialMechanicalProposalCapture = Object.freeze({
+    fixture: 'opaque-mechanical-capture'
   });
+  let lastMechanicalProposalRequest = null;
+  const spatialMechanicalProposalRunner = async (options) => {
+    lastMechanicalProposalRequest = options;
+    return canonicalMechanicalProposalFixture({
+      device,
+      generation: options.generation,
+      makeBuffer: (label) => taggedBuffer(label, Math.max(64, particleCount * 16)),
+      labelPrefix: 'compact-mechanical-proposal',
+      encodeApply(encoder) {
+        encodeCanonicalMechanicalFixtureBundle(encoder);
+      }
+    });
+  };
   const staleStateGeneration = {
     ...generation,
     source: {
@@ -5922,6 +7030,9 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
     schroederSpatialEpochGeneration: generation,
     schroederSpatialEpochTransaction: transaction,
     spatialMechanicalProposalRunner,
+    spatialMechanicalProposalCapture,
+    sequenceIndex: 0,
+    sequenceStepCount: 1,
     canonicalSpatialRequired: true,
     preferWebGpu: true,
     device,
@@ -5931,6 +7042,13 @@ test('MLS-MPM canonical fused mechanics consumes the SS compact mechanics view i
     fuseNoFullResidentMechanics: true,
     summaryRunner: fusedMechanicsSummaryStub(buffers)
   });
+
+  assert.equal(
+    lastMechanicalProposalRequest.capture,
+    spatialMechanicalProposalCapture
+  );
+  assert.equal(lastMechanicalProposalRequest.sequenceIndex, 0);
+  assert.equal(lastMechanicalProposalRequest.sequenceStepCount, 1);
 
   assert.equal(step.p2gGridProjection.schroederSpatialDirectory.mechanicsViewEnabled, true);
   assert.equal(step.p2gGridProjection.activeGridDispatch.mode, 'canonical-compact-mechanics-view');
@@ -6512,6 +7630,7 @@ test('MLS-MPM canonical fused cleanup releases proposals without legacy separati
   const canonicalMechanicalProposalRunner = async ({
     generation: sourceGeneration
   }) => canonicalMechanicalProposalFixture({
+    device,
     generation: sourceGeneration,
     makeBuffer: (label) => tracker.buffer(label),
     encodeApply(encoder) {
@@ -6866,6 +7985,11 @@ test('MLS-MPM resident step compute task declares ComputeManager GPU lane and fe
   assert.equal(task.returnEnvelope, true);
   assert.equal(task.gpuFence.schema, 'peercompute.compute.gpu-fence-requirement.v0');
   assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.hostQueueFenceRequired, false);
+  assert.equal(
+    task.gpuFence.queueFencePolicy,
+    'same-device-queue-ordering-before-admission'
+  );
   assert.equal(task.gpuFence.laneId, 'ulg:test:sph-resident');
   assert.equal(task.gpuFence.stateKey, 'ulg:test:sph-state');
   assert.equal(task.gpuResidentLane.schema, 'peercompute.compute.gpu-resident-lane-task.v0');
@@ -6876,6 +8000,8 @@ test('MLS-MPM resident step compute task declares ComputeManager GPU lane and fe
   assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(task.gpuResidentLane.copyBudget.retainedBytes, buffers.sphParticleState.state.byteLength + buffers.sphParticleState.thermo.byteLength + buffers.mlsMpmParticleState.mechanics.byteLength);
   assert.deepEqual(task.webgpu.retainedBufferRefs, ['sph-state-buffer', 'mls-mpm-mechanics-buffer']);
+  assert.equal(task.webgpu.requiresQueueFence, false);
+  assert.equal(task.webgpu.requiresSameDeviceQueueOrdering, true);
   assert.equal(task.data.gpuResidentLaneManager, undefined);
   assert.equal(task.data.gpuFenceRequirement.laneId, 'ulg:test:sph-resident');
   assert.equal(task.data.gpuResidentLane.stateKey, 'ulg:test:sph-state');
@@ -6883,9 +8009,17 @@ test('MLS-MPM resident step compute task declares ComputeManager GPU lane and fe
 
 test('MLS-MPM resident step compute task handler returns explicit GPU fence evidence without local double leasing', async () => {
   const { options } = noFullReadbackResidentStepFixture();
+  const originalGridUpdateRunner = options.gridUpdateRunner;
   const ignoredLaneManager = fakeGpuResidentLaneManager();
   const task = createMlsMpmResidentStepComputeTask({
     ...options,
+    gridUpdateRunner(args) {
+      return {
+        ...originalGridUpdateRunner(args),
+        queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+        queueCompletionMethod: 'deferred queue.onSubmittedWorkDone cleanup'
+      };
+    },
     modulePath: './sphMlsMpmGpuStep.js',
     laneId: 'ulg:test:sph-resident',
     stateKey: 'ulg:test:sph-state',
@@ -6898,12 +8032,17 @@ test('MLS-MPM resident step compute task handler returns explicit GPU fence evid
   assert.equal(result.computeTaskSchema, ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA);
   assert.equal(result.status, 'resident-step-webgpu-executed');
   assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
-  assert.equal(result.gpuFence.status, 'queue-work-completed');
-  assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
+  assert.equal(
+    result.gpuFence.status,
+    'same-device-queue-ordering-established'
+  );
+  assert.equal(result.gpuFence.method, 'same-device-queue-submit-order');
   assert.equal(result.gpuFence.fenceSatisfied, true);
   assert.equal(result.gpuFence.required, true);
   assert.equal(result.gpuFence.laneId, 'ulg:test:sph-resident');
   assert.equal(result.gpuFence.stateKey, 'ulg:test:sph-state');
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, true);
   assert.deepEqual(result.gpuFence.retainedBufferRefs, [
     'p2g-grid-buffer',
     'updated-grid-buffer',
@@ -6932,6 +8071,7 @@ test('MLS-MPM resident step compute task observes a real outer queue fence for d
   const task = createMlsMpmResidentStepComputeTask({
     ...options,
     device,
+    queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission',
     gridUpdateRunner(args) {
       return {
         ...originalGridUpdateRunner(args),
@@ -6951,6 +8091,8 @@ test('MLS-MPM resident step compute task observes a real outer queue fence for d
   assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
   assert.equal(result.gpuFence.fenceSatisfied, true);
   assert.equal(result.gpuFence.satisfactionReason, 'compute-task-observed-real-queue-completion');
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.normalHotLoopReadbackFree, false);
 });
 
 test('MLS-MPM resident step fence rejects deferred cleanup without a completed queue fence', () => {
@@ -6992,6 +8134,19 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   const tracker = fakeBufferTracker();
   const sourceStateBuffer = tracker.buffer('g2p-state-in');
   const sourceThermoBuffer = tracker.buffer('source-thermo-in');
+  const thermalAuthorityPayload =
+    thermalAuthorityTaskPayloadFromStepOptions({
+      ambientTemperatureK: 247.5,
+      wallTemperaturesK: {
+        xMin: 241,
+        xMax: 242,
+        yMin: 243,
+        yMax: 244,
+        zMin: 245,
+        zMax: 246
+      },
+      wallModel: 'adiabatic'
+    });
   const task = createSphThermalPhaseStageComputeTask({
     modulePath: './sphMlsMpmGpuStep.js',
     taskId: 'ulg:test:thermal-phase-stage',
@@ -7008,6 +8163,7 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
     },
     sourceStateBuffer,
     sourceThermoBuffer,
+    ...thermalAuthorityPayload,
     boxDimsM: [5, 5, 5],
     dtS: 0.1
   });
@@ -7021,6 +8177,19 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   assert.equal(task.gpuResidentLane.owner, 'ulg-thermal-phase-law');
   assert.deepEqual(task.writeFamilies, ['sph-thermo-phase']);
   assert.deepEqual(task.webgpu.retainedBufferRefs, ['sph-state-buffer', 'sph-thermo-buffer']);
+  assert.equal(task.data.ambientTemperatureK, 247.5);
+  assert.equal(
+    task.data.thermalEnvironmentAuthority,
+    thermalAuthorityPayload.thermalEnvironmentAuthority
+  );
+  assert.deepEqual(
+    task.data.wallTemperaturesK,
+    thermalAuthorityPayload.wallTemperaturesK
+  );
+  assert.equal(
+    task.data.wallReservoirAuthority,
+    thermalAuthorityPayload.wallReservoirAuthority
+  );
 
   const result = await runSphThermalPhaseStageComputeTask({
     ...task.data,
@@ -7029,6 +8198,19 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
       assert.equal(args.sourceStateBuffer, sourceStateBuffer);
       assert.equal(args.sourceThermoBuffer, sourceThermoBuffer);
       assert.equal(args.retainOutputParticleBuffers, true);
+      assert.equal(args.ambientTemperatureK, 247.5);
+      assert.equal(
+        args.thermalEnvironmentAuthority,
+        thermalAuthorityPayload.thermalEnvironmentAuthority
+      );
+      assert.deepEqual(
+        args.wallTemperaturesK,
+        thermalAuthorityPayload.wallTemperaturesK
+      );
+      assert.equal(
+        args.wallReservoirAuthority,
+        thermalAuthorityPayload.wallReservoirAuthority
+      );
       return {
         schema: 'peercompute.ulg.sph-gpu-thermal-step-execution.v0',
         backend: 'webgpu',
@@ -7073,7 +8255,106 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   assert.equal(result.thermalPhaseStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
-test('SPH gas-cell EOS producer stage publishes retained gas pressure cell rows', async () => {
+test('thermal compute-manager payload retains matching authorities and fails closed on mismatches', () => {
+  const initial = thermalAuthorityTaskPayloadFromStepOptions({
+    ambientTemperatureK: 251.25,
+    wallTemperaturesK: {
+      xMin: 281,
+      xMax: 282,
+      yMin: 283,
+      yMax: 284,
+      zMin: 285,
+      zMax: 286
+    },
+    wallModel: 'infinite-fixed-temperature-reservoir'
+  });
+  const inherited = thermalAuthorityTaskPayloadFromStepOptions({
+    ambientTemperatureK: initial.ambientTemperatureK,
+    thermalEnvironmentAuthority:
+      initial.thermalEnvironmentAuthority,
+    wallTemperaturesK: initial.wallTemperaturesK,
+    wallReservoirAuthority: initial.wallReservoirAuthority
+  });
+
+  assert.equal(inherited.ambientTemperatureK, 251.25);
+  assert.equal(
+    inherited.thermalEnvironmentAuthority.source,
+    initial.thermalEnvironmentAuthority.source
+  );
+  assert.equal(
+    inherited.thermalEnvironmentAuthority.inheritedAuthority,
+    true
+  );
+  assert.deepEqual(
+    inherited.wallTemperaturesK,
+    initial.wallTemperaturesK
+  );
+  assert.equal(
+    inherited.wallReservoirAuthority.model,
+    'infinite-fixed-temperature-reservoir'
+  );
+  assert.equal(
+    inherited.wallReservoirAuthority.inheritedAuthority,
+    true
+  );
+
+  assert.throws(
+    () => thermalAuthorityTaskPayloadFromStepOptions({
+      ambientTemperatureK: 252,
+      thermalEnvironmentAuthority:
+        initial.thermalEnvironmentAuthority
+    }),
+    /ambientTemperatureK must match/
+  );
+  assert.throws(
+    () => thermalAuthorityTaskPayloadFromStepOptions({
+      wallTemperaturesK: {
+        ...initial.wallTemperaturesK,
+        zMax: 999
+      },
+      wallReservoirAuthority: initial.wallReservoirAuthority
+    }),
+    /wallTemperaturesK.zMax must match/
+  );
+});
+
+test('both thermal compute-manager serialization sites use the authority payload resolver', async () => {
+  const source = await readFile(
+    new URL('../src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url),
+    'utf8'
+  );
+  const payloadSpreads = source.match(
+    /\.\.\.thermalAuthorityTaskPayloadFromStepOptions\(stepOptions\)/g
+  ) || [];
+  assert.equal(payloadSpreads.length, 2);
+  const directSiteStart = source.indexOf(
+    '[THERMAL_PHASE_STAGE_ID]: async () => {'
+  );
+  const directSiteEnd = source.indexOf(
+    '[REACTION_PRODUCT_STAGE_ID]: async () => {',
+    directSiteStart
+  );
+  assert.ok(directSiteStart >= 0 && directSiteEnd > directSiteStart);
+  assert.match(
+    source.slice(directSiteStart, directSiteEnd),
+    /\.\.\.thermalAuthorityTaskPayloadFromStepOptions\(stepOptions\)/
+  );
+
+  const workerSiteStart = source.indexOf(
+    'mechanicsResidentStageWorkerContext = stageWorkerRunnerEnabled'
+  );
+  const workerSiteEnd = source.indexOf(
+    'const stagePlanExecutionOptions = {',
+    workerSiteStart
+  );
+  assert.ok(workerSiteStart >= 0 && workerSiteEnd > workerSiteStart);
+  assert.match(
+    source.slice(workerSiteStart, workerSiteEnd),
+    /\.\.\.thermalAuthorityTaskPayloadFromStepOptions\(stepOptions\)/
+  );
+});
+
+test('SPH direct gas-cell EOS producer keeps one opaque CPU-seeded GPU owner without a host fence', async () => {
   const spatialGasSpeciesLedger = {
     schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
     status: 'spatial-gas-species-ledger-ready',
@@ -7132,11 +8413,16 @@ test('SPH gas-cell EOS producer stage publishes retained gas pressure cell rows'
   assert.equal(task.suppressCommitDelta, true);
   assert.deepEqual(task.readFamilies, ['resident-spatial-gas-species-ledger', 'resident-product-mass']);
   assert.deepEqual(task.writeFamilies, ['resident-gas-pressure']);
-  assert.deepEqual(task.webgpu.retainedBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, []);
   assert.equal(task.gpuFence.required, true);
   assert.equal(task.gpuFence.laneId, 'ulg:test:gas-cell-eos-lane');
   assert.equal(task.gpuResidentLane.owner, 'ulg-resident-gas-cell-eos-law');
 
+  let hostFenceCalls = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    hostFenceCalls += 1;
+    return new Promise(() => {});
+  };
   const result = await runSphGasCellEosProducerStageComputeTask(task.data);
 
   assert.equal(result.computeTaskResultSchema, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
@@ -7145,35 +8431,197 @@ test('SPH gas-cell EOS producer stage publishes retained gas pressure cell rows'
   assert.equal(result.backend, 'webgpu');
   assert.equal(result.status, 'gas-cell-eos-producer-stage-ready');
   assert.equal(result.fullReadbackPerformed, false);
+  assert.equal(result.readbackTelemetrySchema, 'peercompute.ulg.gpu-readback-telemetry.v1');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedMapAsyncCount, 0);
+  assert.equal(result.observedReadbackBytes, 0);
+  assert.equal(result.observedHostQueueFenceCount, 0);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(result.awaitedBackpressureHostQueueFenceCount, 0);
   assert.equal(result.normalHotLoopReadbackFree, true);
-  assert.equal(result.queueCompletionStatus, 'queue-work-completed');
-  assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
-  assert.equal(result.gasCellField.localPressureGradientReady, true);
-  assert.equal(result.gasCellField.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(result.productionHotLoopHostDependencyFree, false);
+  assert.equal(result.stageOneHostIndependent, false);
+  assert.equal(result.pressureRowsHostMaterialized, true);
+  assert.equal(result.hostMaterializedRowCount, 2);
+  assert.deepEqual(result.readbackTelemetrySourceBreakdown, []);
+  assert.equal(result.queueCompletionStatus, 'queue-submitted-no-host-wait');
+  assert.equal(result.queueCompletionMethod, 'queue.writeBuffer');
+  assert.equal(result.queueCompletionFenceWaited, false);
+  assert.equal(hostFenceCalls, 0);
   assert.equal(result.pressureInterfaceGasPressureCellRowCount, 2);
   assert.equal(result.pressureInterfaceGasPressureCellRowStrideFloats, 12);
   assert.equal(result.pressureInterfaceGasPressureCellRowByteLength, 96);
-  assert.equal(result.pressureInterfaceGasPressureCellRowsBufferRetained, true);
-  assert.equal(result.gasPressureCellsBuffer.label, 'ulg-sph-gas-cell-eos-pressure-cells-out');
-  assert.deepEqual(result.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
-  assert.equal(result.retainedGasCellFieldSourceReady, true);
-  assert.equal(result.retainedGasCellFieldSource.schema, 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0');
-  assert.equal(result.retainedGasCellFieldSource.sourceTaskId, 'ulg:test:gas-cell-eos-producer-stage');
-  assert.deepEqual(result.retainedGasCellFieldSource.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
-  assert.equal(result.retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowByteLength, 96);
+  assert.equal(result.pressureInterfaceGasPressureCellRowsBufferRetained, false);
+  assert.deepEqual(result.retainedGasPressureBufferRefs, []);
+  assert.equal(result.retainedGasCellFieldSourceReady, false);
+  for (const key of [
+    'gasCellField',
+    'gasCellFieldSnapshot',
+    'gasPressureCellRows',
+    'gasPressureCellsBuffer',
+    'retainedGasPressureCellsBuffer',
+    'destroyGasPressureCellsBuffer',
+    'releaseAfterFinalConsumerQueue',
+    'releasePromise',
+    'retainedGasCellFieldSource'
+  ]) {
+    assert.equal(Object.hasOwn(result, key), false, key);
+  }
+  const authorityDescriptor = Object.getOwnPropertyDescriptor(
+    result,
+    'cpuSeededGasPressureAuthority'
+  );
+  assert.equal(authorityDescriptor?.enumerable, false);
+  assert.equal(authorityDescriptor?.configurable, false);
+  assert.equal(authorityDescriptor?.writable, false);
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(
+      authorityDescriptor.value,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    device.writes.filter(({ label }) => (
+      label === 'ulg-sph-gas-cell-eos-cpu-seeded-pressure-rows'
+    )).length,
+    1
+  );
   assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
   assert.equal(result.gpuFence.required, true);
   assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(
+    result.gpuFence.fenceDelegationAuthority,
+    'exact-cpu-seeded-gas-pressure-authority'
+  );
   assert.equal(result.gasCellEosProducerStageTaskEvidence.schema, 'peercompute.ulg.gas-cell-eos-producer-stage-task-evidence.v0');
   assert.equal(result.gasCellEosProducerStageTaskEvidence.passed, true);
+  assert.equal(result.gasCellEosProducerStageTaskEvidence.gpuPressureAuthorityReady, true);
+  assert.equal(result.gasCellEosProducerStageTaskEvidence.hostMaterializedRowCount, 2);
   assert.deepEqual(result.gasCellEosProducerStageTaskEvidence.candidateWriteFamilies, ['resident-gas-pressure']);
   assert.ok(result.gasCellEosProducerStageTaskEvidence.mustNotWriteFamilies.includes('pressure-interface-force-rows'));
   assert.equal(result.gasCellEosProducerStageTaskAuthority.status, 'compute-manager-owned-non-mutating-gas-cell-eos-producer-stage-task');
   assert.equal(result.gasCellEosProducerStageTaskAuthority.authoritativeStateMutation, false);
   assert.equal(result.gasCellEosProducerStageTaskAuthority.pressureInterfaceMutationApproved, false);
 
-  result.destroyGasPressureCellsBuffer?.();
-  assert.equal(result.gasPressureCellsBuffer.destroyed, true);
+  const cleanupRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: result,
+    device,
+    pressureStageStatus: 'completed'
+  });
+  assert.equal(cleanupRelease.scheduled, true);
+  assert.equal(cleanupRelease.releasePromise, null);
+  assert.equal(cleanupRelease.cleanupMode, 'exact-unconsumed-authority-discard');
+  assert.equal(hostFenceCalls, 0);
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(
+      authorityDescriptor.value,
+      device
+    ),
+    false
+  );
+  assert.equal(
+    describeSphCpuSeededGasPressureAuthorityGpu(
+      authorityDescriptor.value,
+      { device }
+    ).retiredObserved,
+    true
+  );
+  const exported = { ...result };
+  assert.equal(exported.cpuSeededGasPressureAuthority, undefined);
+  assert.doesNotThrow(() => structuredClone(exported));
+});
+
+test('direct opaque CPU gas owner fails closed across export and device boundaries', async () => {
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    cellDims: [1, 1, 1],
+    cellCount: 1,
+    cells: [{
+      index: 0,
+      gridIndex: [0, 0, 0],
+      centerM: [0.5, 0.5, 0.5],
+      volumeM3: 1,
+      bySpecies: {
+        h2: {
+          material: 'h2',
+          massKg: 0.04,
+          moles: 200,
+          temperatureK: 300
+        }
+      }
+    }]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'gpu-resident-reaction-pressure-summary',
+    totalPressurePa: 180000,
+    boxVolumeM3: 1,
+    boxDimsM: [1, 1, 1],
+    bySpecies: {},
+    spatialGasSpeciesLedger
+  };
+  const device = fakeSummaryDevice(new Float32Array(0));
+  const wrongDevice = fakeSummaryDevice(new Float32Array(0));
+  const result = await runSphGasCellEosProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary,
+    device
+  });
+  const authority = result.cpuSeededGasPressureAuthority;
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(authority, device),
+    true
+  );
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(authority, wrongDevice),
+    false
+  );
+
+  const exported = { ...result };
+  assert.equal(Object.hasOwn(exported, 'cpuSeededGasPressureAuthority'), false);
+  assert.equal(Object.hasOwn(exported, 'gasPressureCellsBuffer'), false);
+  const exportedRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: exported,
+    device,
+    pressureStageStatus: 'error'
+  });
+  assert.equal(exportedRelease.scheduled, false);
+  assert.equal(exportedRelease.status, 'gas-cell-eos-final-consumer-release-not-applicable');
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(authority, device),
+    true
+  );
+
+  const wrongDeviceRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: result,
+    device: wrongDevice,
+    pressureStageStatus: 'error'
+  });
+  assert.equal(wrongDeviceRelease.scheduled, false);
+  assert.equal(
+    wrongDeviceRelease.status,
+    'gas-cell-eos-final-consumer-release-callback-missing'
+  );
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(authority, device),
+    true
+  );
+
+  const exactRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: result,
+    device,
+    pressureStageStatus: 'error'
+  });
+  assert.equal(exactRelease.scheduled, true);
+  assert.equal(exactRelease.cleanupMode, 'exact-unconsumed-authority-discard');
+  assert.equal(
+    isExactSphCpuSeededGasPressureAuthorityGpu(authority, device),
+    false
+  );
 });
 
 test('gas-cell EOS final-consumer retirement covers every pressure terminal exactly once', async () => {
@@ -7190,16 +8638,25 @@ test('gas-cell EOS final-consumer retirement covers every pressure terminal exac
     let releaseScheduled = false;
     let released = false;
     let releasePromise = null;
+    let cleanupFenceCount = 0;
     const owner = {
       releaseAfterFinalConsumerQueue() {
         assert.equal(this, owner);
         calls += 1;
+        cleanupFenceCount += 1;
         releaseScheduled = true;
         releasePromise = Promise.resolve().then(() => {
           released = true;
           return true;
         });
         return true;
+      },
+      deferredCleanupReadbackTelemetrySnapshot() {
+        return createGpuReadbackTelemetry({
+          scope: 'test-final-consumer-cleanup',
+          hostQueueFenceCount: cleanupFenceCount,
+          deferredCleanupHostQueueFenceCount: cleanupFenceCount
+        });
       }
     };
     Object.defineProperties(owner, {
@@ -7216,6 +8673,15 @@ test('gas-cell EOS final-consumer retirement covers every pressure terminal exac
     assert.equal(first.status, expectedStatus, pressureStageStatus);
     assert.equal(first.source, 'gas-cell-eos-producer-result');
     assert.equal(calls, 1);
+    assert.equal(
+      first.deferredCleanupReadbackTelemetry.observedHostQueueFenceCount,
+      1
+    );
+    assert.equal(
+      first.deferredCleanupReadbackTelemetry
+        .deferredCleanupHostQueueFenceCount,
+      1
+    );
     assert.equal(await first.releasePromise, true);
     const repeated = scheduleSphGasCellEosFinalConsumerRelease({
       gasCellEosProducerResult: owner,
@@ -7225,6 +8691,15 @@ test('gas-cell EOS final-consumer retirement covers every pressure terminal exac
     assert.equal(repeated.scheduled, true);
     assert.equal(repeated.alreadyScheduled, true);
     assert.equal(calls, 1);
+    assert.equal(
+      repeated.deferredCleanupReadbackTelemetry.observedHostQueueFenceCount,
+      1
+    );
+    assert.equal(
+      repeated.deferredCleanupReadbackTelemetry
+        .deferredCleanupHostQueueFenceCount,
+      1
+    );
   }
 });
 
@@ -7253,6 +8728,14 @@ test('gas-cell EOS final-consumer retirement rejects unrelated imports and prese
   });
   assert.equal(selected.source, 'gas-cell-eos-producer-result');
   assert.equal(selected.scheduled, true);
+  assert.equal(
+    selected.deferredCleanupReadbackTelemetry.readbackTelemetryComplete,
+    false
+  );
+  assert.ok(
+    selected.deferredCleanupReadbackTelemetry.readbackTelemetryUnknownSources
+      .includes('gas-cell-eos-final-consumer-cleanup-snapshot-missing')
+  );
   assert.equal(unrelatedCalls, 0);
   assert.equal(gasCalls, 1);
 
@@ -7301,10 +8784,48 @@ test('gas-cell EOS final-consumer retirement rejects unrelated imports and prese
     pressureStageStatus: 'completed'
   });
   assert.equal(cpuOnly.status, 'gas-cell-eos-final-consumer-release-not-applicable');
+  assert.equal(
+    cpuOnly.deferredCleanupReadbackTelemetry.readbackTelemetryComplete,
+    true
+  );
+  assert.equal(
+    cpuOnly.deferredCleanupReadbackTelemetry.observedHostQueueFenceCount,
+    0
+  );
+
+  const missingCallback = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: {
+      retainedGasCellFieldSource: {
+        finalConsumerReleaseRequired: true
+      }
+    },
+    pressureStageStatus: 'error'
+  });
+  assert.equal(
+    missingCallback.status,
+    'gas-cell-eos-final-consumer-release-callback-missing'
+  );
+  assert.equal(
+    missingCallback.deferredCleanupReadbackTelemetry.readbackTelemetryComplete,
+    false
+  );
+  assert.ok(
+    missingCallback.deferredCleanupReadbackTelemetry
+      .readbackTelemetryUnknownSources.includes(
+        'gas-cell-eos-final-consumer-release-callback-missing'
+      )
+  );
 });
 
 test('stage chain retires inline gas-cell owners when pressure is omitted or the lane aborts', async () => {
-  const runCase = async ({ includePressureInterfaceStage, abortAfterGas }) => {
+  const runCase = async ({
+    includePressureInterfaceStage,
+    abortAfterGas,
+    gasReadbackTelemetry = createGpuReadbackTelemetry({
+      scope: 'test-gas-cell-eos-stage',
+      hostQueueFenceCount: 1
+    })
+  }) => {
     const buffers = manualBuffers();
     let releaseCalls = 0;
     let laneContract = null;
@@ -7314,6 +8835,7 @@ test('stage chain retires inline gas-cell owners when pressure is omitted or the
       gasCellEosProducerStageTaskEvidence: { passed: true },
       backend: 'webgpu',
       status: 'gas-cell-eos-producer-stage-ready',
+      ...(gasReadbackTelemetry || {}),
       releaseAfterFinalConsumerQueue() {
         releaseCalls += 1;
         return true;
@@ -7408,6 +8930,44 @@ test('stage chain retires inline gas-cell owners when pressure is omitted or the
     omitted.step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseStatus,
     'gas-cell-eos-final-consumer-release-scheduled-after-pressure-omitted'
   );
+  assert.equal(
+    omitted.step.readbackTelemetryComplete,
+    false,
+    JSON.stringify(omitted.step.readbackTelemetryUnknownSources)
+  );
+  assert.equal(
+    omitted.step.readbackTelemetryUnknownSources.includes(
+      'gasCellEosProducer'
+    ),
+    false
+  );
+  assert.equal(omitted.step.observedHostQueueFenceCount, 1);
+  assert.equal(omitted.step.unclassifiedHostQueueFenceCount, 1);
+  assert.equal(omitted.step.normalHotLoopReadbackFree, false);
+  assert.equal(omitted.step.productionHotLoopHostDependencyFree, false);
+  assert.ok(
+    omitted.step.readbackTelemetrySourceBreakdown.some(
+      (entry) => entry.source
+        === 'gasCellEosProducer:test-gas-cell-eos-stage'
+    )
+  );
+
+  const missingTelemetry = await runCase({
+    includePressureInterfaceStage: false,
+    abortAfterGas: false,
+    gasReadbackTelemetry: null
+  });
+  assert.equal(missingTelemetry.step.readbackTelemetryComplete, false);
+  assert.ok(
+    missingTelemetry.step.readbackTelemetryUnknownSources.includes(
+      'gasCellEosProducer'
+    )
+  );
+  assert.equal(missingTelemetry.step.normalHotLoopReadbackFree, false);
+  assert.equal(
+    missingTelemetry.step.productionHotLoopHostDependencyFree,
+    false
+  );
 
   const aborted = await runCase({
     includePressureInterfaceStage: true,
@@ -7417,6 +8977,846 @@ test('stage chain retires inline gas-cell owners when pressure is omitted or the
   assert.equal(
     aborted.step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseStatus,
     'gas-cell-eos-final-consumer-release-scheduled-after-lane-abort'
+  );
+});
+
+test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG and quarantines submit uncertainty', async () => {
+  const buffers = manualBuffers({ particleCount: 2 });
+  const device = fakeSummaryDevice(new Float32Array(0));
+  let hostFenceCalls = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    hostFenceCalls += 1;
+  };
+  const { generation, epochIdentity } =
+    retainedGasOccupancyGenerationFixture(device);
+  const level = generation.mechanicsLevelViews[0];
+  const thermoBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'exact-stage-dag-source-thermo',
+    size: buffers.sphParticleState.thermo.byteLength,
+    usage: 128 | 8
+  }), device);
+  const sphParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount: 2,
+    stateBuffer: generation.source.sourceStateBuffer,
+    thermoBuffer,
+    identityBuffer: generation.mechanicsFieldView.identityBuffer,
+    slot: 0,
+    ...epochIdentity
+  };
+  const mlsMpmParticleUpload = {
+    status: 'webgpu-uploaded',
+    particleCount: 2,
+    mechanicsBuffer: level.phaseVolumeMoment.sourceMechanicsBuffer,
+    storageGeneration: epochIdentity.storageGeneration,
+    slot: 0
+  };
+  const schroederSpatialEpochTransaction =
+    createSchroederSpatialEpochTransaction({
+      device,
+      generation,
+      sphParticleUpload,
+      mlsMpmParticleUpload
+    });
+  const residentProductMass = tagResidentProductMassDevice(
+    residentProductMassHandle({
+      label: 'exact-stage-dag-products',
+      rowCount: 2,
+      byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+    }),
+    device
+  );
+  const productCountControlBuffer = tagWebGpuBufferDevice(
+    device.createBuffer({
+      label: 'exact-stage-dag-product-count-control',
+      size: 256,
+      usage: 128 | 256 | 4 | 8
+    }),
+    device
+  );
+  device.queue.writeBuffer(
+    productCountControlBuffer,
+    0,
+    createResidentProductEventCountControlWords({
+      liveRowCount: 2,
+      rowCapacity: 2,
+      rowStrideVec4: 8,
+      generation: 7,
+      seal: 11
+    })
+  );
+  registerResidentProductEventCountAuthority(residentProductMass, {
+    device,
+    controlBuffer: productCountControlBuffer,
+    controlOffsetBytes: 0,
+    rowCapacity: 2,
+    rowStrideFloats: 32,
+    generation: 7,
+    seal: 11
+  });
+
+  let laneContract = null;
+  let gridTask = null;
+  let spatialResult = null;
+  let eosResult = null;
+  const submittedTasks = [];
+  const observedStages = [];
+  const computeManager = {
+    async submitTask(task) {
+      submittedTasks.push(task);
+      observedStages.push(task.exportName);
+      if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+        return {
+          computeTaskResultSchema:
+            'peercompute.ulg.mls-mpm-mechanics-p2g-stage-compute-task-result.v0',
+          mechanicsP2gStageTask: true,
+          mechanicsP2gStageTaskEvidence: { passed: true },
+          backend: 'webgpu',
+          status: 'projected',
+          mechanicsFieldMode: 'required',
+          gridNodeCount: 8,
+          gridNodeStrideBytes: 48,
+          residentProductMassProductEventDispatchMode:
+            'gpu-authenticated-gas-only-no-mechanics-scatter',
+          residentProductMassGridCouplingStatus:
+            'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter',
+          residentProductMassInputProductEventCountAuthority:
+            'gpu-authored-filtered-live-prefix',
+          residentProductMassInputProductEventCountHostKnown: false,
+          residentProductMassInputProductEventRowCapacity: 2,
+          residentProductMassCoupledEventCount: 0,
+          residentProductMassCoupledUnplacedMassKg: 0,
+          readbackMode: 'no-full-readback',
+          normalHotLoopReadbackFree: true
+        };
+      }
+      if (
+        task.exportName
+        === 'runSphSpatialGasLedgerProducerStageComputeTask'
+      ) {
+        spatialResult = await runSphSpatialGasLedgerProducerStageComputeTask({
+          ...task.data,
+          device
+        });
+        return spatialResult;
+      }
+      if (task.exportName === 'runSphGasCellEosProducerStageComputeTask') {
+        eosResult = await runSphGasCellEosProducerStageComputeTask({
+          ...task.data,
+          device
+        });
+        return eosResult;
+      }
+      if (
+        task.exportName
+        === 'runMlsMpmMechanicsGridUpdateStageComputeTask'
+      ) {
+        gridTask = task;
+        throw new Error('synthetic exact grid submit uncertainty');
+      }
+      throw new Error(`unexpected task export ${task.exportName}`);
+    },
+    acquireGpuResidentLaneLease(spec) {
+      laneContract = spec.residentSequenceLaneContract;
+      return {
+        leaseId: `${spec.laneId}:lease`,
+        laneId: spec.laneId,
+        stateKey: spec.stateKey,
+        residentSequenceLaneContract: laneContract
+      };
+    },
+    async executeGpuResidentLaneStagePlan(leaseId, options = {}) {
+      const stageResults = [];
+      let input = options.input || null;
+      for (const stage of laneContract.passDagStages) {
+        const stageResult = await options.stageExecutors[stage.id]({
+          stage,
+          input,
+          leaseId,
+          context: options.context || {}
+        });
+        stageResults.push({ stageId: stage.id, status: 'completed' });
+        input = stageResult.value;
+      }
+      return {
+        schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+        status: 'completed',
+        completedStageCount: stageResults.length,
+        stageResults,
+        retainedBufferRefs: []
+      };
+    },
+    completeGpuResidentLaneLease() {
+      return {
+        status: 'queue-work-completed',
+        gpuFence: {
+          schema: 'peercompute.compute.gpu-fence-report.v0',
+          status: 'queue-work-completed',
+          required: true,
+          fenceSatisfied: true
+        }
+      };
+    },
+    rejectGpuResidentLaneLease() {
+      return { status: 'rejected' };
+    }
+  };
+
+  await assert.rejects(
+    runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix: 'ulg:test:exact-v4-gas-pressure-mechanics-dag',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      gasPressureMechanicsBoundaryEnabled: true,
+      canonicalSpatialRequired: true,
+      preferWebGpu: true,
+      readbackMode: 'no-full-readback',
+      residentProductMass,
+      schroederSpatialEpochGeneration: generation,
+      schroederSpatialEpochTransaction,
+      schroederSelectedLevel: 0,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      boxDimsM: [2, 2, 2],
+      internalPressureScale: 0.75,
+      ambientPressurePa: 101325,
+      includePressureInterfaceStage: false,
+      device
+    }),
+    /synthetic exact grid submit uncertainty/
+  );
+
+  assert.deepEqual(
+    laneContract.passDagStages.map((stage) => stage.id),
+    [
+      'p2g',
+      'spatialGasLedgerProducer',
+      'gasCellEosProducer',
+      'gridUpdate',
+      'g2p'
+    ]
+  );
+  assert.equal(
+    laneContract.sequenceMode,
+    'mechanics-plus-exact-v4-gas-pressure-boundary-stage-task-chain'
+  );
+  assert.equal(
+    laneContract.queueFencePolicy,
+    'same-device-queue-ordering-before-admission'
+  );
+  assert.equal(
+    laneContract.passDagStages.some(
+      (stage) => stage.id === 'pressureInterface'
+    ),
+    false
+  );
+  const gridStage = laneContract.passDagStages.find(
+    (stage) => stage.id === 'gridUpdate'
+  );
+  assert.deepEqual(gridStage.dependsOn, ['p2g', 'gasCellEosProducer']);
+  assert.equal(gridStage.inputFrom, 'gasCellEosProducer');
+  assert.deepEqual(gridStage.reads, [
+    'mls-mpm-grid',
+    'resident-gas-pressure',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.equal(
+    laneContract.readFamilies.includes('sph-material-interface-field'),
+    false
+  );
+  for (const task of submittedTasks) {
+    assert.equal(
+      task.webgpu.queueFencePolicy,
+      'same-device-queue-ordering-before-admission'
+    );
+    assert.equal(
+      task.gpuResidentLane.queueFencePolicy,
+      'same-device-queue-ordering-before-admission'
+    );
+  }
+  const p2gTask = submittedTasks.find(
+    (task) => task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask'
+  );
+  assert.deepEqual(p2gTask.readFamilies, [
+    'sph-particle-state',
+    'mls-mpm-mechanics',
+    'resident-product-mass',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.equal(p2gTask.data.residentProductMass, residentProductMass);
+  assert.equal(p2gTask.data.gasPressureMechanicsBoundaryRequired, true);
+  assert.equal(p2gTask.data.internalPressureScale, 0.75);
+  assert.equal(p2gTask.data.ambientPressurePa, 101325);
+  assert.equal(p2gTask.data.externalGaugePressurePa, 0);
+  assert.equal(p2gTask.data.externalGaugePressureEnabled, false);
+  assert.equal(p2gTask.data.mechanicsFieldMode, 'required');
+  assert.equal(p2gTask.data.retainGridBuffer, false);
+  assert.deepEqual(p2gTask.webgpu.retainedBufferRefs, []);
+  const spatialTask = submittedTasks.find(
+    (task) => task.exportName
+      === 'runSphSpatialGasLedgerProducerStageComputeTask'
+  );
+  assert.equal(spatialTask.data.residentProductMass, residentProductMass);
+  assert.equal(spatialTask.data.productEventRowCount, 2);
+  assert.equal(spatialTask.data.productEventStrideFloats, 32);
+  assert.equal(spatialTask.data.schroederSpatialEpochGeneration, generation);
+  assert.equal(
+    eosResult.retainedGasCellFieldSource,
+    spatialResult.retainedGasCellFieldSource
+  );
+  assert.equal(
+    isExactSphSpatialGasPressureAuthoritySource(
+      eosResult.retainedGasCellFieldSource
+    ),
+    true
+  );
+  assert.equal(spatialResult.failClosed, false);
+  assert.ok(gridTask);
+  assert.deepEqual(gridTask.readFamilies, [
+    'mls-mpm-grid',
+    'resident-gas-pressure',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.equal(gridTask.data.pressureInterfaceForceRowsBuffer, null);
+  assert.equal(gridTask.data.pressureInterfaceForceSolver, null);
+  assert.equal(gridTask.data.pressureInterfaceGridForceAdmission, null);
+  assert.equal(
+    gridTask.data.gasPressureMechanicsAuthoritySource,
+    eosResult.retainedGasCellFieldSource
+  );
+  assert.equal(gridTask.data.gasPressureMechanicsChartId, 0);
+  assert.equal(gridTask.data.gasPressureMechanicsBoundaryRequired, true);
+  assert.equal(gridTask.data.workerExactPressureGridHandoffRequired, true);
+  assert.equal(gridTask.data.retainUpdatedGridBuffer, false);
+  assert.equal(
+    gridTask.data.schroederSpatialEpochTransaction,
+    schroederSpatialEpochTransaction
+  );
+  assert.deepEqual(gridTask.webgpu.retainedBufferRefs, []);
+  assert.equal(gridTask.gpuResidentLane.copyBudget.retainedBytes, 0);
+  assert.deepEqual(observedStages, [
+    'runMlsMpmMechanicsP2gStageComputeTask',
+    'runSphSpatialGasLedgerProducerStageComputeTask',
+    'runSphGasCellEosProducerStageComputeTask',
+    'runMlsMpmMechanicsGridUpdateStageComputeTask'
+  ]);
+  assert.equal(hostFenceCalls, 0);
+});
+
+test('exact gas-pressure mechanics task creators advertise only their real authority families and retained outputs', () => {
+  const schroederSpatialMechanicalProposal = Object.freeze({
+    label: 'exact-pressure-g2p-proposal-forwarding-sentinel'
+  });
+  const common = {
+    modulePath: './sphMlsMpmGpuStep.js',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    gasPressureMechanicsBoundaryRequired: true
+  };
+  const p2g = createMlsMpmMechanicsP2gStageComputeTask({
+    ...common,
+    sphParticleState: manualBuffers().sphParticleState
+  });
+  assert.deepEqual(p2g.readFamilies, [
+    'sph-particle-state',
+    'mls-mpm-mechanics',
+    'resident-product-mass',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.deepEqual(p2g.webgpu.retainedBufferRefs, []);
+  const grid = createMlsMpmMechanicsGridUpdateStageComputeTask({
+    ...common,
+    p2gGridProjection: {
+      gridNodeCount: 8,
+      gridNodeStrideBytes: 48
+    }
+  });
+  assert.deepEqual(grid.readFamilies, [
+    'mls-mpm-grid',
+    'resident-gas-pressure',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.deepEqual(grid.webgpu.retainedBufferRefs, []);
+  assert.equal(grid.gpuResidentLane.copyBudget.retainedBytes, 0);
+  const g2p = createMlsMpmMechanicsG2pStageComputeTask({
+    ...common,
+    schroederSpatialMechanicalProposal,
+    sphParticleState: manualBuffers().sphParticleState
+  });
+  assert.deepEqual(g2p.readFamilies, [
+    'sph-particle-state',
+    'mls-mpm-mechanics',
+    'mls-mpm-grid',
+    'schroeder-spatial-epoch'
+  ]);
+  assert.deepEqual(g2p.webgpu.retainedBufferRefs, [
+    'sph-state-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(
+    g2p.data.schroederSpatialMechanicalProposal,
+    schroederSpatialMechanicalProposal
+  );
+});
+
+test('enabled exact gas-pressure mechanics idles without product capacity and rejects an ineligible positive capacity', async () => {
+  const buffers = manualBuffers();
+  const idle = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    gasPressureMechanicsBoundaryEnabled: true,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback'
+  });
+  assert.equal(
+    idle.gasPressureMechanicsBoundaryStatus,
+    'exact-v4-gas-pressure-mechanics-boundary-idle-no-product-rows'
+  );
+  assert.equal(idle.gasPressureMechanicsBoundaryRequested, false);
+  assert.equal(idle.gasPressureMechanicsBoundarySubmitted, false);
+
+  await assert.rejects(
+    runMlsMpmResidentStepWithOptionalWebGpu({
+      ...buffers,
+      gasPressureMechanicsBoundaryEnabled: true,
+      residentProductMass: residentProductMassHandle({
+        label: 'exact-positive-capacity-ineligible-product',
+        rowCount: 1,
+        byteLength: 32 * Float32Array.BYTES_PER_ELEMENT
+      }),
+      preferWebGpu: false,
+      readbackMode: 'full-parity-readback'
+    }),
+    {
+      code: 'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_INELIGIBLE'
+    }
+  );
+});
+
+test('stage chain retires the canonical combined spatial owner in both spatial-only modes', async () => {
+  const runCase = async (includePressureInterfaceStage) => {
+    const buffers = manualBuffers();
+    const gasPressureCellsBuffer = { label: 'combined-spatial-owner-gas-buffer' };
+    const spatialRowsBuffer = { label: 'combined-spatial-owner-ledger-buffer' };
+    let releaseCalls = 0;
+    let cleanupFenceCount = 0;
+    let releaseScheduled = false;
+    let released = false;
+    let releasePromise = null;
+    let laneContract = null;
+    const releaseAfterFinalConsumerQueue = () => {
+      if (releaseScheduled || released) return false;
+      releaseCalls += 1;
+      cleanupFenceCount += 1;
+      releaseScheduled = true;
+      releasePromise = Promise.resolve().then(() => {
+        released = true;
+        return true;
+      });
+      return true;
+    };
+    const cleanupSnapshot = () => createGpuReadbackTelemetry({
+      scope: 'test-combined-spatial-owner-cleanup',
+      hostQueueFenceCount: cleanupFenceCount,
+      deferredCleanupHostQueueFenceCount: cleanupFenceCount
+    });
+    const retainedSpatialGasLedgerSource = {
+      schema: 'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v1',
+      status: 'retained-spatial-gas-ledger-source-submitted',
+      ready: true,
+      finalConsumerReleaseRequired: true,
+      releaseAfterFinalConsumerQueue,
+      deferredCleanupReadbackTelemetrySnapshot: cleanupSnapshot
+    };
+    const retainedGasCellFieldSource = {
+      schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+      status: 'pressure-interface-retained-gas-cell-field-source-ready',
+      ready: true,
+      localPressureGradientReady: true,
+      finalConsumerReleaseRequired: true,
+      gasPressureCellsBuffer,
+      retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+      pressureInterfaceGasPressureCellRowCount: 1,
+      pressureInterfaceGasPressureCellRowStrideFloats: 12,
+      retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+      releaseAfterFinalConsumerQueue,
+      deferredCleanupReadbackTelemetrySnapshot: cleanupSnapshot
+    };
+    const spatialResult = {
+      computeTaskResultSchema:
+        ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+      spatialGasLedgerProducerStageTask: true,
+      spatialGasLedgerProducerStageTaskEvidence: { passed: true },
+      backend: 'webgpu',
+      status: 'spatial-gas-ledger-producer-stage-ready',
+      ...createGpuReadbackTelemetry({ scope: 'test-combined-spatial-owner-stage' }),
+      compactSpatialGasRowCount: 1,
+      spatialGasLedgerRowsBuffer: spatialRowsBuffer,
+      retainedSpatialGasLedgerSourceReady: true,
+      retainedSpatialGasLedgerSource,
+      retainedGasCellFieldSourceReady: true,
+      retainedGasCellFieldSource,
+      gasPressureCellsBuffer,
+      retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+      pressureInterfaceGasPressureCellRowCount: 1,
+      pressureInterfaceGasPressureCellRowStrideFloats: 12,
+      retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+      releaseAfterFinalConsumerQueue,
+      destroySpatialGasLedgerRowsBuffer: releaseAfterFinalConsumerQueue,
+      destroyGasPressureCellsBuffer: releaseAfterFinalConsumerQueue,
+      deferredCleanupReadbackTelemetrySnapshot: cleanupSnapshot
+    };
+    for (const owner of [
+      spatialResult,
+      retainedSpatialGasLedgerSource,
+      retainedGasCellFieldSource
+    ]) {
+      Object.defineProperties(owner, {
+        releaseAttempted: { get: () => releaseScheduled || released },
+        releaseScheduled: { get: () => releaseScheduled },
+        releasePromise: { get: () => releasePromise },
+        released: { get: () => released },
+        releaseQuarantined: { get: () => false }
+      });
+    }
+    const pressureResult = {
+      computeTaskResultSchema:
+        ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+      pressureInterfaceStageTask: true,
+      pressureInterfaceStageTaskEvidence: { passed: true },
+      backend: 'cpu-reference',
+      status: 'pressure-interface-stage-blocked',
+      ...createGpuReadbackTelemetry({ scope: 'test-combined-spatial-pressure-stage' })
+    };
+    const computeManager = {
+      async submitTask(task) {
+        if (task.exportName === 'runSphSpatialGasLedgerProducerStageComputeTask') {
+          return spatialResult;
+        }
+        if (task.exportName === 'runSphPressureInterfaceStageComputeTask') {
+          return pressureResult;
+        }
+        const data = { ...task.data, preferWebGpu: false };
+        if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+          return runMlsMpmMechanicsP2gStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsGridUpdateStageComputeTask') {
+          return runMlsMpmMechanicsGridUpdateStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsG2pStageComputeTask') {
+          return runMlsMpmMechanicsG2pStageComputeTask(data);
+        }
+        throw new Error(`unexpected task export ${task.exportName}`);
+      },
+      acquireGpuResidentLaneLease(spec) {
+        laneContract = spec.residentSequenceLaneContract;
+        return {
+          leaseId: `${spec.laneId}:lease`,
+          laneId: spec.laneId,
+          stateKey: spec.stateKey,
+          residentSequenceLaneContract: laneContract
+        };
+      },
+      async executeGpuResidentLaneStagePlan(leaseId, options = {}) {
+        const stageResults = [];
+        let input = options.input || null;
+        for (const stage of laneContract.passDagStages) {
+          const stageResult = await options.stageExecutors[stage.id]({
+            stage,
+            input,
+            leaseId,
+            context: options.context || {}
+          });
+          stageResults.push({ stageId: stage.id, status: 'completed' });
+          input = stageResult.value;
+        }
+        return {
+          schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+          status: 'completed',
+          completedStageCount: stageResults.length,
+          stageResults,
+          retainedBufferRefs: []
+        };
+      },
+      completeGpuResidentLaneLease() {
+        return {
+          status: 'queue-work-completed',
+          gpuFence: {
+            schema: 'peercompute.compute.gpu-fence-report.v0',
+            status: 'queue-work-completed',
+            required: true,
+            fenceSatisfied: true
+          }
+        };
+      }
+    };
+    const step = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix: includePressureInterfaceStage
+        ? 'ulg:test:combined-spatial-owner-pressure'
+        : 'ulg:test:combined-spatial-owner-only',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      includeSpatialGasLedgerProducerStage: true,
+      includeGasCellEosProducerStage: false,
+      includePressureInterfaceStage,
+      preferWebGpu: false,
+      readbackMode: 'full-parity-readback'
+    });
+    return {
+      step,
+      laneContract,
+      releaseCalls,
+      releasePromise,
+      spatialResult,
+      retainedGasCellFieldSource
+    };
+  };
+
+  const spatialOnly = await runCase(false);
+  assert.equal(spatialOnly.releaseCalls, 1);
+  assert.equal(await spatialOnly.releasePromise, true);
+  assert.equal(
+    spatialOnly.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseStatus,
+    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-omitted'
+  );
+  assert.equal(
+    spatialOnly.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseReadbackTelemetry
+      .deferredCleanupHostQueueFenceCount,
+    1
+  );
+
+  const spatialWithPressure = await runCase(true);
+  assert.equal(spatialWithPressure.releaseCalls, 1);
+  assert.equal(await spatialWithPressure.releasePromise, true);
+  assert.deepEqual(
+    spatialWithPressure.laneContract.passDagStages.find(
+      (stage) => stage.id === 'pressureInterface'
+    ).dependsOn,
+    ['spatialGasLedgerProducer']
+  );
+  assert.equal(
+    spatialWithPressure.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseStatus,
+    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-nonconsuming-terminal'
+  );
+  const repeated = scheduleSphGasCellEosFinalConsumerRelease({
+    spatialGasLedgerProducerResult: spatialWithPressure.spatialResult,
+    pressureStageStatus: 'completed'
+  });
+  assert.equal(repeated.scheduled, true);
+  assert.equal(repeated.alreadyScheduled, true);
+  assert.equal(spatialWithPressure.releaseCalls, 1);
+  assert.equal(
+    spatialWithPressure.retainedGasCellFieldSource.releaseScheduled,
+    true
+  );
+});
+
+test('worker gas-owner reconciliation rejects arbitrary or unconfirmed release evidence', async () => {
+  const runCase = async ({ initialStatus, initialScheduled, validFinalizer }) => {
+    const buffers = manualBuffers();
+    let laneContract = null;
+    let finalizerCalls = 0;
+    const retainedGasCellFieldSource = {
+      schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+      status: 'pressure-interface-retained-gas-cell-field-source-ready',
+      ready: true,
+      localPressureGradientReady: true,
+      finalConsumerReleaseRequired: true,
+      gasPressureCellsBuffer: { label: 'worker-retained-gas-owner-buffer' },
+      pressureInterfaceGasPressureCellRowCount: 1,
+      pressureInterfaceGasPressureCellRowStrideFloats: 12,
+      retainedGasPressureBufferRefs: ['ulg-worker:resident-gas-pressure']
+    };
+    const gasResult = {
+      computeTaskResultSchema:
+        ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+      gasCellEosProducerStageTask: true,
+      gasCellEosProducerStageTaskEvidence: { passed: true },
+      backend: 'webgpu',
+      status: 'gas-cell-eos-producer-stage-ready',
+      ...createGpuReadbackTelemetry({ scope: 'test-worker-gas-owner-stage' }),
+      retainedGasCellFieldSourceReady: true,
+      retainedGasCellFieldSource,
+      gasPressureCellsBuffer: retainedGasCellFieldSource.gasPressureCellsBuffer,
+      retainedGasPressureBufferRefs: ['ulg-worker:resident-gas-pressure'],
+      workerRetainedGasPressureBufferRefs: ['ulg-worker:resident-gas-pressure'],
+      workerResidentStage: {
+        retainedWithinWorker: true,
+        workerRetainedGasCellEosReleaseStatus: initialStatus,
+        workerRetainedGasCellEosReleaseScheduled: initialScheduled,
+        workerRetainedGasCellEosReleaseSource: 'synthetic-worker-stage',
+        workerRetainedGasCellEosReleaseReadbackTelemetry:
+          createGpuReadbackTelemetry({
+            scope: 'synthetic-reassuring-worker-cleanup'
+          }),
+        workerQueueFence: {
+          finalConsumerReleaseFenceUsed: false,
+          finalConsumerFenceDeferred: false,
+          fenceSatisfied: false
+        }
+      }
+    };
+    const computeManager = {
+      async submitTask(task) {
+        if (task.exportName === 'runSphGasCellEosProducerStageComputeTask') {
+          return gasResult;
+        }
+        const data = { ...task.data, preferWebGpu: false };
+        if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+          return runMlsMpmMechanicsP2gStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsGridUpdateStageComputeTask') {
+          return runMlsMpmMechanicsGridUpdateStageComputeTask(data);
+        }
+        if (task.exportName === 'runMlsMpmMechanicsG2pStageComputeTask') {
+          return runMlsMpmMechanicsG2pStageComputeTask(data);
+        }
+        throw new Error(`unexpected task export ${task.exportName}`);
+      },
+      acquireGpuResidentLaneLease(spec) {
+        laneContract = spec.residentSequenceLaneContract;
+        return {
+          leaseId: `${spec.laneId}:lease`,
+          laneId: spec.laneId,
+          stateKey: spec.stateKey,
+          residentSequenceLaneContract: laneContract
+        };
+      },
+      async executeGpuResidentLaneStagePlan(leaseId, options = {}) {
+        const stageResults = [];
+        let input = options.input || null;
+        for (const stage of laneContract.passDagStages) {
+          const stageResult = await options.stageExecutors[stage.id]({
+            stage,
+            input,
+            leaseId,
+            context: options.context || {}
+          });
+          stageResults.push({ stageId: stage.id, status: 'completed' });
+          input = stageResult.value;
+        }
+        return {
+          schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+          status: 'completed',
+          completedStageCount: stageResults.length,
+          stageResults,
+          retainedBufferRefs: []
+        };
+      },
+      completeGpuResidentLaneLease() {
+        return {
+          status: 'queue-work-completed',
+          gpuFence: {
+            schema: 'peercompute.compute.gpu-fence-report.v0',
+            status: 'queue-work-completed',
+            required: true,
+            fenceSatisfied: true
+          }
+        };
+      }
+    };
+    const gpuHubResidentStageWorkerRunner = async ({ stage }) => {
+      assert.equal(stage.id, 'gasCellEosFinalizer');
+      finalizerCalls += 1;
+      return validFinalizer
+        ? {
+            value: {
+              status:
+                'gas-cell-eos-final-consumer-release-scheduled-after-pressure-omitted',
+              releaseScheduled: true,
+              releaseConfirmed: true,
+              releaseSource: 'synthetic-worker-finalizer'
+            },
+            gpuFence: {
+              schema: 'peercompute.compute.gpu-fence-report.v0',
+              status: 'gpu-fence-satisfied',
+              required: true,
+              fenceSatisfied: true
+            }
+          }
+        : {
+            value: {
+              status: 'synthetic-non-awaiting-worker-finalizer-status',
+              releaseScheduled: true,
+              releaseConfirmed: null,
+              releaseSource: 'synthetic-worker-finalizer'
+            },
+            gpuFence: {
+              schema: 'peercompute.compute.gpu-fence-report.v0',
+              status: 'gpu-fence-unsatisfied',
+              required: true,
+              fenceSatisfied: false
+            }
+          };
+    };
+    const step = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      ...buffers,
+      computeManager,
+      modulePath: './sphMlsMpmGpuStep.js',
+      stageTaskIdPrefix: validFinalizer
+        ? 'ulg:test:worker-owner-valid-finalizer'
+        : 'ulg:test:worker-owner-invalid-finalizer',
+      useNativeTaskGraph: false,
+      useGpuHubResidentStageExecutors: false,
+      gpuHubResidentStageWorkerRunner,
+      includeGasCellEosProducerStage: true,
+      includePressureInterfaceStage: false,
+      preferWebGpu: false,
+      readbackMode: 'full-parity-readback'
+    });
+    return { step, finalizerCalls };
+  };
+
+  const recovered = await runCase({
+    initialStatus: 'synthetic-arbitrary-worker-release-status',
+    initialScheduled: false,
+    validFinalizer: true
+  });
+  assert.equal(recovered.finalizerCalls, 1);
+  assert.equal(
+    recovered.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseStatus,
+    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-omitted'
+  );
+  assert.equal(
+    recovered.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseScheduled,
+    true
+  );
+
+  const quarantined = await runCase({
+    initialStatus:
+      'gas-cell-eos-final-consumer-release-scheduled-after-pressure-omitted',
+    initialScheduled: true,
+    validFinalizer: false
+  });
+  assert.equal(quarantined.finalizerCalls, 1);
+  assert.equal(
+    quarantined.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseStatus,
+    'gas-cell-eos-final-consumer-release-worker-finalizer-unconfirmed'
+  );
+  assert.equal(
+    quarantined.step.mechanicsStageTaskChain
+      .gasCellEosProducerFinalConsumerReleaseScheduled,
+    false
+  );
+  const telemetry = quarantined.step.mechanicsStageTaskChain
+    .gasCellEosProducerFinalConsumerReleaseReadbackTelemetry;
+  assert.equal(telemetry.readbackTelemetryComplete, false);
+  assert.ok(
+    telemetry.readbackTelemetryUnknownSources.includes(
+      'worker-gas-cell-eos-final-consumer-finalizer-evidence-inconsistent'
+    ),
+    JSON.stringify(telemetry)
   );
 });
 
@@ -7519,6 +9919,14 @@ test('SPH retained gas-cell EOS handoff forwards canonical release and exact v1 
   assert.equal(result.spatialGenerationId, 73);
   assert.equal(result.sourceSpatialGasLedgerGenerationId, 73);
   assert.equal(result.epochIdentity, epochIdentity);
+  assert.equal(result.readbackTelemetrySchema, 'peercompute.ulg.gpu-readback-telemetry.v1');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedMapAsyncCount, 0);
+  assert.equal(result.observedReadbackBytes, 0);
+  assert.equal(result.observedHostQueueFenceCount, 0);
+  assert.deepEqual(result.readbackTelemetrySourceBreakdown, []);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
   assert.equal(result.retainedGasCellFieldSource.stateKey, result.stateKey);
   assert.equal(result.retainedGasCellFieldSource.sourceTaskId, result.sourceTaskId);
   assert.equal(
@@ -7534,7 +9942,7 @@ test('SPH retained gas-cell EOS handoff forwards canonical release and exact v1 
   assert.equal(gasPressureCellsBuffer.destroyed, true);
 });
 
-test('SPH retained spatial-gas EOS result exposes one canonical final-consumer release identity', async () => {
+test('SPH retained spatial-gas EOS v4 stage graph carries only the exact opaque pressure authority', async () => {
   const device = fakeSummaryDevice(new Float32Array(0));
   const residentProductMass = tagResidentProductMassDevice(residentProductMassHandle({
     label: 'retained-spatial-v1-product-events',
@@ -7551,48 +9959,561 @@ test('SPH retained spatial-gas EOS result exposes one canonical final-consumer r
     levelEpoch: 202,
     supportEpoch: 203
   };
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const assignmentBuffer = taggedBuffer(
+    'retained-spatial-v3-level-assignment',
+    2 * SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceStateBuffer = taggedBuffer(
+    'retained-spatial-v3-source-state',
+    2 * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceMechanicsBuffer = taggedBuffer(
+    'retained-spatial-v3-source-mechanics-v0j',
+    2 * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const particleIdentityBuffer = taggedBuffer(
+    'retained-spatial-v3-source-identity',
+    2 * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const schroederSpatialEpochGeneration =
+    runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment: {
+        schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+        status: 'schroeder-level-assignment-submitted',
+        bufferFamilyGenerationStatus:
+          'schroeder-particle-buffer-family-generation-ready',
+        particleCount: 2,
+        assignmentStrideFloats:
+          SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+        assignmentBuffer,
+        assignmentBufferByteLength: assignmentBuffer.size,
+        sourceStateBuffer,
+        sourceStateBufferBorrowed: true,
+        sourceMechanicsBuffer,
+        sourceMechanicsBufferBorrowed: true,
+        sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+        ...epochIdentity,
+        minLevel: 0,
+        maxLevel: 0,
+        chartId: 0,
+        baseGridSpacingM: 1
+      },
+      particleCount: 2,
+      particleIdentityBuffer,
+      particleIdentityStrideWords: 1,
+      selectedLevel: 0,
+      mechanicsGrid: {
+        selectedLevel: 0,
+        gridDims: [2, 2, 2],
+        gridNodeCount: 8,
+        gridShift: 1,
+        gridSpacingM: 1
+      },
+      exactNearCellTreeEnabled: false
+    });
+  assert.equal(
+    schroederSpatialEpochGeneration.ready,
+    true,
+    schroederSpatialEpochGeneration.reason
+  );
+  assert.ok(
+    schroederSpatialEpochGeneration.mechanicsLevelViews[0].phaseVolumeMoment
+  );
   const task = createSphSpatialGasLedgerProducerStageComputeTask({
     modulePath: './sphMlsMpmGpuStep.js',
-    taskId: 'ulg:test:retained-spatial-v1-eos',
-    laneId: 'ulg:test:retained-spatial-v1-eos-lane',
-    stateKey: 'ulg:test:retained-spatial-v1-eos-state',
+    taskId: 'ulg:test:retained-spatial-v3-eos',
+    laneId: 'ulg:test:retained-spatial-v3-eos-lane',
+    stateKey: 'ulg:test:retained-spatial-v3-eos-state',
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
     residentProductMass,
     spatialGasEpochIdentity: epochIdentity,
+    schroederSpatialEpochGeneration,
     boxDimsM: [2, 2, 2],
     device
   });
 
   const result = await runSphSpatialGasLedgerProducerStageComputeTask(task.data);
 
-  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(
+    result.status,
+    'spatial-gas-ledger-producer-stage-ready',
+    JSON.stringify({ reason: result.reason, webgpuStatus: result.webgpuStatus })
+  );
+  assert.equal(result.failClosed, false);
   assert.equal(result.retainedSpatialGasLedgerSourceReady, true);
   assert.equal(result.retainedGasCellFieldSourceReady, true);
-  assert.equal(
-    result.releaseAfterFinalConsumerQueue,
-    result.spatialGasLedgerEosExecution.releaseAfterFinalConsumerQueue
-  );
-  assert.equal(result.destroySpatialGasLedgerRowsBuffer, result.releaseAfterFinalConsumerQueue);
-  assert.equal(result.destroyGasPressureCellsBuffer, result.releaseAfterFinalConsumerQueue);
-  assert.equal(result.stateKey, 'ulg:test:retained-spatial-v1-eos-state');
-  assert.equal(result.sourceTaskId, 'ulg:test:retained-spatial-v1-eos');
+  for (const forbiddenKey of [
+    'spatialGasLedgerRowsBuffer',
+    'gasPressureCellsBuffer',
+    'retainedGasPressureCellsBuffer',
+    'retainedSpatialGasLedgerSource',
+    'spatialGasLedgerEosExecution',
+    'releaseAfterFinalConsumerQueue',
+    'destroySpatialGasLedgerRowsBuffer',
+    'destroyGasPressureCellsBuffer'
+  ]) {
+    assert.equal(Object.hasOwn(result, forbiddenKey), false, forbiddenKey);
+  }
+  const spatialStageGraph = ownDataPropertyGraph(result);
+  for (const buffer of device.createdBuffers) {
+    assert.equal(
+      spatialStageGraph.has(buffer),
+      false,
+      `spatial stage leaked ${buffer.label}`
+    );
+  }
+  for (const owner of [
+    schroederSpatialEpochGeneration,
+    schroederSpatialEpochGeneration.execution,
+    schroederSpatialEpochGeneration.runtime
+  ]) {
+    assert.equal(spatialStageGraph.has(owner), false);
+  }
+  assert.equal(result.stateKey, 'ulg:test:retained-spatial-v3-eos-state');
+  assert.equal(result.sourceTaskId, 'ulg:test:retained-spatial-v3-eos');
   assert.equal(result.deviceId, result.retainedGasCellFieldSource.deviceId);
-  assert.equal(result.spatialGenerationId, result.retainedSpatialGasLedgerSource.spatialEpochGenerationId);
+  assert.equal(
+    result.spatialGenerationId,
+    result.exactGasPressureAuthorityDescription.spatialGenerationId
+  );
   assert.equal(
     result.sourceSpatialGasLedgerGenerationId,
-    result.retainedGasCellFieldSource.sourceSpatialGasLedgerGenerationId
+    result.exactGasPressureAuthorityDescription.spatialGenerationId
   );
   assert.deepEqual(result.epochIdentity, epochIdentity);
+  assert.equal(result.readbackTelemetrySchema, 'peercompute.ulg.gpu-readback-telemetry.v1');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedMapAsyncCount, 0);
+  assert.equal(result.observedReadbackBytes, 0);
+  assert.equal(result.observedHostQueueFenceCount, 0);
+  assert.deepEqual(result.readbackTelemetrySourceBreakdown, []);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(
+    result.retainedGasCellFieldSource
+      .gasFreeVolumePressureDenominatorAuthority,
+    'same-generation-condensed-occupancy-free-volume-sidecar'
+  );
+  assert.equal(result.spatialGasSupportVolumeFallbackM3, 0);
+  assert.equal(
+    result.spatialGasSupportVolumeFallbackSource,
+    'forbidden-authoritative-ss-occupancy-grid-free-volume'
+  );
+  const exactAdmission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource
+  };
+  const normalizedExactImport = normalizePressureInterfaceGasCellFieldImport({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  }, { device });
+  assert.equal(normalizedExactImport.importReady, true);
+  assert.equal(normalizedExactImport.gpuPressureAuthorityReady, true);
+  assert.equal(
+    normalizedExactImport.retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+  assert.equal(
+    normalizedExactImport.pressureInterfaceGasPressureCellRowCapacity,
+    result.exactGasPressureAuthorityDescription.pressureCellCapacity
+  );
+  assert.equal(
+    normalizedExactImport.exactGasPressureAuthorityDeviceAuthenticated,
+    true
+  );
+  for (const forbiddenKey of [
+    'gasPressureCellsBuffer',
+    'retainedGasPressureCellsBuffer',
+    'spatialGasLedgerEosExecution',
+    'releaseAfterFinalConsumerQueue',
+    'spatialGeneration',
+    'spatialEpoch'
+  ]) {
+    assert.equal(
+      Object.hasOwn(normalizedExactImport, forbiddenKey),
+      false,
+      forbiddenKey
+    );
+  }
+  assert.notEqual(
+    normalizedExactImport.pressureInterfaceGasCellFieldAdmission,
+    exactAdmission
+  );
+  assert.deepEqual(
+    Reflect.ownKeys(
+      normalizedExactImport.pressureInterfaceGasCellFieldAdmission
+    ).sort(),
+    [
+      'gasCellFieldConsumptionApproved',
+      'retainedGasCellFieldSource',
+      'schema',
+      'status'
+    ]
+  );
+
+  let wrapperPublicAccessorCount = 0;
+  const hostileAdmissionOwner = schroederSpatialEpochGeneration;
+  const hostileAdmission = {
+    ...exactAdmission,
+    spatialGeneration: hostileAdmissionOwner,
+    arbitraryOwnerGraph: { hostileAdmissionOwner }
+  };
+  const hostileExactWrapper = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission: hostileAdmission,
+    spatialGeneration: hostileAdmissionOwner,
+    spatialEpoch: { hostileAdmissionOwner }
+  };
+  Object.defineProperties(hostileExactWrapper, {
+    gasCellField: {
+      enumerable: true,
+      get() {
+        wrapperPublicAccessorCount += 1;
+        return { hostileAdmissionOwner };
+      }
+    },
+    sameDevice: {
+      enumerable: true,
+      get() {
+        wrapperPublicAccessorCount += 1;
+        return hostileAdmissionOwner;
+      }
+    }
+  });
+  const normalizedHostileExactImport =
+    normalizePressureInterfaceGasCellFieldImport(
+      hostileExactWrapper,
+      { device }
+    );
+  assert.equal(normalizedHostileExactImport.importReady, true);
+  assert.equal(wrapperPublicAccessorCount, 0);
+  assert.equal(
+    normalizedHostileExactImport.pressureInterfaceGasCellFieldAdmission
+      .retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+  assert.equal(
+    ownDataPropertyGraph(normalizedHostileExactImport).has(
+      hostileAdmissionOwner
+    ),
+    false
+  );
+  assert.equal(
+    ownDataPropertyGraph(normalizedHostileExactImport).has(hostileAdmission),
+    false
+  );
+  assert.equal(Object.hasOwn(normalizedHostileExactImport, 'spatialGeneration'), false);
+  assert.equal(Object.hasOwn(normalizedHostileExactImport, 'spatialEpoch'), false);
+
+  let linkAccessorCount = 0;
+  const linkAccessorWrapper = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  };
+  Object.defineProperty(linkAccessorWrapper, 'retainedGasCellFieldSource', {
+    enumerable: true,
+    get() {
+      linkAccessorCount += 1;
+      return result.retainedGasCellFieldSource;
+    }
+  });
+  assert.throws(
+    () => normalizePressureInterfaceGasCellFieldImport(
+      linkAccessorWrapper,
+      { device }
+    ),
+    (error) => error?.code === 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_LINK_ACCESSOR'
+  );
+  assert.equal(linkAccessorCount, 0);
+
+  let rawAliasAccessorCount = 0;
+  const rawAliasAccessorWrapper = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  };
+  Object.defineProperty(rawAliasAccessorWrapper, 'gasPressureCellsBuffer', {
+    enumerable: true,
+    get() {
+      rawAliasAccessorCount += 1;
+      return { label: 'must-not-be-read' };
+    }
+  });
+  const rejectedRawAliasAccessorImport =
+    normalizePressureInterfaceGasCellFieldImport(
+      rawAliasAccessorWrapper,
+      { device }
+    );
+  assert.equal(rejectedRawAliasAccessorImport.importReady, false);
+  assert.equal(
+    rejectedRawAliasAccessorImport.blocker,
+    'pressure-interface-gas-cell-field-import-v4-raw-buffer-alias-rejected'
+  );
+  assert.equal(rawAliasAccessorCount, 0);
+
+  for (const aliasKey of [
+    'gasPressureCellsBuffer',
+    'gasAuthorityControlBuffer'
+  ]) {
+    const rejectedNullAliasImport =
+      normalizePressureInterfaceGasCellFieldImport({
+        schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+        status: 'pressure-interface-gas-cell-field-import-ready',
+        retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+        pressureInterfaceGasCellFieldAdmission: exactAdmission,
+        [aliasKey]: null
+      }, { device });
+    assert.equal(rejectedNullAliasImport.importReady, false, aliasKey);
+    assert.equal(
+      rejectedNullAliasImport.blocker,
+      'pressure-interface-gas-cell-field-import-v4-raw-buffer-alias-rejected',
+      aliasKey
+    );
+  }
+
+  const descriptorThrowingWrapper = new Proxy({}, {
+    getOwnPropertyDescriptor(_target, key) {
+      if (key === 'retainedGasCellFieldSource') {
+        throw new Error('hostile descriptor trap');
+      }
+      return undefined;
+    }
+  });
+  assert.throws(
+    () => normalizePressureInterfaceGasCellFieldImport(
+      descriptorThrowingWrapper,
+      { device }
+    ),
+    (error) => (
+      error?.code
+        === 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_DESCRIPTOR_INSPECTION'
+    )
+  );
+
+  const boundedGraph = Array.from({ length: 65 }, () => ({}));
+  for (let index = 0; index < boundedGraph.length - 1; index += 1) {
+    boundedGraph[index].admission = boundedGraph[index + 1];
+  }
+  assert.throws(
+    () => normalizePressureInterfaceGasCellFieldImport(
+      boundedGraph[0],
+      { device }
+    ),
+    (error) => error?.code === 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_GRAPH_LIMIT'
+  );
+
+  const cyclicWrapper = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  };
+  const cyclicAdmissionWrapper = { admission: cyclicWrapper };
+  cyclicWrapper.admission = cyclicAdmissionWrapper;
+  const normalizedCyclicImport = normalizePressureInterfaceGasCellFieldImport(
+    cyclicWrapper,
+    { device }
+  );
+  assert.equal(normalizedCyclicImport.importReady, true);
+  assert.equal(
+    normalizedCyclicImport.retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+
+  const aliasFreeLegacyWrapper = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource
+  };
+  const normalizedAliasFreeLegacyWrapper =
+    normalizePressureInterfaceGasCellFieldImport({
+      schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+      status: 'pressure-interface-gas-cell-field-import-ready',
+      retainedGasCellFieldSource: aliasFreeLegacyWrapper,
+      pressureInterfaceGasCellFieldAdmission: exactAdmission
+    }, { device });
+  assert.equal(normalizedAliasFreeLegacyWrapper.importReady, true);
+  assert.equal(
+    normalizedAliasFreeLegacyWrapper.retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+
+  const legacyMask = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    gasPressureCellsBuffer: { label: 'legacy-mask-pressure-alias' }
+  };
+  const nestedLegacyMaskImport = normalizePressureInterfaceGasCellFieldImport({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: legacyMask,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  }, { device });
+  assert.equal(
+    nestedLegacyMaskImport.retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+  assert.equal(nestedLegacyMaskImport.importReady, false);
+  assert.equal(
+    nestedLegacyMaskImport.blocker,
+    'pressure-interface-gas-cell-field-import-v4-raw-buffer-alias-rejected'
+  );
+
+  const forgedCurrentSource = {
+    schema: ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+    status: 'retained-gas-cell-eos-source-submitted'
+  };
+  const nestedForgedMaskImport = normalizePressureInterfaceGasCellFieldImport({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: forgedCurrentSource,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission
+  }, { device });
+  assert.equal(
+    nestedForgedMaskImport.retainedGasCellFieldSource,
+    result.retainedGasCellFieldSource
+  );
+  assert.equal(nestedForgedMaskImport.importReady, false);
+  assert.equal(
+    nestedForgedMaskImport.blocker,
+    'pressure-interface-gas-cell-field-import-v4-source-identity-invalid'
+  );
+  const standaloneForgedImport = normalizePressureInterfaceGasCellFieldImport({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: forgedCurrentSource,
+    pressureInterfaceGasCellFieldAdmission: {
+      schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+      status: 'pressure-interface-gas-cell-field-consumption-approved',
+      gasCellFieldConsumptionApproved: true,
+      retainedGasCellFieldSource: forgedCurrentSource
+    }
+  }, { device });
+  assert.equal(standaloneForgedImport.importReady, false);
+  assert.equal(
+    standaloneForgedImport.blocker,
+    'pressure-interface-gas-cell-field-import-v4-source-identity-invalid'
+  );
+
+  for (const retiredSchema of [
+    'peercompute.ulg.sph-retained-gas-cell-eos-source.v2',
+    'peercompute.ulg.sph-retained-gas-cell-eos-source.v3'
+  ]) {
+    const retiredWrapper = {
+      schema: retiredSchema,
+      status: 'retired-gas-cell-eos-source',
+      retainedGasCellFieldSource: result.retainedGasCellFieldSource
+    };
+    const rejectedRetiredWrapperImport =
+      normalizePressureInterfaceGasCellFieldImport({
+        schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+        status: 'pressure-interface-gas-cell-field-import-ready',
+        retainedGasCellFieldSource: retiredWrapper,
+        pressureInterfaceGasCellFieldAdmission: exactAdmission
+      }, { device });
+    assert.equal(rejectedRetiredWrapperImport.importReady, false);
+    assert.equal(
+      rejectedRetiredWrapperImport.retainedGasCellFieldSource,
+      result.retainedGasCellFieldSource
+    );
+    assert.equal(
+      rejectedRetiredWrapperImport.blocker,
+      'pressure-interface-gas-cell-field-import-retired-source-schema-rejected'
+    );
+  }
+
+  const mismatchedAdmissionSource = {
+    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v1',
+    status: 'retained-gas-cell-eos-source-submitted'
+  };
+  const mismatchedExactAdmissionImport =
+    normalizePressureInterfaceGasCellFieldImport({
+      schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+      status: 'pressure-interface-gas-cell-field-import-ready',
+      retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+      pressureInterfaceGasCellFieldAdmission: {
+        schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+        status: 'pressure-interface-gas-cell-field-consumption-approved',
+        gasCellFieldConsumptionApproved: true,
+        retainedGasCellFieldSource: mismatchedAdmissionSource
+      }
+    }, { device });
+  assert.equal(mismatchedExactAdmissionImport.importReady, false);
+  assert.equal(
+    mismatchedExactAdmissionImport.blocker,
+    'pressure-interface-gas-cell-field-import-admission-required'
+  );
+  assert.equal(
+    mismatchedExactAdmissionImport.pressureInterfaceGasCellFieldAdmission,
+    null
+  );
+
+  const exactSchemaDescriptor = Object.getOwnPropertyDescriptor(
+    result.retainedGasCellFieldSource,
+    'schema'
+  );
+  assert.equal(exactSchemaDescriptor?.writable, false);
+  assert.equal(exactSchemaDescriptor?.configurable, false);
+  assert.equal(
+    Reflect.set(
+      result.retainedGasCellFieldSource,
+      'schema',
+      'peercompute.ulg.sph-retained-gas-cell-eos-source.v1'
+    ),
+    false
+  );
+  assert.equal(
+    result.retainedGasCellFieldSource.schema,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
+  );
+  const forbiddenRawAlias = device.createBuffer({
+    label: 'forbidden-exact-v4-stage-wrapper-raw-alias',
+    size: 4,
+    usage: 128
+  });
+  const rejectedRawAliasImport = normalizePressureInterfaceGasCellFieldImport({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource: result.retainedGasCellFieldSource,
+    pressureInterfaceGasCellFieldAdmission: exactAdmission,
+    gasPressureCellsBuffer: forbiddenRawAlias
+  }, { device });
+  assert.equal(rejectedRawAliasImport.importReady, false);
+  assert.equal(
+    rejectedRawAliasImport.blocker,
+    'pressure-interface-gas-cell-field-import-v4-raw-buffer-alias-rejected'
+  );
+  forbiddenRawAlias.destroy();
   const eosTask = createSphGasCellEosProducerStageComputeTask({
     modulePath: './sphMlsMpmGpuStep.js',
-    taskId: 'ulg:test:retained-spatial-v2-eos-forward',
-    laneId: 'ulg:test:retained-spatial-v2-eos-forward-lane',
-    stateKey: 'ulg:test:retained-spatial-v2-eos-forward-state',
+    taskId: 'ulg:test:retained-spatial-v3-eos-forward',
+    laneId: 'ulg:test:retained-spatial-v3-eos-forward-lane',
+    stateKey: 'ulg:test:retained-spatial-v3-eos-forward-state',
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
     spatialGasLedgerProducerResult: result
   });
+  assert.deepEqual(eosTask.webgpu.retainedBufferRefs, []);
+  assert.deepEqual(eosTask.gpuFence.retainedBufferRefs, []);
+  assert.deepEqual(eosTask.gpuResidentLane.retainedBufferRefs, []);
+  assert.deepEqual(eosTask.data.gpuFenceRequirement.retainedBufferRefs, []);
+  assert.deepEqual(eosTask.data.gpuResidentLane.retainedBufferRefs, []);
   const eosResult = await runSphGasCellEosProducerStageComputeTask(
     eosTask.data
   );
@@ -7609,12 +10530,220 @@ test('SPH retained spatial-gas EOS result exposes one canonical final-consumer r
   assert.equal(eosResult.gasPressureCellRowCount, 0);
   assert.equal(
     eosResult.gasPressureCellRowCapacity,
-    result.retainedGasCellFieldSource.gasPressureCellRowCapacity
+    result.exactGasPressureAuthorityDescription.pressureCellCapacity
   );
   assert.equal(eosResult.gasPressureCellLogicalCountGpuAuthored, true);
-  assert.equal(eosResult.releaseAfterFinalConsumerQueue(), true);
-  await result.spatialGasLedgerEosExecution.releasePromise;
-  assert.equal(result.spatialGasLedgerEosExecution.released, true);
+  assert.equal(eosResult.observedMapAsyncCount, 0);
+  assert.equal(eosResult.observedReadbackBytes, 0);
+  assert.equal(eosResult.observedHostQueueFenceCount, 0);
+  assert.equal(eosResult.normalHotLoopReadbackFree, true);
+  assert.equal(eosResult.productionHotLoopHostDependencyFree, true);
+  for (const forbiddenKey of [
+    'gasPressureCellsBuffer',
+    'retainedGasPressureCellsBuffer',
+    'retainedSpatialGasLedgerSource',
+    'spatialGasLedgerEosExecution',
+    'releaseAfterFinalConsumerQueue',
+    'destroyGasPressureCellsBuffer'
+  ]) {
+    assert.equal(Object.hasOwn(eosResult, forbiddenKey), false, forbiddenKey);
+  }
+  const eosStageGraph = ownDataPropertyGraph(eosResult);
+  for (const buffer of device.createdBuffers) {
+    assert.equal(
+      eosStageGraph.has(buffer),
+      false,
+      `EOS stage leaked ${buffer.label}`
+    );
+  }
+  const exceptionalRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: eosResult,
+    device,
+    pressureStageStatus: 'omitted'
+  });
+  assert.equal(exceptionalRelease.scheduled, true);
+  assert.equal(
+    exceptionalRelease.cleanupMode,
+    'exact-unconsumed-authority-host-fence-release'
+  );
+  assert.equal(await exceptionalRelease.releasePromise, true);
+  assert.equal(
+    describeSphSpatialGasPressureAuthority(
+      eosResult.retainedGasCellFieldSource,
+      { device }
+    ).releasedObserved,
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      schroederSpatialEpochGeneration,
+      device
+    ),
+    true
+  );
+  assert.equal(await schroederSpatialEpochGeneration.releasePromise, true);
+});
+
+test('retained spatial-gas producer merges nested Schroeder backpressure telemetry instead of overwriting it', async () => {
+  const device = fakeSummaryDevice(new Float32Array(0));
+  const residentProductMass = tagResidentProductMassDevice(
+    residentProductMassHandle({
+      label: 'retained-spatial-nested-telemetry-product-events',
+      rowCount: 2,
+      byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+    }),
+    device
+  );
+  const occupancy = retainedGasOccupancyGenerationFixture(device, {
+    particleCount: 2
+  });
+  const blockers = Array.from(
+    { length: 3 },
+    () => retainedGasActiveNodeGenerationFixture(device, {
+      particleCount: 2,
+      gridSpacingM: 1
+    })
+  );
+  const releaseGate = deferredTestPromise();
+  const originalFence = device.queue.onSubmittedWorkDone;
+  let fenceCallCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceCallCount += 1;
+    return releaseGate.promise;
+  };
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(blockers[0], device),
+    true
+  );
+
+  const pending = runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    productEventRowCount: 2,
+    productEventStrideFloats: 32,
+    spatialGasEpochIdentity: occupancy.epochIdentity,
+    schroederSpatialEpochGeneration: occupancy.generation,
+    boxDimsM: [2, 2, 2],
+    device
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  releaseGate.resolve();
+  const result = await pending;
+
+  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.awaitedBackpressureHostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(Object.hasOwn(result, 'spatialGasLedgerEosExecution'), false);
+  assert.ok(result.readbackTelemetrySourceBreakdown.some((entry) => (
+    entry.source.includes(
+      'retained-spatial-gas-ledger-eos:schroeder-spatial-generation'
+    )
+    && entry.awaitedBackpressureHostQueueFenceCount === 1
+  )));
+  assert.equal(fenceCallCount, 1);
+  assert.equal(await blockers[0].releasePromise, true);
+
+  device.queue.onSubmittedWorkDone = originalFence;
+  const exceptionalRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    spatialGasLedgerProducerResult: result,
+    device,
+    pressureStageStatus: 'omitted'
+  });
+  assert.equal(exceptionalRelease.scheduled, true);
+  assert.equal(
+    exceptionalRelease.cleanupMode,
+    'exact-unconsumed-authority-host-fence-release'
+  );
+  assert.equal(await exceptionalRelease.releasePromise, true);
+  for (const blocker of blockers.slice(1)) {
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(blocker, device),
+      true
+    );
+    assert.equal(await blocker.releasePromise, true);
+  }
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      occupancy.generation,
+      device
+    ),
+    true
+  );
+  assert.equal(await occupancy.generation.releasePromise, true);
+});
+
+test('retained spatial-gas producer propagates exact ready-child failure cleanup telemetry', async () => {
+  const device = fakeSummaryDevice(new Float32Array(0));
+  const residentProductMass = tagResidentProductMassDevice(
+    residentProductMassHandle({
+      label: 'retained-spatial-failure-telemetry-product-events',
+      rowCount: 2,
+      byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+    }),
+    device
+  );
+  const occupancy = retainedGasOccupancyGenerationFixture(device, {
+    particleCount: 2,
+    storageGeneration: 1301,
+    physicsTick: 1302,
+    positionEpoch: 1303,
+    topologyEpoch: 1304,
+    chartEpoch: 1305,
+    levelEpoch: 1306,
+    supportEpoch: 1307
+  });
+  const createBindGroup = device.createBindGroup.bind(device);
+  device.createBindGroup = (descriptor) => {
+    if (String(descriptor?.label).includes('-eos-aggregate-bind-group')) {
+      throw new Error('synthetic retained producer EOS setup failure');
+    }
+    return createBindGroup(descriptor);
+  };
+  const originalFence = device.queue.onSubmittedWorkDone;
+  let cleanupFenceCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    cleanupFenceCount += 1;
+    return Promise.resolve();
+  };
+
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    productEventRowCount: 2,
+    productEventStrideFloats: 32,
+    spatialGasEpochIdentity: occupancy.epochIdentity,
+    schroederSpatialEpochGeneration: occupancy.generation,
+    boxDimsM: [2, 2, 2],
+    device
+  });
+
+  assert.equal(result.status, 'spatial-gas-ledger-eos-rejected-submit');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.awaitedBackpressureHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(Object.hasOwn(result, 'spatialGasLedgerEosExecution'), false);
+  assert.equal(Object.hasOwn(result, 'retainedSpatialGasLedgerSource'), false);
+  assert.equal(cleanupFenceCount, 1);
+  await Promise.resolve();
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+
+  device.queue.onSubmittedWorkDone = originalFence;
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      occupancy.generation,
+      device
+    ),
+    true
+  );
+  assert.equal(await occupancy.generation.releasePromise, true);
 });
 
 test('SPH spatial gas ledger producer stage derives compact ledger from retained product-event rows', async () => {
@@ -7665,6 +10794,20 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
   assert.equal(result.fullProductEventReadbackPerformed, false);
   assert.equal(result.compactSpatialGasReadbackPerformed, true);
   assert.equal(result.compactSpatialGasReadbackByteLength, 96);
+  assert.equal(result.readbackTelemetrySchema, 'peercompute.ulg.gpu-readback-telemetry.v1');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedMapAsyncCount, 1);
+  assert.equal(result.observedReadbackBytes, 96);
+  assert.equal(result.finalDiagnosticMapAsyncCount, 0);
+  assert.equal(result.finalDiagnosticReadbackBytes, 0);
+  assert.equal(result.unclassifiedMapAsyncCount, 1);
+  assert.equal(result.unclassifiedReadbackBytes, 96);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, false);
+  assert.deepEqual(
+    result.readbackTelemetrySourceBreakdown.map((entry) => entry.source),
+    ['compact-spatial-gas-ledger-readback']
+  );
   assert.equal(result.compactSpatialGasRowCount, 2);
   assert.equal(result.spatialGasSpeciesLedger.schema, ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA);
   assert.equal(result.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
@@ -7675,10 +10818,17 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
   assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 100);
   assert.equal(result.spatialGasSpeciesLedger.cells[1].bySpecies.h2.moles, 200);
   assert.deepEqual(result.retainedSpatialGasSourceBufferRefs, ['resident-product-mass-buffer']);
-  assert.deepEqual(result.retainedSpatialGasLedgerBufferRefs, ['resident-spatial-gas-species-ledger-buffer']);
-  assert.equal(result.retainedSpatialGasLedgerSourceReady, true);
-  assert.equal(result.retainedSpatialGasLedgerSource.schema, ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA);
-  assert.equal(result.retainedSpatialGasLedgerSource.sourceTaskId, 'ulg:test:spatial-gas-ledger-producer-stage');
+  assert.deepEqual(result.retainedSpatialGasLedgerBufferRefs, []);
+  assert.equal(result.spatialGasLedgerRowsBuffer, null);
+  assert.equal(result.spatialGasLedgerRowsBufferRetained, false);
+  assert.equal(result.retainedSpatialGasLedgerSourceReady, false);
+  assert.equal(result.retainedSpatialGasLedgerSource, null);
+  const compactOutput = device.createdBuffers.find((buffer) => (
+    buffer.label === 'ulg-sph-spatial-gas-ledger-compact-rows-out'
+  ));
+  assert.ok(compactOutput);
+  assert.equal(compactOutput.destroyed, true);
+  assert.equal(compactOutput.destroyCount, 1);
   assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
   assert.equal(result.gpuFence.required, true);
   assert.equal(result.gpuFence.fenceSatisfied, true);
@@ -7692,13 +10842,68 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
   assert.equal(result.spatialGasLedgerProducerStageTaskAuthority.status, 'compute-manager-owned-non-mutating-spatial-gas-ledger-producer-stage-task');
   assert.equal(result.spatialGasLedgerProducerStageTaskAuthority.authoritativeStateMutation, false);
 
-  result.destroySpatialGasLedgerRowsBuffer?.();
-  assert.equal(result.spatialGasLedgerRowsBuffer.destroyed, true);
+  assert.equal(result.destroySpatialGasLedgerRowsBuffer, null);
+  assert.equal(compactOutput.destroyCount, 1);
+});
+
+test('SPH spatial gas ledger producer keeps a rejected compact map observed', async () => {
+  const compactRows = compactSpatialGasRowsFixture();
+  const device = fakeSummaryDevice(compactRows);
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (options) => {
+    const buffer = createBuffer(options);
+    if (options.label === 'ulg-sph-spatial-gas-ledger-compact-readback') {
+      buffer.mapAsync = async () => {
+        throw new Error('synthetic compact spatial gas map rejection');
+      };
+    }
+    return buffer;
+  };
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'full-parity-readback',
+    residentProductMass: residentProductMassHandle({
+      label: 'rejected-map-product-events',
+      rowCount: 2,
+      byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+    }),
+    productEventRows: productEventRowsFixture(),
+    productEventRowCount: 2,
+    productEventStrideFloats: 32,
+    reactionTable: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
+      productTermMetadata: [
+        { productTermIndex: 0, material: 'h2', routing: 'gas' }
+      ]
+    },
+    boxDimsM: [4, 4, 4],
+    spatialGasSupportVolumeFallbackM3: 32,
+    device
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(
+    result.status,
+    'spatial-gas-ledger-producer-stage-ready',
+    JSON.stringify({ reason: result.reason, webgpuStatus: result.webgpuStatus })
+  );
+  assert.equal(result.webgpuStatus.status, 'webgpu-failed');
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.observedMapAsyncCount, 1);
+  assert.equal(result.observedReadbackBytes, 96);
+  assert.equal(result.unclassifiedMapAsyncCount, 1);
+  assert.equal(result.unclassifiedReadbackBytes, 96);
+  assert.equal(result.finalDiagnosticMapAsyncCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, false);
 });
 
 test('SPH spatial gas ledger producer blocks cross-device retained product-event buffers before binding', async () => {
   const sourceDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
   const consumerDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const occupancy = retainedGasOccupancyGenerationFixture(consumerDevice);
+  const bindGroupCountBeforeGas = consumerDevice.bindGroups.length;
+  const dispatchCountBeforeGas = consumerDevice.dispatches.length;
   const residentProductMass = tagResidentProductMassDevice(residentProductMassHandle({
     label: 'cross-device-product-events',
     rowCount: 2,
@@ -7719,6 +10924,8 @@ test('SPH spatial gas ledger producer blocks cross-device retained product-event
       ]
     },
     boxDimsM: [2, 2, 2],
+    spatialGasEpochIdentity: occupancy.epochIdentity,
+    schroederSpatialEpochGeneration: occupancy.generation,
     device: consumerDevice
   });
 
@@ -7730,9 +10937,17 @@ test('SPH spatial gas ledger producer blocks cross-device retained product-event
   assert.equal(result.failClosed, true);
   assert.equal(result.compactSpatialGasReadbackPerformed, false);
   assert.equal(result.fullProductEventReadbackPerformed, false);
-  assert.equal(consumerDevice.bindGroups.length, 0);
-  assert.equal(consumerDevice.dispatches.length, 0);
+  assert.equal(consumerDevice.bindGroups.length, bindGroupCountBeforeGas);
+  assert.equal(consumerDevice.dispatches.length, dispatchCountBeforeGas);
   assert.equal(result.spatialGasSpeciesLedger, null);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      occupancy.generation,
+      consumerDevice
+    ),
+    true
+  );
+  assert.equal(await occupancy.generation.releasePromise, true);
 });
 
 test('SPH spatial gas ledger producer pins resident product events before device acquisition awaits', async () => {
@@ -7779,6 +10994,17 @@ test('SPH spatial gas ledger producer pins resident product events before device
 test('SPH spatial gas ledger producer blocks globally tagged cross-device product-event buffers', async () => {
   const sourceDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
   const consumerDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const occupancy = retainedGasOccupancyGenerationFixture(consumerDevice, {
+    storageGeneration: 311,
+    physicsTick: 312,
+    positionEpoch: 313,
+    topologyEpoch: 314,
+    chartEpoch: 315,
+    levelEpoch: 316,
+    supportEpoch: 317
+  });
+  const bindGroupCountBeforeGas = consumerDevice.bindGroups.length;
+  const dispatchCountBeforeGas = consumerDevice.dispatches.length;
   const residentProductMass = residentProductMassHandle({
     label: 'globally-tagged-product-events',
     rowCount: 2,
@@ -7807,6 +11033,8 @@ test('SPH spatial gas ledger producer blocks globally tagged cross-device produc
       ]
     },
     boxDimsM: [2, 2, 2],
+    spatialGasEpochIdentity: occupancy.epochIdentity,
+    schroederSpatialEpochGeneration: occupancy.generation,
     device: consumerDevice
   });
 
@@ -7816,8 +11044,16 @@ test('SPH spatial gas ledger producer blocks globally tagged cross-device produc
   assert.equal(result.productEventBufferSourceDeviceId.startsWith('ulg-webgpu-device:'), true);
   assert.equal(result.productEventBufferConsumerDeviceId.startsWith('ulg-webgpu-device:'), true);
   assert.notEqual(result.productEventBufferSourceDeviceId, result.productEventBufferConsumerDeviceId);
-  assert.equal(consumerDevice.bindGroups.length, 0);
-  assert.equal(consumerDevice.dispatches.length, 0);
+  assert.equal(consumerDevice.bindGroups.length, bindGroupCountBeforeGas);
+  assert.equal(consumerDevice.dispatches.length, dispatchCountBeforeGas);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      occupancy.generation,
+      consumerDevice
+    ),
+    true
+  );
+  assert.equal(await occupancy.generation.releasePromise, true);
 });
 
 test('SPH spatial gas ledger producer derives positioned gas rows when product support volume is missing', async () => {
@@ -7958,6 +11194,7 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     }
   ]);
   const device = fakeSummaryDevice(compactRows);
+  const occupancy = retainedGasOccupancyGenerationFixture(device);
   const residentProductMass = residentProductMassHandle({
     label: 'resident-product-events-for-spatial-ledger',
     rowCount: 2,
@@ -8015,7 +11252,6 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   const admissionCalls = [];
   const importCalls = [];
   const finalConsumerEvents = [];
-  let finalConsumerReleaseCalls = 0;
   let pressureConsumedGasCellsBuffer = null;
   let submittedPressureResult = null;
   let submittedSpatialGasResult = null;
@@ -8042,8 +11278,6 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     publishPressureInterfaceGasCellFieldImportSource(options) {
       importCalls.push(options);
       const retainedGasCellFieldSource = options.source.retainedGasCellFieldSource;
-      const sourceReleaseAfterFinalConsumerQueue =
-        options.source.releaseAfterFinalConsumerQueue;
       return {
         schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0',
         status: 'pressure-interface-gas-cell-field-import-published',
@@ -8061,36 +11295,13 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
           pressureInterfaceGasPressureCellRowByteLength: options.source.pressureInterfaceGasPressureCellRowByteLength,
           pressureInterfaceGasCellFieldAdmission: options.pressureInterfaceGasCellFieldAdmission,
           gasCellFieldSnapshot: options.gasCellFieldSnapshot,
-          gasPressureCellsBuffer: options.source.gasPressureCellsBuffer,
-          retainedGasPressureCellsBuffer: options.source.gasPressureCellsBuffer,
-          pressureInterfaceGasPressureCellsBuffer: options.source.gasPressureCellsBuffer,
-          pressureInterfaceGasPressureCellRowsBufferRetained: true,
+          pressureInterfaceGasPressureCellRowCapacity:
+            options.source.pressureInterfaceGasPressureCellRowCapacity,
+          pressureInterfaceGasPressureCellRowsBufferRetained: false,
           sameDevice: true,
           deviceId: retainedGasCellFieldSource.deviceId,
-          stateKey: retainedGasCellFieldSource.stateKey,
-          sourceTaskId: retainedGasCellFieldSource.sourceTaskId,
-          spatialGeneration: retainedGasCellFieldSource.spatialGeneration,
-          spatialEpoch: retainedGasCellFieldSource.spatialEpoch,
-          spatialEpochPositionEpoch:
-            retainedGasCellFieldSource.spatialEpochPositionEpoch,
-          spatialEpochTopologyEpoch:
-            retainedGasCellFieldSource.spatialEpochTopologyEpoch,
-          spatialEpochChartEpoch:
-            retainedGasCellFieldSource.spatialEpochChartEpoch,
-          spatialEpochLevelEpoch:
-            retainedGasCellFieldSource.spatialEpochLevelEpoch,
-          spatialEpochSupportEpoch:
-            retainedGasCellFieldSource.spatialEpochSupportEpoch,
-          lifecycleStatus: 'retained-gas-cell-final-consumer-available',
-          releaseScheduled: false,
-          released: false,
-          spatialGasLedgerEosExecution:
-            options.source.spatialGasLedgerEosExecution,
-          releaseAfterFinalConsumerQueue() {
-            finalConsumerEvents.push('final-consumer-release-scheduled');
-            finalConsumerReleaseCalls += 1;
-            return sourceReleaseAfterFinalConsumerQueue();
-          }
+          stateKey: options.source.stateKey,
+          sourceTaskId: options.source.sourceTaskId
         }
       };
     }
@@ -8103,7 +11314,8 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
         return runSphSpatialGasLedgerProducerStageComputeTask({
           ...data,
           preferWebGpu: true,
-          device
+          device,
+          schroederSpatialEpochGeneration: occupancy.generation
         }).then((result) => {
           submittedSpatialGasResult = result;
           return result;
@@ -8120,63 +11332,46 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
         });
       }
       if (task.exportName === 'runSphPressureInterfaceStageComputeTask') {
+        const {
+          schroederSpatialEpochGeneration: _ignoredPressureSpatialGeneration,
+          ...pressureData
+        } = data;
         return runSphPressureInterfaceStageComputeTask({
-          ...data,
+          ...pressureData,
           preferWebGpu: true,
           device,
-          pressureInterfaceForceRowsWebGpuRunner: async ({
+          pressureInterfaceForceRowsWebGpuRunner: async (args) => {
+            const {
             retainedGasPressureCellsBuffer,
             retainedGasPressureCellImport
-          }) => {
+            } = args;
             finalConsumerEvents.push('pressure-consumer-submitted');
             pressureConsumedGasCellsBuffer = retainedGasPressureCellsBuffer;
-            assert.equal(
-              retainedGasPressureCellsBuffer,
-              importCalls[0].source.gasPressureCellsBuffer
-            );
+            assert.equal(retainedGasPressureCellsBuffer, undefined);
             assert.equal(retainedGasPressureCellImport.sameDevice, true);
             assert.equal(
               retainedGasPressureCellImport.deviceId,
               webGpuDeviceId(device)
             );
-            assert.equal(
-              retainedGasPressureCellImport.lifecycleStatus,
-              'retained-gas-cell-final-consumer-available'
-            );
             assert.equal(retainedGasPressureCellImport.releaseScheduled, false);
             assert.equal(
-              typeof retainedGasPressureCellImport.releaseAfterFinalConsumerQueue,
-              'function'
+              Object.hasOwn(
+                retainedGasPressureCellImport,
+                'releaseAfterFinalConsumerQueue'
+              ),
+              false
             );
-            const forceRowsBuffer = {
-              label: 'pressure-interface-final-consumer-test-force-rows',
-              size: 16 * Float32Array.BYTES_PER_ELEMENT
-            };
-            return {
-              backend: 'webgpu',
-              status: 'pressure-interface-stage-solver-ready',
-              readbackMode: 'no-full-readback',
-              fullReadbackPerformed: false,
-              normalHotLoopReadbackFree: true,
-              queueCompletionStatus: 'queue-work-completed',
-              retainedGasPressureRowsStatus:
-                'retained-gas-pressure-rows-admitted-same-device',
-              forceRowCount: 1,
-              forceRowByteLength: forceRowsBuffer.size,
-              forceRowsBuffer,
-              pressureInterfaceForceRowsRetained: true,
-              pressureInterfaceForceSolver: {
-                schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
-                status: 'pressure-interface-force-solver-ready',
-                backend: 'webgpu',
-                forceRowCount: 1,
-                forceRowStrideFloats: 16,
-                forceRowByteLength: forceRowsBuffer.size,
-                forceRowsBufferRetained: true,
-                retainedGasPressureRowsStatus:
-                  'retained-gas-pressure-rows-admitted-same-device'
-              }
-            };
+            assert.equal(
+              retainedGasPressureCellImport.retainedGasCellFieldSource,
+              submittedGasEosResult.retainedGasCellFieldSource
+            );
+            assert.equal(
+              isExactSphSpatialGasPressureAuthoritySource(
+                retainedGasPressureCellImport.retainedGasCellFieldSource
+              ),
+              true
+            );
+            return runSphPressureInterfaceForceRowsWebGpu(args);
           }
         }).then((result) => {
           submittedPressureResult = result;
@@ -8268,6 +11463,7 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   const step = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
     ...buffers,
     computeManager,
+    device,
     modulePath: './sphMlsMpmGpuStep.js',
     stageTaskIdPrefix: 'ulg:test:gas-cell-eos-stage-chain',
     useNativeTaskGraph: false,
@@ -8327,7 +11523,10 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerImportPublicationStatus, 'gas-cell-eos-producer-import-published');
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerPressureInterfaceImportReady, true);
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerPressureInterfaceAdmissionApproved, true);
-  assert.deepEqual(step.mechanicsStageTaskChain.gasCellEosProducerRetainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.deepEqual(
+    step.mechanicsStageTaskChain.gasCellEosProducerRetainedGasPressureBufferRefs,
+    []
+  );
   assert.equal(admissionCalls.length, 1);
   assert.equal(importCalls.length, 1);
   assert.equal(admissionCalls[0].sourceStage, 'gasCellEosProducer');
@@ -8347,10 +11546,23 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   );
   assert.equal(importCalls[0].gasCellFieldSnapshot, null);
   assert.equal(importCalls[0].source.hostMaterializedRowCount, 0);
-  assert.equal(
-    pressureConsumedGasCellsBuffer,
-    importCalls[0].source.gasPressureCellsBuffer
-  );
+  assert.equal(pressureConsumedGasCellsBuffer, undefined);
+  for (const owner of [
+    submittedSpatialGasResult,
+    submittedGasEosResult,
+    importCalls[0].source
+  ]) {
+    for (const forbiddenKey of [
+      'gasPressureCellsBuffer',
+      'retainedGasPressureCellsBuffer',
+      'retainedSpatialGasLedgerSource',
+      'spatialGasLedgerEosExecution',
+      'releaseAfterFinalConsumerQueue',
+      'destroyGasPressureCellsBuffer'
+    ]) {
+      assert.equal(Object.hasOwn(owner, forbiddenKey), false, forbiddenKey);
+    }
+  }
   assert.equal(
     submittedPressureResult.backend,
     'webgpu',
@@ -8358,7 +11570,7 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   );
   assert.equal(
     submittedPressureResult.retainedGasPressureRowsStatus,
-    'retained-gas-pressure-rows-admitted-same-device'
+    'retained-gas-pressure-authority-v4-admitted-exact-source'
   );
   assert.equal(
     step.mechanicsStageTaskChain.gasCellEosProducerPressureImportReady,
@@ -8372,28 +11584,64 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     step.mechanicsStageTaskChain.gasCellEosProducerPressureRetainedRowsStatus
       || step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseStatus
   );
-  assert.deepEqual(finalConsumerEvents, [
-    'pressure-consumer-submitted',
-    'final-consumer-release-scheduled'
-  ]);
-  assert.equal(finalConsumerReleaseCalls, 1);
+  assert.deepEqual(finalConsumerEvents, ['pressure-consumer-submitted']);
   assert.equal(
     step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseScheduled,
     true
   );
   assert.equal(
     step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseStatus,
-    'gas-cell-eos-final-consumer-release-scheduled-after-pressure-submit'
+    'gas-cell-eos-final-consumer-retired-queue-ordered-after-pressure-submit'
   );
   assert.equal(
     step.mechanicsStageTaskChain.gasCellEosProducerFinalConsumerReleaseSource,
-    'pressure-interface-import-publication'
+    'exact-v4-gas-pressure-authority'
   );
-  const retainedEosExecution =
-    importCalls[0].source.spatialGasLedgerEosExecution;
-  assert.equal(retainedEosExecution.releaseScheduled, true);
-  assert.equal(await retainedEosExecution.releasePromise, true);
-  assert.equal(retainedEosExecution.released, true);
+  const outerCleanupTelemetry = step.mechanicsStageTaskChain
+    .gasCellEosProducerFinalConsumerReleaseReadbackTelemetry;
+  assert.equal(outerCleanupTelemetry.readbackTelemetryComplete, true);
+  assert.equal(outerCleanupTelemetry.observedHostQueueFenceCount, 0);
+  assert.equal(outerCleanupTelemetry.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(outerCleanupTelemetry.awaitedBackpressureHostQueueFenceCount, 0);
+  assert.equal(
+    step.readbackTelemetryComplete,
+    false,
+    JSON.stringify(step.readbackTelemetryUnknownSources)
+  );
+  assert.equal(step.observedHostQueueFenceCount, 0);
+  assert.equal(step.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(step.awaitedBackpressureHostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, false);
+  assert.equal(step.productionHotLoopHostDependencyFree, false);
+  const retainedGasPressureAuthority =
+    submittedGasEosResult.retainedGasCellFieldSource;
+  const repeatedRelease = scheduleSphGasCellEosFinalConsumerRelease({
+    gasCellEosProducerResult: submittedGasEosResult.retainedGasCellFieldSource,
+    device,
+    pressureStageStatus: 'completed'
+  });
+  assert.equal(repeatedRelease.scheduled, true);
+  assert.equal(repeatedRelease.alreadyScheduled, true);
+  assert.equal(
+    repeatedRelease.deferredCleanupReadbackTelemetry
+      .observedHostQueueFenceCount,
+    0
+  );
+  const retiredAuthority = describeSphSpatialGasPressureAuthority(
+    retainedGasPressureAuthority,
+    { device }
+  );
+  assert.equal(retiredAuthority.consumerSubmittedObserved, true);
+  assert.equal(retiredAuthority.releasedObserved, true);
+  assert.equal(retiredAuthority.terminalObserved, true);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(
+      occupancy.generation,
+      device
+    ),
+    false
+  );
+  assert.equal(await occupancy.generation.releasePromise, true);
   const pressureLaneSummary =
     step.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.pressureInterface;
   assert.equal(pressureLaneSummary.pressureInterfaceGasCellFieldImportReady, true);
@@ -11013,6 +14261,364 @@ test('MLS-MPM resident steps compute task blocks fused sequence when sidecars re
   assert.equal(task.data.residentSequenceLaneContract.fallbackMode, 'per-step-fused-mechanics-active-grid');
 });
 
+test('MLS-MPM resident sequence contract makes surface stress a hard pass-DAG blocker', () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        dynamicViscosityPaS: 0.001,
+        surfaceTensionNPerM: 0.072,
+        temperatureRange: [273.15, 373.15]
+      }]
+    }
+  }, {
+    viscosityEnabled: true,
+    surfaceTensionEnabled: true
+  });
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-surface-stress-pass-dag-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    mechanicsMaterialTable
+  });
+
+  const contract = task.gpuResidentLane.residentSequenceLaneContract;
+  assert.equal(contract.surfaceStressRequired, true);
+  assert.equal(contract.sequenceRequested, true);
+  assert.equal(contract.sequenceRunnable, false);
+  assert.equal(contract.status, 'blocked-fused-sequence-requirements-not-met');
+  assert.equal(contract.sequenceMode, 'per-step-resident-pass-dag');
+  assert.equal(contract.fallbackMode, 'per-step-resident-pass-dag');
+  assert.deepEqual(contract.blockers, [
+    'surface-stress-requires-standalone-s9ab-grid-update'
+  ]);
+  assert.equal(
+    task.webgpu.residentSequenceLaneContract.surfaceStressRequired,
+    true
+  );
+  assert.equal(
+    task.data.residentSequenceLaneContract.fallbackMode,
+    'per-step-resident-pass-dag'
+  );
+});
+
+test('resident product history selects dense P2G compatibility for canonical ambient buoyancy', () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const residentProductMass = residentProductMassHandle({
+    label: 'already-materialized-product-history',
+    rowCount: 2,
+    byteLength: 256,
+    unplacedProductMassKg: 0,
+    unplacedGasProductMassKg: 0
+  });
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        temperatureRange: [273.15, 373.15]
+      }, {
+        name: 'gas',
+        densityKgPerM3: 0.804,
+        bulkModulusPa: 101325,
+        shearModulusPa: 0,
+        cpJPerKgK: 1996,
+        temperatureRange: [373.15, 600]
+      }]
+    }
+  }, {
+    surfaceTensionEnabled: false
+  });
+  const selection = resolvePhaseVolumeAmbientBuoyancyExecution({
+    canonicalSpatialRequired: true,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    residentProductMass
+  });
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-product-dense-p2g-compatibility',
+    stepCount: 1,
+    compactSummaryMode: 'none',
+    canonicalSpatialRequired: true,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    mechanicsMaterialTable,
+    residentProductMass
+  });
+
+  assert.equal(
+    residentProductMassRequiresProductAwareP2g(residentProductMass),
+    true
+  );
+  assert.equal(selection.requested, true);
+  assert.equal(selection.authorityRequired, true);
+  assert.equal(selection.required, false);
+  assert.equal(selection.productAwareP2gRequired, true);
+  assert.equal(
+    selection.skipReason,
+    'resident-product-mass-requires-dense-p2g-compatibility'
+  );
+  assert.equal(
+    task.gpuResidentLane.residentSequenceLaneContract.ambientBuoyancyRequired,
+    false
+  );
+  assert.equal(
+    task.gpuResidentLane.residentSequenceLaneContract.ambientBuoyancySkipReason,
+    'resident-product-mass-requires-dense-p2g-compatibility'
+  );
+});
+
+test('canonical ambient-only resident step keeps product history on dense P2G', async () => {
+  const { tracker, options } = noFullReadbackResidentStepFixture();
+  const device = { queue: {}, lost: new Promise(() => {}) };
+  const { generation, transaction } = residentSpatialEpochTransactionFixture({
+    device,
+    tracker,
+    sphParticleUpload: options.sphParticleUpload,
+    mlsMpmParticleUpload: options.mlsMpmParticleUpload
+  });
+  const residentProductMass = residentProductMassHandle({
+    label: 'canonical-ambient-product-history',
+    rowCount: 2,
+    byteLength: 256,
+    unplacedProductMassKg: 1,
+    unplacedGasProductMassKg: 0.5
+  });
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        {
+          name: 'liquid',
+          densityKgPerM3: 997,
+          bulkModulusPa: 2.2e9,
+          shearModulusPa: 0,
+          cpJPerKgK: 4184,
+          temperatureRange: [273.15, 373.15]
+        },
+        {
+          name: 'gas',
+          densityKgPerM3: 0.804,
+          bulkModulusPa: 101325,
+          shearModulusPa: 0,
+          cpJPerKgK: 1996,
+          temperatureRange: [373.15, 600]
+        }
+      ]
+    }
+  }, {
+    surfaceTensionEnabled: false
+  });
+  const baseP2gRunner = options.p2gRunner;
+  let observedP2gArgs = null;
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    device,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: false,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    residentProductMass,
+    p2gRunner(args) {
+      observedP2gArgs = args;
+      return baseP2gRunner(args);
+    }
+  });
+
+  assert.notEqual(observedP2gArgs?.mechanicsFieldMode, 'required');
+  assert.equal(observedP2gArgs?.residentProductMass, residentProductMass);
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequested, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequired, false);
+  assert.equal(
+    step.phaseVolumeAmbientBuoyancySkipReason,
+    'resident-product-mass-requires-dense-p2g-compatibility'
+  );
+  assert.equal(step.residentProductMass, residentProductMass);
+  assert.equal(
+    step.nextParticleUploads.residentProductMass,
+    residentProductMass
+  );
+  assert.equal(step.fullParticleReadbackPerformed, false);
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
+test('MLS-MPM ambient gas buoyancy requires canonical spatial authority without poisoning noncanonical execution', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        {
+          name: 'liquid',
+          densityKgPerM3: 997,
+          bulkModulusPa: 2.2e9,
+          shearModulusPa: 0,
+          cpJPerKgK: 4184,
+          temperatureRange: [273.15, 373.15]
+        },
+        {
+          name: 'gas',
+          densityKgPerM3: 0.804,
+          bulkModulusPa: 101325,
+          shearModulusPa: 0,
+          cpJPerKgK: 1996,
+          temperatureRange: [373.15, 600]
+        }
+      ]
+    }
+  }, {
+    surfaceTensionEnabled: false
+  });
+  assert.equal(phaseVolumeAmbientBuoyancyRequired({
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0]
+  }), true);
+  assert.equal(phaseVolumeAmbientBuoyancyRequired({
+    mechanicsMaterialTable,
+    ambientPressurePa: 0,
+    gravityMPerS2: [0, -9.80665, 0]
+  }), false);
+  assert.equal(phaseVolumeAmbientBuoyancyRequired({
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, 0, 0]
+  }), false);
+  assert.equal(phaseVolumeAmbientBuoyancyExecutionRequired({
+    canonicalSpatialRequired: false,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0]
+  }), false);
+  assert.equal(phaseVolumeAmbientBuoyancyExecutionRequired({
+    canonicalSpatialRequired: true,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0]
+  }), true);
+
+  const noncanonicalTask = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-ambient-buoyancy-noncanonical-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    mechanicsMaterialTable
+  });
+
+  const noncanonicalContract =
+    noncanonicalTask.gpuResidentLane.residentSequenceLaneContract;
+  assert.equal(noncanonicalContract.surfaceStressRequired, false);
+  assert.equal(noncanonicalContract.ambientBuoyancyRequested, true);
+  assert.equal(noncanonicalContract.ambientBuoyancyRequired, false);
+  assert.equal(
+    noncanonicalContract.ambientBuoyancySkipReason,
+    'noncanonical-spatial-authority-not-selected'
+  );
+  assert.equal(noncanonicalContract.sequenceRequested, true);
+  assert.equal(noncanonicalContract.sequenceRunnable, true);
+  assert.equal(
+    noncanonicalContract.status,
+    'lane-owned-fused-sequence-contract-ready'
+  );
+  assert.deepEqual(noncanonicalContract.blockers, []);
+
+  const canonicalTask = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-ambient-buoyancy-canonical-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    canonicalSpatialRequired: true,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    mechanicsMaterialTable
+  });
+  const canonicalContract =
+    canonicalTask.gpuResidentLane.residentSequenceLaneContract;
+  assert.equal(canonicalContract.ambientBuoyancyRequested, true);
+  assert.equal(canonicalContract.ambientBuoyancyRequired, true);
+  assert.equal(canonicalContract.ambientBuoyancySkipReason, null);
+  assert.equal(canonicalContract.sequenceRunnable, false);
+  assert.equal(
+    canonicalContract.status,
+    'blocked-fused-sequence-requirements-not-met'
+  );
+  assert.deepEqual(canonicalContract.blockers, [
+    'ambient-buoyancy-requires-standalone-s9ab-grid-update'
+  ]);
+
+  const baseP2gRunner = options.p2gRunner;
+  const baseGridUpdateRunner = options.gridUpdateRunner;
+  let observedP2gArgs = null;
+  let observedGridUpdateArgs = null;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    p2gRunner(args) {
+      observedP2gArgs = args;
+      return baseP2gRunner(args);
+    },
+    gridUpdateRunner(args) {
+      observedGridUpdateArgs = args;
+      return baseGridUpdateRunner(args);
+    }
+  });
+
+  assert.notEqual(observedP2gArgs?.mechanicsFieldMode, 'required');
+  assert.equal(
+    observedGridUpdateArgs?.phaseVolumeAmbientBuoyancyRequired,
+    false
+  );
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequested, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequired, false);
+  assert.equal(
+    step.phaseVolumeAmbientBuoyancySkipReason,
+    'noncanonical-spatial-authority-not-selected'
+  );
+  assert.equal(step.fullParticleReadbackPerformed, false);
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
 test('MLS-MPM resident steps compute task can opt into thermal sidecar fused sequence', async () => {
   const { options } = noFullReadbackResidentStepFixture();
   const materialProperties = {
@@ -11103,11 +14709,108 @@ test('MLS-MPM resident steps compute task sidecar fusion plan orders pressure an
   assert.equal(task.lawGraphNode.residentSequenceLaneContract.sidecarFusionRequired, true);
 });
 
+test('resident commit delta preserves unknown telemetry rather than laundering it to zero or false', () => {
+  const unknownStep = {
+    fullParticleReadbackPerformed: undefined,
+    fullParticleReadbackFree: undefined,
+    residentContinuationReady: undefined,
+    readbackTelemetrySchema: 'peercompute.ulg.gpu-readback-telemetry.v1',
+    readbackTelemetryComplete: undefined,
+    readbackTelemetryUnknownSources: undefined,
+    observedMapAsyncCount: undefined,
+    observedReadbackBytes: Number.NaN,
+    observedHostQueueFenceCount: -1,
+    finalDiagnosticMapAsyncCount: undefined,
+    finalDiagnosticReadbackBytes: Number.NaN,
+    deferredCleanupHostQueueFenceCount: -1,
+    awaitedBackpressureHostQueueFenceCount: undefined,
+    unclassifiedMapAsyncCount: undefined,
+    unclassifiedReadbackBytes: Number.NaN,
+    unclassifiedHostQueueFenceCount: -1,
+    readbackTelemetrySourceBreakdown: undefined,
+    mapAsyncCount: undefined,
+    readbackBytes: Number.POSITIVE_INFINITY,
+    hostQueueFenceCount: -1,
+    normalHotLoopReadbackFree: undefined,
+    productionHotLoopHostDependencyFree: undefined
+  };
+  const delta = createMlsMpmResidentStepsCommitDelta({
+    ...unknownStep,
+    status: 'resident-steps-executed',
+    completedStepCount: 1,
+    finalStep: unknownStep,
+    stepSummaries: [unknownStep]
+  });
+  for (const summary of [delta.payload, delta.payload.finalStep, delta.payload.stepSummaries[0]]) {
+    assert.equal(summary.fullParticleReadbackPerformed, null);
+    assert.equal(summary.fullParticleReadbackFree, null);
+    assert.equal(summary.residentContinuationReady, null);
+    assert.equal(summary.readbackTelemetryComplete, null);
+    assert.equal(summary.readbackTelemetryUnknownSources, null);
+    assert.equal(summary.observedMapAsyncCount, null);
+    assert.equal(summary.observedReadbackBytes, null);
+    assert.equal(summary.observedHostQueueFenceCount, null);
+    assert.equal(summary.finalDiagnosticMapAsyncCount, null);
+    assert.equal(summary.finalDiagnosticReadbackBytes, null);
+    assert.equal(summary.deferredCleanupHostQueueFenceCount, null);
+    assert.equal(summary.awaitedBackpressureHostQueueFenceCount, null);
+    assert.equal(summary.unclassifiedMapAsyncCount, null);
+    assert.equal(summary.unclassifiedReadbackBytes, null);
+    assert.equal(summary.unclassifiedHostQueueFenceCount, null);
+    assert.equal(summary.readbackTelemetrySourceBreakdown, null);
+    assert.equal(summary.mapAsyncCount, null);
+    assert.equal(summary.readbackBytes, null);
+    assert.equal(summary.hostQueueFenceCount, null);
+    assert.equal(summary.normalHotLoopReadbackFree, null);
+    assert.equal(summary.productionHotLoopHostDependencyFree, null);
+  }
+
+  const measured = {
+    ...createGpuReadbackTelemetry({
+      scope: 'resident-commit-delta-measured',
+      mapAsyncCount: 0,
+      readbackBytes: 0,
+      hostQueueFenceCount: 0
+    }),
+    fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
+    residentContinuationReady: true
+  };
+  const measuredDelta = createMlsMpmResidentStepsCommitDelta({
+    ...measured,
+    completedStepCount: 1,
+    finalStep: measured,
+    stepSummaries: [measured]
+  });
+  assert.equal(measuredDelta.payload.fullParticleReadbackPerformed, false);
+  assert.equal(measuredDelta.payload.observedMapAsyncCount, 0);
+  assert.equal(measuredDelta.payload.finalDiagnosticMapAsyncCount, 0);
+  assert.equal(measuredDelta.payload.unclassifiedMapAsyncCount, 0);
+  assert.deepEqual(measuredDelta.payload.readbackTelemetrySourceBreakdown, []);
+  assert.equal(measuredDelta.payload.productionHotLoopHostDependencyFree, true);
+  assert.equal(measuredDelta.payload.finalStep.fullParticleReadbackFree, true);
+  assert.equal(measuredDelta.payload.finalStep.observedReadbackBytes, 0);
+  assert.equal(measuredDelta.payload.finalStep.finalDiagnosticReadbackBytes, 0);
+  assert.equal(measuredDelta.payload.finalStep.unclassifiedReadbackBytes, 0);
+  assert.equal(
+    measuredDelta.payload.finalStep.productionHotLoopHostDependencyFree,
+    true
+  );
+});
+
 test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {
   const { options } = noFullReadbackResidentStepFixture();
+  const originalGridUpdateRunner = options.gridUpdateRunner;
   const ignoredLaneManager = fakeGpuResidentLaneManager();
   const task = createMlsMpmResidentStepsComputeTask({
     ...options,
+    gridUpdateRunner(args) {
+      return {
+        ...originalGridUpdateRunner(args),
+        queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+        queueCompletionMethod: 'deferred queue.onSubmittedWorkDone cleanup'
+      };
+    },
     modulePath: './sphMlsMpmGpuStep.js',
     laneId: 'ulg:test:sph-resident-steps',
     stateKey: 'ulg:test:sph-state-steps',
@@ -11137,6 +14840,11 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
   assert.equal(result.completedStepCount, 2);
   assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
   assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(
+    result.gpuFence.status,
+    'same-device-queue-ordering-established'
+  );
+  assert.equal(result.gpuFence.method, 'same-device-queue-submit-order');
   assert.equal(result.gpuFence.laneId, 'ulg:test:sph-resident-steps');
   assert.equal(result.gpuFence.stateKey, 'ulg:test:sph-state-steps');
   assert.equal(result.residentSequenceLaneContract.schema, 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0');
@@ -11162,6 +14870,10 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
   assert.deepEqual(result.commitDelta.payload.outputFamilies, task.expectedOutputFamilies);
   assert.equal(result.commitDelta.payload.outputFamilies.includes('resident-compact-summary'), false);
   assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
+  assert.equal(
+    result.commitDelta.payload.gpuFence.status,
+    'same-device-queue-ordering-established'
+  );
   assert.deepEqual(result.commitDelta.payload.retainedBufferRefs, [
     'p2g-grid-buffer',
     'updated-grid-buffer',
@@ -11170,6 +14882,29 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
     'mls-mpm-mechanics-buffer'
   ]);
   assert.equal(result.commitDelta.payload.finalStep.normalHotLoopReadbackFree, true);
+  assert.equal(result.commitDelta.payload.finalStep.fullParticleReadbackPerformed, false);
+  assert.equal(result.commitDelta.payload.finalStep.fullParticleReadbackFree, true);
+  assert.equal(result.commitDelta.payload.finalStep.residentContinuationReady, true);
+  assert.equal(result.commitDelta.payload.finalStep.readbackTelemetryComplete, true);
+  assert.deepEqual(result.commitDelta.payload.finalStep.readbackTelemetryUnknownSources, []);
+  assert.equal(result.commitDelta.payload.finalStep.observedMapAsyncCount, 0);
+  assert.equal(result.commitDelta.payload.finalStep.observedReadbackBytes, 0);
+  assert.equal(result.commitDelta.payload.finalStep.observedHostQueueFenceCount, 0);
+  assert.equal(result.commitDelta.payload.finalStep.mapAsyncCount, 0);
+  assert.equal(result.commitDelta.payload.finalStep.readbackBytes, 0);
+  assert.equal(result.commitDelta.payload.finalStep.hostQueueFenceCount, 0);
+  assert.equal(result.commitDelta.payload.fullParticleReadbackPerformed, false);
+  assert.equal(result.commitDelta.payload.fullParticleReadbackFree, true);
+  assert.equal(result.commitDelta.payload.residentContinuationReady, true);
+  assert.equal(result.commitDelta.payload.readbackTelemetryComplete, true);
+  assert.deepEqual(result.commitDelta.payload.readbackTelemetryUnknownSources, []);
+  assert.equal(result.commitDelta.payload.observedMapAsyncCount, 0);
+  assert.equal(result.commitDelta.payload.observedReadbackBytes, 0);
+  assert.equal(result.commitDelta.payload.observedHostQueueFenceCount, 0);
+  assert.equal(result.commitDelta.payload.mapAsyncCount, 0);
+  assert.equal(result.commitDelta.payload.readbackBytes, 0);
+  assert.equal(result.commitDelta.payload.hostQueueFenceCount, 0);
+  assert.equal(result.commitDelta.payload.normalHotLoopReadbackFree, true);
   assert.equal(result.commitDelta.payload.finalStep.compactSummaryAuthority, 'diagnostic-only-unless-state-manager-admitted');
   assert.equal(result.commitDelta.payload.finalStep.compactSummaryAdmissionStatus, 'not-admitted-diagnostic-only');
   assert.equal(result.commitDelta.payload.finalStep.compactSummaryAuthoritativeMutation, false);
@@ -11436,6 +15171,11 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-compact-summary-p2g',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyGridBuffer() {
           this.gridBuffer.destroy();
         }
@@ -11459,6 +15199,11 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-compact-summary-grid-update',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyUpdatedGridBuffer() {
           this.updatedGridBuffer.destroy();
         }
@@ -11487,6 +15232,11 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         retainedOutputParticleBuffers: true,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-compact-summary-g2p',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyOutputParticleBuffers() {
           this.stateBuffer.destroy();
           this.mechanicsBuffer.destroy();
@@ -11496,6 +15246,10 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
     summaryRunner(args) {
       summaryCalls += 1;
       assert.equal(args.summaryScope, 'particle-visual');
+      assert.equal(
+        args.compactSummaryReadbackClassification,
+        'unclassified'
+      );
       assert.equal(args.sphParticleUpload.stateBuffer.label, 'source-state');
       assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer.label, 'source-mechanics');
       assert.equal(args.gridUpdate.gpuResult.updatedGridBuffer.label, 'updated-grid-summary');
@@ -11537,6 +15291,11 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         compactGpuSummaryAvailable: true,
         compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
         reductionStrategy: 'two-pass-workgroup-reduction',
+        ...createGpuReadbackTelemetry({
+          scope: 'test-compact-summary',
+          mapAsyncCount: 1,
+          readbackBytes: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        }),
         scientificValidation: false,
         sphValidation: false,
         phaseChangeValidation: false,
@@ -11570,6 +15329,12 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
   assert.equal(step.diagnostics.thermalProblemCount, 0);
   assert.equal(step.diagnostics.thermalPhaseSummaryAvailable, true);
   assert.deepEqual(step.diagnostics.momentumDeltaKgMPerS, [-1, 0, 0]);
+  assert.equal(step.mapAsyncCount, 1);
+  assert.equal(step.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(step.hostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, false);
+  assert.equal(step.fullParticleReadbackFree, true);
+  assert.equal(step.residentContinuationReady, true);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
@@ -12503,7 +16268,7 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
   assert.equal(tracker.destroyed, 9);
 });
 
-test('MLS-MPM resident step merges carried and emitted product-event buffers on the GPU', async () => {
+test('MLS-MPM resident step GPU-filters carried and emitted product history without observing its live count', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
@@ -12575,7 +16340,14 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
         gridNodes: new Float32Array(),
         gridBuffer: tracker.buffer('p2g-grid-merge'),
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
-        residentProductMassGridCouplingStatus: 'resident-product-mass-grid-coupled',
+        residentProductMassGridCouplingStatus:
+          'resident-product-mass-bound-to-p2g-grid',
+        residentProductMassInputProductEventCountAuthority:
+          'gpu-authored-filtered-live-prefix',
+        residentProductMassInputProductEventRowCapacity: 32768,
+        residentProductMassInputProductEventCountHostKnown: false,
+        residentProductMassProductEventDispatchMode:
+          'gpu-authored-indirect-live-count',
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
         destroyGridBuffer() {
@@ -12670,7 +16442,7 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(step.residentProductMassMergeStatus, 'resident-product-mass-merged-gpu-resident');
   assert.equal(
     step.residentProductMassMergeQueueCompletionStatus,
-    'queue-submitted-owner-fence-delegated'
+    'queue-submitted-same-device-ordering'
   );
   assert.equal(
     step.residentProductMassMergeQueueCompletionMethod,
@@ -12678,20 +16450,62 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   );
   assert.equal(
     step.residentProductMass.productEventMergeQueueCompletionStatus,
-    'queue-submitted-owner-fence-delegated'
+    'queue-submitted-same-device-ordering'
   );
   assert.equal(
     step.residentProductMass.productEventMergeQueueCompletionMethod,
     'queue.submit-same-queue-ordering'
   );
-  assert.equal(step.residentProductMassProductEventRowCount, 5);
-  assert.equal(step.mergedResidentProductMassProductEventRowCount, 5);
-  assert.equal(step.residentProductMassGenerationCount, 3);
-  assert.equal(step.residentProductMassBufferByteLength, 640);
-  assert.equal(step.residentProductMassMergedBufferByteLength, 640);
+  const historyCapacityBytes = 4 * 1024 * 1024;
+  const historyCapacityRows = historyCapacityBytes / 128;
+  assert.equal(
+    step.residentProductMassProductEventRowCount,
+    historyCapacityRows
+  );
+  assert.equal(
+    step.mergedResidentProductMassProductEventRowCount,
+    historyCapacityRows
+  );
+  assert.equal(step.residentProductMassGenerationCount, 1);
+  assert.equal(
+    step.residentProductMassBufferByteLength,
+    historyCapacityBytes
+  );
+  assert.equal(
+    step.residentProductMassMergedBufferByteLength,
+    historyCapacityBytes
+  );
   assert.equal(step.residentProductMass.productEventHistoryArenaWarmReuse, false);
-  assert.equal(step.residentProductMass.productEventMergeCopyCount, 2);
-  assert.equal(step.residentProductMass.productEventMergeCopiedByteLength, 640);
+  assert.equal(step.residentProductMass.productEventMergeCopyCount, 0);
+  assert.equal(step.residentProductMass.productEventMergeCopiedByteLength, 0);
+  assert.equal(
+    step.residentProductMass.productEventCompactionStatus,
+    'product-event-filtered-append-gpu-count-resident'
+  );
+  assert.equal(
+    step.residentProductMass.mergePolicy,
+    'bounded-product-history-gpu-count-filtered-append'
+  );
+  assert.equal(
+    step.residentProductMass.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    step.residentProductMass.productEventRowCountHostKnown,
+    false
+  );
+  assert.equal(
+    step.residentProductMass.productEventActiveEventCount,
+    null
+  );
+  assert.equal(
+    step.residentProductMass.productEventGpuFilteredAppendPassCount,
+    2
+  );
+  assert.equal(
+    step.residentProductMass.productEventGpuFilteredAppendDestinationCleared,
+    true
+  );
   assert.equal(step.residentProductMass.productEventMergeHostFenceAwaited, false);
   assert.equal(step.residentProductMassUnplacedProductMassKg, 5);
   assert.equal(step.residentProductMassUnplacedGasProductMassKg, 2.5);
@@ -12701,27 +16515,43 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(step.residentProductMass.gasSpeciesLedger.bySpecies.o2.moles, 1);
   assert.equal(step.residentProductMassMergedInputBufferRetained, true);
   assert.equal(step.residentProductMassMergedEmittedBufferRetained, true);
-  assert.equal(step.residentProductMassGridCouplingStatus, 'resident-product-mass-grid-coupled');
-  assert.deepEqual(step.residentProductMass.productEventSourceRowCounts, [1, 1, 3]);
-  assert.equal(step.residentProductMass.mergeSourceProductEventBufferCount, 3);
-  assert.deepEqual(step.residentProductMass.mergeSourceProductEventBufferByteLengths, [128, 128, 384]);
+  assert.equal(
+    step.residentProductMassGridCouplingStatus,
+    'resident-product-mass-bound-to-p2g-grid'
+  );
+  assert.equal(
+    step.residentProductMassInputProductEventCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    step.residentProductMassInputProductEventRowCapacity,
+    historyCapacityRows
+  );
+  assert.equal(step.residentProductMassInputProductEventCountHostKnown, false);
+  assert.equal(
+    step.residentProductMassProductEventDispatchMode,
+    'gpu-authored-indirect-live-count'
+  );
+  assert.deepEqual(
+    step.residentProductMass.productEventSourceRowCounts,
+    [historyCapacityRows]
+  );
+  assert.equal(step.residentProductMass.mergeSourceProductEventBufferCount, 1);
+  assert.deepEqual(
+    step.residentProductMass.mergeSourceProductEventBufferByteLengths,
+    [historyCapacityBytes]
+  );
   assert.equal(step.nextParticleUploads.residentProductMass, step.residentProductMass);
   assert.equal(step.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
   assert.equal(step.residentBufferLeaseResourceCount, 3);
   assert.equal(step.residentBufferLeaseActiveLeaseCount, 1);
   assert.equal(
-    step.residentBufferLeaseSummary.resources['resident-product-mass:ulg-sph-resident-product-history-arena-1:5:640'].activeLeaseCount,
+    step.residentBufferLeaseSummary.resources[
+      `resident-product-mass:ulg-sph-resident-product-history-arena-1:${historyCapacityRows}:${historyCapacityBytes}`
+    ].activeLeaseCount,
     1
   );
-  assert.equal(device.copies.length, 2);
-  assert.equal(device.copies[0].source, carriedResidentProductMass.productEventBuffer);
-  assert.equal(device.copies[0].destination, step.residentProductMass.productEventBuffer);
-  assert.equal(device.copies[0].destinationOffset, 0);
-  assert.equal(device.copies[0].size, 256);
-  assert.equal(device.copies[1].source, emittedResidentProductMass.productEventBuffer);
-  assert.equal(device.copies[1].destination, step.residentProductMass.productEventBuffer);
-  assert.equal(device.copies[1].destinationOffset, 256);
-  assert.equal(device.copies[1].size, 384);
+  assert.equal(device.copies.length, 0);
   assert.equal(device.submissions.length, 1);
   assert.equal(mergeFenceCount, 0);
 
@@ -12795,7 +16625,1045 @@ test('resident product-history arena appends 128 warm generations without reallo
   assert.equal(mergeFenceCount, 0);
   assert.equal(current.productEventMergeHostFenceAwaited, false);
   await releaseResidentProductHistoryTestHandles(current);
-  assert.equal(mergeFenceCount, 1);
+  assert.equal(mergeFenceCount, 0);
+});
+
+test('resident product-history promotes the first no-host-observation generation to an authenticated GPU count', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let mergeFenceCount = 0;
+  let mapCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    const mapAsync = buffer.mapAsync.bind(buffer);
+    buffer.mapAsync = async (...args) => {
+      mapCount += 1;
+      return mapAsync(...args);
+    };
+    return buffer;
+  };
+  const emitted = residentProductMassHandle({
+    label: 'resident-no-host-observation-first-generation',
+    rowCount: 1368,
+    byteLength: 1368 * 128
+  });
+
+  const promoted = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    emittedResidentProductMass: emitted,
+    allowHostCompactionObservation: false
+  });
+
+  assert.notEqual(promoted, emitted);
+  assert.equal(promoted.status, 'resident-product-mass-merged-gpu-resident');
+  assert.equal(promoted.productEventRowCount, 32768);
+  assert.equal(promoted.productEventBufferByteLength, 4 * 1024 * 1024);
+  assert.equal(
+    promoted.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(promoted.productEventRowCountHostKnown, false);
+  assert.equal(promoted.productEventLiveCountAuthority.rowCapacity, 32768);
+  assert.equal(promoted.productEventLiveCountAuthority.hostObserved, false);
+  assert.equal(promoted.productEventLiveRowCountUpperBound, 1368);
+  assert.equal(promoted.productEventGpuFilteredAppendPassCount, 1);
+  assert.equal(promoted.productEventGpuFilteredAppendDestinationCleared, true);
+  assert.equal(promoted.productEventMergeHostFenceAwaited, false);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(device.copies.length, 0);
+  assert.equal(mapCount, 0);
+  assert.equal(mergeFenceCount, 0);
+  const preserved = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: promoted,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(preserved, promoted);
+  assert.equal(device.submissions.length, 1);
+  const copyOnly = residentProductMassHandle({
+    label: 'resident-no-host-observation-copy-only-source',
+    rowCount: 1,
+    byteLength: 128
+  });
+  copyOnly.productEventBuffer.usage = 0x04;
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device,
+      emittedResidentProductMass: copyOnly,
+      allowHostCompactionObservation: false
+    }),
+    /missing STORAGE usage/
+  );
+  assert.equal(device.submissions.length, 1);
+
+  await releaseResidentProductHistoryTestHandles(promoted, emitted, copyOnly);
+});
+
+test('native resident product-history promotion publishes READY control and exact filtered rows', {
+  skip: RUN_NATIVE_PRODUCT_HISTORY_PROMOTION
+    ? false
+    : 'set ULG_RUN_NATIVE_PRODUCT_HISTORY_PROMOTION=1 for native WebGPU readback',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath:
+      process.env.ULG_PRODUCT_HISTORY_PROMOTION_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist',
+      '--ignore-certificate-errors'
+    ]
+  });
+
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_PRODUCT_HISTORY_PROMOTION_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return {
+          status: 'unsupported',
+          reason: 'WebGPU adapter unavailable'
+        };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      const nonce = Date.now();
+      const step = await import(
+        `/src/runtime/sph/sphMlsMpmGpuStep.js?nativeProductHistoryPromotion=${nonce}`
+      );
+      const identity = await import(
+        `/src/runtime/sph/sphGpuDeviceIdentity.js?nativeProductHistoryPromotion=${nonce}`
+      );
+      const history = await import(
+        `/src/runtime/sph/sphResidentProductHistoryGpu.js?nativeProductHistoryPromotion=${nonce}`
+      );
+      const strideFloats = 32;
+      const sourceRows = new Float32Array(3 * strideFloats);
+      const markLive = (rowIndex, marker) => {
+        const base = rowIndex * strideFloats;
+        sourceRows[base] = marker;
+        sourceRows[base + 11] = 1;
+        sourceRows[base + 13] = 1;
+        sourceRows[base + 17] = 1;
+        sourceRows[base + 18] = 1;
+        sourceRows[base + 30] = 1;
+      };
+      markLive(0, 101);
+      markLive(2, 303);
+      // Row one is structurally present but not committed/live.
+      sourceRows[strideFloats + 0] = 202;
+      const sourceBuffer = identity.tagWebGpuBufferDevice(
+        device.createBuffer({
+          label: 'ulg-native-product-history-promotion-source',
+          size: sourceRows.byteLength,
+          usage:
+            GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        }),
+        device
+      );
+      device.queue.writeBuffer(sourceBuffer, 0, sourceRows);
+      const sourceHandle = identity.tagResidentProductMassDevice({
+        schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+        status: 'resident-product-mass-buffer-retained',
+        source: 'native-product-history-promotion-source',
+        productEventBuffer: sourceBuffer,
+        productEventBufferRetained: true,
+        productEventBufferByteLength: sourceRows.byteLength,
+        productEventRowCount: 3,
+        productEventActiveEventCount: 2,
+        productEventStrideFloats: strideFloats,
+        productEventStrideBytes: strideFloats * Float32Array.BYTES_PER_ELEMENT,
+        productEventGenerationCount: 1,
+        productEventSourceRowCounts: [3],
+        mergeSourceProductEventBufferCount: 1,
+        mergeSourceProductEventRowCounts: [3],
+        mergeSourceProductEventBufferByteLengths: [sourceRows.byteLength],
+        productInventoryCount: 2,
+        gasSpeciesLedgerCount: 0,
+        gasSpeciesReadbackByteLength: 0,
+        sealedBoxGasProductMoles: 0,
+        visibleProductMassKg: 0,
+        unplacedProductMassKg: 2,
+        unplacedGasProductMassKg: 0
+      }, device);
+
+      device.pushErrorScope('validation');
+      device.pushErrorScope('out-of-memory');
+      const promoted = await step.mergeResidentProductMassBuffersWebGpu({
+        device,
+        emittedResidentProductMass: sourceHandle,
+        allowHostCompactionObservation: false
+      });
+      const authority = promoted.productEventLiveCountAuthority;
+      const controlReadback = device.createBuffer({
+        label: 'ulg-native-product-history-promotion-control-readback',
+        size: history.SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const rowsReadback = device.createBuffer({
+        label: 'ulg-native-product-history-promotion-rows-readback',
+        size: 2 * strideFloats * Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(
+        authority.controlBuffer,
+        authority.controlOffsetBytes,
+        controlReadback,
+        0,
+        history.SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+      );
+      encoder.copyBufferToBuffer(
+        promoted.productEventBuffer,
+        0,
+        rowsReadback,
+        0,
+        2 * strideFloats * Float32Array.BYTES_PER_ELEMENT
+      );
+      device.queue.submit([encoder.finish()]);
+      const outOfMemoryError = await device.popErrorScope();
+      const validationError = await device.popErrorScope();
+      await Promise.all([
+        controlReadback.mapAsync(GPUMapMode.READ),
+        rowsReadback.mapAsync(GPUMapMode.READ)
+      ]);
+      const control = Array.from(new Uint32Array(
+        controlReadback.getMappedRange().slice(0)
+      ));
+      const copiedRows = Array.from(new Float32Array(
+        rowsReadback.getMappedRange().slice(0)
+      ));
+      controlReadback.unmap();
+      rowsReadback.unmap();
+      controlReadback.destroy();
+      rowsReadback.destroy();
+      const release = promoted.destroyResidentProductMassBuffers?.();
+      if (release?.then) await release;
+      sourceBuffer.destroy();
+      return {
+        status: 'complete',
+        validationError: validationError?.message || null,
+        outOfMemoryError: outOfMemoryError?.message || null,
+        uncapturedErrors,
+        control,
+        copiedRows,
+        expectedRows: [
+          ...sourceRows.slice(0, strideFloats),
+          ...sourceRows.slice(2 * strideFloats, 3 * strideFloats)
+        ],
+        authority: {
+          rowCapacity: authority.rowCapacity,
+          rowStrideVec4: authority.rowStrideVec4,
+          generation: authority.generation,
+          seal: authority.seal,
+          hostObserved: authority.hostObserved
+        },
+        expected: {
+          magic: history.SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_MAGIC,
+          version: history.SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_VERSION,
+          ready: history.SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_STATUS_READY
+        }
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+
+  assert.equal(native.status, 'complete', native.reason || 'native WebGPU did not run');
+  assert.equal(native.validationError, null);
+  assert.equal(native.outOfMemoryError, null);
+  assert.deepEqual(native.uncapturedErrors, []);
+  assert.equal(native.control[0], native.expected.magic);
+  assert.equal(native.control[1], native.expected.version);
+  assert.equal(native.control[2], native.expected.ready);
+  assert.equal(native.control[3], 2);
+  assert.equal(native.control[4], native.authority.rowCapacity);
+  assert.equal(native.control[5], native.authority.rowStrideVec4);
+  assert.equal(native.control[6], native.authority.generation);
+  assert.equal(native.control[7], native.authority.seal);
+  assert.equal(native.authority.rowCapacity, 32768);
+  assert.equal(native.authority.rowStrideVec4, 8);
+  assert.equal(native.authority.hostObserved, false);
+  assert.deepEqual(native.copiedRows, native.expectedRows);
+});
+
+test('resident product-history filters every append behind an immutable GPU count in a realistic no-host-observation hot loop', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let mergeFenceCount = 0;
+  let compactMapCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    const mapAsync = buffer.mapAsync.bind(buffer);
+    buffer.mapAsync = async (...args) => {
+      compactMapCount += 1;
+      return mapAsync(...args);
+    };
+    return buffer;
+  };
+
+  const rowsPerGeneration = 304;
+  const bytesPerGeneration = rowsPerGeneration * 128;
+  const seed = residentProductMassHandle({
+    label: 'resident-no-host-observation-seed',
+    rowCount: rowsPerGeneration,
+    byteLength: bytesPerGeneration,
+    generationCount: 1,
+    sourceRowCounts: [rowsPerGeneration],
+    sourceByteLengths: [bytesPerGeneration]
+  });
+  let current = seed;
+  for (let generation = 0; generation < 16; generation += 1) {
+    const input = current;
+    current = await mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: input,
+      emittedResidentProductMass: residentProductMassHandle({
+        label: `resident-no-host-observation-emitted-${generation}`,
+        rowCount: rowsPerGeneration,
+        byteLength: bytesPerGeneration
+      }),
+      allowHostCompactionObservation: false
+    });
+    if (generation > 0) input.destroyResidentProductMassBuffers();
+  }
+
+  assert.equal(
+    current.productEventCompactionStatus,
+    'product-event-filtered-append-gpu-count-resident'
+  );
+  assert.equal(
+    current.mergePolicy,
+    'bounded-product-history-gpu-count-filtered-append'
+  );
+  assert.equal(
+    current.productEventCompactionHostObservationAllowed,
+    false
+  );
+  assert.equal(
+    current.productEventCompactionDeferredForGpuResidency,
+    false
+  );
+  assert.equal(
+    current.productEventNoHostObservationCapacityByteLength,
+    4 * 1024 * 1024
+  );
+  assert.equal(current.productEventGenerationCount, 1);
+  assert.equal(current.productEventRowCount, 32768);
+  assert.equal(
+    current.productEventBufferByteLength,
+    4 * 1024 * 1024
+  );
+  assert.equal(current.productEventBuffer.size, 4 * 1024 * 1024);
+  assert.equal(
+    current.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(current.productEventRowCountHostKnown, false);
+  assert.equal(current.productEventActiveEventCount, null);
+  assert.equal(current.productEventGpuFilteredAppend, true);
+  assert.equal(current.productEventGpuFilteredAppendPassCount, 1);
+  assert.equal(current.productEventGpuFilteredAppendDestinationCleared, false);
+  assert.ok(current.productEventLiveCountAuthority);
+  assert.ok(current.productEventLiveCountAuthority.generation > 0);
+  assert.ok(current.productEventLiveCountAuthority.seal > 0);
+  assert.equal(current.productEventLiveCountAuthority.rowCapacity, 32768);
+  assert.equal(current.productEventLiveCountAuthority.rowStrideFloats, 32);
+  assert.equal(current.productEventLiveCountAuthority.liveRowCountHostKnown, false);
+  assert.equal(
+    current.productEventLiveCountAuthority.status,
+    'gpu-conditioned-publication-commit-pending'
+  );
+  assert.equal(
+    current.productEventLiveCountAuthority.controlPrefixByteLength,
+    32
+  );
+  assert.equal(current.productEventLiveCountAuthority.hostObserved, false);
+  assert.equal(current.productEventLiveRowCountUpperBound, 17 * rowsPerGeneration);
+  assert.equal(
+    current.productEventLiveRowCountUpperBoundAuthority,
+    'gpu-authenticated-physical-capacity-no-readback'
+  );
+  assert.equal(
+    current.productEventHistoryArenaStatus,
+    'resident-product-history-arena-gpu-commit-pending'
+  );
+  assert.equal(
+    current.productEventGpuCommitStatus,
+    'gpu-conditioned-publication-commit-pending'
+  );
+  assert.equal(
+    device.createdBuffers.length,
+    4,
+    'history data, two non-aliasing count-control banks, and append params allocate once'
+  );
+  assert.equal(device.copies.length, 0);
+  assert.equal(device.submissions.length, 16);
+  assert.equal(
+    device.createdBuffers.some(
+      (buffer) => (buffer.usage & 1) !== 0
+    ),
+    false
+  );
+  assert.equal(compactMapCount, 0);
+  assert.equal(mergeFenceCount, 0);
+  assert.equal(current.productEventMergeHostFenceAwaited, false);
+  assert.equal(
+    current.productEventHistoryArenaReleasePolicy,
+    'same-device-queue-ordered-reuse-no-host-fence'
+  );
+  assert.equal(
+    current.productEventHistoryArenaBackpressurePolicy,
+    'bounded-three-slot-explicit-fail-fast'
+  );
+  await releaseResidentProductHistoryTestHandles(current, seed);
+  assert.equal(mergeFenceCount, 0);
+});
+
+test('resident product-history grows conservatively then clamps candidate metadata at the GPU-authenticated ceiling', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let mergeFenceCount = 0;
+  let mapCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    const mapAsync = buffer.mapAsync.bind(buffer);
+    buffer.mapAsync = async (...args) => {
+      mapCount += 1;
+      return mapAsync(...args);
+    };
+    return buffer;
+  };
+  const seed = residentProductMassHandle({
+    label: 'gpu-count-growth-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const emittedFirst = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-first',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const first = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: seed,
+    emittedResidentProductMass: emittedFirst,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(first.productEventLiveRowCountUpperBound, 2);
+  assert.equal(first.productEventLiveCountAuthority.rowCapacity, 32768);
+
+  const emittedWithinCapacity = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-within-capacity',
+    rowCount: 32765,
+    byteLength: 32765 * 128
+  });
+  const withinCapacity = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: first,
+    emittedResidentProductMass: emittedWithinCapacity,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(withinCapacity.productEventBuffer, first.productEventBuffer);
+  assert.equal(withinCapacity.productEventLiveRowCountUpperBound, 32767);
+  assert.equal(withinCapacity.productEventHistoryCapacityGrowthPerformed, false);
+
+  const emittedCrossing = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-crossing',
+    rowCount: 2,
+    byteLength: 2 * 128
+  });
+  const grown = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: withinCapacity,
+    emittedResidentProductMass: emittedCrossing,
+    allowHostCompactionObservation: false
+  });
+  assert.notEqual(grown.productEventBuffer, withinCapacity.productEventBuffer);
+  assert.equal(grown.productEventBufferByteLength, 8 * 1024 * 1024);
+  assert.equal(grown.productEventLiveCountAuthority.rowCapacity, 65536);
+  assert.equal(grown.productEventLiveRowCountUpperBound, 32769);
+  assert.equal(grown.productEventHistoryCapacityGrowthPerformed, true);
+  assert.equal(grown.productEventGpuLivePrefixClonePerformed, true);
+  assert.equal(grown.productEventGpuFilteredAppendDestinationCleared, true);
+  const growthParamsWrite = device.writes.findLast(
+    (write) =>
+      write.label
+        === 'ulg-sph-resident-product-history-arena-2-append-params'
+  );
+  assert.ok(growthParamsWrite);
+  const growthParams = new DataView(growthParamsWrite.data);
+  assert.equal(growthParams.getUint32(8, true), 65536);
+  assert.equal(growthParams.getUint32(20, true), 1);
+  assert.equal(growthParams.getUint32(40, true), 32768);
+  assert.equal(device.submissions.length, 3);
+  assert.equal(mapCount, 0);
+  assert.equal(mergeFenceCount, 0);
+  assert.equal(
+    device.createdBuffers.some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+
+  // Release the superseded 4 MiB views so the bounded three-slot arena can
+  // reuse that physical slot for the next conservative capacity rung.
+  first.destroyResidentProductMassBuffers();
+  withinCapacity.destroyResidentProductMassBuffers();
+  const emittedCrossingSixteenMiB = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-crossing-sixteen-mib',
+    rowCount: 65537 - grown.productEventLiveRowCountUpperBound,
+    byteLength:
+      (65537 - grown.productEventLiveRowCountUpperBound) * 128
+  });
+  const sixteenMiB = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: grown,
+    emittedResidentProductMass: emittedCrossingSixteenMiB,
+    allowHostCompactionObservation: false
+  });
+  assert.notEqual(sixteenMiB.productEventBuffer, grown.productEventBuffer);
+  assert.equal(sixteenMiB.productEventBufferByteLength, 16 * 1024 * 1024);
+  assert.equal(sixteenMiB.productEventLiveCountAuthority.rowCapacity, 131072);
+  assert.equal(sixteenMiB.productEventLiveRowCountUpperBound, 65537);
+  assert.equal(sixteenMiB.productEventHistoryCapacityGrowthPerformed, true);
+  assert.equal(sixteenMiB.productEventGpuLivePrefixClonePerformed, true);
+
+  const allocationCountBeforeCeiling = device.createdBuffers.length;
+  const writeCountBeforeCeiling = device.writes.length;
+  const submissionCountBeforeCeiling = device.submissions.length;
+  const emittedPastCeiling = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-past-ceiling',
+    rowCount: 262145 - sixteenMiB.productEventLiveRowCountUpperBound,
+    byteLength:
+      (262145 - sixteenMiB.productEventLiveRowCountUpperBound) * 128
+  });
+  const atCeiling = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: sixteenMiB,
+    emittedResidentProductMass: emittedPastCeiling,
+    allowHostCompactionObservation: false
+  });
+  assert.notEqual(atCeiling.productEventBuffer, sixteenMiB.productEventBuffer);
+  assert.equal(atCeiling.productEventBufferByteLength, 32 * 1024 * 1024);
+  assert.equal(atCeiling.productEventLiveCountAuthority.rowCapacity, 262144);
+  assert.equal(atCeiling.productEventLiveRowCountUpperBound, 262144);
+  assert.equal(
+    atCeiling.productEventLiveRowCountUpperBoundAuthority,
+    'gpu-authenticated-physical-capacity-no-readback'
+  );
+  assert.equal(atCeiling.productEventHistoryCapacityGrowthPerformed, true);
+  assert.deepEqual(
+    [
+      first.productEventBufferByteLength,
+      grown.productEventBufferByteLength,
+      sixteenMiB.productEventBufferByteLength,
+      atCeiling.productEventBufferByteLength
+    ],
+    [
+      4 * 1024 * 1024,
+      8 * 1024 * 1024,
+      16 * 1024 * 1024,
+      32 * 1024 * 1024
+    ]
+  );
+  assert.ok(device.createdBuffers.length > allocationCountBeforeCeiling);
+  assert.ok(device.writes.length > writeCountBeforeCeiling);
+  assert.equal(device.submissions.length, submissionCountBeforeCeiling + 1);
+
+  const allocationCountAtCeiling = device.createdBuffers.length;
+
+  const emittedRetry = residentProductMassHandle({
+    label: 'gpu-count-growth-emitted-retry',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const retry = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: atCeiling,
+    emittedResidentProductMass: emittedRetry,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(retry.productEventBuffer, atCeiling.productEventBuffer);
+  assert.equal(retry.productEventLiveRowCountUpperBound, 262144);
+  assert.equal(retry.productEventLiveCountAuthority.rowCapacity, 262144);
+  assert.equal(device.createdBuffers.length, allocationCountAtCeiling);
+  assert.equal(device.submissions.length, submissionCountBeforeCeiling + 2);
+  assert.equal(mapCount, 0);
+  assert.equal(mergeFenceCount, 0);
+
+  await releaseResidentProductHistoryTestHandles(
+    first,
+    withinCapacity,
+    grown,
+    sixteenMiB,
+    atCeiling,
+    retry,
+    seed,
+    emittedFirst,
+    emittedWithinCapacity,
+    emittedCrossing,
+    emittedCrossingSixteenMiB,
+    emittedPastCeiling,
+    emittedRetry
+  );
+});
+
+test('resident product-history publishes its GPU-count resource family transactionally', async () => {
+  for (const failingLabel of [
+    'ulg-sph-resident-product-history-arena-1-count-control-bank-1',
+    'ulg-sph-resident-product-history-arena-1-append-params'
+  ]) {
+    const device = fakeSummaryDevice(
+      new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+    );
+    let injected = false;
+    const createBuffer = device.createBuffer.bind(device);
+    device.createBuffer = (descriptor) => {
+      if (descriptor.label === failingLabel && !injected) {
+        injected = true;
+        throw new Error(`injected ${failingLabel} allocation failure`);
+      }
+      return createBuffer(descriptor);
+    };
+    const merge = (suffix) => mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: residentProductMassHandle({
+        label: `gpu-count-transaction-seed-${suffix}`,
+        rowCount: 1,
+        byteLength: 128
+      }),
+      emittedResidentProductMass: residentProductMassHandle({
+        label: `gpu-count-transaction-emitted-${suffix}`,
+        rowCount: 1,
+        byteLength: 128
+      }),
+      allowHostCompactionObservation: false
+    });
+
+    await assert.rejects(
+      merge('failed'),
+      new RegExp(`injected ${failingLabel} allocation failure`)
+    );
+    assert.equal(device.submissions.length, 0);
+    const partialResourceFamily = device.createdBuffers.filter(
+      (buffer) =>
+        buffer.label.endsWith('-count-control')
+        || buffer.label.endsWith('-count-control-bank-1')
+        || buffer.label.endsWith('-append-params')
+    );
+    assert.ok(partialResourceFamily.length > 0);
+    assert.ok(
+      partialResourceFamily.every((buffer) => buffer.destroyed === true),
+      `${failingLabel} leaked a partially allocated GPU-count resource family`
+    );
+
+    const recovered = await merge('recovered');
+    assert.equal(
+      recovered.productEventRowCountAuthority,
+      'gpu-authored-filtered-live-prefix'
+    );
+    assert.ok(recovered.productEventLiveCountAuthority);
+    assert.equal(device.submissions.length, 1);
+    const liveResourceFamily = device.createdBuffers.filter(
+      (buffer) =>
+        (
+          buffer.label.endsWith('-count-control')
+          || buffer.label.endsWith('-count-control-bank-1')
+          || buffer.label.endsWith('-append-params')
+        )
+        && buffer.destroyed === false
+    );
+    assert.equal(liveResourceFamily.length, 3);
+    await releaseResidentProductHistoryTestHandles(recovered);
+  }
+});
+
+test('resident product-history revokes released per-view counts before their control records are reused', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const seed = residentProductMassHandle({
+    label: 'gpu-count-revocation-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const first = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: seed,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-revocation-emitted-1',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  const firstAuthority = resolveResidentProductEventCountAuthority(
+    first,
+    device
+  );
+  assert.ok(firstAuthority);
+
+  const second = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: first,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-revocation-emitted-2',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  const secondAuthority = resolveResidentProductEventCountAuthority(
+    second,
+    device
+  );
+  assert.ok(secondAuthority);
+  assert.equal(second.productEventBuffer, first.productEventBuffer);
+  assert.notEqual(
+    secondAuthority.controlBuffer,
+    firstAuthority.controlBuffer,
+    'successive records must alternate physical buffers to avoid WebGPU read/write aliasing'
+  );
+
+  first.destroyResidentProductMassBuffers();
+  assert.equal(
+    resolveResidentProductEventCountAuthority(first, device),
+    null
+  );
+
+  const third = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: second,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-revocation-emitted-3',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: true
+  });
+  const thirdAuthority = resolveResidentProductEventCountAuthority(
+    third,
+    device
+  );
+  assert.ok(thirdAuthority);
+  assert.equal(
+    thirdAuthority.controlBuffer,
+    firstAuthority.controlBuffer
+  );
+  assert.equal(
+    thirdAuthority.controlOffsetBytes,
+    firstAuthority.controlOffsetBytes
+  );
+  assert.notEqual(thirdAuthority.generation, firstAuthority.generation);
+  assert.equal(
+    third.productEventCompactionStatus,
+    'product-event-filtered-append-gpu-count-resident'
+  );
+  assert.equal(
+    resolveResidentProductEventCountAuthority(first, device),
+    null
+  );
+
+  await releaseResidentProductHistoryTestHandles(second, third, seed);
+});
+
+test('resident product-history exposes all 128 retained GPU-count records before bounded backpressure', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let mergeFenceCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
+  const seed = residentProductMassHandle({
+    label: 'gpu-count-record-boundary-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const outputs = [];
+  const emitted = [];
+  let current = seed;
+  for (let index = 0; index < 128; index += 1) {
+    const generation = residentProductMassHandle({
+      label: `gpu-count-record-boundary-emitted-${index}`,
+      rowCount: 1,
+      byteLength: 128
+    });
+    emitted.push(generation);
+    current = await mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: current,
+      emittedResidentProductMass: generation,
+      allowHostCompactionObservation: false
+    });
+    outputs.push(current);
+  }
+  assert.equal(device.createdBuffers.length, 4);
+  assert.equal(device.submissions.length, 128);
+  const blockedEmission = residentProductMassHandle({
+    label: 'gpu-count-record-boundary-blocked',
+    rowCount: 1,
+    byteLength: 128
+  });
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: current,
+      emittedResidentProductMass: blockedEmission,
+      allowHostCompactionObservation: false
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_SPH_PRODUCT_HISTORY_GPU_COUNT_RECORD_BACKPRESSURE'
+      );
+      assert.equal(error.recordCount, 128);
+      return true;
+    }
+  );
+  assert.equal(device.submissions.length, 128);
+
+  outputs[0].destroyResidentProductMassBuffers();
+  const recovered = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: current,
+    emittedResidentProductMass: blockedEmission,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(device.createdBuffers.length, 4);
+  assert.equal(device.submissions.length, 129);
+  assert.equal(recovered.productEventLiveRowCountUpperBound, 130);
+  assert.equal(mergeFenceCount, 0);
+
+  await releaseResidentProductHistoryTestHandles(
+    ...outputs,
+    recovered,
+    seed,
+    ...emitted,
+    blockedEmission
+  );
+  assert.equal(mergeFenceCount, 0);
+});
+
+test('resident product-history authenticates a smaller parent count when a stale branch reuses a larger arena slot', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let mergeFenceCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
+
+  const largeSeed = residentProductMassHandle({
+    label: 'gpu-count-large-slot-seed',
+    rowCount: 4096,
+    byteLength: 4096 * 128
+  });
+  const large = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: largeSeed,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-large-slot-emitted',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  assert.equal(
+    large.productEventHistoryArenaCapacityByteLength,
+    8 * 1024 * 1024
+  );
+
+  const smallSeed = residentProductMassHandle({
+    label: 'gpu-count-small-slot-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const parent = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: smallSeed,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-small-slot-emitted',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  const parentAuthority = resolveResidentProductEventCountAuthority(
+    parent,
+    device
+  );
+  assert.equal(parentAuthority.rowCapacity, 32768);
+
+  large.destroyResidentProductMassBuffers();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(mergeFenceCount, 0);
+
+  const branchA = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: parent,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-small-branch-a',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  assert.equal(branchA.productEventBuffer, parent.productEventBuffer);
+
+  const branchB = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: parent,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-small-branch-b',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  assert.notEqual(branchB.productEventBuffer, parent.productEventBuffer);
+  assert.equal(
+    branchB.productEventHistoryArenaCapacityByteLength,
+    8 * 1024 * 1024
+  );
+  assert.equal(branchB.productEventGpuLivePrefixClonePerformed, true);
+  assert.equal(
+    branchB.productEventGpuFilteredAppendDestinationCleared,
+    true
+  );
+
+  const paramsWrite = device.writes.findLast(
+    (write) =>
+      write.label
+        === 'ulg-sph-resident-product-history-arena-1-append-params'
+  );
+  assert.ok(paramsWrite);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(params.getUint32(8, true), 65536);
+  assert.equal(params.getUint32(12, true), 8);
+  assert.equal(params.getUint32(20, true), 1);
+  assert.equal(params.getUint32(24, true), parentAuthority.generation);
+  assert.equal(params.getUint32(28, true), parentAuthority.seal);
+  assert.equal(params.getUint32(40, true), 32768);
+  assert.equal(params.getUint32(44, true), 8);
+  const branchBindGroup = device.bindGroups.findLast(
+    (bindGroup) =>
+      bindGroup.entries.find((entry) => entry.binding === 0)
+        ?.resource?.buffer === branchB.productEventBuffer
+  );
+  assert.equal(
+    branchBindGroup.entries.find((entry) => entry.binding === 3)
+      ?.resource?.buffer,
+    parentAuthority.controlBuffer
+  );
+  assert.equal(
+    branchBindGroup.entries.find((entry) => entry.binding === 3)
+      ?.resource?.offset,
+    parentAuthority.controlOffsetBytes
+  );
+
+  await releaseResidentProductHistoryTestHandles(
+    parent,
+    branchA,
+    branchB,
+    largeSeed,
+    smallSeed
+  );
+});
+
+test('resident product-history rejects no-host capacities before allocation or submission', async () => {
+  const belowMinimumDevice = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  belowMinimumDevice.limits = {
+    maxBufferSize: 2 * 1024 * 1024,
+    maxStorageBufferBindingSize: 2 * 1024 * 1024
+  };
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device: belowMinimumDevice,
+      inputResidentProductMass: residentProductMassHandle({
+        label: 'gpu-count-below-limit-seed',
+        rowCount: 1,
+        byteLength: 128
+      }),
+      emittedResidentProductMass: residentProductMassHandle({
+        label: 'gpu-count-below-limit-emitted',
+        rowCount: 1,
+        byteLength: 128
+      }),
+      allowHostCompactionObservation: false
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_SPH_PRODUCT_HISTORY_NO_HOST_OBSERVATION_CAPACITY'
+      );
+      return true;
+    }
+  );
+  assert.equal(belowMinimumDevice.createdBuffers.length, 0);
+  assert.equal(belowMinimumDevice.submissions.length, 0);
+
+  const hardCeilingDevice = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device: hardCeilingDevice,
+      inputResidentProductMass: residentProductMassHandle({
+        label: 'gpu-count-hard-ceiling-seed',
+        rowCount: 32768,
+        byteLength: 32768 * 128
+      }),
+      emittedResidentProductMass: residentProductMassHandle({
+        label: 'gpu-count-hard-ceiling-emitted',
+        rowCount: 1,
+        byteLength: 128
+      }),
+      allowHostCompactionObservation: false
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_SPH_PRODUCT_HISTORY_NO_HOST_OBSERVATION_CAPACITY'
+      );
+      return true;
+    }
+  );
+  assert.equal(hardCeilingDevice.createdBuffers.length, 0);
+  assert.equal(hardCeilingDevice.submissions.length, 0);
 });
 
 test('resident product-history arena reuses compact destination and four-byte observation workspace', async () => {
@@ -12870,7 +17738,7 @@ test('resident product-history arena reuses compact destination and four-byte ob
   assert.equal(compactMapCount, 2);
   assert.equal(mergeFenceCount, 0);
   await releaseResidentProductHistoryTestHandles(first, second);
-  assert.ok(mergeFenceCount >= 1);
+  assert.equal(mergeFenceCount, 0);
 });
 
 test('resident product-history arena reserves concurrent tail forks on distinct physical slots', async () => {
@@ -12987,7 +17855,7 @@ test('resident product-history arena retains concatenated history after scoped c
   assert.equal(result.productEventRowCount, 2048);
   assert.equal(result.productEventBufferByteLength, 2048 * 128);
   assert.equal(result.productEventCompactionDroppedRowCount, 0);
-  assert.equal(result.productEventMergeQueueCompletionStatus, 'queue-submitted-owner-fence-delegated');
+  assert.equal(result.productEventMergeQueueCompletionStatus, 'queue-submitted-same-device-ordering');
   await releaseResidentProductHistoryTestHandles(result, seed, emitted);
 });
 
@@ -13112,8 +17980,13 @@ test('resident product-history arena terminates a pending compaction map promptl
   await releaseResidentProductHistoryTestHandles(seed, emitted);
 });
 
-test('resident product-history arena enforces three live slots and resumes after an exact release fence', async () => {
+test('resident product-history arena fails fast at three retained slots and reuses a released slot without a host fence', async () => {
   const device = fakeSummaryDevice(new Float32Array(0));
+  let fenceCalls = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceCalls += 1;
+    throw new Error('resident product-history release must not await a host fence');
+  };
   const makeColdHistory = (suffix) => mergeResidentProductMassBuffersWebGpu({
     device,
     inputResidentProductMass: residentProductMassHandle({
@@ -13137,99 +18010,69 @@ test('resident product-history arena enforces three live slots and resumes after
     code: 'ERR_SPH_PRODUCT_HISTORY_ARENA_BACKPRESSURE'
   });
 
-  const releaseFence = deferredTestPromise();
+  const releasedBuffer = held[0].productEventBuffer;
+  assert.equal(held[0].destroyResidentProductMassBuffers(), true);
+  const resumed = await makeColdHistory('resumed');
+  assert.equal(fenceCalls, 0);
+  assert.equal(device.createdBuffers.length, 3);
+  assert.equal(resumed.productEventBuffer, releasedBuffer);
+  assert.equal(resumed.productEventHistoryArenaWarmReuse, false);
+  assert.equal(resumed.productEventMergeHostFenceAwaited, false);
+  assert.equal(
+    resumed.productEventHistoryArenaReleasePolicy,
+    'same-device-queue-ordered-reuse-no-host-fence'
+  );
+  assert.equal(
+    resumed.productEventHistoryArenaBackpressurePolicy,
+    'bounded-three-slot-explicit-fail-fast'
+  );
+  await releaseResidentProductHistoryTestHandles(held[1], held[2], resumed);
+  assert.equal(fenceCalls, 0);
+});
+
+test('resident product-history arena resizes a released undersized slot without a host fence', async () => {
+  const device = fakeSummaryDevice(new Float32Array(0));
   let fenceCalls = 0;
   device.queue.onSubmittedWorkDone = () => {
     fenceCalls += 1;
-    return releaseFence.promise;
+    throw new Error('resident product-history resize must not await a host fence');
   };
-  const releasePromise = held[0].destroyResidentProductMassBuffers();
-  const resumedPromise = makeColdHistory('resumed');
-  await Promise.resolve();
-  assert.equal(fenceCalls, 1);
-  releaseFence.resolve();
-  await releasePromise;
-  const resumed = await resumedPromise;
-  assert.equal(device.createdBuffers.length, 3);
-  assert.equal(resumed.productEventHistoryArenaWarmReuse, false);
-  await releaseResidentProductHistoryTestHandles(held[1], held[2], resumed);
-});
-
-test('resident product-history arena quarantines a slot whose release fence rejects', async () => {
-  const device = fakeSummaryDevice(new Float32Array(0));
-  const makeColdHistory = (suffix) => mergeResidentProductMassBuffersWebGpu({
+  const first = await mergeResidentProductMassBuffersWebGpu({
     device,
     inputResidentProductMass: residentProductMassHandle({
-      label: `quarantine-input-${suffix}`,
+      label: 'resize-no-fence-input-small',
       rowCount: 1,
       byteLength: 128
     }),
     emittedResidentProductMass: residentProductMassHandle({
-      label: `quarantine-emitted-${suffix}`,
+      label: 'resize-no-fence-emitted-small',
       rowCount: 1,
       byteLength: 128
     })
   });
-  const held = [
-    await makeColdHistory('a'),
-    await makeColdHistory('b'),
-    await makeColdHistory('c')
-  ];
-  const quarantinedBuffer = held[0].productEventBuffer;
-  device.queue.onSubmittedWorkDone = async () => {
-    throw new Error('injected release rejection');
-  };
-  held[0].destroyResidentProductMassBuffers();
-  const replacement = await makeColdHistory('replacement');
-  assert.equal(quarantinedBuffer.destroyed, true);
-  assert.equal(device.createdBuffers.length, 4);
-  assert.equal(replacement.productEventHistoryArenaSlotCount, 3);
-  device.queue.onSubmittedWorkDone = async () => {};
-  await releaseResidentProductHistoryTestHandles(held[1], held[2], replacement);
-});
-
-test('resident product-history arena does not let a hung release hide a separately quarantined slot', async () => {
-  const device = fakeSummaryDevice(new Float32Array(0));
-  const makeColdHistory = (suffix) => mergeResidentProductMassBuffersWebGpu({
+  const undersizedBuffer = first.productEventBuffer;
+  assert.equal(first.destroyResidentProductMassBuffers(), true);
+  const resized = await mergeResidentProductMassBuffersWebGpu({
     device,
     inputResidentProductMass: residentProductMassHandle({
-      label: `mixed-release-input-${suffix}`,
-      rowCount: 1,
-      byteLength: 128
+      label: 'resize-no-fence-input-large',
+      rowCount: 2048,
+      byteLength: 2048 * 128
     }),
     emittedResidentProductMass: residentProductMassHandle({
-      label: `mixed-release-emitted-${suffix}`,
+      label: 'resize-no-fence-emitted-large',
       rowCount: 1,
       byteLength: 128
     })
   });
-  const held = [
-    await makeColdHistory('a'),
-    await makeColdHistory('b'),
-    await makeColdHistory('c')
-  ];
-  const hungFence = deferredTestPromise();
-  let fenceCall = 0;
-  device.queue.onSubmittedWorkDone = () => {
-    fenceCall += 1;
-    if (fenceCall === 1) return hungFence.promise;
-    if (fenceCall === 2) return Promise.reject(new Error('injected mixed release rejection'));
-    return Promise.resolve();
-  };
-  const hungBuffer = held[0].productEventBuffer;
-  const quarantinedBuffer = held[1].productEventBuffer;
-  held[0].destroyResidentProductMassBuffers();
-  held[1].destroyResidentProductMassBuffers();
-
-  const replacement = await makeColdHistory('replacement');
-
-  assert.equal(hungBuffer.destroyed, false);
-  assert.equal(quarantinedBuffer.destroyed, true);
-  assert.equal(replacement.productEventHistoryArenaSlotCount, 3);
-  assert.equal(device.createdBuffers.length, 4);
-  hungFence.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await releaseResidentProductHistoryTestHandles(held[2], replacement);
+  assert.equal(fenceCalls, 0);
+  assert.equal(undersizedBuffer.destroyed, true);
+  assert.notEqual(resized.productEventBuffer, undersizedBuffer);
+  assert.equal(resized.productEventHistoryArenaSlotCount, 1);
+  assert.equal(device.createdBuffers.length, 2);
+  assert.equal(resized.productEventMergeHostFenceAwaited, false);
+  await releaseResidentProductHistoryTestHandles(resized);
+  assert.equal(fenceCalls, 0);
 });
 
 test('resident product-history arena isolates stale handle borrows across slot reuse', async () => {
@@ -13268,7 +18111,7 @@ test('resident product-history arena isolates stale handle borrows across slot r
   assert.equal(fenceCalls, 0);
   first.__ulgActiveBorrowCount -= 1;
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(fenceCalls, 1);
+  assert.equal(fenceCalls, 0);
 
   const third = await mergeResidentProductMassBuffersWebGpu({
     device,
@@ -13443,6 +18286,50 @@ test('resident product-history arena grows transactionally and preserves an idle
   });
   assert.equal(resizeRecovered.productEventBuffer, resizeSurvivor);
   await releaseResidentProductHistoryTestHandles(resizeRecovered);
+});
+
+test('resident product-history rejects a GPU-count authority whose shape no longer matches its handle', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const input = residentProductMassHandle({
+    label: 'mismatched-gpu-count-authority-input',
+    rowCount: 4,
+    byteLength: 4 * 128
+  });
+  const controlBuffer = device.createBuffer({
+    label: 'mismatched-gpu-count-authority-control',
+    size: 2 * 256,
+    usage: 128 | 256 | 4 | 8
+  });
+  registerResidentProductEventCountAuthority(input, {
+    device,
+    controlBuffer,
+    controlOffsetBytes: 256,
+    rowCapacity: 4,
+    rowStrideFloats: 32,
+    generation: 7,
+    seal: 11
+  });
+  input.productEventRowCount = 3;
+
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: input,
+      emittedResidentProductMass: residentProductMassHandle({
+        label: 'mismatched-gpu-count-authority-emitted',
+        rowCount: 1,
+        byteLength: 128
+      }),
+      allowHostCompactionObservation: false
+    }),
+    {
+      code: 'ERR_SPH_PRODUCT_HISTORY_GPU_COUNT_AUTHORITY_SHAPE'
+    }
+  );
+  assert.equal(device.createdBuffers.length, 1);
+  assert.equal(device.submissions.length, 0);
 });
 
 test('resident product-history arena rejects malformed metadata and ambiguous aliases before encoding', async () => {
@@ -14109,6 +18996,157 @@ test('MLS-MPM resident step cleanup preserves product-event buffers from preserv
   );
 });
 
+test('MLS-MPM resident execution cleanup releases obsolete arena views that share the preserved continuation buffer', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const seed = residentProductMassHandle({
+    label: 'scene-replacement-arena-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const firstEmission = residentProductMassHandle({
+    label: 'scene-replacement-arena-emission-1',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const obsolete = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: seed,
+    emittedResidentProductMass: firstEmission,
+    allowHostCompactionObservation: false
+  });
+  const secondEmission = residentProductMassHandle({
+    label: 'scene-replacement-arena-emission-2',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const current = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: obsolete,
+    emittedResidentProductMass: secondEmission,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(current.productEventBuffer, obsolete.productEventBuffer);
+  assert.ok(resolveResidentProductEventCountAuthority(obsolete, device));
+  assert.ok(resolveResidentProductEventCountAuthority(current, device));
+
+  const stepFor = (handle, nextStep) => ({
+    particlePingPong: { nextStep, nextTime: nextStep * 0.001 },
+    residentProductMass: handle,
+    nextParticleUploads: {
+      residentProductMass: handle,
+      sphParticleUpload: {
+        ownsStateBuffer: false,
+        ownsThermoBuffer: false,
+        ownsIdentityBuffer: false
+      },
+      mlsMpmParticleUpload: { ownsMechanicsBuffer: false }
+    }
+  });
+  destroyMlsMpmResidentStepsBuffers({
+    retainedSteps: [stepFor(obsolete, 1)],
+    finalStep: stepFor(current, 2)
+  }, {
+    preserveResidentProductMassHandles: [current],
+    preserveBuffers: [current.productEventBuffer]
+  });
+
+  assert.equal(resolveResidentProductEventCountAuthority(obsolete, device), null);
+  assert.ok(resolveResidentProductEventCountAuthority(current, device));
+  const thirdEmission = residentProductMassHandle({
+    label: 'scene-replacement-arena-emission-3',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const successor = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: current,
+    emittedResidentProductMass: thirdEmission,
+    allowHostCompactionObservation: false
+  });
+  assert.equal(successor.productEventBuffer, current.productEventBuffer);
+  assert.ok(resolveResidentProductEventCountAuthority(successor, device));
+
+  await releaseResidentProductHistoryTestHandles(
+    current,
+    successor,
+    seed,
+    firstEmission,
+    secondEmission,
+    thirdEmission
+  );
+});
+
+test('MLS-MPM resident replacement cleanup reuses GPU-count records across 160 arena generations', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const seed = residentProductMassHandle({
+    label: 'scene-replacement-long-arena-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const emissions = [];
+  const firstEmission = residentProductMassHandle({
+    label: 'scene-replacement-long-emission-0',
+    rowCount: 1,
+    byteLength: 128
+  });
+  emissions.push(firstEmission);
+  let current = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: seed,
+    emittedResidentProductMass: firstEmission,
+    allowHostCompactionObservation: false
+  });
+  const arenaBuffer = current.productEventBuffer;
+
+  for (let generation = 1; generation <= 160; generation += 1) {
+    const obsolete = current;
+    const emitted = residentProductMassHandle({
+      label: `scene-replacement-long-emission-${generation}`,
+      rowCount: 1,
+      byteLength: 128
+    });
+    emissions.push(emitted);
+    current = await mergeResidentProductMassBuffersWebGpu({
+      device,
+      inputResidentProductMass: obsolete,
+      emittedResidentProductMass: emitted,
+      allowHostCompactionObservation: false
+    });
+    destroyMlsMpmResidentStepsBuffers({
+      retainedSteps: [],
+      finalStep: {
+        particlePingPong: {
+          nextStep: generation,
+          nextTime: generation * 0.001
+        },
+        residentProductMass: obsolete,
+        nextParticleUploads: {
+          residentProductMass: obsolete,
+          sphParticleUpload: {
+            ownsStateBuffer: false,
+            ownsThermoBuffer: false,
+            ownsIdentityBuffer: false
+          },
+          mlsMpmParticleUpload: { ownsMechanicsBuffer: false }
+        }
+      }
+    }, {
+      preserveResidentProductMassHandles: [current],
+      preserveBuffers: [current.productEventBuffer]
+    });
+    assert.equal(resolveResidentProductEventCountAuthority(obsolete, device), null);
+    assert.ok(resolveResidentProductEventCountAuthority(current, device));
+  }
+
+  assert.equal(current.productEventBuffer, arenaBuffer);
+  assert.equal(device.submissions.length, 161);
+  await releaseResidentProductHistoryTestHandles(current, seed, ...emissions);
+});
+
 test('MLS-MPM resident step rejects stale CPU mirrors without retained GPU uploads', async () => {
   const buffers = manualBuffers();
   await assert.rejects(
@@ -14192,6 +19230,11 @@ test('MLS-MPM resident step accepts stale CPU mirrors when retained GPU uploads 
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-stale-authoritative-p2g',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyGridBuffer() {
           this.gridBuffer.destroy();
         }
@@ -14216,6 +19259,11 @@ test('MLS-MPM resident step accepts stale CPU mirrors when retained GPU uploads 
         updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-stale-authoritative-grid-update',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyUpdatedGridBuffer() {
           this.updatedGridBuffer.destroy();
         }
@@ -14245,6 +19293,11 @@ test('MLS-MPM resident step accepts stale CPU mirrors when retained GPU uploads 
         retainedOutputParticleBuffers: true,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-stale-authoritative-g2p',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        }),
         destroyOutputParticleBuffers() {
           this.stateBuffer.destroy();
           this.mechanicsBuffer.destroy();
@@ -14379,6 +19432,14 @@ test('MLS-MPM resident steps compactSummaryMode none skips no-full summary readb
   assert.equal(execution.stepSummaries[1].diagnostics.compactGpuSummaryAvailable, false);
   assert.equal(execution.nextSphParticleState.status, 'gpu-resident-unread-ready');
   assert.equal(execution.nextMlsMpmParticleState.status, 'gpu-resident-unread-ready');
+  assert.equal(execution.mapAsyncCount, 0);
+  assert.equal(execution.readbackBytes, 0);
+  assert.equal(execution.hostQueueFenceCount, 0);
+  assert.equal(execution.normalHotLoopReadbackFree, true);
+  assert.equal(execution.fullParticleReadbackFree, true);
+  assert.equal(execution.residentContinuationReady, true);
+  assert.equal(execution.stepSummaries[0].mapAsyncCount, 0);
+  assert.equal(execution.stepSummaries[1].mapAsyncCount, 0);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.ok(tracker.destroyed > 0);
 });
@@ -14680,6 +19741,12 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(Number.isFinite(execution.finalStep.stageTiming.queueFenceMs.fusedMechanicsSequence), true);
   assert.equal(execution.fusedResidentSequence.queueFenceRequested, true);
   assert.equal(execution.fusedResidentSequence.queueFenceStatus, 'complete');
+  assert.equal(execution.mapAsyncCount, 0);
+  assert.equal(execution.readbackBytes, 0);
+  assert.equal(execution.hostQueueFenceCount, 2);
+  assert.equal(execution.normalHotLoopReadbackFree, false);
+  assert.equal(execution.fullParticleReadbackFree, true);
+  assert.equal(execution.residentContinuationReady, true);
   assert.equal(execution.stepSummaries[0].compactSummaryAvailable ?? false, false);
   assert.equal(execution.stepSummaries[1].compactSummaryAvailable ?? false, false);
   assert.equal(device.submissions.length, 2);
@@ -14730,15 +19797,26 @@ test('MLS-MPM resident steps compute task accepts fused active-grid no-summary r
   assert.equal(result.status, 'resident-steps-executed');
   assert.equal(result.finalStep.fusedResidentSequence.status, 'fused-resident-sequence-executed');
   assert.equal(result.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
-  assert.equal(result.gpuFence.status, 'queue-work-completed');
-  assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
+  assert.equal(
+    result.gpuFence.status,
+    'same-device-queue-ordering-established'
+  );
+  assert.equal(result.gpuFence.method, 'same-device-queue-submit-order');
   assert.equal(result.gpuFence.fenceSatisfied, true);
   assert.equal(
     result.gpuFence.satisfactionReason,
-    'compute-task-observed-real-queue-completion'
+    'same-device-retained-buffers-use-queue-submission-order'
   );
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
   assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
-  assert.equal(result.commitDelta.payload.gpuFence.status, 'queue-work-completed');
+  assert.equal(
+    result.commitDelta.payload.gpuFence.status,
+    'same-device-queue-ordering-established'
+  );
   destroyMlsMpmResidentStepsBuffers(result);
 });
 
@@ -14767,7 +19845,17 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     readbackMode: 'no-full-readback',
     compactSummaryMode: 'final-only',
     fuseNoFullResidentMechanicsSequence: true,
-    summaryRunner({ sphParticleUpload, mlsMpmParticleUpload, g2pReconstruction, gridUpdate }) {
+    summaryRunner({
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      g2pReconstruction,
+      gridUpdate,
+      compactSummaryReadbackClassification
+    }) {
+      assert.equal(
+        compactSummaryReadbackClassification,
+        'final-diagnostic'
+      );
       assert.equal(sphParticleUpload.stateBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a');
       assert.equal(mlsMpmParticleUpload.mechanicsBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a');
       assert.equal(g2pReconstruction.stateBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b');
@@ -14812,6 +19900,15 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
         },
         mapAsyncWaitMs: 0,
         queueFenceAttribution: 'unit-summary-runner'
+        ,
+        ...createGpuReadbackTelemetry({
+          scope: 'test-fused-final-compact-summary',
+          mapAsyncCount: 1,
+          readbackBytes: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+          finalDiagnosticMapAsyncCount: 1,
+          finalDiagnosticReadbackBytes:
+            MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        })
       };
     }
   });
@@ -14838,6 +19935,22 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.stepSummaries[0].status, 'resident-step-fused-sequence-intermediate');
   assert.equal(execution.stepSummaries[1].status, 'resident-step-webgpu-executed');
   assert.equal(execution.stepSummaries[0].fusedResidentSequence, true);
+  assert.equal(execution.mapAsyncCount, 1);
+  assert.equal(execution.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(execution.hostQueueFenceCount, 0);
+  assert.equal(execution.finalDiagnosticMapAsyncCount, 1);
+  assert.equal(
+    execution.finalDiagnosticReadbackBytes,
+    MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+  );
+  assert.equal(execution.unclassifiedMapAsyncCount, 0);
+  assert.equal(execution.unclassifiedReadbackBytes, 0);
+  assert.equal(execution.productionHotLoopHostDependencyFree, true);
+  assert.equal(execution.stepSummaries[0].mapAsyncCount, 0);
+  assert.equal(execution.stepSummaries[1].mapAsyncCount, 1);
+  assert.equal(execution.normalHotLoopReadbackFree, false);
+  assert.equal(execution.fullParticleReadbackFree, true);
+  assert.equal(execution.residentContinuationReady, true);
   assert.equal(device.submissions.length, 1);
   assert.equal(device.dispatches.length, 8);
   // These two are read-only all-zero rows that stand in for a disabled feature.
@@ -15311,7 +20424,17 @@ test('MLS-MPM resident steps avoid full-grid per-step fused fallback when therma
         }
       };
     },
-    summaryRunner({ gridUpdate, g2pReconstruction, thermalStep, summaryScope }) {
+    summaryRunner({
+      gridUpdate,
+      g2pReconstruction,
+      thermalStep,
+      summaryScope,
+      compactSummaryReadbackClassification
+    }) {
+      assert.equal(
+        compactSummaryReadbackClassification,
+        'final-diagnostic'
+      );
       assert.notEqual(gridUpdate.fusedResidentMechanics, true);
       assert.notEqual(g2pReconstruction.fusedResidentMechanics, true);
       assert.equal(thermalStep?.backend, 'webgpu');
@@ -15767,7 +20890,7 @@ test('MLS-MPM fused resident sequence encodes thermal sidecar fusion in one subm
   const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable(materialProperties, {
     viscosityEnabled: true,
     viscosityLengthM: buffers.sphParticleState.smoothingLengthM,
-    surfaceTensionEnabled: true
+    surfaceTensionEnabled: false
   });
   const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
     ...buffers,
@@ -15834,12 +20957,13 @@ test('MLS-MPM fused resident sequence encodes thermal sidecar fusion in one subm
   assert.equal(execution.sidecarAwareResidentSequenceActive, false);
   assert.equal(execution.sidecarAwareDirectRunnerContractStatus, 'thermal-sidecar-direct-runner-not-candidate');
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 22);
+  assert.equal(device.dispatches.length, 24);
   const dispatchEntryPoints = device.dispatches.map(
     (dispatch) => dispatch.pipeline?.compute?.entryPoint ?? null
   );
   const thermalProducerApplyGroup = [
     'derive',
+    'finalize_conductivity',
     'budget',
     'resolve_budget',
     'propose',
@@ -15998,6 +21122,21 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
         gridNodes: new Float32Array(),
         gridBuffer: tracker.buffer(`p2g-grid-unread-${index}`),
         gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        residentProductMassGridCouplingStatus: args.residentProductMass
+          ? 'resident-product-mass-bound-to-p2g-grid'
+          : null,
+        residentProductMassInputProductEventCountAuthority:
+          args.residentProductMass
+            ? 'gpu-authored-filtered-live-prefix'
+            : null,
+        residentProductMassInputProductEventRowCapacity:
+          args.residentProductMass?.productEventRowCount ?? null,
+        residentProductMassInputProductEventCountHostKnown:
+          args.residentProductMass ? false : null,
+        residentProductMassProductEventDispatchMode:
+          args.residentProductMass
+            ? 'gpu-authored-indirect-live-count'
+            : null,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
         destroyGridBuffer() {
@@ -16181,7 +21320,11 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
   });
 
   assert.equal(execution.readbackMode, 'no-full-readback');
-  assert.equal(execution.normalHotLoopReadbackFree, true);
+  assert.equal(execution.fullParticleReadbackFree, true);
+  assert.equal(execution.residentContinuationReady, true);
+  assert.equal(execution.normalHotLoopReadbackFree, false);
+  assert.equal(execution.readbackTelemetryComplete, false);
+  assert.equal(execution.mapAsyncCount, null);
   assert.equal(execution.renderStateReadbackAvailable, false);
   assert.equal(execution.gpuAuthoritativeState, false);
   assert.equal(execution.residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
@@ -16206,8 +21349,8 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
   assert.equal(execution.stepSummaries[0].residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
   assert.equal(execution.stepSummaries[1].residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage, 'reaction-step');
   assert.equal(execution.stepSummaries[1].residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS].ownerStage, 'resident-product-mass-handle');
-  assert.equal(execution.stepSummaries[0].normalHotLoopReadbackFree, true);
-  assert.equal(execution.stepSummaries[1].normalHotLoopReadbackFree, true);
+  assert.equal(execution.stepSummaries[0].normalHotLoopReadbackFree, false);
+  assert.equal(execution.stepSummaries[1].normalHotLoopReadbackFree, false);
   assert.equal(execution.stepSummaries[0].diagnostics.reactionSummaryStatus, 'reaction-compact-summary-ready');
   assert.equal(execution.stepSummaries[1].diagnostics.reactionSummaryStatus, 'reaction-compact-summary-ready');
   assert.equal(execution.stepSummaries[1].diagnostics.reactionCanonicalEventCount, 2);
@@ -16222,8 +21365,28 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
 	  assert.equal(execution.stepSummaries[1].diagnostics.reactionProductEventBufferRetained, true);
 	  assert.equal(execution.stepSummaries[1].residentProductMassStatus, 'resident-product-mass-summary-only');
 	  assert.equal(execution.stepSummaries[1].residentProductMassProductEventRowCount, 64);
-	  assert.equal(execution.stepSummaries[1].residentProductMassUnplacedProductMassKg, 2);
-	  assert.equal(execution.stepSummaries[1].residentProductMassEosCouplingStatus, 'resident-product-mass-summary-only-no-eos-buffer');
+  assert.equal(execution.stepSummaries[1].residentProductMassUnplacedProductMassKg, 2);
+  assert.equal(execution.stepSummaries[1].residentProductMassEosCouplingStatus, 'resident-product-mass-summary-only-no-eos-buffer');
+  assert.equal(
+    execution.stepSummaries[1].residentProductMassGridCouplingStatus,
+    'resident-product-mass-bound-to-p2g-grid'
+  );
+  assert.equal(
+    execution.stepSummaries[1].residentProductMassInputProductEventCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    execution.stepSummaries[1].residentProductMassInputProductEventRowCapacity,
+    32
+  );
+  assert.equal(
+    execution.stepSummaries[1].residentProductMassInputProductEventCountHostKnown,
+    false
+  );
+  assert.equal(
+    execution.stepSummaries[1].residentProductMassProductEventDispatchMode,
+    'gpu-authored-indirect-live-count'
+  );
 	  assert.equal(execution.stepSummaries[1].diagnostics.reactionResidentProductMassStatus, 'resident-product-mass-summary-only');
 	  assert.equal(execution.stepSummaries[1].diagnostics.reactionResidentProductMassProductEventRowCount, 64);
 	  assert.equal(execution.stepSummaries[1].diagnostics.reactionResidentProductMassUnplacedProductMassKg, 2);

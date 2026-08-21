@@ -74,12 +74,20 @@ import {
   ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA,
   acquireSchroederSpatialEpochGenerationConsumerLease,
   armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest,
+  canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer,
+  canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer,
+  canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
+  canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   createSchroederSpatialEpochGpu,
   ownsSchroederSpatialEpochGenerationConsumerLease,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
   releaseSchroederSpatialEpochGenerationConsumerLease,
   releaseSchroederSpatialEpochGenerationConsumerLeaseAfter,
   releaseSchroederSpatialEpochGenerationAfterQueue,
+  releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer,
+  releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer,
+  releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
+  releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   resolveSchroederSpatialDirectoryActiveNodeSource,
   schroederSpatialEpochGenerationRetirementCapability,
   runSchroederSpatialEpochGenerationWebGpu,
@@ -307,11 +315,16 @@ function createFullTwoLevelSpatialGeneration(
   {
     directArenaCount = undefined,
     phaseVolumeInterfaceProposalEnabled = false,
+    phaseVolumeSidecarsEnabled = true,
+    phaseVolumeSourceAdmitted = phaseVolumeInterfaceProposalEnabled,
+    aggregateViewEnabled = true,
+    exactNearCellTreeEnabled = true,
+    mechanicsFieldPairV2Enabled = true,
     gpuTimestampRecorder = null
   } = {}
 ) {
   const particleCount = 2;
-  const sourceMechanicsBuffer = phaseVolumeInterfaceProposalEnabled
+  const sourceMechanicsBuffer = phaseVolumeSourceAdmitted
     ? device.createBuffer({
         label: 'loss-two-level-phase-volume-mechanics-source',
         size: particleCount * 32 * Float32Array.BYTES_PER_ELEMENT,
@@ -359,9 +372,12 @@ function createFullTwoLevelSpatialGeneration(
     particleCount: levelAssignment.particleCount,
     particleIdentityBuffer,
     particleIdentityStrideWords: 1,
-    particleBufferSet,
+    particleBufferSet: aggregateViewEnabled ? particleBufferSet : null,
     ...(directArenaCount == null ? {} : { directArenaCount }),
     phaseVolumeInterfaceProposalEnabled,
+    phaseVolumeSidecarsEnabled,
+    mechanicsFieldPairV2Enabled,
+    exactNearCellTreeEnabled,
     gpuTimestampRecorder,
     mechanicsLevels: [
       {
@@ -636,6 +652,919 @@ test('direct level-assignment generation publishes and retires its active-source
   assert.equal(await legacyGeneration.releasePromise, true);
 });
 
+test('exact adjacent successor retires a complete generation in queue order without a host fence', () => {
+  const device = createFakeDevice();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return Promise.resolve();
+  };
+  const priorAssignment = createDirectSpatialLevelAssignment(device);
+  const successorAssignment = createDirectSpatialLevelAssignment(device, {
+    sourceAssignmentBuffer: priorAssignment.assignmentBuffer,
+    physicsSubstep: priorAssignment.physicsSubstep + 1,
+    positionEpoch: priorAssignment.positionEpoch + 1
+  });
+  const generationOptions = {
+    device,
+    particleCount: priorAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  };
+  const prior = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: priorAssignment
+  });
+  const successor = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: successorAssignment
+  });
+
+  const liveConsumerLease =
+    acquireSchroederSpatialEpochGenerationConsumerLease(
+      prior,
+      { consumerId: 'queue-ordered-preflight-negative' }
+    );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      prior,
+      successor,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      prior,
+      successor,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_PREDECESSOR_BUSY'
+    }
+  );
+  assert.equal(prior.activeSourceView.released, false);
+  assert.equal(prior.execution.released, false);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationConsumerLease(
+      liveConsumerLease,
+      { discardedEncoder: true }
+    ),
+    true
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      prior,
+      successor,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      prior,
+      successor,
+      device
+    ),
+    true
+  );
+  assert.equal(fenceRequestCount, 0);
+  assert.equal(prior.activeSourceView.released, true);
+  assert.equal(prior.execution.released, true);
+  assert.equal(prior.releaseScheduled, true);
+  assert.equal(
+    prior.releaseStatus,
+    'spatial-epoch-generation-released-queue-ordered-after-exact-successor'
+  );
+  assert.equal(
+    prior.directRuntimeEntry.liveGenerations.includes(prior),
+    false
+  );
+  assert.equal(
+    prior.directRuntimeEntry.liveGenerations.includes(successor),
+    true
+  );
+
+  const forgedSuccessor = { ...successor };
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      successor,
+      forgedSuccessor,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      successor,
+      forgedSuccessor,
+      device
+    ),
+    {
+      code: 'ERR_SCHROEDER_SPATIAL_GENERATION_FOREIGN'
+    }
+  );
+  assert.equal(successor.execution.released, false);
+});
+
+test('one exact sole consumer lease and its generation retire atomically at a queue boundary', () => {
+  const device = createFakeDevice();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return new Promise(() => {});
+  };
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 1
+  });
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-combined-owner' }
+  );
+
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+      generation,
+      device
+    ),
+    false
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      { ...lease },
+      generation,
+      device
+    ),
+    false
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      createFakeDevice()
+    ),
+    false
+  );
+
+  const siblingLease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-combined-preflight-negative' }
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_MISMATCH'
+    }
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+  assert.equal(generation.execution.released, false);
+  assert.equal(releaseSchroederSpatialEpochGenerationConsumerLease(
+    siblingLease,
+    { discardedEncoder: true }
+  ), true);
+
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    true
+  );
+  assert.equal(fenceRequestCount, 0);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    false
+  );
+  assert.equal(generation.execution.released, true);
+  assert.equal(
+    generation.releaseStatus,
+    'spatial-epoch-generation-released-queue-ordered-after-final-consumer'
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+});
+
+test('queue-ordered final-consumer retirement releases only its exact source-generation lease', () => {
+  const device = createFakeDevice();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return Promise.resolve();
+  };
+  const { generation } = createFullTwoLevelSpatialGeneration(device, {
+    directArenaCount: 2,
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-lease-only-final-consumer' }
+  );
+  const siblingLease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-lease-only-sibling' }
+  );
+  const sourceGenerationExecutions = [
+    generation.activeSourceView,
+    generation.execution,
+    generation.mechanicsFieldPair,
+    generation.phaseVolumeInterfaceProposal,
+    generation.parentFieldView,
+    generation.aggregateView,
+    generation.exactNearCellTree,
+    generation.hierarchyView,
+    ...generation.mechanicsLevelViews.flatMap((levelView) => [
+      levelView.mechanicsView,
+      levelView.phaseVolumeReceipt,
+      levelView.phaseVolumeMoment
+    ])
+  ].filter(Boolean);
+  const generationReleaseSnapshot = {
+    releaseScheduled: generation.releaseScheduled,
+    releaseStatus: generation.releaseStatus,
+    releasePromise: generation.releasePromise
+  };
+
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    true
+  );
+
+  assert.equal(fenceRequestCount, 0);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    false
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(
+      siblingLease,
+      generation
+    ),
+    true
+  );
+  assert.equal(
+    lease.status,
+    'schroeder-spatial-epoch-generation-consumer-lease-released-queue-ordered-after-final-consumer'
+  );
+  assert.equal(generation.execution.released, false);
+  assert.equal(generation.activeSourceView.released, false);
+  assert.equal(
+    sourceGenerationExecutions.every((execution) => (
+      execution.released === false
+    )),
+    true
+  );
+  assert.equal(generation.releaseScheduled, generationReleaseSnapshot.releaseScheduled);
+  assert.equal(generation.releaseStatus, generationReleaseSnapshot.releaseStatus);
+  assert.equal(generation.releasePromise, generationReleaseSnapshot.releasePromise);
+  assert.equal(
+    generation.directRuntimeEntry.liveGenerations.includes(generation),
+    true
+  );
+
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+  assert.equal(fenceRequestCount, 0);
+  assert.equal(generation.execution.released, false);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(
+      siblingLease,
+      generation
+    ),
+    true
+  );
+});
+
+test('lease-only queue retirement rejects forged lineage and cross-device authority', () => {
+  const device = createFakeDevice();
+  const foreignDevice = createFakeDevice();
+  const firstAssignment = createDirectSpatialLevelAssignment(device);
+  const secondAssignment = createDirectSpatialLevelAssignment(device);
+  const generationOptions = {
+    device,
+    particleCount: firstAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: firstAssignment
+  });
+  const otherGeneration = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: secondAssignment
+  });
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-lease-only-hostile-authentication' }
+  );
+
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      { ...lease },
+      generation,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      { ...lease },
+      generation,
+      device
+    ),
+    {
+      code: 'ERR_SCHROEDER_SPATIAL_GENERATION_FOREIGN_CONSUMER_LEASE'
+    }
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      otherGeneration,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      otherGeneration,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_GENERATION_MISMATCH'
+    }
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      foreignDevice
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      foreignDevice
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_DEVICE_MISMATCH'
+    }
+  );
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+  assert.equal(generation.execution.released, false);
+  assert.equal(otherGeneration.execution.released, false);
+});
+
+test('lease-only queue retirement cannot supersede a releasing generation or scheduled lease', async () => {
+  const device = createFakeDevice();
+  const ownerFence = deferred();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return ownerFence.promise;
+  };
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  });
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-lease-only-releasing-generation' }
+  );
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(fenceRequestCount, 1);
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_GENERATION_RELEASING'
+    }
+  );
+  assert.equal(fenceRequestCount, 1);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    true
+  );
+  assert.equal(generation.execution.released, false);
+
+  const leaseRelease = releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+    lease,
+    Promise.resolve()
+  );
+  await leaseRelease;
+  ownerFence.resolve();
+  assert.equal(await generation.releasePromise, true);
+
+  const nextAssignment = createDirectSpatialLevelAssignment(device);
+  const nextGeneration = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment: nextAssignment,
+    particleCount: nextAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  });
+  const nextLease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    nextGeneration,
+    { consumerId: 'queue-ordered-lease-only-scheduled-lease' }
+  );
+  const scheduledLeaseFence = deferred();
+  const scheduledLeaseRelease =
+    releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
+      nextLease,
+      scheduledLeaseFence.promise
+    );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      nextLease,
+      nextGeneration,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+      nextLease,
+      nextGeneration,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_CONSUMER_LEASE_RELEASE_SCHEDULED'
+    }
+  );
+  scheduledLeaseFence.resolve();
+  assert.equal(await scheduledLeaseRelease, true);
+});
+
+test('frozen generation and lease retire all unaffected owners before terminally quarantining one throwing artifact', () => {
+  const device = createFakeDevice();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return new Promise(() => {});
+  };
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const options = {
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  };
+  const generation = runSchroederSpatialEpochGenerationWebGpu(options);
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(
+    generation,
+    { consumerId: 'queue-ordered-hostile-frozen-owner' }
+  );
+  const directoryRuntime = generation.runtime;
+  const activeSourceRuntime = generation.activeSourceViewRuntime;
+  const originalDirectoryRelease =
+    directoryRuntime.releaseExecutionQueueOrdered;
+  const originalActiveSourceRelease =
+    activeSourceRuntime.releaseExecutionQueueOrdered;
+  const attemptedOwners = [];
+  directoryRuntime.releaseExecutionQueueOrdered = () => {
+    attemptedOwners.push('spatial-directory');
+    throw new Error('injected directory queue release failure');
+  };
+  activeSourceRuntime.releaseExecutionQueueOrdered = (...args) => {
+    attemptedOwners.push('spatial-active-source-view');
+    return originalActiveSourceRelease(...args);
+  };
+  Object.freeze(lease);
+  Object.freeze(generation);
+
+  let terminalError = null;
+  try {
+    assert.throws(
+      () => releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+        lease,
+        generation,
+        device
+      ),
+      (error) => {
+        terminalError = error;
+        return error instanceof AggregateError
+          && error.code
+            === 'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL';
+      }
+    );
+  } finally {
+    directoryRuntime.releaseExecutionQueueOrdered = originalDirectoryRelease;
+    activeSourceRuntime.releaseExecutionQueueOrdered =
+      originalActiveSourceRelease;
+  }
+
+  assert.deepEqual(attemptedOwners, [
+    'spatial-directory',
+    'spatial-active-source-view'
+  ]);
+  assert.deepEqual(
+    terminalError.operationResults.map(({ owner }) => owner),
+    [
+      'spatial-directory',
+      'spatial-active-source-view',
+      'generation-consumer-lease'
+    ]
+  );
+  assert.equal(
+    terminalError.operationResults.find(
+      ({ owner }) => owner === 'spatial-directory'
+    ).confirmed,
+    false
+  );
+  assert.equal(
+    terminalError.operationResults.find(
+      ({ owner }) => owner === 'spatial-active-source-view'
+    ).confirmed,
+    true
+  );
+  assert.equal(
+    terminalError.operationResults.find(
+      ({ owner }) => owner === 'generation-consumer-lease'
+    ).confirmed,
+    true
+  );
+  assert.equal(generation.execution.released, false);
+  assert.equal(generation.activeSourceView.released, true);
+  assert.equal(
+    ownsSchroederSpatialEpochGenerationConsumerLease(lease, generation),
+    false
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+      lease,
+      generation,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL'
+    }
+  );
+  assert.throws(
+    () => schroederSpatialEpochGenerationRetirementCapability(
+      generation,
+      device
+    ).retry(),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL'
+    }
+  );
+
+  const successor = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(successor.ready, true, successor.reason);
+  assert.notEqual(
+    successor.execution.arenaIndex,
+    generation.execution.arenaIndex,
+    'the failed directory arena must remain unavailable'
+  );
+  assert.equal(
+    successor.activeSourceView.arenaIndex,
+    generation.activeSourceView.arenaIndex,
+    'the successfully released sibling arena remains immediately reusable'
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+      successor,
+      device
+    ),
+    true
+  );
+  assert.equal(fenceRequestCount, 0);
+});
+
+test('rebuilt macro-boundary assignment retires its private predecessor as an exact final consumer without a host fence', () => {
+  const device = createFakeDevice();
+  let fenceRequestCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    fenceRequestCount += 1;
+    return Promise.resolve();
+  };
+  const terminalPrivateAssignment = createDirectSpatialLevelAssignment(device);
+  const publicMacroBoundaryAssignment = createDirectSpatialLevelAssignment(
+    device,
+    {
+      physicsSubstep: terminalPrivateAssignment.physicsSubstep + 1,
+      positionEpoch: terminalPrivateAssignment.positionEpoch + 1
+    }
+  );
+  const generationOptions = {
+    device,
+    particleCount: terminalPrivateAssignment.particleCount,
+    mechanicsLevels: [],
+    exactNearCellTreeEnabled: false,
+    directArenaCount: 2
+  };
+  const terminalPrivate = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: terminalPrivateAssignment
+  });
+  const publicMacroBoundary = runSchroederSpatialEpochGenerationWebGpu({
+    ...generationOptions,
+    levelAssignment: publicMacroBoundaryAssignment
+  });
+
+  assert.notEqual(
+    publicMacroBoundaryAssignment.sourceAssignmentBuffer,
+    terminalPrivateAssignment.assignmentBuffer
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      terminalPrivate,
+      publicMacroBoundary,
+      device
+    ),
+    false
+  );
+  assert.throws(
+    () => releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+      terminalPrivate,
+      publicMacroBoundary,
+      device
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_SUCCESSOR_MISMATCH'
+    }
+  );
+  assert.equal(
+    canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+      terminalPrivate,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+      terminalPrivate,
+      device
+    ),
+    true
+  );
+  assert.equal(
+    terminalPrivate.releaseStatus,
+    'spatial-epoch-generation-released-queue-ordered-after-final-consumer'
+  );
+  assert.equal(fenceRequestCount, 0);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+      publicMacroBoundary,
+      device
+    ),
+    true
+  );
+  assert.equal(fenceRequestCount, 0);
+});
+
+test('direct directory-v2 cache separates exact active A from physical P', async () => {
+  const device = createFakeDevice();
+  const physicalSourceCount = 6;
+  const physicalSourceCapacity = 8;
+  const levelAssignment = createDirectSpatialLevelAssignment(device, {
+    particleCount: physicalSourceCount
+  });
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-active-tier-identity-source',
+    size: physicalSourceCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleThermoBuffer = device.createBuffer({
+    label: 'direct-spatial-active-tier-thermo-source',
+    size: physicalSourceCount * 12 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const particleBufferSet = {
+    status: 'webgpu-uploaded',
+    particleCount: physicalSourceCount,
+    stateStrideBytes: 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoStrideBytes: 12 * Float32Array.BYTES_PER_ELEMENT,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    stateBuffer: levelAssignment.sourceStateBuffer,
+    thermoBuffer: particleThermoBuffer,
+    identityBuffer: particleIdentityBuffer,
+    storageGeneration: levelAssignment.storageGeneration,
+    physicsTick: levelAssignment.physicsTick,
+    physicsSubstep: levelAssignment.physicsSubstep,
+    positionEpoch: levelAssignment.positionEpoch,
+    topologyEpoch: levelAssignment.topologyEpoch,
+    chartEpoch: levelAssignment.chartEpoch,
+    levelEpoch: levelAssignment.levelEpoch,
+    supportEpoch: levelAssignment.supportEpoch
+  };
+  const build = (
+    activeSourceCapacity,
+    {
+      aggregateViewEnabled = false,
+      exactNearCellTreeEnabled = false
+    } = {}
+  ) => (
+    runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment,
+      particleCount: physicalSourceCount,
+      particleIdentityBuffer,
+      particleIdentityStrideWords: 1,
+      particleBufferSet: aggregateViewEnabled ? particleBufferSet : null,
+      activeSourceCapacity,
+      exactNearCellTreeEnabled,
+      selectedLevel: 0,
+      mechanicsGrid: {
+        gridNodeCount: 512,
+        gridDims: [8, 8, 8],
+        gridShift: 2,
+        gridSpacingM: 0.25
+      }
+    })
+  );
+
+  const tier4 = build(4);
+  assert.equal(tier4.ready, true, tier4.reason);
+  assert.equal(tier4.runtimeCapacity, physicalSourceCapacity);
+  assert.equal(tier4.activeSourceCapacity, 4);
+  assert.match(tier4.directoryRuntimeCacheKey, /:p8:a4:c4:/);
+  assert.equal(tier4.execution.physicalSourceCapacity, physicalSourceCapacity);
+  assert.equal(tier4.execution.activeSourceCapacity, 4);
+  assert.equal(tier4.activeSourceView.physicalSourceCapacity,
+    physicalSourceCapacity);
+  assert.equal(tier4.activeSourceView.activeSourceCapacity, 4);
+  assert.equal(tier4.mechanicsFieldView.sourceCapacity,
+    physicalSourceCapacity);
+  assert.equal(tier4.mechanicsFieldView.activeSourceCapacity, 4);
+  assert.equal(tier4.mechanicsFieldView.candidateCapacity, 4 * 27);
+  assert.equal(tier4.mechanicsFieldView.layout.descriptorCapacityWords,
+    physicalSourceCapacity
+      * tier4.mechanicsFieldView.layout.descriptorWords);
+  assert.equal(tier4.mechanicsFieldView.layout.fieldCapacity, 4 * 27);
+  assert.equal(tier4.execution.readbackPerformed, false);
+  assert.equal(tier4.activeSourceView.readbackPerformed, false);
+  assert.equal(tier4.mechanicsFieldView.readbackPerformed, false);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    tier4,
+    device
+  ), true);
+  assert.equal(await tier4.releasePromise, true);
+
+  const tier5 = build(5);
+  assert.equal(tier5.ready, true, tier5.reason);
+  assert.equal(tier5.activeSourceCapacity, 5);
+  assert.match(tier5.directoryRuntimeCacheKey, /:p8:a5:c5:/);
+  assert.notEqual(
+    tier5.directoryRuntimeCacheKey,
+    tier4.directoryRuntimeCacheKey,
+    'exact A participates in direct runtime cache identity'
+  );
+  assert.equal(tier5.runtimeCacheHit, false);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    tier5,
+    device
+  ), true);
+  assert.equal(await tier5.releasePromise, true);
+
+  const derivedTier = build(physicalSourceCount, {
+    aggregateViewEnabled: true,
+    exactNearCellTreeEnabled: true
+  });
+  assert.equal(derivedTier.ready, true, derivedTier.reason);
+  assert.equal(derivedTier.runtimeCapacity, physicalSourceCapacity);
+  assert.equal(derivedTier.activeSourceCapacity, physicalSourceCount);
+  assert.match(derivedTier.directoryRuntimeCacheKey, /:p8:a6:c6:/);
+  assert.equal(derivedTier.aggregateViewRuntime.maxSourceCount,
+    physicalSourceCapacity);
+  assert.equal(derivedTier.aggregateViewRuntime.cellCapacity,
+    physicalSourceCount);
+  assert.equal(derivedTier.exactNearCellTreeRuntime.maxSourceCount,
+    physicalSourceCapacity);
+  assert.equal(derivedTier.exactNearCellTreeRuntime.cellCapacity,
+    physicalSourceCount);
+  assert.equal(derivedTier.aggregateView.readbackPerformed, false);
+  assert.equal(derivedTier.exactNearCellTree.fullReadbackPerformed, false);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    derivedTier,
+    device
+  ), true);
+  assert.equal(await derivedTier.releasePromise, true);
+
+  const defaultTier = build(null);
+  assert.equal(defaultTier.ready, true, defaultTier.reason);
+  assert.equal(defaultTier.activeSourceCapacity, physicalSourceCapacity);
+  assert.match(defaultTier.directoryRuntimeCacheKey, /:p8:a8:c8:/);
+  assert.equal(defaultTier.mechanicsFieldView.candidateCapacity,
+    physicalSourceCapacity * 27);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(
+    defaultTier,
+    device
+  ), true);
+  assert.equal(await defaultTier.releasePromise, true);
+});
+
 test('native-test legacy level assignment keeps an owned directory-v1 ActiveRank generation', async () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
@@ -801,6 +1730,10 @@ test('directory v2 keeps sparse physical identity GPU-resident and fail-closes f
     sourceCount: physicalSourceCount,
     sourceRowLayoutId: SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
     sortMode: 'lexicographic-u32x5',
+    atlas: {
+      cellMin: [0, 0, 0],
+      cellCount: [32, 16, 8]
+    },
     exactNearQueryProfile,
     activeSourceView,
     ...identity
@@ -817,6 +1750,7 @@ test('directory v2 keeps sparse physical identity GPU-resident and fail-closes f
   assert.equal(execution.activeSourceCount, null);
   assert.equal(execution.activeSourceCountReadbackPerformed, false);
   assert.equal(execution.readbackPerformed, false);
+  assert.equal(execution.radixDigitPassCount, 12);
   assert.equal(execution.gpuBufferCreationCountDuringEncode, 0);
   assert.equal(execution.bufferAllocationCountDuringEncode, 0);
   assert.equal(
@@ -1323,7 +2257,170 @@ test('manufactured frozen fine refresh is rejected without controller-issued aut
   assert.match(generation.reason, /controller-issued topology\/generation proof/);
 });
 
-test('one spatial generation owns exactly two adjacent compact mechanics and field views', async () => {
+test('two-level directory-v2 keeps independent mechanics fields by default', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-independent-two-level-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsLevels: [
+      {
+        selectedLevel: 0,
+        mechanicsGrid: {
+          gridNodeCount: 512,
+          gridDims: [8, 8, 8],
+          gridShift: 2,
+          gridSpacingM: 0.25
+        }
+      },
+      {
+        selectedLevel: 1,
+        mechanicsGrid: {
+          gridNodeCount: 125,
+          gridDims: [5, 5, 5],
+          gridShift: 2,
+          gridSpacingM: 0.5
+        }
+      }
+    ]
+  });
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.mechanicsFieldPairV2Requested, false);
+  assert.equal(generation.mechanicsFieldPairV2Enabled, false);
+  assert.equal(generation.mechanicsFieldConstructionMode, 'independent-v2');
+  assert.equal(generation.mechanicsFieldPair, null);
+  assert.equal(generation.mechanicsFieldPairRuntime, null);
+  assert.equal(generation.mechanicsLevelViews.length, 2);
+  assert.notEqual(
+    generation.mechanicsLevelViews[0].mechanicsFieldViewRuntime,
+    generation.mechanicsLevelViews[1].mechanicsFieldViewRuntime
+  );
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+});
+
+test('paired-v2 request reports not-built and disabled when identity authority is absent', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer: null,
+    mechanicsFieldPairV2Enabled: true,
+    mechanicsLevels: [
+      {
+        selectedLevel: 0,
+        mechanicsGrid: {
+          gridNodeCount: 512,
+          gridDims: [8, 8, 8],
+          gridShift: 2,
+          gridSpacingM: 0.25
+        }
+      },
+      {
+        selectedLevel: 1,
+        mechanicsGrid: {
+          gridNodeCount: 125,
+          gridDims: [5, 5, 5],
+          gridShift: 2,
+          gridSpacingM: 0.5
+        }
+      }
+    ]
+  });
+
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.mechanicsFieldPairV2Requested, true);
+  assert.equal(generation.mechanicsFieldPairV2Enabled, false);
+  assert.equal(generation.mechanicsFieldConstructionMode, 'not-built');
+  assert.equal(generation.mechanicsFieldPair, null);
+  assert.equal(generation.mechanicsFieldPairRuntime, null);
+  assert.ok(generation.mechanicsLevelViews.every(
+    ({ mechanicsFieldView, mechanicsFieldViewRuntime }) => (
+      mechanicsFieldView == null && mechanicsFieldViewRuntime == null
+    )
+  ));
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+});
+
+test('paired-v2 request reports independent fallback and disabled on legacy directory ABI', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'direct-spatial-legacy-pair-request-identity-source',
+    size: levelAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const nativeTestLegacyLevelAssignmentDirectoryV1Arm =
+    armSchroederSpatialLegacyLevelAssignmentDirectoryV1ForNativeTest({
+      device,
+      levelAssignment
+    });
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsFieldPairV2Enabled: true,
+    mechanicsLevels: [
+      {
+        selectedLevel: 0,
+        mechanicsGrid: {
+          gridNodeCount: 512,
+          gridDims: [8, 8, 8],
+          gridShift: 2,
+          gridSpacingM: 0.25
+        }
+      },
+      {
+        selectedLevel: 1,
+        mechanicsGrid: {
+          gridNodeCount: 125,
+          gridDims: [5, 5, 5],
+          gridShift: 2,
+          gridSpacingM: 0.5
+        }
+      }
+    ],
+    phaseVolumeSidecarsEnabled: false,
+    nativeTestLegacyLevelAssignmentDirectoryV1Arm
+  });
+
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.directoryAbiVersion, SCHROEDER_SPATIAL_EPOCH_VERSION);
+  assert.equal(generation.mechanicsFieldPairV2Requested, true);
+  assert.equal(generation.mechanicsFieldPairV2Enabled, false);
+  assert.equal(generation.mechanicsFieldConstructionMode, 'independent-v2');
+  assert.equal(generation.mechanicsFieldPair, null);
+  assert.equal(generation.mechanicsFieldPairRuntime, null);
+  assert.ok(generation.mechanicsLevelViews.every(
+    ({ mechanicsFieldView }) => mechanicsFieldView != null
+  ));
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+});
+
+test('paired-v2 opt-in owns exactly two adjacent compact mechanics and field views', async () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
   const particleIdentityBuffer = device.createBuffer({
@@ -1361,6 +2458,7 @@ test('one spatial generation owns exactly two adjacent compact mechanics and fie
     particleIdentityBuffer,
     particleIdentityStrideWords: 1,
     particleBufferSet,
+    mechanicsFieldPairV2Enabled: true,
     mechanicsLevels: [
       {
         selectedLevel: 0,
@@ -1383,6 +2481,9 @@ test('one spatial generation owns exactly two adjacent compact mechanics and fie
     ]
   });
   assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.mechanicsFieldPairV2Requested, true);
+  assert.equal(generation.mechanicsFieldPairV2Enabled, true);
+  assert.equal(generation.mechanicsFieldConstructionMode, 'paired-v2-shared-radix');
   assert.equal(generation.directoryBuildCount, 1);
   assert.equal(generation.mechanicsLevelCount, 2);
   assert.deepEqual(generation.mechanicsLevels, [0, 1]);
@@ -1416,12 +2517,36 @@ test('one spatial generation owns exactly two adjacent compact mechanics and fie
     generation.mechanicsFieldView,
     generation.mechanicsLevelViews[0].mechanicsFieldView
   );
+  assert.equal(
+    generation.mechanicsFieldPair.schema,
+    'peercompute.ulg.schroeder-spatial-mechanics-field-pair.v1'
+  );
+  assert.equal(
+    generation.mechanicsFieldPair.status,
+    'schroeder-spatial-mechanics-field-pair-gpu-build-submitted'
+  );
+  assert.equal(generation.mechanicsFieldPair.sharedRadixExecutionCount, 1);
+  assert.equal(generation.mechanicsFieldPairRuntime.activeExecutionCount(), 1);
+  assert.deepEqual(
+    generation.mechanicsFieldPair.mechanicsFieldViews,
+    generation.mechanicsLevelViews.map(
+      (levelView) => levelView.mechanicsFieldView
+    )
+  );
   for (const [index, levelView] of generation.mechanicsLevelViews.entries()) {
     assert.equal(levelView.selectedLevel, index);
     assert.equal(levelView.mechanicsView.directoryBuffer, generation.execution.directoryBuffer);
     assert.equal(levelView.mechanicsFieldView.parentMechanicsView, levelView.mechanicsView);
     assert.equal(levelView.mechanicsView.sourceBuffer, levelAssignment.assignmentBuffer);
     assert.equal(levelView.mechanicsFieldView.sourceBuffer, levelAssignment.assignmentBuffer);
+    assert.equal(
+      levelView.mechanicsFieldViewRuntime,
+      generation.mechanicsFieldPairRuntime
+    );
+    assert.equal(
+      levelView.mechanicsFieldView.pairExecution,
+      generation.mechanicsFieldPair
+    );
     assert.equal(levelView.mechanicsView.released, false);
     assert.equal(levelView.mechanicsFieldView.released, false);
   }
@@ -1443,14 +2568,107 @@ test('one spatial generation owns exactly two adjacent compact mechanics and fie
       'spatial-active-source-view',
       'spatial-directory',
       'compact-mechanics-view-level-0',
-      'mechanics-field-view-level-0',
       'compact-mechanics-view-level-1',
-      'mechanics-field-view-level-1',
+      'mechanics-field-pair',
       'spatial-parent-field-view',
       'spatial-aggregate-view',
       'spatial-exact-near-cell-tree',
       'spatial-hierarchy-view'
     ]
+  );
+});
+
+test('private two-level mechanics omits unconsumed aggregate and exact-near derived views', async () => {
+  const device = createFakeDevice();
+  const { generation } = createFullTwoLevelSpatialGeneration(device, {
+    phaseVolumeInterfaceProposalEnabled: true,
+    aggregateViewEnabled: false,
+    exactNearCellTreeEnabled: false
+  });
+
+  assert.equal(generation.ready, true, generation.reason);
+  assert.equal(generation.directoryBuildCount, 1);
+  assert.ok(generation.activeSourceView);
+  assert.ok(generation.execution.directoryBuffer);
+  assert.equal(generation.mechanicsLevelCount, 2);
+  assert.equal(
+    generation.mechanicsLevelViews.every((levelView) => (
+      levelView.mechanicsView?.submitPerformed === true
+      && levelView.mechanicsFieldView?.submitPerformed === true
+      && levelView.phaseVolumeMoment?.submitPerformed === true
+      && levelView.phaseVolumeReceipt?.submitPerformed === true
+    )),
+    true
+  );
+  assert.ok(generation.hierarchyView);
+  assert.ok(generation.parentFieldView);
+  assert.ok(generation.phaseVolumeInterfaceProposal);
+  assert.equal(generation.aggregateView, null);
+  assert.equal(generation.aggregateViewRuntime, null);
+  assert.equal(generation.exactNearCellTreeEnabled, false);
+  assert.equal(generation.exactNearCellTree, null);
+  assert.equal(generation.exactNearCellTreeRuntime, null);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+  const retiredRoles = generation.releaseOperationResults.map(
+    ({ owner }) => owner
+  );
+  assert.equal(retiredRoles.includes('spatial-aggregate-view'), false);
+  assert.equal(retiredRoles.includes('spatial-exact-near-cell-tree'), false);
+  assert.equal(retiredRoles.includes('spatial-directory'), true);
+  assert.equal(retiredRoles.includes('spatial-parent-field-view'), true);
+  assert.equal(
+    retiredRoles.includes('phase-volume-interface-proposal'),
+    true
+  );
+});
+
+test('terminal-like two-level V0J generation omits explicitly disabled S9-A/B/C sidecars', async () => {
+  const device = createFakeDevice();
+  const { generation, sourceMechanicsBuffer } =
+    createFullTwoLevelSpatialGeneration(device, {
+      phaseVolumeSourceAdmitted: true,
+      phaseVolumeSidecarsEnabled: false,
+      phaseVolumeInterfaceProposalEnabled: false,
+      aggregateViewEnabled: false,
+      exactNearCellTreeEnabled: false
+    });
+
+  assert.equal(generation.ready, true, generation.reason);
+  assert.ok(sourceMechanicsBuffer);
+  assert.equal(generation.phaseVolumeSidecarsEnabled, false);
+  assert.equal(generation.phaseVolumeMoment, null);
+  assert.equal(generation.phaseVolumeReceipt, null);
+  assert.equal(generation.phaseVolumeInterfaceProposal, null);
+  assert.equal(
+    generation.mechanicsLevelViews.every((levelView) => (
+      levelView.phaseVolumeMoment == null
+      && levelView.phaseVolumeReceipt == null
+    )),
+    true
+  );
+  const entryPoints = device.submissions[0][0].events
+    .filter((event) => event.kind === 'pass')
+    .flatMap((event) => event.commands.map((command) => command.pipeline));
+  assert.equal(
+    entryPoints.some((label) => /phase-volume-(moment|receipt|interface)/.test(label)),
+    false
+  );
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+    true
+  );
+  assert.equal(await generation.releasePromise, true);
+  assert.equal(
+    generation.releaseOperationResults.some(({ owner }) => (
+      /phase-volume/.test(owner)
+    )),
+    false
   );
 });
 
@@ -1519,6 +2737,19 @@ test('two-level V0J generation mounts and retires the opt-in read-only S9-C inte
       'schroeder-spatial-phase-volume-interface-'
     )
   )).length, 3);
+  const hierarchyProducerIds = timestampBegins
+    .map(({ descriptor }) => descriptor.producerId)
+    .filter((producerId) => (
+      producerId === 'schroeder-spatial-hierarchy-view-build'
+      || producerId === 'schroeder-spatial-parent-field-view-build'
+    ));
+  assert.deepEqual(hierarchyProducerIds, [
+    'schroeder-spatial-hierarchy-view-build',
+    'schroeder-spatial-parent-field-view-build'
+  ]);
+  assert.equal(timestampEnds.filter(({ token }) => (
+    hierarchyProducerIds.includes(token.descriptor.producerId)
+  )).length, 2);
 
   assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
   assert.equal(await generation.releasePromise, true);
@@ -1581,6 +2812,11 @@ test('direct arena-depth selection keys the runtime and configures every owned v
     wide.generation.directRuntimeEntry.mechanicsFieldViewDrainingRuntimeLimit,
     16
   );
+  assert.equal(
+    wide.generation.directRuntimeEntry.mechanicsFieldPairDrainingRuntimeLimit,
+    16
+  );
+  assert.equal(wide.generation.mechanicsFieldPairRuntime.arenaCount, 8);
   for (const levelView of wide.generation.mechanicsLevelViews) {
     assert.equal(levelView.mechanicsViewRuntime.arenaCount, 8);
     assert.equal(levelView.mechanicsFieldViewRuntime.arenaCount, 8);
@@ -1629,7 +2865,7 @@ test('generation retirement permanently retires an already-quarantined mechanics
     'spatial-epoch-generation-released-after-final-consumer');
   assert.equal(
     generation.releaseOperationResults.find(
-      ({ owner }) => owner === 'mechanics-field-view-level-1'
+      ({ owner }) => owner === 'mechanics-field-pair'
     )?.confirmed,
     true
   );
@@ -2075,9 +3311,8 @@ test('exact device loss retires all ten generation artifacts without fencing or 
       'spatial-active-source-view',
       'spatial-directory',
       'compact-mechanics-view-level-0',
-      'mechanics-field-view-level-0',
       'compact-mechanics-view-level-1',
-      'mechanics-field-view-level-1',
+      'mechanics-field-pair',
       'spatial-parent-field-view',
       'spatial-aggregate-view',
       'spatial-exact-near-cell-tree',
@@ -2148,13 +3383,13 @@ test('generation loss supersedes unresolved owner and prestarted mechanics-field
   );
   assert.equal(
     queueFenceCount,
-    1 + generation.mechanicsLevelViews.length,
-    'one owner fence and one contemporaneous private fence per mechanics field'
+    2,
+    'one owner fence and one contemporaneous private fence for the paired fields'
   );
   deviceLoss.resolve({ reason: 'destroyed', message: 'loss beat owner fence' });
   assert.equal(await lossCompletion, true);
   assert.equal(await normalAttempt, true);
-  assert.equal(queueFenceCount, 1 + generation.mechanicsLevelViews.length);
+  assert.equal(queueFenceCount, 2);
   assert.equal(generation.mechanicsLevelViews.every(({ mechanicsFieldView }) => (
     mechanicsFieldView.released === true
   )), true);
@@ -2206,6 +3441,14 @@ test('selected-false post-submit cleanup exposes a fresh retry instead of a reje
   assert.equal(rejected.selected, false);
   const failedAttempt = rejected.releasePromise;
   assert.equal(await failedAttempt, false);
+  const ownedCleanupGeneration = seed.directRuntimeEntry.liveGenerations.find(
+    (candidate) => candidate.execution?.generationId
+      === seed.execution.generationId + 1
+  );
+  assert.ok(ownedCleanupGeneration);
+  assert.notEqual(ownedCleanupGeneration, rejected);
+  Object.freeze(ownedCleanupGeneration);
+  Object.freeze(rejected);
   const capability = schroederSpatialEpochGenerationRetirementCapability(
     rejected,
     device
@@ -2220,6 +3463,11 @@ test('selected-false post-submit cleanup exposes a fresh retry instead of a reje
   assert.equal(await retry, true);
   assert.equal(await capability.completionPromise, true);
   assert.equal(capability.retry(), capability.completionPromise);
+  assert.equal(ownedCleanupGeneration.execution.released, true);
+  assert.equal(
+    seed.directRuntimeEntry.liveGenerations.includes(ownedCleanupGeneration),
+    false
+  );
 });
 
 test('direct spatial generation rejects a third, nonadjacent, or non-2:1 mechanics level', () => {
@@ -2293,6 +3541,15 @@ test('compact mechanics generations retire under resident arena backpressure', a
   assert.equal(next.ready, true);
   assert.equal(next.execution.generationId, 4);
   assert.equal(next.backpressureWaitCount, 1);
+  assert.equal(next.readbackTelemetryComplete, true);
+  assert.equal(next.mapAsyncCount, 0);
+  assert.equal(next.readbackBytes, 0);
+  assert.equal(next.hostQueueFenceCount, 1);
+  assert.equal(next.awaitedBackpressureHostQueueFenceCount, 1);
+  assert.equal(next.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(next.normalHotLoopReadbackFree, false);
+  assert.equal(next.productionHotLoopHostDependencyFree, false);
+  assert.equal(next.fullParticleReadbackFree, true);
   assert.deepEqual(
     await Promise.all(retained.map((generation) => generation.releasePromise)),
     [true, true, true]
@@ -2876,6 +4133,22 @@ test('direct spatial generation backpressure preserves one fresh generation per 
     generations.map((generation) => generation.backpressureWaitCount),
     [0, 0, 0, 1, 1, 1, 1, 1]
   );
+  assert.deepEqual(
+    generations.map((generation) => generation.hostQueueFenceCount),
+    [0, 0, 0, 1, 1, 1, 1, 1]
+  );
+  assert.deepEqual(
+    generations.map(
+      (generation) => generation.awaitedBackpressureHostQueueFenceCount
+    ),
+    [0, 0, 0, 1, 1, 1, 1, 1]
+  );
+  assert.deepEqual(
+    generations.map(
+      (generation) => generation.productionHotLoopHostDependencyFree
+    ),
+    [true, true, true, false, false, false, false, false]
+  );
   assert.equal(device.submissions.length, 8);
   for (const resolveFence of pendingFenceResolvers.splice(0)) resolveFence();
   assert.deepEqual(
@@ -3034,6 +4307,14 @@ test('arena backpressure proceeds when any scheduled owner release is confirmed'
   assert.equal(nextGeneration.selected, true);
   assert.equal(nextGeneration.execution.generationId, 4);
   assert.equal(nextGeneration.backpressureWaitCount, 1);
+  assert.equal(nextGeneration.readbackTelemetryComplete, true);
+  assert.equal(nextGeneration.hostQueueFenceCount, 1);
+  assert.equal(
+    nextGeneration.awaitedBackpressureHostQueueFenceCount,
+    1
+  );
+  assert.equal(nextGeneration.normalHotLoopReadbackFree, false);
+  assert.equal(nextGeneration.productionHotLoopHostDependencyFree, false);
   assert.equal(generations[0].runtime.ownsExecution(generations[0].execution), true);
   assert.equal(generations[1].runtime.ownsExecution(generations[1].execution), false);
   assert.equal(device.submissions.length, 4);

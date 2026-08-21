@@ -173,14 +173,168 @@ function aggregateCenterSample(checkpoint, checkpointIndex, selector) {
   const centerRows = rows.filter((row) => Number.isFinite(finiteOrNull(row?.yCenterMassWeightedM)));
   const representedMassKg = centerRows.reduce((sum, row) => sum + rowMass(row), 0);
   if (!(representedMassKg > 0)) return null;
+  const liveParticleCounts = rows
+    .map((row) => finiteOrNull(row?.liveParticleCount));
+  const phaseWeightedParticleCounts = rows
+    .map((row) => finiteOrNull(row?.phaseWeightedParticleCount));
+  const velocityRows = rows.map((row) => ({
+    meanVyMPerS: finiteOrNull(row?.meanVyMPerS),
+    vySampleMassKg: Math.max(0, finiteOrNull(row?.vySampleMassKg) ?? 0)
+  })).filter((row) => (
+    Number.isFinite(row.meanVyMPerS)
+    && row.vySampleMassKg > 0
+  ));
+  const vySampleMassKg = velocityRows.reduce(
+    (sum, row) => sum + row.vySampleMassKg,
+    0
+  );
+  const velocityMassToleranceKg = Math.max(1e-12, massKg * 1e-6);
+  const velocityMassCoverageComplete = (
+    vySampleMassKg > 0
+    &&
+    Math.abs(vySampleMassKg - massKg) <= velocityMassToleranceKg
+  );
   return {
     checkpointIndex,
     timeS: checkpointTime(checkpoint, checkpointIndex),
     massKg,
     representedMassKg,
+    liveParticleCount: liveParticleCounts.length === rows.length
+      && liveParticleCounts.every((count) => Number.isInteger(count) && count >= 0)
+      ? liveParticleCounts.reduce((sum, count) => sum + count, 0)
+      : null,
+    phaseWeightedParticleCount:
+      phaseWeightedParticleCounts.length === rows.length
+      && phaseWeightedParticleCounts.every((count) => (
+        Number.isFinite(count) && count >= 0
+      ))
+        ? phaseWeightedParticleCounts.reduce((sum, count) => sum + count, 0)
+        : null,
+    vySampleMassKg,
+    velocityMassCoverageComplete,
+    meanVyMPerS: velocityMassCoverageComplete
+      ? velocityRows.reduce((sum, row) => (
+          sum + row.meanVyMPerS * row.vySampleMassKg
+        ), 0) / vySampleMassKg
+      : null,
     yCenterM: centerRows.reduce((sum, row) => (
       sum + rowMass(row) * finiteOrNull(row?.yCenterMassWeightedM)
     ), 0) / representedMassKg
+  };
+}
+
+function frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector) {
+  const capture = checkpoint?.generatedGasCohortCapture || null;
+  const rows = arrayOf(checkpoint?.generatedGasCohorts).filter((row) => (
+    checkpointRowMatches(row, selector)
+  ));
+  if (rows.length === 0) return null;
+  const massKg = rows.reduce((sum, row) => sum + rowMass(row), 0);
+  if (!(massKg > 0)) return null;
+  const representedRows = rows.filter((row) => (
+    Number.isFinite(finiteOrNull(row?.yCenterMassWeightedM))
+  ));
+  const representedMassKg = representedRows.reduce(
+    (sum, row) => sum + rowMass(row),
+    0
+  );
+  const velocityRows = rows.filter((row) => (
+    Number.isFinite(finiteOrNull(row?.meanVyMPerS))
+    && Math.abs(
+      Math.max(0, finiteOrNull(row?.vySampleMassKg) ?? 0) - rowMass(row)
+    ) <= Math.max(1e-12, rowMass(row) * 1e-6)
+  ));
+  const vySampleMassKg = velocityRows.reduce(
+    (sum, row) => sum + Math.max(0, finiteOrNull(row?.vySampleMassKg) ?? 0),
+    0
+  );
+  const velocityMassCoverageComplete = (
+    velocityRows.length === rows.length
+    && Math.abs(vySampleMassKg - massKg) <= Math.max(1e-12, massKg * 1e-6)
+  );
+  const identityParts = rows.map((row) => [
+    row?.materialId,
+    row?.frozenLineageMaskHash,
+    row?.topologySignature,
+    row?.formedAtCheckpointIndex,
+    row?.frozenLineageCount,
+    capture?.topologyEpoch,
+    capture?.identityRevision
+  ].join(':')).sort();
+  const sameCarrierLineageProven = Boolean(
+    representedMassKg > 0
+    && capture?.status === 'captured'
+    && capture?.sameCarrierLineageProven === true
+    && rows.every((row) => (
+      row?.status === 'captured'
+      && row?.sameCarrierLineageProven === true
+      && Number.isInteger(row?.frozenLineageCount)
+      && row.frozenLineageCount > 0
+      && row?.frozenLineageMaskHash
+      && row?.topologySignature
+    ))
+  );
+  const activeGasCarrierCount = rows.reduce(
+    (sum, row) => sum + Math.max(
+      0,
+      finiteOrNull(row?.activeGasCarrierCount) ?? 0
+    ),
+    0
+  );
+  const yMinSamples = rows
+    .map((row) => finiteOrNull(row?.yMinM))
+    .filter(Number.isFinite);
+  const yMaxSamples = rows
+    .map((row) => finiteOrNull(row?.yMaxM))
+    .filter(Number.isFinite);
+  return {
+    checkpointIndex,
+    timeS: checkpointTime(checkpoint, checkpointIndex),
+    massKg,
+    representedMassKg,
+    activeGasCarrierCount,
+    liveParticleCount: activeGasCarrierCount,
+    inactiveFrozenLineageCount: rows.reduce(
+      (sum, row) => sum + Math.max(
+        0,
+        finiteOrNull(row?.inactiveFrozenLineageCount) ?? 0
+      ),
+      0
+    ),
+    frozenLineageCount: rows.reduce(
+      (sum, row) => sum + Math.max(0, finiteOrNull(row?.frozenLineageCount) ?? 0),
+      0
+    ),
+    invalidActiveCarrierCount: rows.reduce(
+      (sum, row) => sum + Math.max(
+        0,
+        finiteOrNull(row?.invalidActiveCarrierCount) ?? 0
+      ),
+      0
+    ),
+    phasePurityProblemCount: rows.reduce(
+      (sum, row) => sum + Math.max(
+        0,
+        finiteOrNull(row?.phasePurityProblemCount) ?? 0
+      ),
+      0
+    ),
+    frozenLineageIdentity: identityParts.join('|'),
+    sameCarrierLineageProven,
+    vySampleMassKg,
+    velocityMassCoverageComplete,
+    meanVyMPerS: velocityMassCoverageComplete
+      ? velocityRows.reduce((sum, row) => (
+          sum + finiteOrNull(row.meanVyMPerS) * rowMass(row)
+        ), 0) / massKg
+      : null,
+    yCenterM: representedMassKg > 0
+      ? representedRows.reduce((sum, row) => (
+          sum + finiteOrNull(row.yCenterMassWeightedM) * rowMass(row)
+        ), 0) / representedMassKg
+      : null,
+    yMinM: yMinSamples.length ? Math.min(...yMinSamples) : null,
+    yMaxM: yMaxSamples.length ? Math.max(...yMaxSamples) : null
   };
 }
 
@@ -210,6 +364,10 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     0,
     finiteOrNull(options.minimumSustainedRiseM) ?? 0.05
   );
+  const minimumSustainedMeanVyMPerS = Math.max(
+    0,
+    finiteOrNull(options.minimumSustainedMeanVyMPerS) ?? 0
+  );
   const tailSampleCount = normalizedPositiveInteger(options.tailSampleCount, 2);
   const minimumTailFraction = Math.min(
     1,
@@ -218,8 +376,13 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
   const minimumSustainedInterfaceSeparationM = finiteOrNull(
     options.minimumSustainedInterfaceSeparationM
   );
+  const frozenLineageAuthorityAvailable = arrayOf(checkpoints).some((checkpoint) => (
+    Object.hasOwn(checkpoint || {}, 'generatedGasCohortCapture')
+  ));
   const samples = arrayOf(checkpoints).map((checkpoint, checkpointIndex) => {
-    const sample = aggregateCenterSample(checkpoint, checkpointIndex, selector);
+    const sample = frozenLineageAuthorityAvailable
+      ? frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector)
+      : aggregateCenterSample(checkpoint, checkpointIndex, selector);
     if (!sample || sample.massKg < minimumMassKg) return null;
     const interfaceY = options.interfaceSelector
       ? interfaceHeight(checkpoint, options.interfaceSelector)
@@ -237,12 +400,55 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
   const tailRisePassCount = birth
     ? tail.filter((sample) => sample.yCenterM >= riseTargetY).length
     : 0;
+  const tailUpwardVelocityPassCount = tail.filter((sample) => (
+    sample.velocityMassCoverageComplete === true
+    && Number.isFinite(sample.meanVyMPerS)
+    && sample.meanVyMPerS > minimumSustainedMeanVyMPerS
+  )).length;
   const requiredTailPassCount = Math.ceil(tailSampleCount * minimumTailFraction);
   const enoughTailSamples = tail.length >= tailSampleCount;
+  const checkpointContinuityPassed = Boolean(
+    birth
+    && samples.every((sample, sampleIndex) => (
+      sample.checkpointIndex === birth.checkpointIndex + sampleIndex
+    ))
+  );
+  const liveCarrierContinuityPassed = Boolean(
+    birth
+    && (
+      frozenLineageAuthorityAvailable
+        ? Number.isInteger(birth.frozenLineageCount)
+          && birth.frozenLineageCount > 0
+          && samples.every((sample) => (
+            sample.frozenLineageCount === birth.frozenLineageCount
+            && sample.frozenLineageIdentity === birth.frozenLineageIdentity
+          ))
+        : Number.isInteger(birth.liveParticleCount)
+          && birth.liveParticleCount > 0
+          && samples.every((sample) => (
+            sample.liveParticleCount === birth.liveParticleCount
+          ))
+    )
+  );
+  const sameCarrierLineageProven = Boolean(
+    frozenLineageAuthorityAvailable
+    && birth
+    && samples.every((sample) => sample.sameCarrierLineageProven === true)
+    && liveCarrierContinuityPassed
+  );
+  const velocityMassCoverageComplete = Boolean(
+    birth
+    && samples.every((sample) => sample.velocityMassCoverageComplete === true)
+  );
   const sustainedRisePassed = Boolean(
     birth
     && enoughTailSamples
     && tailRisePassCount >= requiredTailPassCount
+  );
+  const sustainedUpwardVelocityPassed = Boolean(
+    birth
+    && enoughTailSamples
+    && tailUpwardVelocityPassCount >= requiredTailPassCount
   );
   const interfaceTail = tail.filter((sample) => Number.isFinite(sample.interfaceSeparationM));
   const interfaceSeparationRequired = Number.isFinite(minimumSustainedInterfaceSeparationM);
@@ -258,14 +464,25 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
   const final = samples.at(-1) || null;
 
   return {
-    schema: 'peercompute.ulg.sph-generated-cohort-trajectory-evidence.v0',
+    schema: 'peercompute.ulg.sph-generated-cohort-trajectory-evidence.v1',
     status: !birth
       ? 'missing'
       : !enoughTailSamples
         ? 'insufficient'
-        : sustainedRisePassed && sustainedInterfaceSeparationPassed
+        : checkpointContinuityPassed
+          && liveCarrierContinuityPassed
+          && (!frozenLineageAuthorityAvailable || sameCarrierLineageProven)
+          && velocityMassCoverageComplete
+          && sustainedRisePassed
+          && sustainedUpwardVelocityPassed
+          && sustainedInterfaceSeparationPassed
           ? 'pass'
           : 'fail',
+    authority: frozenLineageAuthorityAvailable
+      ? 'gpu-resident-frozen-phase-lineage-bitmask'
+      : 'aggregate-contiguous-stable-live-carrier-positive-vy-proxy',
+    sameCarrierLineageProven,
+    frozenLineageAuthorityAvailable,
     formed: Boolean(birth),
     sampleCount: samples.length,
     requiredPostBirthSampleCount: tailSampleCount,
@@ -274,6 +491,7 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     minimumMassFractionOfSystem,
     systemReferenceMassKg,
     minimumSustainedRiseM,
+    minimumSustainedMeanVyMPerS,
     minimumTailFraction,
     birth,
     final,
@@ -281,11 +499,191 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     peakRiseFromBirthM: birth && Number.isFinite(peakY) ? peakY - birth.yCenterM : null,
     finalRiseFromBirthM: birth && final ? final.yCenterM - birth.yCenterM : null,
     tailRisePassCount,
+    tailUpwardVelocityPassCount,
     requiredTailPassCount,
+    checkpointContinuityPassed,
+    liveCarrierContinuityPassed,
+    velocityMassCoverageComplete,
     sustainedRisePassed,
+    sustainedUpwardVelocityPassed,
     minimumSustainedInterfaceSeparationM,
     sustainedInterfaceSeparationPassed,
     tail,
+    samples
+  };
+}
+
+export function coldCeilingCondensationEvidence(checkpoints, options = {}) {
+  const selector = options.selector || {
+    phases: DEFAULT_GAS_PHASES
+  };
+  const minimumCeilingContactYM = finiteOrNull(
+    options.minimumCeilingContactYM
+  );
+  const minimumGasMassLossFraction = Math.max(
+    0,
+    finiteOrNull(options.minimumGasMassLossFraction) ?? 0.02
+  );
+  const minimumGasMassLossFractionOfSystem = Math.max(
+    0,
+    finiteOrNull(options.minimumGasMassLossFractionOfSystem) ?? 1e-6
+  );
+  const requestedMinimumGasMassLossKg = Math.max(
+    0,
+    finiteOrNull(options.minimumGasMassLossKg) ?? 0
+  );
+  const minimumReturnDropM = Math.max(
+    0,
+    finiteOrNull(options.minimumReturnDropM) ?? 0
+  );
+  const systemReferenceMassKg = arrayOf(checkpoints).reduce(
+    (maximum, checkpoint) => Math.max(
+      maximum,
+      checkpointSystemMass(checkpoint)
+    ),
+    0
+  );
+  const minimumGasMassLossKg = Math.max(
+    requestedMinimumGasMassLossKg,
+    systemReferenceMassKg * minimumGasMassLossFractionOfSystem
+  );
+  const frozenLineageAuthorityAvailable = arrayOf(checkpoints).some(
+    (checkpoint) => Object.hasOwn(
+      checkpoint || {},
+      'generatedGasCohortCapture'
+    )
+  );
+  const samples = arrayOf(checkpoints).map(
+    (checkpoint, checkpointIndex) =>
+      frozenGeneratedGasCohortSample(
+        checkpoint,
+        checkpointIndex,
+        selector
+      )
+  ).filter(Boolean);
+  const birth = samples[0] || null;
+  const identityContinuityPassed = Boolean(
+    birth
+    && samples.every((sample) =>
+      sample.sameCarrierLineageProven === true
+      && sample.frozenLineageCount === birth.frozenLineageCount
+      && sample.frozenLineageIdentity === birth.frozenLineageIdentity
+    )
+  );
+  const integrityPassed = Boolean(
+    birth
+    && samples.every((sample) =>
+      sample.invalidActiveCarrierCount === 0
+      && sample.phasePurityProblemCount === 0
+    )
+  );
+  const contact = Number.isFinite(minimumCeilingContactYM)
+    ? samples.find((sample) =>
+        Number.isFinite(sample.yMaxM)
+        && sample.yMaxM >= minimumCeilingContactYM
+      ) || null
+    : null;
+  const postContactSamples = contact
+    ? samples.filter(
+        (sample) => sample.checkpointIndex >= contact.checkpointIndex
+      )
+    : [];
+  const peakGasSample = postContactSamples.reduce(
+    (peak, sample) => !peak || sample.massKg > peak.massKg
+      ? sample
+      : peak,
+    null
+  );
+  const peakActiveGasCarrierCount = postContactSamples.reduce(
+    (maximum, sample) => Math.max(
+      maximum,
+      sample.activeGasCarrierCount
+    ),
+    0
+  );
+  const requiredPeakRelativeMassLossKg = peakGasSample
+    ? peakGasSample.massKg * minimumGasMassLossFraction
+    : null;
+  const requiredGasMassLossKg = peakGasSample
+    ? Math.max(
+        minimumGasMassLossKg,
+        requiredPeakRelativeMassLossKg
+      )
+    : null;
+  const condensation = peakGasSample
+    ? postContactSamples.find((sample) =>
+        sample.checkpointIndex > peakGasSample.checkpointIndex
+        && sample.activeGasCarrierCount < peakActiveGasCarrierCount
+        && peakGasSample.massKg - sample.massKg
+          >= requiredGasMassLossKg
+      ) || null
+    : null;
+  const peakCeilingSample = postContactSamples.reduce(
+    (peak, sample) => !peak || sample.yCenterM > peak.yCenterM
+      ? sample
+      : peak,
+    null
+  );
+  const returnSample = condensation && peakCeilingSample
+    ? samples.find((sample) =>
+        sample.checkpointIndex > condensation.checkpointIndex
+        && Number.isFinite(sample.yCenterM)
+        && peakCeilingSample.yCenterM - sample.yCenterM
+          >= minimumReturnDropM
+      ) || (minimumReturnDropM === 0 ? condensation : null)
+    : null;
+  const orderedEvidencePassed = Boolean(
+    contact
+    && peakGasSample
+    && condensation
+    && returnSample
+    && contact.checkpointIndex <= peakGasSample.checkpointIndex
+    && peakGasSample.checkpointIndex < condensation.checkpointIndex
+    && condensation.checkpointIndex <= returnSample.checkpointIndex
+  );
+
+  return {
+    schema:
+      'peercompute.ulg.sph-cold-ceiling-condensation-evidence.v0',
+    status: !frozenLineageAuthorityAvailable || !birth
+      ? 'inconclusive'
+      : identityContinuityPassed
+        && integrityPassed
+        && orderedEvidencePassed
+        ? 'pass'
+        : 'fail',
+    authority: frozenLineageAuthorityAvailable
+      ? 'gpu-resident-frozen-phase-lineage-bitmask'
+      : null,
+    frozenLineageAuthorityAvailable,
+    sameCarrierLineageProven: identityContinuityPassed,
+    integrityPassed,
+    orderedEvidencePassed,
+    sampleCount: samples.length,
+    systemReferenceMassKg,
+    minimumCeilingContactYM,
+    minimumGasMassLossFraction,
+    minimumGasMassLossFractionOfSystem,
+    minimumGasMassLossKg,
+    requiredGasMassLossKg,
+    minimumReturnDropM,
+    birth,
+    contact,
+    peakGasSample,
+    peakActiveGasCarrierCount,
+    condensation,
+    returnSample,
+    ceilingContactCheckpointIndex: contact?.checkpointIndex ?? null,
+    gasMassLossKg: peakGasSample && condensation
+      ? peakGasSample.massKg - condensation.massKg
+      : null,
+    condensedLineageCount: condensation
+      ? peakActiveGasCarrierCount
+        - condensation.activeGasCarrierCount
+      : 0,
+    returnDropM: peakCeilingSample && returnSample
+      ? peakCeilingSample.yCenterM - returnSample.yCenterM
+      : null,
     samples
   };
 }

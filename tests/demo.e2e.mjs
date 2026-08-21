@@ -10,6 +10,9 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_DISCOVERY_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1
 } from '../ulg-gpu-abi/src/schroederSpatialExactNear.js';
+import {
+  STANDARD_SCENARIOS
+} from '../scripts/sph-visual-sanity-matrix.mjs';
 
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
 const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
@@ -18,6 +21,8 @@ const SPH_VISUAL_CAPTURE_ENABLED = process.env.ULG_SPH_VISUAL_CAPTURE === '1';
 const SPH_LONG_HORIZON_CAPTURE_ENABLED = process.env.ULG_SPH_LONG_HORIZON_CAPTURE === '1';
 const DEFAULT_SPH_VISUAL_FRAME_COUNT = 96;
 const DEFAULT_SPH_VISUAL_INTERVAL_MS = 125;
+const MAX_SPH_VISUAL_FALLBACK_FRAME_COUNT = 4;
+const MAX_SPH_VISUAL_FALLBACK_DURATION_MS = 180_000;
 const DEFAULT_SPH_LONG_HORIZON_BATCH_COUNT = 8;
 const DEFAULT_SPH_LONG_HORIZON_BATCH_STEPS = 32;
 const MLS_MPM_RESIDENT_COMPACT_SUMMARY_BYTES = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
@@ -75,7 +80,7 @@ function sanitizeArtifactLabel(label) {
 
 function expectedMlsMpmCapacityCounts(base, drop) {
   const live = base + drop;
-  const spareProductSlots = Math.max(8, Math.round(live / 8));
+  const spareProductSlots = 2 * Math.max(8, Math.round(live / 8));
   const lineageCapacity = live + spareProductSlots;
   const phaseCompanionSlots = lineageCapacity * 3;
   return {
@@ -277,7 +282,8 @@ async function compareCompositedPngs(page, referencePng, candidatePng, {
 
 async function proveNativeGeometryInCompositedFrame(page, {
   label = 'native-geometry-composite',
-  testInfo = null
+  testInfo = null,
+  expectedRuntimeProofKind = 'same-queue-private-staged-composite-submission'
 } = {}) {
   const playButton = page.locator('#sph-play');
   if (await playButton.count() > 0 && (await playButton.textContent())?.trim() === 'Pause') {
@@ -287,7 +293,7 @@ async function proveNativeGeometryInCompositedFrame(page, {
     await playButton.evaluate((button) => button.click());
     await expect(playButton).toHaveText('Play', { timeout: 10_000 });
   }
-  const readiness = await page.evaluate(async () => {
+  const readiness = await page.evaluate(async ({ expectedRuntimeProofKind }) => {
     const deadline = performance.now() + 120_000;
     let snapshot = null;
     while (performance.now() < deadline) {
@@ -298,29 +304,91 @@ async function proveNativeGeometryInCompositedFrame(page, {
       const activeGeneration =
         surface?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration ?? null;
       const proofGeneration =
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration ?? null;
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+        ?? null;
+      const offscreenProofGeneration =
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration
+        ?? null;
       const nonzeroPixelCount =
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount ?? null;
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount
+        ?? null;
+      const candidateSubmittedDrawCount =
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+        ?? null;
       const submittedDrawCount = bridge?.lastSubmittedDrawCount ?? null;
       snapshot = {
         previewActive: overlay?.__sphPendingPresentation?.active ?? null,
         ready: surface?.surfaceDrawVisibleGpuConsumerReady ?? null,
-        foregroundValidated:
-          surface?.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated ?? null,
+        runtimePresentationAdmitted:
+          surface?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+          ?? null,
+        foregroundProofValidated:
+          surface?.surfaceDrawVisibleGpuConsumerForegroundProofValidated ?? null,
+        sameQueueStructuralSubmissionAdmitted:
+          surface
+            ?.surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted
+          ?? null,
+        sameQueueForegroundSubmissionValidated:
+          surface
+            ?.surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated
+          ?? null,
+        proofKind:
+          surface
+            ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind
+          ?? null,
+        gpuFenceSatisfied:
+          surface
+            ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundGpuFenceSatisfied
+          ?? null,
+        sameQueueSubmissionBoundary:
+          surface
+            ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary
+          ?? null,
+        offscreenForegroundValidated:
+          surface?.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated
+          ?? null,
         activeGeneration,
         proofGeneration,
+        offscreenProofGeneration,
         nonzeroPixelCount,
+        candidateSubmittedDrawCount,
         lastRenderStatus: bridge?.lastRenderStatus ?? null,
         submittedDrawCount,
         debugMode: bridge?.lastNativeSurfaceDebugMode ?? bridge?.nativeSurfaceDebugMode ?? null
       };
+      const runtimeProofReady =
+        expectedRuntimeProofKind
+          === 'same-queue-private-staged-composite-submission'
+          ? (
+            snapshot.runtimePresentationAdmitted === true
+            && snapshot.sameQueueStructuralSubmissionAdmitted === true
+            && snapshot.foregroundProofValidated === false
+            && snapshot.sameQueueForegroundSubmissionValidated === false
+            && snapshot.proofKind
+              === 'same-queue-private-staged-composite-submission'
+            && snapshot.gpuFenceSatisfied === false
+            && snapshot.sameQueueSubmissionBoundary === true
+            && activeGeneration != null
+            && activeGeneration === proofGeneration
+            && Number(candidateSubmittedDrawCount) > 0
+          )
+          : (
+            expectedRuntimeProofKind === 'base-composite-color-difference'
+            && snapshot.offscreenForegroundValidated === true
+            && snapshot.proofKind === 'base-composite-color-difference'
+            && snapshot.gpuFenceSatisfied === false
+            && activeGeneration != null
+            && activeGeneration === offscreenProofGeneration
+            && Number(nonzeroPixelCount) > 0
+          );
       if (
         snapshot.previewActive === false
         && snapshot.ready === true
-        && snapshot.foregroundValidated === true
-        && activeGeneration != null
-        && activeGeneration === proofGeneration
-        && Number(nonzeroPixelCount) > 0
+        && runtimeProofReady
         && snapshot.lastRenderStatus === 'native-webgpu-surface-consumer-rendered'
         && Number(submittedDrawCount) > 0
         && snapshot.debugMode === 'none'
@@ -330,16 +398,38 @@ async function proveNativeGeometryInCompositedFrame(page, {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     return snapshot;
-  });
+  }, { expectedRuntimeProofKind });
   expect(readiness).toMatchObject({
     previewActive: false,
     ready: true,
-    foregroundValidated: true,
     lastRenderStatus: 'native-webgpu-surface-consumer-rendered',
     debugMode: 'none'
   });
-  expect(readiness.activeGeneration).toBe(readiness.proofGeneration);
-  expect(readiness.nonzeroPixelCount).toBeGreaterThan(0);
+  if (
+    expectedRuntimeProofKind
+      === 'same-queue-private-staged-composite-submission'
+  ) {
+    expect(readiness).toMatchObject({
+      runtimePresentationAdmitted: true,
+      sameQueueStructuralSubmissionAdmitted: true,
+      foregroundProofValidated: false,
+      sameQueueForegroundSubmissionValidated: false,
+      proofKind: 'same-queue-private-staged-composite-submission',
+      gpuFenceSatisfied: false,
+      sameQueueSubmissionBoundary: true
+    });
+    expect(readiness.activeGeneration).toBe(readiness.proofGeneration);
+    expect(readiness.candidateSubmittedDrawCount).toBeGreaterThan(0);
+  } else {
+    expect(expectedRuntimeProofKind).toBe('base-composite-color-difference');
+    expect(readiness).toMatchObject({
+      offscreenForegroundValidated: true,
+      proofKind: 'base-composite-color-difference',
+      gpuFenceSatisfied: false
+    });
+    expect(readiness.activeGeneration).toBe(readiness.offscreenProofGeneration);
+    expect(readiness.nonzeroPixelCount).toBeGreaterThan(0);
+  }
   expect(readiness.submittedDrawCount).toBeGreaterThan(0);
   const canonical = await captureNativeSceneComposite(page, {
     label: `${label}-canonical`,
@@ -830,9 +920,9 @@ async function recordSphPhaseCanvasSequence(page, { durationMs, fps, sampleInter
       const surfaceDraw = sceneApi?.getSphResidentSurfaceDraw?.() || overlay?.__sphResidentSurfaceDraw || null;
       // The MediaRecorder fast path is the normal native-WebGPU visual
       // capture route. Keep its telemetry shape aligned with the screenshot
-      // fallback so native visibility is judged from the foreground proof,
-      // rather than from Three.js meshes (which this route intentionally has
-      // none of).
+      // fallback so native liveness is judged from runtime admission while
+      // foreground pixel proof remains a separate claim. Three.js meshes are
+      // intentionally absent on this route.
       const residentPresentationProof = overlay?.__sphResidentPresentationProof || null;
       const pendingPresentation = overlay?.__sphPendingPresentation || null;
       const surfaces = [];
@@ -898,6 +988,9 @@ async function recordSphPhaseCanvasSequence(page, { durationMs, fps, sampleInter
         } : null,
         residentPresentation: residentPresentationProof ? {
           visible: residentPresentationProof.visible === true,
+          admitted: residentPresentationProof.admitted === true,
+          foregroundProved:
+            residentPresentationProof.foregroundProved === true,
           status: residentPresentationProof.status ?? null,
           bridge: residentPresentationProof.bridge ?? null,
           activeGeneration: residentPresentationProof.activeGeneration ?? null,
@@ -1165,7 +1258,7 @@ async function collectSphPhaseVisualMetrics(page, frameIndex) {
         compactionMode: surfaceDraw.compactionMode ?? null,
         visibleGpuConsumerReady: surfaceDraw.surfaceDrawVisibleGpuConsumerReady ?? null,
         visibleGpuConsumerForegroundValidated:
-          surfaceDraw.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated ?? null,
+          surfaceDraw.surfaceDrawVisibleGpuConsumerForegroundProofValidated ?? null,
         renderBridgeLastRenderStatus: surfaceDraw.renderBridgeLastRenderStatus ?? null,
         renderBridgeFrameCount: surfaceDraw.renderBridgeFrameCount ?? null,
         renderBridgeLastSubmittedDrawCount:
@@ -1173,6 +1266,9 @@ async function collectSphPhaseVisualMetrics(page, frameIndex) {
       } : null,
       residentPresentation: residentPresentationProof ? {
         visible: residentPresentationProof.visible === true,
+        admitted: residentPresentationProof.admitted === true,
+        foregroundProved:
+          residentPresentationProof.foregroundProved === true,
         status: residentPresentationProof.status ?? null,
         bridge: residentPresentationProof.bridge ?? null,
         activeGeneration: residentPresentationProof.activeGeneration ?? null,
@@ -1289,16 +1385,36 @@ async function captureSphPhaseVisualSequence(page, testInfo, {
     await writeFile(framePath, Buffer.from(result.pngBase64, 'base64'));
     return { ok: true, reason: null, mode: 'canvas-to-data-url' };
   };
-  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+  const fallbackFrameCount = Math.min(
+    frameCount,
+    MAX_SPH_VISUAL_FALLBACK_FRAME_COUNT
+  );
+  const fallbackDeadlineMs = performance.now()
+    + MAX_SPH_VISUAL_FALLBACK_DURATION_MS;
+  for (let frameIndex = 0; frameIndex < fallbackFrameCount; frameIndex += 1) {
     const frameTimingStartMs = performance.now();
     let advanceWaitMs = 0;
     let residentAdvanceObserved = null;
     if (frameIndex > 0) {
       const advanceStartMs = performance.now();
-      const advanced = await waitForSphResidentAdvance(page, metrics[metrics.length - 1], advanceTimeoutMs);
+      const remainingMs = Math.max(0, fallbackDeadlineMs - performance.now());
+      if (remainingMs <= 0) {
+        throw new Error(
+          `SPH visual fallback exceeded ${MAX_SPH_VISUAL_FALLBACK_DURATION_MS}ms`
+        );
+      }
+      const advanced = await waitForSphResidentAdvance(
+        page,
+        metrics[metrics.length - 1],
+        Math.min(advanceTimeoutMs, remainingMs)
+      );
       advanceWaitMs = performance.now() - advanceStartMs;
       residentAdvanceObserved = advanced;
-      if (!advanced) await page.waitForTimeout(intervalMs);
+      if (!advanced) {
+        throw new Error(
+          `SPH visual fallback did not advance before frame ${frameIndex}`
+        );
+      }
     }
     const metricsStartMs = performance.now();
     const metric = await collectSphPhaseVisualMetrics(page, frameIndex);
@@ -1343,7 +1459,8 @@ async function captureSphPhaseVisualSequence(page, testInfo, {
     recorderStatus: recording?.status || 'not-run',
     recorderReason: recording?.reason || recorderFallbackReason || null,
     recorderMedia: recorderFallbackMedia,
-    frameCount,
+    requestedFrameCount: frameCount,
+    frameCount: fallbackFrameCount,
     intervalMs,
     artifactDir,
     captureCadence: summarizeCaptureCadence(metrics, intervalMs),
@@ -4043,6 +4160,545 @@ test('SPH phase scenario menu applies and serializes standard presets', async ({
   await expect(page.locator('#sph-laws input').nth(7)).not.toBeChecked();
 });
 
+if (process.env.PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU === '1') {
+test.describe('SPH Pixel-class mobile resident liveness', () => {
+  test.use({
+    viewport: { width: 412, height: 915 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+    userAgent:
+      'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 '
+      + '(KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36'
+  });
+
+  test('gas-capable sodium/water and triple-stacked water advance without canonical field poisoning', async ({ page }) => {
+    test.setTimeout(300_000);
+    const canonicalFieldErrors = [];
+    page.on('console', (message) => {
+      if (
+        message.type() === 'error'
+        && /canonical MLS-MPM P2G execution rejected|required mechanics-field P2G|canonical spatial v2 dense|ActiveSource-v2 dense/i.test(
+          message.text()
+        )
+      ) {
+        canonicalFieldErrors.push(message.text());
+      }
+    });
+    page.on('pageerror', (error) => {
+      if (
+        /canonical MLS-MPM P2G execution rejected|required mechanics-field P2G|canonical spatial v2 dense|ActiveSource-v2 dense/i.test(
+          error.message
+        )
+      ) {
+        canonicalFieldErrors.push(error.message);
+      }
+    });
+
+    const startAndRequireResidentAdvance = async (url, {
+      addStackedWaterBody = false,
+      expectedRoute,
+      expectedAmbientBuoyancyRequired,
+      expectedAmbientBuoyancySkipReason
+    } = {}) => {
+      await page.goto(url);
+      await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
+      await page.waitForFunction(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        return Boolean(
+          (overlay?.__sphDriver || overlay?.__sphPhaseViewState)
+          && overlay?.querySelector('#sph-play')
+        );
+      }, null, { timeout: 120_000 });
+
+      if (addStackedWaterBody) {
+        const previousRebuildGeneration = await page.evaluate(() => (
+          document.querySelector('#sph-phase-overlay')
+            ?.__sphPhaseRebuildWorker?.generation ?? 0
+        ));
+        await page.waitForFunction(() => {
+          const addButton = document.querySelector(
+            '#sph-phase-overlay #sph-add-body'
+          );
+          return Boolean(addButton && !addButton.disabled);
+        }, null, { timeout: 60_000 });
+        await page.locator('#sph-add-body').evaluate((button) => button.click());
+        await page.waitForFunction((priorGeneration) => {
+          const overlay = document.querySelector('#sph-phase-overlay');
+          const bodies = overlay?.__sphInitialBodies?.bodies || [];
+          const rebuild = overlay?.__sphPhaseRebuildWorker || null;
+          return bodies.length === 3
+            && bodies.every(
+              (body) => String(body.material).toLowerCase() === 'h2o'
+            )
+            && rebuild?.status === 'complete'
+            && Number(rebuild.generation) > priorGeneration;
+        }, previousRebuildGeneration, { timeout: 120_000 });
+      }
+
+      await page.waitForFunction(() => {
+        const button = document.querySelector('#sph-phase-overlay #sph-play');
+        return Boolean(button && !button.disabled);
+      }, null, { timeout: 120_000 });
+      if (!/Pause/i.test(await page.locator('#sph-play').textContent() || '')) {
+        await page.locator('#sph-play').evaluate((button) => button.click());
+      }
+      await expect(page.locator('#sph-play')).toHaveText(
+        'Pause',
+        { timeout: 30_000 }
+      );
+      await page.waitForFunction(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const execution =
+          overlay?.__sphScene?.getMlsMpmResidentSteps?.()
+          || overlay?.__mlsMpmResidentSteps
+          || null;
+        const finalStep = execution?.finalStep || execution;
+        const nextStep =
+          execution?.nextSphParticleState?.step
+          ?? execution?.nextStep
+          ?? finalStep?.particlePingPong?.nextStep
+          ?? 0;
+        return Boolean(
+          overlay?.__mlsMpmResidentStepsError
+          || (
+            nextStep > 0
+            && overlay?.__sphFrameCounters?.lastResidentCompletionAtMs > 0
+          )
+        );
+      }, null, { timeout: 180_000 });
+
+      const firstCompletion = await page.evaluate(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const execution =
+          overlay?.__sphScene?.getMlsMpmResidentSteps?.()
+          || overlay?.__mlsMpmResidentSteps
+          || null;
+        const finalStep = execution?.finalStep || execution;
+        return {
+          error: overlay?.__mlsMpmResidentStepsError ?? null,
+          nextStep:
+            execution?.nextSphParticleState?.step
+            ?? execution?.nextStep
+            ?? finalStep?.particlePingPong?.nextStep
+            ?? 0,
+          completedAt:
+            overlay?.__sphFrameCounters?.lastResidentCompletionAtMs ?? 0,
+          residentSubmissions:
+            overlay?.__sphResidentPerf?.residentSubmissions ?? 0
+        };
+      });
+      expect(firstCompletion.error).toBeNull();
+      await page.waitForFunction((first) => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const execution =
+          overlay?.__sphScene?.getMlsMpmResidentSteps?.()
+          || overlay?.__mlsMpmResidentSteps
+          || null;
+        const finalStep = execution?.finalStep || execution;
+        const nextStep =
+          execution?.nextSphParticleState?.step
+          ?? execution?.nextStep
+          ?? finalStep?.particlePingPong?.nextStep
+          ?? 0;
+        return Boolean(
+          overlay?.__mlsMpmResidentStepsError
+          || (
+            nextStep > first.nextStep
+            && overlay?.__sphFrameCounters?.lastResidentCompletionAtMs
+              > first.completedAt
+            && overlay?.__sphResidentPerf?.residentSubmissions
+              > first.residentSubmissions
+          )
+        );
+      }, firstCompletion, { timeout: 180_000 });
+
+      const result = await page.evaluate(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const execution =
+          overlay?.__sphScene?.getMlsMpmResidentSteps?.()
+          || overlay?.__mlsMpmResidentSteps
+          || null;
+        const finalStep = execution?.finalStep || execution;
+        return {
+          error: overlay?.__mlsMpmResidentStepsError ?? null,
+          nextStep:
+            execution?.nextSphParticleState?.step
+            ?? execution?.nextStep
+            ?? finalStep?.particlePingPong?.nextStep
+            ?? 0,
+          normalHotLoopReadbackFree:
+            execution?.normalHotLoopReadbackFree ?? null,
+          readbackTelemetrySchema:
+            execution?.readbackTelemetrySchema ?? null,
+          readbackTelemetryScope:
+            execution?.readbackTelemetryScope ?? null,
+          readbackTelemetryComplete:
+            execution?.readbackTelemetryComplete ?? null,
+          readbackTelemetryUnknownSources:
+            execution?.readbackTelemetryUnknownSources ?? null,
+          observedMapAsyncCount:
+            execution?.observedMapAsyncCount ?? null,
+          observedReadbackBytes:
+            execution?.observedReadbackBytes ?? null,
+          observedHostQueueFenceCount:
+            execution?.observedHostQueueFenceCount ?? null,
+          mapAsyncCount:
+            execution?.mapAsyncCount ?? null,
+          readbackBytes:
+            execution?.readbackBytes ?? null,
+          hostQueueFenceCount:
+            execution?.hostQueueFenceCount ?? null,
+          fullParticleReadbackPerformed:
+            execution?.fullParticleReadbackPerformed ?? null,
+          fullParticleReadbackFree:
+            execution?.fullParticleReadbackFree ?? null,
+          residentContinuationReady:
+            execution?.residentContinuationReady ?? null,
+          reactionStatus:
+            finalStep?.reactionStep?.result?.status
+            ?? finalStep?.reactionStep?.status
+            ?? null,
+          reactionSummaryStatus:
+            finalStep?.reactionStep?.result?.reactionSummary?.status
+            ?? finalStep?.reactionStep?.reactionSummary?.status
+            ?? null,
+          reactionSummaryReason:
+            finalStep?.reactionStep?.result?.reactionSummary?.reason
+            ?? finalStep?.reactionStep?.reactionSummary?.reason
+            ?? null,
+          ambientBuoyancyRequested:
+            finalStep?.phaseVolumeAmbientBuoyancyRequested
+            ?? execution?.phaseVolumeAmbientBuoyancyRequested
+            ?? null,
+          ambientBuoyancyRequired:
+            finalStep?.phaseVolumeAmbientBuoyancyRequired
+            ?? execution?.phaseVolumeAmbientBuoyancyRequired
+            ?? null,
+          ambientBuoyancySkipReason:
+            finalStep?.phaseVolumeAmbientBuoyancySkipReason
+            ?? execution?.phaseVolumeAmbientBuoyancySkipReason
+            ?? null,
+          renderFps: overlay?.__sphFrameCounters?.renderFps ?? 0,
+          lastResidentCompletionAtMs:
+            overlay?.__sphFrameCounters?.lastResidentCompletionAtMs ?? null,
+          residentSubmissions:
+            overlay?.__sphResidentPerf?.residentSubmissions ?? 0,
+          route: {
+            p2gDense:
+              finalStep?.p2gGridProjection
+                ?.activeSourceDenseCompatibilityEnabled === true,
+            gridDense:
+              finalStep?.gridUpdate
+                ?.activeSourceDenseCompatibilityEnabled === true,
+            g2pDense:
+              finalStep?.g2pReconstruction
+                ?.activeSourceDenseCompatibilityEnabled === true,
+            p2gField:
+              finalStep?.p2gGridProjection
+                ?.mechanicsFieldViewEnabled === true,
+            gridField:
+              finalStep?.gridUpdate?.mechanicsFieldViewEnabled === true,
+            g2pField:
+              finalStep?.g2pReconstruction
+                ?.mechanicsFieldViewEnabled === true,
+            scope:
+              finalStep?.p2gGridProjection
+                ?.activeSourceDenseCompatibilityScope ?? null,
+            provenance:
+              finalStep?.g2pReconstruction
+                ?.activeSourceDenseCompatibilityProvenance ?? null,
+            residentProductEventCount:
+              finalStep?.p2gGridProjection
+                ?.residentProductMassInputProductEventCount ?? 0
+          },
+          warningText:
+            overlay?.querySelector('#sph-warning-bar')?.textContent ?? ''
+        };
+      });
+      const residencyEvidence = JSON.stringify({
+        url,
+        result
+      }, null, 2);
+      expect(result.error).toBeNull();
+      expect(result.nextStep).toBeGreaterThan(firstCompletion.nextStep);
+      expect(result.lastResidentCompletionAtMs)
+        .toBeGreaterThan(firstCompletion.completedAt);
+      expect(result.residentSubmissions)
+        .toBeGreaterThan(firstCompletion.residentSubmissions);
+      expect(result.renderFps).toBeGreaterThan(0);
+      expect(
+        result.normalHotLoopReadbackFree,
+        residencyEvidence
+      ).toBe(true);
+      expect(result.readbackTelemetryComplete, residencyEvidence).toBe(true);
+      expect(result.readbackTelemetryUnknownSources, residencyEvidence)
+        .toEqual([]);
+      expect(result.observedMapAsyncCount, residencyEvidence).toBe(0);
+      expect(result.observedReadbackBytes, residencyEvidence).toBe(0);
+      expect(result.observedHostQueueFenceCount, residencyEvidence).toBe(0);
+      expect(result.mapAsyncCount, residencyEvidence).toBe(0);
+      expect(result.readbackBytes, residencyEvidence).toBe(0);
+      expect(result.hostQueueFenceCount, residencyEvidence).toBe(0);
+      expect(result.fullParticleReadbackPerformed, residencyEvidence)
+        .toBe(false);
+      expect(result.fullParticleReadbackFree, residencyEvidence).toBe(true);
+      expect(result.residentContinuationReady, residencyEvidence).toBe(true);
+      expect(result.ambientBuoyancyRequested).toBe(true);
+      expect(result.ambientBuoyancyRequired).toBe(
+        expectedAmbientBuoyancyRequired
+      );
+      expect(result.ambientBuoyancySkipReason).toBe(
+        expectedAmbientBuoyancySkipReason
+      );
+      if (expectedRoute === 'dense') {
+        expect(result.route.p2gDense, residencyEvidence).toBe(true);
+        expect(result.route.gridDense, residencyEvidence).toBe(true);
+        expect(result.route.g2pDense, residencyEvidence).toBe(true);
+        expect(result.route.p2gField, residencyEvidence).toBe(false);
+        expect(result.route.gridField, residencyEvidence).toBe(false);
+        expect(result.route.g2pField, residencyEvidence).toBe(false);
+        expect(result.route.scope, residencyEvidence)
+          .toBe('single-level-exact-query');
+        expect(result.route.provenance, residencyEvidence)
+          .toBe('locally-submitted-p2g-grid-update-g2p-chain');
+        expect(result.route.residentProductEventCount, residencyEvidence)
+          .toBeGreaterThan(0);
+      } else {
+        expect(expectedRoute).toBe('field');
+        expect(result.route.p2gDense, residencyEvidence).toBe(false);
+        expect(result.route.gridDense, residencyEvidence).toBe(false);
+        expect(result.route.g2pDense, residencyEvidence).toBe(false);
+        expect(result.route.p2gField, residencyEvidence).toBe(true);
+        expect(result.route.gridField, residencyEvidence).toBe(true);
+        expect(result.route.g2pField, residencyEvidence).toBe(true);
+      }
+      expect(result.warningText).not.toMatch(
+        /hot loop is not fully GPU resident/i
+      );
+    };
+
+    await startAndRequireResidentAdvance(
+      '/?scenario=sodium-water&residentAuto=0&ss=1&residentStepsPerSchedule=1',
+      {
+        // The exact gas-pressure mechanics boundary is now authoritative for
+        // this gas-capable scene, so sodium/water must stay on the canonical
+        // mechanics-field route. Product rows remain GPU-certified gas-only
+        // until the field route gains product-mass mechanics scatter.
+        expectedRoute: 'field',
+        expectedAmbientBuoyancyRequired: false,
+        expectedAmbientBuoyancySkipReason:
+          'resident-product-mass-requires-dense-p2g-compatibility'
+      }
+    );
+    await startAndRequireResidentAdvance(
+      '/?scenario=water-cycle&residentAuto=0&ss=1&residentStepsPerSchedule=1',
+      {
+        addStackedWaterBody: true,
+        expectedRoute: 'field',
+        expectedAmbientBuoyancyRequired: true,
+        expectedAmbientBuoyancySkipReason: null
+      }
+    );
+    expect(canonicalFieldErrors).toEqual([]);
+  });
+
+  test('standard Cs/F executes two authoritative two-level steps without a hot-loop readback', async ({ page }) => {
+    test.setTimeout(180_000);
+    const scenario = STANDARD_SCENARIOS.find(
+      (entry) => entry.presetId === 'cesium-fluorine'
+    );
+    expect(scenario).toBeTruthy();
+    const scenarioUrl = new URL(scenario.url, 'https://ulg.invalid');
+    for (const [key, value] of Object.entries({
+      residentAuto: '0',
+      residentWorkers: '1',
+      visualCapture: '1',
+      renderer: 'webgl',
+      surfaceDraw: 'three-render-row-points'
+    })) {
+      scenarioUrl.searchParams.set(key, value);
+    }
+    const consoleIssues = [];
+    page.on('console', (message) => {
+      if (
+        message.type() === 'error'
+        && /Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|used in submit while destroyed|canonical MLS-MPM P2G execution rejected/i.test(
+          message.text()
+        )
+      ) {
+        consoleIssues.push(message.text());
+      }
+    });
+    page.on('pageerror', (error) => consoleIssues.push(error.message));
+
+    await page.goto(`${scenarioUrl.pathname}${scenarioUrl.search}`);
+    await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
+    await page.waitForFunction(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const scene = overlay?.__sphScene;
+      const config = overlay?.__sphSchroederSimulationConfig;
+      return Boolean(
+        !overlay?.__sphCpuClosureTask?.active
+        && scene?.getSphGpuParticleState?.()?.schema
+        && scene?.getMlsMpmGpuParticleState?.()?.schema
+        && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+        && config?.enabled === true
+        && config?.enableTwoLevelMechanics === true
+        && config?.twoLevelMechanicsAuthority === 'authoritative'
+        && config?.twoLevelFineSubstepCount === 2
+      );
+    }, null, { timeout: 120_000 });
+
+    const result = await page.evaluate(async () => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const scene = overlay.__sphScene;
+      const config = overlay.__sphSchroederSimulationConfig;
+      const residentExecutionPolicy =
+        overlay.__mlsMpmResidentExecutionPolicy
+        || overlay.__mlsMpmResidentAutoSchedule?.residentExecutionPolicy
+        || {};
+      const schroederExecutionOptions =
+        overlay.__mlsMpmSchroederExecutionOptions
+        || {
+          schroederSimulation: true,
+          schroederSelectedLevel: config.selectedLevel,
+          schroederSpatialArenaCount: config.spatialArenaCount,
+          schroederBaseGridSpacingM: config.baseGridSpacingM,
+          schroederMinLevel: config.minLevel,
+          schroederMaxLevel: config.maxLevel,
+          schroederTileCellCount: config.tileCellCount,
+          schroederEnablePortableSummary: config.enablePortableSummary,
+          schroederPortableSummaryPeerComputeUseCase:
+            config.portableSummaryPeerComputeUseCase,
+          schroederEnableActiveNodeIndex: config.enableActiveNodeIndex,
+          schroederEnableActiveNodeSortedIndex:
+            config.enableActiveNodeSortedIndex,
+          schroederActiveNodeSortedIndexPolicyMode:
+            config.activeNodeSortedIndexPolicyMode,
+          schroederLawNeighborTraversalPolicyMode:
+            config.lawNeighborTraversalPolicyMode,
+          schroederLawNeighborCandidateReadbackMode:
+            config.lawNeighborCandidateReadbackMode,
+          schroederEnableCrossLevelCoupling:
+            config.enableCrossLevelCoupling,
+          schroederEnablePhaseVolumeMigration:
+            config.enablePhaseVolumeMigration,
+          schroederEnableLawQueue: config.enableLawQueue,
+          schroederEnableLawNeighborCandidates:
+            config.enableLawNeighborCandidates,
+          schroederEnableTwoLevelMechanics:
+            config.enableTwoLevelMechanics,
+          schroederTwoLevelMechanicsAuthority:
+            config.twoLevelMechanicsAuthority,
+          schroederTwoLevelFineSubstepCount:
+            config.twoLevelFineSubstepCount,
+          schroederEnableParticleStorageMaterialization:
+            config.enableParticleStorageMaterialization,
+          schroederParticleStorageAdmissionRowBudget:
+            config.particleStorageAdmissionRowBudget,
+          schroederParticleStorageRequiredCapacity:
+            config.particleStorageRequiredCapacity,
+          schroederParticleStorageCapacityMargin:
+            config.particleStorageCapacityMargin,
+          schroederParticleStorageFreeListSlotCapacity:
+            config.particleStorageFreeListSlotCapacity,
+          schroederParticleStorageFreeListAvailableSlotCount:
+            config.particleStorageFreeListAvailableSlotCount,
+          schroederParticleStorageFreeListMaxSlotsPerRow:
+            config.particleStorageFreeListMaxSlotsPerRow
+        };
+      const execution = await scene.refreshMlsMpmResidentSteps({
+        preferWebGpu: true,
+        gasPressureSummary:
+          overlay.__sphResidentGasPressureSummary
+          || overlay.__sphPhaseViewState?.gasPressureSummary
+          || null,
+        stepCount: 2,
+        readbackMode: 'no-full-readback',
+        compactSummaryMode: 'none',
+        compactSummaryScope: 'particle-visual',
+        continueFromResidentState: false,
+        force: true,
+        emitResidentProgressConsole: false,
+        ...residentExecutionPolicy,
+        ...schroederExecutionOptions
+      });
+      const backgroundSettlement =
+        execution?.schroederBackgroundSettlementPromise?.then
+          ? await execution.schroederBackgroundSettlementPromise
+          : null;
+      overlay.__mlsMpmResidentSteps = execution;
+      overlay.__mlsMpmResidentStep =
+        scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+      const finalStep = execution?.finalStep || null;
+      const twoLevel =
+        execution?.finalSchroederResult?.twoLevelMechanics
+        || execution?.schroederSameLevelMechanics?.twoLevelMechanics
+        || null;
+      return {
+        status: execution?.status ?? null,
+        stepCount: execution?.stepCount ?? null,
+        completedStepCount: execution?.completedStepCount ?? null,
+        stepSummaryCount: execution?.stepSummaries?.length ?? null,
+        finalStepStatus: finalStep?.status ?? null,
+        twoLevelAuthority:
+          twoLevel?.authority
+          ?? finalStep?.twoLevelMechanicsAuthority
+          ?? null,
+        twoLevelFineSubstepCount:
+          finalStep?.twoLevelFineSubstepCount ?? null,
+        authoritativeCommitVerified:
+          finalStep?.twoLevelAuthoritativeCommitVerified === true,
+        nextTime: execution?.nextSphParticleState?.time ?? null,
+        readbackMode: execution?.readbackMode ?? null,
+        fullParticleReadbackPerformed:
+          execution?.fullParticleReadbackPerformed ?? null,
+        fullParticleReadbackFree:
+          execution?.fullParticleReadbackFree ?? null,
+        normalHotLoopReadbackFree:
+          execution?.normalHotLoopReadbackFree ?? null,
+        readbackTelemetryComplete:
+          execution?.readbackTelemetryComplete ?? null,
+        mapAsyncCount: execution?.mapAsyncCount ?? null,
+        readbackBytes: execution?.readbackBytes ?? null,
+        hostQueueFenceCount: execution?.hostQueueFenceCount ?? null,
+        backgroundSettlement,
+        warningText:
+          overlay.querySelector('#sph-warning-bar')?.textContent ?? ''
+      };
+    });
+
+    expect(result.status).toBe('resident-steps-executed');
+    expect(result.stepCount).toBe(2);
+    expect(result.completedStepCount).toBe(2);
+    expect(result.stepSummaryCount).toBe(2);
+    expect(result.finalStepStatus)
+      .toBe('schroeder-two-level-authoritative-step-executed');
+    expect([
+      'authoritative',
+      'two-level-authoritative-resident-mechanics-replaced'
+    ]).toContain(result.twoLevelAuthority);
+    expect(result.twoLevelFineSubstepCount).toBe(2);
+    expect(result.authoritativeCommitVerified).toBe(true);
+    expect(result.nextTime).toBeGreaterThan(0);
+    expect(result.readbackMode).toBe('no-full-readback');
+    expect(result.fullParticleReadbackPerformed).toBe(false);
+    expect(result.fullParticleReadbackFree).toBe(true);
+    expect(result.normalHotLoopReadbackFree).toBe(true);
+    expect(result.readbackTelemetryComplete).toBe(true);
+    expect(result.mapAsyncCount).toBe(0);
+    expect(result.readbackBytes).toBe(0);
+    expect(result.hostQueueFenceCount).toBe(0);
+    expect(result.backgroundSettlement).toBe(true);
+    expect(result.warningText).not.toMatch(
+      /hot loop is not fully GPU resident/i
+    );
+    expect(consoleIssues).toEqual([]);
+  });
+});
+}
+
 test('SPH route paints an opaque bootstrap frame before the application module is ready', async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -4074,7 +4730,7 @@ test('SPH cold startup presents honest body envelopes until current geometry is 
   });
   page.on('pageerror', (error) => consoleIssues.push(error.message));
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/?ss=1&residentWorkers=0');
+  await page.goto('/?ss=1');
   await ensureSphPhaseOverlayVisible(page, { timeout: 90_000 });
 
   await expect.poll(() => page.evaluate(() => {
@@ -4116,21 +4772,54 @@ test('SPH cold startup presents honest body envelopes until current geometry is 
       previewStatus: preview?.status ?? null,
       layerHidden: layer?.hidden ?? null,
       visibleGpuConsumerReady: surface?.surfaceDrawVisibleGpuConsumerReady ?? null,
-      foregroundValidated:
-        surface?.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated ?? null,
+      runtimePresentationAdmitted:
+        surface?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+        ?? null,
+      foregroundProofValidated:
+        surface?.surfaceDrawVisibleGpuConsumerForegroundProofValidated ?? null,
+      sameQueueStructuralSubmissionAdmitted:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted
+        ?? null,
+      sameQueueForegroundSubmissionValidated:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated
+        ?? null,
+      proofKind:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind
+        ?? null,
+      gpuFenceSatisfied:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundGpuFenceSatisfied
+        ?? null,
+      sameQueueSubmissionBoundary:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary
+        ?? null,
       activeGeneration:
         surface?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration ?? null,
       proofGeneration:
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration ?? null,
-      foregroundPixelCount:
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount ?? null
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+        ?? null,
+      candidateSubmittedDrawCount:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+        ?? null
     };
   }), { timeout: 120_000 }).toMatchObject({
     previewActive: false,
     previewStatus: 'control-envelope-preview-retired-after-current-presentation',
     layerHidden: true,
     visibleGpuConsumerReady: true,
-    foregroundValidated: true
+    runtimePresentationAdmitted: true,
+    sameQueueStructuralSubmissionAdmitted: true,
+    foregroundProofValidated: false,
+    sameQueueForegroundSubmissionValidated: false,
+    proofKind: 'same-queue-private-staged-composite-submission',
+    gpuFenceSatisfied: false,
+    sameQueueSubmissionBoundary: true
   });
   const initialReadiness = await page.evaluate(() => {
     const surface = document.querySelector('#sph-phase-overlay')
@@ -4139,25 +4828,30 @@ test('SPH cold startup presents honest body envelopes until current geometry is 
       activeGeneration:
         surface?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration ?? null,
       proofGeneration:
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration ?? null,
-      foregroundPixelCount:
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationNonzeroPixelCount ?? null
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+        ?? null,
+      candidateSubmittedDrawCount:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+        ?? null
     };
   });
   expect(initialReadiness.activeGeneration).toBe(initialReadiness.proofGeneration);
-  expect(initialReadiness.foregroundPixelCount).toBeGreaterThan(0);
+  expect(initialReadiness.candidateSubmittedDrawCount).toBeGreaterThan(0);
   await proveNativeGeometryInCompositedFrame(page, {
-    label: 'cold-start-resident-workers-0',
-    testInfo
+    label: 'cold-start-default-worker-preview',
+    testInfo,
+    expectedRuntimeProofKind:
+      'same-queue-private-staged-composite-submission'
   });
 
-  await page.evaluate(() => {
+  const stagedReplacement = await page.evaluate(() => {
     const input = document.querySelector('#sph-temps input');
     input.value = String(Number(input.value) + 1);
     input.dispatchEvent(new Event('change', { bubbles: true }));
-  });
-  await expect.poll(() => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
+    overlay?.querySelector('#sph-reset')?.click();
     const preview = overlay?.__sphPendingPresentation;
     const layer = overlay?.querySelector('#sph-pending-presentation');
     return {
@@ -4166,7 +4860,8 @@ test('SPH cold startup presents honest body envelopes until current geometry is 
       reason: preview?.reason ?? null,
       hidden: layer?.hidden ?? null
     };
-  }), { timeout: 30_000 }).toEqual({
+  });
+  expect(stagedReplacement).toEqual({
     active: true,
     particleGeneration: null,
     reason: 'replacement-material-closure-pending',
@@ -4211,19 +4906,54 @@ test('SPH cold startup default worker lane presents composited native geometry',
     return {
       previewActive: overlay?.__sphPendingPresentation?.active ?? null,
       ready: surface?.surfaceDrawVisibleGpuConsumerReady ?? null,
-      foregroundValidated:
-        surface?.surfaceDrawVisibleGpuConsumerOffscreenForegroundValidated ?? null,
+      runtimePresentationAdmitted:
+        surface?.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted
+        ?? null,
+      foregroundProofValidated:
+        surface?.surfaceDrawVisibleGpuConsumerForegroundProofValidated ?? null,
+      sameQueueStructuralSubmissionAdmitted:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted
+        ?? null,
+      sameQueueForegroundSubmissionValidated:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerSameQueueForegroundSubmissionValidated
+        ?? null,
+      proofKind:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind
+        ?? null,
+      gpuFenceSatisfied:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundGpuFenceSatisfied
+        ?? null,
+      sameQueueSubmissionBoundary:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary
+        ?? null,
       activeGeneration:
         surface?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration ?? null,
       proofGeneration:
-        surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration ?? null,
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+        ?? null,
+      candidateSubmittedDrawCount:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+        ?? null,
       displayOwner: ownership?.displayOwner ?? null,
       workerCanvasVisibility: workerCanvas ? getComputedStyle(workerCanvas).visibility : null
     };
   }), { timeout: 120_000 }).toMatchObject({
     previewActive: false,
     ready: true,
-    foregroundValidated: true,
+    runtimePresentationAdmitted: true,
+    sameQueueStructuralSubmissionAdmitted: true,
+    foregroundProofValidated: false,
+    sameQueueForegroundSubmissionValidated: false,
+    proofKind: 'same-queue-private-staged-composite-submission',
+    gpuFenceSatisfied: false,
+    sameQueueSubmissionBoundary: true,
     displayOwner: 'main-native',
     workerCanvasVisibility: 'hidden'
   });
@@ -4232,13 +4962,23 @@ test('SPH cold startup default worker lane presents composited native geometry',
       ?.__sphScene?.getSphResidentSurfaceDraw?.();
     return {
       active: surface?.surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration ?? null,
-      proof: surface?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationResourceGeneration ?? null
+      proof:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration
+        ?? null,
+      candidateSubmittedDrawCount:
+        surface
+          ?.surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount
+        ?? null
     };
   });
   expect(generation.active).toBe(generation.proof);
+  expect(generation.candidateSubmittedDrawCount).toBeGreaterThan(0);
   await proveNativeGeometryInCompositedFrame(page, {
     label: 'cold-start-default-worker-lane',
-    testInfo
+    testInfo,
+    expectedRuntimeProofKind:
+      'same-queue-private-staged-composite-submission'
   });
   expect(consoleIssues).toEqual([]);
 });
@@ -4686,8 +5426,8 @@ test('SPH phase visual sequence captures dense H2O/H2O resident motion', async (
     expect(timeline.simulationCadence.advancedIntervalCount).toBeGreaterThan(0);
     expect(timeline.simulationCadence.status).not.toBe('simulation-did-not-advance');
   }
-  const nativeVisibleMetrics = timeline.metrics.filter((metric) => (
-    metric.residentPresentation?.visible === true
+  const nativeAdmittedMetrics = timeline.metrics.filter((metric) => (
+    metric.residentPresentation?.admitted === true
     && metric.residentPresentation?.bridge === 'native-webgpu-surface-consumer'
   ));
   const threeVisibleMetrics = timeline.metrics.filter((metric) => (
@@ -4695,15 +5435,15 @@ test('SPH phase visual sequence captures dense H2O/H2O resident motion', async (
   ));
   // Direct native-WebGPU presentation deliberately has no Three.js surface
   // mesh, so DOM scene traversal is not a visibility oracle for that route.
-  expect(nativeVisibleMetrics.length + threeVisibleMetrics.length).toBeGreaterThan(0);
-  if (nativeVisibleMetrics.length > 0) {
+  expect(nativeAdmittedMetrics.length + threeVisibleMetrics.length).toBeGreaterThan(0);
+  if (nativeAdmittedMetrics.length > 0) {
     expect(timeline.metrics.some((metric) => (
       metric.surfaceDraw?.visibleRendererBridge === 'native-webgpu-surface-consumer'
       && (metric.surfaceDraw?.activeSurfaceCount ?? 0) > 0
       && (metric.surfaceDraw?.vertexCount ?? 0) > 0
       && metric.residentPresentation?.submittedDrawCount > 0
     ))).toBe(true);
-    expect(nativeVisibleMetrics.some((metric) => (
+    expect(nativeAdmittedMetrics.some((metric) => (
       metric.pendingPresentation?.active === false
     ))).toBe(true);
   }
@@ -4715,7 +5455,7 @@ test('SPH phase visual sequence captures dense H2O/H2O resident motion', async (
   const h2oVisibleSurfaces = timeline.metrics.flatMap((metric) => (
     metric.surfaces?.visible || []
   ).filter((surface) => surface.materialKey === 'h2o' && surface.phase === 'liquid'));
-  if (nativeVisibleMetrics.length === 0) {
+  if (nativeAdmittedMetrics.length === 0) {
     const unboundedH2oSurfaces = h2oVisibleSurfaces.filter((surface) => (
       (surface.vertexCount ?? 0) > 0 && !surface.worldBounds
     ));
@@ -8665,7 +9405,7 @@ test('SPH phase mounted non-water binary reactions retain condensed product even
   expect(consoleIssues).toEqual([]);
 });
 
-test('SPH phase live reaction product-event buffer stays bounded under merge-time compaction @fresh-webgpu-process', async ({ page }) => {
+test('SPH phase live reaction product-event history stays GPU-count bounded @fresh-webgpu-process', async ({ page }) => {
   test.setTimeout(300_000);
   const consoleIssues = [];
   page.on('console', (message) => {
@@ -8674,7 +9414,10 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
       consoleIssues.push(text);
     }
   });
-  await page.goto('/?drop=Al&base=o2&dropt=3200&baset=1000&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
+  await page.goto(
+    '/?scenario=sodium-water&residentAuto=1&residentFuseSequence=1'
+    + '&residentStepsPerSchedule=1&ss=1&visualCapture=1'
+  );
   await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -8693,24 +9436,76 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
       return {
         simT: fs?.particlePingPong?.nextTime ?? 0,
         productEventBufferByteLength: rpm?.productEventBufferByteLength ?? 0,
-        productEventGenerationCount: rpm?.productEventGenerationCount ?? 0
+        productEventGenerationCount: rpm?.productEventGenerationCount ?? 0,
+        productEventRowCount: rpm?.productEventRowCount ?? 0,
+        productEventLiveRowCountUpperBound:
+          rpm?.productEventLiveRowCountUpperBound ?? null,
+        productEventRowCountAuthority:
+          rpm?.productEventRowCountAuthority ?? null,
+        productEventRowCountHostKnown:
+          rpm?.productEventRowCountHostKnown ?? null,
+        productEventActiveEventCount:
+          rpm?.productEventActiveEventCount ?? null,
+        productEventCompactionStatus:
+          rpm?.productEventCompactionStatus ?? null,
+        productEventCountGeneration:
+          rpm?.productEventLiveCountAuthority?.generation ?? null,
+        productEventCountSeal:
+          rpm?.productEventLiveCountAuthority?.seal ?? null,
+        normalHotLoopReadbackFree:
+          overlay.__mlsMpmResidentSteps?.normalHotLoopReadbackFree ?? null,
+        observedMapAsyncCount:
+          overlay.__mlsMpmResidentSteps?.observedMapAsyncCount ?? null,
+        observedReadbackBytes:
+          overlay.__mlsMpmResidentSteps?.observedReadbackBytes ?? null,
+        observedHostQueueFenceCount:
+          overlay.__mlsMpmResidentSteps?.observedHostQueueFenceCount ?? null
       };
     }));
   }
-  // The baseline concat-only merge grew past 20 MB (2000+ generations) in this
-  // window; merge-time compaction keeps the buffer inside a sawtooth around the
-  // 256 KiB threshold because consumed rows (status != 1 or no unplaced mass)
-  // are dropped once the generation/byte thresholds trip.
+  // The no-host path now owns one fixed-capacity GPU-filtered live prefix.
+  // Its exact live count and indirect dispatch remain in an immutable control
+  // record, so neither compaction nor a growing concat chain reaches the CPU.
   for (const sample of samples) {
-    expect(sample.productEventBufferByteLength).toBeLessThan(786_432);
-    expect(sample.productEventGenerationCount).toBeLessThan(120);
+    expect(sample.productEventBufferByteLength)
+      .toBeGreaterThanOrEqual(4 * 1024 * 1024);
+    expect(sample.productEventBufferByteLength)
+      .toBeLessThanOrEqual(32 * 1024 * 1024);
+    expect(
+      Number.isInteger(Math.log2(sample.productEventBufferByteLength))
+    ).toBe(true);
+    expect(sample.productEventGenerationCount).toBe(1);
+    expect(sample.productEventRowCount)
+      .toBe(sample.productEventBufferByteLength / 128);
+    expect(sample.productEventLiveRowCountUpperBound)
+      .toBeGreaterThanOrEqual(0);
+    expect(sample.productEventLiveRowCountUpperBound)
+      .toBeLessThanOrEqual(sample.productEventRowCount);
+    expect(sample.productEventRowCountAuthority)
+      .toBe('gpu-authored-filtered-live-prefix');
+    expect(sample.productEventRowCountHostKnown).toBe(false);
+    expect(sample.productEventActiveEventCount).toBeNull();
+    expect(sample.productEventCompactionStatus)
+      .toBe('product-event-filtered-append-gpu-count-resident');
+    expect(sample.productEventCountGeneration).toBeGreaterThan(0);
+    expect(sample.productEventCountSeal).toBeGreaterThan(0);
+    expect(sample.normalHotLoopReadbackFree).toBe(true);
+    expect(sample.observedMapAsyncCount).toBe(0);
+    expect(sample.observedReadbackBytes).toBe(0);
+    expect(sample.observedHostQueueFenceCount).toBe(0);
+  }
+  for (let index = 1; index < samples.length; index += 1) {
+    expect(samples[index].productEventBufferByteLength)
+      .toBeGreaterThanOrEqual(
+        samples[index - 1].productEventBufferByteLength
+      );
   }
   expect(samples[samples.length - 1].simT).toBeGreaterThan(samples[0].simT);
   // Product mutation and visibility are owned by the condensed binary
   // reaction gate immediately above. Keep this long-running gate focused on
-  // merge-time compaction: a late full-parity render refresh is a separate GPU
-  // consumer and can make browser-instance lifetime failures look like lost
-  // chemistry when its error state is coerced to an empty decoded-row map.
+  // GPU-count-bounded history: a late full-parity render refresh is a separate
+  // GPU consumer and can make browser-instance lifetime failures look like
+  // lost chemistry when its error state is coerced to an empty decoded-row map.
   expect(consoleIssues).toEqual([]);
 });
 
@@ -9437,7 +10232,22 @@ test('SPH phase records surface-buffer presentation opt-in without enabling WebG
   expect(result.capabilityVisibleNoReadbackSupported).toBe(false);
 });
 
-test('SPH phase native same-device surface consumer publishes compositor validation readiness', async ({ page }, testInfo) => {
+for (const {
+  title,
+  nativeSurfacePixelValidation
+} of [
+  {
+    title:
+      'SPH phase native same-device surface consumer publishes queue-fenced structural readiness without pixel readback',
+    nativeSurfacePixelValidation: false
+  },
+  {
+    title:
+      'SPH phase native same-device surface consumer diagnostic pixel validation retains positive compositor difference proof',
+    nativeSurfacePixelValidation: true
+  }
+]) {
+test(title, async ({ page }, testInfo) => {
   test.setTimeout(240_000);
   const consoleIssues = [];
   page.on('console', (message) => {
@@ -9447,10 +10257,15 @@ test('SPH phase native same-device surface consumer publishes compositor validat
     }
   });
 
-  // Force partial 8x8 proof workgroups. The staged foreground reducer must
-  // count edge pixels exactly instead of returning before its barrier.
+  // Keep a partial 8x8 viewport for the explicit diagnostic member. Its
+  // staged foreground reducer must count edge pixels exactly instead of
+  // returning before its barrier; the default member never allocates or maps
+  // that pixel-difference path.
   await page.setViewportSize({ width: 1003, height: 761 });
-  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer');
+  const pixelValidationQuery = nativeSurfacePixelValidation
+    ? '&nativeSurfacePixelValidation=1'
+    : '';
+  await page.goto(`/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer${pixelValidationQuery}`);
   await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -9657,27 +10472,35 @@ test('SPH phase native same-device surface consumer publishes compositor validat
     };
   });
 
-  const visual = await proveNativeGeometryInCompositedFrame(page, {
-    label: 'native-same-device-surface-consumer',
-    testInfo
-  });
-  const publishResult = await page.evaluate(({ width, height, changedPixelCount, pixelCount }) => {
-    const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
-    return scene?.publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation?.({
-      status: changedPixelCount > 0 ? 'passed' : 'failed',
-      reason: 'Playwright compositor A/B/A geometry ablation observed the native surface contribution',
-      source: 'playwright-composited-frame-geometry-ablation',
-      width,
-      height,
-      nonzeroPixelCount: changedPixelCount,
-      pixelCount
-    }) || null;
-  }, {
-    width: visual.canonicalVsControl.width,
-    height: visual.canonicalVsControl.height,
-    changedPixelCount: visual.canonicalVsControl.changedPixelCount,
-    pixelCount: visual.canonicalVsControl.pixelCount
-  });
+  let visual = null;
+  let publishResult = null;
+  if (nativeSurfacePixelValidation) {
+    visual = await proveNativeGeometryInCompositedFrame(page, {
+      label: 'native-same-device-surface-consumer-pixel-validation',
+      testInfo,
+      expectedRuntimeProofKind: 'base-composite-color-difference'
+    });
+    publishResult = await page.evaluate(
+      ({ width, height, changedPixelCount, pixelCount }) => {
+        const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
+        return scene?.publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation?.({
+          status: changedPixelCount > 0 ? 'passed' : 'failed',
+          reason: 'Playwright compositor A/B/A geometry ablation observed the native surface contribution',
+          source: 'playwright-composited-frame-geometry-ablation',
+          width,
+          height,
+          nonzeroPixelCount: changedPixelCount,
+          pixelCount
+        }) || null;
+      },
+      {
+        width: visual.canonicalVsControl.width,
+        height: visual.canonicalVsControl.height,
+        changedPixelCount: visual.canonicalVsControl.changedPixelCount,
+        pixelCount: visual.canonicalVsControl.pixelCount
+      }
+    );
+  }
   const postProofState = await page.evaluate(() => {
     const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
     const surface = scene?.getSphResidentSurfaceDraw?.() || null;
@@ -9740,12 +10563,63 @@ test('SPH phase native same-device surface consumer publishes compositor validat
         bridge?.nativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount ?? null,
       bridgeCandidateStagedPresentationStatus:
         bridge?.nativeSurfaceCandidateStagedPresentationStatus ?? null,
+      bridgeRuntimePixelReadbackEnabled:
+        bridge?.enableRuntimePixelReadback === true,
+      bridgeCandidateForegroundValidationStatus:
+        bridge?.nativeSurfaceCandidateForegroundValidationStatus ?? null,
+      bridgeCandidateForegroundProofKind:
+        bridge?.nativeSurfaceCandidateForegroundProofKind ?? null,
+      bridgeCandidateForegroundGpuFenceSatisfied:
+        bridge?.nativeSurfaceCandidateForegroundGpuFenceSatisfied ?? null,
+      bridgeCandidateForegroundSameQueueSubmissionBoundary:
+        bridge?.nativeSurfaceCandidateForegroundSameQueueSubmissionBoundary
+        ?? null,
+      bridgeCandidateForegroundSubmittedDrawCount:
+        bridge?.nativeSurfaceCandidateForegroundSubmittedDrawCount ?? null,
+      bridgeCandidateForegroundResourceGeneration:
+        bridge?.nativeSurfaceCandidateForegroundResourceGeneration ?? null,
+      bridgeActiveSurfaceResourceGeneration:
+        bridge?.activeSurfaceResourceOwner?.generation
+        ?? bridge?.nativeSurfaceResourceGeneration
+        ?? null,
       bridgeCandidatePresentationChangedPixelCount:
         bridge?.nativeSurfaceCandidateStagedPresentation?.changedPixelCount ?? null,
       bridgeCandidatePresentationWidth:
         bridge?.nativeSurfaceCandidateStagedPresentation?.width ?? null,
       bridgeCandidatePresentationHeight:
-        bridge?.nativeSurfaceCandidateStagedPresentation?.height ?? null
+        bridge?.nativeSurfaceCandidateStagedPresentation?.height ?? null,
+      bridgeCandidatePresentationTiming:
+        bridge?.nativeSurfaceCandidateStagedPresentation?.timing ?? null,
+      bridgeCandidatePresentationDiagnosticPixelProofEnabled:
+        bridge?.nativeSurfaceCandidateStagedPresentation
+          ?.targets?.diagnosticPixelProofEnabled ?? null,
+      bridgeCandidatePresentationReadbackInUse:
+        bridge?.nativeSurfaceCandidateStagedPresentation
+          ?.targets?.readbackInUse ?? null,
+      bridgeCandidatePresentationReadbackMapPending:
+        bridge?.nativeSurfaceCandidateStagedPresentation
+          ?.targets?.readbackMapPending ?? null,
+      bridgeCandidatePresentationReadbackBufferPresent:
+        Boolean(
+          bridge?.nativeSurfaceCandidateStagedPresentation
+            ?.targets?.readbackBuffer
+        ),
+      bridgeCandidatePresentationBaseTexturePresent:
+        Boolean(
+          bridge?.nativeSurfaceCandidateStagedPresentation
+            ?.targets?.baseTexture
+        ),
+      bridgeCandidatePresentationDiffCounterBufferPresent:
+        Boolean(
+          bridge?.nativeSurfaceCandidateStagedPresentation
+            ?.targets?.diffCounterBuffer
+        ),
+      bridgeOffscreenValidationStatus:
+        bridge?.offscreenValidationStatus ?? null,
+      bridgeOffscreenValidationNonzeroPixelCount:
+        bridge?.offscreenValidationNonzeroPixelCount ?? null,
+      bridgeOffscreenValidationResourceGeneration:
+        bridge?.offscreenValidationResourceGeneration ?? null
     };
   });
   result = {
@@ -9773,11 +10647,11 @@ test('SPH phase native same-device surface consumer publishes compositor validat
   expect(result.secondBatchContinuationAvailable).toBe(true);
   expect(result.secondBatchNextStep).toBeGreaterThan(result.firstBatchNextStep);
   expect([
-    'same-device-main-thread-import-awaiting-pixel-validation',
+    'same-device-main-thread-import-awaiting-presentation-admission',
     'same-device-main-thread-import-ready'
   ]).toContain(result.firstBatchImportStatus);
   expect([
-    'same-device-main-thread-import-awaiting-pixel-validation',
+    'same-device-main-thread-import-awaiting-presentation-admission',
     'same-device-main-thread-import-blocked-input-not-ready',
     'same-device-main-thread-import-ready'
   ]).toContain(result.secondBatchImportStatus);
@@ -9812,7 +10686,6 @@ test('SPH phase native same-device surface consumer publishes compositor validat
   expect(result.visibleGpuConsumerRenderBridgeStatus).toBe('native-webgpu-surface-consumer-ready');
   expect(result.visibleGpuConsumerRendererCapabilityStatus)
     .toBe('native-webgpu-surface-consumer-supported');
-  expect(result.visibleGpuConsumerPixelValidationStatus).toBe('passed');
   expect(result.visibleGpuConsumerSameDeviceMainThreadImportSelected).toBe(true);
   expect(result.visibleGpuConsumerSameDeviceMainThreadImportRoute)
     .toBe('native-webgpu-surface-consumer');
@@ -9831,24 +10704,80 @@ test('SPH phase native same-device surface consumer publishes compositor validat
   expect(result.bridgeCandidatePresentationCopyCount).toBeGreaterThan(0);
   expect(result.bridgeCandidatePresentationPostAdmissionGeometrySubmitCount).toBe(0);
   expect(result.bridgeCandidateStagedPresentationStatus)
-    .toBe('candidate-staged-presentation-visible-copy-submitted');
-  expect(result.bridgeCandidatePresentationChangedPixelCount).toBeGreaterThan(0);
+    .toBe('candidate-staged-presentation-canvas-copy-submitted');
+  expect(result.bridgeRuntimePixelReadbackEnabled)
+    .toBe(nativeSurfacePixelValidation);
+  expect(result.bridgeCandidateForegroundValidationStatus).toBe('passed');
+  expect(result.bridgeCandidateForegroundSubmittedDrawCount).toBeGreaterThan(0);
+  expect(result.bridgeCandidateForegroundResourceGeneration)
+    .toBe(result.bridgeActiveSurfaceResourceGeneration);
   expect(result.bridgeCandidatePresentationWidth).toBeGreaterThan(0);
   expect(result.bridgeCandidatePresentationHeight).toBeGreaterThan(0);
-  expect(
-    result.bridgeCandidatePresentationWidth % 8 !== 0
-      || result.bridgeCandidatePresentationHeight % 8 !== 0
-  ).toBe(true);
-  expect(result.bridgeCandidatePresentationChangedPixelCount).toBeLessThanOrEqual(
-    result.bridgeCandidatePresentationWidth * result.bridgeCandidatePresentationHeight
-  );
-  expect(result.publishStatus).toBe('browser-frame-validation-passed');
-  expect(result.publishVisibleGpuConsumerReady).toBe(true);
-  expect(result.publishSource).toBe('playwright-composited-frame-geometry-ablation');
-  expect(result.publishNonzeroPixelCount).toBeGreaterThan(0);
-  expect(result.publishPixelCount).toBeGreaterThan(result.publishNonzeroPixelCount);
+  expect(result.bridgeCandidatePresentationTiming?.status).toBe('passed');
+  expect(result.bridgeCandidatePresentationReadbackInUse).toBe(false);
+  expect(result.bridgeCandidatePresentationReadbackMapPending).toBe(false);
+
+  if (nativeSurfacePixelValidation) {
+    expect(result.visibleGpuConsumerPixelValidationStatus).toBe('passed');
+    expect(result.bridgeCandidateForegroundProofKind)
+      .toBe('base-composite-color-difference');
+    expect(result.bridgeCandidateForegroundGpuFenceSatisfied).toBe(false);
+    expect(result.bridgeCandidatePresentationDiagnosticPixelProofEnabled)
+      .toBe(true);
+    expect(result.bridgeCandidatePresentationTiming?.queueFenceMs).toBe(null);
+    expect(result.bridgeCandidatePresentationTiming?.mapMs)
+      .toBeGreaterThanOrEqual(0);
+    expect(result.bridgeCandidatePresentationChangedPixelCount)
+      .toBeGreaterThan(0);
+    expect(
+      result.bridgeCandidatePresentationWidth % 8 !== 0
+        || result.bridgeCandidatePresentationHeight % 8 !== 0
+    ).toBe(true);
+    expect(result.bridgeCandidatePresentationChangedPixelCount)
+      .toBeLessThanOrEqual(
+        result.bridgeCandidatePresentationWidth
+          * result.bridgeCandidatePresentationHeight
+      );
+    expect(result.bridgeOffscreenValidationStatus).toBe('passed');
+    expect(result.bridgeOffscreenValidationNonzeroPixelCount)
+      .toBe(result.bridgeCandidatePresentationChangedPixelCount);
+    expect(result.bridgeOffscreenValidationResourceGeneration)
+      .toBe(result.bridgeActiveSurfaceResourceGeneration);
+    expect(result.publishStatus).toBe('browser-frame-validation-passed');
+    expect(result.publishVisibleGpuConsumerReady).toBe(true);
+    expect(result.publishSource)
+      .toBe('playwright-composited-frame-geometry-ablation');
+    expect(result.publishNonzeroPixelCount).toBeGreaterThan(0);
+    expect(result.publishPixelCount)
+      .toBeGreaterThan(result.publishNonzeroPixelCount);
+  } else {
+    expect(result.visibleGpuConsumerPixelValidationStatus).toBe('not-run');
+    expect(result.bridgeCandidateForegroundProofKind)
+      .toBe('same-queue-private-staged-composite-submission');
+    expect(result.bridgeCandidateForegroundGpuFenceSatisfied).toBe(false);
+    expect(
+      result.bridgeCandidateForegroundSameQueueSubmissionBoundary
+    ).toBe(true);
+    expect(result.bridgeCandidatePresentationDiagnosticPixelProofEnabled)
+      .toBe(false);
+    expect(result.bridgeCandidatePresentationTiming?.queueFenceMs).toBe(0);
+    expect(result.bridgeCandidatePresentationTiming?.mapMs).toBe(null);
+    expect(result.bridgeCandidatePresentationChangedPixelCount).toBe(null);
+    expect(result.bridgeCandidatePresentationReadbackBufferPresent).toBe(false);
+    expect(result.bridgeCandidatePresentationBaseTexturePresent).toBe(false);
+    expect(result.bridgeCandidatePresentationDiffCounterBufferPresent)
+      .toBe(false);
+    expect(result.bridgeOffscreenValidationStatus).toBe('not-run');
+    expect(result.bridgeOffscreenValidationNonzeroPixelCount).toBe(null);
+    expect(result.publishStatus).toBe(null);
+    expect(result.publishVisibleGpuConsumerReady).toBe(null);
+    expect(result.publishSource).toBe(null);
+    expect(result.publishNonzeroPixelCount).toBe(null);
+    expect(result.publishPixelCount).toBe(null);
+  }
   expect(consoleIssues).toEqual([]);
 });
+}
 
 test('SPH phase native surface consumer draws scene-local Schroeder render LOD', async ({ page }) => {
   test.setTimeout(240_000);
@@ -10044,7 +10973,7 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
     .toEqual(result.finalParticleSuccessorEpochIdentity);
   expect(result.drawSourceRefFinalContinuationAuthority).toBe(true);
   expect(result.backendSelectionStatus)
-    .toBe('schroeder-render-proxy-backend-native-webgpu-visible-ready');
+    .toBe('schroeder-render-proxy-backend-native-webgpu-submit-ready');
   expect(result.backendSelectedBackend).toBe('native-webgpu-retained-proxy');
   expect(result.renderStateStatus).toBe('resident-render-field-applied');
   expect(result.surfaceDrawStatus, JSON.stringify(result, null, 2))
@@ -10392,13 +11321,15 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
         === 'committed-successor-x-n-plus-1'
       && drawSource?.status === 'schroeder-render-proxy-draw-source-ready'
       && backendSelection?.status
-        === 'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+        === 'schroeder-render-proxy-backend-native-webgpu-submit-ready'
       && bridge?.schroederRenderProxyNativeExecutorReady === true
       && bridge?.lastSchroederRenderProxyNativeSubmitStatus
         === 'schroeder-render-proxy-native-executor-submitted-to-pass'
       && bridge?.frameCount > 0
       && overlay?.__sphResidentPostStepPresentationProof?.status
-        === 'native-resident-presentation-foreground-proved'
+        === 'native-resident-presentation-submission-admitted'
+      && overlay?.__sphResidentPostStepPresentationProof?.admitted === true
+      && overlay?.__sphResidentPostStepPresentationProof?.foregroundProved === false
       && overlay?.__sphResidentPostStepPresentationProof?.sourceCurrent === true
     );
   }, null, { timeout: 180_000 });
@@ -10422,6 +11353,10 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       || scene.scene?.userData?.schroederRenderProxyBackendSelection
       || null;
     const statusText = overlay.querySelector('#sph-status')?.textContent || '';
+    const warningMessages = Array.from(
+      overlay.querySelectorAll('.sph-warning-chip'),
+      (node) => node.textContent || ''
+    );
     return {
       hash: window.location.hash,
       config: overlay.__sphSchroederSimulationConfig || null,
@@ -10434,6 +11369,12 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       executionSchroederSimulation: execution?.schroederSimulation ?? null,
       executionSchroederSequenceStatus: execution?.schroederSameLevelSequenceStatus ?? null,
       executionResidentComputeManagerMode: execution?.residentComputeManagerMode ?? null,
+      executionRequestedReadbackMode: execution?.requestedReadbackMode ?? null,
+      executionReadbackMode: execution?.readbackMode ?? null,
+      executionNormalHotLoopReadbackFree:
+        execution?.normalHotLoopReadbackFree ?? null,
+      executionFullParticleReadbackPerformed:
+        execution?.fullParticleReadbackPerformed ?? null,
       portableSummaryStatus: execution?.portableSummary?.status ?? null,
       renderLodStatus: execution?.portableSummary?.renderLodStatus ?? null,
       renderLodSelectedLevel: execution?.portableSummary?.renderLod?.selectedLevel ?? null,
@@ -10461,6 +11402,13 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       backendSelectionStatus: backendSelection?.status ?? null,
       backendSelectedBackend: backendSelection?.selectedBackend ?? null,
       renderStateStatus: renderState?.status ?? null,
+      renderFieldReadback: renderState?.renderFieldReadback ?? null,
+      renderRowsReadback: renderState?.renderRowsReadback ?? null,
+      renderRowsReadbackMode: renderState?.renderRowsReadbackMode ?? null,
+      surfaceDrawReadback:
+        surfaceDraw?.surfaceDrawReadback
+        ?? renderState?.surfaceDrawReadback
+        ?? null,
       surfaceDrawStatus: surfaceDraw?.status ?? null,
       surfaceDrawReason: surfaceDraw?.reason ?? null,
       surfaceDrawSourceFamilyRole:
@@ -10486,6 +11434,10 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       bridgeFrameCount: bridge?.frameCount ?? null,
       bridgeLastRenderStatus: bridge?.lastRenderStatus ?? null,
       postStepPresentationProofStatus: postStepPresentationProof?.status ?? null,
+      postStepPresentationAdmitted:
+        postStepPresentationProof?.admitted ?? null,
+      postStepPresentationForegroundProved:
+        postStepPresentationProof?.foregroundProved ?? null,
       postStepPresentationProofCurrent: postStepPresentationProof?.sourceCurrent ?? null,
       postStepPresentationProofTimedOut:
         postStepPresentationProof?.status === 'resident-presentation-proof-wait-timeout',
@@ -10500,7 +11452,13 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
       statusTextIncludesSchroederLine:
         statusText.includes('schroeder sim') && statusText.includes('request=on'),
       statusTextIncludesSequence:
-        statusText.includes('schroeder-same-level-resident-steps-executed')
+        statusText.includes('schroeder-same-level-resident-steps-executed'),
+      hotLoopWarningPresent: warningMessages.includes(
+        'Hot loop has an awaited or unclassified host dependency.'
+      ),
+      frameCounters: overlay.__sphFrameCounters
+        ? { ...overlay.__sphFrameCounters }
+        : null
     };
   });
 
@@ -10519,6 +11477,10 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
   expect(result.executionSchroederSequenceStatus)
     .toBe('schroeder-same-level-resident-steps-executed');
   expect(result.executionResidentComputeManagerMode).toBe('direct-schroeder-scene');
+  expect(result.executionRequestedReadbackMode).toBe('no-full-readback');
+  expect(result.executionReadbackMode).toBe('no-full-readback');
+  expect(result.executionNormalHotLoopReadbackFree).toBe(true);
+  expect(result.executionFullParticleReadbackPerformed).toBe(false);
   expect(result.portableSummaryStatus).toBe('schroeder-portable-summary-plan-ready');
   expect(result.renderLodStatus).toBe('schroeder-render-lod-summary-planned');
   expect(result.renderLodSelectedLevel).toBe(0);
@@ -10541,9 +11503,13 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
     .toBe(result.finalParticleSourceGenerationId);
   expect(result.drawSourceRefFinalContinuationAuthority).toBe(true);
   expect(result.backendSelectionStatus)
-    .toBe('schroeder-render-proxy-backend-native-webgpu-visible-ready');
+    .toBe('schroeder-render-proxy-backend-native-webgpu-submit-ready');
   expect(result.backendSelectedBackend).toBe('native-webgpu-retained-proxy');
   expect(result.renderStateStatus).toBe('resident-render-field-applied');
+  expect(result.renderFieldReadback).toBe(false);
+  expect(result.renderRowsReadback).toBe(false);
+  expect(result.renderRowsReadbackMode).toBe('no-full-readback');
+  expect(result.surfaceDrawReadback).toBe(false);
   expect(result.surfaceDrawStatus)
     .toBe('resident-extension-surface-draw-buffers-retained');
   expect(result.surfaceDrawReason).toBeNull();
@@ -10556,7 +11522,9 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
   expect(result.bridgeLastRenderStatus)
     .toMatch(/^(native-webgpu-surface-consumer-|resident-surface-draw-skipped-resident-gpu-work-in-flight$)/);
   expect(result.postStepPresentationProofStatus)
-    .toBe('native-resident-presentation-foreground-proved');
+    .toBe('native-resident-presentation-submission-admitted');
+  expect(result.postStepPresentationAdmitted).toBe(true);
+  expect(result.postStepPresentationForegroundProved).toBe(false);
   expect(result.postStepPresentationProofCurrent).toBe(true);
   expect(result.postStepPresentationProofTimedOut).toBe(false);
   expect(result.postStepPresentationHandoffStatus)
@@ -10569,10 +11537,20 @@ test('SPH phase URL Schroeder config drives native resident schedule', async ({ 
   expect(result.postStepPresentationHandoffWaitElapsedMs).toBeGreaterThanOrEqual(0);
   expect(result.statusTextIncludesSchroederLine).toBe(true);
   expect(result.statusTextIncludesSequence).toBe(true);
+  expect(result.hotLoopWarningPresent).toBe(false);
+  expect(result.frameCounters?.renderFps).toBeGreaterThan(0);
+  expect(result.frameCounters?.residentCompletionThroughputFps)
+    .toBeGreaterThan(0);
+  expect(result.frameCounters?.residentCompletionThroughputEwmaFps)
+    .toBeGreaterThan(0);
+  expect(result.frameCounters?.lastResidentCompletionStepCount)
+    .toBeGreaterThan(0);
+  expect(result.frameCounters?.lastResidentCompletionElapsedMs)
+    .toBeGreaterThan(0);
   expect(consoleIssues).toEqual([]);
 });
 
-test('native cadence retains a foreground-proved prior frame before its next exact candidate handoff', async ({ page }) => {
+test('native cadence retains a runtime-admitted prior frame before its next exact candidate handoff', async ({ page }) => {
   test.setTimeout(240_000);
   const consoleIssues = [];
   page.on('console', (message) => {
@@ -10603,10 +11581,14 @@ test('native cadence retains a foreground-proved prior frame before its next exa
       && cadence?.forced === false
       && cadence?.effectiveCadence === 3
       && cadence?.reason === 'cadence-skip'
-      && policy?.status === 'native-surface-visible-presentation-cadence-deferred'
-      && policy?.presentationVisible === true
+      && policy?.status === 'native-surface-admitted-presentation-cadence-deferred'
+      && policy?.presentationAdmitted === true
+      && policy?.presentationVisible === false
+      && policy?.presentationForegroundProved === false
       && policy?.currentSourceForAdmission === false
-      && policy?.displayProof?.visible === true
+      && policy?.displayProof?.admitted === true
+      && policy?.displayProof?.visible === false
+      && policy?.displayProof?.foregroundProved === false
       && policy?.displayProof?.sourceCurrent === false
       && Number(cadence?.skippedCount) > 0
       && Number(nextStep) > 3
@@ -10631,9 +11613,15 @@ test('native cadence retains a foreground-proved prior frame before its next exa
           effectiveCadence: cadence?.effectiveCadence ?? null,
           reason: cadence?.reason ?? null,
           policyStatus: policy?.status ?? null,
+          presentationAdmitted: policy?.presentationAdmitted ?? null,
           presentationVisible: policy?.presentationVisible ?? null,
+          presentationForegroundProved:
+            policy?.presentationForegroundProved ?? null,
           currentSourceForAdmission: policy?.currentSourceForAdmission ?? null,
+          displayProofAdmitted: policy?.displayProof?.admitted ?? null,
           displayProofVisible: policy?.displayProof?.visible ?? null,
+          displayProofForegroundProved:
+            policy?.displayProof?.foregroundProved ?? null,
           displayProofSourceCurrent: policy?.displayProof?.sourceCurrent ?? null
         }
       };
@@ -10655,10 +11643,14 @@ test('native cadence retains a foreground-proved prior frame before its next exa
     forced: false,
     effectiveCadence: 3,
     reason: 'cadence-skip',
-    policyStatus: 'native-surface-visible-presentation-cadence-deferred',
-    presentationVisible: true,
+    policyStatus: 'native-surface-admitted-presentation-cadence-deferred',
+    presentationAdmitted: true,
+    presentationVisible: false,
+    presentationForegroundProved: false,
     currentSourceForAdmission: false,
-    displayProofVisible: true,
+    displayProofAdmitted: true,
+    displayProofVisible: false,
+    displayProofForegroundProved: false,
     displayProofSourceCurrent: false
   });
 
@@ -10683,9 +11675,11 @@ test('native cadence retains a foreground-proved prior frame before its next exa
         > Number(sample?.candidatePresentationCopyCount)
       && bridge?.nativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount === 0
       && bridge?.nativeSurfaceCandidateStagedPresentationStatus
-        === 'candidate-staged-presentation-visible-copy-submitted'
+        === 'candidate-staged-presentation-canvas-copy-submitted'
       && handoff?.admitted === true
-      && proof?.status === 'native-resident-presentation-foreground-proved'
+      && proof?.status === 'native-resident-presentation-submission-admitted'
+      && proof?.admitted === true
+      && proof?.foregroundProved === false
       && proof?.sourceCurrent === true
     );
     if (reproof && !overlay.__sphNativeCadenceReproofSample) {
@@ -10717,9 +11711,9 @@ test('native cadence retains a foreground-proved prior frame before its next exa
     .toBeGreaterThan(retained.candidatePresentationCopyCount);
   expect(reproof?.candidatePresentationPostAdmissionGeometrySubmitCount).toBe(0);
   expect(reproof?.candidateStagedPresentationStatus)
-    .toBe('candidate-staged-presentation-visible-copy-submitted');
+    .toBe('candidate-staged-presentation-canvas-copy-submitted');
   expect(reproof?.handoffAdmitted).toBe(true);
-  expect(reproof?.proofStatus).toBe('native-resident-presentation-foreground-proved');
+  expect(reproof?.proofStatus).toBe('native-resident-presentation-submission-admitted');
   expect(reproof?.proofSourceCurrent).toBe(true);
   expect(consoleIssues).toEqual([]);
 });
@@ -10750,14 +11744,16 @@ test('native resident auto playback uses an exact candidate-completion handoff b
     return Boolean(
       overlay?.__sphResidentPostStepPresentationHandoff?.admitted === true
       && overlay?.__sphResidentPostStepPresentationProof?.status
-        === 'native-resident-presentation-foreground-proved'
+        === 'native-resident-presentation-submission-admitted'
+      && overlay?.__sphResidentPostStepPresentationProof?.admitted === true
+      && overlay?.__sphResidentPostStepPresentationProof?.foregroundProved === false
       && overlay?.__sphResidentPostStepPresentationProof?.sourceCurrent === true
       && Number(nextStep) > 1
       && Number(bridge?.nativeSurfaceCandidateStageSubmissionCount) > 0
       && Number(bridge?.nativeSurfaceCandidatePresentationCopyCount) > 0
       && bridge?.nativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount === 0
       && bridge?.nativeSurfaceCandidateStagedPresentationStatus
-        === 'candidate-staged-presentation-visible-copy-submitted'
+        === 'candidate-staged-presentation-canvas-copy-submitted'
     );
   }, null, { timeout: 180_000 });
 
@@ -10799,16 +11795,19 @@ test('native resident auto playback uses an exact candidate-completion handoff b
   expect(result.handoff?.timedOut).toBe(false);
   expect(result.handoff?.waitElapsedMs).toBeGreaterThanOrEqual(0);
   expect(result.proof?.status)
-    .toBe('native-resident-presentation-foreground-proved');
+    .toBe('native-resident-presentation-submission-admitted');
+  expect(result.proof?.admitted).toBe(true);
+  expect(result.proof?.visible).toBe(false);
+  expect(result.proof?.foregroundProved).toBe(false);
   expect(result.proof?.sourceCurrent).toBe(true);
   expect(result.gate?.status)
-    .toMatch(/^native-surface-post-step-presentation-(proved|proof-pending)$/);
+    .toMatch(/^native-surface-post-step-presentation-(admitted|proof-pending)$/);
   expect(result.executionNextStep).toBeGreaterThan(1);
   expect(result.bridgeCandidateStageSubmissionCount).toBeGreaterThan(0);
   expect(result.bridgeCandidatePresentationCopyCount).toBeGreaterThan(0);
   expect(result.bridgeCandidatePresentationPostAdmissionGeometrySubmitCount).toBe(0);
   expect(result.bridgeCandidateStagedPresentationStatus)
-    .toBe('candidate-staged-presentation-visible-copy-submitted');
+    .toBe('candidate-staged-presentation-canvas-copy-submitted');
   expect(result.bridgeCandidatePresentationTiming?.status).toBe('presented');
   for (const key of [
     'targetAllocationMs',
@@ -10917,10 +11916,8 @@ test('native resident playback revalidates its exact source after an actual came
     const gate = document.querySelector('#sph-phase-overlay')
       ?.__sphResidentPostStepPresentationGate || null;
     return gate?.active === true
-      && (
-        gate.status === 'native-surface-post-step-presentation-camera-retry-pending'
-        || gate.status === 'native-surface-post-step-presentation-unproved'
-      )
+      && gate.status
+        === 'native-surface-post-step-presentation-camera-retry-pending'
       && Number.isSafeInteger(gate.generation)
       && Number.isSafeInteger(gate.scheduleToken)
       && Number.isSafeInteger(gate.requestToken)
@@ -10964,10 +11961,8 @@ test('native resident playback revalidates its exact source after an actual came
     };
   });
   expect(stillHeldDuringDrag.nextStep).toBe(heldDuringDrag.nextStep);
-  expect([
-    'native-surface-post-step-presentation-camera-retry-pending',
-    'native-surface-post-step-presentation-unproved'
-  ]).toContain(stillHeldDuringDrag.gate?.status);
+  expect(stillHeldDuringDrag.gate?.status)
+    .toBe('native-surface-post-step-presentation-camera-retry-pending');
   expect(stillHeldDuringDrag.gate).toMatchObject({
     active: true,
     generation: heldDuringDrag.gate?.generation,
@@ -10992,7 +11987,7 @@ test('native resident playback revalidates its exact source after an actual came
       const recovery = document.querySelector('#sph-phase-overlay')
         ?.__sphNativeSurfaceCameraPresentationRecovery || null;
       return recovery?.status
-        === 'native-surface-camera-presentation-recovery-proved'
+        === 'native-surface-camera-presentation-recovery-admitted'
         && typeof recovery?.failureKey === 'string'
         && recovery.failureKey.length > 0
         && recovery?.cameraSettle?.settled === true;
@@ -11046,7 +12041,10 @@ test('native resident playback revalidates its exact source after an actual came
     .toBe(recovered.recovery?.cameraSettle?.cameraInteraction?.endSequence);
   expect(recovered.cameraInteraction?.active).toBe(false);
   expect(recovered.cameraInteraction?.lastEvent).toBe('end');
-  expect(recovered.proof?.status).toBe('native-resident-presentation-foreground-proved');
+  expect(recovered.proof?.status).toBe('native-resident-presentation-submission-admitted');
+  expect(recovered.proof?.admitted).toBe(true);
+  expect(recovered.proof?.visible).toBe(false);
+  expect(recovered.proof?.foregroundProved).toBe(false);
   expect(recovered.proof?.sourceCurrent).toBe(true);
   expect(recovered.gate?.active).not.toBe(true);
 
@@ -11093,7 +12091,7 @@ test('native resident playback revalidates its exact source after an actual came
   expect(consoleIssues).toEqual([]);
 });
 
-test('native resident playback admits an exact candidate that publishes after the bounded handoff wait', async ({ page }) => {
+test('native resident playback fails open after a bounded handoff timeout and keeps advancing', async ({ page }) => {
   test.setTimeout(300_000);
   const consoleIssues = [];
   page.on('console', (message) => {
@@ -11177,91 +12175,50 @@ test('native resident playback admits an exact candidate that publishes after th
     const overlay = document.querySelector('#sph-phase-overlay');
     const handoff = overlay?.__sphResidentPostStepPresentationHandoff || null;
     const gate = overlay?.__sphResidentPostStepPresentationGate || null;
-    return handoff?.timedOut === true
-      && gate?.active === true
-      && gate?.status === 'native-surface-post-step-presentation-unproved'
-      && Number.isSafeInteger(gate.requestToken)
-      && Number.isSafeInteger(gate.candidateGeneration)
-      && Number.isSafeInteger(gate.lifecycleGeneration);
-  }, null, { timeout: 60_000 });
-
-  const held = await page.evaluate(() => {
-    const overlay = document.querySelector('#sph-phase-overlay');
+    if (
+      handoff?.timedOut !== true
+      || gate?.active !== false
+      || gate?.status
+        !== 'native-surface-post-step-presentation-timeout-fail-open'
+      || gate?.livenessFailOpen !== true
+      || gate?.residentPlaybackReleased !== true
+      || !Number.isSafeInteger(gate.requestToken)
+      || !Number.isSafeInteger(gate.candidateGeneration)
+      || !Number.isSafeInteger(gate.lifecycleGeneration)
+    ) {
+      return false;
+    }
     const scene = overlay?.__sphScene;
     const execution = overlay?.__mlsMpmResidentSteps
       || scene?.getMlsMpmResidentSteps?.()
       || null;
-    return {
+    globalThis.__ulgBoundedPresentationFailOpen = {
       nextStep: execution?.nextSphParticleState?.step
         ?? execution?.nextStep
         ?? execution?.finalStep?.particlePingPong?.nextStep
         ?? 0,
-      gate: overlay?.__sphResidentPostStepPresentationGate || null,
-      handoff: overlay?.__sphResidentPostStepPresentationHandoff || null,
-      cameraRecovery:
-        overlay?.__sphNativeSurfaceCameraPresentationRecovery || null
+      gate: { ...gate },
+      handoff: { ...handoff }
     };
-  });
-  await page.waitForTimeout(500);
-  const stillHeld = await page.evaluate(() => {
-    const overlay = document.querySelector('#sph-phase-overlay');
-    const scene = overlay?.__sphScene;
-    const execution = overlay?.__mlsMpmResidentSteps
-      || scene?.getMlsMpmResidentSteps?.()
-      || null;
-    return {
-      nextStep: execution?.nextSphParticleState?.step
-        ?? execution?.nextStep
-        ?? execution?.finalStep?.particlePingPong?.nextStep
-        ?? 0,
-      gate: overlay?.__sphResidentPostStepPresentationGate || null
-    };
-  });
-  expect(stillHeld.nextStep).toBe(held.nextStep);
-  expect(stillHeld.gate).toMatchObject({
-    active: true,
-    generation: held.gate?.generation,
-    scheduleToken: held.gate?.scheduleToken,
-    requestToken: held.gate?.requestToken,
-    candidateGeneration: held.gate?.candidateGeneration,
-    lifecycleGeneration: held.gate?.lifecycleGeneration
-  });
-
-  await page.waitForFunction(() => {
-    const recovery = document.querySelector('#sph-phase-overlay')
-      ?.__sphNativeSurfaceLatePresentationRecovery || null;
-    return recovery?.status
-      === 'native-surface-late-presentation-recovery-proved'
-      && recovery?.handoffAdmitted === true
-      && recovery?.proofSourceCurrent === true;
+    return true;
   }, null, { timeout: 60_000 });
-  const recovered = await page.evaluate(() => {
-    const overlay = document.querySelector('#sph-phase-overlay');
-    const recovery = overlay?.__sphNativeSurfaceLatePresentationRecovery || null;
-    const restored = globalThis.__ulgRestoreNativeSurfacePopErrorScope?.();
-    return {
-      recovery,
-      restored: restored === undefined,
-      cameraRecovery:
-        overlay?.__sphNativeSurfaceCameraPresentationRecovery || null,
-      error: overlay?.__mlsMpmResidentStepsError
-        || overlay?.__sphResidentRenderStateError
-        || null
-    };
-  });
-  expect(recovered.restored).toBe(true);
-  expect(recovered.recovery?.requestToken)
-    .toBeGreaterThanOrEqual(held.gate?.requestToken);
-  expect(recovered.recovery?.candidateGeneration)
-    .toBeGreaterThanOrEqual(held.gate?.candidateGeneration);
-  expect(recovered.recovery?.lifecycleGeneration)
-    .toBe(held.gate?.lifecycleGeneration);
-  expect(recovered.recovery?.sourceExecutionVerified).toBe(true);
-  expect(recovered.cameraRecovery?.failureKey ?? null)
-    .toBe(held.cameraRecovery?.failureKey ?? null);
-  expect(recovered.error).toBeNull();
 
-  await page.waitForFunction((heldStep) => {
+  const released = await page.evaluate(
+    () => globalThis.__ulgBoundedPresentationFailOpen
+  );
+  expect(released.handoff?.timedOut).toBe(true);
+  expect(released.gate).toMatchObject({
+    status: 'native-surface-post-step-presentation-timeout-fail-open',
+    active: false,
+    livenessFailOpen: true,
+    residentPlaybackReleased: true,
+    postStepPresentationProved: false,
+    presentationSourceCurrent: false
+  });
+  expect(released.gate?.proofWaitStatus)
+    .toBe('resident-presentation-proof-wait-timeout');
+
+  await page.waitForFunction((releasedStep) => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
     const execution = overlay?.__mlsMpmResidentSteps
@@ -11271,8 +12228,36 @@ test('native resident playback admits an exact candidate that publishes after th
       ?? execution?.nextStep
       ?? execution?.finalStep?.particlePingPong?.nextStep
       ?? 0;
-    return Number(nextStep) > Number(heldStep);
-  }, held.nextStep, { timeout: 60_000 });
+    return Number(nextStep) > Number(releasedStep);
+  }, released.nextStep, { timeout: 60_000 });
+
+  await page.evaluate(() => document.querySelector('#sph-play')?.click());
+  await expect(page.locator('#sph-play')).toHaveText('Play');
+  const final = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const restored = globalThis.__ulgRestoreNativeSurfacePopErrorScope?.();
+    const scene = overlay?.__sphScene;
+    const execution = overlay?.__mlsMpmResidentSteps
+      || scene?.getMlsMpmResidentSteps?.()
+      || null;
+    return {
+      restored: restored === undefined,
+      nextStep: execution?.nextSphParticleState?.step
+        ?? execution?.nextStep
+        ?? execution?.finalStep?.particlePingPong?.nextStep
+        ?? 0,
+      failOpen: globalThis.__ulgBoundedPresentationFailOpen || null,
+      error: overlay?.__mlsMpmResidentStepsError
+        || overlay?.__sphResidentRenderStateError
+        || null
+    };
+  });
+  expect(final.restored).toBe(true);
+  expect(final.nextStep).toBeGreaterThan(released.nextStep);
+  expect(final.failOpen?.gate?.generation).toBe(released.gate?.generation);
+  expect(final.failOpen?.gate?.scheduleToken)
+    .toBe(released.gate?.scheduleToken);
+  expect(final.error).toBeNull();
   expect(consoleIssues).toEqual([]);
 });
 
@@ -17238,7 +18223,13 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
           | abi.SCHROEDER_SPATIAL_HIERARCHY_STATUS_LEVEL_CONTRACT
           | abi.SCHROEDER_SPATIAL_HIERARCHY_STATUS_CLIPPED_SUPPORT,
         maxWeightResidual: 2 ** -20,
-        maxFirstMomentResidualM: Math.max(baseDx * 2 ** -18, 1e-8)
+        maxFirstMomentResidualM:
+          abi.resolveSchroederSpatialFirstMomentToleranceM({
+            fineGrid:
+              execution.spatialEpochGeneration.hierarchyView.fineGrid,
+            coarseGrid:
+              execution.spatialEpochGeneration.hierarchyView.coarseGrid
+          })
       },
       residentCallCount: residentCalls.length,
       totalMass,
@@ -17659,7 +18650,7 @@ test('SPH phase mounted scene advances under authoritative two-level SS mechanic
   expect(second.physicsTick).toBeGreaterThan(first.physicsTick);
   expect(second.continuedFromResidentState).toBe(true);
   expect(second.residentSourceMode).toBe('previous-gpu-resident-output');
-  expect(second.readbackMode).toBe('compact-grid-conservation-summary-readback');
+  expect(second.readbackMode).toBe('no-full-readback');
   expect(second.fullParticleReadbackPerformed).toBe(false);
   expect(second.normalHotLoopReadbackFree).toBe(true);
   expect(second.authoritativeCommitVerified).toBe(true);

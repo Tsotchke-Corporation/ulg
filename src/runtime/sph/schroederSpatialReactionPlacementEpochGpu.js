@@ -16,9 +16,25 @@ import {
 import {
   resolveSchroederSpatialReactionDiscoveryProposalForConsumer
 } from './schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../webgpuComputeLayout.js';
 
 export const ULG_SCHROEDER_SPATIAL_REACTION_PLACEMENT_SOURCE_FAMILY_SCHEMA =
   'peercompute.ulg.schroeder-spatial-reaction-placement-source-family.v2';
+const placementSourceFamilyCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily:
+      'schroeder-reaction-placement-source-family'
+  });
+const transferredDestinationCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily:
+      'schroeder-reaction-placement-transferred-destination'
+  });
 export const ULG_SPH_REACTION_RESOLVE_POSITION_INVARIANT_CERTIFICATE_SCHEMA =
   'peercompute.ulg.sph-reaction-resolve-position-invariant-certificate.v1';
 export const SCHROEDER_SPATIAL_REACTION_PLACEMENT_STAGE_ID =
@@ -642,6 +658,10 @@ export function acquireSphReactionWarmArenaWebGpu({
 export async function acquireSphReactionWarmArenaWithBackpressureWebGpu(
   options = {}
 ) {
+  const onHostQueueFenceAwait =
+    typeof options.onHostQueueFenceAwait === 'function'
+      ? options.onHostQueueFenceAwait
+      : null;
   for (;;) {
     try {
       return acquireSphReactionWarmArenaWebGpu(options);
@@ -662,6 +682,14 @@ export async function acquireSphReactionWarmArenaWithBackpressureWebGpu(
       }
       let released = false;
       try {
+        try {
+          onHostQueueFenceAwait?.({
+            source: 'reaction-warm-arena-backpressure',
+            count: 1
+          });
+        } catch {
+          // Telemetry must never affect exact-owner backpressure recovery.
+        }
         released = await error.retryAfterFence;
       } catch {
         released = false;
@@ -781,6 +809,32 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
   }
   if (record.destinationReturnScheduled) return false;
+  if (record.destinationCleanupClaim != null) {
+    if (typeof record.destinationCleanup !== 'function') {
+      throw placementEpochError(
+        'transferred placement destination claim has no exact cleanup owner',
+        'OWNERSHIP_TRANSFER'
+      );
+    }
+    try {
+      cancelQueueOrderedCleanupClaim(
+        record.destinationCleanupClaim,
+        record.device,
+        {
+          producerOutput: sourceFamily,
+          cleanup: record.destinationCleanup
+        }
+      );
+    } catch {
+      // A sealed destination claim belongs to its exact submitted consumer.
+      // Never bypass that capability by also scheduling the host-fenced owner
+      // path; doing so would destroy or recycle the same destination twice.
+      throw placementEpochError(
+        'sealed placement destination cleanup requires its exact queue-ordered final consumer',
+        'OWNERSHIP_TRANSFER'
+      );
+    }
+  }
   const queueFence = completionFence
     ?? (typeof record.device.queue?.onSubmittedWorkDone === 'function'
       ? record.device.queue.onSubmittedWorkDone()
@@ -835,6 +889,49 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
     return true;
   });
+  return record.destinationReturnPromise;
+}
+
+export function releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(
+  sourceFamily,
+  { queueOrderedFinalConsumer = null } = {}
+) {
+  if (!isSchroederSpatialReactionPlacementSourceFamily(sourceFamily)) {
+    throw placementEpochError(
+      'placement source family was not minted by the shared-directory epoch builder',
+      'SOURCE_FAMILY_BRAND'
+    );
+  }
+  const record = placementSourceFamilyRecords.get(sourceFamily);
+  if (
+    !record
+    || !record.destinationOwnershipTransferred
+    || record.lifecycle.releaseScheduled !== true
+    || !record.destinationCleanupClaim
+    || !record.destinationCleanup
+    || !queueOrderedFinalConsumer
+    || !record.positionEpochFloorReceipt
+  ) {
+    throw placementEpochError(
+      'queue-ordered destination release requires its exact submitted placement owner',
+      'OWNERSHIP_TRANSFER'
+    );
+  }
+  if (record.destinationReturnScheduled) return false;
+  record.destinationReturnScheduled = true;
+  const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+    record.device,
+    record.destinationCleanup,
+    {
+      queueOrderedFinalConsumer,
+      producerClaim: record.destinationCleanupClaim,
+      producerOutput: sourceFamily,
+      producerFamily:
+        'schroeder-reaction-placement-transferred-destination'
+    }
+  );
+  record.destinationReturnPromise =
+    Promise.resolve(cleanupReceipt).then(() => true);
   return record.destinationReturnPromise;
 }
 
@@ -1022,14 +1119,16 @@ function submitFrozenFamilyCopy(device, family) {
     family.mechanicsBufferByteLength
   );
   device.queue.submit([encoder.finish()]);
-  const completionFence = device.queue?.onSubmittedWorkDone?.();
-  if (!completionFence?.then) {
-    throw placementEpochError(
-      'placement destination initialization requires an exact queue fence',
-      'QUEUE_FENCE'
-    );
-  }
-  return completionFence;
+  return Object.freeze({
+    schema:
+      'peercompute.ulg.schroeder-reaction-placement-initialization-submission.v0',
+    status: 'placement-destination-initialization-submitted',
+    submissionObserved: true,
+    hostQueueFenceCount: 0,
+    queueCompletionMethod: 'same-gpu-queue-submission-order',
+    device,
+    family
+  });
 }
 
 function destroyOnce(record, key, value) {
@@ -1651,7 +1750,8 @@ export function validateSchroederSpatialReactionPlacementPositionEpochFloor(
 }
 
 export function transferSchroederSpatialReactionPlacementDestinationOwnership(
-  sourceFamily
+  sourceFamily,
+  { requestQueueOrderedCleanupClaim = false } = {}
 ) {
   if (!isSchroederSpatialReactionPlacementSourceFamily(sourceFamily)) {
     throw placementEpochError(
@@ -1681,14 +1781,125 @@ export function transferSchroederSpatialReactionPlacementDestinationOwnership(
       record.device
     );
   }
+  const destinationCleanup = record.reactionWarmArenaLease
+    ? () => {
+        const { leaseRecord, record: warmRecord } =
+          requireReactionWarmArenaLease(
+            record.reactionWarmArenaLease,
+            { device: record.device }
+          );
+        leaseRecord.releaseScheduled = true;
+        leaseRecord.released = true;
+        warmRecord.inFlight = false;
+        warmRecord.boundSourceFamily = null;
+        warmRecord.destinationOwnershipTransferred = false;
+        if (warmRecord.terminal || warmRecord.deviceLost) {
+          destroyReactionWarmArenaRecord(warmRecord, { force: true });
+        } else {
+          warmRecord.phase = 'idle';
+        }
+      }
+    : () => {
+        destroyOnce(
+          record,
+          'placed-state',
+          record.family.placedDestinationStateBuffer
+        );
+        destroyOnce(
+          record,
+          'placed-thermo',
+          record.family.placedDestinationThermoBuffer
+        );
+        destroyOnce(
+          record,
+          'placed-mechanics',
+          record.family.placedDestinationMechanicsBuffer
+        );
+      };
+  if (requestQueueOrderedCleanupClaim === true) {
+    record.destinationCleanup = destinationCleanup;
+    record.destinationCleanupClaim =
+      registerQueueOrderedCleanupClaim(
+        transferredDestinationCleanupClaimIssuer,
+        record.device,
+        {
+          producerOutput: sourceFamily,
+          cleanup: destinationCleanup
+        }
+      );
+  }
   record.destinationOwnershipTransferred = true;
   record.lifecycle.destinationOwnership = 'transferred-to-reaction-continuation';
+  const pendingPlacementArtifact =
+    record.pendingQueueOrderedPlacementArtifact ?? null;
+  record.pendingQueueOrderedPlacementArtifact = null;
+  if (pendingPlacementArtifact) {
+    finalizeQueueOrderedPlacementSourceRelease(
+      record,
+      pendingPlacementArtifact
+    );
+  }
   return true;
+}
+
+export function schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(
+  sourceFamily
+) {
+  const record = placementSourceFamilyRecords.get(sourceFamily);
+  return record?.destinationOwnershipTransferred === true
+    ? record.destinationCleanupClaim ?? null
+    : null;
+}
+
+function finalizeQueueOrderedPlacementSourceRelease(
+  record,
+  placementArtifact,
+  { retireDestinations = false } = {}
+) {
+  record.lifecycle.releaseStatus =
+    'borrowed-directory-family-cleanup-queue-ordered-after-placement-consumer';
+  record.retireDestinationsOnSourceCleanup =
+    retireDestinations === true;
+  const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+    record.device,
+    record.sourceFamilyCleanup,
+    {
+      queueOrderedFinalConsumer:
+        placementArtifact.queueOrderedFinalConsumerCapability,
+      producerClaim: record.sourceFamilyCleanupClaim,
+      producerOutput: record.family,
+      producerFamily:
+        'schroeder-reaction-placement-source-family'
+    }
+  );
+  let destinationRetirement = (
+    retireDestinations === true
+    && record.reactionWarmArenaLease
+  )
+    ? releaseSphReactionWarmArenaAfterQueue(
+        record.reactionWarmArenaLease,
+        {
+          device: record.device,
+          completionFence:
+            record.device.queue?.onSubmittedWorkDone?.(),
+          abandon: true,
+          destroy: true
+        }
+    )
+    : Promise.resolve(true);
+  record.lifecycle.releasePromise = Promise.all([
+    Promise.resolve(cleanupReceipt),
+    Promise.resolve(destinationRetirement)
+  ]).then(([, retired]) => retired !== false);
 }
 
 export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
   sourceFamily,
-  { placementArtifact = null, abandon = false } = {}
+  {
+    placementArtifact = null,
+    abandon = false,
+    retireDestinations = false
+  } = {}
 ) {
   if (!isSchroederSpatialReactionPlacementSourceFamily(sourceFamily)) {
     throw placementEpochError(
@@ -1722,8 +1933,56 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
     ? 'placement-consumer-submitted'
     : 'placement-consumer-submission-observed-without-artifact';
   record.completion.placementArtifact = placementArtifact;
+  const queueOrderedRelease = Boolean(
+    placementArtifact
+    && placementArtifact.queueOrderedReleaseAuthorized === true
+    && placementArtifact.queueFenceStatus === 'same-queue-submission-order'
+    && placementArtifact.hostQueueFenceCount === 0
+    && placementArtifact.arenaReuseAllowed === true
+  );
+  if (queueOrderedRelease) {
+    record.lifecycle.releaseScheduled = true;
+    if (
+      record.destinationOwnershipTransferred !== true
+      && retireDestinations !== true
+    ) {
+      record.lifecycle.releaseStatus =
+        'awaiting-explicit-destination-disposition';
+      record.lifecycle.releaseReason =
+        'queue-ordered placement retirement requires transfer or explicit destination retirement';
+      record.pendingQueueOrderedPlacementArtifact = placementArtifact;
+      return true;
+    }
+    finalizeQueueOrderedPlacementSourceRelease(
+      record,
+      placementArtifact,
+      { retireDestinations }
+    );
+    return true;
+  }
+  if (record.sourceFamilyCleanupClaim && record.sourceFamilyCleanup) {
+    try {
+      cancelQueueOrderedCleanupClaim(
+        record.sourceFamilyCleanupClaim,
+        record.device,
+        {
+          producerOutput: record.family,
+          cleanup: record.sourceFamilyCleanup
+        }
+      );
+    } catch {
+      // A sealed claim cannot fall back without its exact submitted artifact.
+      // Keep the family live unless the ordinary completion fence below proves
+      // safe destruction.
+    }
+  }
+  const initializationSubmission = record.initializationFence;
   const completionFence = placementArtifact?.queueFence
-    ?? record.initializationFence
+    ?? (
+      initializationSubmission?.submissionObserved === true
+        ? record.device.queue?.onSubmittedWorkDone?.()
+        : initializationSubmission
+    )
     ?? null;
   if (
     !completionFence?.then
@@ -2105,7 +2364,7 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       deviceLossStatus: 'device-loss-quarantine-not-armed',
       deviceLossReason: null
     };
-    const family = Object.freeze({
+    const family = {
       schema:
         ULG_SCHROEDER_SPATIAL_REACTION_PLACEMENT_SOURCE_FAMILY_SCHEMA,
       status: 'schroeder-spatial-reaction-placement-source-family-ready',
@@ -2161,7 +2420,7 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       privateLawSpatialBuildCount: 0,
       levelAssignmentBuildCount: 0,
       fullParticleReadbackPerformed: false
-    });
+    };
     const record = {
       device,
       family,
@@ -2179,6 +2438,7 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       destinationReturnPromise: null,
       warmArenaReleasePromise: null,
       auxiliaryDestroyed: false,
+      retireDestinationsOnSourceCleanup: false,
       destroyed: new Set(),
       initializationFence,
       stageStorageAllocation,
@@ -2186,6 +2446,39 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       finalizedPlacementArtifact: null,
       positionEpochFloorReceipt: null
     };
+    const sourceFamilyCleanup = () => {
+      destroyPlacementAuxiliaryResources(record);
+      if (
+        record.retireDestinationsOnSourceCleanup === true
+        && !record.reactionWarmArenaLease
+      ) {
+        destroyPlacedDestinations(record);
+      }
+      record.lifecycle.releaseStatus =
+        'released-after-final-consumer-queue-ordered';
+      record.lifecycle.releaseReason = null;
+      record.completion.status = 'placement-consumer-completed';
+    };
+    const sourceFamilyCleanupClaim =
+      registerQueueOrderedCleanupClaim(
+        placementSourceFamilyCleanupClaimIssuer,
+        device,
+        {
+          producerOutput: family,
+          cleanup: sourceFamilyCleanup
+        }
+      );
+    record.sourceFamilyCleanup = sourceFamilyCleanup;
+    record.sourceFamilyCleanupClaim = sourceFamilyCleanupClaim;
+    Object.defineProperty(
+      family,
+      'queueOrderedCleanupClaim',
+      {
+        value: sourceFamilyCleanupClaim,
+        enumerable: false
+      }
+    );
+    Object.freeze(family);
     if (reactionWarmArenaLease) {
       bindReactionWarmArenaSourceFamily(
         reactionWarmArenaLease,
@@ -2209,8 +2502,12 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
         destinationMechanics.destroy?.();
       }
     };
-    const cleanupFence = initializationFence
-      ?? device.queue?.onSubmittedWorkDone?.();
+    const cleanupFence = initializationFence?.submissionObserved === true
+      ? device.queue?.onSubmittedWorkDone?.()
+      : (
+          initializationFence
+          ?? device.queue?.onSubmittedWorkDone?.()
+        );
     // The frozen-family initialization may already be submitted. Without a
     // genuine completion fence, leaking destination storage is safer than
     // destroying buffers that submitted GPU work may still reference.

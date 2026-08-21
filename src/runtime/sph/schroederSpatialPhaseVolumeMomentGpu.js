@@ -343,6 +343,7 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
       retired: false,
       token: null,
       destroyedOwnedBuffers: new Set(),
+      bindGroupCache: new Map(),
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -810,11 +811,34 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
       const withActiveSource = (bindingEntries) => authority.directoryV2
         ? [...bindingEntries, entries.activeSource]
         : bindingEntries;
-      const bindGroup = (pipelineObject, bindingEntries, suffix) => device.createBindGroup({
-        label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
-        layout: pipelineObject.getBindGroupLayout(0),
-        entries: bindingEntries
-      });
+      const bindGroup = (pipelineObject, bindingEntries, suffix) => {
+        const cached = arena.bindGroupCache.get(suffix);
+        const entriesMatch = cached?.entries.length === bindingEntries.length
+          && cached.entries.every((left, index) => {
+            const right = bindingEntries[index];
+            return left.binding === right.binding
+              && left.resource?.buffer === right.resource?.buffer
+              && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
+              && (left.resource?.size ?? null) === (right.resource?.size ?? null);
+          });
+        if (cached?.pipeline === pipelineObject && entriesMatch) {
+          return cached.bindGroup;
+        }
+        const created = device.createBindGroup({
+          label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
+          layout: pipelineObject.getBindGroupLayout(0),
+          entries: bindingEntries
+        });
+        arena.bindGroupCache.set(suffix, {
+          pipeline: pipelineObject,
+          entries: bindingEntries.map(({ binding, resource: bindingResource }) => ({
+            binding,
+            resource: bindingResource
+          })),
+          bindGroup: created
+        });
+        return created;
+      };
       const emitBindGroup = bindGroup(pipelines.emit, withActiveSource([
         entries.assignment,
         entries.mechanics,
@@ -1067,6 +1091,28 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
     return finishRetirement(record);
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      const record = retirementFor(execution);
+      return !record.completed
+        && !deviceLossObserved
+        && submittedExecutions.has(execution)
+        && !record.activeAttempt;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered phase-volume moment release requires an exact submitted idle execution'
+      );
+    }
+    const record = retirementFor(execution);
+    return finishRetirement(record);
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -1176,6 +1222,7 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
         buffer.destroy?.();
         arena.destroyedOwnedBuffers.add(buffer);
       }
+      arena.bindGroupCache.clear();
     }
     runtime.status = 'schroeder-spatial-phase-volume-moment-runtime-destroyed';
     return true;
@@ -1198,6 +1245,8 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     executionRetirementCompletionPromise,

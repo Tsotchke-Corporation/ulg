@@ -473,7 +473,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           liveGenerationCount: entry?.liveGenerations?.length ?? null,
           childRuntimeActivity: {
             mechanics: runtimeRows(entry?.mechanicsViewRuntimes),
-            mechanicsField: runtimeRows(entry?.mechanicsFieldViewRuntimes),
+            mechanicsField: [
+              ...runtimeRows(entry?.mechanicsFieldPairRuntimes),
+              ...runtimeRows(entry?.mechanicsFieldViewRuntimes)
+            ],
             hierarchy: runtimeRows(entry?.hierarchyViewRuntimes),
             parentField: runtimeRows(entry?.parentFieldViewRuntimes),
             aggregate: entry?.aggregateViewRuntime ? {
@@ -518,10 +521,26 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       const mechanicsFieldRuntimeRollovers = [];
       let mechanicsFieldRuntimeSerial = 0;
       let mechanicsFieldEventOrdinal = 0;
+      const mechanicsFieldRuntimeEntries = (entry) => {
+        const entries = [
+          ...(entry?.mechanicsFieldPairRuntimes?.entries?.() ?? []),
+          ...(entry?.mechanicsFieldViewRuntimes?.entries?.() ?? [])
+        ];
+        const seen = new Set();
+        return entries.filter(([, runtime]) => {
+          if (!runtime || seen.has(runtime)) return false;
+          seen.add(runtime);
+          return true;
+        });
+      };
       const runtimeKeyFor = (entry, runtime) => (
-        [...(entry?.mechanicsFieldViewRuntimes?.entries?.() ?? [])].find(
+        mechanicsFieldRuntimeEntries(entry).find(
           ([, candidate]) => candidate === runtime
         )?.[0] ?? null
+      );
+      const runtimeCurrentForKey = (entry, runtimeKey, runtime) => (
+        entry?.mechanicsFieldPairRuntimes?.get(runtimeKey) === runtime
+        || entry?.mechanicsFieldViewRuntimes?.get(runtimeKey) === runtime
       );
       const mechanicsFieldRuntimeRecord = (
         entry,
@@ -552,8 +571,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         createdRatio: record.createdRatio,
         arenaCount: record.arenaCount,
         currentForKey:
-          record.entry?.mechanicsFieldViewRuntimes?.get(record.runtimeKey)
-            === record.runtime,
+          runtimeCurrentForKey(
+            record.entry,
+            record.runtimeKey,
+            record.runtime
+          ),
         activeExecutionCount:
           record.runtime.activeExecutionCount?.() ?? null,
         usableArenaCount: record.runtime.usableArenaCount?.() ?? null,
@@ -640,8 +662,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         }
       };
       const instrumentMechanicsFieldRuntimes = (entry) => {
-        for (const [runtimeKey, runtime] of
-          entry?.mechanicsFieldViewRuntimes?.entries?.() ?? []) {
+        for (const [runtimeKey, runtime] of mechanicsFieldRuntimeEntries(entry)) {
           const runtimeRecord = mechanicsFieldRuntimeRecord(
             entry,
             runtime,
@@ -843,7 +864,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           })
         ),
         mechanicsFieldRuntimes: [
-          ...(entry?.mechanicsFieldViewRuntimes?.entries?.() ?? [])
+          ...mechanicsFieldRuntimeEntries(entry)
         ].map(([runtimeKey, runtime]) => ({
           runtimeKey,
           arenaCount: runtime?.arenaCount ?? null,
@@ -1034,6 +1055,16 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           assignmentBufferByteLength: assignmentRows.byteLength,
           sourceStateBuffer: sphParticleUpload.stateBuffer,
           sourceStateBufferBorrowed: true,
+          sourceStateBufferByteLength:
+            sphParticleUpload.stateBufferByteLength,
+          sourceThermoBuffer: sphParticleUpload.thermoBuffer,
+          sourceThermoBufferBorrowed: true,
+          sourceThermoBufferByteLength:
+            sphParticleUpload.thermoBufferByteLength,
+          sourceIdentityBuffer: sphParticleUpload.identityBuffer,
+          sourceIdentityBufferBorrowed: true,
+          sourceIdentityBufferByteLength:
+            sphParticleUpload.identityBufferByteLength,
           sourceMechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
           sourceMechanicsBufferBorrowed: true,
           sourceMechanicsBufferByteLength:
@@ -1061,11 +1092,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           particleCount,
           particleIdentityBuffer: sphParticleUpload.identityBuffer,
           particleIdentityStrideWords: 1,
-          particleBufferSet: sphParticleUpload,
             mechanicsLevels: [
-              { selectedLevel: 0, mechanicsGrid: fineGrid },
-              { selectedLevel: 1, mechanicsGrid: coarseGrid }
+            { selectedLevel: 0, mechanicsGrid: fineGrid },
+            { selectedLevel: 1, mechanicsGrid: coarseGrid }
             ],
+            mechanicsFieldPairV2Enabled: true,
             phaseVolumeInterfaceProposalEnabled: true
         });
         requireTrue(
@@ -1195,9 +1226,11 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                   oldDestroyedBeforeSuccessor:
                     oldRuntimeRecord.destroyed === true,
                   newRuntimeCurrentForKey:
-                    directRuntimeEntry.mechanicsFieldViewRuntimes.get(
-                      newRuntimeRecord.runtimeKey
-                    ) === successorLevel.runtime
+                    runtimeCurrentForKey(
+                      directRuntimeEntry,
+                      newRuntimeRecord.runtimeKey,
+                      successorLevel.runtime
+                    )
                 };
                 mechanicsFieldRuntimeRollovers.push(rollover);
                 mechanicsFieldEvents.push({
@@ -1234,6 +1267,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             fineMechanicsGrid: fineGrid,
             coarseMechanicsGrid: coarseGrid,
             boxDimsM: [2, 2, 2],
+            mechanicsFieldPairV2Enabled: true,
             phaseVolumeInterfaceTransportEnabled: true,
             spatialEpochGenerationRunner: diagnosticSpatialGenerationRunner,
             mechanicsEpochMode:
@@ -2217,6 +2251,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       operationCount: result.operationCount,
       epochCount: result.epochCount,
       workspaceBuildCount: result.workspaceBuildCount,
+      finalVelocityRows: [
+        result.finalState.slice(4, 7),
+        result.finalState.slice(12, 15)
+      ],
       compactRefluxEvidenceByteLength:
         result.compactRefluxEvidenceByteLength,
       fullRefluxEvidenceByteLength: result.fullRefluxEvidenceByteLength,
@@ -2394,10 +2432,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
     );
   }
   if (REQUESTED_RATIOS.join(',') === '1,2,3,4') {
-    assert.equal(runtimeLifecycle.runtimeCount, 4);
+    assert.equal(runtimeLifecycle.runtimeCount, 2);
     assert.equal(runtimeLifecycle.rolloverCount, 2);
-    assert.equal(runtimeLifecycle.destroyEvents.length, 2);
-    assert.equal(runtimeLifecycle.runtimeGroups.length, 2);
+    assert.equal(runtimeLifecycle.destroyEvents.length, 1);
+    assert.equal(runtimeLifecycle.runtimeGroups.length, 1);
     assert.equal(
       runtimeLifecycle.runtimeGroups.every(
         (group) => group.runtimeIds.length === 2
@@ -2428,19 +2466,15 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         destroyed: runtime.destroyed
       }));
     assert.deepEqual(currentRuntimeShape(1), [
-      { active: 0, usable: 2, retired: 1, destroyed: false },
       { active: 0, usable: 2, retired: 1, destroyed: false }
     ]);
     assert.deepEqual(currentRuntimeShape(2), [
-      { active: 0, usable: 1, retired: 2, destroyed: false },
       { active: 0, usable: 1, retired: 2, destroyed: false }
     ]);
     assert.deepEqual(currentRuntimeShape(3), [
-      { active: 0, usable: 2, retired: 1, destroyed: false },
       { active: 0, usable: 2, retired: 1, destroyed: false }
     ]);
     assert.deepEqual(currentRuntimeShape(4), [
-      { active: 0, usable: 1, retired: 2, destroyed: false },
       { active: 0, usable: 1, retired: 2, destroyed: false }
     ]);
     assert.deepEqual(
@@ -2454,10 +2488,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           result.mechanicsFieldRuntimeLifecycleCheckpoint.destroyEventCount
       })),
       [
-        { ratio: 1, runtimeCount: 2, rolloverCount: 0, destroyEventCount: 0 },
-        { ratio: 2, runtimeCount: 2, rolloverCount: 0, destroyEventCount: 0 },
-        { ratio: 3, runtimeCount: 4, rolloverCount: 2, destroyEventCount: 2 },
-        { ratio: 4, runtimeCount: 4, rolloverCount: 2, destroyEventCount: 2 }
+        { ratio: 1, runtimeCount: 1, rolloverCount: 0, destroyEventCount: 0 },
+        { ratio: 2, runtimeCount: 1, rolloverCount: 0, destroyEventCount: 0 },
+        { ratio: 3, runtimeCount: 2, rolloverCount: 2, destroyEventCount: 1 },
+        { ratio: 4, runtimeCount: 2, rolloverCount: 2, destroyEventCount: 1 }
       ]
     );
   }

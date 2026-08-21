@@ -10,6 +10,11 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from '../src/runtime/sph/sphGpuBuffers.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+  registerResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
@@ -2312,6 +2317,140 @@ test('SPH render field WebGPU no-full handoff can avoid a CPU queue fence', asyn
   assert.equal(result.surfaceBuffer.destroyed, false);
 });
 
+test('SPH render field GPU-authenticates the full resident product-history commit prefix without a readback', async () => {
+  const {
+    device,
+    copies,
+    createdBuffers,
+    shaderModules,
+    bindGroups,
+    queueWrites
+  } = fakeSurfaceDrawDevice({});
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'h2|h2|gas',
+    material: 'h2',
+    phase: 'gas',
+    renderKey: 'h2',
+    resolution: 8,
+    isolation: 20,
+    subtract: 5,
+    radiusNorm: 0.2,
+    colorLinear: [0.6, 0.8, 1]
+  }]);
+  const rowCapacity = 4;
+  const productEventBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'test-resident-product-event-buffer',
+    size: rowCapacity
+      * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  }), device);
+  const countControlBuffer = device.createBuffer({
+    label: 'test-resident-product-count-control',
+    size: 512,
+    usage: 0
+  });
+  const productEventSource = { productEventBuffer };
+  const authority = registerResidentProductEventCountAuthority(productEventSource, {
+    device,
+    controlBuffer: countControlBuffer,
+    controlOffsetBytes: 256,
+    rowCapacity,
+    rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    generation: 7,
+    seal: 11
+  });
+
+  const result = await buildSphRenderFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    productEventBuffer,
+    productEventSource,
+    surfaceTable,
+    particleCount: packed.particleCount,
+    productEventCount: rowCapacity,
+    readbackMode: 'no-full-readback',
+    waitForQueueCompletion: false,
+    deferCleanup: false
+  });
+
+  assert.equal(copies.length, 0, 'the live count must never be copied out of its control record');
+  const renderBindGroup = bindGroups.find((bindGroup) => (
+    bindGroup.entries.some((entry) => (
+      entry.binding === 5
+      && entry.resource.buffer === countControlBuffer
+    ))
+  ));
+  assert.ok(renderBindGroup, 'the exact resident history control slice must be shader-bound');
+  const controlEntry = renderBindGroup.entries.find((entry) => entry.binding === 5);
+  assert.equal(controlEntry.resource.offset, 256);
+  assert.equal(
+    controlEntry.resource.size,
+    SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+  );
+  const gateEntry = renderBindGroup.entries.find((entry) => entry.binding === 6);
+  const gateWrite = queueWrites.find((write) => write.buffer === gateEntry.resource.buffer);
+  assert.deepEqual(Array.from(new Uint32Array(gateWrite.snapshot)), [
+    1,
+    authority.expectedMagic,
+    authority.expectedVersion,
+    authority.expectedReadyStatus,
+    authority.expectedGeneration,
+    authority.expectedSeal,
+    authority.expectedRowCapacity,
+    authority.expectedRowStrideVec4
+  ]);
+  const renderShader = shaderModules.find((module) => module.label === 'ulg-sph-render-field');
+  assert.ok(renderShader);
+  for (let word = 0; word < 8; word += 1) {
+    assert.match(
+      renderShader.code,
+      new RegExp(`product_history_control\\[${word}u\\]`),
+      `control prefix word ${word} must be authenticated or consumed in WGSL`
+    );
+  }
+  assert.match(renderShader.code, /product_history_control\[3u\] <= product_history_control\[4u\]/);
+  assert.match(renderShader.code, /product_history_control\[2u\] == product_history_gate\.expected_ready_status/);
+  assert.match(renderShader.code, /render_field_cells\[out_index \* 2u\] = vec4<f32>\(0\.0\)/);
+  assert.ok(
+    renderShader.code.indexOf('if (!render_product_history_ready())')
+      < renderShader.code.indexOf('for (var particle_index'),
+    'the gate must run before either resident source is consumed'
+  );
+  assert.equal(result.productEventCountAuthority, 'gpu-authored-filtered-live-prefix');
+  assert.equal(result.productEventControlAuthentication, 'full-eight-word-gpu-commit-gate');
+  assert.equal(result.productEventControlHostObserved, false);
+  assert.equal(result.productEventCountHostKnown, false);
+  assert.equal(result.productEventRowCapacity, rowCapacity);
+  assert.equal(result.productEventBufferBound, true);
+  assert.ok(
+    !createdBuffers.some((buffer) => /readback/.test(buffer.label)),
+    'the direct GPU commit-gate path must not allocate a CPU readback buffer'
+  );
+
+  await assert.rejects(
+    () => buildSphRenderFieldWebGpu({
+      device,
+      renderRows: extracted.renderRows,
+      productEventBuffer,
+      productEventSource: {
+        ...productEventSource,
+        productEventLiveCountAuthority:
+          productEventSource.productEventLiveCountAuthority
+      },
+      surfaceTable,
+      particleCount: packed.particleCount,
+      productEventCount: rowCapacity,
+      readbackMode: 'no-full-readback',
+      waitForQueueCompletion: false,
+      deferCleanup: false
+    }),
+    /torn product-event live-count authority/
+  );
+});
+
 test('SPH render field WebGPU can write into a borrowed reusable field buffer', async () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
@@ -2328,7 +2467,7 @@ test('SPH render field WebGPU can write into a borrowed reusable field buffer', 
       colorLinear: [1, 0.7, 0.1]
     }
   ]);
-  const { device, bindGroups } = fakeSurfaceDrawDevice({
+  const { device, bindGroups, createdBuffers, queueWrites } = fakeSurfaceDrawDevice({
     drawRows: new Float32Array(),
     compactedVertexRows: new Float32Array()
   });
@@ -2358,6 +2497,20 @@ test('SPH render field WebGPU can write into a borrowed reusable field buffer', 
   assert.equal(result.fieldRowsBufferReused, true);
   assert.equal(result.fieldRowsBufferOwnedByResult, false);
   assert.equal(bindGroups.at(-1).entries[2].resource.buffer, targetFieldRowsBuffer);
+  assert.equal(result.productEventControlAuthentication, 'not-required-zero-control');
+  const disabledControl = createdBuffers.find((buffer) => (
+    buffer.label === 'ulg-sph-render-field-product-history-control-disabled'
+  ));
+  assert.equal(disabledControl.size, SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES);
+  const gateParams = createdBuffers.find((buffer) => (
+    buffer.label === 'ulg-sph-render-field-product-history-gate-params'
+  ));
+  const gateWrite = queueWrites.find((write) => write.buffer === gateParams);
+  assert.deepEqual(
+    Array.from(new Uint32Array(gateWrite.snapshot)),
+    Array(8).fill(0),
+    'legacy host/nonresident execution must bind an all-zero disabled gate'
+  );
 
   result.releaseRenderFieldBufferLeases();
   result.destroyRenderFieldBuffers({ releaseLeases: true });

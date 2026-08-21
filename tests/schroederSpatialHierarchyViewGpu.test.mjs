@@ -10,6 +10,7 @@ import {
   ULG_SCHROEDER_SPATIAL_HIERARCHY_VIEW_SCHEMA,
   createSchroederSpatialHierarchyViewLayout,
   createSchroederSpatialHierarchyViewPlan,
+  resolveSchroederSpatialFirstMomentToleranceM,
   validateSchroederSpatialHierarchyViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialHierarchyView.js';
 import {
@@ -321,6 +322,29 @@ test('two-level hierarchy ABI has compact CSR ranges and one fail-closed dispatc
   });
   assert.equal(plan.schema, ULG_SCHROEDER_SPATIAL_HIERARCHY_VIEW_SCHEMA);
   assert.equal(plan.maxMechanicsLevelCount, 2);
+  assert.equal(
+    plan.firstMomentToleranceM,
+    resolveSchroederSpatialFirstMomentToleranceM({
+      fineGrid: plan.fineGrid,
+      coarseGrid: plan.coarseGrid
+    })
+  );
+  const productionScaleTolerance = resolveSchroederSpatialFirstMomentToleranceM({
+    fineGrid: {
+      gridNodeCount: 86 ** 3,
+      gridDims: [86, 86, 86],
+      gridShift: 1,
+      gridSpacingM: 0.049628039271952
+    },
+    coarseGrid: {
+      gridNodeCount: 45 ** 3,
+      gridDims: [45, 45, 45],
+      gridShift: 1,
+      gridSpacingM: Math.fround(0.049628039271952 * 2)
+    }
+  });
+  assert.ok(productionScaleTolerance >= 2.2186597448126122e-7);
+  assert.ok(productionScaleTolerance < 1e-4);
   assert.throws(
     () => createSchroederSpatialHierarchyViewPlan({
       ...plan,
@@ -389,6 +413,42 @@ test('hierarchy runtime encodes persistent compact parent-child CSR and retires 
   assert.equal(await runtime.releaseExecutionAfter(execution, Promise.resolve()), true);
   assert.equal(execution.released, true);
   assert.equal(runtime.activeExecutionCount(), 0);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('hierarchy arenas reuse exact immutable bind groups', () => {
+  const device = createFakeDevice();
+  const inputs = createEncodedInputs(device);
+  const runtime = createSchroederSpatialHierarchyViewGpu(device, {
+    fineGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 1,
+      gridSpacingM: 0.25
+    },
+    coarseGrid: {
+      gridNodeCount: 125,
+      gridDims: [5, 5, 5],
+      gridShift: 1,
+      gridSpacingM: 0.5
+    },
+    arenaCount: 1,
+    label: 'test-hierarchy-bind-cache'
+  });
+  const first = runtime.encode(createFakeEncoder(), inputs);
+  const explicitBindGroupCount = device.bindGroups.filter((group) => (
+    /test-hierarchy-bind-cache-arena-0-.*-bindings/.test(group.label)
+  )).length;
+  assert.equal(explicitBindGroupCount, 8);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(createFakeEncoder(), inputs);
+  assert.equal(
+    device.bindGroups.filter((group) => (
+      /test-hierarchy-bind-cache-arena-0-.*-bindings/.test(group.label)
+    )).length,
+    explicitBindGroupCount
+  );
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
   assert.equal(runtime.destroy(), true);
 });
 

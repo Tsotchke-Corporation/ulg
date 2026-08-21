@@ -18,6 +18,11 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import {
+  productEventLiveCountCopyDescriptor,
+  residentProductEventCountAuthorityRegistered,
+  validateProductEventLiveCountCopyDescriptor
+} from './sphResidentProductHistoryGpu.js';
 
 export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_SCHEMA =
   'peercompute.ulg.schroeder-committed-successor-source-family.v1';
@@ -39,6 +44,8 @@ export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_SEAL_SCHEMA =
   'peercompute.ulg.schroeder-successor-level-assignment-seal.v1';
 export const ULG_SCHROEDER_SPATIAL_POSITION_TRANSITION_RECEIPT_SCHEMA =
   'peercompute.ulg.schroeder-spatial-position-transition-receipt.v1';
+export const ULG_SCHROEDER_SPATIAL_PRODUCT_HISTORY_COMMIT_GATE_SCHEMA =
+  'peercompute.ulg.schroeder-product-history-commit-gate.v1';
 
 export const SCHROEDER_SPATIAL_POSITION_TRANSITION_MAGIC = 0x53535058;
 export const SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION = 1;
@@ -72,6 +79,7 @@ const successorPublicationReceiptRecords = new WeakMap();
 const successorLevelAssignmentSealRecords = new WeakMap();
 const positionTransitionReceiptRecords = new WeakMap();
 const finalizedPositionTransitionReceipts = new WeakSet();
+const productHistoryCommitGateRecords = new WeakMap();
 let nextPositionTransitionSubmissionNonce = 0;
 
 const POSITION_TRANSITION_WORKGROUP_SIZE = 64;
@@ -936,6 +944,150 @@ function normalizedReason(value, fallback) {
   return fallback;
 }
 
+function createProductHistoryCommitGate(nextParticleUploads, device) {
+  const residentProductMass = nextParticleUploads?.residentProductMass ?? null;
+  if (!residentProductMass) return null;
+  const descriptor = productEventLiveCountCopyDescriptor(
+    residentProductMass,
+    device
+  );
+  if (!descriptor) {
+    if (
+      residentProductMass.productEventLiveCountAuthority
+      || residentProductEventCountAuthorityRegistered(residentProductMass)
+    ) {
+      throw sourceFamilyError(
+        'successor product-history authority is revoked, copied, or not same-device',
+        'PRODUCT_HISTORY_COMMIT_GATE'
+      );
+    }
+    // Host-count product histories predate the resident GPU-count ABI. They
+    // remain compatible, but cannot manufacture a GPU-conditioned gate.
+    return null;
+  }
+  const gate = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_PRODUCT_HISTORY_COMMIT_GATE_SCHEMA,
+    status: 'gpu-conditioned-publication-commit-pending',
+    ready: false,
+    authenticated: true,
+    gpuConditioned: true,
+    hostObserved: false,
+    deviceId: webGpuDeviceId(device),
+    residentProductMass,
+    productEventBuffer: residentProductMass.productEventBuffer,
+    controlBuffer: descriptor.controlBuffer,
+    controlOffsetBytes: descriptor.controlOffsetBytes,
+    controlPrefixByteLength: descriptor.controlPrefixByteLength,
+    expectedMagic: descriptor.expectedMagic,
+    expectedVersion: descriptor.expectedVersion,
+    expectedReadyStatus: descriptor.expectedReadyStatus,
+    expectedFailedStatus: descriptor.expectedFailedStatus,
+    expectedGeneration: descriptor.expectedGeneration,
+    expectedSeal: descriptor.expectedSeal,
+    expectedRowCapacity: descriptor.expectedRowCapacity,
+    expectedRowStrideVec4: descriptor.expectedRowStrideVec4,
+    failurePolicy:
+      'fail-closed-gpu-consumers-no-host-observation-no-full-rollback'
+  });
+  productHistoryCommitGateRecords.set(gate, Object.freeze({
+    device,
+    nextParticleUploads,
+    residentProductMass,
+    productEventBuffer: residentProductMass.productEventBuffer,
+    descriptor
+  }));
+  return gate;
+}
+
+export function validateSchroederSpatialProductHistoryCommitGate(
+  gate,
+  {
+    device = null,
+    nextParticleUploads = null,
+    residentProductMass = null
+  } = {}
+) {
+  if (gate == null) {
+    return nextParticleUploads?.residentProductMass == null
+      && residentProductMass == null;
+  }
+  const record = productHistoryCommitGateRecords.get(gate);
+  if (
+    !record
+    || !Object.isFrozen(gate)
+    || gate.schema
+      !== ULG_SCHROEDER_SPATIAL_PRODUCT_HISTORY_COMMIT_GATE_SCHEMA
+    || gate.status !== 'gpu-conditioned-publication-commit-pending'
+    || gate.ready !== false
+    || gate.authenticated !== true
+    || gate.gpuConditioned !== true
+    || gate.hostObserved !== false
+    || (device != null && record.device !== device)
+    || (
+      nextParticleUploads != null
+      && record.nextParticleUploads !== nextParticleUploads
+    )
+    || (
+      residentProductMass != null
+      && record.residentProductMass !== residentProductMass
+    )
+    || record.nextParticleUploads?.residentProductMass
+      !== record.residentProductMass
+    || record.nextParticleUploads?.productHistoryCommitGate !== gate
+    || record.residentProductMass?.productEventBuffer
+      !== record.productEventBuffer
+    || !validateProductEventLiveCountCopyDescriptor(record.descriptor, {
+      handle: record.residentProductMass,
+      device: record.device
+    })
+  ) {
+    return false;
+  }
+  const descriptor = record.descriptor;
+  return Boolean(
+    gate.deviceId === webGpuDeviceId(record.device)
+    && gate.residentProductMass === record.residentProductMass
+    && gate.productEventBuffer === record.productEventBuffer
+    && gate.controlBuffer === descriptor.controlBuffer
+    && gate.controlOffsetBytes === descriptor.controlOffsetBytes
+    && gate.controlPrefixByteLength === descriptor.controlPrefixByteLength
+    && gate.expectedMagic === descriptor.expectedMagic
+    && gate.expectedVersion === descriptor.expectedVersion
+    && gate.expectedReadyStatus === descriptor.expectedReadyStatus
+    && gate.expectedFailedStatus === descriptor.expectedFailedStatus
+    && gate.expectedGeneration === descriptor.expectedGeneration
+    && gate.expectedSeal === descriptor.expectedSeal
+    && gate.expectedRowCapacity === descriptor.expectedRowCapacity
+    && gate.expectedRowStrideVec4 === descriptor.expectedRowStrideVec4
+  );
+}
+
+function sourceFamilyProductHistoryCommitGatePreserved(
+  sourceFamily,
+  record
+) {
+  const gate = sourceFamily?.productHistoryCommitGate ?? null;
+  const residentProductMass =
+    record?.nextParticleUploads?.residentProductMass ?? null;
+  if (!gate) {
+    return record?.productHistoryCommitGate == null
+      && (
+        residentProductMass == null
+        || !residentProductEventCountAuthorityRegistered(
+          residentProductMass
+        )
+      );
+  }
+  return Boolean(
+    record?.productHistoryCommitGate === gate
+    && validateSchroederSpatialProductHistoryCommitGate(gate, {
+      device: record.device,
+      nextParticleUploads: record.nextParticleUploads,
+      residentProductMass
+    })
+  );
+}
+
 function exactSourceFamilyRecord(
   sourceFamily,
   { device = null, requireDevice = false } = {}
@@ -1033,6 +1185,62 @@ function requireActiveSourceFamily(record) {
   }
 }
 
+function requireResolvableSourceFamilyLease(
+  sourceFamily,
+  record,
+  consumerLease
+) {
+  const leaseRecord = sourceFamilyLeaseRecords.get(consumerLease);
+  if (
+    !leaseRecord
+    || consumerLease?.schema
+      !== ULG_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_SCHEMA
+    || !Object.isFrozen(consumerLease)
+    || leaseRecord.sourceFamily !== sourceFamily
+    || leaseRecord.sourceFamilyRecord !== record
+  ) {
+    throw sourceFamilyError(
+      'lease does not identify this exact successor source family',
+      'LEASE_IDENTITY'
+    );
+  }
+  if (leaseRecord.released) {
+    throw sourceFamilyError(
+      'successor source family lease was already released',
+      'LEASE_RELEASED'
+    );
+  }
+  if (leaseRecord.releasePending) {
+    throw sourceFamilyError(
+      'successor source family lease already has a queue-fenced release pending',
+      'LEASE_RELEASE_PENDING'
+    );
+  }
+  if (record.leaseCount < 1) {
+    throw sourceFamilyError(
+      'successor source family lease accounting underflow',
+      'LEASE_ACCOUNTING'
+    );
+  }
+  if (record.deviceLost) {
+    destroyOwnedSuccessorLevelAssignment(record);
+    throw sourceFamilyError(
+      `successor source family is quarantined after device loss: ${record.reason}`,
+      'DEVICE_LOST'
+    );
+  }
+  if (
+    record.retired
+    || (!record.active && record.retirementRequested !== true)
+  ) {
+    throw sourceFamilyError(
+      `successor source family is retired: ${record.reason}`,
+      'RETIRED'
+    );
+  }
+  return leaseRecord;
+}
+
 function retirementReceipt(sourceFamily, record, status) {
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_SUCCESSOR_RETIREMENT_RECEIPT_SCHEMA,
@@ -1118,7 +1326,8 @@ function reserveSuccessorPublicationSlot(nextParticleUploads) {
   }
   for (const key of [
     'schroederSpatialSuccessorSourceFamily',
-    'schroederSpatialSuccessorLevelAssignment'
+    'schroederSpatialSuccessorLevelAssignment',
+    'productHistoryCommitGate'
   ]) {
     const existing = Object.getOwnPropertyDescriptor(nextParticleUploads, key);
     if (existing) {
@@ -1158,7 +1367,8 @@ function preparedUploadFamilyPreserved(
   nextParticleUploads,
   sourceFamily,
   buffers,
-  successorLevelAssignment
+  successorLevelAssignment,
+  productHistoryCommitGate = null
 ) {
   const sphUpload = nextParticleUploads?.sphParticleUpload;
   const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload;
@@ -1177,10 +1387,89 @@ function preparedUploadFamilyPreserved(
     ))
     && sphUpload.bufferFamilyGeneration === sourceFamily.storageGeneration
     && mlsUpload.bufferFamilyGeneration === sourceFamily.storageGeneration
+    && sourceFamily.productHistoryCommitGate === productHistoryCommitGate
+    && sourceFamilyProductHistoryCommitGatePreserved(sourceFamily, {
+      device: webGpuBufferDevice(buffers.stateBuffer),
+      nextParticleUploads,
+      productHistoryCommitGate
+    })
     && validateSchroederPostClosureLevelAssignment(
       successorLevelAssignment,
       { nextParticleUploads }
     )
+  );
+}
+
+const SPH_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS = Object.freeze([
+  'schema',
+  'status',
+  'particleCount',
+  'stateStrideBytes',
+  'thermoStrideBytes',
+  'identityStrideBytes',
+  'identitySchema',
+  'identityRequired',
+  'bufferFamilyGeneration',
+  'bufferFamilyGenerationStatus'
+]);
+const MLS_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS = Object.freeze([
+  'schema',
+  'status',
+  'particleCount',
+  'mechanicsStrideBytes',
+  'bufferFamilyGeneration',
+  'bufferFamilyGenerationStatus'
+]);
+
+function snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload) {
+  const snapshot = {};
+  for (const field of SPH_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS) {
+    snapshot[`sph:${field}`] = sphUpload?.[field];
+  }
+  for (const field of MLS_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS) {
+    snapshot[`mls:${field}`] = mlsUpload?.[field];
+  }
+  for (const field of EPOCH_FIELDS) {
+    snapshot[`sph:${field}`] = sphUpload?.[field];
+    snapshot[`mls:${field}`] = mlsUpload?.[field];
+  }
+  return Object.freeze(snapshot);
+}
+
+function successorUploadEnvelopePreserved(sourceFamily, record) {
+  const sphUpload = record.nextParticleUploads?.sphParticleUpload ?? null;
+  const mlsUpload =
+    record.nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  const snapshot = record.uploadEnvelope;
+  if (
+    !sphUpload
+    || !mlsUpload
+    || sphUpload !== record.sphUpload
+    || mlsUpload !== record.mlsUpload
+    || !snapshot
+    || sphUpload.stateBuffer !== record.buffers.stateBuffer
+    || sphUpload.thermoBuffer !== record.buffers.thermoBuffer
+    || sphUpload.identityBuffer !== record.buffers.identityBuffer
+    || mlsUpload.mechanicsBuffer !== record.buffers.mechanicsBuffer
+    || sphUpload.particleCount !== sourceFamily.particleCount
+    || mlsUpload.particleCount !== sourceFamily.particleCount
+    || !EPOCH_FIELDS.every((field) => (
+      sphUpload[field] === sourceFamily.successorEpochIdentity[field]
+      && mlsUpload[field] === sourceFamily.successorEpochIdentity[field]
+    ))
+  ) {
+    return false;
+  }
+  for (const [key, expected] of Object.entries(snapshot)) {
+    const separator = key.indexOf(':');
+    const owner = key.slice(0, separator);
+    const field = key.slice(separator + 1);
+    const upload = owner === 'sph' ? sphUpload : mlsUpload;
+    if (!Object.is(upload?.[field], expected)) return false;
+  }
+  return sourceFamilyProductHistoryCommitGatePreserved(
+    sourceFamily,
+    record
   );
 }
 
@@ -1198,7 +1487,8 @@ function newSourceFamilyRecord({
   buffers,
   successorLevelAssignment = null,
   successorLevelAssignmentSeal = null,
-  storageAllocation = null
+  storageAllocation = null,
+  productHistoryCommitGate = null
 }) {
   return {
     device,
@@ -1212,9 +1502,11 @@ function newSourceFamilyRecord({
     storageAllocation,
     sphUpload,
     mlsUpload,
+    uploadEnvelope: snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload),
     buffers,
     successorLevelAssignment,
     successorLevelAssignmentSeal,
+    productHistoryCommitGate,
     ownsSuccessorLevelAssignment:
       typeof successorLevelAssignment?.destroyAssignmentBuffer === 'function',
     successorLevelAssignmentRetirementScheduled: false,
@@ -1237,6 +1529,7 @@ function publicationReceipt({
   status,
   published,
   sourceFamily = null,
+  productHistoryCommitGate = null,
   reason = null,
   publicationRecord = null
 }) {
@@ -1245,6 +1538,7 @@ function publicationReceipt({
     status,
     published,
     sourceFamily,
+    productHistoryCommitGate,
     reason
   });
   if (publicationRecord) {
@@ -1276,6 +1570,26 @@ function retireUnpublishedSuccessorLevelAssignment(record) {
   };
   if (fence?.then) Promise.resolve(fence).then(retire, retire);
   else retire();
+}
+
+function detachUnpublishedProductHistoryCommitGate(record) {
+  if (!record?.productHistoryCommitGate) return false;
+  try {
+    if (
+      record.nextParticleUploads?.productHistoryCommitGate
+        === record.productHistoryCommitGate
+    ) {
+      return Reflect.set(
+        record.nextParticleUploads,
+        'productHistoryCommitGate',
+        null
+      );
+    }
+  } catch {
+    // The rejected envelope remains unpublishable; never overwrite a foreign
+    // accessor or replacement while cleaning module-owned pending identity.
+  }
+  return false;
 }
 
 /**
@@ -1520,6 +1834,34 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     rawSuccessorLevelAssignment?.destroyAssignmentBuffer?.();
     throw error;
   }
+  let productHistoryCommitGate = null;
+  try {
+    productHistoryCommitGate = createProductHistoryCommitGate(
+      nextParticleUploads,
+      device
+    );
+    if (
+      productHistoryCommitGate
+      && (
+        nextParticleUploads.productHistoryCommitGate !== null
+        || !Reflect.set(
+          nextParticleUploads,
+          'productHistoryCommitGate',
+          productHistoryCommitGate
+        )
+        || nextParticleUploads.productHistoryCommitGate
+          !== productHistoryCommitGate
+      )
+    ) {
+      throw sourceFamilyError(
+        'successor product-history commit gate could not reserve exact envelope identity',
+        'PRODUCT_HISTORY_COMMIT_GATE'
+      );
+    }
+  } catch (error) {
+    rawSuccessorLevelAssignment?.destroyAssignmentBuffer?.();
+    throw error;
+  }
   const successorLevelAssignmentSeal = Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_SEAL_SCHEMA,
     status: 'schroeder-successor-level-assignment-exact-lineage-sealed',
@@ -1564,6 +1906,10 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
             ? 'conservative-mechanics-integration-transition'
             : 'authenticated-topology-or-invariant-transition')),
     publicationAuthority: 'spatial-epoch-transaction-preflight-and-commit',
+    productHistoryCommitGate,
+    productHistoryCommitStatus:
+      productHistoryCommitGate?.status ?? null,
+    productHistoryCommitPending: Boolean(productHistoryCommitGate),
     exactBufferFamilyAuthenticated: true,
     storageAllocationAuthenticated: true,
     topologyTransitionAuthenticated: true,
@@ -1623,7 +1969,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       sourceFamily.successorLevelAssignmentGenerationId,
     storageGeneration: successorEpochIdentity.storageGeneration,
     positionEpoch: successorEpochIdentity.positionEpoch,
-    topologyEpoch: successorEpochIdentity.topologyEpoch
+    topologyEpoch: successorEpochIdentity.topologyEpoch,
+    productHistoryCommitGate
   });
   const sourceFamilyRecord = newSourceFamilyRecord({
     device,
@@ -1639,7 +1986,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     buffers,
     successorLevelAssignment,
     successorLevelAssignmentSeal,
-    storageAllocation: allocation
+    storageAllocation: allocation,
+    productHistoryCommitGate
   });
   successorPublicationPlanRecords.set(plan, {
     transaction,
@@ -1651,6 +1999,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     sourceFamily,
     successorLevelAssignment,
     successorLevelAssignmentSeal,
+    productHistoryCommitGate,
     sourceFamilyRecord,
     attempted: false
   });
@@ -1681,6 +2030,7 @@ export function abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(
     reason,
     'prepared successor publication abandoned'
   );
+  detachUnpublishedProductHistoryCommitGate(prepared.sourceFamilyRecord);
   retireUnpublishedSuccessorLevelAssignment(prepared.sourceFamilyRecord);
   return true;
 }
@@ -1772,6 +2122,7 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       sourceFamily,
       successorLevelAssignment,
       successorLevelAssignmentSeal,
+      productHistoryCommitGate,
       sourceFamilyRecord
     } = prepared;
     if (
@@ -1793,7 +2144,8 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         nextParticleUploads,
         sourceFamily,
         sourceFamilyRecord.buffers,
-        successorLevelAssignment
+        successorLevelAssignment,
+        productHistoryCommitGate
       )
       || !validateSchroederSpatialSuccessorLevelAssignmentSeal(
         successorLevelAssignmentSeal,
@@ -1806,6 +2158,8 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       )
       || nextParticleUploads.schroederSpatialSuccessorSourceFamily !== null
       || nextParticleUploads.schroederSpatialSuccessorLevelAssignment !== null
+      || nextParticleUploads.productHistoryCommitGate
+        !== productHistoryCommitGate
       || !Reflect.set(
         nextParticleUploads,
         'schroederSpatialSuccessorLevelAssignment',
@@ -1840,7 +2194,14 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
           null
         );
       }
+      if (
+        nextParticleUploads.productHistoryCommitGate
+          === productHistoryCommitGate
+      ) {
+        Reflect.set(nextParticleUploads, 'productHistoryCommitGate', null);
+      }
       retireUnpublishedSuccessorLevelAssignment(sourceFamilyRecord);
+      detachUnpublishedProductHistoryCommitGate(sourceFamilyRecord);
       return publicationReceipt({
         status: 'schroeder-successor-source-family-publication-rejected',
         published: false,
@@ -1856,6 +2217,7 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       status: 'schroeder-successor-source-family-published',
       published: true,
       sourceFamily,
+      productHistoryCommitGate,
       publicationRecord: {
         plan,
         commitReceipt,
@@ -1864,7 +2226,8 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         nextParticleUploads,
         sourceFamily,
         successorLevelAssignment,
-        successorLevelAssignmentSeal
+        successorLevelAssignmentSeal,
+        productHistoryCommitGate
       }
     });
   } catch (error) {
@@ -1878,6 +2241,9 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       preparedForFailure?.attempted === true
       && !sourceFamilyRecords.has(preparedForFailure.sourceFamily)
     ) {
+      detachUnpublishedProductHistoryCommitGate(
+        preparedForFailure.sourceFamilyRecord
+      );
       retireUnpublishedSuccessorLevelAssignment(
         preparedForFailure.sourceFamilyRecord
       );
@@ -1918,6 +2284,11 @@ export function validateSchroederSpatialSuccessorPublicationReceipt(
     && familyRecord.transaction === record.transaction
     && familyRecord.generation === record.generation
     && familyRecord.nextParticleUploads === record.nextParticleUploads
+    && receipt.productHistoryCommitGate
+      === record.productHistoryCommitGate
+    && family.productHistoryCommitGate
+      === record.productHistoryCommitGate
+    && sourceFamilyProductHistoryCommitGatePreserved(family, familyRecord)
     && record.nextParticleUploads?.schroederSpatialSuccessorSourceFamily
       === family
     && record.nextParticleUploads?.schroederSpatialSuccessorLevelAssignment
@@ -2054,6 +2425,29 @@ export function createSchroederSpatialSuccessorSourceFamily({
   const successorEpochIdentity = Object.freeze({ ...epochIdentity });
   const queryGeometry = exactQueryGeometry(generation);
   const ownerStages = normalizeComponentOwnerStages(componentOwnerStages);
+  reserveSuccessorPublicationSlot(nextParticleUploads);
+  const productHistoryCommitGate = createProductHistoryCommitGate(
+    nextParticleUploads,
+    device
+  );
+  if (
+    productHistoryCommitGate
+    && (
+      nextParticleUploads.productHistoryCommitGate !== null
+      || !Reflect.set(
+        nextParticleUploads,
+        'productHistoryCommitGate',
+        productHistoryCommitGate
+      )
+      || nextParticleUploads.productHistoryCommitGate
+        !== productHistoryCommitGate
+    )
+  ) {
+    throw sourceFamilyError(
+      'committed successor could not attach its exact product-history commit gate',
+      'PRODUCT_HISTORY_COMMIT_GATE'
+    );
+  }
   const sourceFamily = Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_SCHEMA,
     status: 'schroeder-committed-successor-source-family-authenticated',
@@ -2066,6 +2460,10 @@ export function createSchroederSpatialSuccessorSourceFamily({
     coordinateAuthority: 'final-successor-particle-state',
     positionAuthority: 'same-epoch-final-continuation-particle-state',
     publicationAuthority: 'spatial-epoch-transaction-commit',
+    productHistoryCommitGate,
+    productHistoryCommitStatus:
+      productHistoryCommitGate?.status ?? null,
+    productHistoryCommitPending: Boolean(productHistoryCommitGate),
     exactBufferFamilyAuthenticated: true,
     topologyTransitionAuthenticated: true,
     positionTransitionAuthenticated: false,
@@ -2102,7 +2500,9 @@ export function createSchroederSpatialSuccessorSourceFamily({
     topologyTransitionReceipt,
     sphUpload,
     mlsUpload,
+    uploadEnvelope: snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload),
     buffers,
+    productHistoryCommitGate,
     active: true,
     retired: false,
     deviceLost: false,
@@ -2455,21 +2855,45 @@ export function resolveSchroederSpatialSuccessorSourceFamily(
     stateBuffer = null,
     thermoBuffer = null,
     identityBuffer = null,
-    mechanicsBuffer = null
+    mechanicsBuffer = null,
+    sphParticleUpload = null,
+    mlsMpmParticleUpload = null,
+    consumerLease = null
   } = {}
 ) {
   const record = exactSourceFamilyRecord(sourceFamily, {
     device,
     requireDevice: true
   });
-  requireActiveSourceFamily(record);
+  if (consumerLease == null) {
+    requireActiveSourceFamily(record);
+  } else {
+    // begin-consumption immediately revokes new consumers, but the exact
+    // already-issued lease remains the authority for the in-flight next-tick
+    // mechanics admission until its queue-fenced release begins.
+    requireResolvableSourceFamilyLease(
+      sourceFamily,
+      record,
+      consumerLease
+    );
+  }
   const suppliedBuffers = { stateBuffer, thermoBuffer, identityBuffer, mechanicsBuffer };
   const suppliedMismatch = Object.entries(suppliedBuffers).some(
     ([name, buffer]) => buffer != null && buffer !== record?.buffers?.[name]
   );
+  const suppliedUploadMismatch = Boolean(
+    (sphParticleUpload != null && sphParticleUpload !== record.sphUpload)
+    || (
+      mlsMpmParticleUpload != null
+      && mlsMpmParticleUpload !== record.mlsUpload
+    )
+  );
   if (
     sourceFamily.particleCount !== particleCount
     || suppliedMismatch
+    || suppliedUploadMismatch
+    || !successorUploadEnvelopePreserved(sourceFamily, record)
+    || record.successorLevelAssignmentDestroyed === true
     || (
       sourceFamily.canonicalSpatialLevelAssignmentAvailable === true
       && (

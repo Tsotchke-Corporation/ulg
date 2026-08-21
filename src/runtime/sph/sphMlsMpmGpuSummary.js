@@ -26,6 +26,9 @@ import {
   releaseResidentBufferLease,
   summarizeResidentBufferLeaseLedger
 } from '../residentBufferLease.js';
+import {
+  createGpuReadbackTelemetryAccumulator
+} from './sphGpuReadbackTelemetry.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -71,12 +74,13 @@ function nowMs() {
 }
 
 function deferSubmittedSummaryCleanup(device, cleanup) {
-  if (typeof cleanup !== 'function') return;
+  if (typeof cleanup !== 'function') return false;
   if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
     device.queue.onSubmittedWorkDone().then(cleanup, cleanup);
-    return;
+    return true;
   }
   setTimeout(cleanup, 0);
+  return false;
 }
 
 function finiteNumber(value, fallback = 0) {
@@ -512,10 +516,26 @@ export async function runMlsMpmResidentSummaryWebGpu({
   cohortRanges = null,
   summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   activeGridDispatchPlan = false,
-  readCompactSummary = true
+  readCompactSummary = true,
+  compactSummaryReadbackClassification = 'unclassified'
 } = {}) {
   const summaryTimingStartMs = nowMs();
+  const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
+    scope: 'mls-mpm-resident-compact-summary'
+  });
   const shouldReadCompactSummary = readCompactSummary !== false;
+  const resolvedCompactSummaryReadbackClassification =
+    compactSummaryReadbackClassification === 'final-diagnostic'
+      ? 'final-diagnostic'
+      : 'unclassified';
+  if (
+    compactSummaryReadbackClassification !== 'unclassified'
+    && compactSummaryReadbackClassification !== 'final-diagnostic'
+  ) {
+    readbackTelemetry.markUnknown(
+      'mls-mpm-resident-compact-summary:invalid-readback-classification'
+    );
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmResidentSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -894,6 +914,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         particleCount,
         gridNodeCount,
         readbackMode: 'no-compact-summary-readback',
+        compactSummaryReadbackClassification:
+          resolvedCompactSummaryReadbackClassification,
         compactGpuSummaryAvailable: false,
         compactGpuSummaryStatus: 'not-read-no-compact-summary-readback',
         summaryScope: resolvedSummaryScope,
@@ -932,7 +954,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
         destroyActiveGridDispatchPlanBuffers: activeGridPlanState?.destroyActiveGridDispatchPlanBuffers
           ? () => activeGridPlanState.destroyActiveGridDispatchPlanBuffers()
           : null,
-        normalHotLoopReadbackFree: true,
+        ...readbackTelemetry.snapshot(),
         scientificValidation: false,
         sphValidation: false,
         phaseChangeValidation: false,
@@ -942,6 +964,19 @@ export async function runMlsMpmResidentSummaryWebGpu({
       return compactSummaryResult;
     }
     const mapAsyncStartMs = nowMs();
+    if (
+      resolvedCompactSummaryReadbackClassification === 'final-diagnostic'
+    ) {
+      readbackTelemetry.recordFinalDiagnosticMapAsync(
+        summaryByteLength,
+        'mls-mpm-final-compact-summary'
+      );
+    } else {
+      readbackTelemetry.recordMapAsync(
+        summaryByteLength,
+        'mls-mpm-compact-summary'
+      );
+    }
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
     const mapAsyncWaitMs = Math.max(0, nowMs() - mapAsyncStartMs);
     const decodeStartMs = nowMs();
@@ -981,6 +1016,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         : 'legacy-dense-grid-v1',
       compactReadbackFloatCount: MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
       compactReadbackByteLength: summaryByteLength,
+      compactSummaryReadbackClassification:
+        resolvedCompactSummaryReadbackClassification,
       queueCompletionStatus: 'readback-map-completed',
       queueCompletionMethod: 'mapAsync(readback-buffer)',
       compactPartialSummaryCount: partialCount,
@@ -1003,7 +1040,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
       activeGridDispatchPlanBuffersRetained: activeGridPlanState?.status === 'gpu-active-grid-summary-dispatch-plan-ready',
       destroyActiveGridDispatchPlanBuffers: activeGridPlanState?.destroyActiveGridDispatchPlanBuffers
         ? () => activeGridPlanState.destroyActiveGridDispatchPlanBuffers()
-        : null
+        : null,
+      ...readbackTelemetry.snapshot()
     };
     return compactSummaryResult;
   } finally {
@@ -1032,7 +1070,17 @@ export async function runMlsMpmResidentSummaryWebGpu({
       }
     };
     if (deferTemporaryCleanup) {
-      deferSubmittedSummaryCleanup(device, cleanupTemporaryBuffers);
+      const deferredHostQueueFenceScheduled =
+        deferSubmittedSummaryCleanup(device, cleanupTemporaryBuffers);
+      if (deferredHostQueueFenceScheduled) {
+        readbackTelemetry.recordDeferredCleanupHostQueueFence(
+          1,
+          'mls-mpm-summary-temporary-cleanup'
+        );
+        if (compactSummaryResult) {
+          Object.assign(compactSummaryResult, readbackTelemetry.snapshot());
+        }
+      }
     } else {
       cleanupTemporaryBuffers();
     }

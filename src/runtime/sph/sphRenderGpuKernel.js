@@ -78,6 +78,12 @@ import {
   releaseSchroederSpatialSuccessorSourceFamilyLease,
   resolveSchroederSpatialSuccessorSourceFamily
 } from './schroederSpatialSuccessorSourceFamily.js';
+import {
+  SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+  productEventLiveCountCopyDescriptor,
+  residentProductEventCountAuthorityRegistered,
+  validateProductEventLiveCountCopyDescriptor
+} from './sphResidentProductHistoryGpu.js';
 
 export {
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
@@ -1394,6 +1400,24 @@ function createRenderFieldParamsArray({
   view.setFloat32(24, Math.max(0, Number(renderSmearDtS) || 0), true);
   view.setFloat32(28, 0, true);
   return buffer;
+}
+
+function createRenderProductHistoryGateParamsArray(descriptor = null) {
+  // One 32-byte uniform shared with the shader's exact eight-word control
+  // check. Legacy host-known rows deliberately leave every word zero, with
+  // gateRequired=0; resident history fills only immutable expected values and
+  // never copies or observes the GPU-authored live count on the host.
+  const words = new Uint32Array(8);
+  if (!descriptor) return words;
+  words[0] = 1;
+  words[1] = descriptor.expectedMagic;
+  words[2] = descriptor.expectedVersion;
+  words[3] = descriptor.expectedReadyStatus;
+  words[4] = descriptor.expectedGeneration;
+  words[5] = descriptor.expectedSeal;
+  words[6] = descriptor.expectedRowCapacity;
+  words[7] = descriptor.expectedRowStrideVec4;
+  return words;
 }
 
 function createMaterialInterfaceCandidateParamsArray({
@@ -6493,6 +6517,7 @@ export async function buildSphRenderFieldWebGpu({
     renderRowsSource?.schroederSpatialSourceFamily ?? null,
   productEventRows = null,
   productEventBuffer = null,
+  productEventSource = null,
   surfaceTable,
   particleCount = null,
   productEventCount = null,
@@ -6561,6 +6586,51 @@ export async function buildSphRenderFieldWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedRenderRowsBuffer = renderRowsBuffer || null;
   const borrowedProductEventBuffer = productEventBuffer || null;
+  const productEventLiveCountDescriptor = borrowedProductEventBuffer
+    && productEventSource
+    ? productEventLiveCountCopyDescriptor(productEventSource, device)
+    : null;
+  if (
+    (
+      productEventSource?.productEventLiveCountAuthority
+      || residentProductEventCountAuthorityRegistered(productEventSource)
+    )
+    && !productEventLiveCountDescriptor
+  ) {
+    throw new TypeError(
+      'SPH render field rejected a torn product-event live-count authority'
+    );
+  }
+  if (
+    productEventLiveCountDescriptor
+    && (
+      !validateProductEventLiveCountCopyDescriptor(
+        productEventLiveCountDescriptor,
+        { handle: productEventSource, device }
+      )
+      || !(Number(borrowedProductEventBuffer?.size)
+        >= resolvedProductEventCount
+          * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+          * Float32Array.BYTES_PER_ELEMENT)
+      || productEventSource.productEventBuffer !== borrowedProductEventBuffer
+      || productEventLiveCountDescriptor.controlBuffer == null
+      || productEventLiveCountDescriptor.controlPrefixByteLength
+        !== SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+      || productEventLiveCountDescriptor.hostObserved !== false
+      || productEventLiveCountDescriptor.expectedRowCapacity
+        !== resolvedProductEventCount
+      || productEventLiveCountDescriptor.expectedRowStrideVec4
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+      || productEventLiveCountDescriptor.rowCapacity
+        !== resolvedProductEventCount
+      || productEventLiveCountDescriptor.rowStrideFloats
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    )
+  ) {
+    throw new TypeError(
+      'SPH render field GPU live-count authority does not match its product-event buffer capacity and row ABI'
+    );
+  }
   const renderFieldInputSource = borrowedRenderRowsBuffer
     ? (borrowedProductEventBuffer ? 'resident-render-rows-and-product-events-buffer' : 'resident-render-rows-buffer')
     : (borrowedProductEventBuffer ? 'uploaded-render-rows-with-resident-product-events' : 'uploaded-render-rows');
@@ -6619,6 +6689,23 @@ export async function buildSphRenderFieldWebGpu({
     productEventRows || new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     GPU_BUFFER_USAGE.COPY_SRC
   );
+  const productHistoryControlBufferOwned = !productEventLiveCountDescriptor;
+  const productHistoryControlBuffer = productEventLiveCountDescriptor?.controlBuffer
+    || createZeroedStorageBuffer(
+      device,
+      'ulg-sph-render-field-product-history-control-disabled',
+      SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+    );
+  const productHistoryGateParamsBuffer = device.createBuffer({
+    label: 'ulg-sph-render-field-product-history-gate-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(
+    productHistoryGateParamsBuffer,
+    0,
+    createRenderProductHistoryGateParamsArray(productEventLiveCountDescriptor)
+  );
   const surfaceBuffer = writeStorageBuffer(
     device,
     'ulg-sph-render-field-surfaces',
@@ -6651,14 +6738,16 @@ export async function buildSphRenderFieldWebGpu({
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'uniform'),
-    computeBufferBinding(4, 'read-only-storage')
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'uniform')
   ];
   const {
     pipeline,
     bindGroupLayout,
     cacheStatus: pipelineCacheStatus
   } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-render-field-v1',
+    cacheKey: 'ulg-sph-render-field-v2-product-history-gate',
     label: 'ulg-sph-render-field',
     code: sphRenderFieldWgsl,
     entryPoint: 'main',
@@ -6671,7 +6760,16 @@ export async function buildSphRenderFieldWebGpu({
       { binding: 1, resource: { buffer: surfaceBuffer } },
       { binding: 2, resource: { buffer: fieldRowsBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } },
-      { binding: 4, resource: { buffer: sourceProductEventBuffer } }
+      { binding: 4, resource: { buffer: sourceProductEventBuffer } },
+      {
+        binding: 5,
+        resource: {
+          buffer: productHistoryControlBuffer,
+          offset: productEventLiveCountDescriptor?.controlOffsetBytes ?? 0,
+          size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+        }
+      },
+      { binding: 6, resource: { buffer: productHistoryGateParamsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -6732,6 +6830,8 @@ export async function buildSphRenderFieldWebGpu({
     cleanupDone = true;
     if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
     if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
+    if (productHistoryControlBufferOwned) productHistoryControlBuffer.destroy?.();
+    productHistoryGateParamsBuffer.destroy?.();
     if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
     if (!retainFieldRowsBuffer && !fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
@@ -6823,6 +6923,19 @@ export async function buildSphRenderFieldWebGpu({
       schroederSpatialSourceFamily?.successorEpochIdentity ?? null,
     particleCount: resolvedParticleCount,
     productEventCount: borrowedProductEventBuffer || productEventRows ? resolvedProductEventCount : 0,
+    productEventCountAuthority: productEventLiveCountDescriptor
+      ? 'gpu-authored-filtered-live-prefix'
+      : 'host-exact-or-sparse-scan-bound',
+    productEventControlAuthentication: productEventLiveCountDescriptor
+      ? 'full-eight-word-gpu-commit-gate'
+      : 'not-required-zero-control',
+    productEventControlHostObserved:
+      productEventLiveCountDescriptor?.hostObserved ?? false,
+    productEventCountHostKnown: !productEventLiveCountDescriptor,
+    productEventRowCapacity: productEventLiveCountDescriptor?.expectedRowCapacity
+      ?? (borrowedProductEventBuffer || productEventRows
+        ? resolvedProductEventCount
+        : 0),
     productEventBufferBound: Boolean(borrowedProductEventBuffer || productEventRows),
     productEventBufferByteLength: (borrowedProductEventBuffer || productEventRows)
       ? resolvedProductEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -7310,6 +7423,7 @@ export async function extractSphRenderRowsWebGpu({
   let queueCompletionMethod = null;
   let deferNoFullReadbackCleanup = false;
   let successorSourceFamilyLease = null;
+  let retainedSuccessorSourceFamilyLease = null;
   if (schroederSpatialSourceFamily) {
     successorSourceFamilyLease =
       acquireSchroederSpatialSuccessorSourceFamilyLease(
@@ -7336,13 +7450,21 @@ export async function extractSphRenderRowsWebGpu({
   if (successorSourceFamilyLease) {
     const submittedLease = successorSourceFamilyLease;
     successorSourceFamilyLease = null;
-    deferSubmittedWorkCleanup(device, () => {
-      releaseSchroederSpatialSuccessorSourceFamilyLease(
-        schroederSpatialSourceFamily,
-        submittedLease,
-        { device }
-      );
-    });
+    if (retainRenderRowsBuffer) {
+      // The retained rows are the durable result of this submission. Keep the
+      // source-family lease with that exact result instead of polling the CPU
+      // queue merely to release it. The scene releases the rows only after
+      // their final visible consumer, which is the stronger lifetime edge.
+      retainedSuccessorSourceFamilyLease = submittedLease;
+    } else {
+      deferSubmittedWorkCleanup(device, () => {
+        releaseSchroederSpatialSuccessorSourceFamilyLease(
+          schroederSpatialSourceFamily,
+          submittedLease,
+          { device }
+        );
+      });
+    }
   }
   if (!noFullReadback) {
     queueCompletionStatus = 'queue-submitted';
@@ -7387,6 +7509,14 @@ export async function extractSphRenderRowsWebGpu({
     }
     destroyDeferredCleanupBuffers();
     retainedRenderRowsBuffer.destroy?.();
+    if (retainedSuccessorSourceFamilyLease) {
+      releaseSchroederSpatialSuccessorSourceFamilyLease(
+        schroederSpatialSourceFamily,
+        retainedSuccessorSourceFamilyLease,
+        { device }
+      );
+      retainedSuccessorSourceFamilyLease = null;
+    }
   };
 
   const destroyOrDefer = (buffer) => {

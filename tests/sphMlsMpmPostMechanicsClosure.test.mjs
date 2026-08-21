@@ -10,11 +10,25 @@ import {
   validateMlsMpmPostMechanicsContinuationClaim,
   runMlsMpmPostMechanicsClosureWebGpu
 } from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
-import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  tagResidentProductMassDevice,
+  tagWebGpuBufferDevice
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  registerResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   issuePostSeparationThermalBinAuthority,
   postSeparationThermalBinAuthorityLiveness
 } from '../src/runtime/sph/sphPostSeparationThermalBinAuthority.js';
+import {
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered,
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedFinalConsumerWork,
+  submitQueueOrderedWork
+} from '../src/runtime/webgpuComputeLayout.js';
 
 function buffer(label) {
   return { label, size: 4096, destroy() {} };
@@ -30,6 +44,45 @@ function trackedBuffer(label, { throws = false } = {}) {
       if (throws) throw new Error(`destroy failed: ${label}`);
     }
   };
+}
+
+function productHistoryDevice() {
+  return {
+    createBuffer() {
+      throw new Error('product-history test stub must not allocate');
+    },
+    queue: {
+      submit() {},
+      onSubmittedWorkDone() {
+        return Promise.resolve(true);
+      }
+    }
+  };
+}
+
+let nextProductHistoryAuthorityGeneration = 1;
+
+function tagProductHistorySource(handle, device) {
+  tagResidentProductMassDevice(handle, device);
+  return handle;
+}
+
+function authenticateProductHistorySource(handle, device) {
+  tagProductHistorySource(handle, device);
+  const generation = nextProductHistoryAuthorityGeneration;
+  nextProductHistoryAuthorityGeneration += 1;
+  registerResidentProductEventCountAuthority(handle, {
+    device,
+    controlBuffer: trackedBuffer(
+      `product-history-control-${generation}`
+    ),
+    controlOffsetBytes: 0,
+    rowCapacity: 128,
+    rowStrideFloats: 8,
+    generation,
+    seal: generation + 1000
+  });
+  return handle;
 }
 
 function minimalClosureInputs({
@@ -73,19 +126,25 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
   const phaseState = buffer('phase-v2-state');
   const phaseThermo = buffer('phase-v2-thermo');
   const phaseMechanics = buffer('phase-v2-mechanics');
-  const inputResidentProductMass = {
+  const device = productHistoryDevice();
+  const inputResidentProductMass = tagProductHistorySource({
     status: 'input-products',
     productEventBuffer: buffer('input-products-buffer')
-  };
-  const emittedResidentProductMass = {
+  }, device);
+  const emittedResidentProductMass = tagProductHistorySource({
     status: 'emitted-products',
     productEventBuffer: buffer('emitted-products-buffer')
-  };
-  const mergedResidentProductMass = {
+  }, device);
+  const mergedResidentProductMass = authenticateProductHistorySource({
     status: 'resident-product-mass-merged-gpu-resident',
     productEventBuffer: buffer('merged-products-buffer')
-  };
+  }, device);
   const gpuTimestampRecorder = { active: true };
+  const thermalCleanupClaim = {};
+  const reactionCleanupClaim = {};
+  const phaseOutputCleanupClaim = {};
+  const upstreamFinalConsumerCapability = {};
+  const phaseOutputFinalConsumerCapability = {};
   const calls = [];
   const sphParticleState = {
     particleCount: 2,
@@ -110,7 +169,7 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
     mechanicsBuffer: sourceMechanics
   };
   const result = await runMlsMpmPostMechanicsClosureWebGpu({
-    device: {},
+    device,
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload,
@@ -128,7 +187,11 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
     thermalMaterialTable: { materialCount: 1 },
     thermalStepRunner: async (options) => {
       calls.push(['thermal', options]);
-      return { stateBuffer: thermalState, thermoBuffer: thermalThermo };
+      return {
+        stateBuffer: thermalState,
+        thermoBuffer: thermalThermo,
+        queueOrderedCleanupClaim: thermalCleanupClaim
+      };
     },
     reactionTable: { reactionCount: 1, gasProductCount: 1 },
     spatialReactionDiscoveryProposalRunner: async (options) => {
@@ -141,20 +204,30 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
         stateBuffer: reactionState,
         thermoBuffer: reactionThermo,
         mechanicsBuffer: reactionMechanics,
-        residentProductMass: emittedResidentProductMass
+        residentProductMass: emittedResidentProductMass,
+        queueOrderedCleanupClaim: reactionCleanupClaim
       };
     },
     mechanicsMaterialTable: { materialCount: 1 },
     mechanicsRefreshRunner: async (options) => {
       calls.push(['refresh', options]);
-      return { mechanicsBuffer: refreshedMechanics };
+      return {
+        mechanicsBuffer: refreshedMechanics,
+        queueOrderedFinalConsumerCapability:
+          phaseOutputFinalConsumerCapability,
+        submittedWorkCleanupHostQueueFenceCount: 0
+      };
     },
     phaseCarrierTransferRunner: async (options) => {
       calls.push(['phase-v2', options]);
       return {
         stateBuffer: phaseState,
         thermoBuffer: phaseThermo,
-        mechanicsBuffer: phaseMechanics
+        mechanicsBuffer: phaseMechanics,
+        queueOrderedFinalConsumerCapability:
+          upstreamFinalConsumerCapability,
+        queueOrderedCleanupClaim: phaseOutputCleanupClaim,
+        submittedWorkCleanupHostQueueFenceCount: 0
       };
     },
     boxDimsM: [3, 3, 3],
@@ -223,13 +296,25 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
   assert.equal(calls[4][1].sourceStateBuffer, reactionState);
   assert.equal(calls[4][1].sourceThermoBuffer, reactionThermo);
   assert.equal(calls[4][1].sourceMechanicsBuffer, reactionMechanics);
+  assert.deepEqual(
+    calls[4][1].queueOrderedProducerClaims,
+    [thermalCleanupClaim, reactionCleanupClaim]
+  );
   assert.equal(calls[5][1].sourceStateBuffer, phaseState);
   assert.equal(calls[5][1].sourceThermoBuffer, phaseThermo);
   assert.equal(calls[5][1].sourceMechanicsBuffer, phaseMechanics);
+  assert.deepEqual(
+    calls[5][1].queueOrderedProducerClaims,
+    [phaseOutputCleanupClaim]
+  );
   assert.equal(calls[6][1].inputResidentProductMass,
     inputResidentProductMass);
   assert.equal(calls[6][1].emittedResidentProductMass,
     emittedResidentProductMass);
+  assert.equal(
+    calls[6][1].allowHostCompactionObservation,
+    false
+  );
   assert.equal(result.continuation.stateBuffer, phaseState);
   assert.equal(result.continuation.thermoBuffer, phaseThermo);
   assert.equal(result.continuation.mechanicsBuffer, refreshedMechanics);
@@ -239,6 +324,338 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
     mergedResidentProductMass);
   assert.equal(result.generation.spatialGenerationId, 17);
   assert.equal(result.readbackMode, 'no-full-readback');
+  assert.deepEqual(result.queueOrderedCleanupClaims, []);
+  assert.equal(
+    result.queueOrderedFinalConsumerCapabilities.upstream,
+    upstreamFinalConsumerCapability
+  );
+  assert.equal(
+    result.queueOrderedFinalConsumerCapabilities
+      .phaseCarrierOutput,
+    phaseOutputFinalConsumerCapability
+  );
+  assert.equal(
+    result.thermalStep
+      .queueOrderedRetainedOutputFinalConsumerCapability,
+    upstreamFinalConsumerCapability
+  );
+  assert.equal(
+    result.reactionStep
+      .queueOrderedRetainedOutputFinalConsumerCapability,
+    upstreamFinalConsumerCapability
+  );
+  assert.equal(
+    result.phaseCarrierTransferStep
+      .queueOrderedRetainedOutputFinalConsumerCapability,
+    phaseOutputFinalConsumerCapability
+  );
+  assert.equal(
+    result.phaseCarrierTransferStep
+      .submittedWorkCleanupHostQueueFenceCount,
+    0
+  );
+  assert.equal(
+    result.mechanicsRefreshStep
+      .submittedWorkCleanupHostQueueFenceCount,
+    0
+  );
+});
+
+test('no-full-readback closure promotes either one-sided resident product source before publication', async () => {
+  for (const side of ['input', 'emitted']) {
+    const device = productHistoryDevice();
+    const source = tagProductHistorySource({
+      status: `${side}-resident-product-mass`,
+      productEventBuffer: trackedBuffer(`${side}-resident-product-events`)
+    }, device);
+    const promoted = authenticateProductHistorySource({
+      status: 'resident-product-mass-merged-gpu-resident',
+      productEventBuffer: trackedBuffer(`${side}-promoted-product-history`)
+    }, device);
+    const mergeCalls = [];
+    const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...minimalClosureInputs({ device }),
+      ...(side === 'input'
+        ? { inputResidentProductMass: source }
+        : {
+            thermalMaterialTable: { materialCount: 1 },
+            thermalStepRunner: null,
+            reactionTable: { reactionCount: 1 },
+            reactionStepRunner: async () => ({
+              residentProductMass: source
+            })
+          }),
+      residentProductMassMergeRunner: async (options) => {
+        mergeCalls.push(options);
+        return promoted;
+      }
+    });
+
+    assert.equal(mergeCalls.length, 1, side);
+    assert.equal(
+      mergeCalls[0].inputResidentProductMass,
+      side === 'input' ? source : null,
+      side
+    );
+    assert.equal(
+      mergeCalls[0].emittedResidentProductMass,
+      side === 'emitted' ? source : null,
+      side
+    );
+    assert.equal(
+      mergeCalls[0].allowHostCompactionObservation,
+      false,
+      side
+    );
+    assert.equal(
+      typeof mergeCalls[0].readbackTelemetryAccumulator?.recordMapAsync,
+      'function',
+      side
+    );
+    assert.equal(closure.status, 'post-mechanics-closure-complete', side);
+    assert.equal(closure.continuation.residentProductMass, promoted, side);
+    assert.equal(closure.continuation.productMassMergeRequired, false, side);
+    assert.equal(
+      closure.continuation.productMassStatus,
+      'resident-product-mass-merged-gpu-resident',
+      side
+    );
+  }
+});
+
+test('full-readback closure preserves a one-sided resident product source without promotion', async () => {
+  const source = {
+    status: 'full-readback-resident-product-mass',
+    productEventBuffer: trackedBuffer('full-readback-resident-product-events')
+  };
+  let mergeCallCount = 0;
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...minimalClosureInputs(),
+    readbackMode: 'full-parity-readback',
+    inputResidentProductMass: source,
+    residentProductMassMergeRunner: async () => {
+      mergeCallCount += 1;
+      return null;
+    }
+  });
+
+  assert.equal(mergeCallCount, 0);
+  assert.equal(closure.continuation.residentProductMass, source);
+  assert.equal(closure.continuation.productMassMergeRequired, false);
+  assert.equal(
+    closure.continuation.productMassStatus,
+    'resident-product-mass-ready-without-merge'
+  );
+});
+
+test('no-full-readback closure rejects raw or ambiguous two-source aliases before merge', async () => {
+  for (const aliasKind of ['exact-handle', 'distinct-shared-buffer']) {
+    const device = productHistoryDevice();
+    const sharedBuffer = trackedBuffer(`${aliasKind}-product-events`);
+    const inputSource = tagProductHistorySource({
+      status: `${aliasKind}-input-product-history`,
+      productEventBuffer: sharedBuffer
+    }, device);
+    const emittedSource = aliasKind === 'exact-handle'
+      ? inputSource
+      : tagProductHistorySource({
+          status: `${aliasKind}-emitted-product-history`,
+          productEventBuffer: sharedBuffer
+        }, device);
+    let mergeCallCount = 0;
+    const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...minimalClosureInputs({ device }),
+      inputResidentProductMass: inputSource,
+      thermalMaterialTable: { materialCount: 1 },
+      thermalStepRunner: null,
+      reactionTable: { reactionCount: 1 },
+      reactionStepRunner: async () => ({
+        residentProductMass: emittedSource
+      }),
+      residentProductMassMergeRunner: async () => {
+        mergeCallCount += 1;
+        return inputSource;
+      }
+    }).then(
+      () => null,
+      (error) => error
+    );
+
+    assert.equal(
+      failure?.code,
+      aliasKind === 'exact-handle'
+        ? 'ERR_MLS_MPM_POST_MECHANICS_PRODUCT_HISTORY_UNAUTHENTICATED_ALIAS'
+        : 'ERR_MLS_MPM_POST_MECHANICS_PRODUCT_HISTORY_AMBIGUOUS_ALIAS',
+      aliasKind
+    );
+    assert.equal(mergeCallCount, 0, aliasKind);
+    await failure.postMechanicsCleanupCompletion;
+    assert.equal(sharedBuffer.destroyCount, 0, aliasKind);
+  }
+});
+
+test('no-full-readback closure accepts one exact two-lane alias only with an authenticated GPU count', async () => {
+  const device = productHistoryDevice();
+  const source = authenticateProductHistorySource({
+    status: 'authenticated-exact-alias-product-history',
+    productEventBuffer: trackedBuffer(
+      'authenticated-exact-alias-product-events'
+    )
+  }, device);
+  let mergeCallCount = 0;
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...minimalClosureInputs({ device }),
+    inputResidentProductMass: source,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: null,
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => ({ residentProductMass: source }),
+    residentProductMassMergeRunner: async () => {
+      mergeCallCount += 1;
+      return source;
+    }
+  });
+
+  assert.equal(mergeCallCount, 0);
+  assert.equal(closure.continuation.residentProductMass, source);
+  assert.equal(closure.continuation.productMassMergeRequired, false);
+});
+
+test('no-full-readback one-sided promotion rejects unavailable, unchanged, and foreign-device results', async () => {
+  {
+    const device = {};
+    const source = tagProductHistorySource({
+      status: 'missing-device-capability-product-history',
+      productEventBuffer: trackedBuffer(
+        'missing-device-capability-product-events'
+      )
+    }, device);
+    let mergeCallCount = 0;
+    const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...minimalClosureInputs({ device }),
+      inputResidentProductMass: source,
+      residentProductMassMergeRunner: async () => {
+        mergeCallCount += 1;
+        return source;
+      }
+    }).then(
+      () => null,
+      (error) => error
+    );
+    assert.equal(
+      failure?.code,
+      'ERR_MLS_MPM_POST_MECHANICS_PRODUCT_HISTORY_DEVICE_REQUIRED'
+    );
+    assert.equal(mergeCallCount, 0);
+    await failure.postMechanicsCleanupCompletion;
+  }
+
+  {
+    const device = productHistoryDevice();
+    const source = tagProductHistorySource({
+      status: 'unchanged-promotion-product-history',
+      productEventBuffer: trackedBuffer('unchanged-promotion-product-events')
+    }, device);
+    const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...minimalClosureInputs({ device }),
+      inputResidentProductMass: source,
+      residentProductMassMergeRunner: async () => source
+    }).then(
+      () => null,
+      (error) => error
+    );
+    assert.equal(
+      failure?.code,
+      'ERR_MLS_MPM_POST_MECHANICS_PRODUCT_HISTORY_PROMOTION_INVALID'
+    );
+    await failure.postMechanicsCleanupCompletion;
+  }
+
+  {
+    const device = productHistoryDevice();
+    const foreignDevice = productHistoryDevice();
+    const source = tagProductHistorySource({
+      status: 'foreign-promotion-input-product-history',
+      productEventBuffer: trackedBuffer(
+        'foreign-promotion-input-product-events'
+      )
+    }, device);
+    let foreignReleaseCount = 0;
+    const foreignResult = authenticateProductHistorySource({
+      status: 'foreign-promotion-result-product-history',
+      productEventBuffer: trackedBuffer(
+        'foreign-promotion-result-product-events'
+      ),
+      destroyResidentProductMassBuffers() {
+        foreignReleaseCount += 1;
+        return true;
+      }
+    }, foreignDevice);
+    const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...minimalClosureInputs({ device }),
+      inputResidentProductMass: source,
+      residentProductMassMergeRunner: async () => foreignResult
+    }).then(
+      () => null,
+      (error) => error
+    );
+    assert.equal(
+      failure?.code,
+      'ERR_MLS_MPM_POST_MECHANICS_PRODUCT_HISTORY_PROMOTION_INVALID'
+    );
+    const cleanup = await failure.postMechanicsCleanupCompletion;
+    assert.equal(foreignReleaseCount, 1);
+    assert.equal(cleanup.releasedResidentProductMassCount, 1);
+  }
+});
+
+test('post-promotion closure failure retires the unpublished replacement exactly once', async () => {
+  const device = productHistoryDevice();
+  let inputReleaseCount = 0;
+  const source = tagProductHistorySource({
+    status: 'post-promotion-failure-input-product-history',
+    productEventBuffer: trackedBuffer(
+      'post-promotion-failure-input-product-events'
+    ),
+    destroyResidentProductMassBuffers() {
+      inputReleaseCount += 1;
+      return true;
+    }
+  }, device);
+  let replacementReleaseCount = 0;
+  const promoted = authenticateProductHistorySource({
+    status: 'post-promotion-failure-authenticated-product-history',
+    productEventBuffer: trackedBuffer(
+      'post-promotion-failure-authenticated-product-events'
+    ),
+    destroyResidentProductMassBuffers() {
+      replacementReleaseCount += 1;
+      return true;
+    }
+  }, device);
+  const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...minimalClosureInputs({ device }),
+    inputResidentProductMass: source,
+    residentProductMassMergeRunner: async () => promoted,
+    stageMechanicsTracer: {
+      result() {
+        throw new Error('injected-post-promotion-closure-assembly-failure');
+      }
+    }
+  }).then(
+    () => null,
+    (error) => error
+  );
+
+  assert.match(
+    failure?.message || '',
+    /injected-post-promotion-closure-assembly-failure/
+  );
+  const cleanup = await failure.postMechanicsCleanupCompletion;
+  assert.equal(replacementReleaseCount, 1);
+  assert.equal(inputReleaseCount, 0);
+  assert.equal(cleanup.releasedResidentProductMassCount, 1);
+  assert.equal(cleanup.status, 'post-mechanics-failure-cleanup-complete');
 });
 
 test('post-mechanics thermal consumes and retires the exact G2P bin authority once', async () => {
@@ -305,11 +722,90 @@ test('post-mechanics thermal consumes and retires the exact G2P bin authority on
   assert.equal(stateBuffer.destroyCount, 0);
 });
 
+test('phase output claim remains forwarded only when mechanics consumer is absent', async () => {
+  const inputs = minimalClosureInputs();
+  const phaseClaim = {};
+  const upstreamCapability = {};
+  const phaseState = trackedBuffer('phase-forward-state');
+  const phaseThermo = trackedBuffer('phase-forward-thermo');
+  const phaseMechanics = trackedBuffer('phase-forward-mechanics');
+  inputs.sphParticleState.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  inputs.sphParticleUpload.phaseCarrierPlan =
+    inputs.sphParticleState.phaseCarrierPlan;
+
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    mechanicsMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({
+      stateBuffer: trackedBuffer('phase-forward-thermal-state'),
+      thermoBuffer: trackedBuffer('phase-forward-thermal-thermo')
+    }),
+    phaseCarrierTransferRunner: async () => ({
+      stateBuffer: phaseState,
+      thermoBuffer: phaseThermo,
+      mechanicsBuffer: phaseMechanics,
+      queueOrderedCleanupClaim: phaseClaim,
+      queueOrderedFinalConsumerCapability: upstreamCapability,
+      submittedWorkCleanupHostQueueFenceCount: 0
+    }),
+    mechanicsRefreshRunner: null
+  });
+
+  assert.deepEqual(
+    closure.queueOrderedCleanupClaims,
+    [phaseClaim]
+  );
+  assert.equal(
+    closure.queueOrderedFinalConsumerCapabilities.upstream,
+    upstreamCapability
+  );
+  assert.equal(
+    closure.queueOrderedFinalConsumerCapabilities
+      .phaseCarrierOutput,
+    null
+  );
+});
+
+test('closure forwards upstream claims when no sidecar consumer submits', async () => {
+  const upstreamClaims = [{}, {}];
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...minimalClosureInputs(),
+    queueOrderedProducerClaims: upstreamClaims
+  });
+
+  assert.deepEqual(
+    closure.queueOrderedCleanupClaims,
+    upstreamClaims
+  );
+  assert.equal(
+    closure.queueOrderedFinalConsumerCapability,
+    undefined
+  );
+  assert.equal(
+    closure.queueOrderedFinalConsumerCapabilities.upstream,
+    null
+  );
+});
+
 test('gas-producing closure keeps product state resident and observes species only when explicitly requested', async () => {
   const run = async (reactionStepOptions = {}) => {
-    const inputs = minimalClosureInputs();
+    const device = productHistoryDevice();
+    const inputs = minimalClosureInputs({ device });
     let captured = null;
     const productEventBuffer = trackedBuffer('resident-gas-product-events');
+    const residentProductMass = tagProductHistorySource({
+      status: 'resident-product-mass-buffer-retained',
+      productEventBuffer
+    }, device);
+    const promotedResidentProductMass = authenticateProductHistorySource({
+      status: 'resident-product-mass-merged-gpu-resident',
+      productEventBuffer: trackedBuffer(
+        'resident-gas-authenticated-product-history'
+      )
+    }, device);
     const closure = await runMlsMpmPostMechanicsClosureWebGpu({
       ...inputs,
       thermalMaterialTable: { materialCount: 1 },
@@ -319,14 +815,13 @@ test('gas-producing closure keeps product state resident and observes species on
       reactionStepRunner: async (options) => {
         captured = options;
         return {
-          residentProductMass: {
-            status: 'resident-product-mass-buffer-retained',
-            productEventBuffer
-          }
+          residentProductMass
         };
-      }
+      },
+      residentProductMassMergeRunner: async () =>
+        promotedResidentProductMass
     });
-    return { captured, closure, productEventBuffer };
+    return { captured, closure, promotedResidentProductMass };
   };
 
   const hotPath = await run();
@@ -336,7 +831,7 @@ test('gas-producing closure keeps product state resident and observes species on
   assert.equal(hotPath.captured.readReactionAtomResidual, false);
   assert.equal(
     hotPath.closure.residentProductMass.productEventBuffer,
-    hotPath.productEventBuffer
+    hotPath.promotedResidentProductMass.productEventBuffer
   );
 
   const diagnostic = await run({ readReactionGasSpeciesSummary: true });
@@ -344,7 +839,7 @@ test('gas-producing closure keeps product state resident and observes species on
   assert.equal(diagnostic.captured.readReactionGasSpeciesSummary, true);
   assert.equal(
     diagnostic.closure.residentProductMass.productEventBuffer,
-    diagnostic.productEventBuffer
+    diagnostic.promotedResidentProductMass.productEventBuffer
   );
 });
 
@@ -423,6 +918,15 @@ test('zero-sidecar closure publishes one exact borrowed continuation and replay-
 
   assert.equal(closure.status, 'post-mechanics-closure-complete');
   assert.deepEqual(closure.executedStageOrder, []);
+  assert.equal(closure.fullParticleReadbackPerformed, false);
+  assert.equal(closure.fullParticleReadbackFree, true);
+  assert.equal(closure.residentContinuationReady, true);
+  assert.equal(closure.readbackTelemetryComplete, true);
+  assert.deepEqual(closure.readbackTelemetryUnknownSources, []);
+  assert.equal(closure.mapAsyncCount, 0);
+  assert.equal(closure.readbackBytes, 0);
+  assert.equal(closure.hostQueueFenceCount, 0);
+  assert.equal(closure.normalHotLoopReadbackFree, true);
   assert.deepEqual(closure.continuation.componentSources, {
     state: 'post-mechanics-input',
     thermo: 'source-thermo-input',
@@ -566,7 +1070,8 @@ test('reaction components are adopted independently without a torn-family fallba
 });
 
 test('phase transfer preserves an adopted reaction owner family while its product handle remains live', async () => {
-  const inputs = minimalClosureInputs();
+  const device = productHistoryDevice();
+  const inputs = minimalClosureInputs({ device });
   inputs.sphParticleUpload.phaseCarrierPlan = {
     status: 'phase-lane-capacity-ready'
   };
@@ -578,10 +1083,10 @@ test('phase transfer preserves an adopted reaction owner family while its produc
   const phaseState = trackedBuffer('family-phase-state');
   const phaseThermo = trackedBuffer('family-phase-thermo');
   const phaseMechanics = trackedBuffer('family-phase-mechanics');
-  const residentProductMass = {
-    status: 'resident-product-mass-buffer-retained',
+  const residentProductMass = authenticateProductHistorySource({
+    status: 'resident-product-mass-merged-gpu-resident',
     productEventBuffer: trackedBuffer('family-product-events')
-  };
+  }, device);
   let reactionFamilyReleaseCount = 0;
   const closure = await runMlsMpmPostMechanicsClosureWebGpu({
     ...inputs,
@@ -631,6 +1136,86 @@ test('phase transfer preserves an adopted reaction owner family while its produc
   assert.equal(reactionMechanics.destroyCount, 0);
 });
 
+test('promoted lone product retires the superseded raw reaction owner exactly once', async () => {
+  const device = productHistoryDevice();
+  const inputs = minimalClosureInputs({ device });
+  inputs.sphParticleUpload.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  const thermalState = trackedBuffer('promoted-family-thermal-state');
+  const thermalThermo = trackedBuffer('promoted-family-thermal-thermo');
+  const reactionState = trackedBuffer('promoted-family-reaction-state');
+  const reactionThermo = trackedBuffer('promoted-family-reaction-thermo');
+  const reactionMechanics = trackedBuffer('promoted-family-reaction-mechanics');
+  const phaseState = trackedBuffer('promoted-family-phase-state');
+  const phaseThermo = trackedBuffer('promoted-family-phase-thermo');
+  const phaseMechanics = trackedBuffer('promoted-family-phase-mechanics');
+  const rawProductBuffer = trackedBuffer('promoted-family-raw-product-events');
+  const promotedProductBuffer = trackedBuffer(
+    'promoted-family-authenticated-product-history'
+  );
+  const rawResidentProductMass = tagProductHistorySource({
+    status: 'resident-product-mass-buffer-retained',
+    productEventBuffer: rawProductBuffer
+  }, device);
+  const promotedResidentProductMass = authenticateProductHistorySource({
+    status: 'resident-product-mass-merged-gpu-resident',
+    productEventBuffer: promotedProductBuffer
+  }, device);
+  let reactionFamilyReleaseCount = 0;
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({
+      stateBuffer: thermalState,
+      thermoBuffer: thermalThermo
+    }),
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => ({
+      stateBuffer: reactionState,
+      thermoBuffer: reactionThermo,
+      mechanicsBuffer: reactionMechanics,
+      residentProductMass: rawResidentProductMass,
+      destroyOutputParticleBuffers() {
+        reactionFamilyReleaseCount += 1;
+        rawProductBuffer.destroy();
+        return true;
+      }
+    }),
+    mechanicsMaterialTable: { materialCount: 1 },
+    mechanicsRefreshRunner: null,
+    phaseCarrierTransferRunner: async () => ({
+      stateBuffer: phaseState,
+      thermoBuffer: phaseThermo,
+      mechanicsBuffer: phaseMechanics
+    }),
+    residentProductMassMergeRunner: async () =>
+      promotedResidentProductMass
+  });
+
+  assert.equal(
+    closure.continuation.residentProductMass,
+    promotedResidentProductMass
+  );
+  claimMlsMpmPostMechanicsContinuation(closure, {
+    stateBuffer: phaseState,
+    thermoBuffer: phaseThermo,
+    mechanicsBuffer: phaseMechanics
+  });
+  const retirement = await retireMlsMpmPostMechanicsClosureOutputsAfter(
+    closure,
+    { after: Promise.resolve(true) }
+  );
+
+  assert.equal(reactionFamilyReleaseCount, 1);
+  assert.equal(retirement.ownerFamilyCount, 1);
+  assert.equal(rawProductBuffer.destroyCount, 1);
+  assert.equal(promotedProductBuffer.destroyCount, 0);
+  assert.equal(phaseState.destroyCount, 0);
+  assert.equal(phaseThermo.destroyCount, 0);
+  assert.equal(phaseMechanics.destroyCount, 0);
+});
+
 test('failed closure releases owner-managed stage outputs exactly once without raw member destruction', async () => {
   const inputs = minimalClosureInputs({
     device: {
@@ -639,7 +1224,11 @@ test('failed closure releases owner-managed stage outputs exactly once without r
   });
   const thermalState = trackedBuffer('failed-family-thermal-state');
   const thermalThermo = trackedBuffer('failed-family-thermal-thermo');
+  const thermalFinalConsumer = Object.freeze({
+    schema: 'test.failed-closure-thermal-final-consumer.v0'
+  });
   let familyReleaseCount = 0;
+  const familyReleaseOptions = [];
 
   await assert.rejects(runMlsMpmPostMechanicsClosureWebGpu({
     ...inputs,
@@ -647,8 +1236,11 @@ test('failed closure releases owner-managed stage outputs exactly once without r
     thermalStepRunner: async () => ({
       stateBuffer: thermalState,
       thermoBuffer: thermalThermo,
-      destroyOutputParticleBuffers() {
+      queueOrderedRetainedOutputFinalConsumerCapability:
+        thermalFinalConsumer,
+      destroyOutputParticleBuffers(options) {
         familyReleaseCount += 1;
+        familyReleaseOptions.push(options);
       }
     }),
     reactionTable: { reactionCount: 1 },
@@ -659,8 +1251,172 @@ test('failed closure releases owner-managed stage outputs exactly once without r
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(familyReleaseCount, 1);
+  assert.deepEqual(familyReleaseOptions, [{
+    preserveResidentProductMass: false,
+    queueOrderedFinalConsumer: thermalFinalConsumer
+  }]);
   assert.equal(thermalState.destroyCount, 0);
   assert.equal(thermalThermo.destroyCount, 0);
+});
+
+test('failed mechanics refresh consumes phase-sealed thermal and reaction claims exactly', async () => {
+  let hostFenceCount = 0;
+  const device = {
+    queue: {
+      submit() {},
+      onSubmittedWorkDone() {
+        hostFenceCount += 1;
+        return Promise.resolve();
+      }
+    }
+  };
+  const inputs = minimalClosureInputs({ device });
+  inputs.sphParticleState.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  inputs.sphParticleUpload.phaseCarrierPlan =
+    inputs.sphParticleState.phaseCarrierPlan;
+
+  const thermalOutput = {
+    stateBuffer: trackedBuffer('sealed-failure-thermal-state'),
+    thermoBuffer: trackedBuffer('sealed-failure-thermal-thermo')
+  };
+  const reactionOutput = {
+    stateBuffer: trackedBuffer('sealed-failure-reaction-state'),
+    thermoBuffer: trackedBuffer('sealed-failure-reaction-thermo'),
+    mechanicsBuffer: trackedBuffer('sealed-failure-reaction-mechanics')
+  };
+  let thermalCleanupCount = 0;
+  let reactionCleanupCount = 0;
+  const thermalCleanup = () => {
+    thermalCleanupCount += 1;
+  };
+  const reactionCleanup = () => {
+    reactionCleanupCount += 1;
+  };
+  const thermalIssuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-failed-closure-thermal-output'
+  });
+  const reactionIssuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-failed-closure-reaction-output'
+  });
+  const thermalClaim = registerQueueOrderedCleanupClaim(
+    thermalIssuer,
+    device,
+    {
+      producerOutput: thermalOutput,
+      cleanup: thermalCleanup
+    }
+  );
+  const reactionClaim = registerQueueOrderedCleanupClaim(
+    reactionIssuer,
+    device,
+    {
+      producerOutput: reactionOutput,
+      cleanup: reactionCleanup
+    }
+  );
+  Object.defineProperty(thermalOutput, 'queueOrderedCleanupClaims', {
+    value: Object.freeze([thermalClaim]),
+    enumerable: false
+  });
+  Object.defineProperty(reactionOutput, 'queueOrderedCleanupClaims', {
+    value: Object.freeze([reactionClaim]),
+    enumerable: false
+  });
+  thermalOutput.destroyOutputParticleBuffers = ({
+    queueOrderedFinalConsumer
+  } = {}) => {
+    releaseSubmittedWorkCleanupQueueOrdered(
+      device,
+      thermalCleanup,
+      {
+        queueOrderedFinalConsumer,
+        producerClaim: thermalClaim,
+        producerOutput: thermalOutput,
+        producerFamily: 'test-failed-closure-thermal-output'
+      }
+    );
+    return true;
+  };
+  reactionOutput.destroyOutputParticleBuffers = ({
+    queueOrderedFinalConsumer
+  } = {}) => {
+    releaseSubmittedWorkCleanupQueueOrdered(
+      device,
+      reactionCleanup,
+      {
+        queueOrderedFinalConsumer,
+        producerClaim: reactionClaim,
+        producerOutput: reactionOutput,
+        producerFamily: 'test-failed-closure-reaction-output'
+      }
+    );
+    return true;
+  };
+
+  const failure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => thermalOutput,
+    reactionTable: { reactionCount: 1 },
+    reactionStepRunner: async () => reactionOutput,
+    mechanicsMaterialTable: { materialCount: 1 },
+    phaseCarrierTransferRunner: async ({
+      queueOrderedProducerClaims
+    }) => {
+      const phaseOutput = {
+        stateBuffer: trackedBuffer('sealed-failure-phase-state'),
+        thermoBuffer: trackedBuffer('sealed-failure-phase-thermo'),
+        mechanicsBuffer: trackedBuffer('sealed-failure-phase-mechanics')
+      };
+      Object.defineProperty(
+        phaseOutput,
+        'queueOrderedFinalConsumerCapability',
+        {
+          value: submitQueueOrderedFinalConsumerWork(
+            device,
+            [Object.freeze({
+              label: 'sealed-failure-phase-consumer-command'
+            })],
+            {
+              finalConsumerOwner: phaseOutput,
+              producerClaims: queueOrderedProducerClaims
+            }
+          ),
+          enumerable: false
+        }
+      );
+      return phaseOutput;
+    },
+    mechanicsRefreshRunner: async () => {
+      throw new Error('sealed-failure-mechanics-refresh');
+    }
+  }).then(
+    () => null,
+    (error) => error
+  );
+
+  assert.match(failure?.message || '', /sealed-failure-mechanics-refresh/);
+  await failure.postMechanicsCleanupCompletion;
+  assert.equal(thermalCleanupCount, 1);
+  assert.equal(reactionCleanupCount, 1);
+  assert.equal(hostFenceCount, 1);
+  const replaySubmission = submitQueueOrderedWork(
+    device,
+    [Object.freeze({ label: 'sealed-failure-replay-command' })]
+  );
+  assert.throws(
+    () => sealQueueOrderedFinalConsumerCapability(
+      replaySubmission,
+      device,
+      {
+        finalConsumerOwner: {},
+        producerClaims: [thermalClaim, reactionClaim]
+      }
+    ),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' }
+  );
 });
 
 test('owner-family retirement retries only the family that did not confirm release', async () => {

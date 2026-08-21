@@ -91,7 +91,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
       const nativeDevice = await adapter.requestDevice({
         requiredFeatures: ['timestamp-query'],
         requiredLimits: {
-          maxStorageBuffersPerShaderStage: 8
+          maxStorageBuffersPerShaderStage: 12
         }
       });
       const uncapturedErrors = [];
@@ -322,6 +322,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
       const f32 = Math.fround;
       const f32Add = (left, right) => f32(f32(left) + f32(right));
       const f32Mul = (left, right) => f32(f32(left) * f32(right));
+      const AVOGADRO_PER_MOL = f32(6.02214076e23);
       const makeProductEvent = ({
         position = [0.5, 0.5, 0.5],
         massKg = 0.125,
@@ -331,7 +332,8 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         reactionIndex = 0,
         sourceParticleIndex = 1,
         partnerParticleIndex = 2,
-        moles = 1,
+        moles = null,
+        molarMassKgPerMol = 0.05,
         routingId = 0,
         phaseId = 2,
         temperatureK = 400,
@@ -350,6 +352,9 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         currentVolumeM3 = null
       } = {}) => {
         const unplacedMassKg = f32(Math.max(0, massKg - placedMassKg));
+        const eventMoles = moles == null
+          ? f32(massKg / molarMassKgPerMol)
+          : f32(moles);
         const supportVolumeM3 = currentVolumeM3 == null
           ? (restDensityKgPerM3 > 0
             ? f32(unplacedMassKg / restDensityKgPerM3)
@@ -359,8 +364,8 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           ...position.map(f32), f32(massKg),
           f32(materialId), f32(productTermIndex), f32(reactionIndex),
           f32(sourceParticleIndex),
-          f32(partnerParticleIndex), f32(moles), f32(routingId), f32(phaseId),
-          f32(placedMassKg), unplacedMassKg, 1, f32(massKg),
+          f32(partnerParticleIndex), eventMoles, f32(routingId), f32(phaseId),
+          f32(placedMassKg), unplacedMassKg, 1, f32(molarMassKgPerMol),
           f32(temperatureK), f32(restDensityKgPerM3), f32(status),
           f32(specificInternalEnergyJPerKg),
           ...velocityMPerS.map(f32), supportVolumeM3,
@@ -383,6 +388,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         carrierVelocity = [1, -0.5, 0.25],
         carrierTemperatureK = 300,
         carrierInternalEnergyJPerKg = 10,
+        carrierRepresentedEntityCount = 7.5e22,
         materialId = 11,
         phaseId = 2,
         restDensityKgPerM3 = 1000,
@@ -405,7 +411,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           phaseId === 2 ? 1 : 0,
           phaseId === 3 ? 1 : 0,
           phaseId >= 4 ? 1 : 0,
-          0.05, 1, 1, 0.05
+          0.05, f32(carrierRepresentedEntityCount), 1, 0.05
         ], thermoBase);
         const mechanicsBase = carrierIndex * 32;
         const deformationScale = f32(Math.cbrt(carrierVolumeRatioJ));
@@ -471,7 +477,16 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         const aggregateRestVolume = reduceFixedTree((event) => (
           f32(event[13] / event[17])
         ));
-        const aggregateCurrentVolume = reduceFixedTree((event) => event[23]);
+        // Event row 5.w is support/routing geometry. Materialized product
+        // mass starts at its target reference density, so its incoming
+        // mechanics current volume equals its rest volume (J = 1).
+        const aggregateReferenceBornCurrentVolume = aggregateRestVolume;
+        const aggregateRepresentedEntityCount = reduceFixedTree((event) => (
+          f32Mul(
+            f32(event[13] / event[15]),
+            AVOGADRO_PER_MOL
+          )
+        ));
         for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
           const eventBase = eventIndex * 32;
           productEvents[eventBase + 13] = 0;
@@ -542,13 +557,17 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           ),
           inverseMass
         );
+        thermo[thermoBase + 9] = f32Add(
+          thermo[thermoBase + 9],
+          aggregateRepresentedEntityCount
+        );
         const previousJ = mechanics[mechanicsBase + 18];
         const previousRestVolume = mechanics[mechanicsBase + 19];
         const previousCurrentVolume = f32Mul(previousJ, previousRestVolume);
         const nextRestVolume = f32Add(previousRestVolume, aggregateRestVolume);
         const nextCurrentVolume = f32Add(
           previousCurrentVolume,
-          aggregateCurrentVolume
+          aggregateReferenceBornCurrentVolume
         );
         const nextJ = f32(nextCurrentVolume / nextRestVolume);
         const deformationScale = f32(Math.cbrt(f32(nextJ / previousJ)));
@@ -635,7 +654,11 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           decisions,
           destination,
           expectedSpareCount: availableSpareCount,
-          expectedNoCarrierCount: eventCount - availableSpareCount
+          expectedNoCarrierCount: eventCount - availableSpareCount,
+          expectedRollback: true,
+          expectedClassifierRejectedCount: 0,
+          expectedRejectedCount: 0,
+          expectedSpeculativeDestinationMutationCount: availableSpareCount
         };
       };
       const makeInvalidPayloadSpec = () => {
@@ -646,7 +669,13 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         invalidNan[13] = Number.NaN;
         const invalidInfinity = makeProductEvent();
         invalidInfinity[20] = Number.POSITIVE_INFINITY;
-        const events = [invalidTerm, invalidNan, invalidInfinity];
+        const inconsistentMoles = makeProductEvent({ moles: 9 });
+        const events = [
+          invalidTerm,
+          invalidNan,
+          invalidInfinity,
+          inconsistentMoles
+        ];
         const decisions = new Float32Array(events.length * 4);
         for (let index = 0; index < events.length; index += 1) {
           decisions.set([0, 0, 1, particleCount], index * 4);
@@ -760,6 +789,252 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         };
       };
 
+      const runReactionEntityCountProof = async () => {
+        const { sphReactionStepWgsl } = await import(
+          '/ulg-gpu-abi/src/wgsl.js'
+        );
+        const module = device.createShaderModule({
+          label: 'ulg-native-reaction-entity-count-proof-shader',
+          code: sphReactionStepWgsl
+        });
+        const compilation = await module.getCompilationInfo();
+        const compilationErrors = compilation.messages
+          .filter((message) => message.type === 'error')
+          .map((message) => message.message);
+        if (compilationErrors.length > 0) {
+          return {
+            status: 'shader-compilation-failed',
+            compilationErrors
+          };
+        }
+        const pipeline = device.createComputePipeline({
+          label: 'ulg-native-reaction-entity-count-proof-resolve',
+          layout: 'auto',
+          compute: { module, entryPoint: 'resolve' }
+        });
+        const particleCount = 2;
+        const packedParticleFloats = 13 * 4;
+        const particles = new Float32Array(
+          particleCount * packedParticleFloats
+        );
+        const writeParticle = ({
+          index,
+          position,
+          massKg,
+          materialId,
+          representedEntityCount
+        }) => {
+          const base = index * packedParticleFloats;
+          particles.set([
+            ...position.map(f32), f32(massKg),
+            0, 0, 0, 0,
+            f32(materialId), 1, 300, 1,
+            1, 0, 0, 0,
+            0.05, f32(representedEntityCount), 1, 0.05,
+            1, 0, 0, 0,
+            1, 0, 0, 0,
+            1, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 1, f32(massKg),
+            1, 1, 100, 0,
+            100, 10, 1, 1,
+            0, 0, 0, 0
+          ], base);
+        };
+        writeParticle({
+          index: 0,
+          position: [0.45, 0.5, 0.5],
+          massKg: 2,
+          materialId: 1,
+          representedEntityCount: 2 * AVOGADRO_PER_MOL
+        });
+        writeParticle({
+          index: 1,
+          position: [0.55, 0.5, 0.5],
+          massKg: 1,
+          materialId: 2,
+          representedEntityCount: AVOGADRO_PER_MOL
+        });
+        const reactionRecords = new Float32Array([
+          // Legacy reaction row.
+          1, 2, 3, 0,
+          0, 1, 0, 0,
+          1, 0, 0, 0,
+          // Product material/phase mechanics.
+          3, 2, 1, 100,
+          0, 100, 10, 1,
+          0, 1, 0, 0,
+          // Extended reaction header.
+          0, 0, 2, 0,
+          1, 0, 0, 0,
+          0, 1, 1, 3,
+          0, 0, 1, 1,
+          // Reactant A: 1 molar-mass unit, particle 0 has one unit left.
+          0, 1, 1, 1,
+          0, 1, 0, 1,
+          1, 1, 1, 0,
+          // Reactant B: wholly consumed.
+          0, 2, 1, 1,
+          0, 2, 0, 1,
+          2, 2, 1, 0,
+          // Product C: one product mole has mass 2.
+          0, 3, 1, 2,
+          1, 0, 2, 1,
+          3, 3, 0, 0,
+          1, 0, 0, 0
+        ]);
+        const phaseResponseRecords = new Float32Array([
+          3, 0, 1, 1,
+          0, 0, 0, 0
+        ]);
+        const phaseResponses = new Float32Array([
+          3, 1, 0, 1,
+          -1.0e6, 1.0e6, 2, 2,
+          1, 1, 0, 0,
+          0, 1, 0, 0
+        ]);
+        const thermalGraphNodes = new Float32Array([
+          0, 0, 0, 0,
+          0, 2, -1.0e6, 1.0e6,
+          0, 0, 0, 0,
+          0, 0, 0, 0
+        ]);
+        const thermalGraphSamples = new Float32Array([
+          -1.0e6, 250, 0, 0,
+          1.0e6, 350, 0, 0
+        ]);
+        const proposals = new Float32Array([
+          1, 0, 1, 0.01,
+          0, 0, 2, 0.01
+        ]);
+        const paramsBytes = new ArrayBuffer(48);
+        const paramsWords = new Uint32Array(paramsBytes);
+        const paramsFloats = new Float32Array(paramsBytes);
+        paramsWords.set([
+          particleCount,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          0
+        ], 0);
+        paramsFloats[9] = 0;
+        paramsWords[10] = 1;
+        paramsWords[11] = 0;
+
+        const particleBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-source',
+          particles
+        );
+        const reactionBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-table',
+          reactionRecords
+        );
+        const phaseResponseRecordBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-phase-records',
+          phaseResponseRecords
+        );
+        const phaseResponseBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-phase-responses',
+          phaseResponses
+        );
+        const proposalBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-proposals',
+          proposals
+        );
+        const outputBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-output',
+          particles.byteLength
+        );
+        const paramsBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-params',
+          new Uint8Array(paramsBytes),
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+        const graphNodeBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-graph-nodes',
+          thermalGraphNodes
+        );
+        const graphSampleBuffer = createBuffer(
+          'ulg-native-reaction-entity-count-graph-samples',
+          thermalGraphSamples
+        );
+        const bindGroup = device.createBindGroup({
+          label: 'ulg-native-reaction-entity-count-proof-bind-group',
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: particleBuffer } },
+            { binding: 3, resource: { buffer: reactionBuffer } },
+            { binding: 5, resource: { buffer: phaseResponseRecordBuffer } },
+            { binding: 6, resource: { buffer: phaseResponseBuffer } },
+            { binding: 7, resource: { buffer: proposalBuffer } },
+            { binding: 8, resource: { buffer: outputBuffer } },
+            { binding: 11, resource: { buffer: paramsBuffer } },
+            { binding: 12, resource: { buffer: graphNodeBuffer } },
+            { binding: 13, resource: { buffer: graphSampleBuffer } }
+          ]
+        });
+        const encoder = device.createCommandEncoder({
+          label: 'ulg-native-reaction-entity-count-proof-encoder'
+        });
+        const pass = encoder.beginComputePass({
+          label: 'ulg-native-reaction-entity-count-proof-pass'
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        const outputBytes = await readBuffer(
+          outputBuffer,
+          particles.byteLength,
+          'ulg-native-reaction-entity-count-proof-readback'
+        );
+        const output = new Float32Array(outputBytes);
+        const remainderBase = 0;
+        const directBase = packedParticleFloats;
+        const expectedRemainderEntities = f32Mul(
+          f32(2 * AVOGADRO_PER_MOL),
+          0.5
+        );
+        const expectedDirectEntities = f32Mul(
+          f32(2 / 2),
+          AVOGADRO_PER_MOL
+        );
+        const result = {
+          status: 'complete',
+          remainderMassKg: output[remainderBase + 3],
+          remainderMaterialId: output[remainderBase + 8],
+          remainderRepresentedEntityCount: output[remainderBase + 17],
+          expectedRemainderRepresentedEntityCount: expectedRemainderEntities,
+          directMassKg: output[directBase + 3],
+          directMaterialId: output[directBase + 8],
+          directRepresentedEntityCount: output[directBase + 17],
+          expectedDirectRepresentedEntityCount: expectedDirectEntities,
+          directVolumeRatioJ: output[directBase + 38],
+          directRestVolumeM3: output[directBase + 39]
+        };
+        for (const buffer of [
+          particleBuffer,
+          reactionBuffer,
+          phaseResponseRecordBuffer,
+          phaseResponseBuffer,
+          proposalBuffer,
+          outputBuffer,
+          paramsBuffer,
+          graphNodeBuffer,
+          graphSampleBuffer
+        ]) {
+          buffer.destroy();
+        }
+        return result;
+      };
+
+      const reactionEntityCountProof = await runReactionEntityCountProof();
+
       const summaryUrl = '/src/runtime/sph/sphReactionGpuSummary.js';
       const summarySource = await fetch(summaryUrl).then((response) => (
         response.text()
@@ -811,6 +1086,15 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
         gpuBuffers,
         spatial
       ] = modules;
+      const legacyPlacementModule = device.createShaderModule({
+        label: 'ulg-native-legacy-placement-entity-count-proof-shader',
+        code: wgsl.sphReactionProductEventPlacementWgsl
+      });
+      const legacyPlacementCompilationErrors = (
+        await legacyPlacementModule.getCompilationInfo()
+      ).messages
+        .filter((message) => message.type === 'error')
+        .map((message) => message.message);
       const createTaggedBuffer = (label, values, usage) => (
         identity.tagWebGpuBufferDevice(
           createBuffer(label, values, usage),
@@ -1196,6 +1480,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         return total;
       };
+      const particleRepresentedEntityCount = (thermo) => {
+        let total = 0;
+        for (let index = 9; index < thermo.length; index += 12) {
+          const value = Number(thermo[index]);
+          if (Number.isFinite(value)) total += value;
+        }
+        return total;
+      };
+      const liveEventRepresentedEntityCount = (events) => {
+        let total = 0;
+        for (let base = 0; base < events.length; base += 32) {
+          const mass = Number(events[base + 13]);
+          const molarMass = Number(events[base + 15]);
+          if (!(mass > 0) || !(molarMass > 0)) continue;
+          total += mass / molarMass * AVOGADRO_PER_MOL;
+        }
+        return total;
+      };
       const particleCurrentVolume = (state, mechanics) => {
         let total = 0;
         const particleCount = Math.min(
@@ -1210,11 +1512,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         return total;
       };
-      const liveEventCurrentVolume = (events) => {
+      const liveEventReferenceVolume = (events) => {
         let total = 0;
         for (let base = 0; base < events.length; base += 32) {
-          if (!(events[base + 13] > 0)) continue;
-          const volume = Number(events[base + 23]);
+          const mass = Number(events[base + 13]);
+          const restDensity = Number(events[base + 17]);
+          if (!(mass > 0) || !(restDensity > 0)) continue;
+          const volume = mass / restDensity;
           if (Number.isFinite(volume) && volume > 0) total += volume;
         }
         return total;
@@ -1332,12 +1636,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         const initialMass = particleMass(spec.destination.state)
           + unplacedMass(spec.events);
         const finalMass = particleMass(state) + unplacedMass(events);
-        const initialCurrentVolume = particleCurrentVolume(
+        const initialRepresentedEntityCount =
+          particleRepresentedEntityCount(spec.destination.thermo)
+          + liveEventRepresentedEntityCount(spec.events);
+        const finalRepresentedEntityCount =
+          particleRepresentedEntityCount(thermo)
+          + liveEventRepresentedEntityCount(events);
+        const initialParticleCurrentVolume = particleCurrentVolume(
           spec.destination.state,
           spec.destination.mechanics
-        ) + liveEventCurrentVolume(spec.events);
-        const finalCurrentVolume = particleCurrentVolume(state, mechanics)
-          + liveEventCurrentVolume(events);
+        );
+        const finalParticleCurrentVolume = particleCurrentVolume(
+          state,
+          mechanics
+        );
+        const materializedReferenceVolume =
+          liveEventReferenceVolume(spec.events)
+          - liveEventReferenceVolume(events);
+        const referenceBirthVolumeConsistent = near(
+          finalParticleCurrentVolume,
+          initialParticleCurrentVolume + materializedReferenceVolume,
+          2.0e-5
+        );
         const initialParticleMomentum = particleMomentum(
           spec.destination.state
         );
@@ -1368,12 +1688,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && receipt.destinationMutationCount === (spec.eventCount > 0 ? 1 : 0)
             && receipt.maxDestinationSegmentSize === spec.eventCount;
           conserved = near(finalMass, initialMass, 2.0e-3)
-            && near(finalCurrentVolume, initialCurrentVolume, 2.0e-5)
+            && referenceBirthVolumeConsistent
             && near(
               deformationDeterminant(mechanics, 0),
               mechanics[18],
               2.0e-5
             );
+        } else if (spec.expectedRollback === true) {
+          const expectedDestinationMutationCount =
+            spec.expectedSpeculativeDestinationMutationCount ?? 0;
+          cpuOracleParity = cpuOracleParity
+            && receipt.classifierRejectedCount
+              === spec.expectedClassifierRejectedCount
+            && receipt.rejectedEventCount === spec.expectedRejectedCount
+            && receipt.destinationMutationCount
+              === expectedDestinationMutationCount
+            && (
+              spec.expectedSpareCount == null
+              || (
+                receipt.sparePlacementEventCount === spec.expectedSpareCount
+                && receipt.spareAssignedCount === spec.expectedSpareCount
+                && receipt.noCarrierEventCount === spec.expectedNoCarrierCount
+              )
+            )
+            && fnv1a(new Uint8Array(state.buffer))
+              === fnv1a(new Uint8Array(spec.destination.state.buffer))
+            && fnv1a(new Uint8Array(thermo.buffer))
+              === fnv1a(new Uint8Array(spec.destination.thermo.buffer))
+            && fnv1a(new Uint8Array(mechanics.buffer))
+              === fnv1a(new Uint8Array(spec.destination.mechanics.buffer))
+            && arraysByteEqual(events, spec.events);
+          conserved = near(finalMass, initialMass, 5.0e-6)
+            && referenceBirthVolumeConsistent;
         } else if (spec.expectedSpareCount != null) {
           const dispositions = Array.from(
             { length: spec.eventCount },
@@ -1399,30 +1745,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               )
               && near(
                 restVolume * deformationJ,
-                spec.events[index * 32 + 23]
+                restVolume
               )
+              && near(deformationJ, 1)
               && near(
                 deformationDeterminant(mechanics, index),
                 deformationJ
+              )
+              && near(
+                thermo[index * 12 + 9],
+                spec.events[index * 32 + 13]
+                  / spec.events[index * 32 + 15]
+                  * AVOGADRO_PER_MOL
               );
           }
           conserved = near(finalMass, initialMass, 5.0e-6)
-            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
-        } else if (spec.expectedRollback === true) {
-          cpuOracleParity = cpuOracleParity
-            && receipt.classifierRejectedCount
-              === spec.expectedClassifierRejectedCount
-            && receipt.rejectedEventCount === spec.expectedRejectedCount
-            && receipt.destinationMutationCount === 0
-            && fnv1a(new Uint8Array(state.buffer))
-              === fnv1a(new Uint8Array(spec.destination.state.buffer))
-            && fnv1a(new Uint8Array(thermo.buffer))
-              === fnv1a(new Uint8Array(spec.destination.thermo.buffer))
-            && fnv1a(new Uint8Array(mechanics.buffer))
-              === fnv1a(new Uint8Array(spec.destination.mechanics.buffer))
-            && arraysByteEqual(events, spec.events);
-          conserved = near(finalMass, initialMass, 5.0e-6)
-            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
+            && referenceBirthVolumeConsistent;
         } else {
           const dispositions = Array.from(
             { length: spec.eventCount },
@@ -1443,10 +1781,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             && Array.from(thermo).every(Number.isFinite)
             && Array.from(mechanics).every(Number.isFinite);
           conserved = near(finalMass, initialMass, 5.0e-6)
-            && near(finalCurrentVolume, initialCurrentVolume, 5.0e-6);
+            && referenceBirthVolumeConsistent;
         }
         if (spec.expectedRollback !== true) {
           conserved = conserved
+            && near(
+              finalRepresentedEntityCount,
+              initialRepresentedEntityCount,
+              1.0e16
+            )
             && initialMomentum.every(
               (value, axis) => near(finalMomentum[axis], value, 2.0e-3)
             )
@@ -1456,6 +1799,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           cpuOracleParity,
           conserved,
           conservation: {
+            initialRepresentedEntityCount,
+            finalRepresentedEntityCount,
             initialMomentum,
             finalMomentum,
             initialTotalEnergy,
@@ -1472,8 +1817,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let backpressureChecked = false;
       let diagnosticObservationBackpressureCode = null;
       let diagnosticObservationBackpressureMessage = null;
-      let diagnosticObservationRetryFenceExact = null;
-      let diagnosticObservationPendingBeforeMap = null;
+      let diagnosticObservationRetryFenceAbsent = null;
+      let diagnosticObservationGateDeferredUntilRelease = null;
       let runOrdinal = 0;
       let placementSubmitCount = 0;
       let placementFenceCount = 0;
@@ -1677,7 +2022,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
           )
         );
-        let arenaRelease = injectDiagnosticMapFailure ? null : releaseArena();
+        let arenaRelease = diagnostic ? null : releaseArena();
         await submission.queueFence;
         let arenaReleaseConfirmed = null;
         placementFenceCount += 1;
@@ -1697,9 +2042,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let diagnosticFailureRecovery = null;
         if (diagnostic) {
           if (!injectDiagnosticMapFailure) {
-            diagnosticObservationPendingBeforeMap = placement
+            diagnosticObservationGateDeferredUntilRelease = placement
               .sphReactionProductPlacementSegmentedArenaStats(arenaLease.arena)
-              ?.diagnosticObservationPending === true;
+              ?.diagnosticObservationPending !== true;
             try {
               placement.acquireSphReactionProductPlacementSegmentedArenaWebGpu({
                 device,
@@ -1713,20 +2058,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               diagnosticObservationBackpressureCode = error?.code || String(error);
               diagnosticObservationBackpressureMessage =
                 error?.message || String(error);
-              diagnosticObservationRetryFenceExact =
-                error?.retryAfterFence === arenaRelease;
+              diagnosticObservationRetryFenceAbsent =
+                error?.retryAfterFence == null;
             }
             if (
               !String(diagnosticObservationBackpressureCode)
                 .endsWith('ARENA_BACKPRESSURE')
-              || diagnosticObservationRetryFenceExact !== true
+              || diagnosticObservationRetryFenceAbsent !== true
             ) {
               throw new Error(
-                `diagnostic readback did not pin the exact arena release fence: ${JSON.stringify({
-                  diagnosticObservationPendingBeforeMap,
+                `diagnostic readback did not hold the arena until observation: ${JSON.stringify({
+                  diagnosticObservationGateDeferredUntilRelease,
                   diagnosticObservationBackpressureCode,
                   diagnosticObservationBackpressureMessage,
-                  diagnosticObservationRetryFenceExact
+                  diagnosticObservationRetryFenceAbsent
                 })}`
               );
             }
@@ -1793,6 +2138,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 }
               );
           }
+        }
+        if (diagnostic && !injectDiagnosticMapFailure) {
+          // Queue-ordered diagnostic reuse is authorized only after the exact
+          // completion observation has settled.
+          arenaRelease = releaseArena();
         }
         if (injectDiagnosticMapFailure) {
           // Match the summary caller's failure ordering: observation throws,
@@ -1926,14 +2276,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         const placementReleaseStarted = placementEpoch
           .releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
             authentic.placementSourceFamily,
-            { placementArtifact: submission }
+            {
+              placementArtifact: submission,
+              // The manufactured authority owns its placement destinations;
+              // terminal release must explicitly retire them under the
+              // queue-ordered final-consumer capability.
+              retireDestinations: true
+            }
           );
         await Promise.resolve();
-        const placementReleaseConfirmed = placementEpoch
+        const placementReleaseStatus = placementEpoch
           .schroederSpatialReactionPlacementSourceFamilyLiveness(
             authentic.placementSourceFamily,
             { device }
-          ).releaseStatus === 'released-after-final-consumer';
+          ).releaseStatus;
+        const placementReleaseConfirmed = [
+          'released-after-final-consumer',
+          'released-after-final-consumer-queue-ordered'
+        ].includes(placementReleaseStatus);
         const ancestorReleaseStarted = spatial
           .releaseSchroederSpatialEpochGenerationAfterQueue(
             authentic.ancestor,
@@ -1964,6 +2324,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             arenaReleaseConfirmed,
             placementReleaseStarted,
             placementReleaseConfirmed,
+            placementReleaseStatus,
             ancestorReleaseStarted,
             ancestorReleaseConfirmed,
             artifactAuthentic,
@@ -2263,6 +2624,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         status: 'complete',
         adapterInfo,
         moduleIdentityShared,
+        reactionEntityCountProof,
         cases,
         boundaryEventCounts: boundarySpecs.map((spec) => spec.eventCount),
         diagnostic,
@@ -2275,8 +2637,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           diagnosticReadbackBufferCreatesAfterWarmup,
           completionReadbackCreatesBeforeDiagnostic,
           diagnosticObservationBackpressureCode,
-          diagnosticObservationRetryFenceExact,
-          diagnosticObservationPendingBeforeMap,
+          diagnosticObservationRetryFenceAbsent,
+          diagnosticObservationGateDeferredUntilRelease,
           backpressureCode,
           statsBeforeDestroy: arenaStatsBeforeDestroy,
           statsAfterDestroy: arenaStatsAfterDestroy,
@@ -2304,6 +2666,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         ),
         wgslHasPlacementCommit: typeof wgsl.sphReactionProductEventPlacementWgsl
           === 'string',
+        legacyPlacementCompilationErrors,
         instrumentation: {
           bufferCreateCount: instrumentation.bufferCreateCount,
           queueSubmitCount: instrumentation.queueSubmitCount,
@@ -2337,6 +2700,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   console.log('native segmented placement report', JSON.stringify({
     adapterInfo: native.adapterInfo,
+    reactionEntityCountProof: native.reactionEntityCountProof,
     timestamps: native.timestamps,
     cases: native.cases.map(({ debug, ...caseResult }) => caseResult),
     warmArena: native.warmArena,
@@ -2357,6 +2721,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   assert.deepEqual(native.uncapturedErrors, []);
   assert.equal(native.abiHasPlacementReceipt, true);
   assert.equal(native.wgslHasPlacementCommit, true);
+  assert.deepEqual(native.legacyPlacementCompilationErrors, []);
+  assert.equal(native.reactionEntityCountProof.status, 'complete');
+  assert.equal(native.reactionEntityCountProof.remainderMassKg, 1);
+  assert.equal(native.reactionEntityCountProof.remainderMaterialId, 1);
+  assert.ok(
+    Math.abs(
+      native.reactionEntityCountProof.remainderRepresentedEntityCount
+        - native.reactionEntityCountProof.expectedRemainderRepresentedEntityCount
+    ) <= Math.abs(
+      native.reactionEntityCountProof.expectedRemainderRepresentedEntityCount
+    ) * 2.0e-5
+  );
+  assert.equal(native.reactionEntityCountProof.directMassKg, 2);
+  assert.equal(native.reactionEntityCountProof.directMaterialId, 3);
+  assert.equal(native.reactionEntityCountProof.directVolumeRatioJ, 1);
+  assert.equal(native.reactionEntityCountProof.directRestVolumeM3, 2);
+  assert.ok(
+    Math.abs(
+      native.reactionEntityCountProof.directRepresentedEntityCount
+        - native.reactionEntityCountProof.expectedDirectRepresentedEntityCount
+    ) <= Math.abs(
+      native.reactionEntityCountProof.expectedDirectRepresentedEntityCount
+    ) * 2.0e-5
+  );
   assert.ok(native.cases.length >= 8);
   assert.deepEqual(
     native.boundaryEventCounts,
@@ -2437,8 +2825,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       .endsWith('ARENA_BACKPRESSURE'),
     true
   );
-  assert.equal(native.warmArena.diagnosticObservationRetryFenceExact, true);
-  assert.equal(native.warmArena.diagnosticObservationPendingBeforeMap, true);
+  assert.equal(native.warmArena.diagnosticObservationRetryFenceAbsent, true);
+  assert.equal(
+    native.warmArena.diagnosticObservationGateDeferredUntilRelease,
+    true
+  );
   assert.equal(native.warmArena.destroyedExactlyOnce, true);
   assert.ok(native.instrumentation.spareControlBufferCount > 0);
   assert.equal(native.instrumentation.spareControlCopyDstReady, true);

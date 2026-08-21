@@ -243,6 +243,80 @@ function createFixture(device, overrides = {}) {
   };
 }
 
+function createPostClosureAdmissionFixture(device, {
+  lookupPhysicsTick = 11,
+  lookupPhysicsSubstep = 0,
+  currentPhysicsTick = lookupPhysicsTick,
+  currentPhysicsSubstep = lookupPhysicsSubstep,
+  lookupStorageGeneration = 7,
+  currentStorageGeneration = 8,
+  currentLevelEpoch = 24,
+  currentSupportEpoch = 30,
+  mlsOverrides = {}
+} = {}) {
+  const fixture = createFixture(device, {
+    prior: {
+      storageGeneration: lookupStorageGeneration,
+      physicsTick: lookupPhysicsTick,
+      physicsSubstep: lookupPhysicsSubstep
+    },
+    current: {
+      storageGeneration: currentStorageGeneration,
+      bufferFamilyGeneration: currentStorageGeneration,
+      physicsTick: currentPhysicsTick,
+      physicsSubstep: currentPhysicsSubstep,
+      levelEpoch: currentLevelEpoch,
+      supportEpoch: currentSupportEpoch
+    },
+    mechanics: mlsOverrides
+  });
+  const finalSph = fixture.currentSphParticleUpload;
+  const finalMls = fixture.currentMlsMpmParticleUpload;
+  const assignmentBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'post-closure-admission-assignment',
+    size: fixture.particleCount * 16 * 4,
+    usage: 128
+  }), device);
+  const classified = {
+    ...fixture.priorLevelAssignment,
+    assignmentBuffer,
+    assignmentBufferByteLength: fixture.particleCount * 16 * 4,
+    sourceStateBuffer: finalSph.stateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceStateBufferByteLength: fixture.particleCount * 8 * 4,
+    sourceThermoBuffer: finalSph.thermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: fixture.particleCount * 12 * 4,
+    sourceMechanicsBuffer: finalMls.mechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: fixture.particleCount * 32 * 4,
+    kernelScope: 'schroeder-gpu-level-assignment',
+    fullParticleReadbackPerformed: false
+  };
+  for (const field of [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ]) {
+    classified[field] = finalSph[field];
+  }
+  return {
+    fixture,
+    finalSph,
+    finalMls,
+    classified,
+    nextParticleUploads: {
+      sphParticleUpload: finalSph,
+      mlsMpmParticleUpload: finalMls
+    }
+  };
+}
+
 function frozenFineOptions(runtime, fixture, overrides = {}) {
   const options = {
     priorLevelAssignment: fixture.priorLevelAssignment,
@@ -343,6 +417,13 @@ test('caller-owned encoder publishes a fresh position epoch while freezing macro
   assert.equal(execution.supportEpoch, fixture.priorLevelAssignment.supportEpoch);
   assert.equal(execution.levelReclassificationPerformed, false);
   assert.equal(execution.fullReadbackPerformed, false);
+  assert.equal(execution.fullParticleReadbackPerformed, false);
+  assert.equal(execution.fullParticleReadbackFree, true);
+  assert.equal(execution.readbackTelemetryComplete, true);
+  assert.deepEqual(execution.readbackTelemetryUnknownSources, []);
+  assert.equal(execution.mapAsyncCount, 0);
+  assert.equal(execution.readbackBytes, 0);
+  assert.equal(execution.hostQueueFenceCount, 0);
   assert.equal(execution.normalHotLoopReadbackFree, true);
   assert.equal(device.writes.length, 1);
   assert.deepEqual(Array.from(device.writes[0].data), [fixture.particleCount, 16, 8, 1]);
@@ -608,6 +689,9 @@ test('post-closure admission publishes exact descriptors for an activated high p
   assert.equal(admitted.sourceStateBuffer, finalSph.stateBuffer);
   assert.equal(admitted.sourceThermoBuffer, finalSph.thermoBuffer);
   assert.equal(admitted.sourceMechanicsBuffer, finalMls.mechanicsBuffer);
+  assert.equal(admitted.postClosureTickMode, 'same-lookup-tick');
+  assert.equal(admitted.sourceLookupPhysicsTick, 11);
+  assert.equal(admitted.sourceLookupPhysicsSubstep, 0);
   assert.deepEqual(
     Array.from(admitted.assignments.slice(productOffset, productOffset + 12)),
     [
@@ -626,6 +710,154 @@ test('post-closure admission publishes exact descriptors for an activated high p
     false,
     'public-field copying cannot forge the private exact-lineage seal'
   );
+});
+
+test('post-closure admission seals an exact next-tick/substep-zero successor', () => {
+  const device = createFakeDevice();
+  const admission = createPostClosureAdmissionFixture(device, {
+    currentPhysicsTick: 12,
+    currentPhysicsSubstep: 0
+  });
+  const admitted = admitSchroederPostClosureLevelAssignment({
+    device,
+    lookupLevelAssignment: admission.fixture.priorLevelAssignment,
+    nextParticleUploads: admission.nextParticleUploads,
+    postClosureLevelAssignment: admission.classified
+  });
+
+  assert.equal(admitted.physicsTick, 12);
+  assert.equal(admitted.physicsSubstep, 0);
+  assert.equal(admitted.postClosureTickMode, 'next-tick-successor');
+  assert.equal(admitted.sourceLookupPhysicsTick, 11);
+  assert.equal(admitted.sourceLookupPhysicsSubstep, 0);
+  for (const field of [
+    'postClosureTickMode',
+    'sourceLookupPhysicsTick',
+    'sourceLookupPhysicsSubstep'
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(admitted, field);
+    assert.equal(descriptor.enumerable, true);
+    assert.equal(descriptor.writable, false);
+    assert.equal(descriptor.configurable, false);
+  }
+  assert.equal(
+    validateSchroederPostClosureLevelAssignment(admitted, {
+      device,
+      lookupLevelAssignment: admission.fixture.priorLevelAssignment,
+      nextParticleUploads: admission.nextParticleUploads
+    }),
+    true
+  );
+  assert.equal(
+    validateSchroederPostClosureLevelAssignment({
+      ...admitted,
+      postClosureTickMode: 'same-lookup-tick'
+    }, {
+      device,
+      lookupLevelAssignment: admission.fixture.priorLevelAssignment,
+      nextParticleUploads: admission.nextParticleUploads
+    }),
+    false,
+    'copied public tick evidence cannot forge the private admission seal'
+  );
+});
+
+test('post-closure admission rejects skipped, wrong-substep, wrapped, and stale successors', () => {
+  const cases = [
+    {
+      name: 'N+2',
+      options: { currentPhysicsTick: 13, currentPhysicsSubstep: 0 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'same tick with wrong substep',
+      options: { currentPhysicsTick: 11, currentPhysicsSubstep: 1 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'N+1 with nonzero substep',
+      options: { currentPhysicsTick: 12, currentPhysicsSubstep: 1 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'u32 tick wrap',
+      options: {
+        lookupPhysicsTick: 0xffff_ffff,
+        currentPhysicsTick: 0,
+        currentPhysicsSubstep: 0
+      },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'stale storage generation',
+      options: { currentStorageGeneration: 7 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'stale level epoch',
+      options: { currentLevelEpoch: 23 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'stale support epoch',
+      options: { currentSupportEpoch: 29 },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    },
+    {
+      name: 'cross-component tick identity',
+      options: { mlsOverrides: { physicsTick: 12 } },
+      code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
+    }
+  ];
+
+  for (const entry of cases) {
+    const device = createFakeDevice();
+    const admission = createPostClosureAdmissionFixture(device, entry.options);
+    assert.throws(
+      () => admitSchroederPostClosureLevelAssignment({
+        device,
+        lookupLevelAssignment: admission.fixture.priorLevelAssignment,
+        nextParticleUploads: admission.nextParticleUploads,
+        postClosureLevelAssignment: admission.classified
+      }),
+      (error) => {
+        assert.equal(error.code, entry.code, entry.name);
+        return true;
+      }
+    );
+  }
+});
+
+test('post-closure admission rejects wrong thermo and mechanics classifier sources', () => {
+  for (const sourceRole of ['thermo', 'mechanics']) {
+    const device = createFakeDevice();
+    const admission = createPostClosureAdmissionFixture(device, {
+      currentPhysicsTick: 12,
+      currentPhysicsSubstep: 0
+    });
+    if (sourceRole === 'thermo') {
+      admission.classified.sourceThermoBuffer = tagWebGpuBufferDevice(
+        device.createBuffer({
+          label: 'wrong-post-closure-thermo',
+          size: admission.fixture.particleCount * 12 * 4,
+          usage: 128
+        }),
+        device
+      );
+    } else {
+      admission.classified.sourceMechanicsBuffer =
+        admission.fixture.priorLevelAssignment.sourceMechanicsBuffer;
+    }
+    assert.throws(
+      () => admitSchroederPostClosureLevelAssignment({
+        device,
+        lookupLevelAssignment: admission.fixture.priorLevelAssignment,
+        nextParticleUploads: admission.nextParticleUploads,
+        postClosureLevelAssignment: admission.classified
+      }),
+      { code: 'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_PROVENANCE' }
+    );
+  }
 });
 
 test('refresh fails closed before encoding on count, layout, epoch and device mismatch', () => {
@@ -701,12 +933,24 @@ test('persistent arenas apply bounded backpressure until abandonment or a queue 
 
   const second = runtime.encode(createFakeEncoder(), options);
   runtime.markExecutionSubmitted(second);
+  const queueFence = deferred();
+  device.queue.onSubmittedWorkDone = () => queueFence.promise;
   assert.throws(
     () => runtime.abandonExecution(second),
     (error) => error.code === 'ERR_SCHROEDER_FROZEN_REFRESH_FENCE_REQUIRED'
   );
   assert.equal(runtime.destroy(), false);
-  await runtime.releaseAfterQueue(second);
+  const release = runtime.releaseAfterQueue(second);
+  let availabilitySettled = false;
+  const availability = runtime.waitForAvailableArena().then((available) => {
+    availabilitySettled = true;
+    return available;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(availabilitySettled, false);
+  queueFence.resolve();
+  assert.equal(await release, true);
+  assert.equal(await availability, true);
   assert.equal(runtime.destroy(), true);
 });
 

@@ -13,7 +13,7 @@ export const SPH_REACTION_PRODUCT_PLACEMENT_DIRECT_VALUE_ROWS = 3;
 export const SPH_REACTION_PRODUCT_PLACEMENT_EVENT_PLAN_ROWS = 2;
 export const SPH_REACTION_PRODUCT_PLACEMENT_SUMMARY_VALUE_ROWS = 9;
 export const SPH_REACTION_PRODUCT_PLACEMENT_LAW = Object.freeze({
-  schema: 'peercompute.ulg.sph-reaction-product-placement-law.v4',
+  schema: 'peercompute.ulg.sph-reaction-product-placement-law.v5',
   mutationOrder:
     'stable-event-plan-then-conserving-capture-segment-reduction-then-disjoint-direct-pair-hyperedges',
   captureReductionOrder:
@@ -22,8 +22,8 @@ export const SPH_REACTION_PRODUCT_PLACEMENT_LAW = Object.freeze({
     'mass-momentum-total-energy-reduction-with-relative-kinetic-energy-thermalization',
   directPairSelection:
     'stable-last-admitted-product-event-per-disjoint-reacting-pair',
-  deliberateChangeFromV3:
-    'all placement geometry and mutations preserve authoritative current volume V0*J'
+  deliberateChangeFromV4:
+    'event support volume remains routing geometry while newly materialized product mass is born at target reference density with J=1'
 });
 
 const PARAMS = /* wgsl */ `
@@ -48,6 +48,7 @@ struct ProductPlacementParams {
 
 const PHASE_COMPANION_RESERVED_STATUS: f32 = 254.0;
 const INVALID_KEY: u32 = 0xffffffffu;
+const REACTION_AVOGADRO_PER_MOL: f32 = 6.02214076e23;
 
 fn phase_is_gas(phase_id: f32) -> bool {
   return phase_id >= 2.5 && phase_id < 3.5;
@@ -63,6 +64,47 @@ fn finite_vec3(value: vec3<f32>) -> bool {
 
 fn finite_vec4(value: vec4<f32>) -> bool {
   return all(value == value) && all(abs(value) <= vec4<f32>(3.0e38));
+}
+
+fn represented_entity_count_for_product_mass(
+  mass_kg: f32,
+  molar_mass_kg_per_mol: f32
+) -> f32 {
+  if (
+    !finite_scalar(mass_kg)
+    || !finite_scalar(molar_mass_kg_per_mol)
+    || !(mass_kg > 0.0)
+    || !(molar_mass_kg_per_mol > 0.0)
+  ) {
+    return 0.0;
+  }
+  return mass_kg / molar_mass_kg_per_mol * REACTION_AVOGADRO_PER_MOL;
+}
+
+fn product_event_moles_match_mass(
+  product_mass_kg: f32,
+  product_moles: f32,
+  molar_mass_kg_per_mol: f32
+) -> bool {
+  if (
+    !finite_scalar(product_mass_kg)
+    || !finite_scalar(product_moles)
+    || !finite_scalar(molar_mass_kg_per_mol)
+    || !(product_mass_kg > 0.0)
+    || !(product_moles > 0.0)
+    || !(molar_mass_kg_per_mol > 0.0)
+  ) {
+    return false;
+  }
+  let derived_moles = product_mass_kg / molar_mass_kg_per_mol;
+  if (!finite_scalar(derived_moles) || !(derived_moles > 0.0)) {
+    return false;
+  }
+  let tolerance = max(
+    1.0e-20,
+    1.0e-5 * max(abs(product_moles), abs(derived_moles))
+  );
+  return abs(product_moles - derived_moles) <= tolerance;
 }
 
 fn support_fits_box(radius_m: f32) -> bool {
@@ -271,7 +313,9 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && decision.x == capture_f && decision.w == spare_f;
   let payload_valid = payload_finite && valid_term && row4.z == 1.0 && row7.z == 1.0
     && row0.w >= 0.0 && row3.x >= 0.0 && row3.y >= 0.0
-    && row2.w > 0.0 && row4.y > 0.0 && row5.w >= 0.0
+    && row2.y > 0.0 && row2.w > 0.0 && row3.w > 0.0
+    && row4.y > 0.0 && row5.w >= 0.0
+    && product_event_moles_match_mass(row0.w, row2.y, row3.w)
     && (row3.y <= 0.0 || row5.w > 0.0)
     && pair_valid && decision_indices_valid;
   var support_radius = 0.05;
@@ -288,6 +332,10 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
   let unplaced_mass = max(row3.y, 0.0);
+  let represented_entity_count = represented_entity_count_for_product_mass(
+    unplaced_mass,
+    row3.w
+  );
   let speed_squared = dot(row5.xyz, row5.xyz);
   let specific_total_energy = row4.w + 0.5 * speed_squared;
   let mass_position = routed_position * unplaced_mass;
@@ -297,11 +345,13 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let rest_volume = unplaced_mass / max(row4.y, 1.0e-20);
   let derived_moments_valid = finite_scalar(speed_squared)
     && finite_scalar(specific_total_energy)
+    && finite_scalar(represented_entity_count)
     && finite_vec3(mass_position)
     && finite_vec3(mass_momentum)
     && finite_scalar(total_energy)
     && finite_scalar(temperature_moment)
     && finite_scalar(rest_volume)
+    && (unplaced_mass <= 0.0 || represented_entity_count > 0.0)
     && (unplaced_mass <= 0.0 || (
       rest_volume > 0.0
       && row5.w > 0.0
@@ -342,7 +392,15 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (disposition != 4.0) { return; }
   capture_keys[event] = merge_slot;
   let value_base = event * ${SPH_REACTION_PRODUCT_PLACEMENT_CAPTURE_VALUE_ROWS}u;
-  capture_values[value_base] = vec4<f32>(1.0, f32(event + 1u), 0.0, 0.0);
+  // row0.z is the otherwise-unused exact segmented-reduction lane. It carries
+  // the represented formula-unit count belonging to this event's unplaced
+  // mass so every equal-key capture fold can publish it with the mass.
+  capture_values[value_base] = vec4<f32>(
+    1.0,
+    f32(event + 1u),
+    represented_entity_count,
+    0.0
+  );
   capture_values[value_base + 1u] = vec4<f32>(unplaced_mass, mass_position);
   // The fourth lane is total energy, not internal energy. The capture apply
   // subtracts the merged COM kinetic energy so relative motion is converted
@@ -352,7 +410,11 @@ fn plan_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     temperature_moment,
     rest_volume,
     max(decisions[event].y, 0.0),
-    row5.w
+    // A product event's support volume is spatial routing/scatter geometry,
+    // not deformation authority for a newly born material carrier.  The
+    // product contributes its target-reference volume to both V0 and current
+    // volume, which makes the incoming material exactly J = 1.
+    rest_volume
   );
   capture_values[value_base + 4u] = vec4<f32>(row0.xyz, support_radius);
   capture_values[value_base + 5u] = vec4<f32>(routed_position, select(0.0, 1.0, route_planned));
@@ -497,16 +559,21 @@ fn apply_unique_events_and_emit_summaries(@builtin(global_invocation_id) global_
     select(0.0, 1.0, phase >= 2.5 && phase < 3.5),
     select(0.0, 1.0, phase >= 3.5)
   );
-  next_thermo[thermo_base + 2u] = vec4<f32>(plan1.w, 1.0, 1.0, plan1.w);
+  let represented_entity_count = represented_entity_count_for_product_mass(
+    unplaced_mass,
+    row3.w
+  );
+  next_thermo[thermo_base + 2u] = vec4<f32>(
+    plan1.w,
+    represented_entity_count,
+    1.0,
+    plan1.w
+  );
   let mechanics_base = slot * params.mechanics_stride_vec4;
   let rest_volume = unplaced_mass / max(row4.y, 1.0e-20);
-  let current_volume = max(row5.w, 0.0);
-  let deformation_j = current_volume / max(rest_volume, 1.0e-20);
-  let deformation_scale = pow(max(deformation_j, 1.0e-20), 1.0 / 3.0);
-  if (!(rest_volume > 0.0) || !(current_volume > 0.0)
-    || !(deformation_j > 0.0) || !finite_scalar(rest_volume)
-    || !finite_scalar(current_volume) || !finite_scalar(deformation_j)
-    || !finite_scalar(deformation_scale)) {
+  let deformation_j = 1.0;
+  let deformation_scale = 1.0;
+  if (!(rest_volume > 0.0) || !finite_scalar(rest_volume)) {
     atomicOr(
       &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
       ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.VOLUME_AUTHORITY}u
@@ -581,7 +648,12 @@ fn reduce_capture_segments(@builtin(global_invocation_id) global_id: vec3<u32>) 
   let current0 = input_values[out];
   let prior0 = input_values[left];
   let choose_prior_metadata = prior0.y > current0.y;
-  output_values[out] = vec4<f32>(current0.x + prior0.x, max(current0.y, prior0.y), 0.0, 0.0);
+  output_values[out] = vec4<f32>(
+    current0.x + prior0.x,
+    max(current0.y, prior0.y),
+    current0.z + prior0.z,
+    0.0
+  );
   output_values[out + 1u] = input_values[out + 1u] + input_values[left + 1u];
   output_values[out + 2u] = input_values[out + 2u] + input_values[left + 2u];
   let current3 = input_values[out + 3u];
@@ -681,7 +753,11 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
   let mechanics4 = next_mechanics[mechanics_base + 4u];
   let thermo_base = key * params.thermo_stride_vec4;
   let thermo0 = next_thermo[thermo_base];
-  let merged_current_volume = mechanics4.z * mechanics4.w + aggregate3.w;
+  let thermo2 = next_thermo[thermo_base + 2u];
+  let merged_represented_entity_count = thermo2.y + aggregate0.z;
+  let incoming_reference_volume = aggregate3.w;
+  let merged_current_volume = mechanics4.z * mechanics4.w
+    + incoming_reference_volume;
   let merged_rest_volume = mechanics4.w + aggregate3.y;
   let merged_j = merged_current_volume / max(merged_rest_volume, 1.0e-20);
   let deformation_scale = pow(
@@ -689,7 +765,7 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
     1.0 / 3.0
   );
   if (!(mechanics4.z > 0.0) || !(mechanics4.w > 0.0)
-    || !(aggregate3.y > 0.0) || !(aggregate3.w > 0.0)
+    || !(aggregate3.y > 0.0) || !(incoming_reference_volume > 0.0)
     || !(merged_rest_volume > 0.0) || !(merged_current_volume > 0.0)
     || !(merged_j > 0.0) || !finite_scalar(merged_rest_volume)
     || !finite_scalar(merged_current_volume) || !finite_scalar(merged_j)
@@ -700,6 +776,9 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
     || !finite_scalar(merged_total_energy)
     || !finite_scalar(internal_out)
     || !finite_vec4(thermo0)
+    || !finite_vec4(thermo2)
+    || !finite_scalar(aggregate0.z)
+    || !finite_scalar(merged_represented_entity_count)
     || !finite_vec4(mechanics4)) {
     atomicOr(
       &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.overflowFlags}],
@@ -730,6 +809,12 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
   next_state[state_base] = vec4<f32>(position_out, total_mass);
   next_state[state_base + 1u] = vec4<f32>(velocity_out, internal_out);
   next_thermo[thermo_base] = vec4<f32>(thermo0.xy, temperature_out, thermo0.w);
+  next_thermo[thermo_base + 2u] = vec4<f32>(
+    thermo2.x,
+    merged_represented_entity_count,
+    thermo2.z,
+    thermo2.w
+  );
   next_mechanics[mechanics_base] =
     next_mechanics[mechanics_base] * deformation_scale;
   next_mechanics[mechanics_base + 1u] =
@@ -855,12 +940,13 @@ fn reduce_direct_segments(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let left = (position - reduce.stride) * ${SPH_REACTION_PRODUCT_PLACEMENT_DIRECT_VALUE_ROWS}u;
   let current = input_values[out];
   let prior = input_values[left];
-  output_values[out].x = current.x + prior.x;
+  var selected = current;
   if (prior.y > current.y) {
-    output_values[out].yzw = prior.yzw;
+    selected = prior;
     output_values[out + 1u] = input_values[left + 1u];
     output_values[out + 2u] = input_values[left + 2u];
   }
+  output_values[out] = vec4<f32>(current.x + prior.x, selected.yzw);
 }
 `;
 
@@ -1050,12 +1136,20 @@ fn reduce_summary_segments(@builtin(global_invocation_id) global_id: vec3<u32>) 
   let left = (position - reduce.stride) * ${SPH_REACTION_PRODUCT_PLACEMENT_SUMMARY_VALUE_ROWS}u;
   let current_meta = input_values[out + 8u];
   let prior_meta = input_values[left + 8u];
-  if (prior_meta.y > 0.0 && (current_meta.y <= 0.0 || prior_meta.x < current_meta.x)) {
+  let choose_prior_metadata = prior_meta.y > 0.0
+    && (current_meta.y <= 0.0 || prior_meta.x < current_meta.x);
+  if (choose_prior_metadata) {
     output_values[out] = input_values[left];
-    output_values[out + 1u].x = input_values[left + 1u].x;
     output_values[out + 8u] = prior_meta;
   }
-  output_values[out + 1u].zw = input_values[out + 1u].zw + input_values[left + 1u].zw;
+  let current1 = input_values[out + 1u];
+  let prior1 = input_values[left + 1u];
+  output_values[out + 1u] = vec4<f32>(
+    select(current1.x, prior1.x, choose_prior_metadata),
+    current1.y,
+    current1.z + prior1.z,
+    current1.w + prior1.w
+  );
   for (var row = 2u; row <= 5u; row = row + 1u) {
     output_values[out + row] = input_values[out + row] + input_values[left + row];
   }
@@ -1197,6 +1291,10 @@ fn finalize_segmented_placement_receipt(@builtin(local_invocation_id) local_id: 
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.sparePlacementEventCount}])
       == atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.spareAssignedCount}])
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.fallbackEventCount}]) == 0u
+    // Above-threshold product mass must become a moving carrier.  Treat
+    // reserve exhaustion as a rejected transaction so the same-command
+    // publication gate restores every speculative destination and ledger.
+    && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.noCarrierEventCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.rejectedEventCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.unknownDispositionCount}]) == 0u
     && atomicLoad(&receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.serialConflictFoldPassCount}]) == 0u

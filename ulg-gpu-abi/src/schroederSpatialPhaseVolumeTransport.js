@@ -15,6 +15,7 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_ACCUMULATOR = Object.freez
   localHeatContributionCount: 1,
   parentRouteHeatJ: 2,
   localPressureInternalCompensationJ: 3,
+  localReversibleStressInternalCompensationJ: 3,
   ambientImpulseXNs: 4,
   ambientImpulseYNs: 5,
   ambientImpulseZNs: 6,
@@ -29,9 +30,11 @@ export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_ABI = Object.freeze({
     'exact-s9c-sparse-local-head-ranges-with-virtual-pairs-no-materialized-pair-graph',
   volumeAuthority: 's9a-current-volume-v0-times-j-only',
   materialAuthority:
-    'exact-mechanics-material-phase-records-rest-density-sound-speed-viscosity',
+    'exact-mechanics-material-phase-records-rest-density-sound-speed-viscosity-surface-tension',
   localConservation:
-    'antisymmetric-pressure-and-drag-impulses;drag-loss-to-local-heat;pressure-work-to-signed-compensation-ledger',
+    'antisymmetric-pressure-drag-and-cartesian-surface-stress-impulses;drag-loss-to-local-heat;reversible-pressure-and-capillary-work-to-signed-compensation-ledger',
+  surfaceStress:
+    's9a-color-gradient-css-on-exact-same-level-cartesian-faces;affine-parent-routes-are-not-physical-faces',
   ambientBoundary:
     'hydrostatic-reference-density-buoyancy-with-explicit-external-impulse-and-work-ledger',
   fallbackPolicy:

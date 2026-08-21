@@ -479,6 +479,34 @@ test('directory-v2 encoding dispatches sparse work from the exact GPU ActiveSour
   assert.equal(runtime.destroy(), true);
 });
 
+test('mechanics-view arenas reuse exact immutable bind groups', () => {
+  const device = createFakeDevice();
+  const runtime = createSchroederSpatialMechanicsViewGpu(device, {
+    maxSourceCount: 1024,
+    gridNodeCount: 512,
+    gridDims: [8, 8, 8],
+    gridShift: 2,
+    gridSpacingM: 0.25,
+    arenaCount: 1,
+    label: 'test-mechanics-view-bind-cache'
+  });
+  const authority = createV2Authority(device);
+  const first = encodeV2(runtime, createFakeEncoder(), authority);
+  const explicitBindGroupCount = device.bindGroups.filter((group) => (
+    group.label === 'test-mechanics-view-bind-cache-arena-0-bindings'
+  )).length;
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = encodeV2(runtime, createFakeEncoder(), authority);
+  assert.equal(
+    device.bindGroups.filter((group) => (
+      group.label === 'test-mechanics-view-bind-cache-arena-0-bindings'
+    )).length,
+    explicitBindGroupCount
+  );
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+});
+
 test('stale or tampered directory-v2 lineage is rejected before any GPU work', () => {
   const device = createFakeDevice();
   const runtime = createRuntime(device);

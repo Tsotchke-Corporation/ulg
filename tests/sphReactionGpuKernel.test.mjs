@@ -31,6 +31,10 @@ import {
   runSphReactionStepWebGpu,
   runSphReactionStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
+import {
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedWork
+} from '../src/runtime/webgpuComputeLayout.js';
 import { sphReactionStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const materialProperties = {
@@ -112,6 +116,7 @@ function packedThreeParticles() {
 function fakeReactionFailureDevice({ failAt = null } = {}) {
   const createdBuffers = [];
   let encoderFailed = false;
+  let queueFenceCount = 0;
   const createBuffer = ({ label = 'buffer', size = 4 } = {}) => {
     const buffer = {
       label,
@@ -151,6 +156,9 @@ function fakeReactionFailureDevice({ failAt = null } = {}) {
   };
   const device = {
     createdBuffers,
+    getQueueFenceCount() {
+      return queueFenceCount;
+    },
     limits: {
       maxBufferSize: 1 << 28,
       maxStorageBufferBindingSize: 1 << 28
@@ -158,7 +166,10 @@ function fakeReactionFailureDevice({ failAt = null } = {}) {
     queue: {
       writeBuffer() {},
       submit() {},
-      onSubmittedWorkDone() { return Promise.resolve(true); }
+      onSubmittedWorkDone() {
+        queueFenceCount += 1;
+        return Promise.resolve(true);
+      }
     },
     createBuffer,
     createShaderModule() { return {}; },
@@ -588,7 +599,7 @@ test('SPH reaction table routes only gas-only or explicitly gas product terms to
   assert.equal(conflictingRoutingTable.gasProductCount, 1);
 });
 
-test('SPH reaction CPU step converts only mutual nearest contact pairs and resets product mechanics', () => {
+test('SPH reaction CPU step converts mutual pairs and births products at their reference state', () => {
   const packed = packedThreeParticles();
   packed.sphParticleState.thermo[11] = 0.03125;
   packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 11] = 0.046875;
@@ -616,13 +627,21 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.reactionLedger.eventCount, 1);
   assert.equal(result.reactionLedger.unplacedProductMassKg, 0);
   assert.equal(result.reactionLedger.productMassKgByMaterial.ab, 6);
-  assert.ok(Math.abs(result.mechanics[18] - (0.16 * (2 / 6)) / (2 / 500)) < 1e-5);
+  assert.equal(result.mechanics[18], 1);
   assert.ok(Math.abs(result.mechanics[19] - (2 / 500)) < 1e-8);
+  assert.equal(
+    result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 18],
+    1
+  );
+  assert.ok(Math.abs(
+    result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19]
+      - (4 / 500)
+  ) < 1e-8);
   assert.ok(Math.abs(
     result.mechanics[18] * result.mechanics[19]
       + result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 18]
         * result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19]
-      - 0.16
+      - (6 / 500)
   ) < 1e-6);
   assert.equal(result.mechanics[20], 0);
   assert.equal(result.mechanics[22], 5e5);
@@ -673,6 +692,10 @@ test('SPH reaction WGSL places gas products into freed parent slots after conden
   assert.doesNotMatch(
     sphReactionStepWgsl,
     /select\(\s*rest_volume,\s*current_volume_m3/
+  );
+  assert.match(
+    sphReactionStepWgsl,
+    /fn\s+write_reacted_mechanics[\s\S]*?let deformation_j = 1\.0;[\s\S]*?let deformation_scale = 1\.0;/
   );
   assert.match(sphReactionStepWgsl, /product_term_for_parent_slot\(reaction_index,\s*local_product_slot\)/);
   // Products launch at the consumed pair's COM velocity (momentum-exact).
@@ -738,7 +761,27 @@ test('SPH reaction product placement borrows the canonical directory and publish
   );
   assert.match(
     sphReactionGpuKernelSource,
-    /residentProductMassSettlement[\s\S]*?onSubmittedWorkDone[\s\S]*?releaseSphReactionTransferredDestinationAfterSettledFences/
+    /queueOrderedFinalConsumer[\s\S]*?releaseSubmittedWorkCleanupQueueOrdered[\s\S]*?releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered/
+  );
+  assert.doesNotMatch(
+    sphReactionGpuKernelSource,
+    /queueOrderedFinalConsumer\?\.validateOwnerAuthority/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /if\s*\(queueOrderedRequested\)[\s\S]*?releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered[\s\S]*?releaseSphReactionTransferredDestinationAfterSettledFences/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /device\.queue\?\.onSubmittedWorkDone\?\.\(\)[\s\S]*?appendGpuReadbackTelemetryObservation\(result,[\s\S]*?deferredCleanupHostQueueFenceCount:\s*1/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /onHostQueueFenceAwait\(\)[\s\S]*?recordAwaitedBackpressureHostQueueFence\(/
+  );
+  assert.match(
+    sphReactionGpuKernelSource,
+    /queueOrderedRetainedOutputCleanup[\s\S]*?queueOrderedRelease\(\)[\s\S]*?outputParticleBufferCleanupReceipt[\s\S]*?outputParticleBufferQueueCompletionMethod/
   );
   assert.match(
     sphReactionGpuKernelSource,
@@ -872,6 +915,18 @@ test('SPH reaction unequal-mass stoichiometry retains excess reactant and conser
   packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1] =
     GPU_PHASE_IDS.gas;
   packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 3] = 1.7;
+  packed.sphParticleState.state.set(
+    [2, -1, 0.5],
+    4
+  );
+  packed.sphParticleState.state.set(
+    [-3, 4, -0.25],
+    SPH_GPU_PARTICLE_STATE_FLOATS + 4
+  );
+  packed.sphParticleState.state.set(
+    [0.25, 0.5, -0.75],
+    SPH_GPU_PARTICLE_STATE_FLOATS * 2 + 4
+  );
   const table = buildSphReactionTable([reaction], {
     materialProperties: csfProperties,
     contactRadiusM: 0.1
@@ -892,12 +947,42 @@ test('SPH reaction unequal-mass stoichiometry retains excess reactant and conser
     * csfProperties.cs.molarMassKgPerMol;
   const expectedCesiumRemainingKg = cesiumMassKg - expectedCesiumConsumedKg;
   const expectedProductMassKg = fluorineMassKg + expectedCesiumConsumedKg;
+  const momentumFor = (state) => {
+    const total = [0, 0, 0];
+    for (let index = 0; index < 3; index += 1) {
+      const offset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+      const massKg = state[offset + 3];
+      for (let axis = 0; axis < 3; axis += 1) {
+        total[axis] += massKg * state[offset + 4 + axis];
+      }
+    }
+    return total;
+  };
+  const totalEnergyFor = (state) => {
+    let total = 0;
+    for (let index = 0; index < 3; index += 1) {
+      const offset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+      const massKg = state[offset + 3];
+      const speedSquared =
+        state[offset + 4] ** 2
+        + state[offset + 5] ** 2
+        + state[offset + 6] ** 2;
+      total += massKg * (state[offset + 7] + 0.5 * speedSquared);
+    }
+    return total;
+  };
   const initialMassKg = Array.from({ length: 3 }, (_, index) => (
     packed.sphParticleState.state[index * SPH_GPU_PARTICLE_STATE_FLOATS + 3]
   )).reduce((sum, value) => sum + value, 0);
   const finalMassKg = Array.from({ length: 3 }, (_, index) => (
     result.state[index * SPH_GPU_PARTICLE_STATE_FLOATS + 3]
   )).reduce((sum, value) => sum + value, 0);
+  const initialMomentum = momentumFor(packed.sphParticleState.state);
+  const finalMomentum = momentumFor(result.state);
+  const initialTotalEnergyJ = totalEnergyFor(packed.sphParticleState.state);
+  const finalTotalEnergyJ = totalEnergyFor(result.state);
+  const expectedReactionHeatJ = -reaction.specificEnthalpyJPerKg
+    * expectedProductMassKg;
 
   assert.equal(result.eventCount, 1);
   assert.equal(result.conversionCount, 1);
@@ -912,6 +997,21 @@ test('SPH reaction unequal-mass stoichiometry retains excess reactant and conser
       - expectedProductMassKg
   ) < 2e-5);
   assert.ok(Math.abs(finalMassKg - initialMassKg) < 2e-5);
+  const productMechanicsOffset = MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  assert.equal(result.mechanics[productMechanicsOffset + 18], 1);
+  assert.ok(Math.abs(
+    result.mechanics[productMechanicsOffset + 19]
+      - expectedProductMassKg / csfProperties.csf.phases[0].densityKgPerM3
+  ) < 1e-7);
+  assert.equal(result.mechanics[productMechanicsOffset], 1);
+  assert.equal(result.mechanics[productMechanicsOffset + 4], 1);
+  assert.equal(result.mechanics[productMechanicsOffset + 8], 1);
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(Math.abs(finalMomentum[axis] - initialMomentum[axis]) < 5e-5);
+  }
+  assert.ok(Math.abs(
+    finalTotalEnergyJ - initialTotalEnergyJ - expectedReactionHeatJ
+  ) < 0.1);
   assert.equal(
     result.reactionStoichiometryDiagnosticStatus,
     'extended-stoichiometry-ready'
@@ -1250,6 +1350,163 @@ test('SPH reaction setup, encoder, and map failures drain every non-borrowed loc
       `${failAt} left a local reaction buffer live`
     );
   }
+});
+
+test('SPH retained reaction output fences only the unauthenticated fallback', async () => {
+  const runRetainedStep = async (
+    device = fakeReactionFailureDevice(),
+    requestQueueOrderedCleanupClaim = false
+  ) => {
+    const result = await runSphReactionStepWebGpu({
+      ...packedThreeParticles(),
+      device,
+      reactionTable: reactionTable(),
+      thermalMaterialTable:
+        buildSphThermalMaterialTable(materialProperties),
+      readbackMode: 'no-full-readback',
+      retainOutputParticleBuffers: true,
+      requestQueueOrderedCleanupClaim
+    });
+    return { device, result };
+  };
+
+  const fallback = await runRetainedStep();
+  const fallbackFenceCountBeforeRelease =
+    fallback.device.getQueueFenceCount();
+  assert.equal(fallback.result.observedHostQueueFenceCount, 1);
+  assert.equal(fallback.result.hostQueueFenceCount, 1);
+  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(fallback.result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(fallback.result.normalHotLoopReadbackFree, false);
+  assert.equal(fallback.result.productionHotLoopHostDependencyFree, true);
+  assert.equal(await fallback.result.destroyOutputParticleBuffers(), true);
+  assert.equal(
+    fallback.device.getQueueFenceCount(),
+    fallbackFenceCountBeforeRelease + 1
+  );
+  assert.equal(fallback.result.observedHostQueueFenceCount, 2);
+  assert.equal(fallback.result.hostQueueFenceCount, 2);
+  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 2);
+  assert.equal(fallback.result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(fallback.result.normalHotLoopReadbackFree, false);
+  assert.equal(fallback.result.productionHotLoopHostDependencyFree, true);
+  assert.equal(
+    fallback.result.outputParticleBufferCleanupStatus,
+    'submitted-output-cleanup-deferred-after-host-queue-fence'
+  );
+
+  const forged = await runRetainedStep();
+  const forgedFenceCountBeforeRelease =
+    forged.device.getQueueFenceCount();
+  await assert.rejects(
+    forged.result.destroyOutputParticleBuffers({
+      queueOrderedFinalConsumer: Object.freeze({
+        schema:
+          'peercompute.ulg.queue-ordered-final-consumer-capability.v0',
+        status: 'queue-ordered-final-consumer-capability-issued',
+        claimCount: 1
+      })
+    }),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' }
+  );
+  assert.equal(
+    forged.device.getQueueFenceCount(),
+    forgedFenceCountBeforeRelease
+  );
+
+  const cancelled = await runRetainedStep(undefined, true);
+  assert.equal(
+    await cancelled.result.destroyOutputParticleBuffers(),
+    true
+  );
+  const cancelledClaimSubmission = submitQueueOrderedWork(
+    cancelled.device,
+    [Object.freeze({ label: 'test-cancelled-reaction-claim-command' })]
+  );
+  assert.throws(
+    () => sealQueueOrderedFinalConsumerCapability(
+      cancelledClaimSubmission,
+      cancelled.device,
+      {
+        finalConsumerOwner: Object.freeze({
+          schema: 'test.cancelled-reaction-final-consumer.v0'
+        }),
+        producerClaims: [cancelled.result.queueOrderedCleanupClaim]
+      }
+    ),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' }
+  );
+
+  const authenticated = await runRetainedStep(undefined, true);
+  const authenticatedFenceCountBeforeRelease =
+    authenticated.device.getQueueFenceCount();
+  const ownerAuthority = Object.freeze({
+    schema: 'test.reaction-final-consumer-authority.v0'
+  });
+  const submissionReceipt = submitQueueOrderedWork(
+    authenticated.device,
+    [Object.freeze({ label: 'test-reaction-final-consumer-command' })]
+  );
+  const queueOrderedFinalConsumer =
+    sealQueueOrderedFinalConsumerCapability(
+      submissionReceipt,
+      authenticated.device,
+      {
+        finalConsumerOwner: ownerAuthority,
+        producerClaims: [
+          authenticated.result.queueOrderedCleanupClaim
+        ]
+      }
+    );
+  assert.equal(
+    await authenticated.result.destroyOutputParticleBuffers({
+      queueOrderedFinalConsumer
+    }),
+    true
+  );
+  assert.equal(
+    authenticated.device.getQueueFenceCount(),
+    authenticatedFenceCountBeforeRelease
+  );
+  assert.equal(authenticated.result.observedHostQueueFenceCount, 1);
+  assert.equal(authenticated.result.hostQueueFenceCount, 1);
+  assert.equal(
+    authenticated.result.deferredCleanupHostQueueFenceCount,
+    1
+  );
+  assert.equal(authenticated.result.normalHotLoopReadbackFree, false);
+  assert.equal(
+    authenticated.result.productionHotLoopHostDependencyFree,
+    true
+  );
+  assert.equal(
+    authenticated.result.outputParticleBufferCleanupReceipt
+      ?.hostQueueFenceCount,
+    0
+  );
+  assert.equal(
+    authenticated.result.outputParticleBufferQueueCompletionMethod,
+    'same-gpu-queue-submission-order'
+  );
+  assert.equal(
+    authenticated.result.outputParticleBufferCleanupReceipt
+      ?.remainingCapabilityClaimCount,
+    0
+  );
+
+  const replay = await runRetainedStep(authenticated.device);
+  const replayFenceCountBeforeRelease =
+    authenticated.device.getQueueFenceCount();
+  await assert.rejects(
+    replay.result.destroyOutputParticleBuffers({
+      queueOrderedFinalConsumer
+    }),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' }
+  );
+  assert.equal(
+    authenticated.device.getQueueFenceCount(),
+    replayFenceCountBeforeRelease
+  );
 });
 
 test('SPH reaction pipeline failure returns a warm arena lease before retry', async () => {

@@ -144,6 +144,8 @@ import {
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
   SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT,
   SCHROEDER_NO_FULL_READBACK_MODE,
+  SCHROEDER_SPATIAL_TRANSITION_POLICY_CONSERVATIVE_RESIDENT,
+  SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC,
   SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE,
   DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
@@ -258,6 +260,7 @@ import {
   createSchroederPhaseVolumeTargetAggregatePlan,
   createSchroederPortableSummaryPlan,
   createSchroederSameLevelMechanicsPlan,
+  createSchroederTwoLevelCoverageAdmission,
   decodeSchroederLawNeighborTraversalDiagnostics,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
@@ -308,14 +311,33 @@ import {
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
+  mergeResidentProductMassBuffersWebGpu
+} from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA
+} from '../src/runtime/sph/sphReactionGpuSummary.js';
+import {
   tagWebGpuBufferDevice,
+  tagResidentProductMassDevice,
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../src/runtime/webgpuComputeLayout.js';
+import {
+  createGpuReadbackTelemetry
+} from '../src/runtime/sph/sphGpuReadbackTelemetry.js';
+import {
   buildSphThermalMaterialTable,
   runSphThermalStepWebGpu
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
+import {
+  buildMlsMpmMechanicsMaterialTable
+} from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   createReferenceMaterialClosures
 } from '../src/runtime/material/materialClosures.js';
@@ -358,6 +380,65 @@ const referenceMaterialClosures = createReferenceMaterialClosures();
 const canonicalSidecarThermalMaterialTable = buildSphThermalMaterialTable({
   h2o: referenceMaterialClosures.h2o.properties
 });
+const canonicalSidecarMechanicsMaterialTable =
+  buildMlsMpmMechanicsMaterialTable({
+    h2o: referenceMaterialClosures.h2o.properties
+  });
+
+function residentProductMassFixture(device, label) {
+  const productEventStrideBytes =
+    SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const productEventBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label,
+    size: productEventStrideBytes,
+    usage: 4 | 8 | 128
+  }), device);
+  let releaseCount = 0;
+  const handle = {
+    schema: ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA,
+    status: 'resident-product-mass-buffer-retained',
+    source: 'schroeder-hierarchy-test-product-event',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventStrideBytes,
+    productEventRowCount: 1,
+    productEventActiveEventCount: 1,
+    productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    productEventStrideBytes,
+    productEventGenerationCount: 1,
+    productEventSourceRowCounts: [1],
+    mergeSourceProductEventBufferCount: 1,
+    mergeSourceProductEventRowCounts: [1],
+    mergeSourceProductEventBufferByteLengths: [productEventStrideBytes],
+    productInventoryCount: 0,
+    gasSpeciesLedgerCount: 0,
+    gasSpeciesReadbackByteLength: 0,
+    sealedBoxGasProductMoles: 0,
+    visibleProductMassKg: 0,
+    unplacedProductMassKg: 0,
+    unplacedGasProductMassKg: 0,
+    destroyResidentProductMassBuffers() {
+      releaseCount += 1;
+      productEventBuffer.destroy();
+      return true;
+    }
+  };
+  Object.defineProperty(handle, 'releaseCount', {
+    get() {
+      return releaseCount;
+    }
+  });
+  return tagResidentProductMassDevice(handle, device);
+}
+
+function assertExactZeroReadbackTelemetry(execution) {
+  assert.equal(execution.readbackTelemetryComplete, true);
+  assert.equal(execution.mapAsyncCount, 0);
+  assert.equal(execution.readbackBytes, 0);
+  assert.equal(execution.hostQueueFenceCount, 0);
+  assert.deepEqual(execution.readbackTelemetryUnknownSources, []);
+}
 
 function canonicalSidecarReactionTable() {
   const records = new Float32Array([
@@ -426,6 +507,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
   const dispatches = [];
   const submitted = [];
   const bindGroups = [];
+  const queueFenceCalls = [];
   return {
     createdBuffers,
     writes,
@@ -433,6 +515,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     dispatches,
     submitted,
     bindGroups,
+    queueFenceCalls,
     createBuffer({ label, size, usage }) {
       const buffer = {
         label,
@@ -692,6 +775,10 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
         submitted.push(commands);
       },
       async onSubmittedWorkDone() {
+        queueFenceCalls.push({
+          submissionCount: submitted.length,
+          stack: new Error('unexpected queue fence').stack
+        });
         return undefined;
       }
     }
@@ -880,9 +967,9 @@ async function driveAuthoritativeCanonicalEpochs(options, {
       });
       const priorFineField =
         priorEpoch.generation.parentFieldView?.fineFieldView;
-      if (priorFineField?.ownerRuntime?.releaseExecutionAfter) {
+      if (priorFineField?.ownerRuntime?.releaseExecutionQueueOrdered) {
         assert.equal(
-          await priorFineField.ownerRuntime.releaseExecutionAfter(
+          priorFineField.ownerRuntime.releaseExecutionQueueOrdered(
             priorFineField
           ),
           true
@@ -938,7 +1025,11 @@ async function driveAuthoritativeCanonicalEpochs(options, {
     status: 'schroeder-two-level-mechanics-step-submitted',
     backend: 'webgpu',
     readbackMode: 'no-full-readback',
-    normalHotLoopReadbackFree: true,
+    fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'test-authoritative-two-level-mechanics'
+    }),
     phaseVolumeInterfaceTransport: {
       enabled: true,
       pressureScale: 1,
@@ -1665,6 +1756,113 @@ test('Schroeder level assignment plan is GPU-first and readback-free by contract
   assert.equal(view.getInt32(4, true), -4);
   assert.equal(view.getInt32(8, true), 6);
   assert.equal(view.getFloat32(16, true), 0.25);
+});
+
+test('authoritative two-level coverage derives one pair covering every live assignment row', () => {
+  const assignments = new Float32Array(
+    4 * SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
+  );
+  const writeLiveRow = (index, level) => {
+    const offset = index * SCHROEDER_LEVEL_ASSIGNMENT_FLOATS;
+    assignments[offset] = level;
+    assignments[offset + 1] = 0.125 * (2 ** level);
+    assignments[offset + 2] = 0.05;
+    assignments[offset + 3] = 1;
+    assignments[offset + 4] = 1;
+    assignments[offset + 5] = 1;
+    assignments[offset + 6] = 1;
+    assignments[offset + 7] = 1000;
+    assignments[offset + 10] = 1;
+  };
+  writeLiveRow(0, -1);
+  writeLiveRow(1, 0);
+  writeLiveRow(2, -1);
+  const admission = createSchroederTwoLevelCoverageAdmission({
+    levelAssignment: {
+      schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+      particleCount: 4,
+      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+      minLevel: -8,
+      maxLevel: 8,
+      fullReadbackPerformed: true,
+      assignments
+    },
+    requestedFineLevel: 1
+  });
+  assert.equal(admission.admitted, true);
+  assert.equal(admission.fineLevel, -1);
+  assert.equal(admission.coarseLevel, 0);
+  assert.equal(admission.coverageMinLevel, -1);
+  assert.equal(admission.coverageMaxLevel, 0);
+  assert.equal(admission.liveRowCount, 3);
+  assert.equal(admission.allLiveRowsCovered, true);
+  assert.equal(admission.readbackRequired, false);
+});
+
+test('authoritative two-level coverage rejects the prior silent zero-descriptor freeze', async () => {
+  assert.throws(
+    () => createSchroederTwoLevelCoverageAdmission({
+      levelAssignment: {
+        schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+        particleCount: 3,
+        assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+        minLevel: -8,
+        maxLevel: 8,
+        fullReadbackPerformed: false,
+        assignments: new Float32Array()
+      },
+      requestedFineLevel: 1
+    }),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_TWO_LEVEL_COVERAGE_UNPROVEN'
+      );
+      assert.equal(error?.coverageMinLevel, -8);
+      assert.equal(error?.coverageMaxLevel, 8);
+      assert.equal(error?.recommendedFineLevel, -8);
+      assert.equal(error?.recommendedMinLevel, -8);
+      assert.equal(error?.recommendedMaxLevel, -7);
+      return true;
+    }
+  );
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({
+    particleCount: 3,
+    smoothingLengthM: 0.25
+  });
+  let generationCallCount = 0;
+  let mechanicsCallCount = 0;
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      ...buffers,
+      selectedLevel: 1,
+      minLevel: -8,
+      maxLevel: 8,
+      baseGridSpacingM: 0.25,
+      enableTwoLevelMechanics: true,
+      twoLevelMechanicsAuthority: 'authoritative',
+      enablePressureInterfaceOwnerScope: false,
+      spatialEpochGenerationRunner: async () => {
+        generationCallCount += 1;
+        throw new Error('coverage must reject before spatial generation');
+      },
+      twoLevelMechanicsRunner: async () => {
+        mechanicsCallCount += 1;
+        throw new Error('coverage must reject before mechanics');
+      }
+    }),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_TWO_LEVEL_COVERAGE_UNPROVEN'
+      );
+      return true;
+    }
+  );
+  assert.equal(generationCallCount, 0);
+  assert.equal(mechanicsCallCount, 0);
 });
 
 test('Schroeder level assignment WGSL uses only authenticated V0*J current volume', () => {
@@ -3740,6 +3938,10 @@ test('Schroeder materialization WGSL preserves exact identity and blocks cross-d
     schroederParticleStorageMaterializationWgsl,
     /ss_psm_write_empty\(materialization_offset, assignment_offset, 64\.0\)/
   );
+  assert.match(
+    schroederParticleStorageMaterializationWgsl,
+    /out_sph_thermo\[thermo_base \+ 2u\] = vec4<f32>\(thermo2\.x, 0\.0, 0\.0, thermo2\.w\)/
+  );
 });
 
 test('Schroeder phase-volume level update plan requires StateManager admission', () => {
@@ -4130,7 +4332,16 @@ test('Schroeder WebGPU level assignment submits without default readback buffer'
   assert.equal(result.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(result.fullReadbackPerformed, false);
   assert.equal(result.fullParticleReadbackPerformed, false);
-  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.fullParticleReadbackFree, true);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.hostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
   assert.equal(result.retainedAssignmentBuffer, true);
   assert.ok(result.assignmentBuffer);
   assert.equal(
@@ -4148,6 +4359,55 @@ test('Schroeder WebGPU level assignment submits without default readback buffer'
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
   );
+  assert.equal(
+    device.queueFenceCalls.length,
+    1,
+    'standalone level-assignment temporary cleanup retains its queue fence'
+  );
+});
+
+test('Schroeder level-assignment local temporaries retire after their exact submit without a fence', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const result = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+
+  assert.deepEqual(device.queueFenceCalls, []);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(result.assignmentBuffer.destroyed, false);
+});
+
+test('Schroeder level-assignment calls retain one queue-ordered params buffer per device', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const first = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const second = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+
+  const params = device.createdBuffers.filter(
+    (buffer) => buffer.label === 'ulg-schroeder-level-assignment-params'
+  );
+  assert.equal(params.length, 1);
+  assert.equal(params[0].destroyed, false);
+  first.destroyAssignmentBuffer();
+  second.destroyAssignmentBuffer();
 });
 
 test('Schroeder WebGPU active-node list consumes retained assignments without default readback', async () => {
@@ -4203,7 +4463,16 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
   assert.equal(activeNodes.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(activeNodes.fullReadbackPerformed, false);
   assert.equal(activeNodes.fullParticleReadbackPerformed, false);
-  assert.equal(activeNodes.normalHotLoopReadbackFree, true);
+  assert.equal(activeNodes.fullParticleReadbackFree, true);
+  assert.equal(activeNodes.readbackTelemetryComplete, true);
+  assert.equal(activeNodes.mapAsyncCount, 0);
+  assert.equal(activeNodes.readbackBytes, 0);
+  assert.equal(activeNodes.observedHostQueueFenceCount, 1);
+  assert.equal(activeNodes.hostQueueFenceCount, 1);
+  assert.equal(activeNodes.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(activeNodes.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(activeNodes.normalHotLoopReadbackFree, false);
+  assert.equal(activeNodes.productionHotLoopHostDependencyFree, true);
   assert.equal(activeNodes.retainedActiveNodeBuffer, true);
   assert.ok(activeNodes.activeNodeBuffer);
   assert.equal(activeNodes.activeNodeBuffer.destroyed, false);
@@ -4226,6 +4495,150 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
   );
+  assert.equal(
+    device.queueFenceCalls.length,
+    2,
+    'standalone assignment and active-node temporary cleanup each retain a queue fence'
+  );
+});
+
+test('Schroeder active-node local temporaries retire without minting cross-stage authority', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+
+  assert.deepEqual(device.queueFenceCalls, []);
+  assert.equal(activeNodes.hostQueueFenceCount, 0);
+  assert.equal(activeNodes.deferredCleanupHostQueueFenceCount, 0);
+  assert.equal(activeNodes.normalHotLoopReadbackFree, true);
+  assert.equal(activeNodes.productionHotLoopHostDependencyFree, true);
+  assert.equal(activeNodes.activeNodeBuffer.destroyed, false);
+  assert.equal(activeNodes.queueOrderedFinalConsumerCapability, null);
+});
+
+test('Schroeder active-node calls retain queue-ordered controls per device', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const first = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const second = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+
+  for (const label of [
+    'ulg-schroeder-active-node-phase-volume-assignment-overlay-disabled',
+    'ulg-schroeder-active-node-phase-volume-assignment-overlay-index-disabled',
+    'ulg-schroeder-active-node-params'
+  ]) {
+    assert.equal(
+      device.createdBuffers.filter((buffer) => buffer.label === label).length,
+      1
+    );
+  }
+  assert.equal(first.activeNodeBuffer.destroyed, false);
+  assert.equal(second.activeNodeBuffer.destroyed, false);
+  first.destroyActiveNodeBuffer();
+  second.destroyActiveNodeBuffer();
+});
+
+test('Schroeder active-node final consumer seals prior transfer claims on its existing submit', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const issuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'prior-hierarchy-transfer'
+  });
+  const producerOutput = {};
+  let cleanupCount = 0;
+  const cleanup = () => {
+    cleanupCount += 1;
+  };
+  const producerClaim = registerQueueOrderedCleanupClaim(
+    issuer,
+    device,
+    {
+      producerOutput,
+      cleanup
+    }
+  );
+  const submissionsBefore = device.submitted.length;
+  const fencesBefore = device.queueFenceCalls.length;
+
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1,
+    queueOrderedCleanup: true,
+    queueOrderedProducerClaims: [producerClaim]
+  });
+
+  assert.equal(device.submitted.length, submissionsBefore + 1);
+  assert.equal(device.queueFenceCalls.length, fencesBefore);
+  assert.equal(activeNodes.observedHostQueueFenceCount, 0);
+  assert.equal(activeNodes.hostQueueFenceCount, 0);
+  assert.equal(activeNodes.normalHotLoopReadbackFree, true);
+  assert.equal(
+    Object.prototype.propertyIsEnumerable.call(
+      activeNodes,
+      'queueOrderedFinalConsumerCapability'
+    ),
+    false
+  );
+  const capability = activeNodes.queueOrderedFinalConsumerCapability;
+  assert.ok(capability);
+  releaseSubmittedWorkCleanupQueueOrdered(
+    device,
+    cleanup,
+    {
+      queueOrderedFinalConsumer: capability,
+      producerClaim,
+      producerOutput,
+      producerFamily: 'prior-hierarchy-transfer'
+    }
+  );
+  assert.equal(cleanupCount, 1);
+  assert.equal(device.queueFenceCalls.length, fencesBefore);
 });
 
 test('Schroeder WebGPU active-node list consumes retained phase-volume assignment overlay', async () => {
@@ -4382,7 +4795,12 @@ test('Schroeder WebGPU active-node index builds retained bucket slots without de
   assert.equal(index.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(index.fullReadbackPerformed, false);
   assert.equal(index.fullParticleReadbackPerformed, false);
-  assert.equal(index.normalHotLoopReadbackFree, true);
+  assert.equal(index.fullParticleReadbackFree, true);
+  assert.equal(index.readbackTelemetryComplete, true);
+  assert.equal(index.mapAsyncCount, 0);
+  assert.equal(index.readbackBytes, 0);
+  assert.equal(index.hostQueueFenceCount, 1);
+  assert.equal(index.normalHotLoopReadbackFree, false);
   assert.equal(index.retainedIndexBuffers, true);
   assert.ok(index.bucketCountBuffer);
   assert.ok(index.bucketSlotBuffer);
@@ -4421,6 +4839,45 @@ test('Schroeder WebGPU active-node index builds retained bucket slots without de
   );
 });
 
+test('Schroeder active-node index local temporaries retire while retained outputs stay live', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+  const index = await runSchroederActiveNodeIndexWebGpu({
+    device,
+    activeNodeList: activeNodes,
+    bucketSlotCapacity: DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
+    queueOrderedLocalTemporaryCleanup: true
+  });
+
+  assert.deepEqual(device.queueFenceCalls, []);
+  assert.equal(index.hostQueueFenceCount, 0);
+  assert.equal(index.normalHotLoopReadbackFree, true);
+  for (const retained of [
+    index.bucketCountBuffer,
+    index.bucketSlotBuffer,
+    index.nodeBucketSlotBuffer,
+    index.overflowCounterBuffer
+  ]) {
+    assert.equal(retained.destroyed, false);
+  }
+});
+
 test('Schroeder WebGPU active-node sorted index builds retained radix ranges without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3 });
@@ -4451,7 +4908,12 @@ test('Schroeder WebGPU active-node sorted index builds retained radix ranges wit
   assert.equal(index.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(index.fullReadbackPerformed, false);
   assert.equal(index.fullParticleReadbackPerformed, false);
-  assert.equal(index.normalHotLoopReadbackFree, true);
+  assert.equal(index.fullParticleReadbackFree, true);
+  assert.equal(index.readbackTelemetryComplete, true);
+  assert.equal(index.mapAsyncCount, 0);
+  assert.equal(index.readbackBytes, 0);
+  assert.equal(index.hostQueueFenceCount, 1);
+  assert.equal(index.normalHotLoopReadbackFree, false);
   assert.equal(index.retainedIndexBuffers, true);
   assert.ok(index.bucketCountBuffer);
   assert.ok(index.bucketRangeOffsetBuffer);
@@ -4524,7 +4986,9 @@ test('Schroeder law queue consumes retained active nodes without default readbac
   assert.equal(lawQueue.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(lawQueue.fullReadbackPerformed, false);
   assert.equal(lawQueue.fullParticleReadbackPerformed, false);
+  assert.equal(lawQueue.fullParticleReadbackFree, true);
   assert.equal(lawQueue.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(lawQueue);
   assert.equal(lawQueue.retainedLawQueueBuffer, true);
   assert.ok(lawQueue.lawQueueBuffer);
   assert.equal(lawQueue.lawQueueBuffer.destroyed, false);
@@ -4601,7 +5065,9 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.fullReadbackPerformed, false);
   assert.equal(candidates.compactDiagnosticReadbackPerformed, false);
   assert.equal(candidates.fullParticleReadbackPerformed, false);
+  assert.equal(candidates.fullParticleReadbackFree, true);
   assert.equal(candidates.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(candidates);
   assert.equal(candidates.particleCount, 3);
   assert.equal(candidates.lawQueueCount, 3);
   assert.equal(candidates.activeNodeCount, 3);
@@ -4996,7 +5462,9 @@ test('Schroeder WebGPU cross-level coupling consumes retained hierarchy buffers 
   assert.equal(crossLevel.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(crossLevel.fullReadbackPerformed, false);
   assert.equal(crossLevel.fullParticleReadbackPerformed, false);
+  assert.equal(crossLevel.fullParticleReadbackFree, true);
   assert.equal(crossLevel.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(crossLevel);
   assert.equal(crossLevel.retainedCrossLevelBuffer, true);
   assert.ok(crossLevel.crossLevelBuffer);
   assert.equal(crossLevel.crossLevelBuffer.destroyed, false);
@@ -5046,7 +5514,9 @@ test('Schroeder conservation summary consumes retained cross-level buffers witho
   assert.equal(summary.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(summary.fullReadbackPerformed, false);
   assert.equal(summary.fullParticleReadbackPerformed, false);
+  assert.equal(summary.fullParticleReadbackFree, true);
   assert.equal(summary.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(summary);
   assert.equal(summary.retainedSummaryBuffer, true);
   assert.ok(summary.summaryBuffer);
   assert.equal(summary.summaryBuffer.destroyed, false);
@@ -5101,7 +5571,9 @@ test('Schroeder cross-level transfer consumes retained candidates and particle s
   assert.equal(transfer.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(transfer.fullReadbackPerformed, false);
   assert.equal(transfer.fullParticleReadbackPerformed, false);
+  assert.equal(transfer.fullParticleReadbackFree, true);
   assert.equal(transfer.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(transfer);
   assert.equal(transfer.retainedTransferBuffer, true);
   assert.ok(transfer.transferBuffer);
   assert.equal(transfer.transferBuffer.destroyed, false);
@@ -5161,7 +5633,9 @@ test('Schroeder cross-level state delta consumes retained transfer rows without 
   assert.equal(stateDelta.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(stateDelta.fullReadbackPerformed, false);
   assert.equal(stateDelta.fullParticleReadbackPerformed, false);
+  assert.equal(stateDelta.fullParticleReadbackFree, true);
   assert.equal(stateDelta.normalHotLoopReadbackFree, true);
+  assertExactZeroReadbackTelemetry(stateDelta);
   assert.equal(stateDelta.retainedStateDeltaBuffer, true);
   assert.ok(stateDelta.stateDeltaBuffer);
   assert.equal(stateDelta.stateDeltaBuffer.destroyed, false);
@@ -5326,7 +5800,12 @@ test('Schroeder phase-volume target aggregate materializes retained assignment t
   assert.equal(aggregate.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(aggregate.fullReadbackPerformed, false);
   assert.equal(aggregate.fullParticleReadbackPerformed, false);
-  assert.equal(aggregate.normalHotLoopReadbackFree, true);
+  assert.equal(aggregate.fullParticleReadbackFree, true);
+  assert.equal(aggregate.readbackTelemetryComplete, true);
+  assert.equal(aggregate.mapAsyncCount, 0);
+  assert.equal(aggregate.readbackBytes, 0);
+  assert.equal(aggregate.hostQueueFenceCount, 1);
+  assert.equal(aggregate.normalHotLoopReadbackFree, false);
   assert.equal(aggregate.retainedAggregateBuffer, true);
   assert.ok(aggregate.aggregateBuffer);
   assert.equal(aggregate.aggregateBuffer.destroyed, false);
@@ -5370,7 +5849,12 @@ test('Schroeder hierarchy aggregate-node reduction consumes retained aggregate c
   assert.equal(aggregateNode.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(aggregateNode.fullReadbackPerformed, false);
   assert.equal(aggregateNode.fullParticleReadbackPerformed, false);
-  assert.equal(aggregateNode.normalHotLoopReadbackFree, true);
+  assert.equal(aggregateNode.fullParticleReadbackFree, true);
+  assert.equal(aggregateNode.readbackTelemetryComplete, true);
+  assert.equal(aggregateNode.mapAsyncCount, 0);
+  assert.equal(aggregateNode.readbackBytes, 0);
+  assert.equal(aggregateNode.hostQueueFenceCount, 1);
+  assert.equal(aggregateNode.normalHotLoopReadbackFree, false);
   assert.equal(aggregateNode.retainedAggregateNodeBuffer, true);
   assert.ok(aggregateNode.aggregateNodeBuffer);
   assert.equal(aggregateNode.aggregateNodeBuffer.destroyed, false);
@@ -5410,7 +5894,8 @@ test('Schroeder hierarchy aggregate-node bucket reduction keeps large reductions
   assert.equal(aggregateNode.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(aggregateNode.fullReadbackPerformed, false);
   assert.equal(aggregateNode.fullParticleReadbackPerformed, false);
-  assert.equal(aggregateNode.normalHotLoopReadbackFree, true);
+  assert.equal(aggregateNode.hostQueueFenceCount, 1);
+  assert.equal(aggregateNode.normalHotLoopReadbackFree, false);
   assert.equal(aggregateNode.retainedAggregateNodeBuffer, true);
   assert.equal(aggregateNode.aggregateReductionStatus, 'bucketed-bounded-slot-reduction-submitted');
   assert.equal(aggregateNode.aggregateReductionMode, SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE);
@@ -5609,7 +6094,9 @@ test('Schroeder far-aggregate diagnostic summaries compact force pressure withou
     farFieldErrorBound: 0.03,
     accelerationPressureThreshold: 12,
     queueEpoch: 14,
-    stateFamilyId: 4
+    stateFamilyId: 4,
+    readbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE
   });
 
   assert.equal(diagnostics.schema, ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA);
@@ -5924,7 +6411,9 @@ test('Schroeder far-aggregate law consumer diagnostic summary emits compact reta
     farAggregateLawConsumer,
     radiationPressureThreshold: 11,
     plasmaPressureThreshold: 13,
-    gasPressureThreshold: 17
+    gasPressureThreshold: 17,
+    readbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_READBACK_MODE
   });
 
   assert.equal(
@@ -6233,6 +6722,13 @@ test('Schroeder far-aggregate gas state delta blocks without admission and dispa
   assert.equal(gasStateDelta.retainedGasStateDeltaBuffer, false);
   assert.equal(gasStateDelta.gasStateDeltaBufferByteLength, 0);
   assert.equal(gasStateDelta.gasStateDeltaRows.length, 0);
+  assert.equal(gasStateDelta.fullParticleReadbackFree, true);
+  assert.equal(gasStateDelta.readbackTelemetryComplete, true);
+  assert.deepEqual(gasStateDelta.readbackTelemetryUnknownSources, []);
+  assert.equal(gasStateDelta.mapAsyncCount, 0);
+  assert.equal(gasStateDelta.readbackBytes, 0);
+  assert.equal(gasStateDelta.hostQueueFenceCount, 0);
+  assert.equal(gasStateDelta.normalHotLoopReadbackFree, true);
   assert.equal(gasStateDelta.stateMutationRequired, false);
   assert.equal(gasStateDelta.pressureInterfaceImportRequired, false);
   assert.deepEqual(device.dispatches, []);
@@ -6279,6 +6775,12 @@ test('Schroeder far-aggregate gas state delta emits retained GPU pressure deltas
   assert.equal(gasStateDelta.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(gasStateDelta.fullReadbackPerformed, false);
   assert.equal(gasStateDelta.fullParticleReadbackPerformed, false);
+  assert.equal(gasStateDelta.fullParticleReadbackFree, true);
+  assert.equal(gasStateDelta.readbackTelemetryComplete, true);
+  assert.deepEqual(gasStateDelta.readbackTelemetryUnknownSources, []);
+  assert.equal(gasStateDelta.mapAsyncCount, 0);
+  assert.equal(gasStateDelta.readbackBytes, 0);
+  assert.equal(gasStateDelta.hostQueueFenceCount, 0);
   assert.equal(gasStateDelta.normalHotLoopReadbackFree, true);
   assert.equal(gasStateDelta.farAggregateGasStateDeltaAdmissionApproved, true);
   assert.equal(gasStateDelta.gasStateDeltaRowCount, 4);
@@ -6395,6 +6897,12 @@ test('Schroeder far-aggregate gas-cell import materializes retained pressure row
   assert.equal(gasCellImport.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(gasCellImport.fullReadbackPerformed, false);
   assert.equal(gasCellImport.fullParticleReadbackPerformed, false);
+  assert.equal(gasCellImport.fullParticleReadbackFree, true);
+  assert.equal(gasCellImport.readbackTelemetryComplete, true);
+  assert.deepEqual(gasCellImport.readbackTelemetryUnknownSources, []);
+  assert.equal(gasCellImport.mapAsyncCount, 0);
+  assert.equal(gasCellImport.readbackBytes, 0);
+  assert.equal(gasCellImport.hostQueueFenceCount, 0);
   assert.equal(gasCellImport.normalHotLoopReadbackFree, true);
   assert.equal(gasCellImport.pressureInterfaceImportReady, true);
   assert.equal(gasCellImport.retainedGasCellFieldSourceReady, true);
@@ -6580,7 +7088,12 @@ test('Schroeder phase-volume migration consumes retained aggregate nodes without
   assert.equal(migration.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(migration.fullReadbackPerformed, false);
   assert.equal(migration.fullParticleReadbackPerformed, false);
-  assert.equal(migration.normalHotLoopReadbackFree, true);
+  assert.equal(migration.fullParticleReadbackFree, true);
+  assert.equal(migration.readbackTelemetryComplete, true);
+  assert.equal(migration.mapAsyncCount, 0);
+  assert.equal(migration.readbackBytes, 0);
+  assert.equal(migration.hostQueueFenceCount, 1);
+  assert.equal(migration.normalHotLoopReadbackFree, false);
   assert.equal(migration.retainedMigrationBuffer, true);
   assert.ok(migration.migrationBuffer);
   assert.equal(migration.migrationBuffer.destroyed, false);
@@ -6628,6 +7141,12 @@ test('Schroeder phase-volume level update blocks without admission and dispatche
   assert.equal(update.phaseVolumeLevelUpdateSchema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA);
   assert.equal(update.status, 'schroeder-phase-volume-level-update-blocked-admission-required');
   assert.equal(update.phaseVolumeMigrationAdmissionApproved, false);
+  assert.equal(update.fullParticleReadbackFree, true);
+  assert.equal(update.readbackTelemetryComplete, true);
+  assert.equal(update.mapAsyncCount, 0);
+  assert.equal(update.readbackBytes, 0);
+  assert.equal(update.hostQueueFenceCount, 0);
+  assert.equal(update.normalHotLoopReadbackFree, true);
   assert.equal(update.retainedLevelUpdateBuffer, false);
   assert.equal(update.levelUpdateBufferByteLength, 0);
   assert.equal(update.levelUpdateRows.length, 0);
@@ -6663,7 +7182,12 @@ test('Schroeder phase-volume split/merge proposals consume retained migrations w
   assert.equal(proposal.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(proposal.fullReadbackPerformed, false);
   assert.equal(proposal.fullParticleReadbackPerformed, false);
-  assert.equal(proposal.normalHotLoopReadbackFree, true);
+  assert.equal(proposal.fullParticleReadbackFree, true);
+  assert.equal(proposal.readbackTelemetryComplete, true);
+  assert.equal(proposal.mapAsyncCount, 0);
+  assert.equal(proposal.readbackBytes, 0);
+  assert.equal(proposal.hostQueueFenceCount, 1);
+  assert.equal(proposal.normalHotLoopReadbackFree, false);
   assert.equal(proposal.retainedProposalBuffer, true);
   assert.ok(proposal.proposalBuffer);
   assert.equal(proposal.proposalBuffer.destroyed, false);
@@ -6971,6 +7495,13 @@ test('Schroeder particle-storage materialization blocks without admission and di
   assert.equal(materialization.retainedMaterializationBuffer, false);
   assert.equal(materialization.materializationBufferByteLength, 0);
   assert.equal(materialization.materializationRows.length, 0);
+  assert.equal(materialization.fullParticleReadbackFree, true);
+  assert.equal(materialization.readbackTelemetryComplete, true);
+  assert.deepEqual(materialization.readbackTelemetryUnknownSources, []);
+  assert.equal(materialization.mapAsyncCount, 0);
+  assert.equal(materialization.readbackBytes, 0);
+  assert.equal(materialization.hostQueueFenceCount, 0);
+  assert.equal(materialization.normalHotLoopReadbackFree, true);
   assert.equal(materialization.stateMutationRequired, false);
   assert.equal(
     materialization.stateMutationStatus,
@@ -7046,6 +7577,12 @@ test('Schroeder particle-storage materialization writes retained particle buffer
   assert.equal(materialization.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(materialization.fullReadbackPerformed, false);
   assert.equal(materialization.fullParticleReadbackPerformed, false);
+  assert.equal(materialization.fullParticleReadbackFree, true);
+  assert.equal(materialization.readbackTelemetryComplete, true);
+  assert.deepEqual(materialization.readbackTelemetryUnknownSources, []);
+  assert.equal(materialization.mapAsyncCount, 0);
+  assert.equal(materialization.readbackBytes, 0);
+  assert.equal(materialization.hostQueueFenceCount, 0);
   assert.equal(materialization.normalHotLoopReadbackFree, true);
   assert.equal(materialization.particleStorageMaterializationAdmissionApproved, true);
   assert.equal(materialization.retainedParticleBuffers, true);
@@ -7112,7 +7649,12 @@ test('Schroeder phase-volume level update consumes retained migration rows after
   assert.equal(update.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(update.fullReadbackPerformed, false);
   assert.equal(update.fullParticleReadbackPerformed, false);
-  assert.equal(update.normalHotLoopReadbackFree, true);
+  assert.equal(update.fullParticleReadbackFree, true);
+  assert.equal(update.readbackTelemetryComplete, true);
+  assert.equal(update.mapAsyncCount, 0);
+  assert.equal(update.readbackBytes, 0);
+  assert.equal(update.hostQueueFenceCount, 1);
+  assert.equal(update.normalHotLoopReadbackFree, false);
   assert.equal(update.retainedLevelUpdateBuffer, true);
   assert.ok(update.levelUpdateBuffer);
   assert.equal(update.levelUpdateBuffer.destroyed, false);
@@ -7124,6 +7666,44 @@ test('Schroeder phase-volume level update consumes retained migration rows after
   assert.equal(update.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');
   assert.deepEqual(device.dispatches, [[3, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeLevelUpdateParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder phase-volume diagnostic summary remains fully resident when compact readback is disabled', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 130,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    migrationEpoch: 11,
+    levelUpdateBuffer: { label: 'retained-phase-volume-level-update-buffer' }
+  };
+  const summary = await runSchroederPhaseVolumeDiagnosticSummaryWebGpu({
+    device,
+    phaseVolumeLevelUpdate,
+    phaseVolumeExpandThreshold: 64,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+
+  assert.equal(summary.status, 'schroeder-phase-volume-diagnostic-summary-submitted');
+  assert.equal(summary.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(summary.compactSummaryReadbackPerformed, false);
+  assert.equal(summary.fullReadbackPerformed, false);
+  assert.equal(summary.fullParticleReadbackPerformed, false);
+  assert.equal(summary.fullParticleReadbackFree, true);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 0);
+  assert.equal(summary.readbackBytes, 0);
+  assert.equal(summary.hostQueueFenceCount, 1);
+  assert.equal(summary.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, true);
+  assert.equal(summary.summaryRows.length, 0);
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
@@ -7154,6 +7734,22 @@ test('Schroeder phase-volume diagnostic summary consumes admitted level updates 
   assert.equal(summary.compactSummaryReadbackPerformed, true);
   assert.equal(summary.fullReadbackPerformed, false);
   assert.equal(summary.fullParticleReadbackPerformed, false);
+  assert.equal(summary.fullParticleReadbackFree, true);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 1);
+  assert.equal(summary.readbackBytes, summary.summaryByteLength);
+  assert.equal(summary.hostQueueFenceCount, 1);
+  assert.equal(summary.finalDiagnosticMapAsyncCount, 1);
+  assert.equal(
+    summary.finalDiagnosticReadbackBytes,
+    summary.summaryByteLength
+  );
+  assert.equal(summary.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(summary.unclassifiedMapAsyncCount, 0);
+  assert.equal(summary.unclassifiedReadbackBytes, 0);
+  assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, true);
   assert.equal(summary.retainedSummaryBuffer, true);
   assert.ok(summary.summaryBuffer);
   assert.equal(summary.summaryBuffer.destroyed, false);
@@ -7200,8 +7796,36 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
     },
     directoryBuildCount: 1,
     privateLookupBuildCount: 0,
-    releaseScheduled: false
+    releaseScheduled: false,
+    fullParticleReadbackFree: true,
+    ...createGpuReadbackTelemetry({
+      scope: 'schroeder-same-level-test-spatial-epoch-generation'
+    })
   };
+  const continuationStateBuffer = tagWebGpuBufferDevice(
+    device.createBuffer({
+      label: 'resident-step-stubbed-state',
+      size: buffers.sphParticleState.state.byteLength,
+      usage: 128
+    }),
+    device
+  );
+  const continuationThermoBuffer = tagWebGpuBufferDevice(
+    device.createBuffer({
+      label: 'resident-step-stubbed-thermo',
+      size: buffers.sphParticleState.thermo.byteLength,
+      usage: 128
+    }),
+    device
+  );
+  const continuationMechanicsBuffer = tagWebGpuBufferDevice(
+    device.createBuffer({
+      label: 'resident-step-stubbed-mechanics',
+      size: buffers.mlsMpmParticleState.mechanics.byteLength,
+      usage: 128
+    }),
+    device
+  );
   const residentStepRunner = async (options) => {
     calls.push(options);
     return {
@@ -7225,7 +7849,24 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
       hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
       hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary),
-      fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
+      fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics,
+      fullParticleReadbackPerformed: false,
+      fullParticleReadbackFree: true,
+      residentContinuationReady: true,
+      nextParticleUploads: {
+        sphParticleUpload: {
+          particleCount: buffers.sphParticleState.particleCount,
+          stateBuffer: continuationStateBuffer,
+          thermoBuffer: continuationThermoBuffer
+        },
+        mlsMpmParticleUpload: {
+          particleCount: buffers.mlsMpmParticleState.particleCount,
+          mechanicsBuffer: continuationMechanicsBuffer
+        }
+      },
+      ...createGpuReadbackTelemetry({
+        scope: 'schroeder-same-level-test-resident-step'
+      })
     };
   };
   const result = await runSchroederSameLevelMechanicsWebGpu({
@@ -7245,7 +7886,30 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.status, 'schroeder-same-level-mechanics-submitted');
   assert.equal(result.selectedLevel, 2);
   assert.equal(result.mechanicsGridSpacingM, 1);
-  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(
+    result.normalHotLoopReadbackFree,
+    false,
+    JSON.stringify({
+      readbackTelemetryComplete: result.readbackTelemetryComplete,
+      mapAsyncCount: result.mapAsyncCount,
+      readbackBytes: result.readbackBytes,
+      hostQueueFenceCount: result.hostQueueFenceCount,
+      readbackTelemetryUnknownSources: result.readbackTelemetryUnknownSources
+    })
+  );
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(
+    result.hostQueueFenceCount,
+    2,
+    'the standalone non-paired hierarchy reports both deferred prepass cleanup fences'
+  );
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 2);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+  assert.equal(result.fullParticleReadbackFree, true);
+  assert.equal(result.residentContinuationReady, true);
   assert.equal(result.levelAssignment.retainedAssignmentBuffer, true);
   assert.equal(result.activeNodeList.retainedActiveNodeBuffer, true);
   assert.equal(
@@ -7616,6 +8280,94 @@ test('Schroeder same-level mechanics reclaims a render transfer when final hando
   assert.equal(retainedActiveNodes[0].destroyCount, 1);
 });
 
+test('Schroeder final-transition policy rejects unsupported and ambiguous injected modes before GPU work', async () => {
+  const device = createFakeWebGpuDevice();
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      spatialTransitionPolicy: 'unsupported-transition-policy'
+    }),
+    /requires a supported spatialTransitionPolicy/
+  );
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      spatialTopologyTransitionRunner: async () => ({})
+    }),
+    /injected topology transition runner requires observed-compact-diagnostic/
+  );
+  assert.equal(device.createdBuffers.length, 0);
+});
+
+test('authoritative successor assignment credentials reject incomplete or unauthenticated tuples before GPU work', async () => {
+  const cases = [
+    {
+      label: 'source-family only',
+      options: { levelAssignmentSourceFamily: Object.freeze({}) },
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION'
+    },
+    {
+      label: 'consumer lease only',
+      options: { levelAssignmentSourceFamilyLease: Object.freeze({}) },
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION'
+    },
+    {
+      label: 'family and lease without assignment',
+      options: {
+        levelAssignmentSourceFamily: Object.freeze({}),
+        levelAssignmentSourceFamilyLease: Object.freeze({})
+      },
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION'
+    },
+    {
+      label: 'assignment and family without lease',
+      options: {
+        levelAssignment: Object.freeze({}),
+        levelAssignmentSourceFamily: Object.freeze({})
+      },
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION'
+    },
+    {
+      label: 'authoritative assignment without exact successor credentials',
+      options: { levelAssignment: Object.freeze({}) },
+      code: 'ERR_SCHROEDER_TWO_LEVEL_SPATIAL_TRANSACTION_REQUIRED'
+    }
+  ];
+  for (const { label, options, code } of cases) {
+    const device = createFakeWebGpuDevice();
+    const buffers = manualBuffers({
+      particleCount: 3,
+      smoothingLengthM: 0.25
+    });
+    let residentCallCount = 0;
+    let generationCallCount = 0;
+    await assert.rejects(
+      runSchroederSameLevelMechanicsWebGpu({
+        device,
+        ...buffers,
+        ...options,
+        enableTwoLevelMechanics: true,
+        twoLevelMechanicsAuthority: 'authoritative',
+        spatialEpochGenerationRunner: async () => {
+          generationCallCount += 1;
+          throw new Error('must reject before generation');
+        }
+      }),
+      (error) => {
+        assert.equal(error?.code, code, label);
+        return true;
+      }
+    );
+    assert.equal(generationCallCount, 0, label);
+    assert.equal(device.createdBuffers.length, 0, label);
+    assert.equal(device.queue.submissions?.length ?? 0, 0, label);
+  }
+});
+
 test('Schroeder single-level commits and fences a generation before successor publication', async () => {
   const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -7690,6 +8442,8 @@ test('Schroeder single-level commits and fences a generation before successor pu
     enablePortableSummary: true,
     enablePressureInterfaceOwnerScope: false,
     residentStepRunner,
+    spatialTransitionPolicy:
+      SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC,
     spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
       publicationCallCount += 1;
       assert.ok(commitReceipt);
@@ -7878,7 +8632,9 @@ test('Schroeder default closure advances actual resident motion exactly once', a
     enableLawQueue: false,
     enableCrossLevelCoupling: false,
     enablePressureInterfaceOwnerScope: false,
-    residentStepRunner
+    residentStepRunner,
+    spatialTransitionPolicy:
+      SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC
   });
 
   const positionReceipt =
@@ -7901,8 +8657,8 @@ test('Schroeder default closure advances actual resident motion exactly once', a
   );
 });
 
-test('Schroeder default closure ignores descriptor-only position spoofing', async () => {
-  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+test('Schroeder conservative closure invalidates epochs without compact transition readback', async () => {
+  const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, {
     particleCount: 3,
@@ -7977,14 +8733,46 @@ test('Schroeder default closure ignores descriptor-only position spoofing', asyn
   });
 
   assert.equal(
-    result.residentStep.schroederSpatialPositionTransitionReceipt
-      .positionChanged,
+    result.schroederSpatialTransitionPolicy,
+    SCHROEDER_SPATIAL_TRANSITION_POLICY_CONSERVATIVE_RESIDENT
+  );
+  assert.equal(
+    result.schroederSpatialTransitionCompactReadbackPerformed,
     false
   );
   assert.equal(
+    result.residentStep.schroederSpatialPositionTransitionReceipt,
+    undefined
+  );
+  assert.equal(
+    result.residentStep.schroederSpatialTopologyTransitionReceipt,
+    undefined
+  );
+  assert.equal(
     result.schroederSpatialSuccessorSourceFamily.positionEpoch,
-    generation.execution.positionEpoch,
-    'mutable upload epochs cannot promote a position generation without GPU evidence'
+    generation.execution.positionEpoch + 1,
+    'the conservative policy advances exactly once instead of trusting mutable upload metadata'
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyEpoch,
+    generation.execution.topologyEpoch + 1
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionAuthority,
+    'conservative-mechanics-integration-transition'
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyTransitionMode,
+    'gpu-resident-conservative-topology-advance'
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => (
+      buffer.label ===
+        'ulg-schroeder-spatial-topology-transition-compact-readback'
+      || buffer.label ===
+        'ulg-schroeder-spatial-position-transition-compact-readback'
+    )),
+    false
   );
 });
 
@@ -8065,7 +8853,9 @@ test('Schroeder default closure activates a dormant high slot with one successor
     enableLawQueue: false,
     enableCrossLevelCoupling: false,
     enablePressureInterfaceOwnerScope: false,
-    residentStepRunner
+    residentStepRunner,
+    spatialTransitionPolicy:
+      SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC
   });
 
   const topologyReceipt =
@@ -9280,6 +10070,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     maxLevel: 4,
     tileCellCount: 4,
     stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
+    farAggregateDiagnosticReadbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
     mergeEpoch: 9,
     residentStepRunner: async (options) => {
       calls.push(options);
@@ -9962,6 +10754,10 @@ test('Schroeder same-level mechanics forwards admitted far-aggregate law consume
     farAggregateLawConsumerRadiationScale: 2,
     farAggregateLawConsumerPlasmaScale: 3,
     farAggregateLawConsumerGasSummaryScale: 4,
+    farAggregateDiagnosticReadbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
+    farAggregateLawConsumerDiagnosticReadbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_READBACK_MODE,
     enablePhaseVolumeMigration: false,
     mergeEpoch: 11,
     residentStepRunner: async (options) => {
@@ -10244,6 +11040,10 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     tileCellCount: 4,
     stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
     phaseVolumeMigrationAdmission: approvedPhaseVolumeMigrationAdmission({ rowCount: 3 }),
+    farAggregateDiagnosticReadbackMode:
+      SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
+    phaseVolumeDiagnosticReadbackMode:
+      SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
     mergeEpoch: 12,
     residentStepRunner: async (options) => {
       calls.push(options);
@@ -10501,7 +11301,36 @@ test('Schroeder same-level mechanics can disable local law queue per use case', 
   assert.equal(result.residentStep.hasLawQueue, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].schroederLawQueue, null);
+  assert.equal(calls[0].gasPressureMechanicsBoundaryEnabled, true);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
+});
+
+test('Schroeder single-level resident handoff preserves explicit gas-pressure boundary opt-out', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  let capturedOptions = null;
+
+  await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePressureInterfaceOwnerScope: false,
+    residentStepOptions: {
+      gasPressureMechanicsBoundaryEnabled: false
+    },
+    residentStepRunner: async (options) => {
+      capturedOptions = options;
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed'
+      };
+    }
+  });
+
+  assert.equal(capturedOptions?.gasPressureMechanicsBoundaryEnabled, false);
 });
 
 test('Schroeder same-level mechanics runs count summary and compaction over materialized storage', async () => {
@@ -10857,6 +11686,11 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
   // resident authority path still runs.
   assert.equal(call.retainOutputParticleBuffers, false);
   assert.equal(call.conservationSummaryReadback, true);
+  assert.equal(
+    call.compactSummaryReadback,
+    false,
+    'conservation diagnostics must not implicitly serialize the particle hot loop'
+  );
   assert.equal(residentCalls.length, 1);
 
   assert.equal(result.twoLevelMechanics.status, 'schroeder-two-level-mechanics-step-submitted');
@@ -10884,6 +11718,117 @@ test('Schroeder same-level mechanics leaves two-level mode off by default', asyn
   assert.equal(result.twoLevelMechanics, null);
 });
 
+test('paired-v2 mechanics fields require an explicit two-level opt-in', async () => {
+  const device = createFakeWebGpuDevice();
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      enableMechanicsFieldPairV2: true
+    }),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_V2_REQUIRES_TWO_LEVEL'
+      );
+      return true;
+    }
+  );
+  assert.equal(device.createdBuffers.length, 0);
+  assert.equal(device.queue.submissions?.length ?? 0, 0);
+});
+
+test('canonical two-level epochs reject a mechanics-field mode change at mount', () => {
+  const common = {
+    device: createFakeWebGpuDevice(),
+    initialLevelAssignment: {},
+    initialTransaction: { twoLevelAuthoritative: true },
+    sphParticleState: { particleCount: 1 },
+    mlsMpmParticleState: { particleCount: 1 }
+  };
+  for (const mechanicsFieldPairV2Enabled of [false, true]) {
+    assert.throws(
+      () => createSchroederTwoLevelCanonicalEpochController({
+        ...common,
+        initialGeneration: {
+          selected: true,
+          mechanicsFieldPairV2Enabled: !mechanicsFieldPairV2Enabled
+        },
+        mechanicsFieldPairV2Enabled
+      }),
+      (error) => {
+        assert.equal(
+          error?.code,
+          'ERR_SCHROEDER_TWO_LEVEL_MECHANICS_FIELD_MODE'
+        );
+        return true;
+      }
+    );
+  }
+});
+
+test('injected spatial generations fail closed on paired-v2 requested and observed mode mismatch', async () => {
+  for (const {
+    enableMechanicsFieldPairV2,
+    injected
+  } of [
+    {
+      enableMechanicsFieldPairV2: false,
+      injected: {
+        mechanicsFieldPairV2Requested: true,
+        mechanicsFieldPairV2Enabled: true,
+        mechanicsFieldConstructionMode: 'paired-v2-shared-radix',
+        mechanicsFieldPair: {}
+      }
+    },
+    {
+      enableMechanicsFieldPairV2: true,
+      injected: {
+        mechanicsFieldPairV2Requested: false,
+        mechanicsFieldPairV2Enabled: false,
+        mechanicsFieldConstructionMode: 'independent-v2',
+        mechanicsFieldPair: null,
+        mechanicsFieldView: {}
+      }
+    }
+  ]) {
+    const device = createFakeWebGpuDevice();
+    const buffers = manualBuffers({
+      particleCount: 3,
+      smoothingLengthM: 0.25
+    });
+    let residentCallCount = 0;
+    await assert.rejects(
+      runSchroederSameLevelMechanicsWebGpu({
+        device,
+        ...buffers,
+        selectedLevel: 0,
+        minLevel: 0,
+        maxLevel: 1,
+        baseGridSpacingM: 0.25,
+        enableTwoLevelMechanics: true,
+        enableMechanicsFieldPairV2,
+        spatialEpochGeneration: {
+          selected: true,
+          ready: true,
+          ...injected
+        },
+        residentStepRunner: async () => {
+          residentCallCount += 1;
+          return { status: 'resident-step-must-not-run' };
+        }
+      }),
+      (error) => {
+        assert.equal(
+          error?.code,
+          'ERR_SCHROEDER_TWO_LEVEL_MECHANICS_FIELD_MODE'
+        );
+        return true;
+      }
+    );
+    assert.equal(residentCallCount, 0);
+  }
+});
+
 test('Schroeder two-level authority builds one canonical generation with two compact level views', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -10891,6 +11836,15 @@ test('Schroeder two-level authority builds one canonical generation with two com
   const residentCalls = [];
   let coupledResult = null;
   let initialAggregateView = null;
+  const generationCalls = [];
+  const generatedEpochs = [];
+  const spatialEpochGenerationRunner = async (options) => {
+    generationCalls.push(options);
+    const generation =
+      await runSchroederSpatialEpochGenerationWithBackpressureWebGpu(options);
+    generatedEpochs.push(generation);
+    return generation;
+  };
   const twoLevelMechanicsRunner = async (options) => {
     initialAggregateView =
       options.canonicalEpochController.initialEpoch.generation.aggregateView;
@@ -10903,7 +11857,9 @@ test('Schroeder two-level authority builds one canonical generation with two com
     device,
     ...buffers,
     ...uploads,
-    selectedLevel: 0,
+    selectedLevel: 1,
+    minLevel: 0,
+    maxLevel: 1,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
@@ -10911,6 +11867,7 @@ test('Schroeder two-level authority builds one canonical generation with two com
     twoLevelFineSubstepCount: 2,
     enablePortableSummary: true,
     twoLevelMechanicsRunner,
+    spatialEpochGenerationRunner,
     residentStepOptions: {
       internalPressureScale: 0.75,
       ambientPressurePa: 101325
@@ -10928,10 +11885,118 @@ test('Schroeder two-level authority builds one canonical generation with two com
   assert.equal(result.spatialEpochGenerationDirectoryBuildCount, 1);
   assert.equal(result.spatialEpochGeneration.mechanicsLevelCount, 2);
   assert.deepEqual(result.spatialEpochGeneration.mechanicsLevels, [0, 1]);
-  assert.ok(
-    initialAggregateView,
-    'authoritative two-level generations retain their transaction-owned aggregate view'
+  assert.equal(result.mechanicsFieldPairV2Requested, false);
+  assert.equal(result.mechanicsFieldPairV2Enabled, false);
+  assert.equal(result.mechanicsFieldConstructionMode, 'independent-v2');
+  assert.equal(
+    result.spatialEpochGeneration.mechanicsFieldPairV2Requested,
+    false
   );
+  assert.equal(result.spatialEpochGeneration.mechanicsFieldPairV2Enabled, false);
+  assert.equal(
+    result.spatialEpochGeneration.mechanicsFieldConstructionMode,
+    'independent-v2'
+  );
+  assert.equal(
+    result.twoLevelMechanics.coverageStatus,
+    'schroeder-two-level-coverage-admitted'
+  );
+  assert.equal(result.twoLevelMechanics.coverageSource, 'classifier-clamp-range');
+  assert.equal(result.twoLevelMechanics.requestedFineLevel, 1);
+  assert.equal(result.twoLevelMechanics.fineLevel, 0);
+  assert.equal(result.twoLevelMechanics.coarseLevel, 1);
+  assert.equal(result.twoLevelMechanics.allLiveRowsCovered, true);
+  assert.equal(
+    initialAggregateView,
+    null,
+    'private mechanics E0 must not build an unconsumed FAR aggregate'
+  );
+  assert.equal(generationCalls.length, 4);
+  assert.deepEqual(
+    generationCalls.map(({ activeSourceCapacity }) => activeSourceCapacity),
+    [3, 3, 3, 3],
+    'initial, refreshed private, and terminal public epochs retain exact A=N'
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ mechanicsLevelCount }) => mechanicsLevelCount),
+    [2, 2, 2, 0],
+    'terminal public E* omits the unconsumed mechanics view chain'
+  );
+  assert.deepEqual(
+    generationCalls.map(({ mechanicsFieldPairV2Enabled }) => (
+      mechanicsFieldPairV2Enabled
+    )),
+    [false, false, false, false],
+    'the default route remains independent-v2 across every canonical epoch'
+  );
+  assert.deepEqual(
+    generationCalls.map(({ particleBufferSet }) => (
+      particleBufferSet == null
+    )),
+    [true, true, true, false],
+    'only terminal public E* receives aggregate source buffers'
+  );
+  assert.deepEqual(
+    generationCalls.map(({ exactNearCellTreeEnabled }) => (
+      exactNearCellTreeEnabled
+    )),
+    [false, false, false, false],
+    'a FAR-only public E* does not need an exact-near tree'
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ aggregateView }) => aggregateView != null),
+    [false, false, false, true]
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ exactNearCellTree }) => exactNearCellTree != null),
+    [false, false, false, false]
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ phaseVolumeSidecarsEnabled }) => (
+      phaseVolumeSidecarsEnabled
+    )),
+    [true, true, true, false],
+    'private mechanics epochs retain S9-A/B while terminal public E* omits them'
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ mechanicsLevelViews }) => (
+      mechanicsLevelViews.filter((levelView) => (
+        levelView.phaseVolumeMoment?.submitPerformed === true
+        && levelView.phaseVolumeReceipt?.submitPerformed === true
+      )).length
+    )),
+    [2, 2, 2, 0]
+  );
+  assert.deepEqual(
+    generatedEpochs.map(({ phaseVolumeInterfaceProposal }) => (
+      phaseVolumeInterfaceProposal?.submitPerformed === true
+    )),
+    [true, true, true, false],
+    'consumer-driven scheduling preserves S9-C only on mechanics epochs'
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation.aggregateView,
+    generatedEpochs[3].aggregateView
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.transaction.aggregateViewRequired,
+    true
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.transaction.twoLevelAuthoritative,
+    false
+  );
+  assert.equal(coupledResult.postMechanicsEpoch.generation.mechanicsView, null);
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation.mechanicsFieldView,
+    null
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation.mechanicsFieldPair,
+    null
+  );
+  assert.equal(coupledResult.postMechanicsEpoch.generation.hierarchyView, null);
+  assert.equal(coupledResult.postMechanicsEpoch.generation.parentFieldView, null);
   assert.equal(result.spatialEpochGenerationReleaseScheduled, true);
   assert.equal(result.spatialEpochTransactionMounted, true);
   assert.equal(
@@ -10946,11 +12011,76 @@ test('Schroeder two-level authority builds one canonical generation with two com
   assert.equal(step.status, 'schroeder-two-level-authoritative-step-executed');
   assert.equal(step.backend, 'webgpu');
   assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.fullParticleReadbackPerformed, false);
+  assert.equal(step.fullParticleReadbackFree, true);
+  assert.equal(step.residentContinuationReady, true);
+  assert.equal(step.readbackTelemetryComplete, true);
+  assert.deepEqual(step.readbackTelemetryUnknownSources, []);
+  assert.equal(step.mapAsyncCount, 0);
+  assert.equal(step.readbackBytes, 0);
+  assert.equal(step.hostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  assert.equal(result.fullParticleReadbackPerformed, false);
+  assert.equal(result.fullParticleReadbackFree, true);
+  assert.equal(result.residentContinuationReady, true);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.deepEqual(result.readbackTelemetryUnknownSources, []);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(
+    result.hostQueueFenceCount,
+    0,
+    'independent-v2 local submitted temporaries retire without a host fence'
+  );
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(
+    await result.schroederTwoLevelAggregateTraversalRetirementPromise,
+    true
+  );
+  assert.equal(
+    device.queueFenceCalls.some(({ stack }) => (
+      String(stack).includes('scheduleTwoLevelAggregateTraversalCleanup')
+    )),
+    false,
+    'the exact finalized public E* submit receipt retires its traversal without a host fence'
+  );
+  assert.equal(
+    device.queueFenceCalls.some(({ stack }) => (
+      String(stack).includes('runSchroederLevelAssignmentWebGpu')
+    )),
+    false,
+    'independent-v2 macro-boundary reclassification retires only local temporaries after submit'
+  );
+  assert.deepEqual(
+    result.schroederHierarchyArtifactTransferCleanupClaims,
+    [],
+    'observation-mode local cleanup does not mint cross-stage transfer claims'
+  );
+  assert.equal(
+    result.queueOrderedFinalConsumerCapability ?? null,
+    null,
+    'observation-mode local cleanup does not publish resident render authority'
+  );
   assert.equal(step.twoLevelMechanicsAuthority, 'authoritative');
   assert.equal(step.twoLevelMechanicsStatus,
     'schroeder-two-level-mechanics-step-submitted');
   assert.equal(step.twoLevelFineSubstepCount, 2);
   assert.equal(step.twoLevelAuthoritativeCommitVerified, true);
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldPairV2Requested,
+    false
+  );
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldPairV2Enabled,
+    false
+  );
+  assert.deepEqual(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldConstructionModes,
+    ['independent-v2', 'independent-v2', 'independent-v2', 'not-built']
+  );
   assert.equal(step.internalPressureScale, 0.75);
   assert.equal(step.ambientPressurePa, 101325);
   assert.equal(step.sidecars, 'shared-post-mechanics-closure');
@@ -10968,6 +12098,49 @@ test('Schroeder two-level authority builds one canonical generation with two com
   );
   assert.equal(step.phaseVolumeInterfaceTransport.enabled, true);
   assert.ok(result.schroederSpatialSuccessorSourceFamily);
+  assert.equal(
+    result.schroederSpatialTransitionPolicy,
+    SCHROEDER_SPATIAL_TRANSITION_POLICY_CONSERVATIVE_RESIDENT
+  );
+  assert.equal(
+    result.schroederSpatialTransitionCompactReadbackPerformed,
+    false
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyEpoch,
+    result.schroederSpatialSuccessorSourceFamily.sourceEpochIdentity
+      .topologyEpoch + 1
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionEpoch,
+    result.schroederSpatialSuccessorSourceFamily.sourceEpochIdentity
+      .positionEpoch + 1
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.topologyTransitionMode,
+    'gpu-resident-conservative-topology-advance'
+  );
+  assert.equal(
+    result.schroederSpatialSuccessorSourceFamily.positionAuthority,
+    'conservative-mechanics-integration-transition'
+  );
+  assert.equal(
+    result.twoLevelMechanics.schroederSpatialTopologyTransitionReceipt,
+    undefined
+  );
+  assert.equal(
+    result.twoLevelMechanics.schroederSpatialPositionTransitionReceipt,
+    undefined
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => (
+      buffer.label ===
+        'ulg-schroeder-spatial-topology-transition-compact-readback'
+      || buffer.label ===
+        'ulg-schroeder-spatial-position-transition-compact-readback'
+    )),
+    false
+  );
   assert.equal(
     step.nextParticleUploads.schroederSpatialSuccessorSourceFamily,
     result.schroederSpatialSuccessorSourceFamily,
@@ -11038,6 +12211,22 @@ test('Schroeder two-level authority builds one canonical generation with two com
     await result.schroederTwoLevelAggregateTraversalRetirementPromise,
     true
   );
+  const queueFenceCountBeforeRenderRelease = device.queueFenceCalls.length;
+  await result.localRetainedRenderBuffers.destroyRetainedBuffers({
+    queueOrderedFinalConsumer: Object.freeze({
+      source: 'foreign-successor-capability'
+    })
+  });
+  assert.equal(
+    device.queueFenceCalls.length,
+    queueFenceCountBeforeRenderRelease + 1,
+    'a claim-free cold result retires locally instead of consuming a successor capability'
+  );
+  assert.equal(
+    result.currentSchroederHierarchyArtifactLedgerSummary()
+      .pendingTransferCount,
+    0
+  );
 });
 
 test('Schroeder two-level authority quarantines a committed continuation when exact successor publication is rejected', async () => {
@@ -11057,6 +12246,8 @@ test('Schroeder two-level authority quarantines a committed continuation when ex
       ...buffers,
       ...uploads,
       selectedLevel: 0,
+      minLevel: 0,
+      maxLevel: 1,
       baseGridSpacingM: 0.25,
       dt: 5e-4,
       enableTwoLevelMechanics: true,
@@ -11088,6 +12279,120 @@ test('Schroeder two-level authority quarantines a committed continuation when ex
   await new Promise((resolve) => setImmediate(resolve));
 });
 
+test('Schroeder two-level rejection releases a warm successor product-history view without releasing its shared input arena view', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const rawInputResidentProductMass = residentProductMassFixture(
+    device,
+    'warm-product-history-input-source'
+  );
+  const inputResidentProductMass =
+    await mergeResidentProductMassBuffersWebGpu({
+      device,
+      emittedResidentProductMass: rawInputResidentProductMass,
+      allowHostCompactionObservation: false
+    });
+  const emittedResidentProductMass = residentProductMassFixture(
+    device,
+    'warm-product-history-emitted-source'
+  );
+  const originalInputRelease =
+    inputResidentProductMass.destroyResidentProductMassBuffers;
+  let inputReleaseCount = 0;
+  inputResidentProductMass.destroyResidentProductMassBuffers = function () {
+    inputReleaseCount += 1;
+    return originalInputRelease.call(this);
+  };
+  let successorResidentProductMass = null;
+  let successorReleaseCount = 0;
+  const twoLevelMechanicsRunner = (options) =>
+    driveAuthoritativeCanonicalEpochs(options, {
+      prefix: 'rejected-warm-product-history-publication'
+    });
+  twoLevelMechanicsRunner.schroederSpatialTopologyTransitionAware = true;
+
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      ...buffers,
+      ...uploads,
+      selectedLevel: 0,
+      minLevel: 0,
+      maxLevel: 1,
+      baseGridSpacingM: 0.25,
+      dt: 5e-4,
+      enableTwoLevelMechanics: true,
+      twoLevelMechanicsAuthority: 'authoritative',
+      twoLevelFineSubstepCount: 2,
+      twoLevelMechanicsRunner,
+      spatialSuccessorPublicationRunner(plan) {
+        successorResidentProductMass =
+          plan.productHistoryCommitGate?.residentProductMass ?? null;
+        assert.ok(successorResidentProductMass);
+        assert.notEqual(
+          successorResidentProductMass,
+          inputResidentProductMass
+        );
+        assert.equal(
+          successorResidentProductMass.productEventBuffer,
+          inputResidentProductMass.productEventBuffer
+        );
+        assert.equal(
+          successorResidentProductMass.productEventHistoryArenaWarmReuse,
+          true
+        );
+        const originalSuccessorRelease =
+          successorResidentProductMass.destroyResidentProductMassBuffers;
+        successorResidentProductMass.destroyResidentProductMassBuffers =
+          function () {
+            successorReleaseCount += 1;
+            return originalSuccessorRelease.call(this);
+          };
+        return Object.freeze({
+          status: 'schroeder-successor-source-family-publication-rejected',
+          published: false,
+          sourceFamily: null,
+          reason: 'injected warm product-history identity rejection'
+        });
+      },
+      residentStepOptions: {
+        residentProductMass: inputResidentProductMass,
+        thermalMaterialTable: canonicalSidecarThermalMaterialTable,
+        reactionTable: canonicalSidecarReactionTable(),
+        reactionStepRunner: async () => ({
+          status: 'reaction-step-executed',
+          backend: 'webgpu',
+          residentProductMass: emittedResidentProductMass,
+          fullParticleReadbackPerformed: false,
+          fullParticleReadbackFree: true,
+          ...createGpuReadbackTelemetry({
+            scope: 'test-warm-product-history-reaction-sidecar'
+          })
+        })
+      },
+      residentStepRunner: async () => ({ status: 'must-not-run' })
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_PUBLICATION_REJECTED'
+      );
+      assert.equal(error.committedContinuationQuarantined, true);
+      assert.match(error.message, /warm product-history identity rejection/);
+      return true;
+    }
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(successorReleaseCount, 1);
+  assert.equal(inputReleaseCount, 0);
+
+  inputResidentProductMass.destroyResidentProductMassBuffers();
+  rawInputResidentProductMass.destroyResidentProductMassBuffers();
+  emittedResidentProductMass.destroyResidentProductMassBuffers();
+});
+
 test('Schroeder two-level authority rejects a forged successful successor publication receipt', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -11105,6 +12410,8 @@ test('Schroeder two-level authority rejects a forged successful successor public
       ...buffers,
       ...uploads,
       selectedLevel: 0,
+      minLevel: 0,
+      maxLevel: 1,
       baseGridSpacingM: 0.25,
       dt: 5e-4,
       enableTwoLevelMechanics: true,
@@ -11143,7 +12450,7 @@ test('Schroeder two-level authority rejects a forged successful successor public
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test('canonical epoch refresh retires an orphaned submitted assignment when the prior owner cannot publish a fence', async () => {
+test('canonical epoch refresh waits for cached-runtime arena capacity and retires an orphaned submitted assignment', async () => {
   const device = createFakeWebGpuDevice();
   const uploads = authoritativeUploadFamily(device, { particleCount: 2 });
   const refreshedAssignment = {
@@ -11153,6 +12460,7 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
     releaseScheduled: false
   };
   let encodeCount = 0;
+  let availabilityWaitCount = 0;
   let releaseCount = 0;
   const refreshRuntime = {
     proveFineSubstepAuthority() {
@@ -11160,7 +12468,18 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
     },
     encode() {
       encodeCount += 1;
+      if (encodeCount === 1) {
+        const error = new Error(
+          'cached frozen refresh arenas still await an earlier controller fence'
+        );
+        error.code = 'ERR_SCHROEDER_FROZEN_REFRESH_BACKPRESSURE';
+        throw error;
+      }
       return refreshedAssignment;
+    },
+    waitForAvailableArena() {
+      availabilityWaitCount += 1;
+      return Promise.resolve(true);
     },
     markExecutionSubmitted(execution) {
       assert.equal(execution, refreshedAssignment);
@@ -11191,6 +12510,18 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
     },
     hierarchyView: {}
   };
+  const timestampStages = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      timestampStages.push(descriptor?.stage ?? null);
+      return { encoder };
+    },
+    endEncoderSpan(encoder, token) {
+      assert.equal(token.encoder, encoder);
+    }
+  };
+  let mechanicalProposalOptions = null;
   const controller = createSchroederTwoLevelCanonicalEpochController({
     device,
     initialGeneration,
@@ -11217,15 +12548,23 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
       gridSpacingM: 0.5
     },
     boxDimsM: [5, 5, 5],
+    gpuTimestampRecorder,
     refreshRuntime,
     spatialEpochGenerationRunner: async () => {
       throw new Error('generation must not run after prior release failure');
     },
-    mechanicalProposalRunner: () => ({
-      releaseAfterSubmittedWork() { return true; },
-      releasePromise: Promise.resolve(true)
-    })
+    mechanicalProposalRunner: (options) => {
+      mechanicalProposalOptions = options;
+      return {
+        releaseAfterSubmittedWork() { return true; },
+        releasePromise: Promise.resolve(true)
+      };
+    }
   });
+  assert.equal(
+    mechanicalProposalOptions?.gpuTimestampRecorder,
+    gpuTimestampRecorder
+  );
   controller.initialEpoch.committed = true;
   await assert.rejects(
     controller.refresh({
@@ -11238,10 +12577,15 @@ test('canonical epoch refresh retires an orphaned submitted assignment when the 
       return true;
     }
   );
-  assert.equal(encodeCount, 1);
+  assert.equal(encodeCount, 2);
+  assert.equal(availabilityWaitCount, 1);
   assert.equal(refreshedAssignment.submitPerformed, true);
   assert.equal(refreshedAssignment.releaseScheduled, true);
   assert.equal(releaseCount, 1);
+  assert.deepEqual(timestampStages, [
+    'frozen-assignment-refresh',
+    'frozen-assignment-refresh'
+  ]);
 });
 
 test('canonical refresh preserves the submission error while one stable orphan retry recovers a rejected fence', async () => {
@@ -11551,7 +12895,8 @@ test('canonical controller loss supersedes a post-generation refresh orphan with
     particleCount,
     particleIdentityBuffer: uploads.sphParticleUpload.identityBuffer,
     particleIdentityStrideWords: 1,
-    particleBufferSet: uploads.sphParticleUpload,
+    particleBufferSet: null,
+    exactNearCellTreeEnabled: false,
     mechanicsLevels: [
       { selectedLevel: 0, mechanicsGrid: fineMechanicsGrid },
       { selectedLevel: 1, mechanicsGrid: coarseMechanicsGrid }
@@ -11721,6 +13066,8 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
     ...buffers,
     ...uploads,
     selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
@@ -11765,6 +13112,15 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
 
   const step = result.residentStep;
   assert.equal(step.status, 'schroeder-two-level-authoritative-step-executed');
+  assert.equal(step.fullParticleReadbackPerformed, false);
+  assert.equal(step.fullParticleReadbackFree, true);
+  assert.equal(step.residentContinuationReady, true);
+  assert.equal(step.readbackTelemetryComplete, true);
+  assert.deepEqual(step.readbackTelemetryUnknownSources, []);
+  assert.equal(step.mapAsyncCount, 0);
+  assert.equal(step.readbackBytes, 0);
+  assert.equal(step.hostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, true);
   // Admitted merged storage supersedes the coupled step's outputs: the
   // continuation uploads carry the adopted buffers with the authoritative
   // (merged) count, and the coupled outputs are released.
@@ -11779,6 +13135,10 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'merged-mechanics');
   assert.equal(step.nextSphParticleState.particleCount, 2);
   assert.equal(step.nextMlsMpmParticleState.particleCount, 2);
+  assert.equal(
+    step.nextParticleUploads.schroederSpatialSuccessorSourceFamily ?? null,
+    result.schroederSpatialSuccessorSourceFamily ?? null
+  );
 });
 
 test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequentially on the coupled outputs', async () => {
@@ -11786,6 +13146,7 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
   let coupledResult = null;
+  let canonicalEpochController = null;
   const thermalCalls = [];
   let thermalStepResult = null;
   const result = await runSchroederSameLevelMechanicsWebGpu({
@@ -11793,12 +13154,16 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
     ...buffers,
     ...uploads,
     selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
+    enableMechanicsFieldPairV2: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
     twoLevelMechanicsRunner: async (options) => {
+      canonicalEpochController = options.canonicalEpochController;
       coupledResult = await driveAuthoritativeCanonicalEpochs(options, {
         prefix: 'thermal-two-level'
       });
@@ -11806,6 +13171,7 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
     },
     residentStepOptions: {
       thermalMaterialTable: canonicalSidecarThermalMaterialTable,
+      mechanicsMaterialTable: canonicalSidecarMechanicsMaterialTable,
       thermalStepRunner: async (options) => {
         thermalCalls.push(options);
         thermalStepResult = await runSphThermalStepWebGpu(options);
@@ -11816,8 +13182,69 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
   });
 
   const step = result.residentStep;
+  assert.equal(result.mechanicsFieldPairV2Requested, true);
+  assert.equal(result.mechanicsFieldPairV2Enabled, true);
+  assert.equal(result.mechanicsFieldConstructionMode, 'paired-v2-shared-radix');
+  assert.equal(
+    result.spatialEpochGeneration.mechanicsFieldPairV2Requested,
+    true
+  );
+  assert.equal(result.spatialEpochGeneration.mechanicsFieldPairV2Enabled, true);
+  assert.equal(
+    result.spatialEpochGeneration.mechanicsFieldConstructionMode,
+    'paired-v2-shared-radix'
+  );
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldPairV2Requested,
+    true
+  );
+  assert.equal(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldPairV2Enabled,
+    true
+  );
+  assert.deepEqual(
+    result.twoLevelMechanics.canonicalEpochControllerSummary
+      .mechanicsFieldConstructionModes,
+    [
+      'paired-v2-shared-radix',
+      'paired-v2-shared-radix',
+      'paired-v2-shared-radix',
+      'not-built'
+    ]
+  );
+  assert.equal(
+    await result.schroederTwoLevelAggregateTraversalRetirementPromise,
+    true
+  );
+  await Promise.resolve();
+  assert.deepEqual(
+    device.queueFenceCalls,
+    [],
+    'successful paired canonical submission retires queue-ordered sidecars without a CPU fence'
+  );
+  assert.equal(result.twoLevelMechanics.sidecarHostQueueFenceCount, 0);
+  assert.equal(step.observedHostQueueFenceCount, 0);
+  assert.equal(step.hostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, true);
   assert.equal(step.sidecars, 'shared-post-mechanics-closure');
+  assert.ok(
+    step.postMechanicsClosure.queueOrderedFinalConsumerCapabilities.upstream,
+    'the existing mechanics-refresh submit seals the sidecar producer claim'
+  );
   assert.equal(thermalCalls.length, 1);
+  const retiredThermalGraph = thermalCalls[0].thermalResponseGraphUpload;
+  assert.equal(retiredThermalGraph.destroyed, true);
+  for (const graphBuffer of [
+    retiredThermalGraph.responseRecordBuffer,
+    retiredThermalGraph.responseBuffer,
+    retiredThermalGraph.responseThermalConductivityBuffer,
+    retiredThermalGraph.graphNodeBuffer,
+    retiredThermalGraph.graphSampleBuffer
+  ]) {
+    assert.equal(graphBuffer.destroyCount, 1);
+  }
   // The sidecar consumes the freshly classified public E* family, not the
   // private S* descriptor or a later-mutated continuation wrapper.
   assert.equal(
@@ -11832,6 +13259,45 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
   assert.equal(
     thermalCalls[0].schroederSpatialEpochGeneration,
     coupledResult.postMechanicsEpoch.generation
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation
+      .exactNearCellTree?.submitPerformed,
+    true,
+    'thermal readers require the terminal E* exact-near tree'
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation.aggregateView?.submitPerformed,
+    true,
+    'the terminal FAR reader requires the E* aggregate'
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.generation
+      .phaseVolumeInterfaceProposalEnabled,
+    false,
+    'terminal E* has no P2G/G2P reader and must not rebuild S9-A/B/C'
+  );
+  assert.deepEqual(
+    coupledResult.postMechanicsEpoch.generation.mechanicsLevelViews.map(
+      (levelView) => [
+        levelView.phaseVolumeMoment ?? null,
+        levelView.phaseVolumeReceipt ?? null
+      ]
+    ),
+    []
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.transaction
+      .phaseVolumeInterfaceProposalAuthoritative,
+    false
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.transaction.aggregateViewRequired,
+    true
+  );
+  assert.equal(
+    coupledResult.postMechanicsEpoch.transaction.twoLevelAuthoritative,
+    false
   );
   assert.equal(
     thermalCalls[0].schroederSpatialThermalProposal.generationId,
@@ -11904,6 +13370,8 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
     ...buffers,
     ...uploads,
     selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
     baseGridSpacingM: 0.25,
     dt: 5e-4,
     enableTwoLevelMechanics: true,
@@ -11956,9 +13424,19 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
 
   const step = result.residentStep;
   assert.equal(step.sidecars, 'shared-post-mechanics-closure');
+  assert.equal(
+    result.twoLevelMechanics.sidecarHostQueueFenceCount,
+    2,
+    'the non-paired sidecar route reports its reaction-proposal and graph fences'
+  );
+  assert.ok(step.observedHostQueueFenceCount >= 2);
+  assert.equal(step.normalHotLoopReadbackFree, false);
   assert.equal(reactionCalls.length, 1);
   assert.ok(timedProducerIds.includes(
     'schroeder-hierarchy:two-level-post-mechanics-reaction-discovery-proposal'
+  ));
+  assert.ok(timedProducerIds.includes(
+    'schroeder-hierarchy:two-level-coupled-mechanics'
   ));
   assert.ok(timedProducerIds.includes(
     'schroeder-hierarchy:two-level-post-mechanics-reactionStep'
@@ -12039,6 +13517,94 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
     reactionMechanicsBuffer
   ]) {
     assert.equal(borrowedReplacement.destroyCount, 0);
+  }
+});
+
+test('M4: paired canonical mechanics refresh settles thermal and reaction sidecar claims at one existing submit', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  let retiredThermalGraph = null;
+  let retiredReactionProposal = null;
+  const reactionStateBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'paired-reaction-state-out', size: 4096, usage: 128
+  }), device);
+  const reactionThermoBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'paired-reaction-thermo-out', size: 4096, usage: 128
+  }), device);
+  const reactionMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'paired-reaction-mechanics-out', size: 4096, usage: 128
+  }), device);
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    enableMechanicsFieldPairV2: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner: async (options) => (
+      driveAuthoritativeCanonicalEpochs(options, {
+        prefix: 'paired-reaction-two-level',
+        terminalOwnsThermoBuffer: true
+      })
+    ),
+    residentStepOptions: {
+      thermalMaterialTable: canonicalSidecarThermalMaterialTable,
+      mechanicsMaterialTable: canonicalSidecarMechanicsMaterialTable,
+      thermalStepRunner: async (options) => {
+        retiredThermalGraph = options.thermalResponseGraphUpload;
+        return runSphThermalStepWebGpu(options);
+      },
+      reactionTable: canonicalSidecarReactionTable(),
+      reactionStepRunner: async (options) => {
+        retiredReactionProposal =
+          options.schroederSpatialReactionDiscoveryProposal;
+        return {
+          status: 'reaction-step-executed',
+          backend: 'webgpu',
+          stateBuffer: reactionStateBuffer,
+          thermoBuffer: reactionThermoBuffer,
+          mechanicsBuffer: reactionMechanicsBuffer,
+          ownsStateBuffer: false,
+          ownsThermoBuffer: false,
+          ownsMechanicsBuffer: false,
+          fullParticleReadbackPerformed: false,
+          fullParticleReadbackFree: true,
+          ...createGpuReadbackTelemetry({
+            scope: 'test-paired-reaction-sidecar'
+          })
+        };
+      }
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+
+  await result.schroederTwoLevelAggregateTraversalRetirementPromise;
+  await Promise.resolve();
+  const step = result.residentStep;
+  assert.deepEqual(device.queueFenceCalls, []);
+  assert.equal(result.twoLevelMechanics.sidecarHostQueueFenceCount, 0);
+  assert.equal(step.hostQueueFenceCount, 0);
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  assert.ok(
+    step.postMechanicsClosure.queueOrderedFinalConsumerCapabilities.upstream
+  );
+  assert.equal(retiredReactionProposal.released, true);
+  assert.equal(retiredThermalGraph.destroyed, true);
+  for (const graphBuffer of [
+    retiredThermalGraph.responseRecordBuffer,
+    retiredThermalGraph.responseBuffer,
+    retiredThermalGraph.responseThermalConductivityBuffer,
+    retiredThermalGraph.graphNodeBuffer,
+    retiredThermalGraph.graphSampleBuffer
+  ]) {
+    assert.equal(graphBuffer.destroyCount, 1);
   }
 });
 

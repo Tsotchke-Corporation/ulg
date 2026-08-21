@@ -31,8 +31,13 @@ import {
   retireSchroederSpatialSuccessorSourceFamilyAfterLeases,
   runSchroederSpatialPositionTransitionWebGpu,
   schroederSpatialSuccessorSourceFamilyLiveness,
+  validateSchroederSpatialProductHistoryCommitGate,
   validateSchroederSpatialSuccessorPublicationReceipt
 } from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
+import {
+  registerResidentProductEventCountAuthority,
+  revokeResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   applySchroederSpatialTopologyTransitionReceipt,
   runSchroederSpatialTopologyTransitionWebGpu
@@ -516,6 +521,78 @@ function preparedUploads(f) {
     { generation: f.generation }
   );
   return nextParticleUploads;
+}
+
+function attachGpuCountProductHistory(f, nextParticleUploads, {
+  generation = 71,
+  seal = 0x715ea1
+} = {}) {
+  const rowCapacity = 32768;
+  const rowStrideFloats = 32;
+  const productEventBuffer = taggedBuffer(
+    f.device,
+    `successor-product-history-${generation}`,
+    rowCapacity * rowStrideFloats * Float32Array.BYTES_PER_ELEMENT
+  );
+  const controlBuffer = taggedBuffer(
+    f.device,
+    `successor-product-history-control-${generation}`,
+    256
+  );
+  const residentProductMass = {
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-merged-gpu-resident',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventBuffer.size,
+    productEventRowCount: rowCapacity,
+    productEventStrideFloats: rowStrideFloats,
+    productEventStrideBytes:
+      rowStrideFloats * Float32Array.BYTES_PER_ELEMENT
+  };
+  const authority = registerResidentProductEventCountAuthority(
+    residentProductMass,
+    {
+      device: f.device,
+      controlBuffer,
+      controlOffsetBytes: 0,
+      rowCapacity,
+      rowStrideFloats,
+      generation,
+      seal
+    }
+  );
+  nextParticleUploads.residentProductMass = residentProductMass;
+  return { residentProductMass, authority, productEventBuffer, controlBuffer };
+}
+
+async function preparedProductHistoryGateFixture() {
+  const f = await successorFixture();
+  const nextParticleUploads = preparedUploads(f);
+  const productHistory = attachGpuCountProductHistory(
+    f,
+    nextParticleUploads
+  );
+  const classifier = createSuccessorClassifier(f, {
+    activateHighSlot: false
+  });
+  const tx = transactionForSuccessor(f, nextParticleUploads);
+  const plan = await prepareSchroederSpatialSuccessorSourceFamilyPublication({
+    transaction: tx.transaction,
+    generation: f.generation,
+    lookupLevelAssignment: f.lookupLevelAssignment,
+    nextParticleUploads,
+    successorLevelAssignmentRunner: classifier.runner,
+    topologyTransitionReceipt: f.topologyTransitionReceipt
+  });
+  return {
+    f,
+    nextParticleUploads,
+    productHistory,
+    classifier,
+    tx,
+    plan
+  };
 }
 
 function createSuccessorClassifier(f, {
@@ -1037,6 +1114,55 @@ test('precommit successor preparation allocates final identity and postcommit pu
     resolved.levelAssignmentSeal,
     receipt.sourceFamily.successorLevelAssignmentSeal
   );
+  assert.throws(
+    () => resolveSchroederSpatialSuccessorSourceFamily(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        particleCount: f.particleCount,
+        stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+        thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+        identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+        mechanicsBuffer:
+          nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+        sphParticleUpload: {
+          ...nextParticleUploads.sphParticleUpload
+        },
+        mlsMpmParticleUpload:
+          nextParticleUploads.mlsMpmParticleUpload
+      }
+    ),
+    {
+      code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY'
+    },
+    'a copied upload envelope cannot authenticate exact continuation'
+  );
+  const originalLevelEpoch =
+    nextParticleUploads.sphParticleUpload.levelEpoch;
+  nextParticleUploads.sphParticleUpload.levelEpoch =
+    originalLevelEpoch + 1;
+  assert.throws(
+    () => resolveSchroederSpatialSuccessorSourceFamily(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        particleCount: f.particleCount,
+        stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+        thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+        identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+        mechanicsBuffer:
+          nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+        sphParticleUpload: nextParticleUploads.sphParticleUpload,
+        mlsMpmParticleUpload:
+          nextParticleUploads.mlsMpmParticleUpload
+      }
+    ),
+    {
+      code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY'
+    },
+    'mutable epoch-envelope drift must revoke exact continuation'
+  );
+  nextParticleUploads.sphParticleUpload.levelEpoch = originalLevelEpoch;
   assert.equal(
     receipt.sourceFamily.storageGeneration,
     nextParticleUploads.sphParticleUpload.storageGeneration
@@ -1059,6 +1185,107 @@ test('precommit successor preparation allocates final identity and postcommit pu
   assert.equal(replay.published, false);
   assert.match(replay.reason, /already consumed|invalid|foreign/);
 
+  const consumerLease = acquireSchroederSpatialSuccessorSourceFamilyLease(
+    receipt.sourceFamily,
+    {
+      device: f.device,
+      consumerStage: 'exact-next-tick-mechanics'
+    }
+  );
+  const ownerFence = deferred();
+  const retirementPromise =
+    retireSchroederSpatialSuccessorSourceFamilyAfterLeases(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        reason: 'exact successor admitted by its outstanding lease',
+        after: ownerFence.promise
+      }
+    );
+  assert.throws(
+    () => resolveSchroederSpatialSuccessorSourceFamily(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        particleCount: f.particleCount,
+        stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+        thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+        identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+        mechanicsBuffer:
+          nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+      }
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_RETIREMENT_REQUESTED'
+    },
+    'retirement revokes all consumers that do not hold the exact prior lease'
+  );
+  const leasedResolution = resolveSchroederSpatialSuccessorSourceFamily(
+    receipt.sourceFamily,
+    {
+      device: f.device,
+      particleCount: f.particleCount,
+      stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+      thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+      identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+      mechanicsBuffer:
+        nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+      consumerLease
+    }
+  );
+  assert.equal(leasedResolution.levelAssignment, successorAssignment);
+  assert.throws(
+    () => resolveSchroederSpatialSuccessorSourceFamily(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        particleCount: f.particleCount,
+        stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+        thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+        identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+        mechanicsBuffer:
+          nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+        consumerLease: Object.freeze({ ...consumerLease })
+      }
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_IDENTITY'
+    }
+  );
+  const consumerFence = deferred();
+  const releasePromise =
+    releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+      receipt.sourceFamily,
+      consumerLease,
+      { device: f.device, after: consumerFence.promise }
+    );
+  assert.throws(
+    () => resolveSchroederSpatialSuccessorSourceFamily(
+      receipt.sourceFamily,
+      {
+        device: f.device,
+        particleCount: f.particleCount,
+        stateBuffer: nextParticleUploads.sphParticleUpload.stateBuffer,
+        thermoBuffer: nextParticleUploads.sphParticleUpload.thermoBuffer,
+        identityBuffer: nextParticleUploads.sphParticleUpload.identityBuffer,
+        mechanicsBuffer:
+          nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer,
+        consumerLease
+      }
+    ),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASE_PENDING'
+    },
+    'a lease already scheduled for release cannot admit additional work'
+  );
+  ownerFence.resolve();
+  consumerFence.resolve();
+  await Promise.all([releasePromise, retirementPromise]);
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 1);
+
   const first = allocateSchroederSpatialSuccessorBufferFamilyIdentity({
     device: f.device,
     afterStorageGeneration: receipt.sourceFamily.storageGeneration,
@@ -1080,6 +1307,148 @@ test('precommit successor preparation allocates final identity and postcommit pu
       code:
         'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY_EXHAUSTED'
     }
+  );
+});
+
+test('successor publication carries the exact pending eight-word product-history gate without host observation', async () => {
+  const prepared = await preparedProductHistoryGateFixture();
+  const {
+    f,
+    nextParticleUploads,
+    productHistory,
+    tx,
+    plan
+  } = prepared;
+  const gate = plan.productHistoryCommitGate;
+  assert.ok(gate);
+  assert.equal(nextParticleUploads.productHistoryCommitGate, gate);
+  assert.equal(gate.status, 'gpu-conditioned-publication-commit-pending');
+  assert.equal(gate.ready, false);
+  assert.equal(gate.hostObserved, false);
+  assert.equal(gate.residentProductMass, productHistory.residentProductMass);
+  assert.equal(gate.productEventBuffer, productHistory.productEventBuffer);
+  assert.equal(gate.controlBuffer, productHistory.controlBuffer);
+  assert.equal(gate.controlOffsetBytes, 0);
+  assert.equal(gate.controlPrefixByteLength, 32);
+  assert.equal(gate.expectedMagic, 0x50484731);
+  assert.equal(gate.expectedVersion, 1);
+  assert.equal(gate.expectedReadyStatus, 1);
+  assert.equal(gate.expectedFailedStatus, 0x80000000);
+  assert.equal(gate.expectedGeneration, 71);
+  assert.equal(gate.expectedSeal, 0x715ea1);
+  assert.equal(gate.expectedRowCapacity, 32768);
+  assert.equal(gate.expectedRowStrideVec4, 8);
+  assert.equal(
+    gate.failurePolicy,
+    'fail-closed-gpu-consumers-no-host-observation-no-full-rollback'
+  );
+  assert.equal(
+    validateSchroederSpatialProductHistoryCommitGate(gate, {
+      device: f.device,
+      nextParticleUploads,
+      residentProductMass: productHistory.residentProductMass
+    }),
+    true
+  );
+  assert.equal(
+    validateSchroederSpatialProductHistoryCommitGate(
+      Object.freeze({ ...gate }),
+      {
+        device: f.device,
+        nextParticleUploads,
+        residentProductMass: productHistory.residentProductMass
+      }
+    ),
+    false,
+    'a field-identical copied gate is not branded'
+  );
+  const commitReceipt = tx.commit();
+  const receipt = publishPreparedSchroederSpatialSuccessorSourceFamily(
+    plan,
+    { commitReceipt }
+  );
+  assert.equal(receipt.published, true);
+  assert.equal(receipt.productHistoryCommitGate, gate);
+  assert.equal(receipt.sourceFamily.productHistoryCommitGate, gate);
+  assert.equal(receipt.sourceFamily.productHistoryCommitPending, true);
+  assert.equal(
+    receipt.sourceFamily.productHistoryCommitStatus,
+    'gpu-conditioned-publication-commit-pending'
+  );
+  assert.equal(
+    validateSchroederSpatialSuccessorPublicationReceipt(receipt, {
+      plan,
+      commitReceipt,
+      nextParticleUploads
+    }),
+    true
+  );
+});
+
+test('successor product-history publication rejects revoked, copied, and mismatched pending identities', async () => {
+  const revoked = await preparedProductHistoryGateFixture();
+  const revokedCommit = revoked.tx.commit();
+  assert.equal(
+    revokeResidentProductEventCountAuthority(
+      revoked.productHistory.residentProductMass
+    ),
+    true
+  );
+  const revokedReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      revoked.plan,
+      { commitReceipt: revokedCommit }
+    );
+  assert.equal(revokedReceipt.published, false);
+  assert.equal(revoked.nextParticleUploads.productHistoryCommitGate, null);
+  assert.equal(revoked.classifier.results[0].assignmentBuffer.destroyCount, 1);
+
+  const copiedHandle = await preparedProductHistoryGateFixture();
+  const copiedHandleCommit = copiedHandle.tx.commit();
+  copiedHandle.nextParticleUploads.residentProductMass = {
+    ...copiedHandle.productHistory.residentProductMass
+  };
+  const copiedHandleReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      copiedHandle.plan,
+      { commitReceipt: copiedHandleCommit }
+    );
+  assert.equal(copiedHandleReceipt.published, false);
+  assert.equal(copiedHandle.nextParticleUploads.productHistoryCommitGate, null);
+
+  const copiedGate = await preparedProductHistoryGateFixture();
+  const copiedGateCommit = copiedGate.tx.commit();
+  copiedGate.nextParticleUploads.productHistoryCommitGate = Object.freeze({
+    ...copiedGate.plan.productHistoryCommitGate
+  });
+  const copiedGateReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      copiedGate.plan,
+      { commitReceipt: copiedGateCommit }
+    );
+  assert.equal(copiedGateReceipt.published, false);
+  assert.notEqual(
+    copiedGate.nextParticleUploads.productHistoryCommitGate,
+    copiedGate.plan.productHistoryCommitGate
+  );
+
+  const mismatchedBuffer = await preparedProductHistoryGateFixture();
+  const mismatchedBufferCommit = mismatchedBuffer.tx.commit();
+  mismatchedBuffer.productHistory.residentProductMass.productEventBuffer =
+    taggedBuffer(
+      mismatchedBuffer.f.device,
+      'foreign-replacement-product-history',
+      mismatchedBuffer.productHistory.productEventBuffer.size
+    );
+  const mismatchedBufferReceipt =
+    publishPreparedSchroederSpatialSuccessorSourceFamily(
+      mismatchedBuffer.plan,
+      { commitReceipt: mismatchedBufferCommit }
+    );
+  assert.equal(mismatchedBufferReceipt.published, false);
+  assert.equal(
+    mismatchedBuffer.nextParticleUploads.productHistoryCommitGate,
+    null
   );
 });
 

@@ -360,6 +360,18 @@ test('S9-C ABI is capacity-dispatched and keeps live field counts GPU-only', () 
     wgsl,
     /field_dispatch_shape_admitted\(field_view, field_count\)/
   );
+  assert.match(
+    wgsl,
+    /candidate_count % STENCIL_SIZE == 0u[\s\S]*candidate_count <= source_count \* STENCIL_SIZE/
+  );
+  assert.doesNotMatch(
+    wgsl,
+    /\(\*field_view\)\[33u\] == source_count \* STENCIL_SIZE/
+  );
+  assert.match(
+    wgsl,
+    /\(\*receipt\)\[16u\] <= \(\*field_view\)\[16u\][\s\S]*\(\*field_view\)\[33u\] == \(\*receipt\)\[20u\]/
+  );
   assert.doesNotMatch(
     wgsl,
     /\(\*field_view\)\[60u\] == group_count\(field_count\)[\s\S]*\(\*field_view\)\[61u\] == 1u[\s\S]*\(\*field_view\)\[62u\] == 1u/
@@ -396,6 +408,36 @@ test('S9-C one-level proposal is a read-only, same-encoder artifact with no host
   runtime.releaseExecution(proposal, { discardedEncoder: true });
   assert.equal(proposal.released, true);
   assert.equal(validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor(proposal).admitted, false);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('S9-C arenas reuse exact immutable bind groups', () => {
+  const fixture = createFakeDevice();
+  const authority = createAuthority(fixture.device);
+  const chain = buildReceipt(fixture.device, authority);
+  const runtime = createSchroederSpatialPhaseVolumeInterfaceProposalGpu(
+    fixture.device,
+    {
+      fineFieldCapacity: authority.plan.fieldCapacity,
+      arenaCount: 1,
+      label: 'test-phase-volume-interface-bind-cache'
+    }
+  );
+  const baselineBindGroupCount = fixture.bindGroups.length;
+  const first = runtime.encode(createFakeEncoder(), {
+    fineReceipt: chain.receipt
+  });
+  const explicitBindGroupCount = fixture.bindGroups.length - baselineBindGroupCount;
+  assert.equal(explicitBindGroupCount, 2);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(createFakeEncoder(), {
+    fineReceipt: chain.receipt
+  });
+  assert.equal(
+    fixture.bindGroups.length - baselineBindGroupCount,
+    explicitBindGroupCount
+  );
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
   assert.equal(runtime.destroy(), true);
 });
 
@@ -486,7 +528,7 @@ test('S9-C device-loss retirement destroys only proposal-owned arena buffers', a
   assert.equal(proposal.controlBuffer.destroyCount, 1);
 });
 
-test('native S9-C shader admits an authenticated local span and fails no WebGPU validation', {
+test('native S9-C shader admits a compact authenticated local span and fails no WebGPU validation', {
   skip: RUN_NATIVE
     ? false
     : 'set ULG_RUN_NATIVE_PHASE_VOLUME_INTERFACE=1 for native WebGPU topology execution',
@@ -531,7 +573,7 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       });
       const fieldLayout =
         fieldAbi.createSchroederSpatialMechanicsFieldViewLayout({
-          sourceCapacity: 1,
+          sourceCapacity: 2,
           fieldCapacity: 27
         });
       const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -567,7 +609,7 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       receipt[14] = 41;
       receipt[15] = 43;
       receipt[16] = 1;
-      receipt[17] = 1;
+      receipt[17] = 2;
       receipt[18] = 3;
       receipt[19] = 27;
       receipt[20] = 27;
@@ -612,7 +654,9 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[13] = 37;
       field[14] = 41;
       field[15] = 43;
-      field[16] = 1;
+      // The field retains two physical sources while the receipt above seals
+      // the one-source compact active domain (27 candidates).
+      field[16] = 2;
       field[18] = 27;
       field[19] = 3;
       field[20] = 3;
@@ -649,7 +693,7 @@ test('native S9-C shader admits an authenticated local span and fails no WebGPU 
       field[51] = 27;
       field[52] = 3;
       field[53] = 1;
-      field[54] = 1;
+      field[54] = 2;
       field[55] = 1;
       field[56] = 1;
       field[57] = 1;

@@ -1203,6 +1203,11 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.positionTransformStatus, 'position-transform-disabled');
   assert.equal(result.positionClampStatus, 'position-clamp-ready');
   assert.equal(result.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(result.translationPipelineCreated, true);
+  assert.equal(result.translationBindGroupCreated, true);
+  assert.equal(result.translationCommandEncoderCreated, true);
+  assert.equal(result.translationWorkgroupCountX, 1);
+  assert.equal(result.translationSubmissionObserved, true);
   assert.equal(result.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
 
   assert.equal(result.surfaceVertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
@@ -1562,6 +1567,11 @@ test('ULG GPU builder reuses opted-in extension indirect draw without an adapter
   assert.equal(result.surfaceDraw.drawIndirectRowsBuffer, extensionDrawIndirectBuffer);
   assert.equal(result.surfaceDraw.drawIndirectRowsOwnership, 'extension-owned-retained-buffer');
   assert.equal(result.translationPipelineCacheStatus, 'skipped-extension-draw-indirect-buffer');
+  assert.equal(result.translationPipelineCreated, false);
+  assert.equal(result.translationBindGroupCreated, false);
+  assert.equal(result.translationCommandEncoderCreated, false);
+  assert.equal(result.translationWorkgroupCountX, 0);
+  assert.equal(result.translationSubmissionObserved, false);
   assert.equal(result.queueCompletionStatus, 'queue-work-not-required');
   assert.equal(result.queueCompletionMethod, 'extension-owned-draw-indirect-buffer');
   assert.equal(shaderModules.length, 0);

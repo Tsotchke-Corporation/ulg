@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   checkpointRowMatches,
+  coldCeilingCondensationEvidence,
   condensedLaunchEvidence,
   generatedCohortTrajectoryEvidence,
   phaseAwareVolumeRatioEvidence
@@ -14,6 +15,10 @@ function row({
   massKg = 1,
   yCenterM = 0,
   yMaxM = yCenterM,
+  meanVyMPerS = 0.1,
+  vySampleMassKg = massKg,
+  liveParticleCount = 1,
+  phaseWeightedParticleCount = liveParticleCount,
   kineticEnergyJ = 0,
   minJ = 1,
   maxJ = 1,
@@ -26,6 +31,10 @@ function row({
     massKg,
     yCenterMassWeightedM: yCenterM,
     yMaxM,
+    meanVyMPerS,
+    vySampleMassKg,
+    liveParticleCount,
+    phaseWeightedParticleCount,
     kineticEnergyJ,
     minVolumeRatioJ: minJ,
     maxVolumeRatioJ: maxJ,
@@ -182,8 +191,306 @@ test('generated-cohort trajectory requires a sustained tail and can track an int
 
   assert.equal(evidence.status, 'pass');
   assert.equal(evidence.sustainedRisePassed, true);
+  assert.equal(evidence.sustainedUpwardVelocityPassed, true);
+  assert.equal(evidence.liveCarrierContinuityPassed, true);
+  assert.equal(evidence.checkpointContinuityPassed, true);
+  assert.equal(evidence.sameCarrierLineageProven, false);
   assert.equal(evidence.sustainedInterfaceSeparationPassed, true);
   assert.equal(evidence.tail.length, 2);
+});
+
+test('generated-cohort trajectory rejects aggregate rise caused by a new high carrier', () => {
+  const selector = { materials: ['steam'], phases: ['gas'] };
+  const evidence = generatedCohortTrajectoryEvidence([
+    checkpoint(0, [row({ material: 'bulk', phase: 'liquid' })]),
+    checkpoint(1, [row({
+      material: 'steam',
+      phase: 'gas',
+      massKg: 1,
+      yCenterM: 0.1,
+      meanVyMPerS: -0.1
+    })]),
+    checkpoint(2, [row({
+      material: 'steam',
+      phase: 'gas',
+      massKg: 1,
+      yCenterM: 0.09,
+      meanVyMPerS: -0.1
+    })]),
+    checkpoint(3, [row({
+      material: 'steam',
+      phase: 'gas',
+      massKg: 2,
+      yCenterM: 0.8,
+      meanVyMPerS: -0.05,
+      liveParticleCount: 2
+    })]),
+    checkpoint(4, [row({
+      material: 'steam',
+      phase: 'gas',
+      massKg: 2,
+      yCenterM: 0.9,
+      meanVyMPerS: -0.02,
+      liveParticleCount: 2
+    })])
+  ], {
+    selector,
+    minimumSustainedRiseM: 0.05,
+    tailSampleCount: 2
+  });
+
+  assert.ok(evidence.finalRiseFromBirthM > 0.7);
+  assert.equal(evidence.sustainedRisePassed, true);
+  assert.equal(evidence.liveCarrierContinuityPassed, false);
+  assert.equal(evidence.sustainedUpwardVelocityPassed, false);
+  assert.equal(evidence.status, 'fail');
+});
+
+test('generated-cohort trajectory accepts only the same frozen GPU lineage mask', () => {
+  const cohort = ({
+    checkpointIndex,
+    timeS,
+    y,
+    vy,
+    mask = 'fnv1a32:abc12345'
+  }) => ({
+    sourceTimeS: timeS,
+    totals: { massKg: 1 },
+    materialPhases: [{
+      material: 'h2o',
+      phase: 'liquid',
+      massKg: 0.9,
+      yMaxM: 0.1
+    }],
+    generatedGasCohortCapture: {
+      status: 'captured',
+      checkpointIndex,
+      sameCarrierLineageProven: true,
+      topologyEpoch: 0,
+      identityRevision: 'stable-identity'
+    },
+    generatedGasCohorts: [{
+      schema: 'peercompute.ulg.sph-authoritative-generated-gas-cohort.v0',
+      status: 'captured',
+      authority: 'gpu-resident-frozen-phase-lineage-bitmask',
+      sameCarrierLineageProven: true,
+      material: 'h2o',
+      materialId: 3061144,
+      phase: 'gas',
+      massKg: 0.01,
+      activeGasCarrierCount: 2,
+      frozenLineageCount: 3,
+      frozenLineageMaskHash: mask,
+      topologySignature: 'exact-phase-plan',
+      formedAtCheckpointIndex: 1,
+      yCenterMassWeightedM: y,
+      meanVyMPerS: vy,
+      vySampleMassKg: 0.01
+    }]
+  });
+  const checkpoints = [
+    cohort({ checkpointIndex: 1, timeS: 1, y: 0.2, vy: 0.1 }),
+    cohort({ checkpointIndex: 2, timeS: 2, y: 0.27, vy: 0.1 }),
+    cohort({ checkpointIndex: 3, timeS: 3, y: 0.29, vy: 0.1 })
+  ];
+  const evidence = generatedCohortTrajectoryEvidence(checkpoints, {
+    selector: { materials: ['h2o'], phases: ['gas'] },
+    interfaceSelector: { materials: ['h2o'], excludePhases: ['gas'] },
+    minimumMassFractionOfSystem: 1e-6,
+    minimumSustainedRiseM: 0.05,
+    tailSampleCount: 2
+  });
+  assert.equal(evidence.status, 'pass');
+  assert.equal(evidence.sameCarrierLineageProven, true);
+  assert.equal(evidence.authority, 'gpu-resident-frozen-phase-lineage-bitmask');
+
+  checkpoints[2].generatedGasCohorts[0].frozenLineageMaskHash =
+    'fnv1a32:different';
+  const changed = generatedCohortTrajectoryEvidence(checkpoints, {
+    selector: { materials: ['h2o'], phases: ['gas'] },
+    minimumMassFractionOfSystem: 1e-6,
+    minimumSustainedRiseM: 0.05,
+    tailSampleCount: 2
+  });
+  assert.equal(changed.status, 'fail');
+  assert.equal(changed.sameCarrierLineageProven, false);
+});
+
+test('cold-ceiling condensation follows one frozen lineage while total gas keeps rising', () => {
+  const cohortCheckpoint = ({
+    checkpointIndex,
+    totalGasKg,
+    cohortMassKg,
+    yCenterM,
+    yMaxM,
+    activeGasCarrierCount,
+    mask = 'fnv1a32:coldce11'
+  }) => ({
+    sourceTimeS: checkpointIndex,
+    totals: { massKg: 1000 },
+    materialPhases: [
+      row({
+        material: 'h2o',
+        phase: 'liquid',
+        massKg: 1000 - totalGasKg,
+        yCenterM: 0.1
+      }),
+      row({
+        material: 'h2o',
+        phase: 'gas',
+        massKg: totalGasKg,
+        yCenterM,
+        yMaxM
+      })
+    ],
+    generatedGasCohortCapture: {
+      status: 'captured',
+      checkpointIndex,
+      sameCarrierLineageProven: true,
+      topologyEpoch: 7,
+      identityRevision: 'stable-cold-ceiling-lineage'
+    },
+    generatedGasCohorts: [{
+      schema: 'peercompute.ulg.sph-authoritative-generated-gas-cohort.v0',
+      status: 'captured',
+      authority: 'gpu-resident-frozen-phase-lineage-bitmask',
+      sameCarrierLineageProven: true,
+      material: 'h2o',
+      materialId: 3061144,
+      phase: 'gas',
+      massKg: cohortMassKg,
+      activeGasCarrierCount,
+      inactiveFrozenLineageCount: 7 - activeGasCarrierCount,
+      frozenLineageCount: 7,
+      processedFrozenLineageCount: 7,
+      invalidActiveCarrierCount: 0,
+      phasePurityProblemCount: 0,
+      frozenLineageMaskHash: mask,
+      topologySignature: 'exact-phase-plan',
+      formedAtCheckpointIndex: 0,
+      yCenterMassWeightedM: yCenterM,
+      yMinM: Math.max(0, yCenterM - 0.1),
+      yMaxM,
+      meanVyMPerS: 0.1,
+      vySampleMassKg: cohortMassKg
+    }]
+  });
+  const checkpoints = [
+    cohortCheckpoint({
+      checkpointIndex: 0,
+      totalGasKg: 10,
+      cohortMassKg: 1,
+      yCenterM: 0.2,
+      yMaxM: 0.3,
+      activeGasCarrierCount: 7
+    }),
+    cohortCheckpoint({
+      checkpointIndex: 1,
+      totalGasKg: 20,
+      cohortMassKg: 4,
+      yCenterM: 3.8,
+      yMaxM: 4.8,
+      activeGasCarrierCount: 7
+    }),
+    cohortCheckpoint({
+      checkpointIndex: 2,
+      totalGasKg: 30,
+      cohortMassKg: 5,
+      yCenterM: 4.8,
+      yMaxM: 4.88,
+      activeGasCarrierCount: 7
+    }),
+    cohortCheckpoint({
+      checkpointIndex: 3,
+      totalGasKg: 40,
+      cohortMassKg: 4,
+      yCenterM: 4.7,
+      yMaxM: 4.88,
+      activeGasCarrierCount: 6
+    }),
+    cohortCheckpoint({
+      checkpointIndex: 4,
+      totalGasKg: 50,
+      cohortMassKg: 0.1,
+      yCenterM: 0.5,
+      yMaxM: 0.7,
+      activeGasCarrierCount: 3
+    })
+  ];
+  const options = {
+    selector: { materials: ['h2o'], phases: ['gas'] },
+    minimumCeilingContactYM: 4.75,
+    minimumGasMassLossFraction: 0.02,
+    minimumGasMassLossFractionOfSystem: 1e-6,
+    minimumReturnDropM: 0.25
+  };
+  const evidence = coldCeilingCondensationEvidence(
+    checkpoints,
+    options
+  );
+
+  assert.equal(evidence.status, 'pass');
+  assert.equal(evidence.ceilingContactCheckpointIndex, 1);
+  assert.equal(evidence.condensedLineageCount, 1);
+  assert.equal(evidence.condensation.checkpointIndex, 3);
+  assert.equal(evidence.returnSample.checkpointIndex, 4);
+  assert.ok(evidence.gasMassLossKg > 0.9);
+  assert.ok(evidence.returnDropM > 4);
+
+  const noContact = structuredClone(checkpoints);
+  for (const entry of noContact) {
+    entry.generatedGasCohorts[0].yMaxM = 4.7;
+  }
+  assert.equal(
+    coldCeilingCondensationEvidence(noContact, options).status,
+    'fail'
+  );
+
+  const noGasLaneLoss = structuredClone(checkpoints);
+  for (const entry of noGasLaneLoss) {
+    entry.generatedGasCohorts[0].activeGasCarrierCount = 7;
+    entry.generatedGasCohorts[0].inactiveFrozenLineageCount = 0;
+  }
+  assert.equal(
+    coldCeilingCondensationEvidence(noGasLaneLoss, options).status,
+    'fail'
+  );
+
+  const changedIdentity = structuredClone(checkpoints);
+  changedIdentity[3].generatedGasCohorts[0].frozenLineageMaskHash =
+    'fnv1a32:different';
+  assert.equal(
+    coldCeilingCondensationEvidence(changedIdentity, options).status,
+    'fail'
+  );
+});
+
+test('generated-cohort trajectory fails closed on checkpoint gaps or incomplete velocity mass', () => {
+  const selector = { materials: ['steam'], phases: ['gas'] };
+  const gas = (yCenterM, overrides = {}) => row({
+    material: 'steam',
+    phase: 'gas',
+    massKg: 1,
+    yCenterM,
+    meanVyMPerS: 0.1,
+    ...overrides
+  });
+  const checkpoints = [
+    checkpoint(0, [row({ material: 'bulk', phase: 'liquid' })]),
+    checkpoint(1, [gas(0.1)]),
+    checkpoint(2, []),
+    checkpoint(3, [gas(0.2)]),
+    checkpoint(4, [gas(0.3, { vySampleMassKg: 0.5 })])
+  ];
+  const evidence = generatedCohortTrajectoryEvidence(checkpoints, {
+    selector,
+    minimumSustainedRiseM: 0.05,
+    tailSampleCount: 2
+  });
+
+  assert.equal(evidence.checkpointContinuityPassed, false);
+  assert.equal(evidence.velocityMassCoverageComplete, false);
+  assert.equal(evidence.status, 'fail');
 });
 
 test('condensed launch evidence detects a rebound from the prior settled minimum', () => {

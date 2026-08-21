@@ -196,7 +196,7 @@ test('initialBodies distinguishes live bodies from fixed MLS-MPM mechanics capac
   const { demo } = driver;
   const viewState = createSphPhaseViewState(driver);
   const live = 38;
-  const spareProductSlots = 8;
+  const spareProductSlots = 16;
   const lineageCapacity = live + spareProductSlots;
   const phaseCompanionSlots = lineageCapacity * 3;
   const particleCapacity = lineageCapacity * 4;
@@ -211,10 +211,83 @@ test('initialBodies distinguishes live bodies from fixed MLS-MPM mechanics capac
   assert.equal(viewState.positionsM.length / 3, particleCapacity);
   assert.equal(viewState.sphGpuParticleState.particleCount, particleCapacity);
   assert.equal(viewState.mlsMpmGpuParticleState.particleCount, particleCapacity);
+  const primarySpareIndices = demo.state.particles
+    .map((particle, index) => (
+      particle.spareProductSlot === true ? index : -1
+    ))
+    .filter((index) => index >= 0);
+  const expectedSpareDomainIds = Array.from(
+    { length: spareProductSlots },
+    (_, index) => 38 + index
+  );
+  assert.deepEqual(
+    primarySpareIndices.map(
+      (index) => demo.state.particles[index].initialBodyDomainId
+    ),
+    expectedSpareDomainIds,
+    'product reserve domains begin above the greatest declared body domain'
+  );
+  assert.deepEqual(
+    primarySpareIndices.map(
+      (index) => viewState.sphGpuParticleState.identity[index]
+    ),
+    expectedSpareDomainIds
+  );
+  for (let spare = 0; spare < primarySpareIndices.length; spare += 1) {
+    const primaryIndex = primarySpareIndices[spare];
+    const domainId = expectedSpareDomainIds[spare];
+    const companionIndices = demo.state.particles
+      .map((particle, index) => (
+        particle.phaseCompanionSlot === true
+        && particle.phaseCarrierLineageIndex === primaryIndex
+          ? index
+          : -1
+      ))
+      .filter((index) => index >= 0);
+    assert.equal(companionIndices.length, 3);
+    assert.ok(
+      companionIndices.every(
+        (index) => viewState.sphGpuParticleState.identity[index] === domainId
+      )
+    );
+  }
   assert.equal(
     viewState.initialParticleEdgeDiagnostics.totalGeneratedParticleCount,
     live
   );
+});
+
+test('initialBodies omits permanently dormant reaction-product rows for one-material MLS-MPM scenes', () => {
+  const demo = buildSphPhaseDemoState({
+    initialBodies: container([
+      body({
+        id: 'lower-water',
+        domainId: 1,
+        material: 'h2o',
+        sizeM: [1, 1, 1],
+        centerM: [2, 1, 2],
+        temperatureK: 293.15,
+        particlesPerEdge: [2, 2, 2]
+      }),
+      body({
+        id: 'upper-water',
+        domainId: 2,
+        material: 'h2o',
+        sizeM: [1, 1, 1],
+        centerM: [2, 3, 2],
+        temperatureK: 300,
+        particlesPerEdge: [2, 2, 2]
+      })
+    ]),
+    allowFixtureMaterialProperties: true,
+    mechanics: 'mlsmpm'
+  });
+
+  assert.equal(demo.counts.live, 16);
+  assert.equal(demo.counts.spareProductSlots, 0);
+  assert.equal(demo.state.phaseCarrierPlan.lineageCapacity, 16);
+  assert.equal(demo.counts.phaseCompanionSlots, 48);
+  assert.equal(demo.counts.total, 64);
 });
 
 test('initialBodies rejects empty, anisotropic, and incompatible cross-body sampling before allocation', () => {
@@ -448,7 +521,7 @@ test('same-material bodies keep incandescent authority scoped to the exact rende
   assert.equal(emissiveTemperature[coldKey], undefined);
 });
 
-test('generic hydrostatic initialization only marks floor-supported bodies', () => {
+test('generic hydrostatic initialization follows stacked support and excludes disconnected bodies', () => {
   const driver = createSphPhaseDemo({
     initialBodies: container([
       body({
@@ -461,8 +534,17 @@ test('generic hydrostatic initialization only marks floor-supported bodies', () 
         particlesPerEdge: [2, 2, 2]
       }),
       body({
-        id: 'floating-body',
+        id: 'stacked-body',
         domainId: 5,
+        material: 'fe',
+        sizeM: [0.5, 0.5, 0.5],
+        centerM: [1, 0.75, 1],
+        temperatureK: 1000,
+        particlesPerEdge: [2, 2, 2]
+      }),
+      body({
+        id: 'floating-body',
+        domainId: 6,
         material: 'fe',
         sizeM: [0.5, 0.5, 0.5],
         centerM: [2, 1.25, 1],
@@ -475,12 +557,174 @@ test('generic hydrostatic initialization only marks floor-supported bodies', () 
     physicalLawGroups: { reactions: false }
   });
 
-  assert.deepEqual(driver.demo.initialHydrostaticState.initializedRoles, ['body:floor-body']);
+  assert.deepEqual(
+    driver.demo.initialHydrostaticState.initializedRoles,
+    ['body:floor-body']
+  );
   assert.ok(driver.demo.state.particles.some((particle) => (
     particle.initialBodyId === 'floor-body' && particle.hydrostaticInitialization
   )));
   assert.ok(driver.demo.state.particles.every((particle) => (
+    particle.initialBodyId !== 'stacked-body'
+    || !(particle.massKg > 0)
+    || (
+      particle.hydrostaticInitialization?.supportKind === 'condensed-body'
+      && particle.hydrostaticInitialization?.status === 'prestress-not-admitted'
+      && particle.hydrostaticInitialization?.prestressAdmitted === false
+      && particle.hydrostaticInitialization?.reason
+        === 'coupled-condensed-body-contact-equilibrium-unavailable'
+    )
+  )));
+  for (const particle of driver.demo.state.particles.filter((candidate) => (
+    candidate.initialBodyId === 'stacked-body' && candidate.massKg > 0
+  ))) {
+    const receipt = particle.hydrostaticInitialization;
+    assert.equal(receipt.pressurePa, 0);
+    assert.equal(receipt.overburdenPressurePa, 0);
+    assert.equal(particle.mpmJ, 1);
+    assert.deepEqual(Array.from(particle.mpmF), [
+      1, 0, 0,
+      0, 1, 0,
+      0, 0, 1
+    ]);
+  }
+  assert.ok(driver.demo.state.particles.every((particle) => (
+    particle.initialBodyId === 'floor-body' && particle.massKg > 0
+      ? particle.hydrostaticInitialization?.overburdenPressurePa === 0
+      : true
+  )));
+  assert.deepEqual(
+    driver.demo.initialHydrostaticState.supportGraph
+      .find((entry) => entry.role === 'body:stacked-body')
+      ?.supporterRoles,
+    ['body:floor-body']
+  );
+  assert.equal(
+    driver.demo.initialHydrostaticState.supportGraph
+      .find((entry) => entry.role === 'body:stacked-body')
+      ?.prestressAdmitted,
+    false
+  );
+  assert.ok(driver.demo.state.particles.every((particle) => (
     particle.initialBodyId !== 'floating-body' || !particle.hydrostaticInitialization
+  )));
+});
+
+test('stacked bodies fail closed until coupled contact equilibrium is available', () => {
+  const shared = {
+    allowFixtureMaterialProperties: true,
+    mechanics: 'mlsmpm',
+    physicalLawGroups: { reactions: false }
+  };
+  const split = createSphPhaseDemo({
+    ...shared,
+    initialBodies: container([
+      body({
+        id: 'lower-half',
+        domainId: 7,
+        material: 'h2o',
+        sizeM: [0.5, 0.5, 0.5],
+        centerM: [1, 0.25, 1],
+        temperatureK: 300,
+        particlesPerEdge: [2, 2, 2]
+      }),
+      body({
+        id: 'upper-half',
+        domainId: 8,
+        material: 'h2o',
+        sizeM: [0.5, 0.5, 0.5],
+        centerM: [1, 0.75, 1],
+        temperatureK: 300,
+        particlesPerEdge: [2, 2, 2]
+      })
+    ])
+  });
+  const unified = createSphPhaseDemo({
+    ...shared,
+    initialBodies: container([
+      body({
+        id: 'whole-column',
+        domainId: 9,
+        material: 'h2o',
+        sizeM: [0.5, 1, 0.5],
+        centerM: [1, 0.5, 1],
+        temperatureK: 300,
+        particlesPerEdge: [2, 4, 2]
+      })
+    ])
+  });
+  const lower = split.demo.state.particles.filter(
+    (particle) => (
+      particle.initialBodyId === 'lower-half' && particle.massKg > 0
+    )
+  );
+  const upper = split.demo.state.particles.filter(
+    (particle) => (
+      particle.initialBodyId === 'upper-half' && particle.massKg > 0
+    )
+  );
+  assert.ok(lower.every(
+    (particle) => particle.hydrostaticInitialization?.prestressAdmitted === true
+  ));
+  assert.ok(upper.every((particle) => (
+    particle.hydrostaticInitialization?.status === 'prestress-not-admitted'
+    && particle.mpmJ === 1
+    && particle.hydrostaticPressurePa === 0
+  )));
+  assert.deepEqual(
+    split.demo.initialHydrostaticState.initializedRoles,
+    ['body:lower-half']
+  );
+  assert.deepEqual(
+    unified.demo.initialHydrostaticState.initializedRoles,
+    ['body:whole-column']
+  );
+  assert.ok(unified.demo.state.particles.every((particle) => (
+    !(particle.massKg > 0)
+    || particle.hydrostaticInitialization?.prestressAdmitted === true
+  )));
+});
+
+test('hydrostatic initialization rejects partial support that cannot balance body torque', () => {
+  const driver = createSphPhaseDemo({
+    initialBodies: container([
+      body({
+        id: 'lower-support',
+        domainId: 10,
+        material: 'h2o',
+        sizeM: [0.5, 0.5, 0.5],
+        centerM: [1, 0.25, 1],
+        temperatureK: 300,
+        particlesPerEdge: [2, 2, 2]
+      }),
+      body({
+        id: 'overhang',
+        domainId: 11,
+        material: 'h2o',
+        sizeM: [0.5, 0.5, 0.5],
+        centerM: [1.49, 0.75, 1],
+        temperatureK: 300,
+        particlesPerEdge: [2, 2, 2]
+      })
+    ]),
+    allowFixtureMaterialProperties: true,
+    mechanics: 'mlsmpm',
+    physicalLawGroups: { reactions: false }
+  });
+
+  assert.deepEqual(
+    driver.demo.initialHydrostaticState.initializedRoles,
+    ['body:lower-support']
+  );
+  assert.equal(
+    driver.demo.initialHydrostaticState.supportGraph
+      .find((entry) => entry.role === 'body:overhang')
+      ?.supported,
+    false
+  );
+  assert.ok(driver.demo.state.particles.every((particle) => (
+    particle.initialBodyId !== 'overhang'
+    || !particle.hydrostaticInitialization
   )));
 });
 
@@ -511,8 +755,9 @@ test('a call without initialBodies preserves the legacy two-role output shape', 
     ['base', 'drop']
   );
   assert.ok(legacy.state.particles.every((particle) => (
-    !Object.hasOwn(particle, 'initialBodyId')
-    && !Object.hasOwn(particle, 'initialBodyDomainId')
+    particle.initialBodyId === null
+    && particle.initialBodyDomainId === 0
+    && particle.renderDomainId === 0
   )));
 });
 

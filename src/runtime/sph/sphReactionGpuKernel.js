@@ -27,7 +27,17 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedWork,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -63,12 +73,19 @@ import {
   createSphReactionResolvePositionInvariantCertificate,
   finalizeSchroederSpatialReactionPlacementPositionEpochFloor,
   releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue,
+  releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered,
   releaseSphReactionWarmArenaAfterQueue,
   releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue,
   resolveSphReactionWarmArenaLease,
   runSchroederSpatialReactionPlacementEpochWebGpu,
+  schroederSpatialReactionPlacementTransferredDestinationCleanupClaim,
   transferSchroederSpatialReactionPlacementDestinationOwnership
 } from './schroederSpatialReactionPlacementEpochGpu.js';
+import {
+  appendGpuReadbackTelemetryObservation,
+  createGpuReadbackTelemetry,
+  createGpuReadbackTelemetryAccumulator
+} from './sphGpuReadbackTelemetry.js';
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -79,6 +96,14 @@ export {
 };
 
 export const SPH_REACTION_RECORD_FLOATS = SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length;
+const reactionOutputCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'reaction-product'
+  });
+const reactionStepScratchCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'sph-reaction-step-scratch'
+  });
 export const SPH_REACTION_HEADER_FLOATS = SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length;
 export const SPH_REACTION_REACTANT_TERM_FLOATS = SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.length;
 export const SPH_REACTION_PRODUCT_TERM_FLOATS = SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length;
@@ -2069,7 +2094,7 @@ function resetMechanicsForProduct(
   mechanics,
   index,
   massKg,
-  currentVolumeM3,
+  sourceSupportVolumeM3,
   resolved,
   productMechanics
 ) {
@@ -2078,16 +2103,17 @@ function resetMechanicsForProduct(
     ? resolved.restDensityKgPerM3
     : productMechanics.restDensityKgPerM3;
   const restVolumeM3 = restDensity > 0 ? massKg / restDensity : 0;
-  const volumeRatioJ = restVolumeM3 > 0
-    ? currentVolumeM3 / restVolumeM3
-    : 0;
-  const deformationScale = Math.cbrt(volumeRatioJ);
+  // The consumed source support remains useful for validating the reaction
+  // and routing resident product events, but it is not deformation authority
+  // for a newly created material. Products are born relaxed at their target
+  // reference density, as phase-component materialization already is.
+  const volumeRatioJ = 1;
+  const deformationScale = 1;
   if (
     !(massKg > 0)
-    || !(currentVolumeM3 > 0)
+    || !(sourceSupportVolumeM3 > 0)
     || !(restVolumeM3 > 0)
-    || !(volumeRatioJ > 0)
-    || !Number.isFinite(deformationScale)
+    || !Number.isFinite(sourceSupportVolumeM3)
     || Math.round(productMechanics.status) !== 1
   ) {
     return false;
@@ -2228,7 +2254,12 @@ function outputEnvelope({
   automaticDestinationReturnCompletion = null,
   reactionWarmArenaLease = null,
   reactionWarmArena = null,
-  gpuTimestampInstrumentation = null
+  gpuTimestampInstrumentation = null,
+  readbackTelemetry = createGpuReadbackTelemetry({
+    scope: 'sph-reaction-step',
+    complete: false,
+    unknownSources: ['sph-reaction-step-uninstrumented']
+  })
 }) {
   const canonicalReactionReceipt = canonicalReactionDiscovery?.admitted === true
     ? canonicalReactionDiscovery.receipt
@@ -2469,7 +2500,16 @@ function outputEnvelope({
     reactionParticleBinOverflowCount,
     reactionParticleBinOverflowMetadataReadbackRequested: reactionParticleBins?.overflowMetadataReadbackRequested === true,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
-    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    fullParticleReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    residentContinuationReady: Boolean(
+      readbackMode === NO_FULL_READBACK_MODE
+      && retainedOutputParticleBuffers
+      && stateBuffer
+      && thermoBuffer
+      && mechanicsBuffer
+    ),
+    ...readbackTelemetry,
     scientificValidation: false,
     materialValidation: false,
     chemistryValidation: false,
@@ -3277,6 +3317,7 @@ export async function runSphReactionStepWebGpu({
   readReactionProductPlacementSummary = null,
   reactionProductPlacementReadbackCadence = 'single-step-final',
   reactionProductPlacementSourceSummaryCount = 1,
+  requestQueueOrderedCleanupClaim = false,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
   schroederSpatialEpochGeneration = null,
@@ -3305,6 +3346,9 @@ export async function runSphReactionStepWebGpu({
     );
   }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
+    scope: 'sph-reaction-step-inclusive'
+  });
   const resolveDiagnosticRead = (requested) => requested == null
     ? !noFullReadback
     : requested !== false;
@@ -3438,9 +3482,24 @@ export async function runSphReactionStepWebGpu({
         packedParticleStrideFloats: SPH_REACTION_PACKED_PARTICLE_FLOATS,
         productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
         productPlacementSummaryStrideFloats:
-          SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
+          SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
+        onHostQueueFenceAwait() {
+          readbackTelemetry.recordAwaitedBackpressureHostQueueFence(
+            1,
+            'reaction-warm-arena-backpressure'
+          );
+        }
       })
     : null;
+  if (
+    reactionWarmArenaLease
+    && reactionWarmArenaAcquireRunner
+      !== acquireSphReactionWarmArenaWithBackpressureWebGpu
+  ) {
+    readbackTelemetry.markUnknown(
+      'custom-reaction-warm-arena-acquire-runner'
+    );
+  }
   reactionWarmArena = reactionWarmArenaLease
     ? reactionWarmArenaResolveRunner(reactionWarmArenaLease, {
         device,
@@ -3883,12 +3942,26 @@ export async function runSphReactionStepWebGpu({
   if (reactionParticleBins.metadataReadbackBuffer) {
     encoder.copyBufferToBuffer(reactionParticleBins.metadataBuffer, 0, reactionParticleBins.metadataReadbackBuffer, 0, 16);
   }
-  device.queue.submit([encoder.finish()]);
+  const reactionSummaryWillConsumeScratch =
+    noFullReadback && reactionTable.productTermCount > 0;
+  const authenticatedScratchCleanupRoute =
+    noFullReadback
+    && requestQueueOrderedCleanupClaim === true;
+  const primaryCommandBuffer = encoder.finish();
+  const reactionPrimarySubmissionReceipt =
+    authenticatedScratchCleanupRoute
+      && !reactionSummaryWillConsumeScratch
+      ? submitQueueOrderedWork(device, [primaryCommandBuffer])
+      : (device.queue.submit([primaryCommandBuffer]), null);
   reactionPrimarySubmissionObserved = true;
 
   let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
   let reactionParticleBinOverflowCount = null;
   if (reactionParticleBins.metadataReadbackBuffer) {
+    readbackTelemetry.recordMapAsync(
+      16,
+      'reaction-particle-bin-overflow-control'
+    );
     await reactionParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
     const metadata = new Uint32Array(reactionParticleBins.metadataReadbackBuffer.getMappedRange()).slice(0, 4);
     reactionParticleBinOverflowCount = metadata[0] || 0;
@@ -3902,6 +3975,31 @@ export async function runSphReactionStepWebGpu({
   let continuationThermoBuffer = outThermoBuffer;
   let continuationMechanicsBuffer = outMechanicsBuffer;
   const temporarySummaryBuffers = [];
+  let reactionSummarySuccessful = false;
+  const scratchBuffers = [];
+  let scratchBuffersDestroyed = false;
+  const destroyScratchBuffers = () => {
+    if (scratchBuffersDestroyed) return;
+    scratchBuffersDestroyed = true;
+    for (const buffer of scratchBuffers) {
+      if (!reactionWarmBufferSet.has(buffer)) {
+        destroyReactionOwnedBuffer(buffer);
+      }
+    }
+    destroyLocalResponseGraphUpload();
+  };
+  let scratchCleanupClaim = null;
+  let scratchFinalConsumer = null;
+  if (authenticatedScratchCleanupRoute) {
+    scratchCleanupClaim = registerQueueOrderedCleanupClaim(
+      reactionStepScratchCleanupClaimIssuer,
+      device,
+      {
+        producerOutput: encoder,
+        cleanup: destroyScratchBuffers
+      }
+    );
+  }
   const scheduleCanonicalFailureScratchCleanup =
     scheduleReactionResourceRegistryDrain;
   if (noFullReadback && reactionTable.productTermCount > 0) {
@@ -3916,9 +4014,18 @@ export async function runSphReactionStepWebGpu({
           'ulg-sph-reaction-summary-source-mechanics',
           mlsMpmParticleState.mechanics
         ));
-      if (!packSourceStateBuffer) temporarySummaryBuffers.push(summarySourceStateBuffer);
-      if (!packSourceThermoBuffer) temporarySummaryBuffers.push(summarySourceThermoBuffer);
-      if (!packSourceMechanicsBuffer) temporarySummaryBuffers.push(summarySourceMechanicsBuffer);
+      if (!packSourceStateBuffer) {
+        temporarySummaryBuffers.push(summarySourceStateBuffer);
+        scratchBuffers.push(summarySourceStateBuffer);
+      }
+      if (!packSourceThermoBuffer) {
+        temporarySummaryBuffers.push(summarySourceThermoBuffer);
+        scratchBuffers.push(summarySourceThermoBuffer);
+      }
+      if (!packSourceMechanicsBuffer) {
+        temporarySummaryBuffers.push(summarySourceMechanicsBuffer);
+        scratchBuffers.push(summarySourceMechanicsBuffer);
+      }
       if (canonicalReactionDiscoveryEnabled) {
         const positionInvariantCertificate =
           createSphReactionResolvePositionInvariantCertificate({
@@ -4005,8 +4112,16 @@ export async function runSphReactionStepWebGpu({
         dtSeconds,
         gpuTimestampRecorder,
         canonicalReactionProductPlacementAuthority,
-        reactionWarmArenaLease
+        reactionWarmArenaLease,
+        queueOrderedProducerClaims:
+          scratchCleanupClaim ? [scratchCleanupClaim] : []
       });
+      scratchFinalConsumer =
+        reactionSummary?.queueOrderedFinalConsumerCapability
+        ?? reactionSummary
+          ?.reactionProductPlacementSubmissionArtifact
+          ?.queueOrderedFinalConsumerCapability
+        ?? null;
       if (reactionPlacementSourceFamily) {
         // The shared-directory one-shot submission establishes only an
         // ancestor-bound epoch floor. Observed/readback placement artifacts
@@ -4033,7 +4148,11 @@ export async function runSphReactionStepWebGpu({
         }
         const destinationOwnershipTransferred =
           transferSchroederSpatialReactionPlacementDestinationOwnership(
-            reactionPlacementSourceFamily
+            reactionPlacementSourceFamily,
+            {
+              requestQueueOrderedCleanupClaim:
+                requestQueueOrderedCleanupClaim === true
+            }
           );
         if (destinationOwnershipTransferred !== true) {
           throw new Error(
@@ -4042,8 +4161,43 @@ export async function runSphReactionStepWebGpu({
         }
         reactionPlacementDestinationOwnershipTransferred = true;
       }
+      reactionSummarySuccessful = true;
     } catch (error) {
+      scratchFinalConsumer =
+        scratchFinalConsumer
+        ?? error?.queueOrderedFinalConsumerCapability
+        ?? null;
       if (canonicalReactionDiscoveryEnabled) {
+        if (scratchFinalConsumer && scratchCleanupClaim) {
+          try {
+            releaseSubmittedWorkCleanupQueueOrdered(
+              device,
+              destroyScratchBuffers,
+              {
+                queueOrderedFinalConsumer: scratchFinalConsumer,
+                producerClaim: scratchCleanupClaim,
+                producerOutput: encoder,
+                producerFamily: 'sph-reaction-step-scratch'
+              }
+            );
+          } catch {
+            // The failure registry below remains the terminal owner cleanup.
+          }
+        } else if (scratchCleanupClaim) {
+          try {
+            cancelQueueOrderedCleanupClaim(
+              scratchCleanupClaim,
+              device,
+              {
+                producerOutput: encoder,
+                cleanup: destroyScratchBuffers
+              }
+            );
+          } catch {
+            // A sealed claim without a recoverable capability stays fail-closed
+            // while the resource registry drains behind its host queue fence.
+          }
+        }
         if (reactionPlacementSourceFamily) {
           try {
             if (reactionPlacementDestinationOwnershipTransferred) {
@@ -4075,6 +4229,15 @@ export async function runSphReactionStepWebGpu({
         scheduleCanonicalFailureScratchCleanup();
         throw error;
       }
+      const reactionSummaryFailureReadbackTelemetry =
+        error?.readbackTelemetry
+        ?? createGpuReadbackTelemetry({
+          scope: 'sph-reaction-summary-unavailable',
+          complete: false,
+          unknownSources: [
+            'reaction-summary-failure-without-exact-readback-telemetry'
+          ]
+        });
       reactionSummary = {
         schema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
         backend: 'webgpu',
@@ -4082,33 +4245,18 @@ export async function runSphReactionStepWebGpu({
         reason: error instanceof Error ? error.message : String(error),
         reactionSummaryAvailable: false,
         fullParticleReadbackPerformed: false,
+        fullParticleReadbackFree: true,
+        ...reactionSummaryFailureReadbackTelemetry,
         scientificValidation: false,
         chemistryValidation: false,
         sphValidation: false,
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
-    } finally {
-      const destroyTemporarySummaryBuffers = () => {
-        for (const buffer of temporarySummaryBuffers) {
-          if (!reactionWarmBufferSet.has(buffer)) {
-            destroyReactionOwnedBuffer(buffer);
-          }
-        }
-      };
-      if (temporarySummaryBuffers.length > 0) {
-        const summaryFence = device.queue?.onSubmittedWorkDone?.();
-        if (summaryFence?.then) {
-          Promise.resolve(summaryFence).then(
-            destroyTemporarySummaryBuffers,
-            destroyTemporarySummaryBuffers
-          );
-        }
-        // A WebGPU production queue always exposes onSubmittedWorkDone. If a
-        // test double does not, retain rather than destroy buffers that may
-        // still be referenced by submitted placement work.
-      }
     }
+  }
+  if (reactionSummary) {
+    readbackTelemetry.merge(reactionSummary, 'reaction-summary');
   }
 
   let state = new Float32Array();
@@ -4119,11 +4267,31 @@ export async function runSphReactionStepWebGpu({
   let queueCompletionMethod = 'queue.submit';
   let scratchBufferCleanupStatus = 'pending';
   if (!noFullReadback) {
+    const proposalReadbackByteLength =
+      sphParticleState.particleCount
+      * 4
+      * Float32Array.BYTES_PER_ELEMENT;
+    readbackTelemetry.recordMapAsync(
+      sphParticleState.state.byteLength,
+      'reaction-full-state-readback'
+    );
+    readbackTelemetry.recordMapAsync(
+      sphParticleState.thermo.byteLength,
+      'reaction-full-thermo-readback'
+    );
+    readbackTelemetry.recordMapAsync(
+      mlsMpmParticleState.mechanics.byteLength,
+      'reaction-full-mechanics-readback'
+    );
+    readbackTelemetry.recordMapAsync(
+      proposalReadbackByteLength,
+      'reaction-full-proposal-readback'
+    );
     const [stateBytes, thermoBytes, mechanicsBytes, proposalBytes] = await Promise.all([
       readBuffer(device, outStateBuffer, sphParticleState.state.byteLength, 'ulg-sph-reaction-state-readback'),
       readBuffer(device, outThermoBuffer, sphParticleState.thermo.byteLength, 'ulg-sph-reaction-thermo-readback'),
       readBuffer(device, outMechanicsBuffer, mlsMpmParticleState.mechanics.byteLength, 'ulg-sph-reaction-mechanics-readback'),
-      readBuffer(device, proposalBuffer, sphParticleState.particleCount * 4 * Float32Array.BYTES_PER_ELEMENT, 'ulg-sph-reaction-proposal-readback')
+      readBuffer(device, proposalBuffer, proposalReadbackByteLength, 'ulg-sph-reaction-proposal-readback')
     ]);
     state = new Float32Array(stateBytes);
     thermo = new Float32Array(thermoBytes);
@@ -4140,7 +4308,7 @@ export async function runSphReactionStepWebGpu({
         continuationThermoBuffer,
         continuationMechanicsBuffer
       ];
-  const scratchBuffers = [
+  scratchBuffers.push(
     packedParticleRecordBuffer,
     outPackedParticleRecordBuffer,
     localReactionRecordBuffer,
@@ -4160,31 +4328,72 @@ export async function runSphReactionStepWebGpu({
         ? nonRetainedOutputBuffers
         : []
     )
-  ];
-  let scratchBuffersDestroyed = false;
-  const destroyScratchBuffers = () => {
-    if (scratchBuffersDestroyed) return;
-    scratchBuffersDestroyed = true;
-    for (const buffer of scratchBuffers) {
-      if (!reactionWarmBufferSet.has(buffer)) {
-        destroyReactionOwnedBuffer(buffer);
-      }
-    }
-    destroyLocalResponseGraphUpload();
-  };
+  );
   if (noFullReadback) {
-    const cleanupFence = typeof device.queue?.onSubmittedWorkDone === 'function'
-      ? device.queue.onSubmittedWorkDone()
-      : null;
-    if (cleanupFence?.then) {
-      scratchBufferCleanupStatus = 'deferred-until-queue-complete';
-      queueCompletionStatus = 'queue-submitted-cleanup-deferred';
-      queueCompletionMethod = 'queue.onSubmittedWorkDone(background-cleanup)';
-      cleanupFence.then(destroyScratchBuffers, destroyScratchBuffers);
+    if (
+      scratchCleanupClaim
+      && !scratchFinalConsumer
+      && reactionPrimarySubmissionReceipt
+    ) {
+      scratchFinalConsumer =
+        sealQueueOrderedFinalConsumerCapability(
+          reactionPrimarySubmissionReceipt,
+          device,
+          {
+            finalConsumerOwner: encoder,
+            producerClaims: [scratchCleanupClaim]
+          }
+        );
+    }
+    if (scratchCleanupClaim && scratchFinalConsumer) {
+      const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+        device,
+        destroyScratchBuffers,
+        {
+          queueOrderedFinalConsumer: scratchFinalConsumer,
+          producerClaim: scratchCleanupClaim,
+          producerOutput: encoder,
+          producerFamily: 'sph-reaction-step-scratch'
+        }
+      );
+      scratchBufferCleanupStatus =
+        'queue-ordered-after-authenticated-submission';
+      queueCompletionStatus =
+        cleanupReceipt.queueCompletionStatus;
+      queueCompletionMethod =
+        cleanupReceipt.queueCompletionMethod;
+    } else if (scratchCleanupClaim) {
+      cancelQueueOrderedCleanupClaim(
+        scratchCleanupClaim,
+        device,
+        {
+          producerOutput: encoder,
+          cleanup: destroyScratchBuffers
+        }
+      );
+      deferSubmittedWorkCleanup(device, destroyScratchBuffers);
+      readbackTelemetry.recordDeferredCleanupHostQueueFence(
+        1,
+        'reaction-scratch-buffer-cleanup'
+      );
+      scratchBufferCleanupStatus =
+        'submitted-work-cleanup-deferred-after-host-queue-fence';
+      queueCompletionStatus =
+        'queue-completion-fence-pending';
+      queueCompletionMethod =
+        'gpu-queue-on-submitted-work-done';
     } else {
-      scratchBufferCleanupStatus = 'pending-no-queue-fence';
-      queueCompletionStatus = 'queue-submitted-cleanup-pending';
-      queueCompletionMethod = 'queue.submit';
+      deferSubmittedWorkCleanup(device, destroyScratchBuffers);
+      readbackTelemetry.recordDeferredCleanupHostQueueFence(
+        1,
+        'reaction-scratch-buffer-cleanup'
+      );
+      scratchBufferCleanupStatus =
+        'submitted-work-cleanup-deferred-after-host-queue-fence';
+      queueCompletionStatus =
+        'queue-completion-fence-pending';
+      queueCompletionMethod =
+        'gpu-queue-on-submitted-work-done';
     }
   } else {
     destroyScratchBuffers();
@@ -4210,8 +4419,22 @@ export async function runSphReactionStepWebGpu({
   let outputParticleBuffersReleaseConfirmed = false;
   let outputParticleBuffersReleasePromise = null;
   let automaticDestinationReturnCompletion = null;
+  let result = null;
+  let outputParticleBuffersCleanupClaim = null;
+  const destroyContinuation = () => {
+    destroyReactionOwnedBuffer(continuationStateBuffer);
+    destroyReactionOwnedBuffer(continuationThermoBuffer);
+    destroyReactionOwnedBuffer(continuationMechanicsBuffer);
+  };
+  const queueOrderedRetainedOutputCleanup =
+    reactionPlacementSourceFamily
+      ? () => {}
+      : destroyContinuation;
   const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
-    ? ({ preserveResidentProductMass = false } = {}) => {
+    ? ({
+        preserveResidentProductMass = false,
+        queueOrderedFinalConsumer = null
+      } = {}) => {
       if (outputParticleBuffersReleaseConfirmed) return true;
       if (outputParticleBuffersReleasePromise) {
         return outputParticleBuffersReleasePromise;
@@ -4232,41 +4455,109 @@ export async function runSphReactionStepWebGpu({
             destroyRetainedResidentProductMassBuffers?.()
             ?? Promise.resolve(true)
           );
+      const queueOrderedRequested =
+        queueOrderedFinalConsumer != null;
+      if (
+        !queueOrderedRequested
+        && outputParticleBuffersCleanupClaim != null
+      ) {
+        try {
+          cancelQueueOrderedCleanupClaim(
+            outputParticleBuffersCleanupClaim,
+            device,
+            {
+              producerOutput: result,
+              cleanup: queueOrderedRetainedOutputCleanup
+            }
+          );
+        } catch {
+          // A sealed claim remains bound to its exact final consumer. The
+          // host-fenced fallback below is memory-safe, while normal closure
+          // failure cleanup supplies the attached exact capability.
+        }
+      }
+      const queueOrderedRelease = () => (
+        releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          queueOrderedRetainedOutputCleanup,
+          {
+            queueOrderedFinalConsumer,
+            producerClaim: outputParticleBuffersCleanupClaim,
+            producerOutput: result,
+            producerFamily: 'reaction-product'
+          }
+        )
+      );
       let scheduledRelease = null;
       if (reactionPlacementSourceFamily) {
         const residentProductMassSettlement = Promise.resolve(
           residentProductMassRelease
         );
-        const queueFence = device.queue?.onSubmittedWorkDone?.();
-        if (!queueFence?.then) {
-          return false;
-        }
-        const downstreamCompletionFence = Promise.all([
-          residentProductMassSettlement,
-          queueFence
-        ]).then(([released]) => {
+        scheduledRelease = residentProductMassSettlement.then((released) => {
           if (released !== true) {
             throw new Error(
               'resident product-event ownership did not drain before reaction destination return'
             );
           }
-          return true;
-        });
-        scheduledRelease =
-          releaseSphReactionTransferredDestinationAfterSettledFences({
+          if (queueOrderedRequested) {
+            const cleanupReceipt = queueOrderedRelease();
+            if (result) {
+              result.outputParticleBufferCleanupReceipt = cleanupReceipt;
+              result.outputParticleBufferCleanupStatus =
+                cleanupReceipt.status;
+              result.outputParticleBufferQueueCompletionMethod =
+                cleanupReceipt.queueCompletionMethod;
+            }
+            return releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(
+              reactionPlacementSourceFamily,
+              { queueOrderedFinalConsumer }
+            );
+          }
+          return releaseSphReactionTransferredDestinationAfterSettledFences({
             device,
             sourceFamily: reactionPlacementSourceFamily,
-            completionFence: downstreamCompletionFence,
-            settlementFences: [residentProductMassSettlement, queueFence],
             reactionWarmArenaLease
           });
-        if (!scheduledRelease?.then) return false;
+        });
         reactionPlacementDestinationReturnScheduled = true;
       } else {
-        destroyReactionOwnedBuffer(continuationStateBuffer);
-        destroyReactionOwnedBuffer(continuationThermoBuffer);
-        destroyReactionOwnedBuffer(continuationMechanicsBuffer);
-        scheduledRelease = residentProductMassRelease;
+        scheduledRelease = Promise.resolve(
+          residentProductMassRelease
+        ).then((released) => {
+          if (released !== true) return false;
+          if (queueOrderedRequested) {
+            const cleanupReceipt = queueOrderedRelease();
+            if (result) {
+              result.outputParticleBufferCleanupReceipt = cleanupReceipt;
+              result.outputParticleBufferCleanupStatus =
+                cleanupReceipt.status;
+              result.outputParticleBufferQueueCompletionMethod =
+                cleanupReceipt.queueCompletionMethod;
+            }
+            return true;
+          }
+          const cleanupFence =
+            device.queue?.onSubmittedWorkDone?.();
+          if (!cleanupFence?.then) return false;
+          if (result) {
+            appendGpuReadbackTelemetryObservation(result, {
+              hostQueueFenceCount: 1,
+              deferredCleanupHostQueueFenceCount: 1
+            }, {
+              source: 'reaction-output-buffer-cleanup'
+            });
+            result.outputParticleBufferCleanupStatus =
+              'submitted-output-cleanup-deferred-after-host-queue-fence';
+            result.outputParticleBufferQueueCompletionMethod =
+              'gpu-queue-on-submitted-work-done';
+          }
+          return Promise.resolve(cleanupFence).then(
+            () => {
+              destroyContinuation();
+              return true;
+            }
+          );
+        });
       }
       outputParticleBuffersReleasePromise = Promise.resolve(
         scheduledRelease
@@ -4322,7 +4613,7 @@ export async function runSphReactionStepWebGpu({
       || reactionPlacementDestinationReturnScheduled
     )
   );
-  return outputEnvelope({
+  result = outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     mlsMpmParticleState,
@@ -4376,6 +4667,7 @@ export async function runSphReactionStepWebGpu({
     automaticDestinationReturnCompletion,
     reactionWarmArenaLease,
     reactionWarmArena,
+    readbackTelemetry: readbackTelemetry.snapshot(),
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
     gpuTimestampInstrumentation: timestampProfilingActive
@@ -4407,6 +4699,42 @@ export async function runSphReactionStepWebGpu({
     reactionParticleBinOverflowCount,
     canonicalReactionDiscovery
   });
+  if (
+    retainOutputParticleBuffers
+    && requestQueueOrderedCleanupClaim === true
+  ) {
+    outputParticleBuffersCleanupClaim =
+      registerQueueOrderedCleanupClaim(
+        reactionOutputCleanupClaimIssuer,
+        device,
+        {
+          producerOutput: result,
+          cleanup: queueOrderedRetainedOutputCleanup
+        }
+      );
+    Object.defineProperty(result, 'queueOrderedCleanupClaim', {
+      value: outputParticleBuffersCleanupClaim,
+      enumerable: false
+    });
+    const destinationCleanupClaim =
+      reactionPlacementSourceFamily
+        ? schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(
+            reactionPlacementSourceFamily
+          )
+        : null;
+    Object.defineProperty(
+      result,
+      'queueOrderedCleanupClaims',
+      {
+        value: Object.freeze([
+          outputParticleBuffersCleanupClaim,
+          destinationCleanupClaim
+        ].filter(Boolean)),
+        enumerable: false
+      }
+    );
+  }
+  return result;
   } catch (error) {
     const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];
     try {

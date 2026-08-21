@@ -162,6 +162,35 @@ function gridDescriptor(value, label) {
   });
 }
 
+export const SCHROEDER_SPATIAL_FIRST_MOMENT_F32_OPERATION_BOUND = 16;
+
+export function resolveSchroederSpatialFirstMomentToleranceM({
+  fineGrid,
+  coarseGrid
+} = {}) {
+  const fine = gridDescriptor(fineGrid, 'fineGrid');
+  const coarse = gridDescriptor(coarseGrid, 'coarseGrid');
+  const coordinateMagnitudeM = Math.max(...[fine, coarse].map((grid) => (
+    Math.hypot(...grid.gridDims.map((dimension, axis) => (
+      Math.max(
+        Math.abs(grid.gridShift),
+        Math.abs(dimension - 1 - grid.gridShift)
+      ) * grid.gridSpacingM
+    )))
+  )));
+  // The affine reproduction path performs a position multiply, up to eight
+  // weighted accumulations, and a vector subtraction in f32.  Bound that
+  // roundoff against the largest represented coordinate, not only one cell;
+  // the old cell-only bound became spuriously tighter as N increased.
+  return Math.fround(Math.max(
+    1e-8,
+    fine.gridSpacingM * 2 ** -18,
+    coordinateMagnitudeM
+      * SCHROEDER_SPATIAL_FIRST_MOMENT_F32_OPERATION_BOUND
+      * 2 ** -23
+  ));
+}
+
 export function createSchroederSpatialHierarchyViewLayout({
   fineNodeCapacity,
   coarseNodeCapacity
@@ -289,6 +318,10 @@ export function createSchroederSpatialHierarchyViewPlan({
     childEdgeCapacity: layout.childEdgeCapacity,
     requiredWords: layout.wordLength,
     capacityWords: layout.wordLength,
+    firstMomentToleranceM: resolveSchroederSpatialFirstMomentToleranceM({
+      fineGrid: resolvedFineGrid,
+      coarseGrid: resolvedCoarseGrid
+    }),
     maxMechanicsLevelCount: 2,
     gpuFirst: true,
     fullParticleReadbackRequired: false

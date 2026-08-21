@@ -1,12 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   aggregateSchroederResidentBatchEvidence,
   buildSchroederReactionReceiptIccTrace,
+  createGpuTimestampBenchmarkScenarioParams,
   createSchroederBenchmarkScenarioParams,
+  currentResidentSurfaceDrawConsumerMetricValue,
   currentResidentSurfaceDrawEvidence,
+  durableBenchmarkReleasePublicationEnabled,
+  finalCachedEngineMetric,
+  probeReleasePublicationEnvironment,
   scenarioUrlForCount,
   scenarioPerformanceGate,
   summarizePairedGpuStageProducerRuns,
@@ -14,9 +21,378 @@ import {
   summarizePairedSpatialArenaDepthThroughputRuns,
   summarizePairedPhysicsThroughputRuns,
   summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns,
+  summarizePairedAuthoritativeTwoLevelScalingRuns,
+  summarizeMechanicsFieldPairV2Evidence,
   summarizeResidentGpuStageTimestampEvidence,
-  summarizeResidentGpuTimestampEvidence
+  summarizeResidentGpuTimestampEvidence,
+  writeBenchmarkReport
 } from '../scripts/sph-performance-benchmark.mjs';
+import {
+  applyAuthoritativeTwoLevelLowNAcceptancePolicy,
+  campaignArmPorts
+} from '../scripts/sph-performance-acceptance-campaign.mjs';
+
+test('benchmark durable release publication is opt-in, private, and no-clobber', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ulg-benchmark-publication-'));
+  try {
+    const repoDir = path.join(root, 'repo');
+    const outputPath = path.join(root, 'release', 'benchmark.json');
+    await mkdir(repoDir, { recursive: true });
+    assert.equal(durableBenchmarkReleasePublicationEnabled('1'), true);
+    assert.equal(durableBenchmarkReleasePublicationEnabled('true'), false);
+    assert.deepEqual(probeReleasePublicationEnvironment(false), {});
+    assert.deepEqual(probeReleasePublicationEnvironment(true), {
+      ULG_PROBE_DURABLE_RELEASE_PUBLICATION: '1'
+    });
+
+    await writeBenchmarkReport({
+      outputPath,
+      repoDir,
+      report: { status: 'legacy-first' }
+    });
+    await writeBenchmarkReport({
+      outputPath,
+      repoDir,
+      report: { status: 'legacy-second' }
+    });
+    assert.equal(JSON.parse(await readFile(outputPath, 'utf8')).status, 'legacy-second');
+
+    const durableOutputPath = path.join(root, 'durable', 'benchmark.json');
+    const report = { status: 'durable' };
+    await writeBenchmarkReport({
+      outputPath: durableOutputPath,
+      repoDir,
+      report,
+      durableReleasePublication: true
+    });
+    const artifactStat = await lstat(durableOutputPath);
+    const parentStat = await lstat(path.dirname(durableOutputPath));
+    assert.equal(artifactStat.mode & 0o777, 0o600);
+    assert.equal(parentStat.mode & 0o777, 0o700);
+    const exactBytes = await readFile(durableOutputPath, 'utf8');
+    await assert.rejects(
+      writeBenchmarkReport({
+        outputPath: durableOutputPath,
+        repoDir,
+        report: { status: 'replacement' },
+        durableReleasePublication: true
+      }),
+      /already exists and will not be replaced/
+    );
+    assert.equal(await readFile(durableOutputPath, 'utf8'), exactBytes);
+    await assert.rejects(
+      writeBenchmarkReport({
+        outputPath: path.join(repoDir, 'unsafe.json'),
+        repoDir,
+        report,
+        durableReleasePublication: true
+      }),
+      /outside the repository/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('benchmark selects the exact final cached measured batch', () => {
+  const result = {
+    timeline: {
+      interactiveCacheLifecycle: {
+        schema: 'peercompute.ulg.sph-interactive-cache-lifecycle.v1',
+        status: 'same-page-warm-reset-cached-measurement-complete',
+        completedAtMs: 400,
+        pageInstanceId: 'page-1',
+        reset: {
+          resetOrdinal: 4,
+          playbackQuiescence: {
+            schema:
+              'peercompute.ulg.sph-interactive-playback-quiescence.v0',
+            status: 'resident-playback-quiescent',
+            reason: 'reset-playback-before-direct-measurement',
+            initialButtonText: 'Pause',
+            finalButtonText: 'Play',
+            pauseRequested: true,
+            residentPending: false,
+            stableFrameCount: 2,
+            completedStepCount: 1,
+            elapsedMs: 1
+          }
+        },
+        postResetMeasurement: {
+          warmupBatchIndices: [1],
+          measuredBatchIndices: [2, 3],
+          observedResidentBatchIndices: [1, 2, 3],
+          observedMeasurementClasses: [
+            'post-reset-warmup',
+            'post-reset-measured',
+            'post-reset-measured'
+          ],
+          drain: {
+            schema:
+              'peercompute.ulg.sph-interactive-cache-terminal-drain.v1',
+            status: 'unmeasured-terminal-consumer-complete',
+            measured: false,
+            metricPublished: false,
+            sourceBatchIndex: 3,
+            successorBatchIndex: 4,
+            completedStepCount: 1,
+            elapsedMs: 1.25,
+            settledStatus:
+              'background-settlement-complete-after-unmeasured-terminal-consumer'
+          },
+          terminalHandoff: {
+            schema:
+              'peercompute.ulg.sph-interactive-cache-terminal-handoff.v1',
+            status: 'scene-terminal-consumer-settled',
+            reason: null,
+            terminalConsumerMethod: 'scene-api-dispose',
+            terminalConsumerContract:
+              'queue-ordered-overlay-clear-final-consumer-before-resident-artifact-retirement',
+            recordedDrainExecutionMatched: true,
+            backgroundSettlementPromisePresent: true,
+            playbackQuiescence: {
+              schema:
+                'peercompute.ulg.sph-interactive-playback-quiescence.v0',
+              status: 'resident-playback-quiescent',
+              reason: 'terminal-handoff-before-dispose',
+              initialButtonText: 'Play',
+              finalButtonText: 'Play',
+              pauseRequested: false,
+              residentPending: false,
+              stableFrameCount: 2,
+              completedStepCount: 1,
+              elapsedMs: 1
+            },
+            pendingBeforeDispose: true,
+            disposeInvoked: true,
+            settlementAwaitMs: 0.5,
+            settlementStatus: 'terminal-settlement-resolved',
+            settlementValue: true,
+            spatialEpochSettlementComplete: true,
+            hierarchyArtifactSettlementComplete: true,
+            successorSourceFamilyRetirementComplete: true,
+            completedAtMs: 400
+          }
+        }
+      },
+      metrics: [
+        {
+          phase: 'resident-batch',
+          batchIndex: 1,
+          pageInstanceId: 'page-1',
+          cacheResetOrdinal: 4,
+          interactiveCacheMeasurementClass: 'post-reset-warmup',
+          renderState: { marker: 'warmup' }
+        },
+        {
+          phase: 'resident-batch',
+          batchIndex: 2,
+          pageInstanceId: 'page-1',
+          cacheResetOrdinal: 4,
+          interactiveCacheMeasurementClass: 'post-reset-measured',
+          renderState: { marker: 'measured-1' }
+        },
+        {
+          phase: 'resident-batch',
+          batchIndex: 3,
+          pageInstanceId: 'page-1',
+          cacheResetOrdinal: 4,
+          interactiveCacheMeasurementClass: 'post-reset-measured',
+          renderState: { marker: 'measured-2' }
+        },
+        {
+          phase: 'resident-batch-retained-continuation',
+          batchIndex: 3,
+          renderState: { marker: 'later-nonmeasurement' }
+        }
+      ]
+    }
+  };
+  assert.equal(
+    finalCachedEngineMetric(result)?.renderState?.marker,
+    'measured-2'
+  );
+  result.timeline.metrics[2].pageInstanceId = 'different-page';
+  assert.equal(finalCachedEngineMetric(result), null);
+  result.timeline.metrics[2].pageInstanceId = 'page-1';
+  result.timeline.interactiveCacheLifecycle.postResetMeasurement
+    .measuredBatchIndices = [2];
+  assert.equal(finalCachedEngineMetric(result), null);
+  result.timeline.interactiveCacheLifecycle.postResetMeasurement
+    .measuredBatchIndices = [2, 3];
+  result.timeline.interactiveCacheLifecycle.postResetMeasurement
+    .terminalHandoff.settlementValue = false;
+  assert.equal(finalCachedEngineMetric(result), null);
+  result.timeline.interactiveCacheLifecycle.postResetMeasurement
+    .terminalHandoff.settlementValue = true;
+  result.timeline.interactiveCacheLifecycle.reset
+    .playbackQuiescence.status = 'resident-playback-quiescence-timeout';
+  assert.equal(finalCachedEngineMetric(result), null);
+  result.timeline.interactiveCacheLifecycle.reset
+    .playbackQuiescence.status = 'resident-playback-quiescent';
+  result.timeline.interactiveCacheLifecycle.postResetMeasurement
+    .terminalHandoff.playbackQuiescence.residentPending = true;
+  assert.equal(finalCachedEngineMetric(result), null);
+});
+
+test('interactive probe pipelines settlement and proves same-page reset telemetry', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /pending-successor-consumer/u);
+  assert.match(
+    source,
+    /background-settlement-complete-after-successor-consumer/u
+  );
+  assert.match(source, /unmeasured-terminal-consumer-complete/u);
+  assert.doesNotMatch(
+    source,
+    /const settled = await backgroundSettlementPromise/u
+  );
+  assert.match(source, /resetButton\.click\(\)/u);
+  assert.match(source, /quiesceInteractivePlayback/u);
+  assert.match(source, /reset-playback-before-direct-measurement/u);
+  assert.match(source, /resident-playback-quiescent/u);
+  assert.match(source, /performance\.timeOrigin/u);
+  assert.match(source, /interactiveCacheMeasurementClass/u);
+  assert.match(source, /missingSourceKeys/u);
+  assert.match(source, /nativeIndirectArgsReadbackRequested === true/u);
+  assert.match(source, /materialInterfaceDiagnosticMs: 0/u);
+  assert.match(source, /sceneApi\.dispose\(\)/u);
+  assert.match(
+    source,
+    /terminalExecution === recordedDrainExecution/u
+  );
+  assert.match(source, /scene-terminal-consumer-settled/u);
+});
+
+test('direct resident probe preserves the explicit paired-v2 option without auto scheduling', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  const directFallback = source.match(
+    /const schroederExecutionOptions =[\s\S]*?\|\| \(schroederSimulationConfig\?\.enabled === true[\s\S]*?: \{ schroederSimulation: false \}\);/u
+  )?.[0] || '';
+
+  assert.match(
+    directFallback,
+    /schroederEnableMechanicsFieldPairV2:\s*schroederSimulationConfig\.enableMechanicsFieldPairV2/u,
+    'residentAuto=0 probes must forward the paired-v2 URL/config opt-in'
+  );
+});
+
+test('compatibility-normalized campaign reserves disjoint two-count arm ports', () => {
+  assert.deepEqual(
+    campaignArmPorts({
+      basePort: 5280,
+      runCount: 3,
+      particleCountCount: 2
+    }),
+    [5280, 5282, 5284, 5286, 5288, 5290]
+  );
+  assert.throws(
+    () => campaignArmPorts({
+      basePort: 65_530,
+      runCount: 3,
+      particleCountCount: 2
+    }),
+    /exceeds 65535/
+  );
+});
+
+test('compatibility-normalized campaign pins approved provenance and strict server isolation', async () => {
+  const [campaignSource, probeSource, policy] = await Promise.all([
+    readFile(
+      new URL(
+        '../scripts/sph-performance-acceptance-campaign.mjs',
+        import.meta.url
+      ),
+      'utf8'
+    ),
+    readFile(
+      new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+      'utf8'
+    ),
+    readFile(
+      new URL(
+        '../scripts/performance-baselines/webgpu-portability-v1.json',
+        import.meta.url
+      ),
+      'utf8'
+    ).then(JSON.parse)
+  ]);
+  assert.equal(policy.policyId, 'webgpu-portability-v1');
+  assert.equal(
+    policy.historicalOriginGitHead,
+    '6c20c32b814a0e4cb66ff973fb4cc225659f3f25'
+  );
+  assert.equal(
+    policy.executionGitHead,
+    'fbcfd6ed2e02420cbd5ab512a56b5a073d114af9'
+  );
+  assert.equal(
+    policy.canonicalDiff.sha256,
+    '029d3c8c1e6ed4c6c7eb15fcbeacc58ebe8f08295de8895f4de0f2cefb58ce06'
+  );
+  assert.equal(policy.changedPaths.length, 10);
+  assert.match(
+    campaignSource,
+    /Compatibility-normalized baseline must be a direct non-merge child/
+  );
+  assert.match(campaignSource, /changed-path set does not match/);
+  assert.match(campaignSource, /canonical diff does not match/);
+  assert.match(
+    campaignSource,
+    /authoritative-two-level-physics-scaling-compatibility-normalized-campaign\.v1/
+  );
+  assert.match(campaignSource, /ULG_BENCH_PROBE_SCRIPT/);
+  assert.equal(
+    [
+      ...campaignSource.matchAll(
+        /ULG_BENCH_SCHROEDER_SPATIAL_ARENA_COUNT: '4'/gu
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [
+      ...campaignSource.matchAll(
+        /VITE_ULG_SCHROEDER_SPATIAL_EPOCH_ARENA_COUNT: '4'/gu
+      )
+    ].length >= 2,
+    true
+  );
+  assert.equal(
+    [
+      ...campaignSource.matchAll(
+        /VITE_ULG_SCHROEDER_PARENT_FIELD_MECHANICS_ARENA_COUNT: '1'/gu
+      )
+    ].length >= 2,
+    true
+  );
+  assert.match(probeSource, /'--strictPort'/);
+  assert.match(probeSource, /await server\.stop\(\)/);
+});
+
+test('GPU timestamp benchmarks negotiate queries without enabling serialized scene profiling', () => {
+  assert.deepEqual(
+    createGpuTimestampBenchmarkScenarioParams({
+      measureGpuTimestampInterval: true,
+      measureGpuStageTimestamps: false
+    }),
+    { residentGpuTimestampFeature: '1' }
+  );
+  assert.deepEqual(
+    createGpuTimestampBenchmarkScenarioParams({
+      measureGpuTimestampInterval: true,
+      measureGpuStageTimestamps: true
+    }),
+    { residentGpuTimestampFeature: '1' }
+  );
+  assert.deepEqual(createGpuTimestampBenchmarkScenarioParams(), {});
+});
 
 function finalizedReactionReceiptTelemetry(overrides = {}) {
   return {
@@ -429,12 +805,16 @@ function pairedThroughputCampaignRuns({
   authoritativeTwoLevel = false
 } = {}) {
   const commonConfigSignature = 'c'.repeat(64);
-  const armConfigSignature = 'd'.repeat(64);
+  const baselineArmConfigSignature = 'd'.repeat(64);
+  const candidateArmConfigSignature = authoritativeTwoLevel
+    ? 'e'.repeat(64)
+    : baselineArmConfigSignature;
   const provenance = ({
     gitHead,
     fingerprint,
     statusHash,
-    dirty
+    dirty,
+    armConfigSignature
   }) => ({
     gitHead,
     sourceFingerprintBefore: fingerprint,
@@ -448,7 +828,10 @@ function pairedThroughputCampaignRuns({
     commonConfigSignature,
     armConfigSignature
   });
-  const scenario = (physicsStepsPerSecond) => ({
+  const scenario = (
+    physicsStepsPerSecond,
+    { pairV2 = false } = {}
+  ) => ({
     status: 'good',
     probeMode: 'scene',
     batches: 5,
@@ -460,7 +843,14 @@ function pairedThroughputCampaignRuns({
     schroederSimulationActive: true,
     schroederTransactionCoverageComplete: true,
     scenarioUrl: authoritativeTwoLevel
-      ? 'https://benchmark.invalid/?ss=1&schroederLevel=0&schroederMaxLevel=1&schroederCrossLevelCoupling=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2'
+      ? (
+          'https://benchmark.invalid/?ss=1&schroederLevel=0'
+          + '&schroederMaxLevel=1&schroederCrossLevelCoupling=1'
+          + '&schroederTwoLevel=1'
+          + '&schroederTwoLevelAuthority=authoritative'
+          + '&schroederTwoLevelSubsteps=2'
+          + (pairV2 ? '&schroederMechanicsFieldPairV2=1' : '')
+        )
       : 'https://benchmark.invalid/?ss=1&schroederLevel=0&schroederMaxLevel=0&schroederCrossLevelCoupling=0',
     schroederTwoLevelMechanicsConfiguredRequested: authoritativeTwoLevel,
     schroederTwoLevelMechanicsRequestedObserved: authoritativeTwoLevel,
@@ -479,6 +869,16 @@ function pairedThroughputCampaignRuns({
       : null,
     schroederTwoLevelAuthoritativeCommitVerified:
       authoritativeTwoLevel ? true : null,
+    schroederMechanicsFieldPairV2ConfiguredRequested:
+      authoritativeTwoLevel ? pairV2 : false,
+    schroederMechanicsFieldPairV2Enabled:
+      authoritativeTwoLevel && pairV2 ? true : null,
+    schroederMechanicsFieldConstructionMode:
+      authoritativeTwoLevel && pairV2
+        ? 'paired-v2-shared-radix'
+        : null,
+    schroederMechanicsFieldPairV2CoverageComplete:
+      authoritativeTwoLevel && pairV2 ? true : null,
     probeIssues: []
   });
   return [100, 110, 90].map((baselineFps, index) => ({
@@ -489,12 +889,13 @@ function pairedThroughputCampaignRuns({
       reportStatus: 'complete',
       reportPerformanceGateStatus: 'pass',
       scenarioStatus: 'good',
-      scenario: scenario(baselineFps),
+      scenario: scenario(baselineFps, { pairV2: false }),
       sourceProvenance: provenance({
         gitHead: 'e'.repeat(40),
         fingerprint: 'a'.repeat(64),
         statusHash: '1'.repeat(64),
-        dirty: false
+        dirty: false,
+        armConfigSignature: baselineArmConfigSignature
       })
     },
     candidate: {
@@ -502,15 +903,114 @@ function pairedThroughputCampaignRuns({
       reportStatus: 'complete',
       reportPerformanceGateStatus: 'pass',
       scenarioStatus: 'good',
-      scenario: scenario(baselineFps * candidateScale),
+      scenario: scenario(
+        baselineFps * candidateScale,
+        { pairV2: authoritativeTwoLevel }
+      ),
       sourceProvenance: provenance({
         gitHead: 'f'.repeat(40),
         fingerprint: 'b'.repeat(64),
         statusHash: '2'.repeat(64),
-        dirty: true
+        dirty: true,
+        armConfigSignature: candidateArmConfigSignature
       })
     }
   }));
+}
+
+function pairedAuthoritativeTwoLevelScalingRuns({
+  lowCandidateScale = 0.89,
+  highCandidateScale = 0.97,
+  orders = ['AB', 'BA', 'AB']
+} = {}) {
+  const runs = pairedThroughputCampaignRuns({
+    candidateScale: 1,
+    orders,
+    authoritativeTwoLevel: true
+  });
+  return runs.map((run, index) => {
+    const lowBaselineFps = [100, 110, 90][index];
+    const highBaselineFps = [10, 11, 9][index];
+    const scenarioAtCount = (
+      source,
+      particleCount,
+      physicsStepsPerSecond
+    ) => ({
+      ...source,
+      targetParticleCount: particleCount,
+      actualParticleCount: particleCount,
+      effectiveParticleCount: particleCount,
+      physicsStepsPerSecond,
+      schroederBackpressureWaitCount: 0,
+      schroederBackpressureWaitMs: 0,
+      performanceGate: {
+        status: 'pass',
+        blockers: []
+      }
+    });
+    return {
+      ...run,
+      baseline: {
+        ...run.baseline,
+        scenario: null,
+        scenarios: [
+          scenarioAtCount(run.baseline.scenario, 1024, lowBaselineFps),
+          scenarioAtCount(run.baseline.scenario, 9826, highBaselineFps)
+        ]
+      },
+      candidate: {
+        ...run.candidate,
+        scenario: null,
+        scenarios: [
+          scenarioAtCount(
+            run.candidate.scenario,
+            1024,
+            lowBaselineFps * lowCandidateScale
+          ),
+          scenarioAtCount(
+            run.candidate.scenario,
+            9826,
+            highBaselineFps * highCandidateScale
+          )
+        ]
+      }
+    };
+  });
+}
+
+function cleanCampaignMemoryEvidence() {
+  const events = {
+    low: 0,
+    high: 0,
+    max: 0,
+    oom: 0,
+    oom_kill: 0,
+    oom_group_kill: 0
+  };
+  return {
+    status: 'pass',
+    before: {
+      schema: 'peercompute.ulg.cgroup-memory-snapshot.v0',
+      path: '/user.slice/test.scope',
+      memoryHigh: '4294967296',
+      memoryMax: '7516192768',
+      memorySwapMax: '0',
+      memoryCurrent: 64_000_000,
+      memoryPeak: 80_000_000,
+      events: { ...events }
+    },
+    after: {
+      schema: 'peercompute.ulg.cgroup-memory-snapshot.v0',
+      path: '/user.slice/test.scope',
+      memoryHigh: '4294967296',
+      memoryMax: '7516192768',
+      memorySwapMax: '0',
+      memoryCurrent: 128_000_000,
+      memoryPeak: 2_947_850_240,
+      events: { ...events }
+    },
+    eventDeltas: { ...events }
+  };
 }
 
 function pairedSpatialArenaDepthCampaignRuns({
@@ -832,7 +1332,7 @@ function reactionHistoricalScenario(gpuStageTimestampEvidence) {
     batchSteps: 1,
     completedStepCount: 1,
     scenarioUrl:
-      '/?drop=na&base=h2o&dropt=300&baset=300&dropn=8&basen=8&mech=mlsmpm&ss=1&schroederLevel=0&schroederMaxLevel=1&schroederCrossLevelCoupling=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&residentGpuTimestampProfile=1&lawr=1',
+      '/?drop=na&base=h2o&dropt=300&baset=300&dropn=8&basen=8&mech=mlsmpm&ss=1&schroederLevel=0&schroederMaxLevel=1&schroederCrossLevelCoupling=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&residentGpuTimestampFeature=1&lawr=1',
     schroederSimulationConfiguredRequested: true,
     schroederSimulationRequestedObserved: true,
     schroederSimulationActive: true,
@@ -970,7 +1470,8 @@ test('benchmark scenario params explicitly mount authoritative two-level mechani
     crossLevelCouplingRequested: true,
     twoLevelMechanicsRequested: true,
     twoLevelMechanicsAuthority: 'authoritative',
-    twoLevelFineSubstepCount: 4
+    twoLevelFineSubstepCount: 4,
+    mechanicsFieldPairV2Requested: true
   });
 
   assert.equal(params.ss, '1');
@@ -981,6 +1482,7 @@ test('benchmark scenario params explicitly mount authoritative two-level mechani
   assert.equal(params.schroederTwoLevel, '1');
   assert.equal(params.schroederTwoLevelAuthority, 'authoritative');
   assert.equal(params.schroederTwoLevelSubsteps, '4');
+  assert.equal(params.schroederMechanicsFieldPairV2, '1');
   assert.deepEqual(createSchroederBenchmarkScenarioParams(), {});
 });
 
@@ -998,6 +1500,16 @@ test('benchmark scene geometry derives a touching base height from its particle 
   assert.equal(params.get('ironh'), '1.6');
   assert.equal(params.get('basen'), '8');
   assert.equal(params.get('dropn'), '8');
+  assert.equal(params.get('residentAuto'), '0');
+});
+
+test('interactive cache lifecycle starts one warm resident execution', () => {
+  const scenario = scenarioUrlForCount(1024, {
+    interactiveCacheLifecycle: true
+  });
+  const params = new URL(`https://benchmark.invalid${scenario.url}`).searchParams;
+
+  assert.equal(params.get('residentAuto'), '1');
 });
 
 test('current resident surface telemetry outranks a stale render-state snapshot', () => {
@@ -1056,6 +1568,45 @@ test('current resident surface telemetry outranks a stale render-state snapshot'
   assert.equal(fallback.status, 'resident-surface-draw-snapshot-only');
   assert.equal(fallback.gpuBufferHandoffReady, true);
   assert.equal(fallback.indirectRowsBufferByteLength, 16);
+
+  assert.equal(
+    currentResidentSurfaceDrawConsumerMetricValue({
+      surfaceDraw: {
+        surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted: true,
+        visibleGpuConsumerForegroundProofValidated: false,
+        surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration: 9
+      },
+      renderState: {
+        surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted: false,
+        surfaceDrawVisibleGpuConsumerForegroundProofValidated: true,
+        surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration: 8
+      },
+      key: 'surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted'
+    }),
+    true
+  );
+  assert.equal(
+    currentResidentSurfaceDrawConsumerMetricValue({
+      surfaceDraw: {
+        visibleGpuConsumerForegroundProofValidated: false
+      },
+      renderState: {
+        surfaceDrawVisibleGpuConsumerForegroundProofValidated: true
+      },
+      key: 'surfaceDrawVisibleGpuConsumerForegroundProofValidated'
+    }),
+    false
+  );
+  assert.equal(
+    currentResidentSurfaceDrawConsumerMetricValue({
+      surfaceDraw: null,
+      renderState: {
+        surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration: 8
+      },
+      key: 'surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration'
+    }),
+    8
+  );
 });
 
 test('benchmark SS control params leave two-level mechanics absent', () => {
@@ -1108,6 +1659,27 @@ test('SS performance evidence aggregates every requested batch and all released 
   assert.equal(evidence.backpressureWaitMs, 0.5);
 });
 
+test('SS performance evidence accepts exact-successor queue-ordered generation release', () => {
+  const metrics = completeMetrics();
+  for (const metric of metrics.filter((entry) => entry.phase === 'resident-batch')) {
+    for (const summary of metric.residentSteps
+      .schroederSpatialEpochGenerationSummaries) {
+      summary.releaseStatus =
+        'spatial-epoch-generation-released-queue-ordered-after-exact-successor';
+    }
+  }
+
+  const evidence = aggregate(metrics);
+  assert.equal(evidence.generationCoverageComplete, true);
+  assert.equal(evidence.transactionCoverageComplete, true);
+
+  metrics[1].residentSteps.schroederSpatialEpochGenerationSummaries[0]
+    .releaseStatus = 'spatial-epoch-generation-release-unconfirmed';
+  const unconfirmed = aggregate(metrics);
+  assert.equal(unconfirmed.generationCoverageComplete, false);
+  assert.equal(unconfirmed.transactionCoverageComplete, false);
+});
+
 test('SS performance evidence proves the requested direct spatial arena depth', () => {
   const metrics = completeMetrics();
   for (const metric of metrics.filter((entry) => entry.phase === 'resident-batch')) {
@@ -1129,10 +1701,29 @@ test('SS performance evidence proves the requested direct spatial arena depth', 
   assert.deepEqual(evidence.observedSpatialArenaCounts, [8]);
   assert.equal(evidence.spatialArenaCountCoverageComplete, true);
 
-  metrics[1].residentSteps.schroederSpatialEpochGenerationSummaries[0]
+  const legacyMetrics = structuredClone(metrics);
+  for (const metric of legacyMetrics.filter(
+    (entry) => entry.phase === 'resident-batch'
+  )) {
+    for (const summary of metric.residentSteps
+      .schroederSpatialEpochGenerationSummaries) {
+      delete summary.directArenaCount;
+    }
+  }
+  const legacyEvidence = aggregateSchroederResidentBatchEvidence({
+    metrics: legacyMetrics,
+    requestedBatchCount: 2,
+    requestedBatchStepCount: 2,
+    schroederSimulationRequested: true,
+    schroederSpatialArenaCount: 8
+  });
+  assert.deepEqual(legacyEvidence.observedSpatialArenaCounts, [8]);
+  assert.equal(legacyEvidence.spatialArenaCountCoverageComplete, true);
+
+  legacyMetrics[1].residentSteps.schroederSpatialEpochGenerationSummaries[0]
     .arenaCapacity = 3;
   assert.equal(aggregateSchroederResidentBatchEvidence({
-    metrics,
+    metrics: legacyMetrics,
     requestedBatchCount: 2,
     requestedBatchStepCount: 2,
     schroederSimulationRequested: true,
@@ -1226,6 +1817,68 @@ test('SS performance gate fails closed when a requested arena depth is not obser
   assert.equal(evidence.status, 'fail');
   assert.ok(evidence.blockers.includes(
     'schroeder-spatial-arena-count-coverage-incomplete'
+  ));
+});
+
+test('paired-v2 benchmark evidence authenticates every retained generation', () => {
+  const metrics = [{
+    phase: 'resident-batch',
+    residentSteps: {
+      schroederSpatialEpochGenerationSummaries: [
+        {
+          mechanicsFieldPairV2Enabled: true,
+          mechanicsFieldConstructionMode: 'paired-v2-shared-radix'
+        },
+        {
+          spatialEpochGeneration: {
+            mechanicsFieldPairV2Enabled: true,
+            mechanicsFieldConstructionMode: 'paired-v2-shared-radix'
+          }
+        }
+      ]
+    }
+  }];
+  const evidence = summarizeMechanicsFieldPairV2Evidence({
+    metrics,
+    configuredRequested: true
+  });
+
+  assert.equal(evidence.generationSummaryCount, 2);
+  assert.equal(evidence.mechanicsFieldPairV2Enabled, true);
+  assert.equal(
+    evidence.mechanicsFieldConstructionMode,
+    'paired-v2-shared-radix'
+  );
+  assert.equal(evidence.coverageComplete, true);
+
+  const mixed = structuredClone(metrics);
+  mixed[0].residentSteps.schroederSpatialEpochGenerationSummaries[1]
+    .spatialEpochGeneration.mechanicsFieldConstructionMode =
+      'independent-v2';
+  assert.equal(summarizeMechanicsFieldPairV2Evidence({
+    metrics: mixed,
+    configuredRequested: true
+  }).coverageComplete, false);
+});
+
+test('performance gate fails closed when paired-v2 construction is not observed', () => {
+  const evidence = scenarioPerformanceGate({
+    estimatedReadbackBytesPerStep: 0,
+    schroederMechanicsFieldPairV2Requested: true,
+    schroederMechanicsFieldPairV2Enabled: false,
+    schroederMechanicsFieldConstructionMode: 'independent-v2',
+    schroederMechanicsFieldPairV2CoverageComplete: false
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'schroeder-mechanics-field-pair-v2-request-not-observed'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'schroeder-mechanics-field-pair-v2-construction-mode-mismatch'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'schroeder-mechanics-field-pair-v2-coverage-incomplete'
   ));
 });
 
@@ -1757,6 +2410,30 @@ test('long-horizon stage timestamp probe scales query capacity and fails closed 
   );
 });
 
+test('long-horizon benchmark authenticates deferred Schroeder settlement after a useful successor', async () => {
+  const source = await readFile(
+    new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    source,
+    /execution\?\.schroederBackgroundSettlementPromise/
+  );
+  assert.match(
+    source,
+    /authenticatePendingBackgroundSettlement/
+  );
+  assert.match(source, /pending-successor-consumer/);
+  assert.match(source, /unmeasured-terminal-consumer-complete/);
+  assert.doesNotMatch(source, /await backgroundSettlementPromise/);
+  assert.match(
+    source,
+    /Schroeder resident batch omitted its pending background settlement promise/
+  );
+  assert.match(source, /backgroundSettlementAwaitMs/);
+  assert.match(source, /backgroundSettlementStatus/);
+});
+
 test('long-horizon stage timing compaction preserves queue profiler identity and summaries', async () => {
   const source = await readFile(
     new URL('../scripts/sph-long-horizon-probe.mjs', import.meta.url),
@@ -2150,6 +2827,42 @@ test('paired authoritative two-level historical throughput campaign accepts only
   assert.ok(Math.abs(evidence.paired.medianRatio - 0.96) < 1e-12);
 });
 
+test('paired authoritative throughput rejects unauthenticated paired-v2 candidates', () => {
+  const runs = pairedThroughputCampaignRuns({
+    authoritativeTwoLevel: true
+  });
+  runs[0].candidate.scenario.scenarioUrl =
+    runs[0].candidate.scenario.scenarioUrl.replace(
+      '&schroederMechanicsFieldPairV2=1',
+      ''
+    );
+  runs[1].candidate.scenario.schroederMechanicsFieldConstructionMode =
+    'independent-v2';
+  runs[2].candidate.scenario.schroederMechanicsFieldPairV2Enabled = false;
+
+  const evidence = summarizePairedAuthoritativeTwoLevelPhysicsThroughputRuns({
+    runs,
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.ok(evidence.blockers.includes(
+    'candidate-throughput-evidence-incomplete'
+  ));
+  assert.equal(
+    evidence.runs[0].candidate.twoLevelRoute.scenarioUrl.complete,
+    false
+  );
+  assert.equal(
+    evidence.runs[1].candidate.twoLevelRoute.pairV2EvidenceComplete,
+    false
+  );
+  assert.equal(
+    evidence.runs[2].candidate.twoLevelRoute.pairV2EvidenceComplete,
+    false
+  );
+});
+
 test('paired authoritative two-level historical throughput campaign rejects observation, wrong depth, and incomplete authority', () => {
   const runs = pairedThroughputCampaignRuns({
     authoritativeTwoLevel: true
@@ -2188,6 +2901,248 @@ test('paired authoritative two-level historical throughput campaign rejects obse
     evidence.runs[2].candidate.twoLevelRoute.authoritativeCommitVerified,
     false
   );
+});
+
+test('paired authoritative two-level scaling accepts bounded same-N degradation when relative performance improves with N', () => {
+  const evidence = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs: pairedAuthoritativeTwoLevelScalingRuns({
+      lowCandidateScale: 0.89,
+      highCandidateScale: 0.97
+    }),
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'pass');
+  assert.equal(
+    evidence.schema,
+    'peercompute.ulg.sph-paired-authoritative-two-level-physics-scaling-campaign.v1'
+  );
+  assert.deepEqual(
+    evidence.method.requiredParticleCounts,
+    [1024, 9826]
+  );
+  assert.equal(evidence.method.minimumRelativeScalingGain, 1.03);
+  assert.equal(evidence.method.minimumSameNThroughputRatio, 0.75);
+  assert.match(evidence.method.sameNPolicy, /not-five-percent/);
+  assert.ok(Math.abs(
+    evidence.sameN.low.paired.medianRatio - 0.89
+  ) < 1e-12);
+  assert.ok(Math.abs(
+    evidence.sameN.high.paired.medianRatio - 0.97
+  ) < 1e-12);
+  assert.ok(Math.abs(
+    evidence.paired.medianRelativeScalingGain - (0.97 / 0.89)
+  ) < 1e-12);
+  assert.equal(evidence.paired.withinThreshold, true);
+  assert.equal(
+    evidence.independentMedianCrossCheck.withinThreshold,
+    true
+  );
+  assert.ok(evidence.paired.scalingExponentAdvantage > 0);
+  assert.ok(evidence.particleCoverage.every((run) => (
+    run.baseline.complete && run.candidate.complete
+  )));
+});
+
+test('paired authoritative two-level scaling rejects worsening relative performance even when both same-N ratios are bounded', () => {
+  const evidence = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs: pairedAuthoritativeTwoLevelScalingRuns({
+      lowCandidateScale: 0.97,
+      highCandidateScale: 0.94
+    }),
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+
+  assert.equal(evidence.status, 'fail');
+  assert.equal(evidence.sameN.low.status, 'pass');
+  assert.equal(evidence.sameN.high.status, 'pass');
+  assert.ok(evidence.blockers.includes(
+    'paired-authoritative-two-level-relative-scaling-gain-below-threshold'
+  ));
+  assert.ok(evidence.blockers.includes(
+    'independent-median-authoritative-two-level-relative-scaling-gain-below-threshold'
+  ));
+});
+
+test('paired authoritative two-level scaling keeps a catastrophic same-N floor and exact route/count coverage', () => {
+  const catastrophic = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs: pairedAuthoritativeTwoLevelScalingRuns({
+      lowCandidateScale: 0.74,
+      highCandidateScale: 0.90
+    }),
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+  assert.equal(catastrophic.status, 'fail');
+  assert.ok(catastrophic.blockers.includes(
+    'low-n-paired-physics-throughput-regression-exceeds-threshold'
+  ));
+  assert.ok(catastrophic.blockers.includes(
+    'low-n-independent-median-physics-throughput-regression-exceeds-threshold'
+  ));
+  assert.equal(catastrophic.paired.withinThreshold, true);
+
+  const corruptedRuns = pairedAuthoritativeTwoLevelScalingRuns();
+  corruptedRuns[0].candidate.scenarios[1].actualParticleCount = 9825;
+  corruptedRuns[1].candidate.scenarios[1]
+    .schroederTwoLevelMechanicsAuthorityObserved = 'observation';
+  const corrupted = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs: corruptedRuns,
+    expectedBaselineGitHead: 'e'.repeat(40)
+  });
+  assert.equal(corrupted.status, 'fail');
+  assert.ok(corrupted.blockers.includes(
+    'authoritative-two-level-scaling-particle-coverage-incomplete'
+  ));
+  assert.ok(corrupted.blockers.includes(
+    'high-n-candidate-throughput-evidence-incomplete'
+  ));
+});
+
+test('Stage 4 campaign accepts a half-speed low-N result only as quantified warning debt', () => {
+  const runs = pairedAuthoritativeTwoLevelScalingRuns({
+    lowCandidateScale: 0.50,
+    highCandidateScale: 0.90
+  });
+  const measured = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs,
+    expectedBaselineGitHead: 'e'.repeat(40),
+    minimumRelativeScalingGain: 1.03,
+    minimumSameNThroughputRatio: 0.75
+  });
+  const accepted = applyAuthoritativeTwoLevelLowNAcceptancePolicy(measured, {
+    runs,
+    cgroupMemoryEvidence: cleanCampaignMemoryEvidence()
+  });
+
+  assert.equal(measured.status, 'fail');
+  assert.equal(measured.sameN.low.status, 'fail');
+  assert.equal(accepted.status, 'pass');
+  assert.equal(accepted.sameN.low.status, 'fail');
+  assert.deepEqual(accepted.blockers, []);
+  assert.equal(
+    accepted.acceptancePolicy.lowN.status,
+    'accepted-with-warning'
+  );
+  assert.equal(accepted.acceptancePolicy.lowN.blocking, false);
+  assert.equal(
+    accepted.acceptancePolicy.lowN.warningCode,
+    'authoritative-two-level-low-n-transitional-throughput-debt'
+  );
+  assert.equal(
+    accepted.acceptancePolicy.lowN.ordinaryMinimumAcceptedRatio,
+    0.75
+  );
+  assert.equal(
+    accepted.acceptancePolicy.lowN.catastrophicMinimumAcceptedRatio,
+    0.40
+  );
+  assert.ok(Math.abs(
+    accepted.acceptancePolicy.lowN.pairedMedianRatio - 0.50
+  ) < 1e-12);
+  assert.ok(Math.abs(
+    accepted.acceptancePolicy.lowN.pairedDebtToOrdinaryFloorRatio - 0.25
+  ) < 1e-12);
+  assert.equal(accepted.warnings.length, 1);
+  assert.equal(accepted.warnings[0].severity, 'warning');
+  assert.equal(accepted.warnings[0].blocking, false);
+});
+
+test('Stage 4 campaign hard-blocks low-N below the catastrophic 0.40 floor', () => {
+  const runs = pairedAuthoritativeTwoLevelScalingRuns({
+    lowCandidateScale: 0.39,
+    highCandidateScale: 0.90
+  });
+  const measured = summarizePairedAuthoritativeTwoLevelScalingRuns({
+    runs,
+    expectedBaselineGitHead: 'e'.repeat(40),
+    minimumRelativeScalingGain: 1.03,
+    minimumSameNThroughputRatio: 0.75
+  });
+  const rejected = applyAuthoritativeTwoLevelLowNAcceptancePolicy(measured, {
+    runs,
+    cgroupMemoryEvidence: cleanCampaignMemoryEvidence()
+  });
+
+  assert.equal(rejected.status, 'fail');
+  assert.equal(rejected.acceptancePolicy.lowN.status, 'blocked');
+  assert.equal(
+    rejected.acceptancePolicy.lowN.catastrophicFloorStatus,
+    'not-met'
+  );
+  assert.ok(rejected.blockers.includes(
+    'low-n-paired-catastrophic-throughput-floor-not-met'
+  ));
+  assert.ok(rejected.blockers.includes(
+    'low-n-independent-median-catastrophic-throughput-floor-not-met'
+  ));
+  assert.deepEqual(rejected.warnings, []);
+});
+
+test('Stage 4 low-N debt cannot waive high-N, scaling, or memory failures', () => {
+  const summarize = ({ lowCandidateScale, highCandidateScale }) => {
+    const runs = pairedAuthoritativeTwoLevelScalingRuns({
+      lowCandidateScale,
+      highCandidateScale
+    });
+    const measured = summarizePairedAuthoritativeTwoLevelScalingRuns({
+      runs,
+      expectedBaselineGitHead: 'e'.repeat(40),
+      minimumRelativeScalingGain: 1.03,
+      minimumSameNThroughputRatio: 0.75
+    });
+    return { runs, measured };
+  };
+  const highFailure = summarize({
+    lowCandidateScale: 0.50,
+    highCandidateScale: 0.70
+  });
+  const highRejected = applyAuthoritativeTwoLevelLowNAcceptancePolicy(
+    highFailure.measured,
+    {
+      runs: highFailure.runs,
+      cgroupMemoryEvidence: cleanCampaignMemoryEvidence()
+    }
+  );
+  assert.equal(highRejected.status, 'fail');
+  assert.equal(highRejected.acceptancePolicy.lowN.status, 'blocked');
+  assert.ok(highRejected.blockers.some((blocker) => (
+    blocker.startsWith('high-n-')
+  )));
+
+  const scalingFailure = summarize({
+    lowCandidateScale: 0.80,
+    highCandidateScale: 0.81
+  });
+  const scalingRejected = applyAuthoritativeTwoLevelLowNAcceptancePolicy(
+    scalingFailure.measured,
+    {
+      runs: scalingFailure.runs,
+      cgroupMemoryEvidence: cleanCampaignMemoryEvidence()
+    }
+  );
+  assert.equal(scalingRejected.status, 'fail');
+  assert.ok(scalingRejected.blockers.includes(
+    'paired-authoritative-two-level-relative-scaling-gain-below-threshold'
+  ));
+
+  const memoryFailure = cleanCampaignMemoryEvidence();
+  memoryFailure.after.memoryPeak = 8_000_000_000;
+  const lowDebt = summarize({
+    lowCandidateScale: 0.50,
+    highCandidateScale: 0.90
+  });
+  const memoryRejected = applyAuthoritativeTwoLevelLowNAcceptancePolicy(
+    lowDebt.measured,
+    {
+      runs: lowDebt.runs,
+      cgroupMemoryEvidence: memoryFailure
+    }
+  );
+  assert.equal(memoryRejected.status, 'fail');
+  assert.equal(memoryRejected.acceptancePolicy.lowN.status, 'blocked');
+  assert.ok(memoryRejected.blockers.includes(
+    'authoritative-two-level-campaign-memory-evidence-incomplete'
+  ));
 });
 
 test('paired spatial arena-depth characterization proves same-source 3-versus-8 evidence', () => {

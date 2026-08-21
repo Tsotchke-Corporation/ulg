@@ -362,6 +362,32 @@ test('authoritative checkpoint upload pairs fail closed on torn mechanics genera
   });
   assert.equal(verifiedTimeZero.status, 'ready');
   assert.equal(verifiedTimeZero.timeZeroProvenanceVerified, true);
+
+  const explicitSourceSlotZero = validateAuthoritativeGpuUploadPair({
+    sphParticleUpload: {
+      ...sphParticleUpload,
+      slot: 0,
+      sourceSlot: 0,
+      nextSlot: 0,
+      step: 0,
+      time: 0
+    },
+    mlsMpmParticleUpload: {
+      ...mlsMpmParticleUpload,
+      slot: 0,
+      sourceSlot: 0,
+      nextSlot: 0,
+      step: 0,
+      time: 0
+    },
+    requireTimeZero: true,
+    expectedStep: 0,
+    expectedTimeS: 0
+  });
+  assert.equal(explicitSourceSlotZero.status, 'ready');
+  assert.equal(explicitSourceSlotZero.sharedSlotIdentityVerified, true);
+  assert.equal(explicitSourceSlotZero.coherenceLevel, 'shared-slot-and-metadata');
+  assert.equal(explicitSourceSlotZero.timeZeroProvenanceVerified, true);
 });
 
 test('checkpoint shader is general, fixed-capacity, and preserves raw phase fractions', () => {

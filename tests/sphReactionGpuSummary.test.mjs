@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
   ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
   SPH_GPU_REACTION_PRODUCT_EVENT_DISPOSITION_IDS,
+  sphReactionStrictGateF32ToBits,
   ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
@@ -19,15 +21,38 @@ import {
   decodeSphReactionProductPlacementSummaryValues,
   decodeSphReactionProductInventoryValues,
   decodeSphReactionSummaryValues,
+  createSphReactionStrictGateProducerShadow,
+  createSphReactionStrictGateProducerReceipt,
+  createSphReactionStrictGateGpuFinalizePlan,
   createResidentProductMassHandle,
+  deriveSphReactionStrictGateStaticBlockerFlags,
+  finalizeSphReactionStrictGateCpu,
+  hashSphReactionStrictGateF32Rows,
   reactionStrictGateFromSummary,
+  resolveSphReactionProductPlacementClassificationProgram,
   runSphReactionSummaryWebGpu,
   sphReactionProductEventCompactWgsl,
+  sphReactionStrictGateFinalizeWgsl,
+  validateSphReactionStrictGateControl,
+  SPH_REACTION_STRICT_GATE_BLOCKER,
+  SPH_REACTION_STRICT_GATE_BYTES,
+  SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE,
+  SPH_REACTION_STRICT_GATE_INDEX,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_STATUS,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+  SPH_REACTION_STRICT_GATE_STATUS,
+  SPH_REACTION_STRICT_GATE_VERSION,
   ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   SPH_GPU_REACTION_SUMMARY_FLOATS
 } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import {
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../src/runtime/webgpuComputeLayout.js';
 import {
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_LAYOUT,
@@ -57,6 +82,8 @@ import {
   sphReactionProductPlacementTransactionalTerminalWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
 import {
+  createSphReactionProductEventSpatialClassificationWgsl,
+  sphReactionProductEventSpatialClassificationV2Wgsl,
   sphReactionProductEventSpatialClassificationWgsl,
   sphReactionProductSpareAssignWgsl,
   sphReactionProductSpareEventMarkWgsl,
@@ -71,7 +98,10 @@ function fakeSummaryDevice(
   productInventoryValues = new Float32Array(),
   atomResidualValues = new Float32Array(),
   productEventValues = new Float32Array(),
-  productPlacementValues = new Float32Array()
+  productPlacementValues = new Float32Array(),
+  {
+    throwDestroyOnceLabel = null
+  } = {}
 ) {
   const createdBuffers = [];
   const bindGroups = [];
@@ -80,6 +110,8 @@ function fakeSummaryDevice(
   const copies = [];
   const submissions = [];
   const writes = [];
+  let queueFenceCount = 0;
+  let destroyThrowConsumed = false;
   return {
     createdBuffers,
     bindGroups,
@@ -88,6 +120,9 @@ function fakeSummaryDevice(
     copies,
     submissions,
     writes,
+    get queueFenceCount() {
+      return queueFenceCount;
+    },
     queue: {
       writeBuffer(buffer, offset, data) {
         writes.push({
@@ -99,6 +134,10 @@ function fakeSummaryDevice(
       },
       submit(commands) {
         submissions.push(commands);
+      },
+      onSubmittedWorkDone() {
+        queueFenceCount += 1;
+        return Promise.resolve();
       }
     },
     createBuffer({ label, size, usage }) {
@@ -126,6 +165,13 @@ function fakeSummaryDevice(
           this.unmapped = true;
         },
         destroy() {
+          if (
+            label === throwDestroyOnceLabel
+            && !destroyThrowConsumed
+          ) {
+            destroyThrowConsumed = true;
+            throw new Error(`injected one-shot destroy failure: ${label}`);
+          }
           this.destroyed = true;
         }
       };
@@ -191,6 +237,14 @@ function reactionTable() {
     gasProductCount: 1,
     atomTermCount: 4,
     combinedRecords: new Float32Array(120),
+    atomTermStrideFloats: SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length,
+    atomTermLayout: [...SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT],
+    atomTermRecords: new Float32Array([
+      0, 1, 0, 1, 1, 2, 0, 1,
+      0, 1, 1, 2, 1, 1, 0, 1,
+      0, 2, 0, 1, 1, 2, 0, 1,
+      0, 2, 1, 2, 1, 1, 0, 1
+    ]),
     productTermMetadata: [
       {
         productTermIndex: 0,
@@ -232,10 +286,15 @@ function reactionTable() {
         chargeBalance: { balanced: true },
         provisionalEnergeticsStatus: null
       },
+      reactantTermOffset: 0,
+      reactantTermCount: 2,
+      productTermOffset: 0,
+      productTermCount: 2,
       energyModel: 'atomic-kohn-sham-tight-binding-v0'
     }],
     atomTermMetadata: [
       {
+        atomTermIndex: 0,
         reactionIndex: 0,
         termKind: 'reactant',
         termKindId: 1,
@@ -245,9 +304,11 @@ function reactionTable() {
         coefficient: 2,
         charge: 0,
         material: 'a',
-        formula: 'A'
+        formula: 'A',
+        status: 1
       },
       {
+        atomTermIndex: 1,
         reactionIndex: 0,
         termKind: 'reactant',
         termKindId: 1,
@@ -257,9 +318,11 @@ function reactionTable() {
         coefficient: 1,
         charge: 0,
         material: 'b',
-        formula: 'B'
+        formula: 'B',
+        status: 1
       },
       {
+        atomTermIndex: 2,
         reactionIndex: 0,
         termKind: 'product',
         termKindId: 2,
@@ -269,9 +332,11 @@ function reactionTable() {
         coefficient: 2,
         charge: 0,
         material: 'ab',
-        formula: 'AB'
+        formula: 'AB',
+        status: 1
       },
       {
+        atomTermIndex: 3,
         reactionIndex: 0,
         termKind: 'product',
         termKindId: 2,
@@ -281,7 +346,8 @@ function reactionTable() {
         coefficient: 1,
         charge: 0,
         material: 'c2',
-        formula: 'C2'
+        formula: 'C2',
+        status: 1
       }
     ]
   };
@@ -438,6 +504,117 @@ test('canonical placement envelope and SS classifier publish real parallel trave
   );
 });
 
+test('canonical placement classifier source and host selection match directory ABI exactly', () => {
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /spatial_expectation: SchroederSpatialExactNearExpectationV1/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /SS_EXACT_NEAR_ABI_VERSION_V1: u32 = 1u/
+  );
+  assert.doesNotMatch(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /SchroederSpatialExactNearExpectationV2/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationV2Wgsl,
+    /spatial_expectation: SchroederSpatialExactNearExpectationV2/
+  );
+  assert.match(
+    sphReactionProductEventSpatialClassificationV2Wgsl,
+    /SS_EXACT_NEAR_ABI_VERSION_V2: u32 = 2u/
+  );
+  assert.doesNotMatch(
+    sphReactionProductEventSpatialClassificationV2Wgsl,
+    /SchroederSpatialExactNearExpectationV1/
+  );
+  assert.equal(
+    sphReactionProductEventSpatialClassificationWgsl.match(
+      /spatial_expectation\.source_count/g
+    )?.length,
+    3
+  );
+  assert.doesNotMatch(
+    sphReactionProductEventSpatialClassificationWgsl,
+    /spatial_expectation\.physical_source_count/
+  );
+  assert.equal(
+    sphReactionProductEventSpatialClassificationV2Wgsl.match(
+      /spatial_expectation\.physical_source_count/g
+    )?.length,
+    3
+  );
+  assert.doesNotMatch(
+    sphReactionProductEventSpatialClassificationV2Wgsl,
+    /spatial_expectation\.source_count/
+  );
+  assert.throws(
+    () => createSphReactionProductEventSpatialClassificationWgsl(3),
+    /unsupported reaction-product placement directory ABI version/
+  );
+
+  const expectationData = new Uint32Array(28);
+  const placementV1 = {
+    directoryAbiVersion: 1,
+    expectationBufferByteLength: expectationData.byteLength,
+    generation: { execution: { abiVersion: 1 } },
+    authentication: {
+      directoryAbiVersion: 1,
+      expectationUniformBytes: expectationData.byteLength,
+      expectationData
+    }
+  };
+  const placementV2 = {
+    ...placementV1,
+    directoryAbiVersion: 2,
+    generation: { execution: { abiVersion: 2 } },
+    authentication: {
+      ...placementV1.authentication,
+      directoryAbiVersion: 2
+    }
+  };
+  const programV1 =
+    resolveSphReactionProductPlacementClassificationProgram(placementV1);
+  const programV2 =
+    resolveSphReactionProductPlacementClassificationProgram(placementV2);
+  assert.equal(programV1.cacheKeySuffix, 'directory-v1');
+  assert.equal(programV1.shaderCode, sphReactionProductEventSpatialClassificationWgsl);
+  assert.equal(programV2.cacheKeySuffix, 'directory-v2');
+  assert.equal(programV2.shaderCode, sphReactionProductEventSpatialClassificationV2Wgsl);
+
+  assert.throws(
+    () => resolveSphReactionProductPlacementClassificationProgram({
+      ...placementV2,
+      directoryAbiVersion: 3
+    }),
+    {
+      code:
+        'ERR_SPH_REACTION_PRODUCT_PLACEMENT_CLASSIFICATION_UNSUPPORTED_DIRECTORY_ABI'
+    }
+  );
+  assert.throws(
+    () => resolveSphReactionProductPlacementClassificationProgram({
+      ...placementV2,
+      generation: { execution: { abiVersion: 1 } }
+    }),
+    {
+      code:
+        'ERR_SPH_REACTION_PRODUCT_PLACEMENT_CLASSIFICATION_DIRECTORY_ABI_MISMATCH'
+    }
+  );
+  assert.throws(
+    () => resolveSphReactionProductPlacementClassificationProgram({
+      ...placementV2,
+      expectationBufferByteLength: expectationData.byteLength + 4
+    }),
+    {
+      code:
+        'ERR_SPH_REACTION_PRODUCT_PLACEMENT_CLASSIFICATION_DIRECTORY_ABI_MISMATCH'
+    }
+  );
+});
+
 test('canonical placement uses stable segmented reductions and disjoint direct-pair hyperedges', () => {
   assert.match(sphReactionProductSpareParticleMarkWgsl, /mark_spare_particles/);
   assert.match(sphReactionProductSpareParticleMarkWgsl, /0x80000000u/);
@@ -516,6 +693,24 @@ test('canonical placement uses stable segmented reductions and disjoint direct-p
     assert.doesNotMatch(source, /@workgroup_size\(1\)/);
     assert.doesNotMatch(source, /for \(var event = 0u; event < active_event_count/);
   }
+  for (const source of [
+    sphReactionProductPlacementDirectReduceWgsl,
+    sphReactionProductPlacementSummaryReduceWgsl
+  ]) {
+    assert.doesNotMatch(
+      source,
+      /output_values\[[^\]]+\]\.[xyzw]{2,4}\s*=/,
+      'storage-buffer vector lanes must be replaced with a whole-vector write'
+    );
+  }
+  assert.match(
+    sphReactionProductPlacementDirectReduceWgsl,
+    /output_values\[out\] = vec4<f32>\(current\.x \+ prior\.x, selected\.yzw\)/
+  );
+  assert.match(
+    sphReactionProductPlacementSummaryReduceWgsl,
+    /output_values\[out \+ 1u\] = vec4<f32>\(/
+  );
   assert.match(sphReactionProductPlacementPlanWgsl, /let event = global_id\.x/);
   assert.doesNotMatch(
     sphReactionProductPlacementPlanWgsl,
@@ -1222,6 +1417,1313 @@ test('SPH reaction strict gate blocks provisional energetics and atom residual d
   assert.deepEqual(provisional.blockers, ['provisional-energetics-not-strict']);
 });
 
+function strictGateAtomTermAuthority(atomResidualValues) {
+  const authority = new Float32Array(atomResidualValues.length);
+  for (let offset = 0; offset < atomResidualValues.length; offset += 8) {
+    authority.set([
+      atomResidualValues[offset],
+      atomResidualValues[offset + 5],
+      atomResidualValues[offset + 6],
+      atomResidualValues[offset + 1],
+      1,
+      1,
+      0,
+      atomResidualValues[offset + 7]
+    ], offset);
+  }
+  return authority;
+}
+
+function finalizeStrictGateFixture({
+  atomResidualValues,
+  atomTermValues = strictGateAtomTermAuthority(atomResidualValues),
+  receiptAtomResidualValues = atomResidualValues,
+  receiptAtomTermValues = atomTermValues,
+  producerShadowWords = undefined,
+  reactionCount = 1,
+  atomTermCount = atomResidualValues.length / 8,
+  atomResidualCapacity = atomResidualValues.length / 8,
+  atomTermCapacity = atomTermValues.length / 8,
+  receiptSourceGeneration = 17,
+  receiptCompletionGeneration = 18,
+  receiptSeal = 19,
+  expectedSourceGeneration = receiptSourceGeneration,
+  expectedCompletionGeneration = receiptCompletionGeneration,
+  expectedSeal = receiptSeal,
+  receiptReactionCount = reactionCount,
+  receiptAtomTermCount = atomTermCount,
+  receiptAtomResidualCapacity = atomResidualCapacity,
+  receiptAtomTermCapacity = atomTermCapacity,
+  ...overrides
+}) {
+  const resolvedProducerShadowWords = producerShadowWords === undefined
+    ? createSphReactionStrictGateProducerShadow({
+        atomResidualValues: receiptAtomResidualValues,
+        atomTermValues: receiptAtomTermValues,
+        atomTermCount: receiptAtomTermCount
+      })
+    : producerShadowWords;
+  const producerReceipt = createSphReactionStrictGateProducerReceipt({
+    atomResidualValues: receiptAtomResidualValues,
+    atomTermValues: receiptAtomTermValues,
+    producerShadowWords: resolvedProducerShadowWords,
+    sourceGeneration: receiptSourceGeneration,
+    completionGeneration: receiptCompletionGeneration,
+    seal: receiptSeal,
+    reactionCount: receiptReactionCount,
+    atomTermCount: receiptAtomTermCount,
+    atomResidualCapacity: receiptAtomResidualCapacity,
+    atomTermCapacity: receiptAtomTermCapacity,
+    producerSequence: 20
+  });
+  return finalizeSphReactionStrictGateCpu({
+    atomResidualValues,
+    atomTermValues,
+    producerShadowWords: resolvedProducerShadowWords,
+    producerReceipt,
+    reactionCount,
+    atomTermCount,
+    atomResidualCapacity,
+    atomTermCapacity,
+    expectedSourceGeneration,
+    expectedCompletionGeneration,
+    expectedSeal,
+    ...overrides
+  });
+}
+
+test('GPU strict-gate CPU oracle authenticates exact atom-term rows and fails closed', () => {
+  const balancedRows = new Float32Array([
+    0, 11, -2, -1, 1, 1, 0, 1,
+    0, 8, -1, -1, 1, 1, 1, 1,
+    0, 11, 2, 1, 1, 2, 0, 1,
+    0, 8, 1, 1, 1, 2, 1, 1
+  ]);
+  const finalize = (overrides = {}) => finalizeStrictGateFixture({
+    atomResidualValues: overrides.atomResidualValues ?? balancedRows,
+    ...overrides
+  });
+  const passed = finalize();
+  assert.equal(passed.pass, true);
+  assert.equal(passed.blockerFlags, 0);
+  assert.deepEqual(passed.atomResidualMolByReactionAndZ, {
+    0: { 8: 0, 11: 0 }
+  });
+  assert.deepEqual(passed.chargeResidualMolByReaction, { 0: 0 });
+  assert.equal(passed.maxAbsAtomResidualMol, 0);
+  assert.equal(passed.maxAbsChargeResidualMol, 0);
+  assert.equal(passed.controlWords.byteLength, SPH_REACTION_STRICT_GATE_BYTES);
+  assert.equal(
+    validateSphReactionStrictGateControl(passed.controlWords, {
+      sourceGeneration: 17,
+      completionGeneration: 18,
+      seal: 19,
+      reactionCount: 1,
+      atomTermCount: 4,
+      atomResidualCapacity: 4,
+      atomTermCapacity: 4,
+      atomResidualStrideVec4: 2,
+      atomTermStrideVec4: 2,
+      atomResidualToleranceMol: 1e-6,
+      chargeResidualToleranceMol: 1e-6,
+      gateVersion: SPH_REACTION_STRICT_GATE_VERSION,
+      producerReceiptVersion: SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+      producerReceipt: passed.producerReceipt
+    }).pass,
+    true
+  );
+
+  const driftRows = balancedRows.slice();
+  driftRows[18] += 1e-3;
+  assert.notEqual(
+    finalize({ atomResidualValues: driftRows }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.ATOM_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+  const chargedRows = balancedRows.slice();
+  chargedRows[19] += 1e-3;
+  assert.notEqual(
+    finalize({ atomResidualValues: chargedRows }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.CHARGE_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+  const problemRows = balancedRows.slice();
+  problemRows[31] = 0;
+  assert.notEqual(
+    finalize({ atomResidualValues: problemRows }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+    0
+  );
+  const nonfiniteRows = balancedRows.slice();
+  nonfiniteRows[2] = Number.NaN;
+  assert.notEqual(
+    finalize({ atomResidualValues: nonfiniteRows }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.NONFINITE_EVIDENCE,
+    0
+  );
+  assert.notEqual(
+    finalize({
+      atomResidualValues: balancedRows.slice(0, 24),
+      atomTermCount: 4
+    }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+    0
+  );
+  assert.notEqual(
+    finalize({ expectedSourceGeneration: 99 }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    finalize({ expectedSeal: 99 }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.SEAL_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    finalize({
+      staticBlockerFlags: SPH_REACTION_STRICT_GATE_BLOCKER.PROVISIONAL_ENERGETICS
+    }).blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.PROVISIONAL_ENERGETICS,
+    0
+  );
+  assert.notEqual(
+    finalize({ expectedSourceGeneration: '17' }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    finalize({ expectedSeal: '19' }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.SEAL_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    finalize({ reactionCount: '1' }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    finalize({ atomResidualToleranceMol: '0.001' }).blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+});
+
+test('GPU strict-gate validation binds the exact independently expected tolerance policy', () => {
+  const passed = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, 0, 0, 1, 1, 0, 1
+    ])
+  });
+  assert.equal(passed.pass, true);
+  const expectedAuthority = {
+    sourceGeneration: 17,
+    completionGeneration: 18,
+    seal: 19,
+    reactionCount: 1,
+    atomTermCount: 1,
+    atomResidualCapacity: 1,
+    atomTermCapacity: 1,
+    atomResidualStrideVec4: 2,
+    atomTermStrideVec4: 2,
+    atomResidualToleranceMol: 1e-6,
+    chargeResidualToleranceMol: 1e-6,
+    gateVersion: SPH_REACTION_STRICT_GATE_VERSION,
+    producerReceiptVersion: SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+    producerReceipt: passed.producerReceipt
+  };
+  assert.equal(validateSphReactionStrictGateControl(
+    passed.controlWords,
+    expectedAuthority
+  ).pass, true);
+
+  for (const producerReceipt of [0, false, '', Number.NaN]) {
+    const validation = validateSphReactionStrictGateControl(
+      passed.controlWords,
+      {
+        ...expectedAuthority,
+        producerReceipt,
+        requireExpectedAuthority: false
+      }
+    );
+    assert.equal(validation.valid, false);
+    assert.equal(validation.pass, false);
+    assert.ok(validation.reasons.includes(
+      'producer-producer-receipt-byte-length-mismatch'
+    ));
+  }
+
+  for (const [field, toleranceName] of [
+    [SPH_REACTION_STRICT_GATE_INDEX.atomResidualToleranceMol,
+      'atomResidualToleranceMol'],
+    [SPH_REACTION_STRICT_GATE_INDEX.chargeResidualToleranceMol,
+      'chargeResidualToleranceMol']
+  ]) {
+    const replayedLoosePolicy = passed.controlWords.slice();
+    replayedLoosePolicy[field] = sphReactionStrictGateF32ToBits(1);
+    const validation = validateSphReactionStrictGateControl(
+      replayedLoosePolicy,
+      expectedAuthority
+    );
+    assert.equal(validation.authorityBound, true);
+    assert.equal(validation.pass, false);
+    assert.ok(validation.reasons.includes(`${toleranceName}-mismatch`));
+  }
+
+  const {
+    atomResidualToleranceMol: _omittedAtomTolerance,
+    chargeResidualToleranceMol: _omittedChargeTolerance,
+    ...missingToleranceAuthority
+  } = expectedAuthority;
+  const missingToleranceValidation = validateSphReactionStrictGateControl(
+    passed.controlWords,
+    missingToleranceAuthority
+  );
+  assert.equal(missingToleranceValidation.authorityBound, false);
+  assert.equal(missingToleranceValidation.pass, false);
+  assert.ok(missingToleranceValidation.reasons.includes(
+    'expected-atomResidualToleranceMol-required'
+  ));
+  assert.ok(missingToleranceValidation.reasons.includes(
+    'expected-chargeResidualToleranceMol-required'
+  ));
+});
+
+test('GPU strict-gate uses deterministic binary32 sums at rounding, subnormal, and overflow edges', () => {
+  const nextAfterOne = Math.fround(1 + 2 ** -23);
+  const tieRoundsUp = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, nextAfterOne, 0, 1, 1, 0, 1,
+      0, 1, 2 ** -24, 0, 1, 2, 0, 1
+    ]),
+    atomResidualToleranceMol: nextAfterOne
+  });
+  assert.equal(tieRoundsUp.maxAbsAtomResidualMol, Math.fround(
+    1 + 2 * (2 ** -23)
+  ));
+  assert.notEqual(
+    tieRoundsUp.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.ATOM_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+
+  const minimumSubnormal = new Float32Array(Uint32Array.of(1).buffer)[0];
+  const subnormal = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, minimumSubnormal, 0, 1, 1, 0, 1
+    ]),
+    atomResidualToleranceMol: 0
+  });
+  assert.equal(subnormal.maxAbsAtomResidualMol, minimumSubnormal);
+  assert.notEqual(
+    subnormal.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.ATOM_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+
+  const maximumFinite = new Float32Array(
+    Uint32Array.of(0x7f7f_ffff).buffer
+  )[0];
+  const overflow = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, maximumFinite, 0, 1, 1, 0, 1,
+      0, 1, maximumFinite, 0, 1, 2, 0, 1
+    ]),
+    atomResidualToleranceMol: maximumFinite
+  });
+  assert.notEqual(
+    overflow.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.NONFINITE_EVIDENCE,
+    0
+  );
+  assert.equal(overflow.pass, false);
+});
+
+test('GPU strict-gate oracle cannot cancel atom or charge drift across reactions', () => {
+  const finalize = (atomResidualValues) => finalizeStrictGateFixture({
+    atomResidualValues,
+    reactionCount: 2,
+    atomTermCount: 2,
+    receiptSourceGeneration: 21,
+    receiptCompletionGeneration: 22,
+    receiptSeal: 23
+  });
+  const atomCancellation = finalize(new Float32Array([
+    0, 1, 1, 0, 1, 1, 0, 1,
+    1, 1, -1, 0, 1, 1, 0, 1
+  ]));
+  assert.equal(atomCancellation.pass, false);
+  assert.equal(atomCancellation.maxAbsAtomResidualMol, 1);
+  assert.deepEqual(atomCancellation.atomResidualMolByReactionAndZ, {
+    0: { 1: 1 },
+    1: { 1: -1 }
+  });
+  assert.notEqual(
+    atomCancellation.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.ATOM_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+
+  const chargeCancellation = finalize(new Float32Array([
+    0, 1, 0, 1, 1, 1, 0, 1,
+    1, 1, 0, -1, 1, 1, 0, 1
+  ]));
+  assert.equal(chargeCancellation.pass, false);
+  assert.equal(chargeCancellation.maxAbsChargeResidualMol, 1);
+  assert.equal(
+    chargeCancellation.validation.control.maxAbsChargeResidualMol,
+    1
+  );
+  assert.equal(chargeCancellation.validation.valid, true);
+  assert.deepEqual(chargeCancellation.chargeResidualMolByReaction, {
+    0: 1,
+    1: -1
+  });
+  assert.notEqual(
+    chargeCancellation.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.CHARGE_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+
+  const outOfOrder = finalize(new Float32Array([
+    1, 1, 0, 0, 1, 1, 0, 1,
+    0, 1, 0, 0, 1, 1, 0, 1
+  ]));
+  assert.equal(outOfOrder.pass, false);
+  assert.notEqual(
+    outOfOrder.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+    0
+  );
+
+  const uncoveredReaction = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, 0, 0, 1, 1, 0, 1
+    ]),
+    reactionCount: 2,
+    atomTermCount: 1,
+    receiptSourceGeneration: 21,
+    receiptCompletionGeneration: 22,
+    receiptSeal: 23
+  });
+  assert.equal(uncoveredReaction.pass, false);
+  assert.notEqual(
+    uncoveredReaction.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+    0
+  );
+});
+
+test('GPU strict-gate rejects duplicate, relabelled, stale, and copied evidence', () => {
+  const canonicalEvidence = new Float32Array([
+    0, 1, 0, 0, 1, 1, 0, 1,
+    0, 8, 0, 0, 1, 2, 0, 1
+  ]);
+  const canonicalAuthority = strictGateAtomTermAuthority(canonicalEvidence);
+  const passed = finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority
+  });
+  assert.equal(passed.pass, true);
+
+  const duplicated = canonicalEvidence.slice();
+  duplicated.set(duplicated.subarray(0, 8), 8);
+  const duplicateResult = finalizeStrictGateFixture({
+    atomResidualValues: duplicated,
+    atomTermValues: canonicalAuthority
+  });
+  assert.equal(duplicateResult.pass, false);
+  assert.notEqual(
+    duplicateResult.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+    0
+  );
+
+  const relabelled = canonicalEvidence.slice();
+  relabelled[2] = 1;
+  relabelled[9] = 1;
+  relabelled[10] = -1;
+  const relabelledResult = finalizeStrictGateFixture({
+    atomResidualValues: relabelled,
+    atomTermValues: canonicalAuthority
+  });
+  assert.equal(relabelledResult.pass, false);
+  assert.notEqual(
+    relabelledResult.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+    0
+  );
+
+  const staleReceiptResult = finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    receiptSourceGeneration: 17,
+    expectedSourceGeneration: 117
+  });
+  assert.equal(staleReceiptResult.pass, false);
+  assert.notEqual(
+    staleReceiptResult.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH,
+    0
+  );
+
+  const changedEvidence = canonicalEvidence.slice();
+  changedEvidence[9] = 2;
+  const changedAuthority = strictGateAtomTermAuthority(changedEvidence);
+  const copiedReceiptResult = finalizeStrictGateFixture({
+    atomResidualValues: changedEvidence,
+    atomTermValues: changedAuthority,
+    receiptAtomResidualValues: canonicalEvidence,
+    receiptAtomTermValues: canonicalAuthority
+  });
+  assert.equal(copiedReceiptResult.pass, false);
+  assert.notEqual(
+    copiedReceiptResult.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.BITWISE_SHADOW_MISMATCH,
+    0
+  );
+
+  assert.equal(validateSphReactionStrictGateControl(passed.controlWords).pass, false);
+  const missingCapacityStrideExpectations = validateSphReactionStrictGateControl(
+    passed.controlWords,
+    {
+      sourceGeneration: 17,
+      completionGeneration: 18,
+      seal: 19,
+      reactionCount: 1,
+      atomTermCount: 2,
+      atomResidualToleranceMol: 1e-6,
+      chargeResidualToleranceMol: 1e-6,
+      gateVersion: SPH_REACTION_STRICT_GATE_VERSION,
+      producerReceiptVersion: SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+      producerReceipt: passed.producerReceipt
+    }
+  );
+  assert.equal(missingCapacityStrideExpectations.pass, false);
+  assert.ok(missingCapacityStrideExpectations.reasons.some((reason) =>
+    reason.includes('expected-atomResidualCapacity-required')
+  ));
+  assert.ok(missingCapacityStrideExpectations.reasons.some((reason) =>
+    reason.includes('expected-atomTermStrideVec4-required')
+  ));
+  const impossibleZeroReaction = passed.controlWords.slice();
+  impossibleZeroReaction[SPH_REACTION_STRICT_GATE_INDEX.reactionCount] = 0;
+  assert.equal(validateSphReactionStrictGateControl(impossibleZeroReaction, {
+    sourceGeneration: 17,
+    completionGeneration: 18,
+    seal: 19,
+    reactionCount: 0,
+    atomTermCount: 2,
+    atomResidualCapacity: 2,
+    atomTermCapacity: 2,
+    atomResidualStrideVec4: 2,
+    atomTermStrideVec4: 2,
+    atomResidualToleranceMol: 1e-6,
+    chargeResidualToleranceMol: 1e-6,
+    gateVersion: SPH_REACTION_STRICT_GATE_VERSION,
+    producerReceiptVersion: SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+    producerReceipt: passed.producerReceipt
+  }).pass, false);
+});
+
+test('GPU strict-gate rejects signed-zero identity aliases before aggregation', () => {
+  const canonicalEvidence = new Float32Array([
+    0, 1, 0, 0, 1, 1, 0, 1
+  ]);
+  const canonicalAuthority = strictGateAtomTermAuthority(canonicalEvidence);
+  for (const [residualLane, authorityLane, label] of [
+    [0, 0, 'reaction index'],
+    [6, 2, 'term index']
+  ]) {
+    const signedZeroEvidence = canonicalEvidence.slice();
+    signedZeroEvidence[residualLane] = -0;
+    const crossPlaneResult = finalizeStrictGateFixture({
+      atomResidualValues: signedZeroEvidence,
+      atomTermValues: canonicalAuthority
+    });
+    assert.equal(crossPlaneResult.pass, false, label);
+    assert.notEqual(
+      crossPlaneResult.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+      0,
+      label
+    );
+    assert.equal(
+      crossPlaneResult.blockerFlags
+        & SPH_REACTION_STRICT_GATE_BLOCKER.BITWISE_SHADOW_MISMATCH,
+      0,
+      `${label} must be rejected even when both shadow planes are authentic`
+    );
+
+    const signedZeroAuthority = canonicalAuthority.slice();
+    signedZeroAuthority[authorityLane] = -0;
+    const canonicalizationResult = finalizeStrictGateFixture({
+      atomResidualValues: signedZeroEvidence,
+      atomTermValues: signedZeroAuthority
+    });
+    assert.equal(canonicalizationResult.pass, false, `${label} canonicalization`);
+    assert.notEqual(
+      canonicalizationResult.blockerFlags
+        & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+      0,
+      `${label} canonicalization`
+    );
+  }
+});
+
+test('GPU strict-gate exact shadows reject concrete FNV checksum collisions', () => {
+  const canonicalEvidence = new Float32Array([
+    0, 1, 0, 0, 1, 1, 0, 1,
+    0, 1, 0, 0, 1, 2, 0, 1
+  ]);
+  const collidingEvidence = new Float32Array([
+    0, 1, 0, 0, 24, 1, 0, 1,
+    0, 1, 0, 0, 384, 2, 0, 1
+  ]);
+  assert.equal(
+    hashSphReactionStrictGateF32Rows(canonicalEvidence, 2),
+    0x85e9_1905
+  );
+  assert.equal(
+    hashSphReactionStrictGateF32Rows(collidingEvidence, 2),
+    0x85e9_1905
+  );
+  const evidenceCollision = finalizeStrictGateFixture({
+    atomResidualValues: collidingEvidence,
+    receiptAtomResidualValues: canonicalEvidence
+  });
+  assert.equal(evidenceCollision.pass, false);
+  assert.notEqual(
+    evidenceCollision.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.BITWISE_SHADOW_MISMATCH,
+    0
+  );
+
+  const canonicalAuthority = new Float32Array([
+    0, 1, 0, 1, 1, 1, 0, 1,
+    0, 2, 0, 1, 1, 1, 0, 1
+  ]);
+  const collidingAuthority = new Float32Array([
+    0, 1, 0, 1, 1, 1, -999935, 1,
+    0, 2, 0, 1, 1, 1, 969331, 1
+  ]);
+  assert.equal(
+    hashSphReactionStrictGateF32Rows(canonicalAuthority, 2),
+    0x29e9_1905
+  );
+  assert.equal(
+    hashSphReactionStrictGateF32Rows(collidingAuthority, 2),
+    0x29e9_1905
+  );
+  const authorityCollision = finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: collidingAuthority,
+    receiptAtomTermValues: canonicalAuthority
+  });
+  assert.equal(authorityCollision.pass, false);
+  assert.notEqual(
+    authorityCollision.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.BITWISE_SHADOW_MISMATCH,
+    0
+  );
+
+  const missingShadow = finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    producerShadowWords: null
+  });
+  assert.equal(missingShadow.pass, false);
+  assert.notEqual(
+    missingShadow.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+    0
+  );
+});
+
+test('GPU strict-gate exact shadow authenticates every lane and exact planar layout', () => {
+  const canonicalEvidence = new Float32Array([
+    0, 1, 0, 0, 1, 1, 0, 1,
+    0, 8, 0, 0, 1, 2, 0, 1
+  ]);
+  const canonicalAuthority = strictGateAtomTermAuthority(canonicalEvidence);
+  const assertShadowBlocked = (result, message) => {
+    assert.equal(result.pass, false, message);
+    assert.notEqual(
+      result.blockerFlags
+        & SPH_REACTION_STRICT_GATE_BLOCKER.BITWISE_SHADOW_MISMATCH,
+      0,
+      message
+    );
+    assert.notEqual(
+      result.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+      0,
+      message
+    );
+  };
+
+  for (let lane = 0; lane < 16; lane += 1) {
+    const liveEvidence = canonicalEvidence.slice();
+    const liveAuthority = canonicalAuthority.slice();
+    const liveWords = lane < 8
+      ? new Uint32Array(liveEvidence.buffer)
+      : new Uint32Array(liveAuthority.buffer);
+    const wordIndex = lane < 8 ? lane : lane - 8;
+    liveWords[wordIndex] = (liveWords[wordIndex] ^ 1) >>> 0;
+    assertShadowBlocked(finalizeStrictGateFixture({
+      atomResidualValues: liveEvidence,
+      atomTermValues: liveAuthority,
+      receiptAtomResidualValues: canonicalEvidence,
+      receiptAtomTermValues: canonicalAuthority
+    }), `lane ${lane} must be bitwise authenticated`);
+  }
+
+  const negativeZeroEvidence = canonicalEvidence.slice();
+  new Uint32Array(negativeZeroEvidence.buffer)[2] = 0x8000_0000;
+  assertShadowBlocked(finalizeStrictGateFixture({
+    atomResidualValues: negativeZeroEvidence,
+    atomTermValues: canonicalAuthority,
+    receiptAtomResidualValues: canonicalEvidence,
+    receiptAtomTermValues: canonicalAuthority
+  }), '+0 and -0 must not authenticate as the same evidence');
+
+  const canonicalNanEvidence = canonicalEvidence.slice();
+  const differentNanEvidence = canonicalEvidence.slice();
+  new Uint32Array(canonicalNanEvidence.buffer)[2] = 0x7fc0_0001;
+  new Uint32Array(differentNanEvidence.buffer)[2] = 0x7fc0_0002;
+  const canonicalNanAuthority = strictGateAtomTermAuthority(canonicalNanEvidence);
+  assertShadowBlocked(finalizeStrictGateFixture({
+    atomResidualValues: differentNanEvidence,
+    atomTermValues: canonicalNanAuthority,
+    receiptAtomResidualValues: canonicalNanEvidence,
+    receiptAtomTermValues: canonicalNanAuthority
+  }), 'distinct NaN payloads must not authenticate');
+
+  const permutedEvidence = new Float32Array([
+    ...canonicalEvidence.subarray(8, 16),
+    ...canonicalEvidence.subarray(0, 8)
+  ]);
+  const permutedAuthority = new Float32Array([
+    ...canonicalAuthority.subarray(8, 16),
+    ...canonicalAuthority.subarray(0, 8)
+  ]);
+  assertShadowBlocked(finalizeStrictGateFixture({
+    atomResidualValues: permutedEvidence,
+    atomTermValues: permutedAuthority,
+    receiptAtomResidualValues: canonicalEvidence,
+    receiptAtomTermValues: canonicalAuthority
+  }), 'row permutations must not authenticate');
+
+  const canonicalShadow = createSphReactionStrictGateProducerShadow({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    atomTermCount: 2
+  });
+  const extendedShadow = new Uint32Array(canonicalShadow.length + 1);
+  extendedShadow.set(canonicalShadow);
+  for (const malformedShadow of [
+    canonicalShadow.slice(0, -1),
+    extendedShadow
+  ]) {
+    const result = finalizeStrictGateFixture({
+      atomResidualValues: canonicalEvidence,
+      atomTermValues: canonicalAuthority,
+      producerShadowWords: malformedShadow
+    });
+    assert.equal(result.pass, false);
+    assert.notEqual(
+      result.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+      0
+    );
+  }
+  const validReceipt = createSphReactionStrictGateProducerReceipt({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    producerShadowWords: canonicalShadow,
+    sourceGeneration: 17,
+    completionGeneration: 18,
+    seal: 19,
+    reactionCount: 1,
+    atomTermCount: 2,
+    atomResidualCapacity: 2,
+    atomTermCapacity: 2,
+    producerSequence: 20
+  });
+  const swappedShadow = new Uint32Array(canonicalShadow.length);
+  swappedShadow.set(canonicalShadow.subarray(16), 0);
+  swappedShadow.set(canonicalShadow.subarray(0, 16), 16);
+  assertShadowBlocked(finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    producerShadowWords: swappedShadow,
+    producerReceipt: validReceipt
+  }), 'swapped shadow planes must not authenticate');
+  for (const receiptIndex of [
+    SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.shadowPlaneWordCount,
+    SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.shadowLogicalWordCount
+  ]) {
+    const malformedReceipt = validReceipt.slice();
+    malformedReceipt[receiptIndex] += 1;
+    const result = finalizeStrictGateFixture({
+      atomResidualValues: canonicalEvidence,
+      atomTermValues: canonicalAuthority,
+      producerShadowWords: canonicalShadow,
+      producerReceipt: malformedReceipt
+    });
+    assert.equal(result.pass, false);
+    assert.notEqual(
+      result.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+      0
+    );
+    assert.ok(result.producerReceiptValidation.reasons.includes(
+      'producer-receipt-shadow-layout-invalid'
+    ));
+  }
+  const v1Receipt = validReceipt.slice();
+  v1Receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.version] = 1;
+  assert.equal(finalizeStrictGateFixture({
+    atomResidualValues: canonicalEvidence,
+    atomTermValues: canonicalAuthority,
+    producerShadowWords: canonicalShadow,
+    producerReceipt: v1Receipt
+  }).pass, false);
+});
+
+test('GPU strict-gate CPU oracle mirrors WGSL receipt blocker classification', () => {
+  const atomResidualValues = new Float32Array([
+    0, 8, 0, 0, 1, 1, 0, 1,
+    0, 8, 0, 0, 1, 2, 0, 1
+  ]);
+  const baseline = finalizeStrictGateFixture({ atomResidualValues });
+  assert.equal(baseline.pass, true);
+
+  const missingAndLayout = (
+    SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE
+    | SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH
+  ) >>> 0;
+  const cases = [
+    {
+      id: 'status-not-ready',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.statusFlags] =
+          SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_STATUS.BLOCKED
+          | SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_STATUS.FAIL_CLOSED;
+      },
+      expectedBlockers: missingAndLayout,
+      expectedReadyRows: 0
+    },
+    {
+      id: 'producer-blocker-present',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.blockerFlags] =
+          SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW;
+      },
+      expectedBlockers: missingAndLayout,
+      expectedReadyRows: 0
+    },
+    {
+      id: 'producer-sequence-zero',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.producerSequence] = 0;
+      },
+      expectedBlockers: missingAndLayout,
+      expectedReadyRows: 0
+    },
+    {
+      id: 'camel-case-reaction-count-drift',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.reactionCount] = 2;
+      },
+      expectedBlockers: missingAndLayout,
+      expectedReadyRows: 0
+    },
+    {
+      id: 'camel-case-stride-drift',
+      mutate(receipt) {
+        receipt[
+          SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.atomResidualStrideVec4
+        ] = 3;
+      },
+      expectedBlockers: missingAndLayout,
+      expectedReadyRows: 0
+    },
+    {
+      id: 'source-generation-drift',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.sourceGeneration] = 0;
+      },
+      expectedBlockers: (
+        SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE
+        | SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH
+      ) >>> 0,
+      expectedReadyRows: 2
+    },
+    {
+      id: 'completion-generation-drift',
+      mutate(receipt) {
+        receipt[
+          SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.completionGeneration
+        ] = 0;
+      },
+      expectedBlockers: (
+        SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE
+        | SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH
+      ) >>> 0,
+      expectedReadyRows: 2
+    },
+    {
+      id: 'seal-drift',
+      mutate(receipt) {
+        receipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.seal] = 0;
+      },
+      expectedBlockers: (
+        SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE
+        | SPH_REACTION_STRICT_GATE_BLOCKER.SEAL_MISMATCH
+      ) >>> 0,
+      expectedReadyRows: 2
+    }
+  ];
+
+  for (const receiptCase of cases) {
+    const producerReceipt = baseline.producerReceipt.slice();
+    receiptCase.mutate(producerReceipt);
+    const result = finalizeStrictGateFixture({
+      atomResidualValues,
+      producerReceipt
+    });
+    assert.equal(
+      result.blockerFlags,
+      receiptCase.expectedBlockers,
+      receiptCase.id
+    );
+    assert.equal(result.readyRowCount, receiptCase.expectedReadyRows, receiptCase.id);
+    assert.equal(
+      result.problemRowCount,
+      atomResidualValues.length / 8 - receiptCase.expectedReadyRows,
+      receiptCase.id
+    );
+  }
+
+  const shortReceipt = finalizeStrictGateFixture({
+    atomResidualValues,
+    producerReceipt: Uint32Array.of(0)
+  });
+  assert.equal(
+    shortReceipt.blockerFlags,
+    (
+      SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE
+      | SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH
+      | SPH_REACTION_STRICT_GATE_BLOCKER.SEAL_MISMATCH
+      | SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH
+    ) >>> 0
+  );
+  assert.equal(shortReceipt.readyRowCount, 0);
+  assert.equal(shortReceipt.problemRowCount, 2);
+});
+
+test('GPU strict-gate enforces exact f32 index bounds and max-f32 finiteness', () => {
+  const evidence = new Float32Array([
+    0, 1, 0, 0, SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE, 1, 0, 1
+  ]);
+  assert.equal(finalizeStrictGateFixture({ atomResidualValues: evidence }).pass, true);
+
+  const outOfRangeTerm = evidence.slice();
+  outOfRangeTerm[6] = SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE;
+  const outOfRangeTermResult = finalizeStrictGateFixture({
+    atomResidualValues: outOfRangeTerm
+  });
+  assert.equal(outOfRangeTermResult.pass, false);
+  assert.notEqual(
+    outOfRangeTermResult.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.PROBLEM_ROW,
+    0
+  );
+
+  const inexactEventCount = evidence.slice();
+  inexactEventCount[4] = SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE + 2;
+  assert.equal(finalizeStrictGateFixture({
+    atomResidualValues: inexactEventCount
+  }).pass, false);
+
+  const invalidReactionCount = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array(),
+    reactionCount: SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE,
+    atomTermCount: 0,
+    receiptReactionCount: SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE
+  });
+  assert.notEqual(
+    invalidReactionCount.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+    0
+  );
+  const invalidTermCount = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array(),
+    reactionCount: 0,
+    atomTermCount: SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE,
+    receiptAtomTermCount: SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE
+  });
+  assert.notEqual(
+    invalidTermCount.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+    0
+  );
+
+  const maxFiniteF32 = new Float32Array(
+    new Uint32Array([0x7f7f_ffff]).buffer
+  )[0];
+  const maxFiniteResidual = evidence.slice();
+  maxFiniteResidual[2] = maxFiniteF32;
+  const maxFiniteResult = finalizeStrictGateFixture({
+    atomResidualValues: maxFiniteResidual
+  });
+  assert.equal(maxFiniteResult.pass, false);
+  assert.equal(
+    maxFiniteResult.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.NONFINITE_EVIDENCE,
+    0
+  );
+  assert.notEqual(
+    maxFiniteResult.blockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.ATOM_RESIDUAL_OUT_OF_TOLERANCE,
+    0
+  );
+});
+
+test('GPU strict-gate treats zero reactions as vacuously balanced only with zero terms', () => {
+  const empty = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array(),
+    reactionCount: 0,
+    atomTermCount: 0,
+    receiptSourceGeneration: 24,
+    receiptCompletionGeneration: 25,
+    receiptSeal: 26
+  });
+  assert.equal(empty.pass, true);
+  assert.equal(empty.maxAbsAtomResidualMol, 0);
+  assert.equal(empty.maxAbsChargeResidualMol, 0);
+  assert.deepEqual(empty.atomResidualMolByReactionAndZ, {});
+  assert.deepEqual(empty.chargeResidualMolByReaction, {});
+  assert.equal(empty.producerShadowWords.byteLength, Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(empty.producerShadowWords[0], 0);
+
+  const emptyTable = {
+    schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+    reactionCount: 0,
+    reactantTermCount: 0,
+    productTermCount: 0,
+    atomTermCount: 0,
+    metadata: [],
+    atomTermRecords: new Float32Array(),
+    atomTermMetadata: [],
+    atomTermStrideFloats: SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length,
+    atomTermLayout: [...SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT]
+  };
+  const emptyPlan = createSphReactionStrictGateGpuFinalizePlan({
+    reactionTable: emptyTable,
+    expectedSourceGeneration: 24,
+    expectedCompletionGeneration: 25,
+    expectedSeal: 26
+  });
+  assert.equal(emptyPlan.configuredToPass, true);
+  assert.equal(emptyPlan.producerShadow.logicalWordCount, 0);
+  assert.equal(emptyPlan.producerShadow.logicalByteLength, 0);
+  assert.equal(emptyPlan.producerShadow.bindingByteLength, empty.producerShadowWords.byteLength);
+  assert.equal(emptyPlan.bindings[5].byteLength, Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(emptyPlan.producerShadow.zeroRowSentinelWord, 0);
+
+  for (const malformedShadow of [new Uint32Array(), Uint32Array.of(1)]) {
+    const malformed = finalizeStrictGateFixture({
+      atomResidualValues: new Float32Array(),
+      producerShadowWords: malformedShadow,
+      reactionCount: 0,
+      atomTermCount: 0,
+      receiptSourceGeneration: 24,
+      receiptCompletionGeneration: 25,
+      receiptSeal: 26
+    });
+    assert.equal(malformed.pass, false);
+    assert.notEqual(
+      malformed.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+      0
+    );
+    assert.notEqual(
+      malformed.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.LAYOUT_MISMATCH,
+      0
+    );
+  }
+
+  const missing = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array(),
+    reactionCount: 1,
+    atomTermCount: 0,
+    receiptSourceGeneration: 24,
+    receiptCompletionGeneration: 25,
+    receiptSeal: 26
+  });
+  assert.equal(missing.pass, false);
+  assert.notEqual(
+    missing.blockerFlags & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+    0
+  );
+});
+
+test('GPU strict-gate build plan stays resident and begins from a blocked sentinel', () => {
+  const table = reactionTable();
+  assert.equal(deriveSphReactionStrictGateStaticBlockerFlags(table), 0);
+  const selfAuthenticatedPlan = createSphReactionStrictGateGpuFinalizePlan({
+    reactionTable: table
+  });
+  assert.equal(selfAuthenticatedPlan.configuredToPass, false);
+  assert.notEqual(
+    selfAuthenticatedPlan.configurationBlockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.GENERATION_MISMATCH,
+    0
+  );
+  assert.notEqual(
+    selfAuthenticatedPlan.configurationBlockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.SEAL_MISMATCH,
+    0
+  );
+  const plan = createSphReactionStrictGateGpuFinalizePlan({
+    reactionTable: table,
+    atomResidualCapacity: table.atomTermCount,
+    atomTermCapacity: table.atomTermCount,
+    expectedSourceGeneration: 31,
+    expectedCompletionGeneration: 32,
+    expectedSeal: 33
+  });
+  assert.equal(plan.status, 'sph-reaction-strict-gate-gpu-finalize-plan-ready');
+  assert.equal(plan.configuredToPass, true);
+  assert.equal(plan.failClosed, true);
+  assert.equal(plan.gpuAuthoredControl, true);
+  assert.equal(plan.hostReadbackRequired, false);
+  assert.equal(plan.producerReceipt.required, true);
+  assert.equal(plan.producerReceipt.gpuAuthored, true);
+  assert.equal(plan.producerReceipt.finalizerAccess, 'read-only');
+  assert.equal(plan.producerReceipt.identityProof, 'full-bitwise-planar-shadow-v1');
+  assert.equal('identityHash' in plan.producerReceipt, false);
+  assert.equal(plan.producerShadow.required, true);
+  assert.equal(plan.producerShadow.gpuAuthored, true);
+  assert.equal(plan.producerShadow.hostReadbackRequired, false);
+  assert.equal(plan.producerShadow.layout, 'planar-raw-u32-v1');
+  assert.equal(plan.producerShadow.sourceRowWords, 8);
+  assert.equal(plan.producerShadow.planeCount, 2);
+  assert.equal(plan.producerShadow.logicalWordCount, table.atomTermCount * 16);
+  assert.equal(plan.producerShadow.exactBindingLengthRequired, true);
+  assert.deepEqual(plan.producerShadow.requiredUsage, ['COPY_DST', 'STORAGE']);
+  assert.equal(plan.producerShadow.copyOperations.length, 2);
+  assert.equal(plan.control.byteLength, 64);
+  assert.equal(plan.params.byteLength, 64);
+  assert.equal(plan.producerReceipt.byteLength, 64);
+  assert.deepEqual(plan.dispatchWorkgroups, [1, 1, 1]);
+  assert.equal(plan.shader.code, sphReactionStrictGateFinalizeWgsl);
+  assert.equal(plan.shader.entryPoint, 'finalize_reaction_strict_gate');
+  assert.equal(plan.bindings[0].rowStrideBytes, 32);
+  assert.equal(plan.bindings[1].role, 'authoritative-atom-term-table');
+  assert.equal(plan.bindings[1].rowStrideBytes, 32);
+  assert.equal(plan.bindings[2].role, 'atom-residual-producer-receipt');
+  assert.equal(plan.bindings[2].bufferType, 'read-only-storage');
+  assert.equal(plan.bindings[3].role, 'strict-gate-control');
+  assert.equal(plan.bindings[4].role, 'strict-gate-params');
+  assert.equal(plan.bindings[5].role, 'exact-producer-shadow');
+  assert.equal(plan.bindings[5].bufferType, 'read-only-storage');
+  assert.notEqual(
+    plan.control.initialWords[SPH_REACTION_STRICT_GATE_INDEX.statusFlags]
+      & SPH_REACTION_STRICT_GATE_STATUS.BLOCKED,
+    0
+  );
+  assert.equal(
+    plan.control.initialWords[SPH_REACTION_STRICT_GATE_INDEX.statusFlags]
+      & SPH_REACTION_STRICT_GATE_STATUS.PASS,
+    0
+  );
+
+  const provisionalTable = {
+    ...table,
+    metadata: [{
+      ...table.metadata[0],
+      stoichiometry: {
+        ...table.metadata[0].stoichiometry,
+        provisionalEnergeticsStatus: 'provisional-heuristic'
+      }
+    }]
+  };
+  const blockedPlan = createSphReactionStrictGateGpuFinalizePlan({
+    reactionTable: provisionalTable,
+    expectedSourceGeneration: 31,
+    expectedCompletionGeneration: 32,
+    expectedSeal: 33
+  });
+  assert.equal(
+    blockedPlan.status,
+    'sph-reaction-strict-gate-gpu-finalize-plan-fail-closed'
+  );
+  assert.equal(blockedPlan.configuredToPass, false);
+  assert.notEqual(
+    blockedPlan.staticBlockerFlags
+      & SPH_REACTION_STRICT_GATE_BLOCKER.PROVISIONAL_ENERGETICS,
+    0
+  );
+});
+
+test('GPU strict-gate static authority rejects duplicated, relabelled, and out-of-range atom terms', () => {
+  const duplicate = reactionTable();
+  duplicate.atomTermRecords = duplicate.atomTermRecords.slice();
+  duplicate.atomTermRecords.set(duplicate.atomTermRecords.subarray(0, 8), 8);
+  duplicate.atomTermMetadata = duplicate.atomTermMetadata.map((record) => ({
+    ...record
+  }));
+  duplicate.atomTermMetadata[1] = {
+    ...duplicate.atomTermMetadata[0],
+    atomTermIndex: 1
+  };
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(duplicate)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  for (const [rowOffset, metadataField, replacement] of [
+    [4, 'atomsPerFormula', 2],
+    [5, 'coefficient', 3],
+    [6, 'charge', 1]
+  ]) {
+    const mismatched = reactionTable();
+    mismatched.atomTermRecords = mismatched.atomTermRecords.slice();
+    mismatched.atomTermRecords[rowOffset] = replacement;
+    assert.notEqual(
+      deriveSphReactionStrictGateStaticBlockerFlags(mismatched)
+        & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+      0,
+      `${metadataField} mismatch must fail closed`
+    );
+  }
+
+  const coercedMetadata = reactionTable();
+  coercedMetadata.atomTermMetadata = coercedMetadata.atomTermMetadata.map(
+    (record) => ({ ...record })
+  );
+  coercedMetadata.atomTermMetadata[0].atomsPerFormula = '1';
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(coercedMetadata)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  const fractionalDiscreteMetadata = reactionTable();
+  fractionalDiscreteMetadata.atomTermMetadata =
+    fractionalDiscreteMetadata.atomTermMetadata.map((record) => ({ ...record }));
+  fractionalDiscreteMetadata.atomTermMetadata[0].termKindId =
+    1 + Number.EPSILON;
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(fractionalDiscreteMetadata)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  const outOfRange = reactionTable();
+  outOfRange.atomTermRecords = outOfRange.atomTermRecords.slice();
+  outOfRange.atomTermRecords[2] =
+    SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE - 1;
+  outOfRange.atomTermMetadata = outOfRange.atomTermMetadata.map((record) => ({
+    ...record
+  }));
+  outOfRange.atomTermMetadata[0].termIndex =
+    SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE - 1;
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(outOfRange)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  const sparse = reactionTable();
+  sparse.atomTermCount -= 1;
+  sparse.atomTermRecords = sparse.atomTermRecords.slice(0, -8);
+  sparse.atomTermMetadata = sparse.atomTermMetadata.slice(0, -1);
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(sparse)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  const twoReaction = {
+    ...reactionTable(),
+    reactionCount: 2,
+    reactantTermCount: 2,
+    productTermCount: 2,
+    atomTermCount: 4,
+    metadata: [0, 1].map((reactionIndex) => ({
+      stoichiometry: {
+        atomBalance: { balanced: true },
+        chargeBalance: { balanced: true },
+        provisionalEnergeticsStatus: null
+      },
+      reactantTermOffset: reactionIndex,
+      reactantTermCount: 1,
+      productTermOffset: reactionIndex,
+      productTermCount: 1
+    })),
+    atomTermRecords: new Float32Array([
+      0, 1, 0, 1, 1, 1, 0, 1,
+      0, 2, 0, 1, 1, 1, 0, 1,
+      1, 1, 1, 1, 1, 1, 0, 1,
+      1, 2, 1, 1, 1, 1, 0, 1
+    ]),
+    atomTermMetadata: [
+      [0, 1, 0],
+      [0, 2, 0],
+      [1, 1, 1],
+      [1, 2, 1]
+    ].map(([reactionIndex, termKindId, termIndex], atomTermIndex) => ({
+      atomTermIndex,
+      reactionIndex,
+      termKind: termKindId === 1 ? 'reactant' : 'product',
+      termKindId,
+      termIndex,
+      atomicNumberZ: 1,
+      atomsPerFormula: 1,
+      coefficient: 1,
+      charge: 0,
+      status: 1
+    }))
+  };
+  assert.equal(deriveSphReactionStrictGateStaticBlockerFlags(twoReaction), 0);
+  const crossReactionTerm = {
+    ...twoReaction,
+    atomTermRecords: twoReaction.atomTermRecords.slice(),
+    atomTermMetadata: twoReaction.atomTermMetadata.map((record) => ({
+      ...record
+    }))
+  };
+  crossReactionTerm.atomTermRecords[2] = 1;
+  crossReactionTerm.atomTermMetadata[0].termIndex = 1;
+  assert.notEqual(
+    deriveSphReactionStrictGateStaticBlockerFlags(crossReactionTerm)
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+
+  for (const [rowOffset, label] of [
+    [0, 'reaction index'],
+    [2, 'term index'],
+    [6, 'charge']
+  ]) {
+    const signedZero = reactionTable();
+    signedZero.atomTermRecords = signedZero.atomTermRecords.slice();
+    signedZero.atomTermRecords[rowOffset] = -0;
+    assert.notEqual(
+      deriveSphReactionStrictGateStaticBlockerFlags(signedZero)
+        & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+      0,
+      `${label} signed-zero metadata alias must fail closed`
+    );
+  }
+});
+
+test('GPU strict-gate diagnostic validation never grants unbound admission', () => {
+  const passed = finalizeStrictGateFixture({
+    atomResidualValues: new Float32Array([
+      0, 1, 0, 0, 1, 1, 0, 1
+    ])
+  });
+  const diagnostic = validateSphReactionStrictGateControl(
+    passed.controlWords,
+    { requireExpectedAuthority: false }
+  );
+  assert.equal(diagnostic.valid, true);
+  assert.equal(diagnostic.authorityBound, false);
+  assert.equal(diagnostic.pass, false);
+  assert.equal(diagnostic.blocked, true);
+});
+
 test('SPH reaction compact summary runs a two-pass WebGPU reduction without particle readback', async () => {
   const values = new Float32Array([
     65, 1, 2, 1,
@@ -1285,6 +2787,23 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
   assert.equal(summary.status, 'reaction-compact-summary-ready');
   assert.equal(summary.reductionStrategy, 'two-pass-workgroup-reduction');
   assert.equal(summary.fullParticleReadbackPerformed, false);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 5);
+  assert.equal(
+    summary.readbackBytes,
+    128
+      + 32
+      + 128
+      + (65 * 2 * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT)
+      + 128
+  );
+  assert.equal(summary.hostQueueFenceCount, 0);
+  assert.equal(summary.finalDiagnosticMapAsyncCount, 0);
+  assert.equal(summary.unclassifiedMapAsyncCount, 5);
+  assert.equal(summary.unclassifiedReadbackBytes, summary.readbackBytes);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, false);
   assert.equal(summary.compactReadbackByteLength, 128);
   assert.equal(summary.compactReadbackFloatCount, 32);
   assert.equal(summary.compactPartialSummaryCount, 2);
@@ -1382,6 +2901,14 @@ test('SPH reaction product events can remain GPU-resident without product-event 
   });
 
   assert.equal(summary.productEvents.schema, ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 4);
+  assert.equal(summary.readbackBytes, 416);
+  assert.equal(summary.hostQueueFenceCount, 0);
+  assert.equal(summary.finalDiagnosticMapAsyncCount, 0);
+  assert.equal(summary.unclassifiedMapAsyncCount, 4);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, false);
   assert.equal(summary.productEvents.status, 'product-event-sparse-storage-gpu-resident');
   assert.equal(summary.productEventRowCount, 130);
   assert.equal(summary.productEventActiveEventCount, 0);
@@ -1430,6 +2957,20 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(summary.readbackMode, 'resident-product-event-buffer-no-readback');
   assert.equal(summary.reactionSummaryAvailable, false);
   assert.equal(summary.compactSummaryReadbackSkipped, true);
+  assert.equal(summary.readbackTelemetryComplete, true);
+  assert.equal(summary.mapAsyncCount, 0);
+  assert.equal(summary.readbackBytes, 0);
+  assert.equal(summary.hostQueueFenceCount, 1);
+  assert.equal(summary.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, true);
+  assert.equal(summary.localBufferCleanupHostQueueFenceCount, 1);
+  assert.equal(
+    summary.localBufferCleanupMethod,
+    'gpu-queue-on-submitted-work-done'
+  );
+  assert.equal(device.queueFenceCount, 1);
   assert.equal(summary.compactReadbackByteLength, 0);
   assert.equal(summary.gasSpeciesReadbackByteLength, 0);
   assert.equal(summary.productInventoryReadbackByteLength, 0);
@@ -1447,12 +2988,89 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(retained.destroyed, true);
 });
 
+test('SPH reaction exact summary cleanup falls back to one fence and retries a one-shot destructor failure', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
+    new Float32Array(),
+    new Float32Array(),
+    new Float32Array(),
+    new Float32Array(),
+    new Float32Array(),
+    {
+      throwDestroyOnceLabel: 'ulg-sph-reaction-summary-records'
+    }
+  );
+  const producerOutput = {};
+  let externalCleanupCount = 0;
+  const externalCleanup = () => {
+    externalCleanupCount += 1;
+  };
+  const issuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-reaction-summary-upstream'
+  });
+  const producerClaim = registerQueueOrderedCleanupClaim(
+    issuer,
+    device,
+    {
+      producerOutput,
+      cleanup: externalCleanup
+    }
+  );
+  const buffer = (label) => ({ label });
+  const summary = await runSphReactionSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 65
+    },
+    reactionTable: reactionTable(),
+    sourceStateBuffer: buffer('source-state'),
+    sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'),
+    nextStateBuffer: buffer('next-state'),
+    nextThermoBuffer: buffer('next-thermo'),
+    proposalBuffer: buffer('reaction-proposals'),
+    retainProductEventBuffer: true,
+    readCompactSummary: false,
+    readGasSpeciesSummary: false,
+    readProductInventory: false,
+    readAtomResidual: false,
+    queueOrderedProducerClaims: [producerClaim]
+  });
+
+  assert.equal(device.queueFenceCount, 1);
+  assert.equal(summary.hostQueueFenceCount, 1);
+  assert.equal(summary.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, false);
+  assert.equal(summary.productionHotLoopHostDependencyFree, true);
+  await Promise.resolve();
+  await Promise.resolve();
+  const recordsBuffer = device.createdBuffers.find(
+    ({ label }) => label === 'ulg-sph-reaction-summary-records'
+  );
+  assert.equal(recordsBuffer.destroyed, true);
+  releaseSubmittedWorkCleanupQueueOrdered(
+    device,
+    externalCleanup,
+    {
+      queueOrderedFinalConsumer:
+        summary.queueOrderedFinalConsumerCapability,
+      producerClaim,
+      producerOutput,
+      producerFamily: 'test-reaction-summary-upstream'
+    }
+  );
+  assert.equal(externalCleanupCount, 1);
+  assert.equal(device.queueFenceCount, 1);
+  summary.destroyProductEventBuffer();
+});
+
 test('SPH reaction host refuses product placement without the canonical spatial placement authority', async () => {
-  // Slice 9 makes represented current volume the geometry authority. The
-  // legacy placement path derives geometry from density, writes F = I with
-  // J = 1, and loses relative kinetic energy, so production must present the
-  // canonical placement authority or fail closed rather than silently falling
-  // back. This fixture supplies no authority, so placement must be refused.
+  // Reference-state birth (F = I, J = 1) is only one part of placement. The
+  // legacy path still lacks canonical routing, deterministic conflict folds,
+  // represented-entity publication, and relative-kinetic-energy
+  // thermalization, so production must fail closed without the authority.
   const placementValues = concatenateFloat32Rows(
     productPlacementRow({ status: 1 }),
     productPlacementRow({ status: 1 })
@@ -1485,125 +3103,25 @@ test('SPH reaction host refuses product placement without the canonical spatial 
       readAtomResidual: false,
       productPlacementReadbackCadence: 'resident-sequence-final'
     }),
-    /canonical Schroeder spatial placement authority/
-  );
-});
-
-test('SPH reaction host binds and reads the per-term placement accumulator without particle readback', { skip: 'legacy placement path removed in Slice 9; see the refusal test above' }, async () => {
-  const placementValues = concatenateFloat32Rows(
-    productPlacementRow({ status: 1 }),
-    productPlacementRow({ status: 1 })
-  );
-  const device = fakeSummaryDevice(
-    new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
-    new Float32Array(),
-    new Float32Array(),
-    new Float32Array(),
-    new Float32Array(),
-    placementValues
-  );
-  const buffer = (label) => ({ label });
-
-  const summary = await runSphReactionSummaryWebGpu({
-    device,
-    sphParticleState: {
-      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
-      particleCount: 2
-    },
-    reactionTable: reactionTable(),
-    sourceStateBuffer: buffer('source-state'),
-    sourceThermoBuffer: buffer('source-thermo'),
-    sourceMechanicsBuffer: buffer('source-mechanics'),
-    nextStateBuffer: buffer('next-state'),
-    nextThermoBuffer: buffer('next-thermo'),
-    nextMechanicsBuffer: buffer('next-mechanics'),
-    proposalBuffer: buffer('reaction-proposals'),
-    boxDimsM: [3, 4, 5],
-    retainProductEventBuffer: true,
-    readCompactSummary: false,
-    readGasSpeciesSummary: false,
-    readProductInventory: false,
-    readAtomResidual: false,
-    productPlacementReadbackCadence: 'resident-sequence-final'
-  });
-
-  const expectedPlacementByteLength = 2
-    * SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS
-    * Float32Array.BYTES_PER_ELEMENT;
-  const placementBindGroup = device.bindGroups.find(
-    (group) => group.layout.entryPoint === 'place_product_events'
-  );
-  const productTermCountWrite = device.writes.find((write) => (
-    write.label === 'ulg-sph-reaction-product-event-placement-params'
-    && write.offset === 28
-  ));
-  const placementBoxWrite = device.writes.find((write) => (
-    write.label === 'ulg-sph-reaction-product-event-placement-params'
-    && write.offset === 32
-  ));
-  const placementBoxClampWrite = device.writes.find((write) => (
-    write.label === 'ulg-sph-reaction-product-event-placement-params'
-    && write.offset === 44
-  ));
-  const placementCanonicalSpatialWrite = device.writes.find((write) => (
-    write.label === 'ulg-sph-reaction-product-event-placement-params'
-    && write.offset === 48
-  ));
-  const placementCopy = device.copies.find(
-    (copy) => copy.destination.label === 'ulg-sph-reaction-product-placement-readback'
-  );
-
-  assert.equal(summary.fullParticleReadbackPerformed, false);
-  assert.equal(summary.compactReadbackByteLength, 0);
-  assert.equal(summary.productPlacementProvenance.schema, ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA);
-  assert.equal(summary.productPlacementProvenance.available, true);
-  assert.deepEqual(summary.productPlacementProvenance.records.map((record) => record.productTermIndex), [0, 1]);
-  assert.equal(summary.productPlacementProvenanceReadbackFloatCount, 64);
-  assert.equal(summary.productPlacementProvenanceReadbackByteLength, expectedPlacementByteLength);
-  assert.equal(summary.productPlacementAccumulatorByteLength, expectedPlacementByteLength);
-  assert.equal(summary.productPlacementReadbackCadence, 'resident-sequence-final');
-  assert.equal(placementBindGroup.entries.length, 11);
-  assert.equal(placementBindGroup.entries[5].binding, 5);
-  assert.equal(
-    placementBindGroup.entries[5].resource.buffer.label,
-    'ulg-sph-reaction-product-placement-accumulator'
-  );
-  assert.equal(placementBindGroup.entries[6].binding, 6);
-  assert.equal(placementBindGroup.entries[6].resource.buffer.label, 'source-state');
-  assert.equal(placementBindGroup.entries[7].binding, 7);
-  assert.equal(placementBindGroup.entries[7].resource.buffer.label, 'source-thermo');
-  assert.equal(placementBindGroup.entries[8].binding, 8);
-  assert.equal(
-    placementBindGroup.entries[8].resource.buffer.label,
-    'ulg-sph-reaction-product-event-placement-compact-count'
-  );
-  assert.equal(placementBindGroup.entries[9].binding, 9);
-  assert.equal(
-    placementBindGroup.entries[9].resource.buffer.label,
-    'ulg-sph-reaction-product-event-placement-decisions'
-  );
-  assert.equal(placementBindGroup.entries[10].binding, 10);
-  assert.equal(
-    placementBindGroup.entries[10].resource.buffer.label,
-    'ulg-sph-reaction-product-event-placement-local-completion-receipt'
-  );
-  assert.deepEqual(productTermCountWrite.values, [2]);
-  assert.deepEqual(placementBoxWrite.values, [3, 4, 5]);
-  assert.deepEqual(placementBoxClampWrite.values, [1]);
-  assert.deepEqual(
-    placementCanonicalSpatialWrite.values,
-    [0, 0, 0, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION]
-  );
-  assert.equal(placementCopy.size, expectedPlacementByteLength);
-  assert.equal(placementCopy.source.label, 'ulg-sph-reaction-product-placement-accumulator');
-  assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [1, 1, 1]);
-  assert.equal(device.copies.length, 1);
-  assert.equal(
-    device.copies.some((copy) => /(?:source|next)-(?:state|thermo|mechanics)/.test(copy.source.label)),
-    false
-  );
-  assert.equal(
-    device.createdBuffers.some((created) => /particle.*readback|state.*readback/.test(created.label)),
-    false
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_SPH_REACTION_PRODUCT_PLACEMENT_AUTHORITY_REQUIRED'
+      );
+      assert.match(
+        error.message,
+        /canonical Schroeder spatial placement authority/
+      );
+      assert.equal(error.readbackTelemetry.readbackTelemetryComplete, true);
+      assert.equal(error.readbackTelemetry.mapAsyncCount, 0);
+      assert.equal(error.readbackTelemetry.readbackBytes, 0);
+      assert.equal(error.readbackTelemetry.hostQueueFenceCount, 0);
+      assert.equal(error.readbackTelemetry.normalHotLoopReadbackFree, true);
+      assert.equal(
+        error.readbackTelemetry.productionHotLoopHostDependencyFree,
+        true
+      );
+      return true;
+    }
   );
 });

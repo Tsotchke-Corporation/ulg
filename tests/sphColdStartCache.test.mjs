@@ -92,6 +92,7 @@ function fakeTableInputs() {
       schema: 'peercompute.ulg.sph-thermal-phase-response-table.v0',
       records: new Float32Array([9, 10, 11, 12]),
       responses: new Float32Array([13, 14, 15, 16]),
+      responseThermalConductivities: new Float32Array([2.16]),
       materialCount: 1,
       responseCount: 1,
       recordStrideFloats: 4,
@@ -260,6 +261,18 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
   assert.equal(bundle.thermalClosureGraphSet.graphs[0].schema, 'peercompute.ulg.closure-law-graph.v0');
   assert.equal(bundle.thermalClosureGraphSet.graphs[0].nodeRows.length, 16);
   assert.equal(bundle.thermalPhaseResponseTable.records.length, 4);
+  assert.equal(
+    bundle.thermalClosureGraphSet.sourceThermalMaterialTableRowHash,
+    bundle.thermalMaterialTable.cache.rowHash
+  );
+  assert.equal(
+    bundle.thermalPhaseResponseTable.sourceThermalMaterialTableRowHash,
+    bundle.thermalMaterialTable.cache.rowHash
+  );
+  assert.deepEqual(
+    [...bundle.thermalPhaseResponseTable.responseThermalConductivities],
+    [Math.fround(2.16)]
+  );
   assert.equal(bundle.opticalGpuTable.recordCount, 1);
   assert.equal(
     bundle.opticalGpuTable.materialPropertyBankPbrWarmInputConsumer.status,
@@ -283,6 +296,30 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
     'opticalGpuTable',
     'reactionTable'
   ]));
+});
+
+test('SPH static table cache rejects a thermal response record without conductivity sidecar', () => {
+  const update = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs(),
+    generatorFingerprint
+  });
+  const staleSnapshot = JSON.parse(update.cacheSnapshot);
+  const staleThermalResponseRecord = Object.values(staleSnapshot.tables).find(
+    (record) => record.family === 'sph-thermal-phase-response-table'
+  );
+  delete staleThermalResponseRecord.arrays.responseThermalConductivities;
+
+  const bundle = rehydrateSphStaticTableBundle(JSON.stringify(staleSnapshot), {
+    generatorFingerprint
+  });
+
+  assert.equal(bundle.thermalPhaseResponseTable, null);
+  assert.equal(bundle.hitCount, 4);
+  assert.equal(bundle.staleCount, 1);
+  assert.deepEqual(bundle.staleDerivedFamilies, [{
+    family: 'sph-thermal-phase-response-table',
+    reason: 'missing-response-thermal-conductivity-sidecar'
+  }]);
 });
 
 test('SPH static table cache rejects a persisted v0 reaction table after the phase-policy ABI bump', () => {

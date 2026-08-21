@@ -72,8 +72,16 @@ function createMockDevice() {
       submit() {
         calls.queueSubmits += 1;
       },
-      writeBuffer() {
+      writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size) {
         calls.queueWrites += 1;
+        const source = ArrayBuffer.isView(data)
+          ? new Uint8Array(
+              data.buffer,
+              data.byteOffset + dataOffset,
+              size ?? data.byteLength - dataOffset
+            )
+          : new Uint8Array(data, dataOffset, size ?? data.byteLength - dataOffset);
+        new Uint8Array(buffer.storage, bufferOffset, source.byteLength).set(source);
       }
     },
     createBuffer(descriptor) {
@@ -292,7 +300,7 @@ test('temperature encoder dispatches on an external encoder with zero submits an
   assert.equal(firstEncoder.calls.passEnd, 2);
   assert.equal(firstEncoder.calls.finish, 0);
   assert.equal(device.calls.queueSubmits, 0);
-  assert.equal(device.calls.queueWrites, 0);
+  assert.equal(device.calls.queueWrites, 1);
   assert.equal(device.calls.mapAsync, 0);
 
   const params = new Uint32Array(first.paramsBuffer.storage);
@@ -307,8 +315,12 @@ test('temperature encoder dispatches on an external encoder with zero submits an
     ...validFlatOptions(device, secondEncoder)
   });
   assert.equal(second.pipelineCacheStatus, 'pipeline-cache-hit');
-  assert.equal(device.calls.shaderModules.length, 2);
+  assert.equal(device.calls.shaderModules.length, 1);
   assert.equal(device.calls.computePipelines.length, 2);
+  assert.equal(
+    device.calls.computePipelines[0].descriptor.compute.module,
+    device.calls.computePipelines[1].descriptor.compute.module
+  );
   assert.deepEqual(secondEncoder.calls.dispatchWorkgroups, [[1, undefined, undefined]]);
   assert.equal(secondEncoder.calls.dispatchWorkgroupsIndirect.length, 1);
   assert.equal(device.calls.queueSubmits, 0);

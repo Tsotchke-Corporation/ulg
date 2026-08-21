@@ -968,6 +968,44 @@ export function createSchroederSpatialActiveSourceViewGpu(device, {
     return finalizeRelease(execution, ownership);
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      if (releasedExecutions.has(execution)) return false;
+      const ownership = ownershipFor(execution);
+      return Boolean(
+        submittedExecutions.has(execution)
+        && !releaseInFlightExecutions.has(execution)
+        && ownership.arena.scan.canReleasePreparedQueueOrdered?.(
+          ownership.preparedScan
+        ) === true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      const error = new Error(
+        'queue-ordered active-source release requires an exact submitted idle execution'
+      );
+      error.code =
+        'ERR_SCHROEDER_ACTIVE_SOURCE_VIEW_QUEUE_ORDERED_RELEASE_STALE';
+      throw error;
+    }
+    const ownership = ownershipFor(execution);
+    const scanReleased =
+      ownership.arena.scan.releasePreparedQueueOrdered?.(
+        ownership.preparedScan
+      );
+    if (scanReleased !== true) {
+      throw new Error(
+        'queue-ordered active-source scan owner did not confirm release'
+      );
+    }
+    return finalizeRelease(execution, ownership, { scanReleased: true });
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       return Promise.reject(new TypeError(
@@ -1091,6 +1129,8 @@ export function createSchroederSpatialActiveSourceViewGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     allocationEntries,

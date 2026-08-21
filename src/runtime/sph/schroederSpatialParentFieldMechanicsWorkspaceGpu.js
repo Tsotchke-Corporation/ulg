@@ -101,46 +101,73 @@ const IDENTITY_FIELDS = Object.freeze([
 
 const PIPELINE_BINDINGS = Object.freeze({
   initialize: Object.freeze([0, 1, 2, 3, 4, 5]),
-  registerReflux: Object.freeze([0, 2, 3, 4, 5]),
-  restrictFine: Object.freeze([0, 1, 3, 4, 5]),
-  finalizeBaseline: Object.freeze([3, 4, 5]),
-  injectCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  validateRegistry: Object.freeze([0, 3, 4, 5]),
-  updatePredictors: Object.freeze([0, 3, 4, 5]),
-  contactPredictors: Object.freeze([0, 3, 4, 5]),
-  sealPredictors: Object.freeze([3, 4, 5]),
-  beginFine: Object.freeze([0, 1, 3, 4, 5]),
-  validateFine: Object.freeze([0, 1, 3, 4, 5]),
-  validateRoutedCoarse: Object.freeze([0, 3, 4, 5]),
-  sealFineAlpha: Object.freeze([3, 4, 5]),
-  prepareFine: Object.freeze([0, 1, 3, 4, 5]),
-  applyFine: Object.freeze([0, 1, 3, 4, 5]),
-  applyFineHeat: Object.freeze([0, 1, 3, 4, 5]),
-  commitReflux: Object.freeze([0, 1, 3, 4, 5]),
+  registerReflux: Object.freeze([0, 2, 3, 4, 5, 11]),
+  restrictFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  finalizeBaseline: Object.freeze([3, 4, 5, 11]),
+  injectCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
+  validateRegistry: Object.freeze([0, 3, 4, 5, 11]),
+  updatePredictors: Object.freeze([0, 3, 4, 5, 11]),
+  contactPredictors: Object.freeze([0, 3, 4, 5, 11]),
+  sealPredictors: Object.freeze([3, 4, 5, 11]),
+  beginFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  validateFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  validateRoutedCoarse: Object.freeze([0, 3, 4, 5, 11]),
+  sealFineAlpha: Object.freeze([3, 4, 5, 11]),
+  prepareFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  applyFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  applyFineHeat: Object.freeze([0, 1, 3, 4, 5, 11]),
+  commitReflux: Object.freeze([0, 1, 3, 4, 5, 11]),
   // Fine finalization now settles cross-level phase-volume routes, which
   // reads the coarse mechanics field view (2).
-  finalizeFine: Object.freeze([0, 1, 2, 3, 4, 5]),
+  finalizeFine: Object.freeze([0, 1, 2, 3, 4, 5, 11]),
   // Admission authenticates the coarse pressure receipt and coarse phase
   // moments, so it binds the coarse mechanics field view (2) as well.
   admitCrossLevelPhaseVolume:
-    Object.freeze([0, 1, 2, 3, 5, 6, 7, 8, 9]),
+    Object.freeze([0, 1, 2, 3, 5, 6, 7, 8, 9, 11]),
   // Proposal reads coarse phase state and pressure rows through the coarse
   // mechanics field view (2) while routing impulses through the workspace.
   proposeCrossLevelPhaseVolume:
-    Object.freeze([0, 1, 2, 3, 4, 5, 7, 8, 9, 10]),
+    Object.freeze([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]),
   initializeTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  registerTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  sealTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  prevalidateCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  beginCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  validateCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  sealCoarse: Object.freeze([0, 2, 3, 4, 5]),
-  prepareCoarse: Object.freeze([2, 3, 4, 5]),
-  applyCoarseRows: Object.freeze([3, 4, 5]),
-  applyCoarse: Object.freeze([2, 3, 4, 5]),
-  commitCoarse: Object.freeze([3, 4, 5]),
-  finalizeCoarse: Object.freeze([2, 3, 4, 5])
+  registerTerminal: Object.freeze([0, 2, 3, 4, 5, 11]),
+  sealTerminal: Object.freeze([0, 2, 3, 4, 5, 11]),
+  prevalidateCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
+  beginCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
+  validateCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
+  sealCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
+  prepareCoarse: Object.freeze([2, 3, 4, 5, 11]),
+  applyCoarseRows: Object.freeze([3, 4, 5, 11]),
+  applyCoarse: Object.freeze([2, 3, 4, 5, 11]),
+  commitCoarse: Object.freeze([3, 4, 5, 11]),
+  finalizeCoarse: Object.freeze([2, 3, 4, 5, 11])
 });
+const PREDICTOR_PIPELINE_BINDINGS = Object.freeze([0, 1, 2, 3, 4, 5, 11]);
+const TERMINAL_PIPELINE_BINDINGS = Object.freeze([0, 2, 3, 4, 5, 11]);
+const PREDICTOR_PIPELINE_NAMES = new Set([
+  'initialize',
+  'registerReflux',
+  'restrictFine',
+  'finalizeBaseline',
+  'injectCoarse',
+  'validateRegistry',
+  'updatePredictors',
+  'contactPredictors',
+  'sealPredictors'
+]);
+const TERMINAL_PIPELINE_NAMES = new Set([
+  'initializeTerminal',
+  'registerTerminal',
+  'sealTerminal',
+  'prevalidateCoarse',
+  'validateCoarse',
+  'sealCoarse',
+  'prepareCoarse',
+  'beginCoarse',
+  'applyCoarseRows',
+  'applyCoarse',
+  'commitCoarse',
+  'finalizeCoarse'
+]);
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
   const number = Number(value);
@@ -1097,7 +1124,7 @@ function paramsData(execution, {
   u32(3, plan.layout.accumulatorOffsetWords);
   u32(4, plan.layout.baselineStateOffsetWords);
   u32(5, plan.layout.combinedStateOffsetWords);
-  u32(6, plan.layout.wordLength);
+  u32(6, plan.layout.workspaceBindingWordLength);
   for (let index = 0; index < IDENTITY_FIELDS.length; index += 1) {
     u32(7 + index, plan[IDENTITY_FIELDS[index]]);
   }
@@ -1202,6 +1229,20 @@ function encodeIndirect(encoder, pipeline, bindGroup, indirectBuffer, label) {
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+  pass.end();
+}
+
+function encodeGroupedStages(encoder, stages, label) {
+  const pass = encoder.beginComputePass({ label });
+  for (const stage of stages) {
+    pass.setPipeline(stage.pipeline);
+    pass.setBindGroup(0, stage.bindGroup);
+    if (stage.indirectBuffer) {
+      pass.dispatchWorkgroupsIndirect(stage.indirectBuffer, 0);
+    } else {
+      pass.dispatchWorkgroups(1, 1, 1);
+    }
+  }
   pass.end();
 }
 
@@ -1334,16 +1375,27 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   parentFieldCapacity,
   fineFieldCapacity = parentFieldCapacity,
   arenaCount = 3,
+  externalRefluxLedgerRequired = false,
+  gpuTimestampRecorder = null,
   label = 'ulg-schroeder-spatial-parent-field-mechanics-workspace'
 } = {}) {
   assertDevice(device);
+  if (typeof externalRefluxLedgerRequired !== 'boolean') {
+    throw new TypeError('externalRefluxLedgerRequired must be a boolean');
+  }
+  const workspaceTimestampSpansActive = () =>
+    gpuTimestampRecorder?.active === true
+    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+    && typeof gpuTimestampRecorder.endEncoderSpan === 'function';
   const layout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     parentFieldCapacity,
     fineFieldCapacity
   });
-  const localRefluxLayout = createSchroederCrossLevelRefluxLedgerLayout({
-    parentFieldCapacity
-  });
+  const localRefluxLayout = externalRefluxLedgerRequired
+    ? null
+    : createSchroederCrossLevelRefluxLedgerLayout({
+        parentFieldCapacity
+      });
   const resolvedArenaCount = positiveInteger(arenaCount, 'arenaCount', 8);
   const maxBufferSize = positiveInteger(
     device.limits?.maxBufferSize ?? 256 * 1024 * 1024,
@@ -1355,6 +1407,11 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'device.limits.maxStorageBufferBindingSize',
     Number.MAX_SAFE_INTEGER
   );
+  const minStorageBufferOffsetAlignment = positiveInteger(
+    device.limits?.minStorageBufferOffsetAlignment ?? 256,
+    'device.limits.minStorageBufferOffsetAlignment',
+    Number.MAX_SAFE_INTEGER
+  );
   const maxUniformBufferBindingSize = positiveInteger(
     device.limits?.maxUniformBufferBindingSize ?? 64 * 1024,
     'device.limits.maxUniformBufferBindingSize',
@@ -1362,9 +1419,14 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   );
   if (
     layout.byteLength > maxBufferSize
-    || layout.byteLength > maxStorageBufferBindingSize
-    || localRefluxLayout.byteLength > maxBufferSize
-    || localRefluxLayout.byteLength > maxStorageBufferBindingSize
+    || layout.workspaceBindingByteLength > maxStorageBufferBindingSize
+    || layout.parentToCoarseOrdinalByteLength > maxStorageBufferBindingSize
+    || layout.parentToCoarseOrdinalByteOffset
+      % minStorageBufferOffsetAlignment !== 0
+    || (localRefluxLayout != null && (
+      localRefluxLayout.byteLength > maxBufferSize
+      || localRefluxLayout.byteLength > maxStorageBufferBindingSize
+    ))
   ) {
     throw new RangeError('parent-field mechanics workspace exceeds WebGPU buffer limits');
   }
@@ -1373,8 +1435,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'device.limits.maxStorageBuffersPerShaderStage',
     0xffff
   );
-  if (maxStorageBuffersPerShaderStage < 8) {
-    throw new RangeError('parent-field mechanics requires eight storage bindings');
+  if (maxStorageBuffersPerShaderStage < 10) {
+    throw new RangeError('parent-field mechanics requires ten storage bindings');
   }
   if (
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
@@ -1387,46 +1449,85 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     label: `${label}-shader`,
     code: schroederSpatialParentFieldMechanicsWorkspaceWgsl
   });
-  const pipeline = (entryPoint) => device.createComputePipeline({
+  const explicitLayoutsAvailable =
+    typeof device.createBindGroupLayout === 'function'
+    && typeof device.createPipelineLayout === 'function';
+  const createSharedLayout = (suffix, bindings) => {
+    if (!explicitLayoutsAvailable) return null;
+    const bindGroupLayout = device.createBindGroupLayout({
+      label: `${label}-${suffix}-bind-group-layout`,
+      entries: bindings.map((binding) => ({
+        binding,
+        visibility: globalThis.GPUShaderStage?.COMPUTE ?? 4,
+        buffer: {
+          type: binding === 5
+            ? 'uniform'
+            : ([0, 6, 7, 8, 9, 10].includes(binding)
+                ? 'read-only-storage'
+                : 'storage')
+        }
+      }))
+    });
+    return Object.freeze({
+      bindGroupLayout,
+      pipelineLayout: device.createPipelineLayout({
+        label: `${label}-${suffix}-pipeline-layout`,
+        bindGroupLayouts: [bindGroupLayout]
+      })
+    });
+  };
+  const predictorSharedLayout = createSharedLayout(
+    'predictor-shared',
+    PREDICTOR_PIPELINE_BINDINGS
+  );
+  const terminalSharedLayout = createSharedLayout(
+    'terminal-shared',
+    TERMINAL_PIPELINE_BINDINGS
+  );
+  const pipeline = (name, entryPoint) => device.createComputePipeline({
     label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
-    layout: 'auto',
+    layout: PREDICTOR_PIPELINE_NAMES.has(name)
+      ? (predictorSharedLayout?.pipelineLayout ?? 'auto')
+      : TERMINAL_PIPELINE_NAMES.has(name)
+        ? (terminalSharedLayout?.pipelineLayout ?? 'auto')
+        : 'auto',
     compute: { module, entryPoint }
   });
   const pipelines = Object.freeze({
-    initialize: pipeline('initialize_parent_field_workspace'),
-    registerReflux: pipeline('register_reflux_coarse_registry'),
-    restrictFine: pipeline('restrict_fine_field_state'),
-    finalizeBaseline: pipeline('finalize_fine_parent_baseline'),
-    injectCoarse: pipeline('inject_coarse_native_state'),
-    validateRegistry: pipeline('validate_reflux_coarse_registry_mass'),
-    updatePredictors: pipeline('update_parent_field_predictors'),
-    contactPredictors: pipeline('contact_parent_field_predictors'),
-    sealPredictors: pipeline('seal_parent_field_predictors'),
-    beginFine: pipeline('begin_fine_velocity_correction'),
-    validateFine: pipeline('validate_fine_velocity_correction'),
-    validateRoutedCoarse: pipeline('validate_routed_coarse_cfl'),
-    sealFineAlpha: pipeline('seal_fine_correction_alpha'),
-    prepareFine: pipeline('prepare_fine_transaction'),
-    applyFine: pipeline('apply_fine_velocity_correction'),
-    applyFineHeat: pipeline('apply_fine_route_heat'),
-    commitReflux: pipeline('commit_routed_reflux'),
-    finalizeFine: pipeline('finalize_fine_velocity_correction'),
+    initialize: pipeline('initialize', 'initialize_parent_field_workspace'),
+    registerReflux: pipeline('registerReflux', 'register_reflux_coarse_registry'),
+    restrictFine: pipeline('restrictFine', 'restrict_fine_field_state'),
+    finalizeBaseline: pipeline('finalizeBaseline', 'finalize_fine_parent_baseline'),
+    injectCoarse: pipeline('injectCoarse', 'inject_coarse_native_state'),
+    validateRegistry: pipeline('validateRegistry', 'validate_reflux_coarse_registry_mass'),
+    updatePredictors: pipeline('updatePredictors', 'update_parent_field_predictors'),
+    contactPredictors: pipeline('contactPredictors', 'contact_parent_field_predictors'),
+    sealPredictors: pipeline('sealPredictors', 'seal_parent_field_predictors'),
+    beginFine: pipeline('beginFine', 'begin_fine_velocity_correction'),
+    validateFine: pipeline('validateFine', 'validate_fine_velocity_correction'),
+    validateRoutedCoarse: pipeline('validateRoutedCoarse', 'validate_routed_coarse_cfl'),
+    sealFineAlpha: pipeline('sealFineAlpha', 'seal_fine_correction_alpha'),
+    prepareFine: pipeline('prepareFine', 'prepare_fine_transaction'),
+    applyFine: pipeline('applyFine', 'apply_fine_velocity_correction'),
+    applyFineHeat: pipeline('applyFineHeat', 'apply_fine_route_heat'),
+    commitReflux: pipeline('commitReflux', 'commit_routed_reflux'),
+    finalizeFine: pipeline('finalizeFine', 'finalize_fine_velocity_correction'),
     admitCrossLevelPhaseVolume:
-      pipeline('admit_cross_level_phase_volume'),
+      pipeline('admitCrossLevelPhaseVolume', 'admit_cross_level_phase_volume'),
     proposeCrossLevelPhaseVolume:
-      pipeline('propose_cross_level_phase_volume'),
-    initializeTerminal: pipeline('initialize_coarse_terminal_workspace'),
-    registerTerminal: pipeline('register_coarse_terminal_registry'),
-    sealTerminal: pipeline('seal_coarse_terminal_workspace'),
-    prevalidateCoarse: pipeline('begin_coarse_terminal_validation'),
-    beginCoarse: pipeline('begin_coarse_velocity_publish'),
-    validateCoarse: pipeline('validate_coarse_velocity_publish'),
-    sealCoarse: pipeline('seal_coarse_velocity_publish'),
-    prepareCoarse: pipeline('prepare_coarse_transaction'),
-    applyCoarseRows: pipeline('apply_coarse_reflux_rows'),
-    applyCoarse: pipeline('apply_coarse_velocity_publish'),
-    commitCoarse: pipeline('commit_coarse_reflux'),
-    finalizeCoarse: pipeline('finalize_coarse_velocity_publish')
+      pipeline('proposeCrossLevelPhaseVolume', 'propose_cross_level_phase_volume'),
+    initializeTerminal: pipeline('initializeTerminal', 'initialize_coarse_terminal_workspace'),
+    registerTerminal: pipeline('registerTerminal', 'register_coarse_terminal_registry'),
+    sealTerminal: pipeline('sealTerminal', 'seal_coarse_terminal_workspace'),
+    prevalidateCoarse: pipeline('prevalidateCoarse', 'begin_coarse_terminal_validation'),
+    beginCoarse: pipeline('beginCoarse', 'begin_coarse_velocity_publish'),
+    validateCoarse: pipeline('validateCoarse', 'validate_coarse_velocity_publish'),
+    sealCoarse: pipeline('sealCoarse', 'seal_coarse_velocity_publish'),
+    prepareCoarse: pipeline('prepareCoarse', 'prepare_coarse_transaction'),
+    applyCoarseRows: pipeline('applyCoarseRows', 'apply_coarse_reflux_rows'),
+    applyCoarse: pipeline('applyCoarse', 'apply_coarse_velocity_publish'),
+    commitCoarse: pipeline('commitCoarse', 'commit_coarse_reflux'),
+    finalizeCoarse: pipeline('finalizeCoarse', 'finalize_coarse_velocity_publish')
   });
   const deviceId = webGpuDeviceId(device);
   const storageUsage = GPU_BUFFER_USAGE.STORAGE
@@ -1454,11 +1555,13 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           layout.byteLength,
           storageUsage
         ),
-        refluxLedgerBuffer: allocateArenaBuffer(
-          `${arenaLabel}-reflux-ledger`,
-          localRefluxLayout.byteLength,
-          storageUsage
-        ),
+        refluxLedgerBuffer: localRefluxLayout == null
+          ? null
+          : allocateArenaBuffer(
+              `${arenaLabel}-reflux-ledger`,
+              localRefluxLayout.byteLength,
+              storageUsage
+            ),
         paramsBuffer: allocateArenaBuffer(
           `${arenaLabel}-params`,
           SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES,
@@ -1885,7 +1988,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       [2, execution.parentFieldView.coarseFieldView.fieldViewBuffer],
       [3, execution.workspaceBuffer],
       [4, execution.refluxLedger.buffer],
-      [5, execution.paramsBuffer]
+      [5, execution.paramsBuffer],
+      [11, execution.workspaceBuffer]
     ]);
     const transport = execution.phaseVolumeTransportAuthority;
     if (transport) {
@@ -1913,6 +2017,11 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   ) {
     const requiredCoarseCapacity = parentFieldView.coarseFieldCapacity;
     if (refluxLedger == null) {
+      if (externalRefluxLedgerRequired) {
+        throw new TypeError(
+          'parent-field mechanics external-ledger runtime requires one live reflux ledger'
+        );
+      }
       return {
         schema: ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
         status: 'schroeder-cross-level-reflux-ledger-arena-local',
@@ -1968,9 +2077,77 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       layout: pipelineObject.getBindGroupLayout(0),
       entries: PIPELINE_BINDINGS[pipelineName].map((binding) => ({
         binding,
-        resource: { buffer: resources.get(binding) }
+        resource: binding === 3
+          ? {
+              buffer: resources.get(binding),
+              offset: 0,
+              size: layout.workspaceBindingByteLength
+            }
+          : binding === 11
+            ? {
+                buffer: resources.get(binding),
+                offset: layout.parentToCoarseOrdinalByteOffset,
+                size: layout.parentToCoarseOrdinalByteLength
+              }
+            : { buffer: resources.get(binding) }
       }))
     });
+  }
+
+  function sharedBindGroup(execution, sharedLayout, bindings, suffix) {
+    if (!sharedLayout) return null;
+    const resources = resourcesFor(execution);
+    return device.createBindGroup({
+      label: `${label}-${suffix}-group-${execution.arenaGeneration}`,
+      layout: sharedLayout.bindGroupLayout,
+      entries: bindings.map((binding) => ({
+        binding,
+        resource: binding === 3
+          ? {
+              buffer: resources.get(binding),
+              offset: 0,
+              size: layout.workspaceBindingByteLength
+            }
+          : binding === 11
+            ? {
+                buffer: resources.get(binding),
+                offset: layout.parentToCoarseOrdinalByteOffset,
+                size: layout.parentToCoarseOrdinalByteLength
+              }
+            : { buffer: resources.get(binding) }
+      }))
+    });
+  }
+
+  function encodeWorkspaceStages(encoder, stages, sequenceLabel) {
+    if (!workspaceTimestampSpansActive()) {
+      encodeGroupedStages(encoder, stages, sequenceLabel);
+      return;
+    }
+    for (const stage of stages) {
+      const span = gpuTimestampRecorder.beginEncoderSpan(encoder, {
+        producerId: `schroeder-parent-workspace:${stage.name}`,
+        stage: stage.name,
+        spanClass: 'same-production-command-encoder'
+      });
+      if (stage.indirectBuffer) {
+        encodeIndirect(
+          encoder,
+          stage.pipeline,
+          stage.bindGroup,
+          stage.indirectBuffer,
+          `${sequenceLabel}:${stage.name}`
+        );
+      } else {
+        encodeDirect(
+          encoder,
+          stage.pipeline,
+          stage.bindGroup,
+          `${sequenceLabel}:${stage.name}`
+        );
+      }
+      gpuTimestampRecorder.endEncoderSpan(encoder, span);
+    }
   }
 
   function encodePredictors(encoder, {
@@ -2102,7 +2279,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         fineIndirectBuffer: arena.fineIndirectBuffer,
         coarseIndirectBuffer: arena.coarseIndirectBuffer,
         encodedDispatchCount: 9,
-        encodedComputePassCount: 9,
+        encodedComputePassCount: workspaceTimestampSpansActive() ? 9 : 1,
         retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
@@ -2172,65 +2349,66 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         0,
         3 * UINT32_BYTES
       );
-      encodeDirect(
-        encoder,
-        pipelines.initialize,
-        bindGroup(execution, 'initialize'),
-        `${label}Initialize`
+      const predictorGroup = sharedBindGroup(
+        execution,
+        predictorSharedLayout,
+        PREDICTOR_PIPELINE_BINDINGS,
+        'predictor-shared'
       );
-      encodeDirect(
-        encoder,
-        pipelines.registerReflux,
-        bindGroup(execution, 'registerReflux'),
-        `${label}RegisterRefluxKeys`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.restrictFine,
-        bindGroup(execution, 'restrictFine'),
-        arena.fineIndirectBuffer,
-        `${label}RestrictFine`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.finalizeBaseline,
-        bindGroup(execution, 'finalizeBaseline'),
-        arena.parentIndirectBuffer,
-        `${label}FinalizeBaseline`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.injectCoarse,
-        bindGroup(execution, 'injectCoarse'),
-        arena.coarseIndirectBuffer,
-        `${label}InjectCoarse`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.validateRegistry,
-        bindGroup(execution, 'validateRegistry'),
-        `${label}ValidateCoarseRegistry`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.updatePredictors,
-        bindGroup(execution, 'updatePredictors'),
-        arena.parentIndirectBuffer,
-        `${label}UpdatePredictors`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.contactPredictors,
-        bindGroup(execution, 'contactPredictors'),
-        arena.parentIndirectBuffer,
-        `${label}ContactPredictors`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.sealPredictors,
-        bindGroup(execution, 'sealPredictors'),
-        `${label}SealPredictors`
-      );
+      const predictorBindGroup = (pipelineName) =>
+        predictorGroup ?? bindGroup(execution, pipelineName);
+      encodeWorkspaceStages(encoder, [
+        {
+          name: 'initialize-predictors',
+          pipeline: pipelines.initialize,
+          bindGroup: predictorBindGroup('initialize')
+        },
+        {
+          name: 'register-reflux-keys',
+          pipeline: pipelines.registerReflux,
+          bindGroup: predictorBindGroup('registerReflux')
+        },
+        {
+          name: 'restrict-fine',
+          pipeline: pipelines.restrictFine,
+          bindGroup: predictorBindGroup('restrictFine'),
+          indirectBuffer: arena.fineIndirectBuffer
+        },
+        {
+          name: 'finalize-baseline',
+          pipeline: pipelines.finalizeBaseline,
+          bindGroup: predictorBindGroup('finalizeBaseline'),
+          indirectBuffer: arena.parentIndirectBuffer
+        },
+        {
+          name: 'inject-coarse',
+          pipeline: pipelines.injectCoarse,
+          bindGroup: predictorBindGroup('injectCoarse'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'validate-registry',
+          pipeline: pipelines.validateRegistry,
+          bindGroup: predictorBindGroup('validateRegistry')
+        },
+        {
+          name: 'update-predictors',
+          pipeline: pipelines.updatePredictors,
+          bindGroup: predictorBindGroup('updatePredictors'),
+          indirectBuffer: arena.parentIndirectBuffer
+        },
+        {
+          name: 'contact-predictors',
+          pipeline: pipelines.contactPredictors,
+          bindGroup: predictorBindGroup('contactPredictors'),
+          indirectBuffer: arena.parentIndirectBuffer
+        },
+        {
+          name: 'seal-predictors',
+          pipeline: pipelines.sealPredictors,
+          bindGroup: predictorBindGroup('sealPredictors')
+        }
+      ], `${label}PredictorSequence`);
       const executionOwner = {
         arena,
         token,
@@ -2936,7 +3114,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         fineIndirectBuffer: arena.fineIndirectBuffer,
         coarseIndirectBuffer: arena.coarseIndirectBuffer,
         encodedDispatchCount: 12,
-        encodedComputePassCount: 12,
+        encodedComputePassCount: workspaceTimestampSpansActive() ? 12 : 1,
         retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
@@ -3072,81 +3250,79 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         0,
         3 * UINT32_BYTES
       );
-      encodeDirect(
-        encoder,
-        pipelines.initializeTerminal,
-        bindGroup(execution, 'initializeTerminal'),
-        `${label}InitializeCoarseTerminal`
+      const terminalGroup = sharedBindGroup(
+        execution,
+        terminalSharedLayout,
+        TERMINAL_PIPELINE_BINDINGS,
+        'terminal-shared'
       );
-      encodeDirect(
-        encoder,
-        pipelines.registerTerminal,
-        bindGroup(execution, 'registerTerminal'),
-        `${label}RegisterCoarseTerminal`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.sealTerminal,
-        bindGroup(execution, 'sealTerminal'),
-        `${label}SealCoarseTerminalWorkspace`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.prevalidateCoarse,
-        bindGroup(execution, 'prevalidateCoarse'),
-        `${label}PrevalidateCoarseTerminal`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.validateCoarse,
-        bindGroup(execution, 'validateCoarse'),
-        arena.coarseIndirectBuffer,
-        `${label}ValidateCoarseTerminalRows`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.sealCoarse,
-        bindGroup(execution, 'sealCoarse'),
-        `${label}SealCoarseTerminalTransaction`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.prepareCoarse,
-        bindGroup(execution, 'prepareCoarse'),
-        `${label}PrepareCoarseTerminalTransaction`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.beginCoarse,
-        bindGroup(execution, 'beginCoarse'),
-        `${label}ClaimCoarseTerminalField`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.applyCoarseRows,
-        bindGroup(execution, 'applyCoarseRows'),
-        arena.coarseIndirectBuffer,
-        `${label}ApplyCoarseTerminalLedgerRows`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.applyCoarse,
-        bindGroup(execution, 'applyCoarse'),
-        arena.coarseIndirectBuffer,
-        `${label}ApplyCoarseTerminalVelocities`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.commitCoarse,
-        bindGroup(execution, 'commitCoarse'),
-        `${label}CommitCoarseTerminalEvidence`
-      );
-      encodeDirect(
-        encoder,
-        pipelines.finalizeCoarse,
-        bindGroup(execution, 'finalizeCoarse'),
-        `${label}FinalizeCoarseTerminal`
-      );
+      const terminalBindGroup = (pipelineName) =>
+        terminalGroup ?? bindGroup(execution, pipelineName);
+      encodeWorkspaceStages(encoder, [
+        {
+          name: 'initialize-terminal',
+          pipeline: pipelines.initializeTerminal,
+          bindGroup: terminalBindGroup('initializeTerminal')
+        },
+        {
+          name: 'register-terminal',
+          pipeline: pipelines.registerTerminal,
+          bindGroup: terminalBindGroup('registerTerminal')
+        },
+        {
+          name: 'seal-terminal-workspace',
+          pipeline: pipelines.sealTerminal,
+          bindGroup: terminalBindGroup('sealTerminal')
+        },
+        {
+          name: 'prevalidate-coarse',
+          pipeline: pipelines.prevalidateCoarse,
+          bindGroup: terminalBindGroup('prevalidateCoarse')
+        },
+        {
+          name: 'validate-coarse-rows',
+          pipeline: pipelines.validateCoarse,
+          bindGroup: terminalBindGroup('validateCoarse'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'seal-coarse-transaction',
+          pipeline: pipelines.sealCoarse,
+          bindGroup: terminalBindGroup('sealCoarse')
+        },
+        {
+          name: 'prepare-coarse-transaction',
+          pipeline: pipelines.prepareCoarse,
+          bindGroup: terminalBindGroup('prepareCoarse')
+        },
+        {
+          name: 'begin-coarse-publish',
+          pipeline: pipelines.beginCoarse,
+          bindGroup: terminalBindGroup('beginCoarse')
+        },
+        {
+          name: 'apply-coarse-reflux-rows',
+          pipeline: pipelines.applyCoarseRows,
+          bindGroup: terminalBindGroup('applyCoarseRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'apply-coarse-velocities',
+          pipeline: pipelines.applyCoarse,
+          bindGroup: terminalBindGroup('applyCoarse'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'commit-coarse-reflux',
+          pipeline: pipelines.commitCoarse,
+          bindGroup: terminalBindGroup('commitCoarse')
+        },
+        {
+          name: 'finalize-coarse-publish',
+          pipeline: pipelines.finalizeCoarse,
+          bindGroup: terminalBindGroup('finalizeCoarse')
+        }
+      ], `${label}CoarseTerminalSequence`);
       revalidateInputs();
       const update = coarseTerminalGridUpdateArtifact(
         execution,
@@ -3905,6 +4081,42 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     return finalizeRelease(execution, ownership, { retirementRecord });
   }
 
+  function releaseExecutionQueueOrdered(execution) {
+    const retirementRecord = retirementRecordFor(execution);
+    if (retirementRecord.completed) return true;
+    if (deviceLossObserved) {
+      const error = new Error(
+        'device-lost parent-field mechanics workspace requires quarantine retirement'
+      );
+      error.code =
+        'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_DEVICE_LOSS_RETIREMENT_REQUIRED';
+      throw error;
+    }
+    const ownership = ownershipFor(execution);
+    if (!ownership.anySubmitted) {
+      throw new Error(
+        'unsubmitted parent-field mechanics workspace requires discarded release'
+      );
+    }
+    if (
+      ownership.terminalSubmitted !== true
+      || execution?.terminalSubmitted !== true
+    ) {
+      const error = new Error(
+        'queue-ordered parent-field mechanics workspace release requires its terminal submission'
+      );
+      error.code =
+        'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_TERMINAL_SUBMISSION_REQUIRED';
+      throw error;
+    }
+    // Every producer and consumer of this arena is submitted to the same
+    // device queue. Re-publishing the arena synchronously is safe because a
+    // later writeBuffer/clear/dispatch that reuses it is ordered after those
+    // already-submitted commands. GPUBuffer destruction is still owned by the
+    // runtime and remains deferred until runtime teardown or device loss.
+    return finalizeRelease(execution, ownership, { retirementRecord });
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -4041,11 +4253,13 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   }
 
   function allocationEntries() {
-    return arenas.flatMap((arena) => arenaBuffers(arena).map((buffer) => ({
-      role: 'parent-field-mechanics-workspace-arena-buffer',
-      arenaIndex: arena.arenaIndex,
-      buffer
-    })));
+    return arenas.flatMap((arena) => arenaBuffers(arena)
+      .filter(Boolean)
+      .map((buffer) => ({
+        role: 'parent-field-mechanics-workspace-arena-buffer',
+        arenaIndex: arena.arenaIndex,
+        buffer
+      })));
   }
 
   function destroy() {
@@ -4074,6 +4288,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     status: 'schroeder-spatial-parent-field-mechanics-workspace-gpu-runtime-ready',
     deviceId,
     arenaCount: resolvedArenaCount,
+    externalRefluxLedgerRequired,
     layout,
     pipelineCount: Object.keys(pipelines).length,
     retainedGpuBufferBytes,
@@ -4092,6 +4307,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     isExecutionSubmitted,
     isTerminalSubmitted,
     releaseExecution,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     executionRetirementCompletionPromise,
@@ -4108,20 +4324,55 @@ const DIRECT_RUNTIME_CACHE_LIMIT = 4;
 export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   parentFieldCapacity,
   fineFieldCapacity = parentFieldCapacity,
-  arenaCount = 3
+  arenaCount = 3,
+  externalRefluxLedgerRequired = false,
+  gpuTimestampRecorder = null
 } = {}) {
   assertDevice(device);
+  if (typeof externalRefluxLedgerRequired !== 'boolean') {
+    throw new TypeError('externalRefluxLedgerRequired must be a boolean');
+  }
   const capacity = positiveInteger(parentFieldCapacity, 'parentFieldCapacity');
   const fineCapacity = positiveInteger(
     fineFieldCapacity,
     'fineFieldCapacity'
   );
+  const resolvedArenaCount = positiveInteger(arenaCount, 'arenaCount', 8);
+  const expectedLayout =
+    createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
+      parentFieldCapacity: capacity,
+      fineFieldCapacity: fineCapacity
+    });
+  const expectedLocalRefluxBytes = externalRefluxLedgerRequired
+    ? 0
+    : createSchroederCrossLevelRefluxLedgerLayout({
+        parentFieldCapacity: capacity
+      }).byteLength;
+  const expectedRetainedGpuBufferBytes = resolvedArenaCount * (
+    expectedLayout.byteLength
+    + expectedLocalRefluxBytes
+    + SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
+    + 9 * UINT32_BYTES
+  );
+  const rawRetainedBudget = Number(device.limits?.maxBufferSize);
+  const retainedBudget = Number.isFinite(rawRetainedBudget)
+    && rawRetainedBudget > 0
+    ? Math.max(rawRetainedBudget, expectedRetainedGpuBufferBytes)
+    : Number.POSITIVE_INFINITY;
   let byCapacity = directRuntimeCache.get(device);
   if (!byCapacity) {
     byCapacity = new Map();
     directRuntimeCache.set(device, byCapacity);
   }
-  const key = `${capacity}:${fineCapacity}:${positiveInteger(arenaCount, 'arenaCount', 8)}`;
+  const key = [
+    capacity,
+    fineCapacity,
+    resolvedArenaCount,
+    externalRefluxLedgerRequired ? 'external' : 'local',
+    typeof gpuTimestampRecorder?.beginEncoderSpan === 'function'
+      ? 'timestamp-capable'
+      : 'production'
+  ].join(':');
   let runtime = byCapacity.get(key);
   if (runtime?.status !== 'schroeder-spatial-parent-field-mechanics-workspace-gpu-runtime-ready') {
     byCapacity.delete(key);
@@ -4130,26 +4381,41 @@ export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     byCapacity.delete(key);
     byCapacity.set(key, runtime);
   }
-  if (!runtime) {
-    if (byCapacity.size >= DIRECT_RUNTIME_CACHE_LIMIT) {
-      const retired = [...byCapacity.entries()].find(
-        ([, candidate]) => candidate.activeExecutionCount?.() === 0
+  const cachedRetainedBytes = () => [...byCapacity.values()].reduce(
+    (sum, candidate) => sum + Number(candidate.retainedGpuBufferBytes ?? 0),
+    0
+  );
+  const cacheNeedsEviction = () => (
+    (!runtime && byCapacity.size >= DIRECT_RUNTIME_CACHE_LIMIT)
+    || cachedRetainedBytes() + (runtime ? 0 : expectedRetainedGpuBufferBytes)
+      > retainedBudget
+  );
+  while (cacheNeedsEviction()) {
+    const retired = [...byCapacity.entries()].find(
+      ([, candidate]) => (
+        candidate !== runtime
+        && candidate.activeExecutionCount?.() === 0
+      )
+    );
+    if (!retired) {
+      if (runtime) break;
+      const error = new Error(
+        'parent-field mechanics runtime cache is under active-workspace backpressure'
       );
-      if (!retired) {
-        const error = new Error(
-          'parent-field mechanics runtime cache is under active-workspace backpressure'
-        );
-        error.code = 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_CACHE_BACKPRESSURE';
-        throw error;
-      }
-      const [retiredKey, retiredRuntime] = retired;
-      byCapacity.delete(retiredKey);
-      retiredRuntime.destroy();
+      error.code = 'ERR_SCHROEDER_PARENT_FIELD_MECHANICS_CACHE_BACKPRESSURE';
+      throw error;
     }
+    const [retiredKey, retiredRuntime] = retired;
+    byCapacity.delete(retiredKey);
+    retiredRuntime.destroy();
+  }
+  if (!runtime) {
     runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       parentFieldCapacity: capacity,
       fineFieldCapacity: fineCapacity,
-      arenaCount,
+      arenaCount: resolvedArenaCount,
+      externalRefluxLedgerRequired,
+      gpuTimestampRecorder,
       label: `ulg-schroeder-direct-parent-field-mechanics-${capacity}`
     });
     byCapacity.set(key, runtime);

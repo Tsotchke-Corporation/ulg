@@ -11,6 +11,10 @@ import {
 } from './sphReactionProductPlacementReceipt.js';
 
 export {
+  sphReactionStrictGateFinalizeWgsl
+} from './sphReactionStrictGateWgsl.js';
+
+export {
   schroederSpatialAggregateStacklessTraversalWgsl,
   schroederSpatialAggregateViewWgsl
 } from './schroederSpatialAggregateViewWgsl.js';
@@ -563,7 +567,7 @@ struct ThermalParams {
   max_pair_support_m: f32,
   ambient_temperature_k: f32,
   _pad_b: f32,
-  _pad_c: f32,
+  ambient_radiation_exchange_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -1320,7 +1324,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  // This is a documented open-system source/sink (the environment absorbs
 	  // or supplies the energy, like the wall coupling above). The crossing
 	  // clamp guarantees a substep never overshoots past ambient equilibrium.
-	  if (self_emissivity > 0.0 && self_nominal_radius_m > 0.0 && params.ambient_temperature_k > 0.0) {
+	  if (
+	    params.ambient_radiation_exchange_enabled == 1u
+	    && self_emissivity > 0.0
+	    && self_nominal_radius_m > 0.0
+	    && params.ambient_temperature_k > 0.0
+	  ) {
 	    let surface_area_m2 = 4.0 * 3.14159265359 * self_nominal_radius_m * self_nominal_radius_m;
 	    let current_u = vel_u.w + du;
 	    let current_temperature = temperature + du * temperature_slope;
@@ -1492,6 +1501,7 @@ const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_SOURCE_OFFSET: u32 = 0u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_START_OFFSET: u32 = 1u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_COUNT_OFFSET: u32 = 2u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STATUS_OFFSET: u32 = 3u;
+const REACTION_AVOGADRO_PER_MOL: f32 = 6.02214076e23;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
@@ -1632,6 +1642,21 @@ fn reaction_value_finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
 }
 
+fn represented_entity_count_from_mass(
+  mass_kg: f32,
+  molar_mass_kg_per_mol: f32
+) -> f32 {
+  if (
+    !reaction_value_finite(mass_kg)
+    || !reaction_value_finite(molar_mass_kg_per_mol)
+    || !(mass_kg > 0.0)
+    || !(molar_mass_kg_per_mol > 0.0)
+  ) {
+    return 0.0;
+  }
+  return mass_kg / molar_mass_kg_per_mol * REACTION_AVOGADRO_PER_MOL;
+}
+
 fn phase_mask_satisfied(mask_f: f32, phase_id_f: f32) -> bool {
   let mask = u32(mask_f + 0.5);
   if (mask == 0u) {
@@ -1740,20 +1765,20 @@ fn product_output_ready(
   index: u32,
   material_id: f32,
   mass_kg: f32,
-  current_volume_m3: f32,
+  source_support_volume_m3: f32,
   next_u: f32,
   velocity: vec3<f32>
 ) -> bool {
   if (
     !reaction_value_finite(material_id)
     || !reaction_value_finite(mass_kg)
-    || !reaction_value_finite(current_volume_m3)
+    || !reaction_value_finite(source_support_volume_m3)
     || !reaction_value_finite(next_u)
     || !all(velocity == velocity)
     || !all(abs(velocity) <= vec3<f32>(3.402823e38))
     || !(material_id > 0.0)
     || !(mass_kg > 0.0)
-    || !(current_volume_m3 > 0.0)
+    || !(source_support_volume_m3 > 0.0)
   ) {
     return false;
   }
@@ -1787,14 +1812,8 @@ fn product_output_ready(
     return false;
   }
   let rest_volume = mass_kg / resolved.row0.w;
-  let deformation_j = current_volume_m3 / rest_volume;
-  let deformation_scale = pow(deformation_j, 1.0 / 3.0);
   return reaction_value_finite(rest_volume)
-    && reaction_value_finite(deformation_j)
-    && reaction_value_finite(deformation_scale)
-    && rest_volume > 0.0
-    && deformation_j > 0.0
-    && deformation_scale > 0.0;
+    && rest_volume > 0.0;
 }
 
 fn copy_particle(index: u32) {
@@ -1832,21 +1851,33 @@ fn copy_particle_with_mass(index: u32, mass_kg: f32) {
   out_particle_records[base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, next_mass);
   let mechanics_base = base + 5u;
   let volume_row = out_particle_records[mechanics_base + 4u];
-  if (pos_mass.w > 0.0 && volume_row.w > 0.0) {
+  if (pos_mass.w > 0.0) {
     // A partially consumed carrier retains its deformation and the same
     // specific current volume. Scaling V0 by the surviving mass fraction
-    // partitions Vcurrent = V0 * J exactly between remainder and products.
+    // retires exactly the consumed share; replacement product material is
+    // born independently at its own target reference state. Uniform
+    // composition makes represented entities proportional to the same mass
+    // fraction.
     let surviving_fraction = clamp(next_mass / pos_mass.w, 0.0, 1.0);
-    out_particle_records[mechanics_base + 4u] = vec4<f32>(
-      volume_row.x,
-      volume_row.y,
-      volume_row.z,
-      volume_row.w * surviving_fraction
+    let thermo2 = out_particle_records[base + 4u];
+    out_particle_records[base + 4u] = vec4<f32>(
+      thermo2.x,
+      thermo2.y * surviving_fraction,
+      thermo2.z,
+      thermo2.w
     );
+    if (volume_row.w > 0.0) {
+      out_particle_records[mechanics_base + 4u] = vec4<f32>(
+        volume_row.x,
+        volume_row.y,
+        volume_row.z,
+        volume_row.w * surviving_fraction
+      );
+    }
   }
 }
 
-fn write_reacted_mechanics(index: u32, mass_kg: f32, current_volume_m3: f32, resolved: ThermalRows) {
+fn write_reacted_mechanics(index: u32, mass_kg: f32, _source_support_volume_m3: f32, resolved: ThermalRows) {
   let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
   var rest_density = resolved.row0.w;
   if (rest_density <= 0.0) {
@@ -1856,12 +1887,14 @@ fn write_reacted_mechanics(index: u32, mass_kg: f32, current_volume_m3: f32, res
   if (rest_density > 0.0) {
     rest_volume = mass_kg / rest_density;
   }
-  // Every caller authenticates source V0*J before reaching this mutation.
-  // Target density establishes the new reference volume only; it may never
-  // substitute for missing represented current volume.
-  let current_volume = current_volume_m3;
-  let deformation_j = current_volume / rest_volume;
-  let deformation_scale = pow(deformation_j, 1.0 / 3.0);
+  // Every caller authenticates the consumed source support volume before
+  // reaching this mutation, but that support is routing geometry rather than
+  // deformation authority for a newly born material. Chemical products start
+  // relaxed at their target reference density, matching phase-component
+  // materialization and preventing gas-scale support from becoming enormous
+  // condensed-product strain.
+  let deformation_j = 1.0;
+  let deformation_scale = 1.0;
   let out_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
   out_particle_records[out_base] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
   out_particle_records[out_base + 1u] = vec4<f32>(deformation_scale, 0.0, 0.0, 0.0);
@@ -1879,16 +1912,21 @@ fn write_product_particle(
   mass_kg: f32,
   current_volume_m3: f32,
   next_u: f32,
-  velocity: vec3<f32>
+  velocity: vec3<f32>,
+  represented_entity_count: f32
 ) -> bool {
-  if (!product_output_ready(
+  if (
+    !reaction_value_finite(represented_entity_count)
+    || !(represented_entity_count > 0.0)
+    || !product_output_ready(
     index,
     material_id,
     mass_kg,
     current_volume_m3,
     next_u,
     velocity
-  )) {
+    )
+  ) {
     return false;
   }
   let pos_mass = state_pos_mass(index);
@@ -1899,7 +1937,12 @@ fn write_product_particle(
   out_particle_records[out_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, next_u);
   out_particle_records[out_base + 2u] = resolved.row0;
   out_particle_records[out_base + 3u] = resolved.row1;
-  out_particle_records[out_base + 4u] = resolved.row2;
+  out_particle_records[out_base + 4u] = vec4<f32>(
+    resolved.row2.x,
+    max(represented_entity_count, 0.0),
+    resolved.row2.z,
+    resolved.row2.w
+  );
   if (params.reset_mechanics != 0u) {
     write_reacted_mechanics(index, max(mass_kg, 0.0), current_volume_m3, resolved);
   } else {
@@ -2736,6 +2779,7 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     var legacy_product_material_id = rx0.z;
     var legacy_next_mass = pos_mass.w;
+    var legacy_represented_entity_count = thermo_row2(particle_index).y;
     let legacy_next_u = vel_u.w - rx1.x;
     if (product_term_count > 0u) {
       let product_term_offset = u32(max(header0.w, 0.0));
@@ -2748,6 +2792,13 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       if (product_term_count > 1u) {
         legacy_next_mass = max((pos_mass.w + partner_pos_mass.w) * term1.x, 0.0);
       }
+      legacy_represented_entity_count = represented_entity_count_from_mass(
+        legacy_next_mass,
+        term0.w
+      );
+    } else if (pos_mass.w > 0.0) {
+      legacy_represented_entity_count = thermo_row2(particle_index).y
+        * clamp(legacy_next_mass / pos_mass.w, 0.0, 1.0);
     }
     var legacy_current_volume = self_current_volume
       * legacy_next_mass / max(pos_mass.w, 1.0e-20);
@@ -2763,7 +2814,8 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       legacy_next_mass,
       legacy_current_volume,
       legacy_next_u,
-      vel_u.xyz
+      vel_u.xyz,
+      legacy_represented_entity_count
     );
     if (!legacy_written) {
       copy_particle(particle_index);
@@ -2909,7 +2961,11 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
         emitted_product_mass,
         emitted_product_current_volume,
         product_u,
-        product_com_velocity
+        product_com_velocity,
+        represented_entity_count_from_mass(
+          emitted_product_mass,
+          product_term.molar_mass
+        )
       );
       if (product_written) {
         return;
@@ -3139,6 +3195,204 @@ fn scatter_placement_rows(
 }
 `;
 
+// Resident product history is append-only after product placement. This
+// kernel filters each new source before appending it to a stable live prefix,
+// so the hot loop never needs to map a compacted count. Each published logical
+// view owns an immutable aligned control record; later views may share the
+// data buffer without widening an older view's readable prefix.
+export const sphResidentProductHistoryFilteredAppendWgsl = `
+struct ResidentProductHistoryAppendParams {
+  source_a_row_count: u32,
+  source_b_row_count: u32,
+  row_capacity: u32,
+  row_stride_vec4: u32,
+  reuse_parent_prefix: u32,
+  source_a_uses_parent_count: u32,
+  expected_parent_generation: u32,
+  expected_parent_seal: u32,
+  next_generation: u32,
+  next_seal: u32,
+  expected_parent_row_capacity: u32,
+  expected_parent_row_stride_vec4: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> history_rows: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_a_rows: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_b_rows: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> parent_control: array<u32>;
+@group(0) @binding(4) var<storage, read_write> next_control: array<u32>;
+@group(0) @binding(5) var<uniform> params: ResidentProductHistoryAppendParams;
+
+const HISTORY_CONTROL_MAGIC: u32 = 0x50484731u;
+const HISTORY_CONTROL_VERSION: u32 = 1u;
+const HISTORY_CONTROL_READY: u32 = 1u;
+const HISTORY_CONTROL_FAILED: u32 = 0x80000000u;
+const HISTORY_ERROR_PARENT: u32 = 1u;
+const HISTORY_ERROR_SOURCE: u32 = 2u;
+const HISTORY_ERROR_CAPACITY: u32 = 4u;
+
+fn history_source_row_live(
+  source_kind: u32,
+  row: u32,
+  stride: u32
+) -> bool {
+  let base = row * stride;
+  if (source_kind == 0u) {
+    let bound = arrayLength(&source_a_rows);
+    if (stride < 8u || base > bound || stride > bound - base) {
+      return false;
+    }
+    let row2 = source_a_rows[base + 2u];
+    let row3 = source_a_rows[base + 3u];
+    let row4 = source_a_rows[base + 4u];
+    let row7 = source_a_rows[base + 7u];
+    return row4.z == 1.0
+      && row7.z == 1.0
+      && row2.w > 0.0
+      && row4.y > 0.0
+      && row3.y > 0.0;
+  }
+  let bound = arrayLength(&source_b_rows);
+  if (stride < 8u || base > bound || stride > bound - base) {
+    return false;
+  }
+  let row2 = source_b_rows[base + 2u];
+  let row3 = source_b_rows[base + 3u];
+  let row4 = source_b_rows[base + 4u];
+  let row7 = source_b_rows[base + 7u];
+  return row4.z == 1.0
+    && row7.z == 1.0
+    && row2.w > 0.0
+    && row4.y > 0.0
+    && row3.y > 0.0;
+}
+
+fn history_fail(error: u32) {
+  if (arrayLength(&next_control) < 12u) { return; }
+  next_control[0u] = HISTORY_CONTROL_MAGIC;
+  next_control[1u] = HISTORY_CONTROL_VERSION;
+  next_control[2u] = HISTORY_CONTROL_FAILED;
+  next_control[3u] = 0u;
+  next_control[4u] = params.row_capacity;
+  next_control[5u] = params.row_stride_vec4;
+  next_control[6u] = params.next_generation;
+  next_control[7u] = params.next_seal;
+  next_control[8u] = 0u;
+  next_control[9u] = 1u;
+  next_control[10u] = 1u;
+  next_control[11u] = error;
+}
+
+fn history_copy_source_row(
+  source_kind: u32,
+  source_row: u32,
+  destination_row: u32,
+  stride: u32
+) {
+  let source_base = source_row * stride;
+  let destination_base = destination_row * stride;
+  for (var component = 0u; component < stride; component = component + 1u) {
+    if (source_kind == 0u) {
+      history_rows[destination_base + component] =
+        source_a_rows[source_base + component];
+    } else {
+      history_rows[destination_base + component] =
+        source_b_rows[source_base + component];
+    }
+  }
+}
+
+@compute @workgroup_size(1)
+fn append_filtered_sources(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) { return; }
+  if (
+    arrayLength(&parent_control) < 12u
+    || arrayLength(&next_control) < 12u
+    || parent_control[0u] != HISTORY_CONTROL_MAGIC
+    || parent_control[1u] != HISTORY_CONTROL_VERSION
+    || parent_control[2u] != HISTORY_CONTROL_READY
+    || parent_control[4u] != params.expected_parent_row_capacity
+    || parent_control[5u] != params.expected_parent_row_stride_vec4
+    || parent_control[6u] != params.expected_parent_generation
+    || parent_control[7u] != params.expected_parent_seal
+    || params.expected_parent_row_stride_vec4
+      != params.row_stride_vec4
+    || parent_control[3u] > params.expected_parent_row_capacity
+  ) {
+    history_fail(HISTORY_ERROR_PARENT);
+    return;
+  }
+  let stride = params.row_stride_vec4;
+  let capacity = params.row_capacity;
+  if (
+    stride < 8u
+    || capacity == 0u
+    || capacity > arrayLength(&history_rows) / stride
+  ) {
+    history_fail(HISTORY_ERROR_CAPACITY);
+    return;
+  }
+  let parent_count = parent_control[3u];
+  let source_a_count = select(
+    params.source_a_row_count,
+    parent_count,
+    params.source_a_uses_parent_count == 1u
+  );
+  if (
+    source_a_count > arrayLength(&source_a_rows) / stride
+    || params.source_b_row_count > arrayLength(&source_b_rows) / stride
+  ) {
+    history_fail(HISTORY_ERROR_SOURCE);
+    return;
+  }
+  var appended_count = 0u;
+  for (var row = 0u; row < source_a_count; row = row + 1u) {
+    if (history_source_row_live(0u, row, stride)) {
+      appended_count = appended_count + 1u;
+    }
+  }
+  for (var row = 0u; row < params.source_b_row_count; row = row + 1u) {
+    if (history_source_row_live(1u, row, stride)) {
+      appended_count = appended_count + 1u;
+    }
+  }
+  let base_count = select(
+    0u,
+    parent_count,
+    params.reuse_parent_prefix == 1u
+  );
+  if (appended_count > capacity || base_count > capacity - appended_count) {
+    history_fail(HISTORY_ERROR_CAPACITY);
+    return;
+  }
+  var destination = base_count;
+  for (var row = 0u; row < source_a_count; row = row + 1u) {
+    if (history_source_row_live(0u, row, stride)) {
+      history_copy_source_row(0u, row, destination, stride);
+      destination = destination + 1u;
+    }
+  }
+  for (var row = 0u; row < params.source_b_row_count; row = row + 1u) {
+    if (history_source_row_live(1u, row, stride)) {
+      history_copy_source_row(1u, row, destination, stride);
+      destination = destination + 1u;
+    }
+  }
+  next_control[0u] = HISTORY_CONTROL_MAGIC;
+  next_control[1u] = HISTORY_CONTROL_VERSION;
+  next_control[2u] = HISTORY_CONTROL_READY;
+  next_control[3u] = destination;
+  next_control[4u] = capacity;
+  next_control[5u] = stride;
+  next_control[6u] = params.next_generation;
+  next_control[7u] = params.next_seal;
+  next_control[8u] = (destination + 63u) / 64u;
+  next_control[9u] = 1u;
+  next_control[10u] = 1u;
+  next_control[11u] = 0u;
+}
+`;
+
 // Places unplaced product-event mass into spare (zero-mass) particle slots so
 // gas products become real mechanics citizens instead of immovable event
 // sources. Single-invocation deterministic loop (same policy as the event
@@ -3189,6 +3443,59 @@ ${schroederSpatialExactNearTraversalV1Wgsl}
 // ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_END
 
 const PHASE_COMPANION_RESERVED_STATUS: f32 = 254.0;
+const REACTION_PRODUCT_PLACEMENT_AVOGADRO_PER_MOL: f32 = 6.02214076e23;
+
+fn placement_represented_entity_count_for_product_mass(
+  mass_kg: f32,
+  molar_mass_kg_per_mol: f32
+) -> f32 {
+  if (
+    !(mass_kg > 0.0)
+    || !(molar_mass_kg_per_mol > 0.0)
+    || mass_kg != mass_kg
+    || molar_mass_kg_per_mol != molar_mass_kg_per_mol
+  ) {
+    return 0.0;
+  }
+  let represented_entity_count = mass_kg / molar_mass_kg_per_mol
+    * REACTION_PRODUCT_PLACEMENT_AVOGADRO_PER_MOL;
+  return select(
+    0.0,
+    represented_entity_count,
+    represented_entity_count == represented_entity_count
+      && abs(represented_entity_count) <= 3.0e38
+  );
+}
+
+fn placement_product_event_moles_match_mass(
+  product_mass_kg: f32,
+  product_moles: f32,
+  molar_mass_kg_per_mol: f32
+) -> bool {
+  if (
+    !(product_mass_kg > 0.0)
+    || !(product_moles > 0.0)
+    || !(molar_mass_kg_per_mol > 0.0)
+    || product_mass_kg != product_mass_kg
+    || product_moles != product_moles
+    || molar_mass_kg_per_mol != molar_mass_kg_per_mol
+  ) {
+    return false;
+  }
+  let derived_moles = product_mass_kg / molar_mass_kg_per_mol;
+  if (
+    !(derived_moles > 0.0)
+    || derived_moles != derived_moles
+    || abs(derived_moles) > 3.0e38
+  ) {
+    return false;
+  }
+  let tolerance = max(
+    1.0e-20,
+    1.0e-5 * max(abs(product_moles), abs(derived_moles))
+  );
+  return abs(product_moles - derived_moles) <= tolerance;
+}
 
 fn placement_summary_base(product_term_index: u32) -> u32 {
   return product_term_index * 8u;
@@ -4121,6 +4428,11 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let summary_base = placement_summary_base(product_term_index);
     let unplaced_mass_kg = max(row3.y, 0.0);
     let event_product_mass_kg = max(event_row0_header.w, 0.0);
+    let unplaced_represented_entity_count =
+      placement_represented_entity_count_for_product_mass(
+        unplaced_mass_kg,
+        row3.w
+      );
     if (event_product_mass_kg > 0.0 || unplaced_mass_kg > 0.0) {
       record_placement_identity(summary_base, event_row1_header, event_row2_header);
     }
@@ -4128,8 +4440,17 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let event_valid = !(
       status != 1.0
       || event_row7_header.z != 1.0
+      || !(event_row2_header.y > 0.0)
       || !(event_row2_header.w > 0.0)
+      || !(row3.w > 0.0)
       || !(row4.y > 0.0)
+      || !placement_product_event_moles_match_mass(
+        event_product_mass_kg,
+        event_row2_header.y,
+        row3.w
+      )
+      || (unplaced_mass_kg > 0.0
+        && !(unplaced_represented_entity_count > 0.0))
     );
     if (!event_valid) {
       rejected_event_count = rejected_event_count + 1u;
@@ -4314,8 +4635,15 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
       let thermo_base = merge_slot * params.thermo_stride_vec4;
       let particle_thermo0 = next_thermo[thermo_base];
+      let particle_thermo2 = next_thermo[thermo_base + 2u];
       let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
       next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
+      next_thermo[thermo_base + 2u] = vec4<f32>(
+        particle_thermo2.x,
+        particle_thermo2.y + unplaced_represented_entity_count,
+        particle_thermo2.z,
+        particle_thermo2.w
+      );
       // Rest volume grows by the event's share so density stays consistent.
       next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
       record_capture_merge(summary_base, unplaced_mass_kg, merged_mass, merge_distance);
@@ -4411,6 +4739,7 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let thermo_base = merge_slot * params.thermo_stride_vec4;
         let particle_thermo0 = next_thermo[thermo_base];
+        let particle_thermo2 = next_thermo[thermo_base + 2u];
         if (placement_phase_is_gas(event_phase_id)) {
           if (abs(particle_thermo0.y - event_phase_id) < 0.5) {
             let merged_route = placement_route_gas_merge_position(
@@ -4437,6 +4766,12 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
         next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
         let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
         next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
+        next_thermo[thermo_base + 2u] = vec4<f32>(
+          particle_thermo2.x,
+          particle_thermo2.y + unplaced_represented_entity_count,
+          particle_thermo2.z,
+          particle_thermo2.w
+        );
         next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
         record_fallback_merge(summary_base, unplaced_mass_kg, merged_mass, nearest_distance);
         fallback_event_count = fallback_event_count + 1u;
@@ -4493,7 +4828,12 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     next_thermo[thermo_base] = vec4<f32>(material_id, phase_id, temperature_k, rest_density);
     next_thermo[thermo_base + 1u] = vec4<f32>(solid_fraction, liquid_fraction, gas_fraction, plasma_fraction);
-    next_thermo[thermo_base + 2u] = vec4<f32>(support_radius_m, 1.0, 1.0, support_radius_m);
+    next_thermo[thermo_base + 2u] = vec4<f32>(
+      support_radius_m,
+      unplaced_represented_entity_count,
+      1.0,
+      support_radius_m
+    );
     // Mechanics: fresh rest state (F = I, J = 1) with the event's product
     // mechanics -- mirrors write_reacted_mechanics in the reaction kernel.
     var rest_volume = 0.0;
@@ -6948,13 +7288,48 @@ struct RenderFieldParams {
   _pad2: f32,
 };
 
+struct RenderProductHistoryGateParams {
+  gate_required: u32,
+  expected_magic: u32,
+  expected_version: u32,
+  expected_ready_status: u32,
+  expected_generation: u32,
+  expected_seal: u32,
+  expected_row_capacity: u32,
+  expected_row_stride_vec4: u32,
+};
+
 @group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
 	@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
 	@group(0) @binding(3) var<uniform> params: RenderFieldParams;
 	@group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> product_history_control: array<u32>;
+@group(0) @binding(6) var<uniform> product_history_gate: RenderProductHistoryGateParams;
 
 const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 5u;
+
+fn render_product_history_ready() -> bool {
+  if (product_history_gate.gate_required == 0u) {
+    return true;
+  }
+  return arrayLength(&product_history_control) >= 8u
+    && product_history_control[0u] == product_history_gate.expected_magic
+    && product_history_control[1u] == product_history_gate.expected_version
+    && product_history_control[2u] == product_history_gate.expected_ready_status
+    && product_history_control[3u] <= product_history_control[4u]
+    && product_history_control[4u] == product_history_gate.expected_row_capacity
+    && product_history_control[5u] == product_history_gate.expected_row_stride_vec4
+    && product_history_control[6u] == product_history_gate.expected_generation
+    && product_history_control[7u] == product_history_gate.expected_seal;
+}
+
+fn render_product_event_count() -> u32 {
+  if (product_history_gate.gate_required != 0u) {
+    return product_history_control[3u];
+  }
+  return params.product_event_count;
+}
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE];
@@ -7066,6 +7441,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (cell_index >= field_cell_count) {
     return;
   }
+  let out_index = field_offset + cell_index;
+  if (out_index >= params.total_field_cells) {
+    return;
+  }
+  // Product history and particle rows form one visible step. A pending,
+  // failed, forged, or mismatched history view invalidates the whole step:
+  // zero both rows explicitly so a caller-owned pooled output cannot retain a
+  // stale frame, and do so before reading either source family.
+  if (!render_product_history_ready()) {
+    render_field_cells[out_index * 2u] = vec4<f32>(0.0);
+    render_field_cells[out_index * 2u + 1u] = vec4<f32>(0.0);
+    return;
+  }
+  let authenticated_product_event_count = render_product_event_count();
 
   let resolution = max(u32(s1.x), 1u);
   let xy_count = resolution * resolution;
@@ -7105,10 +7494,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
   var density = 0.0;
   var palette = vec3<f32>(0.0, 0.0, 0.0);
-  // Density-weighted particle temperature for per-fragment emission; product
-  // events carry no per-event temperature, so only particles contribute and
-  // an event-only cell reads 0 (the draw shader falls back to the per-surface
-  // uniform temperature there).
+  // Density-weighted particle temperature for per-fragment emission. Product
+  // event row4.x is not yet closure-resolved from product_u for every route,
+  // so treating it as authoritative here could invent visible heat.
   var temperature_weighted = 0.0;
   var temperature_weight = 0.0;
   // Velocity moments (weights = the same positive metaball values) for the
@@ -7241,7 +7629,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
 
-	  for (var event_index = 0u; event_index < params.product_event_count; event_index = event_index + 1u) {
+	  for (var event_index = 0u; event_index < authenticated_product_event_count; event_index = event_index + 1u) {
 	    let event0 = product_event_row0(event_index);
 	    let event1 = product_event_row1(event_index);
 	    let event2 = product_event_row2(event_index);
@@ -7274,12 +7662,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    }
 	  }
 
-  let out_index = field_offset + cell_index;
-  if (out_index < params.total_field_cells) {
-    let mean_temperature_k = select(0.0, temperature_weighted / max(temperature_weight, 1.0e-6), temperature_weight > 0.0);
-    render_field_cells[out_index * 2u] = vec4<f32>(density, palette);
-    render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, 0.0, 0.0, 0.0);
-  }
+  let mean_temperature_k = select(0.0, temperature_weighted / max(temperature_weight, 1.0e-6), temperature_weight > 0.0);
+  render_field_cells[out_index * 2u] = vec4<f32>(density, palette);
+  render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, 0.0, 0.0, 0.0);
 }
 `;
 
@@ -9490,8 +9875,8 @@ struct PressureInterfaceParams {
 @group(0) @binding(5) var<storage, read> contact_kinematics_rows: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> gas_authority_control: array<u32>;
 
-const GAS_AUTHORITY_MAGIC: u32 = 0x53474132u;
-const GAS_AUTHORITY_VERSION: u32 = 2u;
+const GAS_AUTHORITY_MAGIC: u32 = 0x53474133u;
+const GAS_AUTHORITY_VERSION: u32 = 3u;
 const GAS_AUTHORITY_REQUIRED_READY: u32 = 31u;
 const GAS_AUTHORITY_EMPTY: u32 = 32u;
 const GAS_AUTHORITY_FAILED: u32 = 0x80000000u;
@@ -9515,7 +9900,7 @@ fn authenticated_gas_pressure_cell_count() -> u32 {
     || gas_authority_control[6u] != params.gas_authority_storage_generation
     || gas_authority_control[7u] != params.gas_pressure_cell_capacity
     || gas_authority_control[30u] != params.gas_pressure_cell_stride_floats
-    || gas_authority_control[31u] != 0u
+    || gas_authority_control[31u] != gas_authority_control[10u]
     || params.gas_pressure_cell_stride_floats != 12u
     || params.gas_pressure_cell_capacity > 0x55555555u
     || arrayLength(&gas_pressure_cells) < params.gas_pressure_cell_capacity * 3u
@@ -17825,7 +18210,9 @@ fn ss_psm_free_particle(source_index: u32) -> f32 {
   out_sph_state[state_base] = vec4<f32>(state0.x, state0.y, state0.z, 0.0);
   out_sph_state[state_base + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   let thermo2 = out_sph_thermo[thermo_base + 2u];
-  out_sph_thermo[thermo_base + 2u] = vec4<f32>(thermo2.x, thermo2.y, 0.0, thermo2.w);
+  // A freed lane represents no material. Retaining its entity count would
+  // double-count the merged members beside the newly materialized child.
+  out_sph_thermo[thermo_base + 2u] = vec4<f32>(thermo2.x, 0.0, 0.0, thermo2.w);
   let row4 = out_mls_mechanics[mechanics_base + 4u];
   out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
   let row5 = out_mls_mechanics[mechanics_base + 5u];

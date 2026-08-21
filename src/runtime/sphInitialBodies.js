@@ -629,6 +629,80 @@ export function sphInitialBodiesFromLegacyDropBase({
   ]);
 }
 
+/**
+ * Resolve the legacy phase-demo proxy controls into the exact ordered initial
+ * bodies consumed by the runtime.
+ *
+ * The historical controls share one fixed matter pitch: the reference base
+ * edge divided by its reference five-cell sampling. Changing either edge-count
+ * control changes the physical block size by N * pitch; it does not ask the
+ * material-specific legacy spacing planner to choose a second geometry.
+ */
+export function sphInitialBodiesFromLegacyPhaseControls({
+  baseMaterial,
+  dropMaterial,
+  baseTemperatureK,
+  dropTemperatureK,
+  baseParticlesPerEdge = 5,
+  dropParticlesPerEdge = 3,
+  referenceBaseEdgeM = 1,
+  referenceBaseParticlesPerEdge = 5,
+  sceneLengthScale = 1,
+  referenceBoxDimensionsM = [5, 5, 5],
+  referenceBaseBottomM = 0,
+  referenceDropBottomM = 2.5,
+  baseVelocityMPerS = [0, 0, 0],
+  dropVelocityMPerS = [0, 0, 0]
+} = {}) {
+  const scale = positiveNumber(sceneLengthScale, 'sceneLengthScale');
+  const referenceBaseEdge = positiveNumber(
+    referenceBaseEdgeM,
+    'referenceBaseEdgeM'
+  );
+  const referencePitchCount = positiveSafeInteger(
+    referenceBaseParticlesPerEdge,
+    'referenceBaseParticlesPerEdge'
+  );
+  const baseCount = positiveSafeInteger(
+    baseParticlesPerEdge,
+    'baseParticlesPerEdge'
+  );
+  const dropCount = positiveSafeInteger(
+    dropParticlesPerEdge,
+    'dropParticlesPerEdge'
+  );
+  const referenceBox = vector3(
+    referenceBoxDimensionsM,
+    'referenceBoxDimensionsM',
+    positiveNumber
+  );
+  const baseBottomM =
+    finiteNumber(referenceBaseBottomM, 'referenceBaseBottomM') * scale;
+  const dropBottomM =
+    finiteNumber(referenceDropBottomM, 'referenceDropBottomM') * scale;
+  const boxDimensionsM = referenceBox.map((extent) => extent * scale);
+  const cellPitchM = referenceBaseEdge * scale / referencePitchCount;
+  const baseEdgeM = cellPitchM * baseCount;
+  const dropEdgeM = cellPitchM * dropCount;
+  const centerX = boxDimensionsM[0] / 2;
+  const centerZ = boxDimensionsM[2] / 2;
+
+  return sphInitialBodiesFromLegacyDropBase({
+    baseMaterial,
+    dropMaterial,
+    baseSizeM: [baseEdgeM, baseEdgeM, baseEdgeM],
+    dropSizeM: [dropEdgeM, dropEdgeM, dropEdgeM],
+    baseCenterM: [centerX, baseBottomM + baseEdgeM / 2, centerZ],
+    dropCenterM: [centerX, dropBottomM + dropEdgeM / 2, centerZ],
+    baseTemperatureK,
+    dropTemperatureK,
+    baseParticlesPerEdge: [baseCount, baseCount, baseCount],
+    dropParticlesPerEdge: [dropCount, dropCount, dropCount],
+    baseVelocityMPerS,
+    dropVelocityMPerS
+  });
+}
+
 /** Extract the unique legacy base/drop bodies without changing their geometry. */
 export function sphInitialBodiesToLegacyDropBase(value) {
   const initialBodies = normalizeSphInitialBodies(value);

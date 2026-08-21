@@ -414,12 +414,13 @@ fn reject_transport() {
   let state_offset = field_load(30u);
   if (state_offset >= FIELD_RECEIPT_WORDS
       && state_offset <= arrayLength(&field_view)) {
+    let receipt = state_offset - FIELD_RECEIPT_WORDS;
     field_store(
-      state_offset - FIELD_RECEIPT_WORDS + 2u,
+      receipt + 2u,
       FIELD_RECEIPT_FAIL_CLOSED
     );
     field_store(
-      state_offset - FIELD_RECEIPT_WORDS + 26u,
+      receipt + 26u,
       FIELD_PRESSURE_FAIL_CLOSED
     );
   }
@@ -480,38 +481,43 @@ fn proposal_seal() -> u32 {
     ^ proposal_control[2u];
 }
 
-fn proposal_admitted() -> bool {
-  if (arrayLength(&proposal_control) < PROPOSAL_HEADER_WORDS
-      || proposal_control[0u] != PROPOSAL_MAGIC
-      || proposal_control[1u] != PROPOSAL_VERSION
-      || proposal_control[2u] != PROPOSAL_READY_ADMITTED
-      || proposal_control[3u] != params.generation_id
-      || !proposal_identity_matches()
-      || proposal_control[23u] != bitcast<u32>(params.fine_level)
-      || proposal_control[24u] != bitcast<u32>(params.coarse_level)
-      || proposal_control[25u] != 1u
-      || proposal_control[26u] != 1u
-      || proposal_control[29u] != params.parent_field_completion_ordinal
-      || proposal_control[34u] != LOCAL_HEAD_WORDS
-      || proposal_control[37u] != MOMENT_ROW_WORDS
-      || proposal_control[49u] != proposal_seal()
-      || proposal_control[50u] != LOCAL_POLICY) {
-    return false;
-  }
+fn proposal_admission_reason() -> u32 {
+  if (arrayLength(&proposal_control) < PROPOSAL_HEADER_WORDS) { return 1u; }
+  if (proposal_control[0u] != PROPOSAL_MAGIC) { return 2u; }
+  if (proposal_control[1u] != PROPOSAL_VERSION) { return 3u; }
+  if (proposal_control[2u] != PROPOSAL_READY_ADMITTED) { return 4u; }
+  if (proposal_control[3u] != params.generation_id) { return 5u; }
+  if (!proposal_identity_matches()) { return 6u; }
+  if (proposal_control[23u] != bitcast<u32>(params.fine_level)) { return 7u; }
+  if (proposal_control[24u] != bitcast<u32>(params.coarse_level)) { return 8u; }
+  if (proposal_control[25u] != 1u) { return 9u; }
+  if (proposal_control[26u] != 1u) { return 10u; }
+  if (proposal_control[29u] != params.parent_field_completion_ordinal) { return 11u; }
+  if (proposal_control[34u] != LOCAL_HEAD_WORDS) { return 12u; }
+  if (proposal_control[37u] != MOMENT_ROW_WORDS) { return 13u; }
+  if (proposal_control[49u] != proposal_seal()) { return 14u; }
+  if (proposal_control[50u] != LOCAL_POLICY) { return 15u; }
   if (params.level_index == 0u) {
-    return proposal_control[16u] == field_load(34u)
-      && proposal_control[17u] == params.field_capacity
-      && proposal_control[23u] == bitcast<u32>(params.selected_level)
-      && proposal_control[30u] == params.local_head_offset_words
-      && proposal_control[27u] == params.field_completion_ordinal
-      && proposal_control[28u] == params.other_receipt_completion_ordinal;
+    if (proposal_control[16u] != field_load(34u)) { return 20u; }
+    if (proposal_control[17u] != params.field_capacity) { return 21u; }
+    if (proposal_control[23u] != bitcast<u32>(params.selected_level)) { return 22u; }
+    if (proposal_control[30u] != params.local_head_offset_words) { return 23u; }
+    if (proposal_control[27u] != params.field_completion_ordinal) { return 24u; }
+    if (proposal_control[28u] != params.other_receipt_completion_ordinal) { return 25u; }
+    return 0u;
   }
-  return proposal_control[18u] == field_load(34u)
-    && proposal_control[19u] == params.field_capacity
-    && proposal_control[24u] == bitcast<u32>(params.selected_level)
-    && proposal_control[31u] == params.local_head_offset_words
-    && proposal_control[28u] == params.field_completion_ordinal
-    && proposal_control[27u] == params.other_receipt_completion_ordinal;
+  if (params.level_index != 1u) { return 30u; }
+  if (proposal_control[18u] != field_load(34u)) { return 31u; }
+  if (proposal_control[19u] != params.field_capacity) { return 32u; }
+  if (proposal_control[24u] != bitcast<u32>(params.selected_level)) { return 33u; }
+  if (proposal_control[31u] != params.local_head_offset_words) { return 34u; }
+  if (proposal_control[28u] != params.field_completion_ordinal) { return 35u; }
+  if (proposal_control[27u] != params.other_receipt_completion_ordinal) { return 36u; }
+  return 0u;
+}
+
+fn proposal_admitted() -> bool {
+  return proposal_admission_reason() == 0u;
 }
 
 fn receipt_admitted() -> bool {
@@ -536,50 +542,53 @@ fn receipt_admitted() -> bool {
   return receipt_control[59u] == expected_seal;
 }
 
-fn field_admitted() -> bool {
+fn field_admission_reason() -> u32 {
   let selected_matches = (
     params.level_index == 0u && params.selected_level == params.fine_level
   ) || (
     params.level_index == 1u && params.selected_level == params.coarse_level
   );
-  return params.transport_enabled == 1u
-    && selected_matches
-    && params.field_capacity > 0u
-    && params.phase_record_count > 0u
-    && params.dt > 0.0
-    && finite_f32(params.dt)
-    && params.grid_spacing_m > 0.0
-    && finite_f32(params.grid_spacing_m)
-    && arrayLength(&field_view) >= FIELD_HEADER_WORDS
-    && field_load(0u) == FIELD_MAGIC
-    && field_load(1u) == FIELD_VERSION
-    && field_load(2u) == FIELD_READY_ADMITTED
-    && field_load(3u) == params.generation_id
-    && field_load(8u) == params.storage_generation
-    && field_load(9u) == params.physics_tick
-    && field_load(10u) == params.physics_substep
-    && field_load(11u) == params.position_epoch
-    && field_load(12u) == params.topology_epoch
-    && field_load(13u) == params.chart_epoch
-    && field_load(14u) == params.level_epoch
-    && field_load(15u) == params.support_epoch
-    && field_load(17u) == bitcast<u32>(params.selected_level)
-    && field_load(18u) == params.grid_node_count
-    && field_load(23u) == bitcast<u32>(params.grid_spacing_m)
-    && field_load(32u) == params.field_capacity
-    && field_load(34u) <= params.field_capacity
-    && field_load(38u) == params.field_completion_ordinal
-    && field_load(59u) == FIELD_STATE_EMPTY
-    && field_load(63u) == params.field_mutation_output_ordinal
-    && field_pressure_offset() >= field_load(30u)
-    && field_pressure_offset()
-      + params.field_capacity * FIELD_PRESSURE_WORDS
-      == arrayLength(&field_view)
-    && field_dispatch_shape_admitted()
-    && field_receipt_admitted()
-    && field_pressure_receipt_admitted()
-    && proposal_admitted()
-    && receipt_admitted();
+  if (params.transport_enabled != 1u || !selected_matches) { return 1u; }
+  if (params.field_capacity == 0u || params.phase_record_count == 0u
+      || !(params.dt > 0.0) || !finite_f32(params.dt)
+      || !(params.grid_spacing_m > 0.0)
+      || !finite_f32(params.grid_spacing_m)) { return 2u; }
+  if (arrayLength(&field_view) < FIELD_HEADER_WORDS
+      || field_load(0u) != FIELD_MAGIC
+      || field_load(1u) != FIELD_VERSION
+      || field_load(2u) != FIELD_READY_ADMITTED
+      || field_load(3u) != params.generation_id) { return 3u; }
+  if (field_load(8u) != params.storage_generation
+      || field_load(9u) != params.physics_tick
+      || field_load(10u) != params.physics_substep
+      || field_load(11u) != params.position_epoch
+      || field_load(12u) != params.topology_epoch
+      || field_load(13u) != params.chart_epoch
+      || field_load(14u) != params.level_epoch
+      || field_load(15u) != params.support_epoch) { return 4u; }
+  if (field_load(17u) != bitcast<u32>(params.selected_level)
+      || field_load(18u) != params.grid_node_count
+      || field_load(23u) != bitcast<u32>(params.grid_spacing_m)) { return 5u; }
+  if (field_load(32u) != params.field_capacity
+      || field_load(34u) > params.field_capacity
+      || field_load(38u) != params.field_completion_ordinal) { return 6u; }
+  if (field_load(59u) != FIELD_STATE_EMPTY
+      || field_load(63u) != params.field_mutation_output_ordinal) { return 7u; }
+  if (field_pressure_offset() < field_load(30u)
+      || field_pressure_offset()
+        + params.field_capacity * FIELD_PRESSURE_WORDS
+        != arrayLength(&field_view)) { return 8u; }
+  if (!field_dispatch_shape_admitted()) { return 9u; }
+  if (!field_receipt_admitted()) { return 10u; }
+  if (!field_pressure_receipt_admitted()) { return 11u; }
+  let proposal_reason = proposal_admission_reason();
+  if (proposal_reason != 0u) { return 1200u + proposal_reason; }
+  if (!receipt_admitted()) { return 13u; }
+  return 0u;
+}
+
+fn field_admitted() -> bool {
+  return field_admission_reason() == 0u;
 }
 
 fn field_key(field_index: u32) -> u32 {
@@ -1178,7 +1187,11 @@ fn stage_transport(
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
   let first = field_linear_invocation(local_id, workgroup_id);
-  if (!field_admitted() || !scratch_admitted()) {
+  if (field_admission_reason() != 0u) {
+    reject_scratch();
+    return;
+  }
+  if (!scratch_admitted()) {
     reject_scratch();
     return;
   }

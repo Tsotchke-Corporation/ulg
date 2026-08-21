@@ -5,6 +5,27 @@ import {
   mlsMpmParticleSeparationBinFillWgsl,
   mlsMpmParticleSeparationComputeWgsl
 } from './wgsl.js';
+import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE,
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION
+} from './schroederSpatialActiveSourceView.js';
+import {
+  SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
+} from './schroederSpatialMechanicsView.js';
 
 export const SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_WORDS = 16;
 export const SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_OFFSET_WORDS = 4;
@@ -590,6 +611,425 @@ fn finalize_canonical_spatial_authority(
 `;
 }
 
+function activeSourceV2DenseSingleLevelValidationWgsl(prefix) {
+  const upper = prefix.toUpperCase();
+  const rejectedStatusMask =
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
+  return `const ${upper}_ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
+const ${upper}_ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
+const ${upper}_ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
+const ${upper}_ACTIVE_SOURCE_READY_ADMITTED: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_READY
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_ADMITTED
+}u;
+const ${upper}_ACTIVE_SOURCE_REJECTED_MASK: u32 = ${rejectedStatusMask}u;
+const ${upper}_ACTIVE_SOURCE_MISSING: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MISSING_ORDINAL}u;
+const ${upper}_ACTIVE_SOURCE_ACTIVE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS
+}u;
+const ${upper}_ACTIVE_SOURCE_CANDIDATE_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS
+}u;
+const ${upper}_ACTIVE_SOURCE_PHYSICAL_DISPATCH: u32 = ${
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS
+}u;
+
+fn ${prefix}_active_source_fold(value: u32, word: u32) -> u32 {
+  return (value ^ word) * 0x01000193u;
+}
+
+fn ${prefix}_active_source_projection_seal() -> u32 {
+  var value = ${prefix}_active_source_fold(
+    active_source_view[31u],
+    active_source_view[25u]
+  );
+  value = ${prefix}_active_source_fold(value, active_source_view[26u]);
+  value = ${prefix}_active_source_fold(value, active_source_view[27u]);
+  value = ${prefix}_active_source_fold(value, active_source_view[18u]);
+  value = ${prefix}_active_source_fold(value, active_source_view[20u]);
+  return ${prefix}_active_source_fold(value, active_source_view[30u]);
+}
+
+fn ${prefix}_active_source_dispatch_admitted(
+  invocation_count: u32,
+  offset: u32
+) -> bool {
+  let groups = invocation_count / 64u
+    + select(0u, 1u, invocation_count % 64u != 0u);
+  let x = active_source_view[offset];
+  let y = active_source_view[offset + 1u];
+  let z = active_source_view[offset + 2u];
+  if (invocation_count == 0u) {
+    return x == 0u && y == 1u && z == 1u;
+  }
+  let expected_x = min(groups, params.active_source_dispatch_x_limit);
+  let expected_y = groups / expected_x
+    + select(0u, 1u, groups % expected_x != 0u);
+  return x == expected_x && y == expected_y && z == 1u;
+}
+
+fn ${prefix}_spatial_directory_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ${upper}_ACTIVE_SOURCE_HEADER_WORDS) {
+    return false;
+  }
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  let active_candidate_count = active_source_view[43u];
+  return params.schroeder_spatial_directory_enabled != 0u
+    && params.active_source_dispatch_x_limit > 0u
+    && active_source_view[0u] == ${upper}_ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ${upper}_ACTIVE_SOURCE_VERSION
+    && (active_source_view[2u] & ${upper}_ACTIVE_SOURCE_READY_ADMITTED)
+      == ${upper}_ACTIVE_SOURCE_READY_ADMITTED
+    && (active_source_view[2u] & ${upper}_ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && active_source_view[3u] == params.schroeder_spatial_generation_id
+    && params.schroeder_spatial_generation_id > 0u
+    && active_source_view[4u] == params.schroeder_spatial_device_ordinal
+    && active_source_view[5u] == params.schroeder_spatial_lane_ordinal
+    && active_source_view[6u] == params.schroeder_spatial_lease_token
+    && active_source_view[7u] == params.schroeder_spatial_source_family_id
+    && active_source_view[8u] == params.schroeder_spatial_storage_generation
+    && active_source_view[9u] == params.schroeder_spatial_physics_tick
+    && active_source_view[10u] == params.schroeder_spatial_physics_substep
+    && active_source_view[11u] == params.schroeder_spatial_position_epoch
+    && active_source_view[12u] == params.schroeder_spatial_topology_epoch
+    && active_source_view[13u] == params.schroeder_spatial_chart_epoch
+    && active_source_view[14u] == params.schroeder_spatial_level_epoch
+    && active_source_view[15u] == params.schroeder_spatial_support_epoch
+    && physical_count == params.particle_count
+    && physical_count > 0u
+    && physical_count <= physical_capacity
+    && physical_capacity == params.active_source_physical_capacity
+    && active_count <= physical_count
+    && active_count <= active_capacity
+    && active_capacity == params.active_source_active_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u]
+      == ${SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0}u
+    && active_source_view[24u]
+      == ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SOURCE_STRIDE_FLOATS}u
+    && active_to_physical
+      == params.active_source_active_to_physical_offset_words
+    && active_to_physical == ${upper}_ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active
+      == params.active_source_physical_to_active_offset_words
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == params.active_source_view_capacity_words
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[28u] <= capacity_words
+    && active_source_view[29u]
+      == params.active_source_completion_ordinal
+    && active_source_view[30u]
+      == params.active_source_completion_ordinal
+    && active_source_view[31u] == params.active_source_fingerprint
+    && active_source_view[32u] == physical_count
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[37u] == 64u
+    && active_source_view[38u] == params.active_source_dispatch_x_limit
+    && active_source_view[40u] == ${upper}_ACTIVE_SOURCE_ACTIVE_DISPATCH
+    && active_source_view[41u] == ${upper}_ACTIVE_SOURCE_CANDIDATE_DISPATCH
+    && active_source_view[42u] == ${upper}_ACTIVE_SOURCE_PHYSICAL_DISPATCH
+    && active_count <= 0xffffffffu / 27u
+    && active_candidate_count == active_count * 27u
+    && active_source_view[44u] == active_capacity * 27u
+    && active_source_view[47u]
+      == ${prefix}_active_source_projection_seal()
+    && ${prefix}_active_source_dispatch_admitted(
+      active_count,
+      ${upper}_ACTIVE_SOURCE_ACTIVE_DISPATCH
+    )
+    && ${prefix}_active_source_dispatch_admitted(
+      active_candidate_count,
+      ${upper}_ACTIVE_SOURCE_CANDIDATE_DISPATCH
+    )
+    && ${prefix}_active_source_dispatch_admitted(
+      physical_count,
+      ${upper}_ACTIVE_SOURCE_PHYSICAL_DISPATCH
+    );
+}
+`;
+}
+
+function createActiveSourceV2DenseSingleLevelP2gWgsl(source) {
+  const withParams = replaceRequired(
+    source,
+    `  schroeder_spatial_pad2: u32,
+};`,
+    `  schroeder_spatial_pad2: u32,
+  active_source_physical_capacity: u32,
+  active_source_active_capacity: u32,
+  active_source_view_capacity_words: u32,
+  active_source_active_to_physical_offset_words: u32,
+  active_source_physical_to_active_offset_words: u32,
+  active_source_fingerprint: u32,
+  active_source_dispatch_x_limit: u32,
+  active_source_completion_ordinal: u32,
+  product_history_control_magic: u32,
+  product_history_control_version: u32,
+  product_history_control_status: u32,
+  product_history_live_row_count: u32,
+  product_history_row_capacity: u32,
+  product_history_row_stride_vec4: u32,
+  product_history_control_generation: u32,
+  product_history_control_seal: u32,
+  expected_product_history_generation: u32,
+  expected_product_history_seal: u32,
+  expected_product_history_row_capacity: u32,
+  expected_product_history_row_stride_vec4: u32,
+};`,
+    'ActiveSource-v2 dense P2G parameter fields'
+  );
+  const withBinding = replaceRequired(
+    withParams,
+    '@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;',
+    '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;',
+    'ActiveSource-v2 dense P2G authority binding'
+  );
+  const withValidation = replaceRequiredRange(
+    withBinding,
+    'const SCHROEDER_SPATIAL_MAGIC: u32',
+    '\n// Canonical SS mechanics has one level/topology authority.',
+    activeSourceV2DenseSingleLevelValidationWgsl('p2g'),
+    'ActiveSource-v2 dense P2G validation'
+  );
+  const withQueryGeometry = replaceRequiredRange(
+    withValidation,
+    'fn p2g_canonical_query_geometry_admitted() -> bool {',
+    '\nfn p2g_spatial_evidence_add',
+    `fn p2g_canonical_query_geometry_admitted() -> bool {
+  // The runtime admits this compatibility shader only when the exact
+  // ActiveSource query range is the selected level. That single-level
+  // contract is folded into the authenticated source fingerprint.
+  return p2g_spatial_directory_admitted();
+}
+`,
+    'ActiveSource-v2 dense P2G query geometry'
+  );
+  const withParticleAdmission = replaceRequiredRange(
+    withQueryGeometry,
+    'fn p2g_particle_enabled(particle_index: u32) -> bool {',
+    '\nfn p2g_finalize_node_index',
+    `fn p2g_product_history_control_admitted() -> bool {
+  // A zero expected generation selects the legacy exact-host-count route.
+  // GPU-count handles always carry a positive immutable generation and must
+  // authenticate every word copied from their selected control record.
+  if (params.expected_product_history_generation == 0u) {
+    return params.expected_product_history_seal == 0u
+      && params.expected_product_history_row_capacity == 0u
+      && params.expected_product_history_row_stride_vec4 == 0u
+      && params.product_history_control_magic == 0u
+      && params.product_history_control_version == 0u
+      && params.product_history_control_status == 0u
+      && params.product_history_live_row_count == 0u
+      && params.product_history_row_capacity == 0u
+      && params.product_history_row_stride_vec4 == 0u
+      && params.product_history_control_generation == 0u
+      && params.product_history_control_seal == 0u;
+  }
+  return params.product_history_control_magic == 0x50484731u
+    && params.product_history_control_version == 1u
+    && params.product_history_control_status == 1u
+    && params.product_history_live_row_count
+      == params.resident_product_event_count
+    && params.product_history_live_row_count
+      <= params.product_history_row_capacity
+    && params.expected_product_history_row_capacity > 0u
+    && params.expected_product_history_row_stride_vec4 == 8u
+    && params.expected_product_history_row_capacity
+      <= arrayLength(&product_events)
+        / params.expected_product_history_row_stride_vec4
+    && params.product_history_row_capacity
+      == params.expected_product_history_row_capacity
+    && params.product_history_row_stride_vec4
+      == params.expected_product_history_row_stride_vec4
+    && params.product_history_control_generation
+      == params.expected_product_history_generation
+    && params.product_history_control_seal
+      == params.expected_product_history_seal;
+}
+
+fn p2g_particle_enabled(particle_index: u32) -> bool {
+  p2g_authenticate_spatial_header(particle_index);
+  if (p2g_spatial_authority_rejected()) {
+    return false;
+  }
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < P2G_ACTIVE_SOURCE_HEADER_WORDS
+      || particle_index >= params.particle_count) {
+    p2g_spatial_reject(15u);
+    return false;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  if (physical_to_active > bound_words
+      || particle_index >= bound_words - physical_to_active) {
+    p2g_spatial_reject(15u);
+    return false;
+  }
+  let active_ordinal =
+    active_source_view[physical_to_active + particle_index];
+  if (particle_index + 1u == params.particle_count) {
+    p2g_spatial_evidence_add(18u, 1u);
+  }
+  if (active_ordinal == P2G_ACTIVE_SOURCE_MISSING) {
+    return false;
+  }
+  if (active_ordinal >= active_source_view[18u]
+      || active_to_physical > bound_words
+      || active_ordinal >= bound_words - active_to_physical
+      || active_source_view[active_to_physical + active_ordinal]
+        != particle_index) {
+    p2g_spatial_reject(15u);
+    return false;
+  }
+  p2g_spatial_evidence_add(8u, 1u);
+  p2g_spatial_evidence_add(9u, 1u);
+  return true;
+}
+`,
+    'ActiveSource-v2 dense P2G particle admission'
+  );
+  const withProductGate = replaceRequired(
+    withParticleAdmission,
+    `  if (event_index >= params.resident_product_event_count) {
+    return;
+  }
+
+  let event0 = product_event_row0(event_index);`,
+    `  if (event_index >= params.resident_product_event_count) {
+    return;
+  }
+  // Main is encoded before this dispatch. Any ActiveSource rejection must
+  // suppress sidecar mass too; finalize_grid then zeroes the dense grid.
+  if (p2g_spatial_authority_rejected()) {
+    return;
+  }
+
+  let event0 = product_event_row0(event_index);`,
+    'ActiveSource-v2 dense P2G product-event authority gate'
+  );
+  return `${withProductGate}
+
+// Active count can be zero, and product rows can still exist. Authenticate
+// the immutable authority unconditionally before either scatter dispatch.
+@compute @workgroup_size(1)
+fn preflight_active_source_dense_single_level() {
+  if (!p2g_spatial_directory_admitted()
+      || !p2g_canonical_query_geometry_admitted()
+      || !p2g_product_history_control_admitted()) {
+    p2g_spatial_reject(14u);
+  }
+}
+`;
+}
+
+function createActiveSourceV2DenseSingleLevelG2pWgsl(source) {
+  const withParams = replaceRequired(
+    source,
+    `  schroeder_spatial_pad0: u32,
+};`,
+    `  schroeder_spatial_pad0: u32,
+  active_source_physical_capacity: u32,
+  active_source_active_capacity: u32,
+  active_source_view_capacity_words: u32,
+  active_source_active_to_physical_offset_words: u32,
+  active_source_physical_to_active_offset_words: u32,
+  active_source_fingerprint: u32,
+  active_source_dispatch_x_limit: u32,
+  active_source_completion_ordinal: u32,
+};`,
+    'ActiveSource-v2 dense G2P parameter fields'
+  );
+  const withBinding = replaceRequired(
+    withParams,
+    '@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;',
+    '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;',
+    'ActiveSource-v2 dense G2P authority binding'
+  );
+  const withValidation = replaceRequiredRange(
+    withBinding,
+    'const G2P_SCHROEDER_SPATIAL_MAGIC: u32',
+    '\nfn g2p_spatial_evidence_add',
+    activeSourceV2DenseSingleLevelValidationWgsl('g2p'),
+    'ActiveSource-v2 dense G2P validation'
+  );
+  const withQueryGeometry = replaceRequiredRange(
+    withValidation,
+    'fn g2p_canonical_query_geometry_admitted() -> bool {',
+    '\nfn g2p_spatial_reject',
+    `fn g2p_canonical_query_geometry_admitted() -> bool {
+  // See the P2G variant: the exact single-level query is host-authenticated
+  // and folded into the GPU-checked ActiveSource fingerprint.
+  return g2p_spatial_directory_admitted();
+}
+`,
+    'ActiveSource-v2 dense G2P query geometry'
+  );
+  return replaceRequiredRange(
+    withQueryGeometry,
+    'fn g2p_particle_enabled(particle_index: u32) -> bool {',
+    '\nfn g2p_copy_input_particle',
+    `fn g2p_particle_enabled(particle_index: u32) -> bool {
+  g2p_authenticate_spatial_header(particle_index);
+  if (g2p_p2g_authority_rejected()
+      || g2p_spatial_authority_rejected()) {
+    return false;
+  }
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < G2P_ACTIVE_SOURCE_HEADER_WORDS
+      || particle_index >= params.particle_count) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  if (physical_to_active > bound_words
+      || particle_index >= bound_words - physical_to_active) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  let active_ordinal =
+    active_source_view[physical_to_active + particle_index];
+  if (particle_index + 1u == params.particle_count) {
+    g2p_spatial_evidence_add(19u, 1u);
+  }
+  if (active_ordinal == G2P_ACTIVE_SOURCE_MISSING) {
+    return false;
+  }
+  if (active_ordinal >= active_source_view[18u]
+      || active_to_physical > bound_words
+      || active_ordinal >= bound_words - active_to_physical
+      || active_source_view[active_to_physical + active_ordinal]
+        != particle_index) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  g2p_spatial_evidence_add(12u, 1u);
+  g2p_spatial_evidence_add(13u, 1u);
+  return true;
+}
+`,
+    'ActiveSource-v2 dense G2P particle admission'
+  );
+}
+
 export const mlsMpmP2gGridProjectionCanonicalSpatialWgsl = createCanonicalP2gWgsl();
 export const mlsMpmG2pReconstructCanonicalSpatialWgsl = createCanonicalG2pWgsl();
 
@@ -672,6 +1112,22 @@ export const mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl =
     mlsMpmG2pReconstructCanonicalSpatialWgsl,
     'g2p',
     'g2p_canonical_query_geometry_admitted'
+  );
+export const mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl =
+  createActiveSourceV2DenseSingleLevelP2gWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialWgsl
+  );
+export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl =
+  createActiveSourceV2DenseSingleLevelP2gWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl =
+  createActiveSourceV2DenseSingleLevelG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialWgsl
+  );
+export const mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl =
+  createActiveSourceV2DenseSingleLevelG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl
   );
 
 function createCanonicalSeparationWgsl(source, {

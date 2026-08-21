@@ -13,8 +13,10 @@ import {
   summarizeSphStaticTableCacheSnapshot
 } from '../runtime/sph/sphColdStartCache.js';
 import {
+  buildSphThermalMaterialTableFromViewState,
   sphStaticTableInputsFromViewState,
-  surfaceDescriptorsFromMaterials
+  surfaceDescriptorsFromMaterials,
+  thermalMaterialTablesExactlyEqual
 } from '../runtime/sph/sphStaticTableInputs.js';
 import {
   applySphLocalCacheLookupToOptions,
@@ -96,7 +98,11 @@ function reactionTableContactRadiiCoverViewState(reactionTable = {}, viewState =
   return true;
 }
 
-export function staticTableBundleCoversViewState(bundle, viewState = {}) {
+export function staticTableBundleCoversViewState(
+  bundle,
+  viewState = {},
+  liveThermalMaterialTable = null
+) {
   if (!bundle?.schema || bundle.hitCount <= 0) return false;
   if (!REQUIRED_STATIC_TABLE_FAMILIES.every((family) => bundle.restoredFamilies?.includes(family))) {
     return false;
@@ -104,6 +110,14 @@ export function staticTableBundleCoversViewState(bundle, viewState = {}) {
   const expectedMaterials = Object.keys(viewState.materialProperties || {});
   const thermalMaterials = (bundle.thermalMaterialTable?.metadata || []).map((entry) => entry.material).filter(Boolean);
   if (!sameStringSet(expectedMaterials, thermalMaterials)) return false;
+  const authoritativeThermalMaterialTable = liveThermalMaterialTable
+    ?? buildSphThermalMaterialTableFromViewState(viewState);
+  if (!thermalMaterialTablesExactlyEqual(
+    bundle.thermalMaterialTable,
+    authoritativeThermalMaterialTable
+  )) {
+    return false;
+  }
 
   const expectedProducts = (viewState.reactions || []).map((reaction) => reaction.product).filter(Boolean);
   const reactionProducts = (bundle.reactionTable?.metadata || []).map((entry) => entry.product).filter(Boolean);
@@ -423,7 +437,8 @@ async function runSphPhaseRebuildTask(task, record) {
     const generatorFingerprint = input.staticTableCache.generatorFingerprint || null;
     const previousSnapshot = input.staticTableCache.cacheSnapshot || null;
     const cachedBundle = rehydrateSphStaticTableBundle(previousSnapshot, { generatorFingerprint });
-    if (staticTableBundleCoversViewState(cachedBundle, viewState)) {
+    const liveThermalMaterialTable = buildSphThermalMaterialTableFromViewState(viewState);
+    if (staticTableBundleCoversViewState(cachedBundle, viewState, liveThermalMaterialTable)) {
       staticTableCacheBundle = compactSphStaticTableBundleForTransfer(cachedBundle);
       staticTableCacheUpdate = reusedStaticTableCacheUpdate({
         snapshot: previousSnapshot,
@@ -444,7 +459,9 @@ async function runSphPhaseRebuildTask(task, record) {
     } else {
       staticTableCacheUpdate = createSphStaticTableCacheUpdate({
         previousSnapshot,
-        tableInputs: sphStaticTableInputsFromViewState(viewState),
+        tableInputs: sphStaticTableInputsFromViewState(viewState, {
+          thermalMaterialTable: liveThermalMaterialTable
+        }),
         generatorFingerprint
       });
       staticTableCacheBundle = compactSphStaticTableBundleForTransfer(rehydrateSphStaticTableBundle(staticTableCacheUpdate.cacheSnapshot, {

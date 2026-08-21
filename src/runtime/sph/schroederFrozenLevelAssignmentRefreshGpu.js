@@ -19,6 +19,9 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import {
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export const ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA =
   'peercompute.ulg.schroeder-frozen-level-assignment-refresh.v1';
@@ -30,6 +33,10 @@ export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE = Object.freeze({
   FINE_SUBSTEP: 'frozen-fine-substep',
   MACRO_BOUNDARY: 'macro-boundary-full-reclassification',
   POST_CLOSURE: 'post-closure-full-reclassification'
+});
+const SCHROEDER_POST_CLOSURE_TICK_MODE = Object.freeze({
+  SAME_LOOKUP_TICK: 'same-lookup-tick',
+  NEXT_TICK_SUCCESSOR: 'next-tick-successor'
 });
 
 const U32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
@@ -56,6 +63,13 @@ function refreshError(message, code, ErrorType = Error) {
   const error = new ErrorType(message);
   error.code = code;
   return error;
+}
+
+function refreshBackpressureError() {
+  return refreshError(
+    'all frozen level-assignment refresh arenas are retained or awaiting a queue fence',
+    'ERR_SCHROEDER_FROZEN_REFRESH_BACKPRESSURE'
+  );
 }
 
 function exactU32(value, label, { positive = false } = {}) {
@@ -666,6 +680,11 @@ export function validateSchroederPostClosureLevelAssignment(
     && levelAssignment.sourceMechanicsBuffer === mls.mechanicsBuffer
     && levelAssignment.sourceLookupAssignmentBuffer
       === record.lookupLevelAssignment.assignmentBuffer
+    && levelAssignment.postClosureTickMode === record.postClosureTickMode
+    && levelAssignment.sourceLookupPhysicsTick
+      === record.sourceLookupPhysicsTick
+    && levelAssignment.sourceLookupPhysicsSubstep
+      === record.sourceLookupPhysicsSubstep
     && levelAssignment.particleCount === sph.particleCount
     && [
       'storageGeneration',
@@ -1002,9 +1021,23 @@ export function admitSchroederPostClosureLevelAssignment({
     }
     currentIdentity[field] = sphValue;
   }
+  const sameLookupTick = (
+    currentIdentity.physicsTick === lookup.identity.physicsTick
+    && currentIdentity.physicsSubstep === lookup.identity.physicsSubstep
+  );
+  const nextTickSuccessor = (
+    lookup.identity.physicsTick < 0xffff_ffff
+    && currentIdentity.physicsTick === lookup.identity.physicsTick + 1
+    && currentIdentity.physicsSubstep === 0
+  );
+  const postClosureTickMode = sameLookupTick
+    ? SCHROEDER_POST_CLOSURE_TICK_MODE.SAME_LOOKUP_TICK
+    : nextTickSuccessor
+      ? SCHROEDER_POST_CLOSURE_TICK_MODE.NEXT_TICK_SUCCESSOR
+      : null;
   if (
-    currentIdentity.physicsTick !== lookup.identity.physicsTick
-    || currentIdentity.physicsSubstep !== lookup.identity.physicsSubstep
+    postClosureTickMode == null
+    || currentIdentity.storageGeneration <= lookup.identity.storageGeneration
     || currentIdentity.positionEpoch < lookup.identity.positionEpoch
     || currentIdentity.topologyEpoch < lookup.identity.topologyEpoch
     || currentIdentity.chartEpoch !== lookup.identity.chartEpoch
@@ -1012,7 +1045,7 @@ export function admitSchroederPostClosureLevelAssignment({
     || currentIdentity.supportEpoch <= lookup.identity.supportEpoch
   ) {
     throw refreshError(
-      'post-closure assignment must publish a fresh descriptor generation in the same lookup tick',
+      'post-closure assignment must publish a fresh descriptor generation in the same lookup tick/substep or exactly the next tick at substep zero',
       'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'
     );
   }
@@ -1059,11 +1092,28 @@ export function admitSchroederPostClosureLevelAssignment({
     sourceLookupSupportEpoch: lookup.identity.supportEpoch,
     fullParticleReadbackPerformed: false
   });
+  Object.defineProperties(postClosureLevelAssignment, {
+    postClosureTickMode: {
+      value: postClosureTickMode,
+      enumerable: true
+    },
+    sourceLookupPhysicsTick: {
+      value: lookup.identity.physicsTick,
+      enumerable: true
+    },
+    sourceLookupPhysicsSubstep: {
+      value: lookup.identity.physicsSubstep,
+      enumerable: true
+    }
+  });
   admittedPostClosureLevelAssignments.set(postClosureLevelAssignment, {
     device,
     lookupLevelAssignment,
     nextParticleUploads,
-    assignmentBuffer: postClosureLevelAssignment.assignmentBuffer
+    assignmentBuffer: postClosureLevelAssignment.assignmentBuffer,
+    postClosureTickMode,
+    sourceLookupPhysicsTick: lookup.identity.physicsTick,
+    sourceLookupPhysicsSubstep: lookup.identity.physicsSubstep
   });
   return postClosureLevelAssignment;
 }
@@ -1273,6 +1323,36 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
     arenaCount: resolvedArenaCount,
     outputByteLength,
     normalHotLoopReadbackFree: true,
+
+    waitForAvailableArena() {
+      if (destroyed) {
+        return Promise.reject(refreshError(
+          'frozen level-assignment refresh runtime is destroyed',
+          'ERR_SCHROEDER_FROZEN_REFRESH_RUNTIME_DESTROYED'
+        ));
+      }
+      if (deviceLossObserved) {
+        return Promise.reject(refreshError(
+          'frozen level-assignment refresh runtime observed device loss',
+          'ERR_SCHROEDER_FROZEN_REFRESH_DEVICE_LOST'
+        ));
+      }
+      if (arenas.some((arena) => !arena.busy && !arena.retired)) {
+        return Promise.resolve(true);
+      }
+      const releasePromises = arenas
+        .map((arena) => arena.releasePromise)
+        .filter((promise) => promise && typeof promise.then === 'function');
+      if (releasePromises.length === 0) {
+        return Promise.reject(refreshBackpressureError());
+      }
+      return Promise.any(releasePromises.map((promise) => (
+        Promise.resolve(promise).then((released) => {
+          if (released === true) return true;
+          throw refreshBackpressureError();
+        })
+      )));
+    },
 
     proveFineSubstepAuthority({
       priorLevelAssignment,
@@ -1519,10 +1599,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       }
       const arena = arenas.find((candidate) => !candidate.busy && !candidate.retired);
       if (!arena) {
-        throw refreshError(
-          'all frozen level-assignment refresh arenas are retained or awaiting a queue fence',
-          'ERR_SCHROEDER_FROZEN_REFRESH_BACKPRESSURE'
-        );
+        throw refreshBackpressureError();
       }
       arena.busy = true;
       arena.generation += 1;
@@ -1606,7 +1683,10 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           levelReclassificationPerformed: false,
           fullReadbackPerformed: false,
           fullParticleReadbackPerformed: false,
-          normalHotLoopReadbackFree: true,
+          fullParticleReadbackFree: true,
+          ...createGpuReadbackTelemetry({
+            scope: 'schroeder-frozen-level-assignment-refresh'
+          }),
           bufferFamilyGenerationStatus:
             'schroeder-particle-buffer-family-generation-ready',
           bufferFamilyGeneration: Object.freeze({
@@ -1752,6 +1832,30 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       attempt.promise = releaseAttempt;
       arena.releasePromise = releaseAttempt;
       return releaseAttempt;
+    },
+
+    releaseQueueOrdered(execution) {
+      const record = retirementRecordFor(execution);
+      if (record.completed) return true;
+      if (deviceLossObserved) {
+        throw refreshError(
+          'device-lost frozen refresh requires quarantine retirement',
+          'ERR_SCHROEDER_FROZEN_REFRESH_DEVICE_LOST'
+        );
+      }
+      const arena = requireOwnedExecution(execution);
+      if (!execution.submitPerformed || record.activeAttempt) {
+        throw refreshError(
+          'queue-ordered frozen refresh release requires one submitted execution with no active retirement',
+          'ERR_SCHROEDER_FROZEN_REFRESH_QUEUE_ORDERED_RELEASE_STALE'
+        );
+      }
+      // The exact successor refresh has already been submitted on this
+      // device's only queue and is the last consumer of this assignment.
+      // Reusing the persistent arena is therefore ordered without observing a
+      // host queue-completion fence.
+      execution.releaseScheduled = true;
+      return finishRetirement(record);
     },
 
     quarantineExecutionAfterDeviceLoss(execution) {

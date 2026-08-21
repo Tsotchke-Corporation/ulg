@@ -237,9 +237,28 @@ fn emit_spatial_keys(
   }
 
   let cell_f = floor(position / native_spacing);
-  let cell_valid = safe_i32_f32(cell_f.x)
+  var cell_valid = safe_i32_f32(cell_f.x)
     && safe_i32_f32(cell_f.y)
     && safe_i32_f32(cell_f.z);
+  if (cell_valid && params.chart_count > 0u) {
+    let bounded_cell_order = vec3<u32>(
+      signed_order_key(i32(cell_f.x)),
+      signed_order_key(i32(cell_f.y)),
+      signed_order_key(i32(cell_f.z))
+    );
+    let bounded_cell_min_order = vec3<u32>(
+      signed_order_key(params.cell_min_x),
+      signed_order_key(params.cell_min_y),
+      signed_order_key(params.cell_min_z)
+    );
+    let bounded_cell_offset = bounded_cell_order - bounded_cell_min_order;
+    cell_valid = bounded_cell_order.x >= bounded_cell_min_order.x
+      && bounded_cell_offset.x < params.cell_count_x
+      && bounded_cell_order.y >= bounded_cell_min_order.y
+      && bounded_cell_offset.y < params.cell_count_y
+      && bounded_cell_order.z >= bounded_cell_min_order.z
+      && bounded_cell_offset.z < params.cell_count_z;
+  }
   if (!cell_valid) {
     write_invalid_keys(source_index);
     atomicAdd(&epoch_evidence[0], 1u);

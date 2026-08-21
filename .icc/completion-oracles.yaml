@@ -59,7 +59,7 @@ oracles:
 
       - runtime_event:
           event_kinds: [ulg_perf_probe]
-          event_names: [physics_fps_above_30_on_cached_run]
+          event_names: [physics_steps_per_second_at_least_30_on_cached_run]
           event_values: [PASS]
         severity: high
         label: Cached resident physics reaches the minimum interactive performance target
@@ -181,3 +181,351 @@ oracles:
         severity: low
         label: ICC index and memory were refreshed after the latest slice
         action: npm run icc:update
+
+  - name: ss-six-stage-contained-merge-ready
+    aliases: [ss-contained-merge, ss-dark-merge]
+    requires:
+      - id: ss-default-route-containment
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [ss_default_route_containment_verified]
+          event_values: [PASS]
+        severity: high
+        label: The ordinary SS route remains on independent-v2 unless paired-v2 is explicitly requested
+        action: restore_default_off_pair_flag_and_rerun_same_source_containment_probe
+
+      - id: ss-paired-v2-opt-in-route
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_explicit_opt_in_route_verified]
+          event_values: [PASS]
+        severity: high
+        label: The experimental paired-v2 flag reaches the shared-radix builder and is observed in public telemetry
+        action: repair_pair_flag_propagation_or_public_route_telemetry
+
+      - id: ss-independent-v2-rollback
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_independent_v2_rollback_verified]
+          event_values: [PASS]
+        severity: high
+        label: Disabling paired-v2 restores the same-source independent-v2 construction route without a GPU readback selector
+        action: repair_explicit_pair_rollback_route
+
+      - id: ss-paired-v2-semantic-parity
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_same_source_semantic_parity_verified]
+          event_values: [PASS]
+        severity: high
+        label: Paired-v2 and independent-v2 produce same-source semantic field parity
+        action: rerun_and_repair_same_source_paired_field_sparse_ab
+
+      - id: ss-transaction-coverage
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [authoritative_two_level_transaction_coverage_complete]
+          event_values: [PASS]
+        severity: high
+        label: All six authoritative two-level campaign scenarios exercised exact transaction and generation lifecycles
+        action: rerun_authoritative_two_level_ab_ba_ab_campaign
+
+      - id: ss-configured-copy-budget
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [authoritative_two_level_configured_copy_budget_zero]
+          event_values: [PASS]
+        severity: high
+        label: All six authoritative two-level campaign scenarios declared a zero copy budget and no configured render readback
+        action: remove_configured_readback_or_copy_route
+
+      - id: ss-zero-backpressure-waits
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [authoritative_two_level_zero_backpressure_waits]
+          event_values: [PASS]
+        severity: high
+        label: Every authoritative two-level candidate scenario completed without a generation backpressure wait
+        action: remove_generation_backpressure_host_waits
+
+      - id: ss-hot-loop-readback
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [normal_hot_loop_readback_free]
+          event_values: [PASS]
+        severity: high
+        label: Dedicated instrumentation observed zero CPU maps, readback bytes, and awaited queue fences in the resident hot loop
+        action: run_instrumented_resident_hot_loop_probe_and_remove_observed_host_sync
+
+      - id: ss-relative-scaling
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [authoritative_two_level_relative_scaling_gain_met]
+          event_values: [PASS]
+        severity: high
+        label: Authoritative two-level throughput scaling with N beat the historical scaling floor
+        action: optimize_fixed_cost_or_restore_relative_scaling_gain
+
+      - id: ss-high-n-floor
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [authoritative_two_level_high_n_floor_met]
+          event_values: [PASS]
+        severity: high
+        label: Authoritative two-level high-N throughput met the same-N historical floor
+        action: profile_and_restore_high_n_throughput
+
+      - id: ss-low-n-floor
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [authoritative_two_level_low_n_floor_met]
+          event_values: [PASS]
+        severity: low
+        label: Paired-v2 low-N throughput debt remains visible but does not block a default-off contained merge
+        action: contain_or_remove_fixed_dispatch_tail_before_default_enablement
+
+      - id: ss-campaign-memory
+        runtime_event:
+          event_kinds: [ulg_resource_probe]
+          event_names: [stage6_campaign_memory_cap_clean]
+          event_values: [PASS]
+        severity: high
+        label: The canonical six-arm performance campaign stayed within its no-swap memory cap
+        action: reduce_campaign_or_runtime_memory_pressure
+
+      - id: ss-marching-cubes
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [webgpu_marching_cubes_active]
+          event_values: [PASS]
+        severity: high
+        label: Continuous surface extraction and presentation exercised the WebGPU marching-cubes path
+        action: repair_and_retest_webgpu_marching_cubes_renderer
+
+      - id: ss-cached-interactive-fps
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [physics_steps_per_second_at_least_30_on_cached_run]
+          event_values: [PASS]
+        severity: low
+        label: Cached low-N resident throughput debt remains visible but does not block a default-off contained merge
+        action: profile_and_restore_cached_resident_interactivity
+
+      - id: ss-native-gates
+        runtime_event:
+          event_kinds: [ulg_test_probe]
+          event_names: [stage6_native_webgpu_matrix_passed]
+          event_values: [PASS]
+        severity: high
+        label: The exact candidate passed the required native WebGPU mechanics and lifecycle matrix
+        action: rerun_and_repair_stage6_native_webgpu_matrix
+
+      - id: ss-mobile-liveness
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [mobile_animation_liveness_passed]
+          event_values: [PASS]
+        severity: low
+        label: Physical Pixel liveness debt remains visible under the 2026-08-21 explicit manual on-device verification waiver and does not block a default-off contained merge; the machine-verified receipt remains a default-enable blocker
+        action: repair_mobile_animation_liveness_and_retest_pixel
+
+      - id: ss-visual-matrix
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [standard_visual_matrix_passed]
+          event_values: [PASS]
+        severity: high
+        label: The complete standard visual scenario matrix passed artifact and frame review
+        action: rerun_and_review_standard_visual_matrix
+
+      - id: ss-full-node-build
+        runtime_event:
+          event_kinds: [ulg_test_probe]
+          event_names: [full_node_and_build_passed]
+          event_values: [PASS]
+        severity: high
+        label: The exact candidate passed the full Node suite and production build
+        action: rerun_and_repair_full_node_and_build
+
+      - id: ss-no-hot-loop-stubs
+        no_stubbed_paths:
+          - cpu_closure_hot_loop
+          - cpu_surface_extraction_hot_loop
+          - main_thread_long_task
+        severity: high
+        label: The contained SS route has no known CPU closure, extraction, or main-thread hot-loop fallback
+        action: move_remaining_hot_loop_fallback_to_webgpu_or_worker
+
+  - name: ss-six-stage-default-enable-ready
+    aliases: [ss-default-enable, ss-rollout]
+    requires:
+      - id: ss-default-selector
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_default_selector_verified]
+          event_values: [PASS]
+        severity: high
+        label: The default route selects paired-v2 only where same-source evidence proves the selected regime
+        action: implement_or_repair_readback_free_default_pair_selector
+
+      - id: ss-explicit-rollback
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_explicit_rollback_verified]
+          event_values: [PASS]
+        severity: high
+        label: One explicit runtime flag restores independent-v2 after default rollout
+        action: restore_and_verify_explicit_independent_v2_rollback
+
+      - id: ss-default-semantic-parity
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [paired_v2_same_source_semantic_parity_verified]
+          event_values: [PASS]
+        severity: high
+        label: Default-selected paired-v2 remains semantically identical to independent-v2 on the same source
+        action: rerun_and_repair_same_source_paired_field_sparse_ab
+
+      - id: ss-default-transaction-coverage
+        runtime_event:
+          event_kinds: [ulg_ss_probe]
+          event_names: [authoritative_two_level_transaction_coverage_complete]
+          event_values: [PASS]
+        severity: high
+        label: All default-selected authoritative two-level scenarios exercised exact transaction and generation lifecycles
+        action: rerun_default_selected_authoritative_two_level_campaign
+
+      - id: ss-default-configured-copy-budget
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [authoritative_two_level_configured_copy_budget_zero]
+          event_values: [PASS]
+        severity: high
+        label: Every default-selected scenario declared a zero copy budget and no configured render readback
+        action: remove_configured_readback_or_copy_route
+
+      - id: ss-default-zero-backpressure
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [authoritative_two_level_zero_backpressure_waits]
+          event_values: [PASS]
+        severity: high
+        label: Every default-selected scenario completed without a generation backpressure wait
+        action: remove_generation_backpressure_host_waits
+
+      - id: ss-default-hot-loop-readback
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [normal_hot_loop_readback_free]
+          event_values: [PASS]
+        severity: high
+        label: Dedicated instrumentation observed zero CPU maps, readback bytes, and awaited queue fences in the default hot loop
+        action: run_instrumented_resident_hot_loop_probe_and_remove_observed_host_sync
+
+      - id: ss-default-low-n-floor
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [default_selected_low_n_floor_met]
+          event_values: [PASS]
+        severity: high
+        label: The default-selected route meets the same-N historical low-N floor
+        action: tune_or_select_independent_v2_below_the_measured_crossover
+
+      - id: ss-default-high-n-floor
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [default_selected_high_n_floor_met]
+          event_values: [PASS]
+        severity: high
+        label: The default-selected route meets the same-N historical high-N floor
+        action: profile_and_restore_default_selected_high_n_throughput
+
+      - id: ss-default-relative-scaling
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [default_selected_relative_scaling_gain_met]
+          event_values: [PASS]
+        severity: high
+        label: The default-selected route preserves the paired algorithmic scaling gain as N increases
+        action: repair_default_selector_or_restore_relative_scaling_gain
+
+      - id: ss-default-campaign-memory
+        runtime_event:
+          event_kinds: [ulg_resource_probe]
+          event_names: [stage6_campaign_memory_cap_clean]
+          event_values: [PASS]
+        severity: high
+        label: The default-selected campaign stays within its no-swap memory cap
+        action: reduce_campaign_or_runtime_memory_pressure
+
+      - id: ss-default-native-gates
+        runtime_event:
+          event_kinds: [ulg_test_probe]
+          event_names: [stage6_native_webgpu_matrix_passed]
+          event_values: [PASS]
+        severity: high
+        label: The exact rollout candidate passes the required native WebGPU mechanics and lifecycle matrix
+        action: rerun_and_repair_stage6_native_webgpu_matrix
+
+      - id: ss-default-mobile-liveness
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [mobile_animation_liveness_passed]
+          event_values: [PASS]
+        severity: high
+        label: Sodium-water and triple-water advance on a physical Pixel-class Android Chrome device
+        action: repair_mobile_animation_liveness_and_retest_pixel
+
+      - id: ss-default-mobile-memory
+        runtime_event:
+          event_kinds: [ulg_resource_probe]
+          event_names: [mobile_memory_cap_clean]
+          event_values: [PASS]
+        severity: high
+        label: The physical mobile rollout probe stays within its declared memory budget
+        action: reduce_mobile_runtime_memory_pressure
+
+      - id: ss-default-visual-matrix
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [standard_visual_matrix_passed]
+          event_values: [PASS]
+        severity: high
+        label: The complete default-selected visual scenario matrix passes artifact and frame review
+        action: rerun_and_review_standard_visual_matrix
+
+      - id: ss-default-marching-cubes
+        runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [webgpu_marching_cubes_active]
+          event_values: [PASS]
+        severity: high
+        label: Continuous surface extraction and presentation exercise the WebGPU marching-cubes path
+        action: repair_and_retest_webgpu_marching_cubes_renderer
+
+      - id: ss-default-cached-fps
+        runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [default_selected_physics_steps_per_second_at_least_30_on_cached_run]
+          event_values: [PASS]
+        severity: high
+        label: A cached default-selected resident run stays above the minimum physics FPS target
+        action: profile_and_restore_cached_resident_interactivity
+
+      - id: ss-default-full-node-build
+        runtime_event:
+          event_kinds: [ulg_test_probe]
+          event_names: [full_node_and_build_passed]
+          event_values: [PASS]
+        severity: high
+        label: The exact rollout candidate passes the full Node suite and production build
+        action: rerun_and_repair_full_node_and_build
+
+      - id: ss-default-no-hot-loop-stubs
+        no_stubbed_paths:
+          - cpu_closure_hot_loop
+          - cpu_surface_extraction_hot_loop
+          - main_thread_long_task
+        severity: high
+        label: The default SS route has no known CPU closure, extraction, or main-thread hot-loop fallback
+        action: move_remaining_hot_loop_fallback_to_webgpu_or_worker

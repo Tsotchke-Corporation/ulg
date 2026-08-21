@@ -6,6 +6,7 @@
 //                        forms out of them) — a derived estimate, documented as such.
 //   - heat capacity:     Dulong–Petit / equipartition (3R per atom over the molar mass).
 //   - bulk modulus:      mass-weighted mean of the reactant bulk moduli (sets the sound speed c=√(K/ρ)).
+//   - conductivity:      harmonic mean of positive representative reactant phase conductivities.
 //   - optical colour:    from the product molecule's HOMO–LUMO gap (RHF) → absorption edge → sRGB.
 // One condensed (liquid-like) phase, shear 0 (a reaction-product puddle/melt). Evidence-only: every
 // validation flag stays false (HF/STO-3G + additive estimates are approximations, not validated).
@@ -89,11 +90,27 @@ function reducedReactantBulkModulusPa(reactants = []) {
   return finite.reduce((sum, value) => sum + value, 0) / finite.length;
 }
 
+function reducedReactantThermalConductivityWPerMK(reactants = []) {
+  const finite = (reactants || [])
+    .map((reactant) => Number(reactant?.thermalConductivityWPerMK));
+  // Conductivity is a bilateral transport certificate. If any representative
+  // reactant phase lacks a finite positive value, keep the reduced product
+  // fail-closed instead of silently substituting the better-known reactant.
+  if (
+    finite.length === 0
+    || finite.some((value) => !Number.isFinite(value) || value <= 0)
+  ) {
+    return 0;
+  }
+  return finite.length / finite.reduce((sum, value) => sum + 1 / value, 0);
+}
+
 function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [] }) {
   const molarMassKgPerMol = formulaMolarMassKgPerMol(atomCounts);
   const atomsPerFormula = atomCount(atomCounts);
   const densityKgPerM3 = reducedReactantPackedDensityKgPerM3(molarMassKgPerMol, reactants);
   const bulkModulusPa = reducedReactantBulkModulusPa(reactants);
+  const thermalConductivityWPerMK = reducedReactantThermalConductivityWPerMK(reactants);
   const cpJPerKgK = (3 * R * Math.max(1, atomsPerFormula)) / molarMassKgPerMol;
   return withPropertyProvenance({
     molarMassKgPerMol,
@@ -101,7 +118,7 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
     label,
     compound: true,
     closureBacked: true,
-    derivation: 'reduced-reaction-product-closure: exact formula mass; reactant-packed density and bulk estimates',
+    derivation: 'reduced-reaction-product-closure: exact formula mass; reactant-packed density, bulk, and conductivity estimates',
     intrinsicColorSrgb: [0.78, 0.80, 0.82],
     phases: [{
       name: 'liquid',
@@ -109,6 +126,7 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
       densityKgPerM3,
       temperatureRange: [0, OPEN_TOP_K],
       bulkModulusPa,
+      thermalConductivityWPerMK,
       shearModulusPa: 0
     }],
     transitions: [],
@@ -134,14 +152,15 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
           'phases.liquid.densityKgPerM3',
           'phases.liquid.temperatureRange',
           'phases.liquid.bulkModulusPa',
+          'phases.liquid.thermalConductivityWPerMK',
           'phases.liquid.shearModulusPa'
         ],
         status: DS.REDUCED_ESTIMATE,
         source: 'reactant-packed-product-closure',
-        method: 'mobile-safe reduced product closure from exact formula mass plus reactant condensed packing and Dulong-Petit heat capacity',
+        method: 'mobile-safe reduced product closure from exact formula mass plus reactant condensed packing, Dulong-Petit heat capacity, and harmonic-mean representative conductivity',
         inputs: [
           `product=${key || label}`,
-          ...((reactants || []).map((reactant) => `${reactant?.material || reactant?.formula || 'reactant'}:rho=${reactant?.densityKgPerM3 ?? 'unknown'}:K=${reactant?.bulkModulusPa ?? 'unknown'}`))
+          ...((reactants || []).map((reactant) => `${reactant?.material || reactant?.formula || 'reactant'}:rho=${reactant?.densityKgPerM3 ?? 'unknown'}:K=${reactant?.bulkModulusPa ?? 'unknown'}:k=${reactant?.thermalConductivityWPerMK ?? 'unknown'}`))
         ],
         blockers: ['reaction-product-first-principles-closure-skipped-for-interactive-runtime']
       })

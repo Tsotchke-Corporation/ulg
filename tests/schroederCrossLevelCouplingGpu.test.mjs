@@ -13,6 +13,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  createSchroederCrossLevelRefluxLedgerLayout,
   decodeSchroederCrossLevelInvariantEvidence
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -35,6 +36,7 @@ import {
   createSchroederCrossLevelGridCouplingPlan,
   decodeSchroederCrossLevelGridConservationSummaryRow,
   prolongGridRowsCpuOracle,
+  resolveSchroederParentFieldMechanicsWorkspaceArenaCount,
   restrictGridRowsCpuOracle,
   runSchroederTwoLevelMechanicsStepWebGpu,
   summarizeGridConservationCpuOracle,
@@ -45,6 +47,9 @@ import {
   runMlsMpmP2gGridProjectionWebGpu
 } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
+  SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS,
   runMlsMpmGridUpdateWebGpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import {
@@ -158,8 +163,10 @@ function productionM3Device({
 } = {}) {
   const device = {
     createdBuffers: [],
+    createdPipelines: [],
     submissions: [],
     dispatches: [],
+    passTrace: [],
     fenceRequestCount: 0,
     limits: {
       maxBufferSize: 256 * 1024 * 1024,
@@ -189,6 +196,7 @@ function productionM3Device({
     createBindGroupLayout(descriptor) { return descriptor; },
     createPipelineLayout(descriptor) { return descriptor; },
     createComputePipeline(descriptor) {
+      this.createdPipelines.push(descriptor);
       return {
         descriptor,
         getBindGroupLayout() { return { entries: [] }; }
@@ -200,14 +208,27 @@ function productionM3Device({
         clearBuffer() {},
         copyBufferToBuffer() {},
         beginComputePass() {
+          let pipeline = null;
           return {
-            setPipeline() {},
+            setPipeline(value) { pipeline = value; },
             setBindGroup() {},
             dispatchWorkgroups: (...dims) => {
               device.dispatches.push(dims);
+              device.passTrace.push({
+                kind: 'direct',
+                label: pipeline?.descriptor?.label ?? null,
+                entryPoint:
+                  pipeline?.descriptor?.compute?.entryPoint ?? null
+              });
             },
             dispatchWorkgroupsIndirect: (buffer, offset = 0) => {
               device.dispatches.push(['indirect', buffer, offset]);
+              device.passTrace.push({
+                kind: 'indirect',
+                label: pipeline?.descriptor?.label ?? null,
+                entryPoint:
+                  pipeline?.descriptor?.compute?.entryPoint ?? null
+              });
             },
             end() {}
           };
@@ -231,7 +252,9 @@ function productionM3Fixture({
   fineSubstepCount,
   device = productionM3Device(),
   baseGridSpacingM = 0.25,
-  phaseVolumeInterfaceTransportEnabled = false
+  phaseVolumeInterfaceTransportEnabled = false,
+  surfaceTensionEnabled = false,
+  mechanicsFieldPairV2Enabled = true
 }) {
   const particleCount = 1;
   const state = new Float32Array([
@@ -386,7 +409,9 @@ function productionM3Fixture({
     particleCount,
     particleIdentityBuffer: identityBuffer,
     particleIdentityStrideWords: 1,
-    particleBufferSet: sphParticleUpload,
+    particleBufferSet: null,
+    exactNearCellTreeEnabled: false,
+    mechanicsFieldPairV2Enabled,
     mechanicsLevels: [
       { selectedLevel: 0, mechanicsGrid: fineGrid },
       { selectedLevel: 1, mechanicsGrid: coarseGrid }
@@ -421,6 +446,7 @@ function productionM3Fixture({
             shearModulusPa: 0,
             cpJPerKgK: 4184,
             dynamicViscosityPaS: 0.001,
+            surfaceTensionNPerM: 0.072,
             temperatureRange: [273.15, 373.15]
           }, {
             name: 'gas',
@@ -432,7 +458,7 @@ function productionM3Fixture({
             temperatureRange: [373.15, 1000]
           }]
         }
-      }, { viscosityEnabled: true })
+      }, { viscosityEnabled: true, surfaceTensionEnabled })
     : null;
   const mechanicsMaterialPhaseUpload = mechanicsMaterialTable
     ? uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable)
@@ -450,6 +476,7 @@ function productionM3Fixture({
     fineMechanicsGrid: fineGrid,
     coarseMechanicsGrid: coarseGrid,
     boxDimsM: [1, 1, 1],
+    mechanicsFieldPairV2Enabled,
     phaseVolumeInterfaceTransportEnabled,
     mechanicsEpochMode:
       SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE
@@ -468,6 +495,7 @@ function productionM3Fixture({
     fineSubstepCount,
     baseGridSpacingM,
     phaseVolumeInterfaceTransportEnabled,
+    surfaceTensionEnabled,
     mechanicsMaterialTable,
     mechanicsMaterialPhaseUpload
   };
@@ -475,9 +503,12 @@ function productionM3Fixture({
 
 async function runProductionM3Fixture(fixture, {
   counts = { p2g: 0, gridUpdate: 0, g2p: 0 },
+  g2pOptions = null,
   progress = null,
   overrides = {}
 } = {}) {
+  const gridUpdates = [];
+  const gridUpdateBufferLabels = [];
   const result = await runSchroederTwoLevelMechanicsStepWebGpu({
     ...fixture,
     hierarchyView: fixture.generation.hierarchyView,
@@ -496,12 +527,20 @@ async function runProductionM3Fixture(fixture, {
     gridUpdateRunner: async (options) => {
       counts.gridUpdate += 1;
       progress?.('grid-update-start', counts);
+      const bufferCountBefore = fixture.device.createdBuffers.length;
       const update = await runMlsMpmGridUpdateWebGpu(options);
+      gridUpdates.push(update);
+      gridUpdateBufferLabels.push(
+        fixture.device.createdBuffers
+          .slice(bufferCountBefore)
+          .map(({ label }) => label)
+      );
       progress?.('grid-update-complete', counts);
       return update;
     },
     g2pRunner: async (options) => {
       counts.g2p += 1;
+      g2pOptions?.push(options);
       progress?.('g2p-start', counts);
       const reconstruction = await runMlsMpmG2pWebGpu(options);
       assert.equal(validateLocallySubmittedMlsMpmFusedG2p(
@@ -564,7 +603,7 @@ async function runProductionM3Fixture(fixture, {
     compactSummaryReadback: false,
     ...overrides
   });
-  return { result, counts };
+  return { result, counts, gridUpdates, gridUpdateBufferLabels };
 }
 
 test('Schroeder cross-level grid coupling schemas and row layout are stable', () => {
@@ -588,6 +627,60 @@ test('Schroeder cross-level grid coupling schemas and row layout are stable', ()
   assert.equal(
     SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_ROW_LAYOUT[8],
     'massResidualKg:f32'
+  );
+});
+
+test('parent-field workspace arena policy preserves low-N overlap and bounds split high-N storage', () => {
+  const device = {
+    limits: {
+      maxBufferSize: 4_294_967_292,
+      maxStorageBufferBindingSize: 2_147_483_644
+    }
+  };
+  assert.equal(
+    resolveSchroederParentFieldMechanicsWorkspaceArenaCount({
+      device,
+      parentFieldCapacity: 1_119_744,
+      fineFieldCapacity: 124_416,
+      externalRefluxLedgerByteLength:
+        createSchroederCrossLevelRefluxLedgerLayout({
+          parentFieldCapacity: 1_119_744,
+          coarseFieldCapacity: 124_416
+        }).byteLength
+    }),
+    3
+  );
+  assert.equal(
+    resolveSchroederParentFieldMechanicsWorkspaceArenaCount({
+      device,
+      parentFieldCapacity: 10_744_488,
+      fineFieldCapacity: 1_193_832,
+      externalRefluxLedgerByteLength:
+        createSchroederCrossLevelRefluxLedgerLayout({
+          parentFieldCapacity: 10_744_488,
+          coarseFieldCapacity: 1_193_832
+        }).byteLength
+    }),
+    2
+  );
+  const memoryBoundDevice = {
+    limits: {
+      maxBufferSize: 600_000_000,
+      maxStorageBufferBindingSize: 600_000_000
+    }
+  };
+  assert.equal(
+    resolveSchroederParentFieldMechanicsWorkspaceArenaCount({
+      device: memoryBoundDevice,
+      parentFieldCapacity: 1_119_744,
+      fineFieldCapacity: 124_416,
+      externalRefluxLedgerByteLength:
+        createSchroederCrossLevelRefluxLedgerLayout({
+          parentFieldCapacity: 1_119_744,
+          coarseFieldCapacity: 124_416
+        }).byteLength
+    }),
+    2
   );
 });
 
@@ -1051,6 +1144,14 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     assert.equal(result.parentFieldMechanicsFineCorrectionCount, ratio);
     assert.equal(result.parentFieldMechanicsCoarseTerminalCount, 1);
     assert.equal(result.parentFieldMechanicsCoarsePublishCount, 0);
+    assert.equal(result.fullParticleReadbackPerformed, false);
+    assert.equal(result.fullParticleReadbackFree, true);
+    assert.equal(result.readbackTelemetryComplete, true);
+    assert.deepEqual(result.readbackTelemetryUnknownSources, []);
+    assert.equal(result.mapAsyncCount, 0);
+    assert.equal(result.readbackBytes, 0);
+    assert.equal(result.hostQueueFenceCount, 0);
+    assert.equal(result.normalHotLoopReadbackFree, true);
     assert.equal(result.canonicalMacroStatus.operationCount, ratio + 1);
     assert.equal(result.canonicalMacroStatus.producerChainAuthenticated, true);
     assert.equal(result.canonicalEpochControllerSummary.epochCount, ratio + 1);
@@ -1108,6 +1209,87 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
   }
 });
 
+test('independent-v2 frozen refresh reuses both level topologies with fresh state', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2,
+    mechanicsFieldPairV2Enabled: false
+  });
+  const { result } = await runProductionM3Fixture(fixture);
+  assert.equal(
+    result.canonicalEpochControllerSummary.mechanicsFieldPairV2Enabled,
+    false
+  );
+  assert.deepEqual(
+    result.canonicalEpochControllerSummary.mechanicsFieldConstructionModes,
+    ['independent-v2', 'independent-v2', 'independent-v2']
+  );
+  assert.equal(
+    result.canonicalEpochControllerSummary.mechanicsFieldTopologySuccessorCount,
+    4
+  );
+  assert.deepEqual(
+    result.canonicalEpochControllerSummary
+      .mechanicsFieldTopologySuccessorCountByEpoch,
+    [0, 2, 2]
+  );
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('independent-v2 topology successor cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+});
+
+test('M3 production profiling brackets every fine and terminal mechanics queue stage', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 2 });
+  const producerIds = [];
+  const g2pOptions = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    async measureQueueStage(descriptor, runStage) {
+      producerIds.push(descriptor?.producerId ?? null);
+      return runStage();
+    }
+  };
+  const { result } = await runProductionM3Fixture(fixture, {
+    g2pOptions,
+    overrides: { gpuTimestampRecorder }
+  });
+  assert.equal(g2pOptions.length, 3);
+  assert.ok(g2pOptions.every((options) => (
+    options.gpuTimestampRecorder === gpuTimestampRecorder
+  )));
+  assert.deepEqual(producerIds, [
+    'schroeder-two-level-mechanics:fine-0-p2g',
+    'schroeder-two-level-mechanics:fine-0-coarse-predictor-p2g',
+    'schroeder-two-level-mechanics:fine-0-parent-predictor',
+    'schroeder-two-level-mechanics:fine-0-grid-update',
+    'schroeder-two-level-mechanics:fine-0-correction',
+    'schroeder-two-level-mechanics:fine-0-g2p',
+    'schroeder-two-level-mechanics:fine-0-epoch-refresh',
+    'schroeder-two-level-mechanics:fine-1-p2g',
+    'schroeder-two-level-mechanics:fine-1-coarse-predictor-p2g',
+    'schroeder-two-level-mechanics:fine-1-parent-predictor',
+    'schroeder-two-level-mechanics:fine-1-grid-update',
+    'schroeder-two-level-mechanics:fine-1-correction',
+    'schroeder-two-level-mechanics:fine-1-g2p',
+    'schroeder-two-level-mechanics:fine-1-epoch-refresh',
+    'schroeder-two-level-mechanics:terminal-coarse-p2g',
+    'schroeder-two-level-mechanics:terminal-coarse-grid-update',
+    'schroeder-two-level-mechanics:terminal-coarse-correction',
+    'schroeder-two-level-mechanics:terminal-coarse-g2p'
+  ]);
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('M3 profiling fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+});
+
 test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid update', async () => {
   const fixture = productionM3Fixture({
     fineSubstepCount: 1,
@@ -1156,6 +1338,205 @@ test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid updat
     fixture.device,
     result.pendingPostMechanicsClosure,
     { reason: new Error('Slice 9 mounted-transport fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
+});
+
+test('Slice 9 declares cross-level pressure only for operator-readable projections', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const projectionPolicies = [];
+  const { result } = await runProductionM3Fixture(fixture, {
+    overrides: {
+      p2gRunner: async (options) => {
+        projectionPolicies.push({
+          role: options.fusedCoarseTerminalTransaction
+            ? 'terminal'
+            : (options.fusedFineSubstepTransaction
+                ? 'fine'
+                : 'coarse-predictor'),
+          crossLevelPressureConsumerRequired:
+            options.pressureCrossLevelConsumerRequired
+        });
+        return runMlsMpmP2gGridProjectionWebGpu(options);
+      }
+    }
+  });
+
+  assert.deepEqual(projectionPolicies, [
+    {
+      role: 'fine',
+      crossLevelPressureConsumerRequired: true
+    },
+    {
+      role: 'coarse-predictor',
+      crossLevelPressureConsumerRequired: true
+    },
+    {
+      role: 'terminal',
+      crossLevelPressureConsumerRequired: false
+    }
+  ]);
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('Slice 9 pressure-consumer policy fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
+});
+
+test('Slice 9 surface stress submits six colored face passes transactionally', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true,
+    surfaceTensionEnabled: true
+  });
+  const {
+    result,
+    counts,
+    gridUpdates,
+    gridUpdateBufferLabels
+  } = await runProductionM3Fixture(fixture);
+  const expectedWindow = [
+    'stage_transport',
+    ...SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
+    'validate_staged_transport',
+    'commit_transport'
+  ];
+  const expectedEntryPoints = new Set(expectedWindow);
+  const transportTrace = fixture.device.passTrace.filter(
+    ({ entryPoint }) => expectedEntryPoints.has(entryPoint)
+  );
+  const surfacePipelines = fixture.device.createdPipelines.filter(
+    ({ compute }) =>
+      SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS.includes(
+        compute?.entryPoint
+      )
+  );
+
+  assert.deepEqual(counts, { p2g: 3, gridUpdate: 2, g2p: 2 });
+  assert.deepEqual(
+    surfacePipelines.map(({ compute }) => compute.entryPoint),
+    SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS
+  );
+  assert.deepEqual(
+    transportTrace.map(({ entryPoint }) => entryPoint),
+    [...expectedWindow, ...expectedWindow]
+  );
+  assert.equal(
+    transportTrace
+      .filter(({ entryPoint }) =>
+        SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS.includes(
+          entryPoint
+        )
+      )
+      .every(({ kind }) => kind === 'indirect'),
+    true
+  );
+  assert.deepEqual(gridUpdateBufferLabels, [
+    [
+      'ulg-mls-mpm-mechanics-field-grid-update-params',
+      'ulg-mls-mpm-mechanics-field-grid-update-indirect',
+      'ulg-schroeder-phase-volume-transport-scratch'
+    ],
+    [
+      'ulg-mls-mpm-mechanics-field-grid-update-params',
+      'ulg-mls-mpm-mechanics-field-grid-update-indirect',
+      'ulg-schroeder-phase-volume-transport-scratch'
+    ]
+  ]);
+  assert.equal(
+    fixture.device.createdBuffers.some(
+      ({ label }) => label.includes('surface-stress')
+    ),
+    false
+  );
+  assert.equal(gridUpdates.length, 2);
+  for (const update of gridUpdates) {
+    assert.equal(update.phaseVolumeSurfaceStressRequested, true);
+    assert.equal(update.phaseVolumeSurfaceStressSubmitted, true);
+    assert.equal(
+      update.phaseVolumeSurfaceStressSubmission?.schema,
+      ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA
+    );
+    assert.equal(
+      update.phaseVolumeSurfaceStressSubmission?.status,
+      ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS
+    );
+    assert.equal(
+      update.phaseVolumeSurfaceStressSubmission?.dispatchCount,
+      SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS.length
+    );
+    assert.deepEqual(
+      update.phaseVolumeSurfaceStressSubmission?.entryPoints,
+      SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS
+    );
+  }
+
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('Slice 9 surface-stress fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
+});
+
+test('Slice 9 surface stress rejects missing authority before host submission', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true,
+    surfaceTensionEnabled: true
+  });
+  let probed = false;
+  const { result } = await runProductionM3Fixture(fixture, {
+    overrides: {
+      gridUpdateRunner: async (options) => {
+        if (!probed) {
+          probed = true;
+          for (const missingAuthority of [
+            { mechanicsMaterialPhaseUpload: null },
+            { schroederSpatialEpochTransaction: null }
+          ]) {
+            const before = {
+              buffers: fixture.device.createdBuffers.length,
+              submissions: fixture.device.submissions.length,
+              passes: fixture.device.passTrace.length
+            };
+            await assert.rejects(
+              runMlsMpmGridUpdateWebGpu({
+                ...options,
+                ...missingAuthority
+              }),
+              /Required (?:surface stress|phase-volume transport) lacks exact S9 authority or mechanics material records/
+            );
+            assert.deepEqual({
+              buffers: fixture.device.createdBuffers.length,
+              submissions: fixture.device.submissions.length,
+              passes: fixture.device.passTrace.length
+            }, before);
+          }
+        }
+        return runMlsMpmGridUpdateWebGpu(options);
+      }
+    }
+  });
+
+  assert.equal(probed, true);
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('Slice 9 surface-stress fail-fast fixture cleanup') }
   ), true);
   assert.equal(await fixture.controller.completionPromise(), true);
   destroyMlsMpmMechanicsMaterialPhaseUpload(
@@ -1222,10 +1603,16 @@ test('M4 production controller publishes terminal S* exactly once through a fres
   const fixture = productionM3Fixture({ fineSubstepCount: 1 });
   const { result } = await runProductionM3Fixture(fixture);
   const closure = result.pendingPostMechanicsClosure;
+  const terminalContinuationStateBuffer =
+    closure.terminalParticleContinuation.stateBuffer;
+  const terminalContinuationMechanicsBuffer =
+    closure.terminalParticleContinuation.mechanicsBuffer;
   assert.equal(validateSchroederFusedMechanicsPendingClosure(
     fixture.device,
     closure
   ), true);
+  assert.equal(terminalContinuationStateBuffer.destroyed, false);
+  assert.equal(terminalContinuationMechanicsBuffer.destroyed, false);
 
   const publicEpoch = await fixture.controller.refreshForPostMechanics({
     priorEpoch: closure.canonicalEpoch,
@@ -1345,6 +1732,8 @@ test('M4 production controller publishes terminal S* exactly once through a fres
     closure.finalMlsMpmParticleUpload.mechanicsBuffer.destroyed,
     true
   );
+  assert.equal(terminalContinuationStateBuffer.destroyed, true);
+  assert.equal(terminalContinuationMechanicsBuffer.destroyed, true);
   assert.equal(publishedStateBuffer.destroyed, false);
   assert.equal(publishedMechanicsBuffer.destroyed, false);
   assert.equal(fixture.controller.summary().postMechanicsEpochCount, 1);
@@ -1354,7 +1743,7 @@ test('M4 production controller publishes terminal S* exactly once through a fres
 
 test('M3 warmed shared-device r=1..4 matrix rotates depleted mechanics-field caches', async () => {
   const device = productionM3Device();
-  const observedFieldRuntimes = new Set();
+  const observedFieldPairRuntimes = new Set();
   let directEntry = null;
   for (let ratio = 1; ratio <= 4; ratio += 1) {
     const fixture = productionM3Fixture({
@@ -1363,16 +1752,16 @@ test('M3 warmed shared-device r=1..4 matrix rotates depleted mechanics-field cac
     });
     directEntry ??= fixture.generation.directRuntimeEntry;
     assert.equal(fixture.generation.directRuntimeEntry, directEntry);
-    for (const runtime of directEntry.mechanicsFieldViewRuntimes.values()) {
-      observedFieldRuntimes.add(runtime);
+    for (const runtime of directEntry.mechanicsFieldPairRuntimes.values()) {
+      observedFieldPairRuntimes.add(runtime);
     }
     const { result } = await runProductionM3Fixture(fixture);
     assert.equal(validateSchroederFusedMechanicsPendingClosure(
       device,
       result.pendingPostMechanicsClosure
     ), true);
-    for (const runtime of directEntry.mechanicsFieldViewRuntimes.values()) {
-      observedFieldRuntimes.add(runtime);
+    for (const runtime of directEntry.mechanicsFieldPairRuntimes.values()) {
+      observedFieldPairRuntimes.add(runtime);
     }
     assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
       device,
@@ -1381,19 +1770,20 @@ test('M3 warmed shared-device r=1..4 matrix rotates depleted mechanics-field cac
     ), true);
     assert.equal(await fixture.controller.completionPromise(), true);
     assert.equal(directEntry.liveGenerations.length, 0);
-    assert.equal(directEntry.mechanicsFieldViewDrainingRuntimes.size, 0);
-    for (const runtime of directEntry.mechanicsFieldViewRuntimes.values()) {
+    assert.equal(directEntry.mechanicsFieldPairDrainingRuntimes.size, 0);
+    for (const runtime of directEntry.mechanicsFieldPairRuntimes.values()) {
       assert.equal(runtime.activeExecutionCount(), 0);
     }
   }
   assert.ok(
-    observedFieldRuntimes.size > directEntry.mechanicsFieldViewRuntimes.size,
+    observedFieldPairRuntimes.size
+      > directEntry.mechanicsFieldPairRuntimes.size,
     'the warmed matrix must prove at least one depleted same-key rollover'
   );
-  assert.equal(directEntry.mechanicsFieldViewRuntimes.size, 2);
+  assert.equal(directEntry.mechanicsFieldPairRuntimes.size, 1);
 });
 
-test('M3 r=1 returns its pending closure without awaiting diagnostic fences', async () => {
+test('M3 r=1 returns its pending closure with no normal host queue fence', async () => {
   const sharedFence = deferredPromise();
   const device = productionM3Device({
     fenceFactory: () => sharedFence.promise
@@ -1401,107 +1791,84 @@ test('M3 r=1 returns its pending closure without awaiting diagnostic fences', as
   const fixture = productionM3Fixture({ fineSubstepCount: 1, device });
   const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
   let lastProgress = 'not-started';
-  const runPromise = runProductionM3Fixture(fixture, {
-    counts,
-    progress: (stage) => { lastProgress = stage; }
-  });
-  let result;
-  try {
-    ({ result } = await settleBefore(
-      runPromise,
-      750,
-      () => 'M3 r=1 awaited a diagnostic retirement fence before returning S*: '
-        + JSON.stringify({
-          counts,
-          lastProgress,
-          fenceRequestCount: device.fenceRequestCount
-        })
-    ));
-  } catch (timeoutError) {
-    sharedFence.resolve(true);
-    try {
-      await runPromise;
-    } catch (runError) {
-      timeoutError.cause = runError;
-    }
-    throw timeoutError;
-  }
+  const { result } = await settleBefore(
+    runProductionM3Fixture(fixture, {
+      counts,
+      progress: (stage) => { lastProgress = stage; }
+    }),
+    750,
+    () => 'M3 r=1 awaited a host queue fence before returning S*: '
+      + JSON.stringify({ counts, lastProgress, fenceRequestCount: device.fenceRequestCount })
+  );
 
   assert.equal(validateSchroederFusedMechanicsPendingClosure(
     device,
     result.pendingPostMechanicsClosure
   ), true);
   assert.equal(result.canonicalEpochControllerSummary.epochCount, 2);
-  assert.ok(device.fenceRequestCount > 0);
+  assert.equal(device.fenceRequestCount, 0);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, true);
 
-  sharedFence.resolve(true);
-  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+  const abandonment = abandonSchroederFusedMechanicsPendingClosureAfter(
     device,
     result.pendingPostMechanicsClosure,
     { reason: new Error('M3 r=1 deferred-fence cleanup') }
-  ), true);
+  );
+  sharedFence.resolve(true);
+  assert.equal(await abandonment, true);
   assert.equal(await fixture.controller.completionPromise(), true);
 });
 
-test('M3 r=4 waits only after bounded retirement arenas exhaust', async () => {
+test('M3 r=4 reuses terminal workspaces in same-device queue order without awaiting retirement fences', async () => {
   const sharedFence = deferredPromise();
   const device = productionM3Device({
     fenceFactory: () => sharedFence.promise
   });
   const fixture = productionM3Fixture({ fineSubstepCount: 4, device });
   const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
-  let settled = false;
-  const runPromise = runProductionM3Fixture(fixture, { counts }).then(
-    (value) => {
-      settled = true;
-      return value;
-    },
-    (error) => {
-      settled = true;
-      throw error;
-    }
-  );
-
-  await settleBefore(
-    (async () => {
-      while (counts.p2g < 6 && !settled) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-      return true;
-    })(),
-    750,
-    'M3 r=4 did not reach the bounded arena pressure point'
-  );
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(settled, false);
-  assert.ok(counts.p2g >= 6);
-  assert.ok(counts.g2p >= 3);
-  assert.ok(device.fenceRequestCount > 0);
-
-  sharedFence.resolve(true);
+  let lastProgress = 'not-started';
   const { result } = await settleBefore(
-    runPromise,
+    runProductionM3Fixture(fixture, {
+      counts,
+      progress: (stage) => { lastProgress = stage; }
+    }),
     750,
-    'M3 r=4 did not resume after bounded arena retirement'
+    () => 'M3 r=4 awaited a retirement fence despite same-device queue ordering: '
+      + JSON.stringify({
+        counts,
+        lastProgress,
+        fenceRequestCount: device.fenceRequestCount
+      })
   );
   assert.deepEqual(counts, { p2g: 9, gridUpdate: 5, g2p: 5 });
   assert.equal(validateSchroederFusedMechanicsPendingClosure(
     device,
     result.pendingPostMechanicsClosure
   ), true);
+  assert.equal(result.readbackTelemetryComplete, true);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  sharedFence.resolve(true);
   assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
     device,
     result.pendingPostMechanicsClosure,
-    { reason: new Error('M3 r=4 bounded-backpressure cleanup') }
+    { reason: new Error('M3 r=4 queue-ordered reuse cleanup') }
   ), true);
   assert.equal(await fixture.controller.completionPromise(), true);
 });
 
 test('M3 loss abandonment waits exact device evidence and terminalizes every owner without another queue fence', async () => {
-  const normalFence = deferredPromise();
   const deviceLoss = deferredPromise();
   const device = productionM3Device({
-    fenceFactory: () => normalFence.promise,
+    fenceFactory: () => {
+      throw new Error('M3 loss cleanup must not request a normal host queue fence');
+    },
     lost: deviceLoss.promise
   });
   const fixture = productionM3Fixture({ fineSubstepCount: 1, device });
@@ -1517,6 +1884,8 @@ test('M3 loss abandonment waits exact device evidence and terminalizes every own
   ), true);
 
   const fenceCountBeforeLoss = device.fenceRequestCount;
+  assert.equal(fenceCountBeforeLoss, 0);
+  assert.equal(result.hostQueueFenceCount, 0);
   let abandonmentSettled = false;
   const abandonment = abandonSchroederFusedMechanicsPendingClosureAfter(
     device,
@@ -1559,7 +1928,6 @@ test('M3 loss abandonment waits exact device evidence and terminalizes every own
     closure.terminalSpatialEpochTransaction.state,
     'aborted'
   );
-  normalFence.reject(new Error('stale queue fence rejected after loss won'));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
     closure.terminalSpatialEpochTransaction.state,

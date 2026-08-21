@@ -1,8 +1,8 @@
 export const ULG_SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-parent-field-mechanics-workspace.v3';
+  'peercompute.ulg.schroeder-spatial-parent-field-mechanics-workspace.v4';
 
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_MAGIC = 0x53505733;
-export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_VERSION = 3;
+export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_VERSION = 4;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS = 104;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS = 16;
@@ -10,6 +10,8 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WOR
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES = 288;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ATOMIC_SCALE = 65536;
+export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS =
+  64;
 
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED = 1 << 1;
@@ -195,6 +197,13 @@ function checkedMultiply(left, right, label) {
   return value;
 }
 
+function checkedAlignWords(value, alignment, label) {
+  const remainder = value % alignment;
+  return remainder === 0
+    ? value
+    : checkedAdd(value, alignment - remainder, label);
+}
+
 export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
   parentFieldCapacity,
   fineFieldCapacity = parentFieldCapacity
@@ -247,11 +256,19 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
     'fine impulse range'
   );
-  const parentToCoarseOrdinalOffsetWords = checkedAdd(
+  const unalignedParentToCoarseOrdinalOffsetWords = checkedAdd(
     fineImpulseOffsetWords,
     fineImpulseWords,
     'parent-to-coarse reverse-map offset'
   );
+  const parentToCoarseOrdinalOffsetWords = checkedAlignWords(
+    unalignedParentToCoarseOrdinalOffsetWords,
+    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS,
+    'parent-to-coarse reverse-map binding alignment'
+  );
+  const parentToCoarseOrdinalPaddingWords =
+    parentToCoarseOrdinalOffsetWords
+    - unalignedParentToCoarseOrdinalOffsetWords;
   const wordLength = checkedAdd(
     parentToCoarseOrdinalOffsetWords,
     capacity,
@@ -276,7 +293,17 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     fineImpulseRowWords:
       SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
     parentToCoarseOrdinalOffsetWords,
+    parentToCoarseOrdinalPaddingWords,
     parentToCoarseOrdinalWords: capacity,
+    workspaceBindingWordLength: parentToCoarseOrdinalOffsetWords,
+    workspaceBindingByteLength:
+      parentToCoarseOrdinalOffsetWords * Uint32Array.BYTES_PER_ELEMENT,
+    parentToCoarseOrdinalByteOffset:
+      parentToCoarseOrdinalOffsetWords * Uint32Array.BYTES_PER_ELEMENT,
+    parentToCoarseOrdinalByteLength:
+      capacity * Uint32Array.BYTES_PER_ELEMENT,
+    storageBindingAlignmentWords:
+      SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS,
     bankWords,
     wordLength,
     byteLength: wordLength * Uint32Array.BYTES_PER_ELEMENT

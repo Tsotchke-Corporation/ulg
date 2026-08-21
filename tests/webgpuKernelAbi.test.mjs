@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import {
   mlsMpmG2pReconstructCanonicalSpatialWgsl,
   mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl,
   mlsMpmP2gGridProjectionCanonicalSpatialWgsl,
   mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl,
   mlsMpmParticleSeparationApplyCanonicalSpatialWgsl,
@@ -145,6 +146,19 @@ const CONTRACTS = [
     // The mechanics-field specialization appends a separate 16-byte mutation
     // claim tail without changing this base ABI.
     bytes: 144
+  },
+  {
+    file: 'src/runtime/sph/sphGridGpuKernel.js',
+    label: 'ulg-mls-mpm-p2g-active-source-v2-dense-params',
+    factory: 'createActiveSourceV2DenseProjectionParamsArray',
+    wgslStruct: 'P2gProjectionParams',
+    wgslSource:
+      mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl,
+    // The exact single-level ActiveSource-v2 compatibility route appends
+    // eight authenticated view-capacity/fingerprint/dispatch/build words,
+    // eight GPU-authored product-history control words, and four immutable
+    // host-expected generation/seal/capacity/stride words.
+    bytes: 224
   },
   {
     file: 'src/runtime/sph/sphGridUpdateGpuKernel.js',

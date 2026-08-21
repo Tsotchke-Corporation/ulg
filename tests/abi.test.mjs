@@ -47,6 +47,27 @@ import {
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_ROW_LAYOUT,
   SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT,
+  SPH_REACTION_STRICT_GATE_BLOCKER,
+  SPH_REACTION_STRICT_GATE_BYTES,
+  SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE,
+  SPH_REACTION_STRICT_GATE_INDEX,
+  SPH_REACTION_STRICT_GATE_LAYOUT,
+  SPH_REACTION_STRICT_GATE_MAGIC,
+  SPH_REACTION_STRICT_GATE_PARAMS_BYTES,
+  SPH_REACTION_STRICT_GATE_PARAMS_INDEX,
+  SPH_REACTION_STRICT_GATE_PARAMS_LAYOUT,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_BYTES,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_LAYOUT,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_MAGIC,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_STATUS,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION,
+  SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_WORDS,
+  SPH_REACTION_STRICT_GATE_SHADOW_PLANE_COUNT,
+  SPH_REACTION_STRICT_GATE_SHADOW_ROW_WORDS,
+  SPH_REACTION_STRICT_GATE_STATUS,
+  SPH_REACTION_STRICT_GATE_VERSION,
+  SPH_REACTION_STRICT_GATE_WORDS,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
   createClosureTableDescriptor,
@@ -59,6 +80,12 @@ import {
   createSimulationArtifact,
   createTensorDescriptor,
   createToleranceReport,
+  createSphReactionStrictGateBlockedSentinel,
+  createSphReactionStrictGateFinalizeParams,
+  createSphReactionStrictGateProducerShadow,
+  createSphReactionStrictGateProducerReceipt,
+  validateSphReactionStrictGateControl,
+  validateSphReactionStrictGateProducerReceipt,
   complex64ToPairs,
   ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA,
   ULG_CLOSURE_LAW_GRAPH_SCHEMA,
@@ -143,6 +170,7 @@ import {
   sphReactionProductEventPlacementWgsl,
   sphReactionProductEventWgsl,
   sphReactionProductInventoryWgsl,
+  sphReactionStrictGateFinalizeWgsl,
   sphReactionSummaryFinalizeWgsl,
   sphReactionSummaryPartialsWgsl,
   sphReactionStepWgsl,
@@ -154,6 +182,12 @@ import {
   sphRenderRowsWgsl,
   sphThermalStepWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  sphReactionProductPlacementCaptureApplyWgsl,
+  sphReactionProductPlacementCaptureReduceWgsl,
+  sphReactionProductPlacementEventApplyWgsl,
+  sphReactionProductPlacementPlanWgsl
+} from '../ulg-gpu-abi/src/sphReactionProductPlacementSegmentedWgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -161,6 +195,274 @@ test('complex64 vectors round-trip through the shared ABI layout', () => {
   const vector = createComplex64Vector([[1, 2], [-3.5, 4.25]]);
   assert.equal(vector.byteLength, 16);
   assert.deepEqual(complex64ToPairs(vector), [[1, 2], [-3.5, 4.25]]);
+});
+
+test('SPH reaction strict gate is a versioned fail-closed 64-byte GPU ABI', () => {
+  assert.equal(SPH_REACTION_STRICT_GATE_WORDS, 16);
+  assert.equal(SPH_REACTION_STRICT_GATE_BYTES, 64);
+  assert.equal(SPH_REACTION_STRICT_GATE_PARAMS_BYTES, 64);
+  assert.equal(SPH_REACTION_STRICT_GATE_PARAMS_LAYOUT.length, 16);
+  assert.equal(SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_WORDS, 16);
+  assert.equal(SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_BYTES, 64);
+  assert.equal(SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_LAYOUT.length, 16);
+  assert.equal(SPH_REACTION_STRICT_GATE_F32_INDEX_EXCLUSIVE, 2 ** 24);
+  assert.equal(SPH_REACTION_STRICT_GATE_LAYOUT.length, 16);
+  assert.equal(
+    SPH_REACTION_STRICT_GATE_LAYOUT[SPH_REACTION_STRICT_GATE_INDEX.maxAbsChargeResidualMol],
+    'maxAbsChargeResidualMol:f32-bits'
+  );
+  assert.deepEqual(
+    [...new Set(Object.values(SPH_REACTION_STRICT_GATE_INDEX))].sort((a, b) => a - b),
+    Array.from({ length: 16 }, (_, index) => index)
+  );
+  assert.equal(SPH_REACTION_STRICT_GATE_MAGIC, 0x5352_4732);
+  assert.equal(SPH_REACTION_STRICT_GATE_VERSION, 2);
+  assert.equal(SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_MAGIC, 0x5352_5032);
+  assert.equal(SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION, 2);
+  assert.equal(SPH_REACTION_STRICT_GATE_SHADOW_ROW_WORDS, 8);
+  assert.equal(SPH_REACTION_STRICT_GATE_SHADOW_PLANE_COUNT, 2);
+
+  const atomTermValues = new Float32Array([
+    0, 1, 0, 1, 1, 1, 0, 1,
+    0, 2, 0, 1, 1, 1, 0, 1
+  ]);
+  const atomResidualValues = new Float32Array([
+    0, 1, 0, 0, 0, 1, 0, 1,
+    0, 1, 0, 0, 0, 2, 0, 1
+  ]);
+  const producerShadowWords = createSphReactionStrictGateProducerShadow({
+    atomResidualValues,
+    atomTermValues,
+    atomTermCount: 2
+  });
+  const producerReceipt = createSphReactionStrictGateProducerReceipt({
+    atomResidualValues,
+    atomTermValues,
+    producerShadowWords,
+    sourceGeneration: 3,
+    completionGeneration: 4,
+    seal: 5,
+    reactionCount: 1,
+    atomTermCount: 2,
+    atomResidualCapacity: 2,
+    atomTermCapacity: 2,
+    producerSequence: 6
+  });
+  assert.equal(
+    producerReceipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.statusFlags],
+    SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_STATUS.READY
+  );
+  assert.equal(
+    producerReceipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.shadowPlaneWordCount],
+    16
+  );
+  assert.equal(
+    producerReceipt[SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_INDEX.shadowLogicalWordCount],
+    32
+  );
+  assert.equal(
+    validateSphReactionStrictGateProducerReceipt(producerReceipt, {
+      sourceGeneration: 3,
+      completionGeneration: 4,
+      seal: 5,
+      reactionCount: 1,
+      atomTermCount: 2,
+      atomResidualCapacity: 2,
+      atomTermCapacity: 2,
+      atomResidualStrideVec4: 2,
+      atomTermStrideVec4: 2,
+      version: SPH_REACTION_STRICT_GATE_PRODUCER_RECEIPT_VERSION
+    }).pass,
+    true
+  );
+  assert.equal(
+    validateSphReactionStrictGateProducerReceipt(producerReceipt).pass,
+    false
+  );
+  const structurallyValidReceipt = validateSphReactionStrictGateProducerReceipt(
+    producerReceipt,
+    { requireExpectedAuthority: false }
+  );
+  assert.equal(structurallyValidReceipt.valid, true);
+  assert.equal(structurallyValidReceipt.authorityBound, false);
+  assert.equal(structurallyValidReceipt.pass, false);
+
+  const sentinel = createSphReactionStrictGateBlockedSentinel({
+    sourceGeneration: 3,
+    completionGeneration: 4,
+    seal: 5,
+    reactionCount: 1,
+    atomTermCount: 4
+  });
+  assert.ok(sentinel instanceof Uint32Array);
+  assert.equal(sentinel.byteLength, 64);
+  assert.notEqual(
+    sentinel[SPH_REACTION_STRICT_GATE_INDEX.statusFlags]
+      & SPH_REACTION_STRICT_GATE_STATUS.BLOCKED,
+    0
+  );
+  assert.equal(
+    sentinel[SPH_REACTION_STRICT_GATE_INDEX.statusFlags]
+      & SPH_REACTION_STRICT_GATE_STATUS.PASS,
+    0
+  );
+  assert.notEqual(
+    sentinel[SPH_REACTION_STRICT_GATE_INDEX.blockerFlags]
+      & SPH_REACTION_STRICT_GATE_BLOCKER.MISSING_EVIDENCE,
+    0
+  );
+  assert.deepEqual(validateSphReactionStrictGateControl(sentinel, {
+    requireExpectedAuthority: false
+  }).reasons, []);
+  assert.equal(validateSphReactionStrictGateControl(sentinel, {
+    requireExpectedAuthority: false
+  }).pass, false);
+  assert.equal(validateSphReactionStrictGateControl(sentinel).valid, false);
+
+  assert.equal(validateSphReactionStrictGateControl(new Uint32Array(15)).valid, false);
+  const badMagic = sentinel.slice();
+  badMagic[SPH_REACTION_STRICT_GATE_INDEX.magic] = 0;
+  assert.equal(validateSphReactionStrictGateControl(badMagic).valid, false);
+  const badVersion = sentinel.slice();
+  badVersion[SPH_REACTION_STRICT_GATE_INDEX.version] += 1;
+  assert.equal(validateSphReactionStrictGateControl(badVersion).valid, false);
+  assert.equal(
+    validateSphReactionStrictGateControl(sentinel, { sourceGeneration: 99 }).valid,
+    false
+  );
+  assert.doesNotThrow(() => validateSphReactionStrictGateControl(
+    new Uint8Array(new ArrayBuffer(65), 1, 64)
+  ));
+  assert.equal(
+    validateSphReactionStrictGateControl(
+      new Uint8Array(new ArrayBuffer(65), 1, 64)
+    ).valid,
+    false
+  );
+
+  const nonNumericSentinel = createSphReactionStrictGateBlockedSentinel({
+    sourceGeneration: '3',
+    completionGeneration: true,
+    seal: null,
+    reactionCount: '1',
+    atomTermCount: false,
+    atomResidualToleranceMol: '0.000001',
+    chargeResidualToleranceMol: '0.000001'
+  });
+  assert.equal(nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.sourceGeneration], 0);
+  assert.equal(nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.completionGeneration], 0);
+  assert.equal(nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.seal], 0);
+  assert.equal(nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.reactionCount], 0);
+  assert.equal(nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.atomTermCount], 0);
+  assert.notEqual(
+    nonNumericSentinel[SPH_REACTION_STRICT_GATE_INDEX.blockerFlags]
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+  const nonNumericParams = createSphReactionStrictGateFinalizeParams({
+    reactionCount: null,
+    atomTermCount: '4',
+    atomResidualCapacity: true,
+    atomTermCapacity: false,
+    expectedSourceGeneration: '3',
+    expectedCompletionGeneration: '4',
+    expectedSeal: '5',
+    atomResidualToleranceMol: '0.000001'
+  });
+  assert.equal(nonNumericParams[SPH_REACTION_STRICT_GATE_PARAMS_INDEX.atomTermCount], 0);
+  assert.equal(nonNumericParams[SPH_REACTION_STRICT_GATE_PARAMS_INDEX.expectedSourceGeneration], 0);
+  assert.notEqual(
+    nonNumericParams[SPH_REACTION_STRICT_GATE_PARAMS_INDEX.staticBlockerFlags]
+      & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+    0
+  );
+  for (const toleranceName of [
+    'atomResidualToleranceMol',
+    'chargeResidualToleranceMol'
+  ]) {
+    const signedZeroParams = createSphReactionStrictGateFinalizeParams({
+      reactionCount: 1,
+      atomTermCount: 1,
+      atomResidualCapacity: 1,
+      atomTermCapacity: 1,
+      expectedSourceGeneration: 3,
+      expectedCompletionGeneration: 4,
+      expectedSeal: 5,
+      [toleranceName]: -0
+    });
+    assert.notEqual(
+      signedZeroParams[SPH_REACTION_STRICT_GATE_PARAMS_INDEX.staticBlockerFlags]
+        & SPH_REACTION_STRICT_GATE_BLOCKER.STATIC_INPUT_INVALID,
+      0,
+      `${toleranceName}: signed-zero policy is rejected`
+    );
+  }
+
+  assert.match(sphReactionStrictGateFinalizeWgsl, /@compute @workgroup_size\(1\)/);
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /@binding\(0\) var<storage, read> atom_residual_evidence/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /@binding\(1\) var<storage, read> atom_term_authority/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /@binding\(2\) var<storage, read> producer_receipt/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /@binding\(3\) var<storage, read_write> reaction_strict_gate/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /@binding\(5\) var<storage, read> producer_shadow_bits/
+  );
+  assert.match(sphReactionStrictGateFinalizeWgsl, /BLOCKER_GENERATION_MISMATCH/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /BLOCKER_SEAL_MISMATCH/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /BLOCKER_NONFINITE_EVIDENCE/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /params\.static_blocker_flags/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /atom_residual_bits_by_z: array<u32, 119>/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /identity_matches/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /BLOCKER_BITWISE_SHADOW_MISMATCH/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /shadow_matches/);
+  assert.doesNotMatch(sphReactionStrictGateFinalizeWgsl, /hash_word|hash_vec4/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /0x7f7fffffu/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /exact_f32_index_bits/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /add_rte_f32_bits/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /shift_right_jam_u32/);
+  assert.match(sphReactionStrictGateFinalizeWgsl, /row_reaction < current_reaction/);
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /seen_reaction_count != params\.reaction_count/
+  );
+  assert.match(sphReactionStrictGateFinalizeWgsl, /max_abs_charge_residual_bits/);
+  assert.doesNotMatch(sphReactionStrictGateFinalizeWgsl, /row0\.y == f32\(atomic_number\)/);
+  assert.doesNotMatch(
+    sphReactionStrictGateFinalizeWgsl,
+    /producer_receipt\[[^\n]+\]\s*=(?!=)/
+  );
+  assert.doesNotMatch(
+    sphReactionStrictGateFinalizeWgsl,
+    /storageBarrier\(\)|workgroupBarrier\(\)/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /\(bits & 0x80000000u\) != 0u/
+  );
+  assert.doesNotMatch(
+    sphReactionStrictGateFinalizeWgsl,
+    /atom_residual_bits_by_z\[[^\]]+\]\s*\+|current_charge_residual_bits\s*\+/
+  );
+  assert.match(
+    sphReactionStrictGateFinalizeWgsl,
+    /atom_residual_evidence\[row_word_offset\]\s*== atom_term_authority\[row_word_offset\]/
+  );
+  assert.doesNotMatch(
+    sphReactionStrictGateFinalizeWgsl,
+    /\)\s*blockers = blockers \|/
+  );
 });
 
 test('tensor and closure descriptors carry ABI metadata', () => {
@@ -551,6 +853,18 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionStepWgsl, /fn propose/);
   assert.match(sphReactionStepWgsl, /fn resolve/);
   assert.match(sphReactionStepWgsl, /@compute @workgroup_size\(64\)/);
+  assert.match(
+    sphReactionStepWgsl,
+    /fn represented_entity_count_from_mass[\s\S]*mass_kg \/ molar_mass_kg_per_mol \* REACTION_AVOGADRO_PER_MOL/
+  );
+  assert.match(
+    sphReactionStepWgsl,
+    /thermo2\.y \* surviving_fraction/
+  );
+  assert.match(
+    sphReactionStepWgsl,
+    /represented_entity_count_from_mass\(\s*emitted_product_mass,\s*product_term\.molar_mass\s*\)/
+  );
   assert.equal(ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-summary.v0');
   assert.equal(
     ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
@@ -794,8 +1108,54 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventCompactWgsl, /if \(stride < 8u\)/);
   assert.doesNotMatch(sphReactionProductEventCompactWgsl, /max\(params\.row_stride_vec4, 8u\)/);
   assert.match(sphReactionProductEventPlacementWgsl, /event_row7_header\.z != 1\.0/);
+  assert.match(sphReactionProductEventPlacementWgsl, /!\(event_row2_header\.y > 0\.0\)/);
   assert.match(sphReactionProductEventPlacementWgsl, /!\(event_row2_header\.w > 0\.0\)/);
+  assert.match(sphReactionProductEventPlacementWgsl, /!\(row3\.w > 0\.0\)/);
   assert.match(sphReactionProductEventPlacementWgsl, /!\(row4\.y > 0\.0\)/);
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /fn placement_represented_entity_count_for_product_mass[\s\S]*REACTION_PRODUCT_PLACEMENT_AVOGADRO_PER_MOL/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /fn placement_product_event_moles_match_mass[\s\S]*product_mass_kg \/ molar_mass_kg_per_mol/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /placement_product_event_moles_match_mass\(\s*event_product_mass_kg,\s*event_row2_header\.y,\s*row3\.w\s*\)/
+  );
+  assert.match(
+    sphReactionProductPlacementPlanWgsl,
+    /fn product_event_moles_match_mass[\s\S]*product_mass_kg \/ molar_mass_kg_per_mol/
+  );
+  assert.match(
+    sphReactionProductPlacementPlanWgsl,
+    /product_event_moles_match_mass\(row0\.w, row2\.y, row3\.w\)/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /particle_thermo2\.y \+ unplaced_represented_entity_count/
+  );
+  assert.match(
+    sphReactionProductEventPlacementWgsl,
+    /vec4<f32>\(\s*support_radius_m,\s*unplaced_represented_entity_count,\s*1\.0,\s*support_radius_m\s*\)/
+  );
+  assert.match(
+    sphReactionProductPlacementPlanWgsl,
+    /capture_values\[value_base\] = vec4<f32>\(\s*1\.0,\s*f32\(event \+ 1u\),\s*represented_entity_count,\s*0\.0\s*\)/
+  );
+  assert.match(
+    sphReactionProductPlacementCaptureReduceWgsl,
+    /current0\.z \+ prior0\.z/
+  );
+  assert.match(
+    sphReactionProductPlacementCaptureApplyWgsl,
+    /let merged_represented_entity_count = thermo2\.y \+ aggregate0\.z/
+  );
+  assert.match(
+    sphReactionProductPlacementEventApplyWgsl,
+    /vec4<f32>\(\s*plan1\.w,\s*represented_entity_count,\s*1\.0,\s*plan1\.w\s*\)/
+  );
   assert.match(sphReactionProductEventPlacementWgsl, /product_term_count: u32/);
   assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> placement_summary/);
   assert.match(sphReactionProductEventPlacementWgsl, /@group\(0\) @binding\(6\) var<storage, read> source_state/);

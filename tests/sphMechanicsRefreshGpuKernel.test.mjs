@@ -25,6 +25,11 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../src/runtime/webgpuComputeLayout.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-6) {
   assert.ok(
@@ -327,6 +332,7 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
 
   const queueWrites = [];
   const bindGroups = [];
+  let queueFenceCount = 0;
   const device = {
     queue: {
       writeBuffer(buffer, offset, data) {
@@ -334,6 +340,7 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
       },
       submit() {},
       onSubmittedWorkDone() {
+        queueFenceCount += 1;
         return Promise.resolve();
       }
     },
@@ -380,8 +387,21 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
       };
     }
   };
+  const producerOutput = {};
+  let upstreamCleanupCount = 0;
+  const upstreamCleanup = () => {
+    upstreamCleanupCount += 1;
+  };
+  const issuer = createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'test-mechanics-upstream'
+  });
+  const producerClaim = registerQueueOrderedCleanupClaim(
+    issuer,
+    device,
+    { producerOutput, cleanup: upstreamCleanup }
+  );
 
-  const result = await runMlsMpmMechanicsRefreshWebGpu({
+  const refreshArgs = {
     device,
     sphParticleState: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -406,6 +426,10 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
     },
     retainOutputParticleBuffers: true,
     readbackMode: 'no-full-readback'
+  };
+  const result = await runMlsMpmMechanicsRefreshWebGpu({
+    ...refreshArgs,
+    queueOrderedProducerClaims: [producerClaim]
   });
 
   assert.equal(result.status, 'mechanics-constitutive-refresh-executed');
@@ -424,10 +448,44 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
   assert.equal(result.mechanicsMaterialBankWarmInputConsumer.bufferSource, 'sph-particle-upload');
   assert.equal(result.mechanicsMaterialBankWarmInputRowCount, 1);
   assert.equal(result.mechanicsMaterialBankWarmInputMatchedMaterialCount, 1);
+  assert.equal(queueFenceCount, 0);
+  assert.equal(result.submittedWorkCleanupHostQueueFenceCount, 0);
+  assert.equal(
+    result.submittedWorkCleanupMethod,
+    'same-gpu-queue-submission-order'
+  );
+  const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+    device,
+    upstreamCleanup,
+    {
+      queueOrderedFinalConsumer:
+        result.queueOrderedFinalConsumerCapability,
+      producerClaim,
+      producerOutput,
+      producerFamily: 'test-mechanics-upstream'
+    }
+  );
+  assert.equal(cleanupReceipt.hostQueueFenceCount, 0);
+  assert.equal(upstreamCleanupCount, 1);
   assert.ok(bindGroups.at(-1).entries.some((entry) => (
     entry.binding === 6 && entry.resource.buffer.label === 'material-bank-warm-inputs'
   )));
   assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-refresh-output-mechanics'), false);
+
+  const standalone =
+    await runMlsMpmMechanicsRefreshWebGpu(refreshArgs);
+  assert.equal(queueFenceCount, 1);
+  assert.equal(standalone.observedHostQueueFenceCount, 1);
+  assert.equal(standalone.hostQueueFenceCount, 1);
+  assert.equal(standalone.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(standalone.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(standalone.readbackTelemetryComplete, true);
+  assert.equal(standalone.normalHotLoopReadbackFree, false);
+  assert.equal(standalone.productionHotLoopHostDependencyFree, true);
+  assert.equal(
+    standalone.submittedWorkCleanupMethod,
+    'gpu-queue-on-submitted-work-done'
+  );
 });
 
 test('WebGPU mechanics refresh reuses uploaded material phase records', async () => {

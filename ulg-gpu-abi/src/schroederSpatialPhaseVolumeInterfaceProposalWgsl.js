@@ -453,6 +453,7 @@ fn field_admitted(
   let key_words = (*field_view)[27u];
   let key_end = key_offset + field_count * FIELD_KEY_WORDS;
   let source_count = (*field_view)[16u];
+  let candidate_count = (*field_view)[33u];
   let grid_node_count = (*field_view)[18u];
   let grid_dim_x = (*field_view)[19u];
   let grid_dim_y = (*field_view)[20u];
@@ -513,7 +514,13 @@ fn field_admitted(
     && (*field_view)[24u] == FIELD_HEADER_WORDS
     && (*field_view)[25u] == FIELD_DESCRIPTOR_WORDS
     && (*field_view)[32u] == field_capacity
-    && (*field_view)[33u] == source_count * STENCIL_SIZE
+    // ActiveSource-v2 fields retain the physical source count at word 16,
+    // while word 33 seals only the compact active candidate domain.  Keep
+    // dense-v1 admissible, but do not reinterpret a compact candidate count
+    // as though every physical source were active.
+    && candidate_count > 0u
+    && candidate_count % STENCIL_SIZE == 0u
+    && candidate_count <= source_count * STENCIL_SIZE
     && field_count > 0u
     && field_count <= field_capacity
     && (*field_view)[35u] == 0u
@@ -562,7 +569,11 @@ fn receipt_matches_field(
   let descriptor_span = key_offset - descriptor_offset;
   return descriptor_span % FIELD_DESCRIPTOR_WORDS == 0u
     && descriptor_span / FIELD_DESCRIPTOR_WORDS == (*receipt)[17u]
-    && (*field_view)[16u] == (*receipt)[16u]
+    // The receipt scans the compact active-source domain, whereas the field
+    // header retains the physical source domain.  Candidate equality below,
+    // together with receipt_admitted()'s exact count seal, binds the two.
+    && (*receipt)[16u] > 0u
+    && (*receipt)[16u] <= (*field_view)[16u]
     && (*field_view)[17u] == (*receipt)[21u]
     && (*field_view)[18u] == (*receipt)[22u]
     && (*field_view)[23u] == (*receipt)[23u]

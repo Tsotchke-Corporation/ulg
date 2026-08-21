@@ -17,6 +17,11 @@ import {
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_SHADOW,
   SPLAT_PHASE_SMEARED_PRIMARY
 } from '../src/runtime/sph/sphRenderFieldSourceLocalGpu.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+  registerResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_RENDER_SOURCE_LOCAL === '1';
 const NATIVE_BASE_URL = process.env.ULG_RENDER_SOURCE_LOCAL_BASE_URL
@@ -31,6 +36,7 @@ function fakeComputeDevice() {
   const dispatches = [];
   const submissions = [];
   const bufferClears = [];
+  const copies = [];
   let mapAsyncCalls = 0;
 
   const device = {
@@ -40,7 +46,14 @@ function fakeComputeDevice() {
     },
     queue: {
       writeBuffer(buffer, offset, data) {
-        buffer.writes.push({ offset, byteLength: data.byteLength ?? 0 });
+        buffer.writes.push({
+          offset,
+          byteLength: data.byteLength ?? 0,
+          snapshot: data?.buffer?.slice(
+            data.byteOffset ?? 0,
+            (data.byteOffset ?? 0) + (data.byteLength ?? 0)
+          ) ?? null
+        });
       },
       submit(commands) {
         submissions.push(commands);
@@ -112,7 +125,15 @@ function fakeComputeDevice() {
             end() {}
           };
         },
-        copyBufferToBuffer() {},
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+          copies.push({
+            source,
+            sourceOffset,
+            destination,
+            destinationOffset,
+            size
+          });
+        },
         // Real WebGPU encoders have this. Without it here the builder silently
         // takes its zero-fill upload fallback and the test would be measuring
         // the path production does not use.
@@ -134,6 +155,7 @@ function fakeComputeDevice() {
     dispatches,
     submissions,
     bufferClears,
+    copies,
     get mapAsyncCalls() {
       return mapAsyncCalls;
     }
@@ -222,7 +244,10 @@ test('generic source-local shadow builder emits standard v1 field rows without a
   assert.equal(bindGroups[1].entries[2].resource.buffer.label, 'ulg-sph-render-field-source-local-cells');
   assert.ok(shaderModules.some((module) => /render_phase_weight/.test(module.code)));
   assert.ok(shaderModules.some((module) => /particle_radius_scale/.test(module.code)));
-  assert.ok(shaderModules.some((module) => /row1\.z \* value/.test(module.code)));
+  assert.ok(shaderModules.some((module) => (
+    /normalized_temperature_low \* value/.test(module.code)
+    && /normalized_temperature_high \* value/.test(module.code)
+  )));
   // Accumulation must be atomic and must detect overflow. It deliberately uses
   // atomicAdd rather than a compare-exchange retry loop: a metaball field is
   // maximally contended -- many particles write the same cells by construction
@@ -550,9 +575,10 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
         const smearDense = await render.buildSphRenderFieldWebGpu(smearShared);
         const productRows = new Float32Array(render.SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS);
         productRows[0] = 5; productRows[1] = 5; productRows[2] = 5;
-        productRows[4] = 1;   // materialId, matching the surface
+        productRows[4] = surface.materialId;
         productRows[11] = 0;  // phaseId unset -> admitted by both paths
         productRows[13] = 1;  // unplacedMassKg
+        productRows[16] = 999_999; // deliberately noncanonical event temperature
         productRows[18] = 1;  // status: placed
         const productShared = {
           ...shared,
@@ -581,6 +607,85 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           }
           return { density, palette, temperature };
         };
+        const productDenseEffect = compareFields(dense, productDense);
+        let productDenseMaxTemperatureK = 0;
+        let productShadowMaxTemperatureK = 0;
+        let productDenseMaxDensity = 0;
+        let productShadowMaxDensity = 0;
+        for (let offset = 0; offset < productDense.fieldRows.length; offset += 8) {
+          productDenseMaxDensity = Math.max(
+            productDenseMaxDensity,
+            productDense.fieldRows[offset]
+          );
+          productShadowMaxDensity = Math.max(
+            productShadowMaxDensity,
+            productShadow.fieldRows[offset]
+          );
+          productDenseMaxTemperatureK = Math.max(
+            productDenseMaxTemperatureK,
+            productDense.fieldRows[offset + 4]
+          );
+          productShadowMaxTemperatureK = Math.max(
+            productShadowMaxTemperatureK,
+            productShadow.fieldRows[offset + 4]
+          );
+        }
+        const hotRows = new Float32Array(render.SPH_GPU_RENDER_ROW_FLOATS * 9);
+        for (let particle = 0; particle < 9; particle += 1) {
+          const offset = particle * render.SPH_GPU_RENDER_ROW_FLOATS;
+          hotRows.set(rows, offset);
+          hotRows[offset + 6] = 2193.31;
+        }
+        const hotShared = {
+          ...shared,
+          renderRows: hotRows,
+          particleCount: 9
+        };
+        const hotShadow = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...hotShared,
+          maxSplatCellsPerSource: 4096
+        });
+        const hotDense = await render.buildSphRenderFieldWebGpu(hotShared);
+        const hotDelta = compareFields(hotDense, hotShadow);
+        let hotDenseMaxTemperatureK = 0;
+        let hotShadowMaxTemperatureK = 0;
+        for (let offset = 0; offset < hotDense.fieldRows.length; offset += 8) {
+          hotDenseMaxTemperatureK = Math.max(
+            hotDenseMaxTemperatureK,
+            hotDense.fieldRows[offset + 4]
+          );
+          hotShadowMaxTemperatureK = Math.max(
+            hotShadowMaxTemperatureK,
+            hotShadow.fieldRows[offset + 4]
+          );
+        }
+        const extremeRows = hotRows.slice();
+        for (let particle = 0; particle < 9; particle += 1) {
+          extremeRows[particle * render.SPH_GPU_RENDER_ROW_FLOATS + 6] = 10_000;
+        }
+        const extremeShared = {
+          ...shared,
+          renderRows: extremeRows,
+          particleCount: 9
+        };
+        const extremeShadow = await sourceLocal.buildSphRenderFieldSourceLocalWebGpu({
+          ...extremeShared,
+          maxSplatCellsPerSource: 4096
+        });
+        const extremeDense = await render.buildSphRenderFieldWebGpu(extremeShared);
+        const extremeDelta = compareFields(extremeDense, extremeShadow);
+        let extremeDenseMaxTemperatureK = 0;
+        let extremeShadowMaxTemperatureK = 0;
+        for (let offset = 0; offset < extremeDense.fieldRows.length; offset += 8) {
+          extremeDenseMaxTemperatureK = Math.max(
+            extremeDenseMaxTemperatureK,
+            extremeDense.fieldRows[offset + 4]
+          );
+          extremeShadowMaxTemperatureK = Math.max(
+            extremeShadowMaxTemperatureK,
+            extremeShadow.fieldRows[offset + 4]
+          );
+        }
         // A single particle has zero dispersion by construction
         // (<|v|^2> - |<v>|^2 = 0), so the arm above proves the four-pass
         // sequence does not corrupt anything but never exercises the
@@ -686,6 +791,19 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
           smearStrategy: smearShadow.sourceLocalStrategy,
           productDelta,
           productStrategy: productShadow.sourceLocalStrategy,
+          productDenseEffect,
+          productDenseMaxTemperatureK,
+          productShadowMaxTemperatureK,
+          productDenseMaxDensity,
+          productShadowMaxDensity,
+          hotDelta,
+          hotShadowOverflow: hotShadow.sourceLocalOverflow,
+          hotDenseMaxTemperatureK,
+          hotShadowMaxTemperatureK,
+          extremeDelta,
+          extremeShadowOverflow: extremeShadow.sourceLocalOverflow,
+          extremeDenseMaxTemperatureK,
+          extremeShadowMaxTemperatureK,
           maxDensityAbs,
           maxPaletteAbs,
           maxTemperatureAbs
@@ -719,7 +837,20 @@ test('native Vulkan source-local shadow compiles and stays close to dense phase-
   assert.ok(native.maxTemperatureAbs <= 2, JSON.stringify(native));
 
   assert.equal(native.productStrategy, 'shadow', 'product events must not fall back to dense');
-  assert.ok(native.productDelta.density <= 1e-3, `product density ${JSON.stringify(native.productDelta)}`);
+  assert.ok(native.productDelta.density <= 1e-3, `product density ${JSON.stringify(native)}`);
+  assert.ok(native.productDenseEffect.density > 0, JSON.stringify(native));
+  assert.ok(native.productDenseMaxDensity > 0, JSON.stringify(native));
+  assert.ok(native.productShadowMaxDensity > 0, JSON.stringify(native));
+  assert.ok(Math.abs(native.productDenseMaxTemperatureK - 900) < 1e-3, JSON.stringify(native));
+  assert.ok(Math.abs(native.productShadowMaxTemperatureK - 900) < 1, JSON.stringify(native));
+  assert.equal(native.hotShadowOverflow, false, JSON.stringify(native));
+  assert.ok(native.hotDenseMaxTemperatureK >= 2193, JSON.stringify(native));
+  assert.ok(native.hotShadowMaxTemperatureK >= 2192, JSON.stringify(native));
+  assert.ok(native.hotDelta.temperature <= 2, JSON.stringify(native.hotDelta));
+  assert.equal(native.extremeShadowOverflow, false, JSON.stringify(native));
+  assert.ok(native.extremeDenseMaxTemperatureK >= 9999, JSON.stringify(native));
+  assert.ok(native.extremeShadowMaxTemperatureK >= 9998, JSON.stringify(native));
+  assert.ok(native.extremeDelta.temperature <= 64, JSON.stringify(native.extremeDelta));
   // Velocity smear is refused, so it must land on the dense gather and match it
   // exactly. When the four-pass implementation is fixed, flip this to the
   // 'shadow' strategy and the 1e-3 tolerances used above -- this arm is the
@@ -755,15 +886,83 @@ test('accumulator lane count matches between both shaders and the host', () => {
   // The lane count appears in the splat WGSL, the resolve WGSL, and the host
   // buffer allocation. A mismatch does not fail to compile -- it silently
   // misaligns every cell's channels, so pin all three together.
-  const { sphRenderFieldSourceLocalSplatWgsl, sphRenderFieldSourceLocalResolveWgsl } =
-    SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  const {
+    sphRenderFieldSourceLocalSplatWgsl,
+    sphRenderFieldSourceLocalProductSplatWgsl,
+    sphRenderFieldSourceLocalResolveWgsl
+  } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
   const laneOf = (source) => {
     const match = /const ACCUM_LANES: u32 = (\d+)u;/.exec(source);
     assert.ok(match, 'ACCUM_LANES must be declared');
     return Number(match[1]);
   };
   assert.equal(laneOf(sphRenderFieldSourceLocalSplatWgsl), SOURCE_LOCAL_ACCUM_LANES);
+  assert.equal(laneOf(sphRenderFieldSourceLocalProductSplatWgsl), SOURCE_LOCAL_ACCUM_LANES);
   assert.equal(laneOf(sphRenderFieldSourceLocalResolveWgsl), SOURCE_LOCAL_ACCUM_LANES);
+});
+
+test('hot clustered particles use a bounded temperature ratio instead of overflowing before density', () => {
+  const {
+    SOURCE_LOCAL_TEMPERATURE_SCALE,
+    SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K,
+    SOURCE_LOCAL_TEMPERATURE_RANGE_K,
+    sphRenderFieldSourceLocalSplatWgsl,
+    sphRenderFieldSourceLocalResolveWgsl
+  } = SPH_RENDER_FIELD_SOURCE_LOCAL_TESTING;
+  assert.equal(SOURCE_LOCAL_TEMPERATURE_SCALE, 16_384);
+  assert.equal(SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K, 8_192);
+  assert.equal(SOURCE_LOCAL_TEMPERATURE_RANGE_K, 1_048_576);
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /normalized_temperature_low/
+  );
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /quantize\(normalized_temperature_low \* value, params\.temperature_scale\)/
+  );
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /quantize\(normalized_temperature_high \* value, params\.temperature_scale\)/
+  );
+  assert.match(
+    sphRenderFieldSourceLocalSplatWgsl,
+    /if \(admitted_temperature_k > SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K\)/
+  );
+  assert.match(
+    sphRenderFieldSourceLocalResolveWgsl,
+    /SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K \* temperature_low_weighted/
+  );
+
+  const particleCount = 9;
+  const metaballValue = 250;
+  const maxU32Safe = 4_294_967_040;
+  const encodedWeight = particleCount * Math.trunc(
+    metaballValue * SOURCE_LOCAL_TEMPERATURE_SCALE
+  );
+  assert.ok(encodedWeight < maxU32Safe);
+  for (const temperatureK of [2193.31, 10_000, 1_000_000]) {
+    const oldNumerator = particleCount
+      * temperatureK * metaballValue * 1_024;
+    const encodedLowNumerator = particleCount * Math.trunc(
+      Math.min(temperatureK / SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K, 1)
+        * metaballValue * SOURCE_LOCAL_TEMPERATURE_SCALE
+    );
+    const encodedHighNumerator = particleCount * Math.trunc(
+      Math.max(0, temperatureK - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K)
+        / (SOURCE_LOCAL_TEMPERATURE_RANGE_K - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K)
+        * metaballValue * SOURCE_LOCAL_TEMPERATURE_SCALE
+    );
+    const decodedTemperatureK = (
+      SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K * encodedLowNumerator
+      + (SOURCE_LOCAL_TEMPERATURE_RANGE_K - SOURCE_LOCAL_TEMPERATURE_LOW_RANGE_K)
+        * encodedHighNumerator
+    ) / encodedWeight;
+
+    assert.ok(oldNumerator > maxU32Safe, 'the prior direct T*weight encoding wraps');
+    assert.ok(encodedLowNumerator < maxU32Safe);
+    assert.ok(encodedHighNumerator < maxU32Safe);
+    assert.ok(Math.abs(decodedTemperatureK - temperatureK) < 1);
+  }
 });
 
 test('velocity moments are gated on a non-zero smear interval', () => {
@@ -893,8 +1092,166 @@ test('production mode publishes into the caller pooled buffer and is presentable
   assert.equal(result.sourceLocalShadowOnly, false);
   assert.equal(result.sourceLocalUsableForPresentation, true);
   assert.equal(result.backend, 'webgpu-source-local');
+  assert.equal(result.productEventControlAuthentication, 'not-required-zero-control');
+  const disabledControl = input.buffers.find((buffer) => (
+    buffer.label
+      === 'ulg-sph-render-field-source-local-product-history-control-disabled'
+  ));
+  assert.equal(
+    disabledControl.size,
+    SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+  );
+  const gateParams = input.buffers.find((buffer) => (
+    buffer.label
+      === 'ulg-sph-render-field-source-local-product-history-gate-params'
+  ));
+  assert.deepEqual(
+    Array.from(new Uint32Array(gateParams.writes[0].snapshot)),
+    Array(8).fill(0),
+    'legacy host/nonresident execution must share an all-zero disabled gate'
+  );
+  const controlBindGroups = input.bindGroups.filter((bindGroup) => (
+    bindGroup.entries.some((entry) => entry.resource.buffer === disabledControl)
+  ));
+  assert.equal(controlBindGroups.length, 2, 'particle splat and resolve must share one step gate');
+  assert.equal(
+    input.bindGroups.filter((bindGroup) => (
+      bindGroup.entries.some((entry) => entry.resource.buffer === gateParams)
+    )).length,
+    2,
+    'particle splat and resolve must share the same disabled expectations'
+  );
   // The pooled buffer belongs to the caller and must survive the builder.
   assert.ok(!pooled.destroyed, 'a caller-owned buffer must not be destroyed');
+});
+
+test('source-local production GPU-authenticates one full product-history prefix across splat and resolve without a readback', async () => {
+  const input = fakeComputeDevice();
+  const surfaceTable = singleSurfaceTable();
+  const rowCapacity = 4;
+  const productEventBuffer = tagWebGpuBufferDevice(input.device.createBuffer({
+    label: 'resident-product-events',
+    size: rowCapacity
+      * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  }), input.device);
+  const countControlBuffer = input.device.createBuffer({
+    label: 'resident-product-event-count-control',
+    size: 512,
+    usage: 0
+  });
+  const productEventSource = { productEventBuffer };
+  const authority = registerResidentProductEventCountAuthority(productEventSource, {
+    device: input.device,
+    controlBuffer: countControlBuffer,
+    controlOffsetBytes: 256,
+    rowCapacity,
+    rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    generation: 13,
+    seal: 17
+  });
+  const pooled = input.device.createBuffer({
+    label: 'pooled-field-rows',
+    size: surfaceTable.totalFieldCells
+      * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+
+  const result = await buildSphRenderFieldSourceLocalWebGpu({
+    device: input.device,
+    renderRows: renderRowsForSurface(surfaceTable),
+    surfaceTable,
+    particleCount: 1,
+    productEventBuffer,
+    productEventSource,
+    productEventCount: rowCapacity,
+    sourceLocalMode: SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION,
+    targetFieldRowsBuffer: pooled
+  });
+
+  assert.equal(input.copies.length, 0, 'the live count must stay inside its immutable control record');
+  const controlBindGroups = input.bindGroups.filter((bindGroup) => (
+    bindGroup.entries.some((entry) => entry.resource.buffer === countControlBuffer)
+  ));
+  assert.equal(
+    controlBindGroups.length,
+    3,
+    'particle splat, product splat, and resolve must share one authenticated step gate'
+  );
+  for (const bindGroup of controlBindGroups) {
+    const entry = bindGroup.entries.find((candidate) => (
+      candidate.resource.buffer === countControlBuffer
+    ));
+    assert.equal(entry.resource.offset, 256);
+    assert.equal(
+      entry.resource.size,
+      SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+    );
+  }
+  const gateParams = input.buffers.find((buffer) => (
+    buffer.label
+      === 'ulg-sph-render-field-source-local-product-history-gate-params'
+  ));
+  assert.equal(
+    input.bindGroups.filter((bindGroup) => (
+      bindGroup.entries.some((entry) => entry.resource.buffer === gateParams)
+    )).length,
+    3,
+    'all source-local passes must bind the same immutable expected-values record'
+  );
+  assert.deepEqual(Array.from(new Uint32Array(gateParams.writes[0].snapshot)), [
+    1,
+    authority.expectedMagic,
+    authority.expectedVersion,
+    authority.expectedReadyStatus,
+    authority.expectedGeneration,
+    authority.expectedSeal,
+    authority.expectedRowCapacity,
+    authority.expectedRowStrideVec4
+  ]);
+  const gatedShaders = input.shaderModules.filter((module) => (
+    /source-local-(?:shadow-splat|product-splat|shadow-resolve)/.test(module.label)
+  ));
+  assert.equal(gatedShaders.length, 3);
+  for (const module of gatedShaders) {
+    for (let word = 0; word < 8; word += 1) {
+      assert.match(
+        module.code,
+        new RegExp(`product_history_control\\[${word}u\\]`),
+        `${module.label} must authenticate or consume control word ${word}`
+      );
+    }
+    assert.match(module.code, /product_history_control\[2u\] == product_history_gate\.expected_ready_status/);
+    assert.match(module.code, /product_history_control\[3u\] <= product_history_control\[4u\]/);
+  }
+  const resolveShader = gatedShaders.find((module) => /shadow-resolve/.test(module.label));
+  assert.match(resolveShader.code, /render_field_cells\[out_index \* 2u\] = vec4<f32>\(0\.0\)/);
+  const particleShader = gatedShaders.find((module) => /shadow-splat/.test(module.label));
+  assert.ok(
+    particleShader.code.indexOf('if (!source_local_product_history_ready())')
+      < particleShader.code.indexOf('let row0 = render_row0'),
+    'particle splat must authenticate before reading particle rows'
+  );
+  assert.equal(result.productEventCountAuthority, 'gpu-authored-filtered-live-prefix');
+  assert.equal(result.productEventControlAuthentication, 'full-eight-word-gpu-commit-gate');
+  assert.equal(result.productEventControlHostObserved, false);
+  assert.equal(result.productEventCountHostKnown, false);
+  assert.equal(result.productEventRowCapacity, rowCapacity);
+  assert.equal(result.productEventBufferBound, true);
+  assert.equal(input.mapAsyncCalls, 0);
+  const productParams = input.buffers.find((buffer) => (
+    buffer.label === 'ulg-sph-render-field-source-local-product-params'
+  ));
+  const baseParams = input.buffers.find((buffer) => (
+    buffer.label === 'ulg-sph-render-field-source-local-params'
+  ));
+  assert.equal(baseParams.size, 48, 'particle splat params include smear phase fields');
+  assert.equal(productParams.size, 32, 'product splat params retain their eight-word ABI');
+  assert.equal(productParams.destroyed, true, 'transient product params must be released');
+  assert.equal(productEventBuffer.destroyed, false, 'borrowed product history must survive');
+  assert.equal(pooled.destroyed, false, 'caller-owned field output must survive');
 });
 
 test('production without a pooled target is refused rather than silently allocating', async () => {

@@ -1,10 +1,11 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v3';
+  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v8';
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_MAGIC = 0x4d50_4731;
-export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 3;
-export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS = 44;
+export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 8;
+export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS = 130;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS = 48;
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS = 3_596;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS = 3;
 // The exact traversal decides on-GPU whether a certified zero-edge completion
 // can replace the CSR solver. One dispatch triplet launches that path without
@@ -14,6 +15,19 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONDITIONAL_DISPATCH_WORDS 
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_WORDS = 3;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_DIRECTED_ROW_WORDS = 1;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC =
+  0x4d49_5231;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION = 2;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS = 2;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_BUILDING =
+  1 << 0;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY =
+  1 << 1;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED =
+  1 << 2;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED =
+  1 << 3;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STATE_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCALE_ROW_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ENERGY_ROW_WORDS = 8;
@@ -51,7 +65,23 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE = Object.freeze({
   ENERGY_ITERATION_1: 1 << 14,
   ENERGY_ITERATION_2: 1 << 15,
   ENERGY_ITERATION_3: 1 << 16,
-  ENERGY_VERIFIED: 1 << 17
+  ENERGY_VERIFIED: 1 << 17,
+  ITERATION_4: 1 << 18,
+  ITERATION_5: 1 << 19,
+  ITERATION_6: 1 << 20,
+  ITERATION_7: 1 << 21,
+  ENERGY_ITERATION_4: 1 << 22,
+  ENERGY_ITERATION_5: 1 << 23,
+  ENERGY_ITERATION_6: 1 << 24,
+  ENERGY_ITERATION_7: 1 << 25,
+  // Iterations 8-15 retain exact individual completion counters below. These
+  // two mask bits authenticate the extended solve/energy stage family without
+  // exhausting the remaining u32 stage namespace.
+  ITERATIONS_8_15: 1 << 26,
+  ENERGY_ITERATIONS_8_15: 1 << 27,
+  MATCHING_CLEANUP: 1 << 28,
+  MATCHING_TRUST_RESTORED: 1 << 29,
+  CONTACT_INTERFACE_RECEIPT_PUBLISHED: 1 << 30
 });
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE = Object.freeze({
@@ -73,7 +103,8 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE = Object.freeze({
   STAGE_ORDER: 1 << 15,
   ENERGY_GAIN: 1 << 16,
   ENERGY_CLOSURE: 1 << 17,
-  NEGATIVE_INTERNAL_ENERGY: 1 << 18
+  NEGATIVE_INTERNAL_ENERGY: 1 << 18,
+  CONTACT_INTERFACE_RECEIPT: 1 << 19
 });
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_LAYOUT =
@@ -121,7 +152,93 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_LAYOUT =
     'fullSolverPath:u32',
     'zeroEdgeDispatchX:u32',
     'zeroEdgeDispatchY:u32',
-    'zeroEdgeDispatchZ:u32'
+    'zeroEdgeDispatchZ:u32',
+    'measureCount4:u32',
+    'measureCount5:u32',
+    'measureCount6:u32',
+    'measureCount7:u32',
+    'solveCount4:u32',
+    'solveCount5:u32',
+    'solveCount6:u32',
+    'solveCount7:u32',
+    'energyMeasureCount4:u32',
+    'energyMeasureCount5:u32',
+    'energyMeasureCount6:u32',
+    'energyMeasureCount7:u32',
+    'measureCount8:u32',
+    'measureCount9:u32',
+    'measureCount10:u32',
+    'measureCount11:u32',
+    'measureCount12:u32',
+    'measureCount13:u32',
+    'measureCount14:u32',
+    'measureCount15:u32',
+    'solveCount8:u32',
+    'solveCount9:u32',
+    'solveCount10:u32',
+    'solveCount11:u32',
+    'solveCount12:u32',
+    'solveCount13:u32',
+    'solveCount14:u32',
+    'solveCount15:u32',
+    'energyMeasureCount8:u32',
+    'energyMeasureCount9:u32',
+    'energyMeasureCount10:u32',
+    'energyMeasureCount11:u32',
+    'energyMeasureCount12:u32',
+    'energyMeasureCount13:u32',
+    'energyMeasureCount14:u32',
+    'energyMeasureCount15:u32',
+    'preSolveMaxPositionResidualOrderedF32_0:u32',
+    'preSolveMaxPositionResidualOrderedF32_1:u32',
+    'preSolveMaxPositionResidualOrderedF32_2:u32',
+    'preSolveMaxPositionResidualOrderedF32_3:u32',
+    'preSolveMaxPositionResidualOrderedF32_4:u32',
+    'preSolveMaxPositionResidualOrderedF32_5:u32',
+    'preSolveMaxPositionResidualOrderedF32_6:u32',
+    'preSolveMaxPositionResidualOrderedF32_7:u32',
+    'preSolveMaxPositionResidualOrderedF32_8:u32',
+    'preSolveMaxPositionResidualOrderedF32_9:u32',
+    'preSolveMaxPositionResidualOrderedF32_10:u32',
+    'preSolveMaxPositionResidualOrderedF32_11:u32',
+    'preSolveMaxPositionResidualOrderedF32_12:u32',
+    'preSolveMaxPositionResidualOrderedF32_13:u32',
+    'preSolveMaxPositionResidualOrderedF32_14:u32',
+    'preSolveMaxPositionResidualOrderedF32_15:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_0:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_1:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_2:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_3:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_4:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_5:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_6:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_7:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_8:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_9:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_10:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_11:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_12:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_13:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_14:u32',
+    'preSolveMaxPositionViolationRatioOrderedF32_15:u32',
+    'preSolveMaxVelocityResidualOrderedF32_0:u32',
+    'preSolveMaxVelocityResidualOrderedF32_1:u32',
+    'preSolveMaxVelocityResidualOrderedF32_2:u32',
+    'preSolveMaxVelocityResidualOrderedF32_3:u32',
+    'preSolveMaxVelocityResidualOrderedF32_4:u32',
+    'preSolveMaxVelocityResidualOrderedF32_5:u32',
+    'preSolveMaxVelocityResidualOrderedF32_6:u32',
+    'preSolveMaxVelocityResidualOrderedF32_7:u32',
+    'preSolveMaxVelocityResidualOrderedF32_8:u32',
+    'preSolveMaxVelocityResidualOrderedF32_9:u32',
+    'preSolveMaxVelocityResidualOrderedF32_10:u32',
+    'preSolveMaxVelocityResidualOrderedF32_11:u32',
+    'preSolveMaxVelocityResidualOrderedF32_12:u32',
+    'preSolveMaxVelocityResidualOrderedF32_13:u32',
+    'preSolveMaxVelocityResidualOrderedF32_14:u32',
+    'preSolveMaxVelocityResidualOrderedF32_15:u32',
+    'matchingCleanupPassCount:u32',
+    'matchingCleanupTrustRestoreCount:u32'
   ]);
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_LAYOUT =
@@ -305,7 +422,7 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI = Object.freeze({
   indirectDispatchBufferPolicy:
     'dedicated-three-u32-storage-indirect-buffer-no-control-alias',
   conditionalDispatchBufferPolicy:
-    'authenticated-control-zero-edge-triplet-copied-to-a-dedicated-indirect-buffer-selects-certified-zero-edge-completion-without-host-readback',
+    'authenticated-control-zero-edge-triplet selects certified zero-edge completion, then the full-solver path phase-reuses the dedicated storage-indirect triplet for GPU-latched matching-cleanup particle dispatch without host readback',
   sortPolicy: 'none-csr-order-authored-by-exclusive-scan-and-source-local-rank',
   exactNearTraversalCount: 1,
   radixSortRequired: false,
@@ -467,6 +584,10 @@ function computePairGraphBuffers(particleCapacity, directedPairCapacity) {
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS
     ),
     frozenBufferLayout(
+      'mechanical-pair-graph-matching-cleanup-control',
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+    ),
+    frozenBufferLayout(
       'mechanical-pair-graph-indirect-dispatch',
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS,
       { indirect: true }
@@ -518,6 +639,34 @@ function keyedLengths(buffers, field) {
   ])));
 }
 
+function maximumPhysicalDirectedPairs(particleCapacity) {
+  if (particleCapacity > 65536) return UINT32_MAX;
+  return particleCapacity * (particleCapacity - 1);
+}
+
+function minimumInterfaceReceiptDirectedCapacity(particleCapacity) {
+  const receiptPrefixWords =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
+      + particleCapacity + 1;
+  const maximumPublished = maximumPhysicalDirectedPairs(particleCapacity);
+  const capacity = receiptPrefixWords <= maximumPublished
+    ? receiptPrefixWords
+    : Math.ceil(
+        (
+          receiptPrefixWords
+            + maximumPublished
+              * SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+        )
+          / SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_WORDS
+      );
+  if (capacity < 1 || capacity > UINT32_MAX) {
+    throw new RangeError(
+      'mechanical interface receipt capacity is unrepresentable'
+    );
+  }
+  return capacity;
+}
+
 export function createSchroederSpatialMechanicalPairGraphLayout({
   particleCapacity,
   directedPairCapacity,
@@ -565,6 +714,7 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
   const [
     control,
     evidence,
+    matchingCleanupControl,
     indirectDispatch,
     conditionalDispatch,
     sourceCounts,
@@ -593,9 +743,40 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_PROPOSAL_HEADER_WORDS
         * UINT32_BYTES
   });
+  const interfaceReceiptMaximumPublishedRows = Math.min(
+    resolvedDirectedPairCapacity,
+    maximumPhysicalDirectedPairs(resolvedParticleCapacity)
+  );
+  const interfaceReceiptWordLength =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
+      + resolvedParticleCapacity + 1
+      + interfaceReceiptMaximumPublishedRows
+        * SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+  const interfaceReceipt = Object.freeze({
+    role: 'mechanical-contact-interface-receipt',
+    wordLength: interfaceReceiptWordLength,
+    byteLength: interfaceReceiptWordLength * UINT32_BYTES,
+    storageBinding: true,
+    indirect: false,
+    aliased: true,
+    aliasOf: appendStaging.role,
+    aliasWordOffset: 0,
+    aliasByteOffset: 0,
+    maximumPublishedRows: interfaceReceiptMaximumPublishedRows,
+    fullDirectedCapacity:
+      interfaceReceiptMaximumPublishedRows === resolvedDirectedPairCapacity
+  });
+  if (interfaceReceipt.wordLength > appendStaging.wordLength) {
+    throw new RangeError(
+      `mechanical contact interface receipt word length `
+      + `${interfaceReceipt.wordLength} exceeds aliased append-staging word `
+      + `length ${appendStaging.wordLength}`
+    );
+  }
   const bufferLayouts = Object.freeze({
     control,
     evidence,
+    matchingCleanupControl,
     indirectDispatch,
     conditionalDispatch,
     sourceCounts,
@@ -606,6 +787,7 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     scratchStateB,
     scales,
     energyLedger,
+    interfaceReceipt,
     proposals
   });
   return Object.freeze({
@@ -615,6 +797,8 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     directedPairCapacity: resolvedDirectedPairCapacity,
     controlWords: SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS,
     evidenceWords: SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS,
+    matchingCleanupControlWords:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
     indirectDispatchWords:
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS,
     conditionalDispatchWords:
@@ -649,6 +833,13 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_PROPOSAL_HEADER_WORDS
         * UINT32_BYTES,
     energyLedgerAliasLifetime: 'solver-scratch-until-proposal-publication',
+    interfaceReceiptHeaderWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+    interfaceReceiptRowWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+    interfaceReceiptMaximumPublishedRows,
+    interfaceReceiptWordLength,
+    interfaceReceiptAliasedToAppendStaging: true,
     proposalHeaderWords:
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_PROPOSAL_HEADER_WORDS,
     proposalRowWords:
@@ -667,7 +858,7 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     maxStorageBufferBindingSize:
       resolvedDeviceLimits.maxStorageBufferBindingSize,
     buffers,
-    bufferAliases: Object.freeze([energyLedger]),
+    bufferAliases: Object.freeze([energyLedger, interfaceReceipt]),
     bufferLayouts,
     bufferWordLengths: keyedLengths(buffers, 'wordLength'),
     bufferByteLengths: keyedLengths(buffers, 'byteLength'),
@@ -712,12 +903,23 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
     minimumDirectedPairCapacity,
     'minimumDirectedPairCapacity'
   );
+  const interfaceReceiptMinimumDirectedCapacity =
+    minimumInterfaceReceiptDirectedCapacity(resolvedParticleCapacity);
+  const effectiveMinimumDirectedPairCapacity = Math.max(
+    resolvedMinimumDirectedPairCapacity,
+    interfaceReceiptMinimumDirectedCapacity
+  );
   if (
-    resolvedMinimumDirectedPairCapacity
+    effectiveMinimumDirectedPairCapacity
       > resolvedMaximumDirectedPairCapacity
   ) {
     throw new RangeError(
-      'minimumDirectedPairCapacity exceeds maximumDirectedPairCapacity'
+      `effective minimum directed-pair capacity `
+      + `${effectiveMinimumDirectedPairCapacity} exceeds `
+      + `maximumDirectedPairCapacity ${resolvedMaximumDirectedPairCapacity}; `
+      + `caller minimum is ${resolvedMinimumDirectedPairCapacity} and `
+      + `interface-receipt minimum is `
+      + `${interfaceReceiptMinimumDirectedCapacity}`
     );
   }
   const resolvedDeviceLimits = resolveDeviceLimits(deviceLimits);
@@ -726,17 +928,19 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
     arenaByteLimit
   });
 
-  // One provisional directed row is used only to validate every fixed-size
-  // particle/control buffer through the exact same checked layout path. Its
-  // four row words are then removed to recover the capacity-independent base.
+  // The minimum receipt-safe provisional graph validates every fixed-size
+  // particle/control buffer through the exact checked layout path. Its
+  // directed-row bytes are then removed to recover the capacity-independent
+  // base.
   const provisional = createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: resolvedParticleCapacity,
-    directedPairCapacity: 1,
+    directedPairCapacity: interfaceReceiptMinimumDirectedCapacity,
     maxRetainedBytes: DEFAULT_BYTE_LIMIT,
     deviceLimits: resolvedDeviceLimits
   });
   const fixedRetainedByteLength = provisional.retainedByteLength
-    - SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_BYTES_PER_DIRECTED_PAIR;
+    - interfaceReceiptMinimumDirectedCapacity
+      * SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_BYTES_PER_DIRECTED_PAIR;
   const availablePairBytes = resolvedMaxRetainedBytes - fixedRetainedByteLength;
   const perBufferLimit = Math.min(
     resolvedDeviceLimits.maxBufferSize,
@@ -782,10 +986,10 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
     )
   });
   const directedPairCapacity = Math.min(...Object.values(capacityLimits));
-  if (directedPairCapacity < resolvedMinimumDirectedPairCapacity) {
+  if (directedPairCapacity < effectiveMinimumDirectedPairCapacity) {
     throw new RangeError(
       `mechanical pair graph maxRetainedBytes ${resolvedMaxRetainedBytes} cannot `
-      + `admit the required ${resolvedMinimumDirectedPairCapacity} directed pairs `
+      + `admit the required ${effectiveMinimumDirectedPairCapacity} directed pairs `
       + `after fixed retained buffers; device/budget capacity is ${directedPairCapacity}`
     );
   }
@@ -804,6 +1008,8 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: resolvedParticleCapacity,
     directedPairCapacity,
     minimumDirectedPairCapacity: resolvedMinimumDirectedPairCapacity,
+    effectiveMinimumDirectedPairCapacity,
+    interfaceReceiptMinimumDirectedCapacity,
     maximumDirectedPairCapacity: resolvedMaximumDirectedPairCapacity,
     fixedRetainedByteLength,
     bytesPerDirectedPair:

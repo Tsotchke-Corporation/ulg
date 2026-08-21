@@ -5,7 +5,8 @@ import {
   ULG_SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import {
-  createSchroederSpatialExactNearTraversalV1Wgsl
+  createSchroederSpatialExactNearTraversalV1Wgsl,
+  createSchroederSpatialExactNearTraversalV2Wgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearTraversalWgsl.js';
 import {
   validateSchroederSpatialAggregateViewDescriptor
@@ -24,12 +25,21 @@ import {
 import {
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORD,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_BUILDING,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION,
   ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
   createSchroederSpatialMechanicalPairGraphCapacityPlan
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicalPairGraph.js';
@@ -54,6 +64,8 @@ export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-mechanical-proposal.v3';
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_BUFFER_SCHEMA =
   'peercompute.ulg.schroeder-spatial-mechanical-proposal-buffer.v3';
+export const ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2';
 export const ULG_SCHROEDER_SPATIAL_CONSUMER_GPU_EVIDENCE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-consumer-gpu-evidence.v3';
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_STATUS =
@@ -62,6 +74,10 @@ export const SCHROEDER_SPATIAL_MECHANICAL_SOURCE_POSITION_AUTHORITY =
   'post-g2p-state-with-swept-pre-integration-ss-directory';
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_MODE =
   'proposal-deferred-to-post-mechanics';
+export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-mechanical-proposal-capture.v1';
+export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_MODE =
+  'history-and-final-mechanical-v1';
 
 export const SCHROEDER_SPATIAL_MECHANICAL_CONSUMERS = Object.freeze([
   Object.freeze({
@@ -85,11 +101,153 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_ROW_FLOATS = 8;
 export const SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS =
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS;
-export const SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS = 4;
+export const SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES = 512;
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES = 512;
+// The owner admits a bounded contact/wall frontier. This is an incident-CSR
+// admission cap, not a claim that every owner stage visits each cursor once.
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH = 1;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES =
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+      / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS = 5;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES =
+    1024;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS =
+    131072;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS =
+    64;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_WALL_REFINEMENT_ROUNDS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_MAGIC =
+  0x4d44_5431;
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_VERSION = 1;
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_WORDS = 64;
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_BYTES =
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_WORDS
+    * Uint32Array.BYTES_PER_ELEMENT;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_MAGIC = 0x4d54_5431;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION = 1;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD = 64;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD = 128;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS = 2;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS = 32;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS =
+    SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+      * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+      * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_BYTES =
+    SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS
+      * Uint32Array.BYTES_PER_ELEMENT;
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS =
+  Object.freeze({
+    HEADER_VALID: 1 << 0,
+    LOCAL_CAPTURE_COMPLETE: 1 << 1,
+    POST_WALL_CAPTURE_COMPLETE: 1 << 2,
+    WINNER_TARGET_MATCH: 1 << 3,
+    INVALID: 0x8000_0000
+  });
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS =
+  Object.freeze({
+    SELECTED: 1 << 0,
+    RECIPROCAL: 1 << 1,
+    APPLIED: 1 << 2,
+    TARGET_IS_LOW: 1 << 3,
+    PAIR_CONTAINS_BOTH_TARGETS: 1 << 4,
+    ROUND_ZERO_TARGET_WALL_CLIPPED: 1 << 5,
+    ROUND_ZERO_PEER_WALL_CLIPPED: 1 << 6,
+    LOCAL_CAPTURE_COMPLETE: 1 << 7,
+    POST_WALL_CAPTURE_COMPLETE: 1 << 8,
+    POST_WALL_CHANGED: 1 << 9,
+    THREE_BLOCK_APPLIED: 1 << 10
+  });
+export const SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS =
+  Object.freeze({
+    HEADER_VALID: 1 << 0,
+    APPLY_OBSERVED: 1 << 1,
+    TERMINAL_MEASURED: 1 << 2,
+    WINNER_MATERIALIZED: 1 << 3,
+    PRODUCTION_MAX_MATCH: 1 << 4,
+    IMPULSE_FINITE: 1 << 5,
+    INVALID: 0x8000_0000
+  });
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S = 1e-5;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_RECIPROCAL_LAPLACIAN_BOUND_FACTOR = 2;
+export const SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION =
+  0.02;
 export const SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT = 1;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_BYTES_DEFAULT =
-  8 * 1024 * 1024;
+  16 * 1024 * 1024;
 export const SCHROEDER_SPATIAL_MECHANICAL_MIN_DIRECTED_PAIRS_PER_PARTICLE = 16;
+const MATCHING_CONSTRAINT_ROW_WORDS = 4;
+const MATCHING_CONSTRAINT_BYTES_PER_DIRECTED_PAIR =
+  MATCHING_CONSTRAINT_ROW_WORDS * Float32Array.BYTES_PER_ELEMENT;
+
+const MATCHING_CLEANUP_CONTROL_MAGIC = 0x4d43_4c31;
+const MATCHING_CLEANUP_CONTROL_VERSION = 1;
+const MATCHING_CLEANUP_CONTROL_HEADER_WORDS = 12;
+const MATCHING_CLEANUP_SELECTION_COUNT_WORD =
+  MATCHING_CLEANUP_CONTROL_HEADER_WORDS;
+const MATCHING_CLEANUP_COPY_COUNT_WORD =
+  MATCHING_CLEANUP_SELECTION_COUNT_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_APPLY_COUNT_WORD =
+  MATCHING_CLEANUP_COPY_COUNT_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_WALL_COUNT_WORD =
+  MATCHING_CLEANUP_APPLY_COUNT_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD =
+  MATCHING_CLEANUP_WALL_COUNT_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD =
+  MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD =
+  MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_CONTROL_EXPECTED_WORDS =
+  MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+if (
+  MATCHING_CLEANUP_CONTROL_EXPECTED_WORDS
+    !== SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+) {
+  throw new Error('mechanical matching-cleanup control ABI word count drifted');
+}
+if (
+  !Number.isSafeInteger(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES
+  )
+  || SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES <= 0
+  || SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES
+    > SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+  || (
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES & 1
+  ) !== (SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES & 1)
+) {
+  throw new Error(
+    'mechanical matching-cleanup encoded pass budget must preserve terminal buffer parity within the logical receipt capacity'
+  );
+}
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_HEADER_LAYOUT = Object.freeze([
   'magic:u32',
@@ -179,6 +337,7 @@ const GPU_BUFFER_USAGE = {
 
 const EXPECTATION_BYTES = 112;
 const MECHANICAL_PARAMS_BYTES = 128;
+const MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES = 16;
 const MECHANICAL_SUPPORT_HEADER_WORDS = 6;
 const MECHANICAL_SUPPORT_ROW_WORDS = 8;
 const MECHANICAL_SUPPORT_TRAILER_WORDS = 1;
@@ -202,6 +361,226 @@ const MECHANICAL_PROPOSAL_ROW_BYTES =
   SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_ROW_WORDS * Uint32Array.BYTES_PER_ELEMENT;
 const mechanicalProposalPools = new WeakMap();
 const liveMechanicalProposalArtifacts = new WeakSet();
+const mechanicalProposalCaptureRecords = new WeakMap();
+
+function exactPositiveCaptureStepCount(value) {
+  const stepCount = Number(value);
+  if (!Number.isSafeInteger(stepCount) || stepCount < 1) {
+    throw new RangeError(
+      'mechanical proposal capture sequenceStepCount must be a positive safe integer'
+    );
+  }
+  return stepCount;
+}
+
+function requireMechanicalProposalCaptureRecord(capture) {
+  const record = mechanicalProposalCaptureRecords.get(capture);
+  if (!record) {
+    throw new TypeError(
+      'mechanical proposal capture must be an exact handle created by this module instance'
+    );
+  }
+  if (record.destroyed) {
+    throw new Error('mechanical proposal capture has been destroyed');
+  }
+  return record;
+}
+
+export function createSchroederSpatialMechanicalProposalCapture({
+  sequenceStepCount,
+  mode = SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_MODE
+} = {}) {
+  const resolvedSequenceStepCount = exactPositiveCaptureStepCount(
+    sequenceStepCount
+  );
+  if (mode !== SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_MODE) {
+    throw new RangeError(`unsupported mechanical proposal capture mode: ${mode}`);
+  }
+  const capture = Object.freeze({});
+  mechanicalProposalCaptureRecords.set(capture, {
+    mode,
+    sequenceStepCount: resolvedSequenceStepCount,
+    nextSequenceIndex: 0,
+    device: null,
+    particleCount: null,
+    buffer: null,
+    layout: null,
+    lastProposal: null,
+    destroyed: false
+  });
+  return capture;
+}
+
+export function describeSchroederSpatialMechanicalProposalCapture(capture) {
+  const record = requireMechanicalProposalCaptureRecord(capture);
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_SCHEMA,
+    status: record.nextSequenceIndex === record.sequenceStepCount
+      ? 'complete'
+      : (record.buffer ? 'capturing' : 'prepared'),
+    mode: record.mode,
+    sequenceStepCount: record.sequenceStepCount,
+    encodedStepCount: record.nextSequenceIndex,
+    complete: record.nextSequenceIndex === record.sequenceStepCount,
+    device: record.device,
+    particleCount: record.particleCount,
+    buffer: record.buffer,
+    layout: record.layout,
+    lastProposal: record.lastProposal,
+    fullParticleReadbackPerformed: false,
+    hostSummaryReadbackPerformed: false,
+    hostQueueFenceCount: 0
+  });
+}
+
+export function destroySchroederSpatialMechanicalProposalCapture(capture) {
+  const record = mechanicalProposalCaptureRecords.get(capture);
+  if (!record || record.destroyed) return false;
+  record.buffer?.destroy?.();
+  record.buffer = null;
+  record.lastProposal = null;
+  record.destroyed = true;
+  return true;
+}
+
+function captureByteProduct(left, right, label) {
+  const value = left * right;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} exceeds the safe WebGPU capture byte range`);
+  }
+  return value;
+}
+
+function createMechanicalProposalCaptureLayout({
+  sequenceStepCount,
+  particleCount,
+  controlByteLength,
+  evidenceByteLength,
+  matchingCleanupByteLength
+}) {
+  const historyStrideByteLength =
+    controlByteLength + evidenceByteLength + matchingCleanupByteLength;
+  const historyByteLength = captureByteProduct(
+    sequenceStepCount,
+    historyStrideByteLength,
+    'mechanical proposal capture history'
+  );
+  const stateByteLength = captureByteProduct(
+    particleCount,
+    8 * Float32Array.BYTES_PER_ELEMENT,
+    'mechanical proposal capture state'
+  );
+  const thermoByteLength = captureByteProduct(
+    particleCount,
+    12 * Float32Array.BYTES_PER_ELEMENT,
+    'mechanical proposal capture thermo'
+  );
+  const mechanicsByteLength = captureByteProduct(
+    particleCount,
+    32 * Float32Array.BYTES_PER_ELEMENT,
+    'mechanical proposal capture mechanics'
+  );
+  const identityByteLength = captureByteProduct(
+    particleCount,
+    Uint32Array.BYTES_PER_ELEMENT,
+    'mechanical proposal capture identity'
+  );
+  const stateByteOffset = historyByteLength;
+  const thermoByteOffset = stateByteOffset + stateByteLength;
+  const mechanicsByteOffset = thermoByteOffset + thermoByteLength;
+  const identityByteOffset = mechanicsByteOffset + mechanicsByteLength;
+  const totalByteLength = identityByteOffset + identityByteLength;
+  if (!Number.isSafeInteger(totalByteLength) || totalByteLength < 4) {
+    throw new RangeError('mechanical proposal capture total byte length is invalid');
+  }
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_SCHEMA,
+    mode: SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_CAPTURE_MODE,
+    totalByteLength,
+    history: Object.freeze({
+      byteOffset: 0,
+      byteLength: historyByteLength,
+      strideByteLength: historyStrideByteLength,
+      stepCount: sequenceStepCount,
+      control: Object.freeze({ byteOffset: 0, byteLength: controlByteLength }),
+      evidence: Object.freeze({
+        byteOffset: controlByteLength,
+        byteLength: evidenceByteLength
+      }),
+      matchingCleanup: Object.freeze({
+        byteOffset: controlByteLength + evidenceByteLength,
+        byteLength: matchingCleanupByteLength
+      })
+    }),
+    final: Object.freeze({
+      state: Object.freeze({ byteOffset: stateByteOffset, byteLength: stateByteLength }),
+      thermo: Object.freeze({ byteOffset: thermoByteOffset, byteLength: thermoByteLength }),
+      mechanics: Object.freeze({ byteOffset: mechanicsByteOffset, byteLength: mechanicsByteLength }),
+      identity: Object.freeze({ byteOffset: identityByteOffset, byteLength: identityByteLength })
+    })
+  });
+}
+
+function resolveMechanicalProposalCaptureRequest({
+  capture,
+  sequenceIndex,
+  sequenceStepCount
+}) {
+  if (capture == null) return null;
+  const record = requireMechanicalProposalCaptureRecord(capture);
+  const resolvedSequenceStepCount = exactPositiveCaptureStepCount(
+    sequenceStepCount
+  );
+  const resolvedSequenceIndex = Number(sequenceIndex);
+  if (
+    !Number.isSafeInteger(resolvedSequenceIndex)
+    || resolvedSequenceIndex < 0
+    || resolvedSequenceIndex >= resolvedSequenceStepCount
+  ) {
+    throw new RangeError(
+      'mechanical proposal capture sequenceIndex must identify one sequence step'
+    );
+  }
+  if (resolvedSequenceStepCount !== record.sequenceStepCount) {
+    throw new Error('mechanical proposal capture sequence length changed');
+  }
+  if (resolvedSequenceIndex !== record.nextSequenceIndex) {
+    throw new Error(
+      'mechanical proposal capture steps must be encoded once in strict sequence order'
+    );
+  }
+  return Object.freeze({
+    record,
+    sequenceIndex: resolvedSequenceIndex,
+    sequenceStepCount: resolvedSequenceStepCount
+  });
+}
+
+function mechanicalSolverIterationUniformPlan(device) {
+  const requestedAlignment = Math.trunc(finiteNumber(
+    device?.limits?.minUniformBufferOffsetAlignment,
+    MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
+  ));
+  const alignment = Math.ceil(Math.max(
+    MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES,
+    requestedAlignment
+  ) / MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES)
+    * MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES;
+  const strideBytes = Math.ceil(
+    MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES / alignment
+  ) * alignment;
+  const byteLength = strideBytes
+    * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+  const values = new Uint32Array(byteLength / Uint32Array.BYTES_PER_ELEMENT);
+  for (
+    let iteration = 0;
+    iteration < SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+    iteration += 1
+  ) {
+    values[iteration * strideBytes / Uint32Array.BYTES_PER_ELEMENT] = iteration;
+  }
+  return Object.freeze({ strideBytes, byteLength, values });
+}
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -357,6 +736,489 @@ export function schroederSpatialMechanicalPairSharesPhaseLineage({
     && self % capacity === peer % capacity;
 }
 
+/**
+ * Resolve whether one condensed phase carrier is wholly hidden inside the
+ * finite-volume cell of a companion from the same conserved lineage.
+ *
+ * Phase transfer initially materializes solid/liquid companions at the same
+ * position.  Treating both nested cells as independent exterior geometry
+ * double-counts the lineage boundary and can create an impossible contact
+ * star against a third material.  Only the outer cell owns that portion of
+ * the union boundary.  A companion must contain the carrier at both ends of
+ * the mechanical sweep; independently moving phase components therefore
+ * regain their own exposed geometry as soon as either endpoint is exposed.
+ */
+export function evaluateSchroederSpatialMechanicalPhaseGeometryOcclusion({
+  selfIndex = 0,
+  lineageCapacity = 0,
+  phaseLaneCount = 0,
+  carriers = []
+} = {}) {
+  const index = Math.trunc(finiteNumber(selfIndex, -1));
+  const capacity = Math.trunc(finiteNumber(lineageCapacity, 0));
+  const laneCount = Math.trunc(finiteNumber(phaseLaneCount, 0));
+  if (
+    index < 0
+    || capacity <= 0
+    || laneCount <= 1
+    || index >= capacity * laneCount
+  ) {
+    return Object.freeze({
+      valid: true,
+      occluded: false,
+      ownerIndex: null,
+      reason: 'phase-lineage-disabled'
+    });
+  }
+  const byIndex = new Map(carriers.map((carrier) => [
+    Math.trunc(finiteNumber(carrier?.index, -1)),
+    carrier
+  ]));
+  const self = byIndex.get(index);
+  const normalize = (carrier) => {
+    const massKg = finiteNumber(carrier?.massKg, Number.NaN);
+    const restVolumeM3 = finiteNumber(
+      carrier?.restVolumeM3,
+      Number.NaN
+    );
+    const phaseClass = Math.trunc(finiteNumber(carrier?.phaseClass, -1));
+    const rawPosition = carrier?.position;
+    const rawEpochPosition = carrier?.epochPosition ?? rawPosition;
+    const position = [0, 1, 2].map((axis) => Number(rawPosition?.[axis]));
+    const epochPosition = [0, 1, 2].map(
+      (axis) => Number(rawEpochPosition?.[axis])
+    );
+    const valid = Number.isFinite(massKg)
+      && Number.isFinite(restVolumeM3)
+      && position.every(Number.isFinite)
+      && epochPosition.every(Number.isFinite);
+    return {
+      massKg,
+      restVolumeM3,
+      phaseClass,
+      materialId: finiteNumber(carrier?.materialId, Number.NaN),
+      position,
+      epochPosition,
+      valid
+    };
+  };
+  const selfCarrier = normalize(self);
+  if (!self || !selfCarrier.valid) {
+    return Object.freeze({
+      valid: false,
+      occluded: false,
+      ownerIndex: null,
+      reason: 'invalid-self-carrier'
+    });
+  }
+  if (
+    !(selfCarrier.massKg > 0)
+    || !(selfCarrier.restVolumeM3 > 0)
+    || (selfCarrier.phaseClass !== 1 && selfCarrier.phaseClass !== 2)
+  ) {
+    return Object.freeze({
+      valid: true,
+      occluded: false,
+      ownerIndex: null,
+      reason: 'non-condensed-or-dormant'
+    });
+  }
+  const selfEdgeM = Math.cbrt(selfCarrier.restVolumeM3);
+  let ownerIndex = null;
+  let ownerEdgeM = -1;
+  const lineage = index % capacity;
+  for (let lane = 0; lane < laneCount; lane += 1) {
+    const peerIndex = lane * capacity + lineage;
+    if (peerIndex === index) continue;
+    const peer = byIndex.get(peerIndex);
+    if (!peer) continue;
+    const candidate = normalize(peer);
+    if (!candidate.valid) {
+      return Object.freeze({
+        valid: false,
+        occluded: false,
+        ownerIndex: null,
+        reason: 'invalid-lineage-companion'
+      });
+    }
+    if (
+      !(candidate.massKg > 0)
+      || !(candidate.restVolumeM3 > 0)
+      || (candidate.phaseClass !== 1 && candidate.phaseClass !== 2)
+    ) continue;
+    if (
+      !Number.isFinite(selfCarrier.materialId)
+      || !Number.isFinite(candidate.materialId)
+      || Math.abs(candidate.materialId - selfCarrier.materialId) >= 0.5
+    ) {
+      return Object.freeze({
+        valid: false,
+        occluded: false,
+        ownerIndex: null,
+        reason: 'lineage-material-mismatch'
+      });
+    }
+    const peerEdgeM = Math.cbrt(candidate.restVolumeM3);
+    const geometricScaleM = Math.max(
+      selfEdgeM,
+      peerEdgeM,
+      ...selfCarrier.position.map(Math.abs),
+      ...candidate.position.map(Math.abs),
+      ...selfCarrier.epochPosition.map(Math.abs),
+      ...candidate.epochPosition.map(Math.abs),
+      1e-12
+    );
+    const toleranceM = 16 * 1.1920928955078125e-7 * geometricScaleM;
+    const candidateOwnsSize = peerEdgeM > selfEdgeM + toleranceM
+      || (
+        Math.abs(peerEdgeM - selfEdgeM) <= toleranceM
+        && peerIndex < index
+      );
+    if (!candidateOwnsSize) continue;
+    const containsAt = (selfPosition, peerPosition) => (
+      selfPosition.every((value, axis) => (
+        Math.abs(value - peerPosition[axis]) + 0.5 * selfEdgeM
+          <= 0.5 * peerEdgeM + toleranceM
+      ))
+    );
+    if (
+      !containsAt(selfCarrier.position, candidate.position)
+      || !containsAt(selfCarrier.epochPosition, candidate.epochPosition)
+    ) continue;
+    if (
+      peerEdgeM > ownerEdgeM + toleranceM
+      || (
+        Math.abs(peerEdgeM - ownerEdgeM) <= toleranceM
+        && (ownerIndex == null || peerIndex < ownerIndex)
+      )
+    ) {
+      ownerIndex = peerIndex;
+      ownerEdgeM = peerEdgeM;
+    }
+  }
+  return Object.freeze({
+    valid: true,
+    occluded: ownerIndex != null,
+    ownerIndex,
+    reason: ownerIndex == null
+      ? 'phase-geometry-exposed'
+      : 'contained-by-lineage-companion'
+  });
+}
+
+function schroederSpatialMechanicalInterfaceFaceAtDelta({
+  deltaM,
+  selfEdgeM,
+  otherEdgeM,
+  normalToleranceM
+}) {
+  const halfSumM = 0.5 * (selfEdgeM + otherEdgeM);
+  const separationM = deltaM.map((value) => Math.abs(value) - halfSumM);
+  let normalAxis = 0;
+  if (separationM[1] > separationM[normalAxis]) normalAxis = 1;
+  if (separationM[2] > separationM[normalAxis]) normalAxis = 2;
+  if (separationM[normalAxis] > normalToleranceM) return null;
+  const tangentAxes = normalAxis === 0
+    ? [1, 2]
+    : normalAxis === 1
+      ? [0, 2]
+      : [0, 1];
+  // Positions and cell edges are f32 in production. Decimal lattice points
+  // that meet only at an edge or corner can therefore appear to overlap by a
+  // few binary32 ulps after subtraction. Such a zero-area contact must not
+  // become a full-strength unilateral constraint.
+  const tangentZeroToleranceM =
+    16 * 1.1920928955078125e-7 * Math.max(
+      selfEdgeM,
+      otherEdgeM,
+      halfSumM,
+      ...deltaM.map(Math.abs),
+      1e-12
+    );
+  const overlapM = tangentAxes.map((axis) => {
+    const overlap = Math.min(
+      selfEdgeM,
+      otherEdgeM,
+      halfSumM - Math.abs(deltaM[axis])
+    );
+    return overlap > tangentZeroToleranceM ? overlap : 0;
+  });
+  if (!(overlapM[0] > 0) || !(overlapM[1] > 0)) return null;
+  return Object.freeze({
+    areaM2: overlapM[0] * overlapM[1],
+    normalAxis,
+    overlapM: Object.freeze(overlapM)
+  });
+}
+
+function schroederSpatialMechanicalAabbNormalRoundoffToleranceM({
+  deltaM,
+  selfEdgeM,
+  otherEdgeM
+}) {
+  const halfSumM = 0.5 * (selfEdgeM + otherEdgeM);
+  // The production geometry is evaluated in f32. A converged face can land a
+  // few representational steps outside support after reciprocal Jacobi
+  // corrections are accumulated and written back. Keep that numerical shell
+  // proportional to the actual cell geometry: it must retain a closing
+  // velocity constraint at a represented face, but it must not become a
+  // world-scale absolute gap. Position overlap remains clamped to zero, so the
+  // shell never attracts separated carriers.
+  const geometricScaleM = Math.max(
+    selfEdgeM,
+    otherEdgeM,
+    halfSumM,
+    ...deltaM.map(Math.abs),
+    1e-12
+  );
+  return Math.min(
+    8 * 1.1920928955078125e-7 * geometricScaleM,
+    1e-4 * halfSumM
+  );
+}
+
+function schroederSpatialMechanicalFiniteVolumeContact({
+  deltaM,
+  epochDeltaM,
+  selfEdgeM,
+  otherEdgeM,
+  selfIndex,
+  otherIndex
+}) {
+  const halfSumM = 0.5 * (selfEdgeM + otherEdgeM);
+  const normalRoundoffToleranceM =
+    schroederSpatialMechanicalAabbNormalRoundoffToleranceM({
+      deltaM,
+      selfEdgeM,
+      otherEdgeM
+    });
+  const currentFace = schroederSpatialMechanicalInterfaceFaceAtDelta({
+    deltaM,
+    selfEdgeM,
+    otherEdgeM,
+    normalToleranceM: normalRoundoffToleranceM
+  });
+  const sweepDeltaM = vectorSubtract(deltaM, epochDeltaM);
+  let entryT = -Number.MAX_VALUE;
+  let exitT = Number.MAX_VALUE;
+  let sweptFace = null;
+  if (vectorLength(sweepDeltaM) > 1e-12) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const startM = epochDeltaM[axis];
+      const sweepM = sweepDeltaM[axis];
+      if (Math.abs(sweepM) <= 1e-12) {
+        if (Math.abs(startM) > halfSumM) {
+          entryT = Number.POSITIVE_INFINITY;
+          exitT = Number.NEGATIVE_INFINITY;
+          break;
+        }
+        continue;
+      }
+      const firstT = (-halfSumM - startM) / sweepM;
+      const secondT = (halfSumM - startM) / sweepM;
+      entryT = Math.max(entryT, Math.min(firstT, secondT));
+      exitT = Math.min(exitT, Math.max(firstT, secondT));
+    }
+    if (entryT <= exitT && exitT >= 0 && entryT <= 1) {
+      const impactT = Math.min(1, Math.max(0, entryT));
+      const impactDeltaM = vectorAdd(
+        epochDeltaM,
+        vectorScale(sweepDeltaM, impactT)
+      );
+      const impactFace = schroederSpatialMechanicalInterfaceFaceAtDelta({
+        deltaM: impactDeltaM,
+        selfEdgeM,
+        otherEdgeM,
+        normalToleranceM:
+          schroederSpatialMechanicalAabbNormalRoundoffToleranceM({
+            deltaM: impactDeltaM,
+            selfEdgeM,
+            otherEdgeM
+          })
+      });
+      if (impactFace) sweptFace = { impactT, impactDeltaM, impactFace };
+    }
+  }
+  const cohortInverted = dot3(epochDeltaM, deltaM) <= 0;
+  let sourceFace = null;
+  let sourceDeltaM = null;
+  if (sweptFace && (
+    !currentFace
+    || cohortInverted
+    || Math.max(...epochDeltaM.map(Math.abs)) >= halfSumM
+  )) {
+    sourceFace = sweptFace.impactFace;
+    sourceDeltaM = sweptFace.impactDeltaM;
+  } else if (currentFace) {
+    sourceFace = currentFace;
+    sourceDeltaM = deltaM;
+  }
+  // A center-vector inversion is not itself a collision. A pair can exchange
+  // sides while remaining disjoint in a tangential slab; only a finite-area
+  // current or swept AABB face may admit the unilateral constraint.
+  if (!sourceDeltaM) return null;
+  const normalAxis = sourceFace?.normalAxis
+    ?? sourceDeltaM.reduce(
+      (best, value, axis) => (
+        Math.abs(value) > Math.abs(sourceDeltaM[best]) ? axis : best
+      ),
+      0
+    );
+  const coincidenceNormal =
+    schroederSpatialMechanicalCoincidenceNormal(selfIndex, otherIndex);
+  const normalSign = Math.abs(sourceDeltaM[normalAxis]) > 1e-12
+    ? Math.sign(sourceDeltaM[normalAxis])
+    : Math.sign(coincidenceNormal[normalAxis]) || 1;
+  const normal = [0, 0, 0];
+  normal[normalAxis] = normalSign;
+  // Axis-aligned finite-volume cells exchange only the impulse and position
+  // correction normal to their admitted face. A center-to-center swept
+  // response would manufacture tangential momentum whenever impact is
+  // off-axis, ejecting the two materials laterally despite exact pair COM.
+  const responseNormal = normal;
+  const responseProjection = 1;
+  const supportDistanceM = halfSumM;
+  return Object.freeze({
+    normal: Object.freeze(normal),
+    responseNormal: Object.freeze(responseNormal),
+    responseProjection,
+    supportDistanceM,
+    overlapM: Math.max(supportDistanceM - dot3(deltaM, normal), 0),
+    sweptContact: Boolean(sweptFace),
+    sweptImpactT: sweptFace?.impactT ?? null,
+    cohortInverted
+  });
+}
+
+/**
+ * Manufactured oracle for the v2 mechanical interface receipt geometry.
+ * Rest-volume carriers are axis-aligned finite-volume cells. Static contact
+ * selects the least-penetration face with an x/y/z tie break and measures the
+ * exact overlap of the two tangential intervals. A separated final state can
+ * still publish the same-substep face at the first swept AABB impact.
+ */
+export function evaluateSchroederSpatialMechanicalInterfaceFaceContact({
+  position = [0, 0, 0],
+  otherPosition = [0, 0, 0],
+  epochPosition = position,
+  otherEpochPosition = otherPosition,
+  restVolumeM3 = 1,
+  otherRestVolumeM3 = 1,
+  normalToleranceM = null
+} = {}) {
+  const selfVolumeM3 = Math.max(finiteNumber(restVolumeM3, 0), 0);
+  const otherVolumeM3 = Math.max(finiteNumber(otherRestVolumeM3, 0), 0);
+  if (!(selfVolumeM3 > 0) || !(otherVolumeM3 > 0)) {
+    return Object.freeze({
+      contact: false,
+      sweptContact: false,
+      reason: 'inactive-finite-volume-cell',
+      areaM2: 0,
+      impactT: null,
+      normalAxis: null
+    });
+  }
+  const selfEdgeM = Math.cbrt(Math.max(selfVolumeM3, 1e-18));
+  const otherEdgeM = Math.cbrt(Math.max(otherVolumeM3, 1e-18));
+  const halfSumM = 0.5 * (selfEdgeM + otherEdgeM);
+  const resolvedNormalToleranceM = normalToleranceM == null
+    ? Math.max(
+        1e-5,
+        SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION
+          * halfSumM
+      )
+    : Math.max(finiteNumber(normalToleranceM, 0), 0);
+  const finalDeltaM = vectorSubtract(
+    finiteVector3(position),
+    finiteVector3(otherPosition)
+  );
+  const finalFace = schroederSpatialMechanicalInterfaceFaceAtDelta({
+    deltaM: finalDeltaM,
+    selfEdgeM,
+    otherEdgeM,
+    normalToleranceM: resolvedNormalToleranceM
+  });
+  if (finalFace) {
+    return Object.freeze({
+      contact: true,
+      sweptContact: false,
+      reason: 'final-face-overlap',
+      areaM2: finalFace.areaM2,
+      impactT: 1,
+      normalAxis: finalFace.normalAxis,
+      overlapM: finalFace.overlapM
+    });
+  }
+  const epochDeltaM = vectorSubtract(
+    finiteVector3(epochPosition),
+    finiteVector3(otherEpochPosition)
+  );
+  const sweepDeltaM = vectorSubtract(finalDeltaM, epochDeltaM);
+  let entryT = -Number.MAX_VALUE;
+  let exitT = Number.MAX_VALUE;
+  for (let axis = 0; axis < 3; axis += 1) {
+    const startM = epochDeltaM[axis];
+    const velocityM = sweepDeltaM[axis];
+    if (Math.abs(velocityM) <= 1e-12) {
+      if (Math.abs(startM) > halfSumM) {
+        return Object.freeze({
+          contact: false,
+          sweptContact: false,
+          reason: 'outside-swept-face-support',
+          areaM2: 0,
+          impactT: null,
+          normalAxis: null
+        });
+      }
+      continue;
+    }
+    const firstT = (-halfSumM - startM) / velocityM;
+    const secondT = (halfSumM - startM) / velocityM;
+    entryT = Math.max(entryT, Math.min(firstT, secondT));
+    exitT = Math.min(exitT, Math.max(firstT, secondT));
+  }
+  if (entryT > exitT || exitT < 0 || entryT > 1) {
+    return Object.freeze({
+      contact: false,
+      sweptContact: false,
+      reason: 'outside-swept-face-support',
+      areaM2: 0,
+      impactT: null,
+      normalAxis: null
+    });
+  }
+  const impactT = Math.min(1, Math.max(0, entryT));
+  const impactDeltaM = vectorAdd(
+    epochDeltaM,
+    vectorScale(sweepDeltaM, impactT)
+  );
+  const impactFace = schroederSpatialMechanicalInterfaceFaceAtDelta({
+    deltaM: impactDeltaM,
+    selfEdgeM,
+    otherEdgeM,
+    normalToleranceM: 0
+  });
+  if (!impactFace) {
+    return Object.freeze({
+      contact: false,
+      sweptContact: false,
+      reason: 'edge-or-corner-only-impact',
+      areaM2: 0,
+      impactT: null,
+      normalAxis: null
+    });
+  }
+  return Object.freeze({
+    contact: true,
+    sweptContact: true,
+    reason: 'swept-face-overlap',
+    areaM2: impactFace.areaM2,
+    impactT,
+    normalAxis: impactFace.normalAxis,
+    overlapM: impactFace.overlapM
+  });
+}
+
 /** Small manufactured-pair oracle for the symmetric WGSL pair contribution. */
 export function evaluateSchroederSpatialMechanicalPairProposal({
   position = [0, 0, 0],
@@ -371,6 +1233,7 @@ export function evaluateSchroederSpatialMechanicalPairProposal({
   otherRestVolumeM3 = 1,
   relaxation = 0.35,
   normalVelocityDamping = 0.25,
+  frozenMatchingFrame = null,
   selfIndex = 0,
   otherIndex = 1,
   phaseLineageCapacity = 0,
@@ -441,6 +1304,210 @@ export function evaluateSchroederSpatialMechanicalPairProposal({
     vectorScale(sweepDelta, closestT)
   );
   const sweptDistanceM = vectorLength(closestDelta);
+  if (unilateralContact) {
+    let finiteVolumeContact = null;
+    if (frozenMatchingFrame != null) {
+      const frozenNormal = finiteVector3(frozenMatchingFrame.normal);
+      const frozenResponseNormal = finiteVector3(
+        frozenMatchingFrame.responseNormal
+      );
+      const frozenProjection = finiteNumber(
+        frozenMatchingFrame.responseProjection,
+        dot3(frozenResponseNormal, frozenNormal)
+      );
+      const frozenSupportDistanceM = finiteNumber(
+        frozenMatchingFrame.supportDistanceM,
+        restDistanceM
+      );
+      const frozenNormalLength = vectorLength(frozenNormal);
+      const frozenResponseNormalLength = vectorLength(frozenResponseNormal);
+      const frozenNormalAxis = frozenNormal.reduce(
+        (best, value, axis) => (
+          Math.abs(value) > Math.abs(frozenNormal[best]) ? axis : best
+        ),
+        0
+      );
+      const frozenTangentAxes = frozenNormalAxis === 0
+        ? [1, 2]
+        : frozenNormalAxis === 1
+          ? [0, 2]
+          : [0, 1];
+      const frozenFaceToleranceM =
+        schroederSpatialMechanicalAabbNormalRoundoffToleranceM({
+          deltaM: delta,
+          selfEdgeM: selfDiameterM,
+          otherEdgeM: peerDiameterM
+        });
+      const frozenFaceIsActive =
+        dot3(delta, frozenNormal)
+          <= frozenSupportDistanceM + frozenFaceToleranceM
+        && frozenTangentAxes.every(
+          (axis) => Math.abs(delta[axis]) < frozenSupportDistanceM
+        );
+      const frozenSweptContact = frozenFaceIsActive
+        || frozenMatchingFrame.admitted === false
+        ? null
+        : schroederSpatialMechanicalFiniteVolumeContact({
+            deltaM: delta,
+            epochDeltaM: epochDelta,
+            selfEdgeM: selfDiameterM,
+            otherEdgeM: peerDiameterM,
+            selfIndex,
+            otherIndex
+          });
+      const frozenSweptFaceIsActive = Boolean(
+        frozenSweptContact?.sweptContact
+        && dot3(frozenSweptContact.normal, frozenNormal) > 1 - 1e-6
+      );
+      if (
+        frozenNormalLength > 1e-12
+        && frozenResponseNormalLength > 1e-12
+        && frozenProjection > 1e-6
+        && frozenSupportDistanceM > 0
+        // An initially admitted supporting face is still finite. Once cleanup
+        // motion leaves either tangential slab, retaining its infinite
+        // halfspace would manufacture a position and velocity impulse between
+        // cells that no longer share a face. An initially admitted constraint
+        // may still represent a genuine same-step sweep through that exact
+        // frozen face even when the endpoint is tangentially disjoint.
+        && (frozenFaceIsActive || frozenSweptFaceIsActive)
+      ) {
+        finiteVolumeContact = Object.freeze({
+          normal: Object.freeze(frozenNormal),
+          responseNormal: Object.freeze(frozenResponseNormal),
+          responseProjection: frozenProjection,
+          supportDistanceM: frozenSupportDistanceM,
+          overlapM: Math.max(
+            frozenSupportDistanceM - dot3(delta, frozenNormal),
+            0
+          ),
+          sweptContact:
+            Boolean(frozenMatchingFrame.sweptContact)
+            || frozenSweptFaceIsActive,
+          sweptImpactT:
+            frozenMatchingFrame.sweptImpactT
+            ?? frozenSweptContact?.sweptImpactT
+            ?? null,
+          cohortInverted: Boolean(frozenMatchingFrame.cohortInverted)
+        });
+      }
+    } else {
+      finiteVolumeContact =
+        schroederSpatialMechanicalFiniteVolumeContact({
+          deltaM: delta,
+          epochDeltaM: epochDelta,
+          selfEdgeM: selfDiameterM,
+          otherEdgeM: peerDiameterM,
+          selfIndex,
+          otherIndex
+        });
+    }
+    if (!finiteVolumeContact) {
+      return Object.freeze({
+        ...policy,
+        unilateralContact,
+        handled: false,
+        reason: 'outside-pair-support',
+        restDistanceM,
+        distanceM,
+        sweptDistanceM,
+        sweptContact: false,
+        cohortInverted: false,
+        overlapM: 0,
+        positionDeltaM: zero,
+        otherPositionDeltaM: zero,
+        velocityDeltaMPerS: zero,
+        otherVelocityDeltaMPerS: zero
+      });
+    }
+    const { normal } = finiteVolumeContact;
+    let {
+      responseNormal,
+      responseProjection
+    } = finiteVolumeContact;
+    const relativeVelocity = vectorSubtract(
+      finiteVector3(velocity),
+      finiteVector3(otherVelocity)
+    );
+    const overlapM = finiteVolumeContact.overlapM;
+    const inverseMass = 1 / Math.max(selfMass, 1e-30);
+    const otherInverseMass = 1 / Math.max(peerMass, 1e-30);
+    const inverseMassSum = inverseMass + otherInverseMass;
+    const share = inverseMass / inverseMassSum;
+    const otherShare = otherInverseMass / inverseMassSum;
+    const approachMPerS = dot3(relativeVelocity, normal);
+    const dampingSpeedMPerS = approachMPerS < 0 ? -approachMPerS : 0;
+    let relativeVelocityDelta = vectorScale(
+      responseNormal,
+      dampingSpeedMPerS / responseProjection
+    );
+    if (approachMPerS < 0) {
+      const centralLinearWorkSpeedSquared = dot3(
+        relativeVelocity,
+        relativeVelocityDelta
+      );
+      const kineticDeltaSpeedSquared =
+        2 * centralLinearWorkSpeedSquared
+          + dot3(
+            relativeVelocityDelta,
+            relativeVelocityDelta
+          );
+      const kineticToleranceSpeedSquared =
+        64 * 1.1920928955078125e-7
+          * Math.max(dot3(relativeVelocity, relativeVelocity), 1);
+      if (
+        centralLinearWorkSpeedSquared > 0
+        || kineticDeltaSpeedSquared > kineticToleranceSpeedSquared
+      ) {
+        const radialApproachMPerS = dot3(
+          relativeVelocity,
+          responseNormal
+        );
+        const radialDelta = vectorScale(
+          responseNormal,
+          Math.max(-radialApproachMPerS, 0)
+        );
+        const afterRadial = vectorAdd(relativeVelocity, radialDelta);
+        const faceDelta = vectorScale(
+          normal,
+          Math.max(-dot3(afterRadial, normal), 0)
+        );
+        relativeVelocityDelta = vectorAdd(radialDelta, faceDelta);
+      }
+    }
+    return Object.freeze({
+      ...policy,
+      unilateralContact,
+      handled: true,
+      reason: 'overlapping-finite-volume-pair',
+      restDistanceM,
+      distanceM,
+      sweptDistanceM,
+      sweptContact: finiteVolumeContact.sweptContact,
+      sweptImpactT: finiteVolumeContact.sweptImpactT,
+      cohortInverted: finiteVolumeContact.cohortInverted,
+      overlapM,
+      normal: Object.freeze(normal),
+      responseNormal: Object.freeze(responseNormal),
+      responseProjection,
+      supportDistanceM: finiteVolumeContact.supportDistanceM,
+      positionDeltaM: Object.freeze(
+        vectorScale(responseNormal, share * overlapM / responseProjection)
+      ),
+      otherPositionDeltaM: Object.freeze(
+        vectorScale(
+          responseNormal,
+          -otherShare * overlapM / responseProjection
+        )
+      ),
+      velocityDeltaMPerS: Object.freeze(
+        vectorScale(relativeVelocityDelta, share)
+      ),
+      otherVelocityDeltaMPerS: Object.freeze(
+        vectorScale(relativeVelocityDelta, -otherShare)
+      )
+    });
+  }
   const sweptContact = unilateralContact && sweptDistanceM < restDistanceM;
   const epochDistanceM = vectorLength(epochDelta);
   const sweepB = dot3(epochDelta, sweepDelta);
@@ -604,6 +1671,214 @@ function requireBuffer(device, buffer, label) {
   return buffer;
 }
 
+function resolveMechanicalDiagnosticTrace({
+  device,
+  diagnosticTrace,
+  execution,
+  particleCount
+}) {
+  if (diagnosticTrace == null) return null;
+  const buffer = requireBuffer(
+    device,
+    diagnosticTrace.buffer,
+    'diagnosticTrace.buffer'
+  );
+  const byteOffset = diagnosticTrace.byteOffset ?? 0;
+  const alignment = Math.max(
+    1,
+    Math.trunc(finiteNumber(
+      device?.limits?.minStorageBufferOffsetAlignment,
+      256
+    ))
+  );
+  if (
+    !Number.isSafeInteger(byteOffset)
+    || byteOffset < 0
+    || byteOffset % alignment !== 0
+  ) {
+    throw new RangeError(
+      `diagnosticTrace.byteOffset must be a nonnegative ${alignment}-byte multiple`
+    );
+  }
+  const requestedTargetIndices = diagnosticTrace.targetIndices ?? null;
+  let targetIndices = null;
+  if (requestedTargetIndices != null) {
+    if (
+      !Array.isArray(requestedTargetIndices)
+      || requestedTargetIndices.length
+        !== SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+    ) {
+      throw new RangeError(
+        'diagnosticTrace.targetIndices must contain exactly two particle indices'
+      );
+    }
+    targetIndices = Object.freeze(requestedTargetIndices.map(
+      (value, index) => {
+        const target = exactU32(
+          value,
+          `diagnosticTrace.targetIndices[${index}]`
+        );
+        if (target >= particleCount) {
+          throw new RangeError(
+            `diagnosticTrace.targetIndices[${index}] exceeds particleCount`
+          );
+        }
+        return target;
+      }
+    ));
+    if (targetIndices[0] === targetIndices[1]) {
+      throw new RangeError(
+        'diagnosticTrace.targetIndices must be distinct'
+      );
+    }
+  }
+  const traceWordCount = targetIndices
+    ? SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS
+    : SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_WORDS;
+  const traceByteLength = targetIndices
+    ? SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_BYTES
+    : SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_BYTES;
+  if (
+    !Number.isSafeInteger(buffer.size)
+    || byteOffset + traceByteLength > buffer.size
+  ) {
+    throw new RangeError(
+      `diagnosticTrace.buffer must expose one complete ${traceByteLength}-byte trace slot`
+    );
+  }
+  const requiredUsage = 0x4 | 0x8 | 0x80;
+  if (
+    Number.isFinite(buffer.usage)
+    && (buffer.usage & requiredUsage) !== requiredUsage
+  ) {
+    throw new TypeError(
+      'diagnosticTrace.buffer requires COPY_SRC, COPY_DST, and STORAGE usage'
+    );
+  }
+  const materialId = (value, label) => {
+    const resolved = Number(value);
+    if (
+      !Number.isSafeInteger(resolved)
+      || resolved < 0
+      || Math.fround(resolved) !== resolved
+    ) {
+      throw new RangeError(`${label} must be a nonnegative exact f32 integer`);
+    }
+    return resolved;
+  };
+  const materialAId = materialId(
+    diagnosticTrace.materialAId,
+    'diagnosticTrace.materialAId'
+  );
+  const materialBId = materialId(
+    diagnosticTrace.materialBId,
+    'diagnosticTrace.materialBId'
+  );
+  if (materialAId === materialBId) {
+    throw new RangeError('diagnosticTrace material IDs must be distinct');
+  }
+  const words = new Uint32Array(traceWordCount);
+  const floats = new Float32Array(words.buffer);
+  words[0] = SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_MAGIC;
+  words[1] = SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_VERSION;
+  words[2] =
+    SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.HEADER_VALID;
+  words[3] = exactU32(
+    execution.generationId,
+    'diagnosticTrace execution.generationId',
+    { positive: true }
+  );
+  words[4] = exactU32(
+    execution.storageGeneration,
+    'diagnosticTrace execution.storageGeneration',
+    { positive: true }
+  );
+  words[5] = exactU32(
+    execution.physicsTick,
+    'diagnosticTrace execution.physicsTick'
+  );
+  words[6] = exactU32(
+    execution.physicsSubstep,
+    'diagnosticTrace execution.physicsSubstep'
+  );
+  words[7] = exactU32(
+    execution.positionEpoch,
+    'diagnosticTrace execution.positionEpoch'
+  );
+  words[8] = exactU32(
+    execution.topologyEpoch,
+    'diagnosticTrace execution.topologyEpoch'
+  );
+  words[9] = exactU32(
+    execution.supportEpoch,
+    'diagnosticTrace execution.supportEpoch'
+  );
+  words[10] = exactU32(
+    particleCount,
+    'diagnosticTrace particleCount',
+    { positive: true }
+  );
+  words[11] = SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+  floats[12] = materialAId;
+  floats[13] = materialBId;
+  for (const word of [18, 19, 30, 31, 33, 34, 35, 36, 37, 38]) {
+    words[word] = 0xffff_ffff;
+  }
+  if (targetIndices) {
+    const header =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+    words[header] =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_MAGIC;
+    words[header + 1] =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION;
+    words[header + 2] =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS.HEADER_VALID;
+    words[header + 3] =
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+    words[header + 4] =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+    words[header + 5] =
+      SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS;
+    words[header + 6] = targetIndices[0];
+    words[header + 7] = targetIndices[1];
+    for (
+      let passIndex = 0;
+      passIndex < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+      passIndex += 1
+    ) {
+      for (
+        let targetSlot = 0;
+        targetSlot
+          < SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+        targetSlot += 1
+      ) {
+        const row =
+          SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD
+          + (
+            passIndex
+              * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+            + targetSlot
+          )
+            * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS;
+        words[row] = passIndex;
+        words[row + 1] = targetIndices[targetSlot];
+        words[row + 2] = 0xffff_ffff;
+        words[row + 3] = 0xffff_ffff;
+        words[row + 4] = 0xffff_ffff;
+      }
+    }
+  }
+  device.queue.writeBuffer(buffer, byteOffset, words);
+  return Object.freeze({
+    buffer,
+    byteOffset,
+    byteLength: traceByteLength,
+    materialAId,
+    materialBId,
+    targetIndices
+  });
+}
+
 function resolveMechanicalSpatialAuthority({
   device,
   generation,
@@ -675,6 +1950,7 @@ function resolveMechanicalSpatialAuthority({
     : null;
   return {
     generation,
+    device,
     execution,
     source,
     stateBuffer,
@@ -847,6 +2123,36 @@ function createMechanicalProposalHeader(execution, particleCount) {
   return words;
 }
 
+function createMechanicalMatchingCleanupControlHeader(execution, particleCount) {
+  const words = new Uint32Array(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+  );
+  words[0] = MATCHING_CLEANUP_CONTROL_MAGIC;
+  words[1] = MATCHING_CLEANUP_CONTROL_VERSION;
+  words[2] = exactU32(execution?.generationId, 'execution.generationId', {
+    positive: true
+  });
+  words[3] = exactU32(
+    execution?.storageGeneration,
+    'execution.storageGeneration',
+    { positive: true }
+  );
+  words[4] = exactU32(execution?.physicsTick, 'execution.physicsTick');
+  words[5] = exactU32(
+    execution?.physicsSubstep,
+    'execution.physicsSubstep'
+  );
+  words[6] = exactU32(execution?.positionEpoch, 'execution.positionEpoch');
+  words[7] = exactU32(execution?.topologyEpoch, 'execution.topologyEpoch');
+  words[8] = exactU32(execution?.supportEpoch, 'execution.supportEpoch');
+  words[9] = exactU32(particleCount, 'particleCount', {
+    positive: true
+  });
+  words[10] = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+  words[11] = SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+  return words;
+}
+
 function createMechanicalPairGraphEvidenceHeader({
   execution,
   selectedLevel,
@@ -893,7 +2199,10 @@ function createMechanicalPairGraphEvidenceHeader({
   return buffer;
 }
 
-const exactNearTraversalWgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
+const exactNearTraversalV1Wgsl = createSchroederSpatialExactNearTraversalV1Wgsl({
+  directoryBindingName: 'spatial_directory'
+});
+const exactNearTraversalV2Wgsl = createSchroederSpatialExactNearTraversalV2Wgsl({
   directoryBindingName: 'spatial_directory'
 });
 
@@ -950,7 +2259,7 @@ ${mechanicalContactGraphParamsWgsl}
 @group(0) @binding(12) var<uniform> mechanical_params: MechanicalProposalParams;
 @group(0) @binding(13) var<storage, read> spatial_aggregate_view: array<u32>;
 
-${exactNearTraversalWgsl}
+${exactNearTraversalV1Wgsl}
 
 const MECHANICAL_AGGREGATE_MAGIC: u32 = 0x53414731u;
 const MECHANICAL_AGGREGATE_VERSION: u32 = 2u;
@@ -973,6 +2282,7 @@ const MECHANICAL_AGGREGATE_HIERARCHY_COMPILED: bool = true;
 const MECHANICAL_AGGREGATE_INVALID_U32: u32 = 0xffffffffu;
 const MECHANICAL_AGGREGATE_PREFLIGHT_FAILED: u32 = 0x80000000u;
 const MECHANICAL_SUPPORT_ACTIVE_PROJECTION_MEMBER: u32 = 8u;
+const MECHANICAL_SUPPORT_PHASE_GEOMETRY_OCCLUDED: u32 = 16u;
 const MECHANICAL_ACTIVE_MEMBER_MAGIC: u32 = 0x53414d31u;
 const MECHANICAL_ACTIVE_MEMBER_VERSION: u32 = 1u;
 const MECHANICAL_ACTIVE_MEMBER_STATUS_EXACT: u32 = 3u;
@@ -1944,6 +3254,108 @@ fn mechanical_graph_same_phase_lineage(self_index: u32, other_index: u32) -> boo
     && self_index % capacity == other_index % capacity;
 }
 
+// A solid/liquid split represents one conserved finite-volume lineage.  While
+// one condensed companion is wholly nested inside another at both sweep
+// endpoints, the inner cell contributes no exposed union boundary.  Give the
+// larger cell deterministic ownership (lower index breaks an f32 size tie) so
+// a newly materialized companion cannot double-count external contact.  Once
+// either endpoint is exposed, both independently moving components retain
+// their ordinary geometry.
+fn mechanical_graph_phase_geometry_occlusion(index: u32) -> u32 {
+  let capacity = mechanical_params.phase_lineage_capacity;
+  let lane_count = mechanical_params.phase_lane_count;
+  if (
+    capacity == 0u
+    || lane_count <= 1u
+    || index >= capacity * lane_count
+  ) { return 0u; }
+  let self_state = current_state[index * 2u];
+  let self_volume = source_mechanics[index * 8u + 4u].w;
+  let self_class = mechanical_graph_source_phase_class(index);
+  if (
+    !(self_state.w > 0.0)
+    || !(self_volume > 0.0)
+    || (self_class != 1u && self_class != 2u)
+  ) { return 0u; }
+  let self_edge_m = mechanical_graph_cbrt(self_volume);
+  let self_epoch_position = mechanical_graph_epoch_position(index);
+  if (
+    !ss_exact_near_finite(self_state.x)
+    || !ss_exact_near_finite(self_state.y)
+    || !ss_exact_near_finite(self_state.z)
+    || !ss_exact_near_finite(self_edge_m)
+    || !ss_exact_near_finite(self_epoch_position.x)
+    || !ss_exact_near_finite(self_epoch_position.y)
+    || !ss_exact_near_finite(self_epoch_position.z)
+  ) { return 0xffffffffu; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < lane_count; lane = lane + 1u) {
+    let peer_index = lane * capacity + lineage;
+    if (peer_index == index) { continue; }
+    let peer_state = current_state[peer_index * 2u];
+    let peer_volume = source_mechanics[peer_index * 8u + 4u].w;
+    let peer_class = mechanical_graph_source_phase_class(peer_index);
+    let peer_active = peer_state.w > 0.0 && peer_volume > 0.0;
+    if (
+      !peer_active
+      || (peer_class != 1u && peer_class != 2u)
+    ) { continue; }
+    let peer_edge_m = mechanical_graph_cbrt(peer_volume);
+    let peer_epoch_position = mechanical_graph_epoch_position(peer_index);
+    if (
+      !ss_exact_near_finite(peer_state.x)
+      || !ss_exact_near_finite(peer_state.y)
+      || !ss_exact_near_finite(peer_state.z)
+      || !ss_exact_near_finite(peer_edge_m)
+      || !ss_exact_near_finite(peer_epoch_position.x)
+      || !ss_exact_near_finite(peer_epoch_position.y)
+      || !ss_exact_near_finite(peer_epoch_position.z)
+    ) { return 0xffffffffu; }
+    let geometric_scale_m = max(
+      max(self_edge_m, peer_edge_m),
+      max(
+        max(
+          max(abs(self_state.x), abs(self_state.y)),
+          abs(self_state.z)
+        ),
+        max(
+          max(
+            max(abs(peer_state.x), abs(peer_state.y)),
+            abs(peer_state.z)
+          ),
+          max(
+            max(
+              max(
+                max(abs(self_epoch_position.x), abs(self_epoch_position.y)),
+                abs(self_epoch_position.z)
+              ),
+              max(abs(peer_epoch_position.x), abs(peer_epoch_position.y))
+            ),
+            abs(peer_epoch_position.z)
+          )
+        )
+      )
+    );
+    let tolerance_m = 16.0 * 1.1920929e-7
+      * max(geometric_scale_m, 1.0e-12);
+    let peer_owns_size = peer_edge_m > self_edge_m + tolerance_m
+      || (
+        abs(peer_edge_m - self_edge_m) <= tolerance_m
+        && peer_index < index
+      );
+    if (!peer_owns_size) { continue; }
+    let current_delta = abs(self_state.xyz - peer_state.xyz);
+    let epoch_delta = abs(self_epoch_position - peer_epoch_position);
+    let containment_limit_m = 0.5 * peer_edge_m
+      - 0.5 * self_edge_m + tolerance_m;
+    if (
+      all(current_delta <= vec3<f32>(containment_limit_m))
+      && all(epoch_delta <= vec3<f32>(containment_limit_m))
+    ) { return 1u; }
+  }
+  return 0u;
+}
+
 fn mechanical_graph_pair_policy(
   self_endpoint: MechanicalGraphEndpointMetadata,
   other_endpoint: MechanicalGraphEndpointMetadata
@@ -1966,6 +3378,10 @@ fn mechanical_graph_pair_policy(
     }
     return rejected;
   }
+  if (
+    ((self_endpoint.descriptor | other_endpoint.descriptor)
+      & MECHANICAL_SUPPORT_PHASE_GEOMETRY_OCCLUDED) != 0u
+  ) { return rejected; }
   let self_class = (self_endpoint.descriptor >> 1u) & 3u;
   let other_class = (other_endpoint.descriptor >> 1u) & 3u;
   if (self_class == 0u || other_class == 0u) { return rejected; }
@@ -2100,16 +3516,16 @@ fn mechanical_graph_pair_within_symmetric_envelope(
   let other_epoch_position = mechanical_graph_cached_epoch_position(other_index);
   let epoch_distance_m = length(self_epoch_position - other_epoch_position);
   let current_distance_m = sqrt(max(current_distance_squared_m2, 0.0));
-  // The retained solver debits a complete-solve endpoint trust of one own
-  // diameter plus that endpoint's authenticated post-G2P displacement. The
-  // extra displacement term permits exact swept-cohort rollback after a deep
-  // crossing without restoring the old per-round nine-diameter shell.
+  // The retained solver keeps every corrected endpoint inside an authenticated
+  // epoch ball: sixteen own diameters, twice its post-G2P displacement, and its
+  // initial wall projection. The displacement term permits swept-cohort
+  // rollback after a deep crossing without restoring a per-round shell.
   // Orthogonal box projection is non-expansive, so only the initial distance
   // to the box must be added. This is a certificate, not a heuristic radius.
   let pair_radius_m = rest_distance_m
     + 2.0 * (self_displacement_m + other_displacement_m)
-    + self_diameter
-    + other_diameter
+    + ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS}.0
+      * (self_diameter + other_diameter)
     + self_wall_projection_m
     + other_wall_projection_m;
   if (
@@ -2135,20 +3551,11 @@ fn mechanical_graph_pair_within_symmetric_envelope(
     mechanical_params.retain_complete_authenticated_cell_cliques != 0u
     && shares_authenticated_cell
   ) { return true; }
-  // Starting from the current state, each endpoint can move by at most its
-  // cumulative trust (own diameter plus authenticated displacement). Initial
-  // wall projection is the only extra non-expansive box displacement. This
-  // current-distance predicate is equivalent to the epoch-space certificate
-  // without retaining the excess shell caused by opposing displacements.
-  let current_pair_radius_m = rest_distance_m
-    + self_diameter
-    + other_diameter
-    + self_displacement_m
-    + other_displacement_m
-    + self_wall_projection_m
-    + other_wall_projection_m;
-  return epoch_distance_m <= pair_radius_m
-    && current_distance_m <= current_pair_radius_m;
+  // The epoch-ball predicate is the complete certificate. Unlike cumulative
+  // path-length accounting, it permits later Jacobi rounds to recover trust
+  // by moving back toward the epoch without making an unretained pair
+  // reachable.
+  return epoch_distance_m <= pair_radius_m;
 }
 
 fn mechanical_graph_allocate_append_slot() -> u32 {
@@ -2452,6 +3859,18 @@ fn reduce_support(@builtin(global_invocation_id) global_id: vec3<u32>) {
       1u
     );
   }
+  var phase_geometry_occlusion = 0u;
+  if (mechanically_active && lineage_material_matches) {
+    phase_geometry_occlusion =
+      mechanical_graph_phase_geometry_occlusion(particle_index);
+  }
+  if (phase_geometry_occlusion == 0xffffffffu) {
+    atomicOr(&global_support_bits[3u], 0x80000000u);
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+  }
   atomicAdd(&global_support_bits[3u], 1u);
   let volume = max(raw_volume, 0.0);
   if (mechanically_active) {
@@ -2503,7 +3922,13 @@ fn reduce_support(@builtin(global_invocation_id) global_id: vec3<u32>) {
       );
       atomicOr(
         &global_support_bits[support_base + 3u],
-        1u | (mechanical_graph_source_phase_class(particle_index) << 1u)
+        1u
+          | (mechanical_graph_source_phase_class(particle_index) << 1u)
+          | select(
+            0u,
+            MECHANICAL_SUPPORT_PHASE_GEOMETRY_OCCLUDED,
+            phase_geometry_occlusion == 1u
+          )
       );
       if (
         MECHANICAL_ACTIVE_RANK_VIEW_COMPILED
@@ -2933,7 +4358,9 @@ fn materialize_contact_graph(
   // Mixed-phase/material populations retain the generation-wide conservative
   // cube.  It covers unilateral swept rollback, wall projection, and body
   // interfaces, then the pair predicate removes its excess shell.
-  let mixed_law_query_radius_m = 3.0 * max(global_max_diameter, 0.0)
+  let mixed_law_query_radius_m = ${
+    1 + 2 * SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS
+  }.0 * max(global_max_diameter, 0.0)
     + 4.0 * max(global_max_displacement_m, 0.0)
     + 2.0 * max(global_max_wall_projection_m, 0.0);
   // Once every active source is certified as one liquid material, eligible
@@ -3422,6 +4849,41 @@ fn materialize_contact_graph(
 
 `;
 
+function createSchroederSpatialMechanicalProposalV2Wgsl(source) {
+  const traversalSpecialized = source.replace(
+    exactNearTraversalV1Wgsl,
+    exactNearTraversalV2Wgsl
+  );
+  if (traversalSpecialized === source) {
+    throw new Error(
+      'mechanical proposal v2 specialization could not replace exact-near traversal'
+    );
+  }
+  const expectationSpecialized = traversalSpecialized.replace(
+    'var<uniform> spatial_expectation: SchroederSpatialExactNearExpectationV1;',
+    'var<uniform> spatial_expectation: SchroederSpatialExactNearExpectationV2;'
+  );
+  if (expectationSpecialized === traversalSpecialized) {
+    throw new Error(
+      'mechanical proposal v2 specialization could not replace expectation type'
+    );
+  }
+  return expectationSpecialized
+    .replaceAll(
+      'spatial_expectation.source_count',
+      'spatial_expectation.physical_source_count'
+    )
+    .replace(
+      '} else if (dispatch_ordinal >= mechanical_params.particle_count) {',
+      '} else if (dispatch_ordinal >= spatial_directory[37u]) {'
+    );
+}
+
+export const schroederSpatialMechanicalProposalV2Wgsl =
+  createSchroederSpatialMechanicalProposalV2Wgsl(
+    schroederSpatialMechanicalProposalWgsl
+  );
+
 function createSchroederSpatialMechanicalProposalFlatWgsl(
   source,
   { activeRankView = false } = {}
@@ -3502,6 +4964,15 @@ export const schroederSpatialMechanicalProposalFlatWgsl =
 export const schroederSpatialMechanicalProposalActiveRankWgsl =
   createSchroederSpatialMechanicalProposalFlatWgsl(
     schroederSpatialMechanicalProposalWgsl,
+    { activeRankView: true }
+  );
+export const schroederSpatialMechanicalProposalV2FlatWgsl =
+  createSchroederSpatialMechanicalProposalFlatWgsl(
+    schroederSpatialMechanicalProposalV2Wgsl
+  );
+export const schroederSpatialMechanicalProposalV2ActiveRankWgsl =
+  createSchroederSpatialMechanicalProposalFlatWgsl(
+    schroederSpatialMechanicalProposalV2Wgsl,
     { activeRankView: true }
   );
 
@@ -3971,10 +5442,20 @@ fn validate_contact_graph_csr(
 }
 `;
 
-export const schroederSpatialMechanicalGraphSolverWgsl = /* wgsl */ `
+const mechanicalSolverInputStateReadWriteDeclarationWgsl =
+  '@group(0) @binding(0) var<storage, read_write> input_state: array<vec4<f32>>;';
+
+const schroederSpatialMechanicalGraphSolverCoreWgsl = /* wgsl */ `
 ${mechanicalContactGraphParamsWgsl}
 
-@group(0) @binding(0) var<storage, read> input_state: array<vec4<f32>>;
+struct MechanicalSolverIterationParams {
+  iteration: u32,
+  reserved_0: u32,
+  reserved_1: u32,
+  reserved_2: u32,
+};
+
+${mechanicalSolverInputStateReadWriteDeclarationWgsl}
 @group(0) @binding(1) var<storage, read_write> output_state: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> source_thermo: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> source_mechanics: array<vec4<f32>>;
@@ -3987,6 +5468,96 @@ ${mechanicalContactGraphParamsWgsl}
 @group(0) @binding(10) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
 @group(0) @binding(11) var<uniform> mechanical_params: MechanicalProposalParams;
 @group(0) @binding(12) var<storage, read_write> energy_ledger: array<vec4<f32>>;
+@group(0) @binding(13) var<storage, read_write> matching_constraints:
+  array<vec4<f32>>;
+@group(0) @binding(14) var<storage, read_write> matching_cleanup_dispatch:
+  array<atomic<u32>>;
+@group(0) @binding(15) var<storage, read_write> mechanical_diagnostic_trace:
+  array<atomic<u32>>;
+@group(0) @binding(16) var<uniform> mechanical_solver_iteration:
+  MechanicalSolverIterationParams;
+
+var<workgroup> mechanical_matching_persistent_pass: u32;
+var<workgroup> mechanical_matching_persistent_active_count: u32;
+var<workgroup> mechanical_matching_persistent_contact_count: u32;
+var<workgroup> mechanical_matching_persistent_dispatch_active: u32;
+
+const MECHANICAL_DIAGNOSTIC_TRACE_MAGIC: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_MAGIC}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_VERSION: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_VERSION}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_WORDS}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_MAGIC: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_MAGIC}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_VALID: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS.HEADER_VALID}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_LOCAL_CAPTURE_COMPLETE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS
+    .LOCAL_CAPTURE_COMPLETE}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_POST_WALL_CAPTURE_COMPLETE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS
+    .POST_WALL_CAPTURE_COMPLETE}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_WINNER_TARGET_MATCH: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS
+    .WINNER_TARGET_MATCH}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS.INVALID >>> 0}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_SELECTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS.SELECTED}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_RECIPROCAL: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS.RECIPROCAL}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_APPLIED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS.APPLIED}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_TARGET_IS_LOW: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS.TARGET_IS_LOW}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_PAIR_CONTAINS_BOTH_TARGETS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .PAIR_CONTAINS_BOTH_TARGETS}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_ROUND_ZERO_TARGET_WALL_CLIPPED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .ROUND_ZERO_TARGET_WALL_CLIPPED}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_ROUND_ZERO_PEER_WALL_CLIPPED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .ROUND_ZERO_PEER_WALL_CLIPPED}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_LOCAL_CAPTURE_COMPLETE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .LOCAL_CAPTURE_COMPLETE}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_POST_WALL_CAPTURE_COMPLETE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .POST_WALL_CAPTURE_COMPLETE}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_POST_WALL_CHANGED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .POST_WALL_CHANGED}u;
+const MECHANICAL_DIAGNOSTIC_TARGET_ROW_THREE_BLOCK_APPLIED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_ROW_STATUS
+    .THREE_BLOCK_APPLIED}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_HEADER_VALID: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.HEADER_VALID}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_APPLY_OBSERVED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.APPLY_OBSERVED}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_TERMINAL_MEASURED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.TERMINAL_MEASURED}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_WINNER_MATERIALIZED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.WINNER_MATERIALIZED}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_PRODUCTION_MAX_MATCH: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.PRODUCTION_MAX_MATCH}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_IMPULSE_FINITE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.IMPULSE_FINITE}u;
+const MECHANICAL_DIAGNOSTIC_TRACE_INVALID: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_STATUS.INVALID >>> 0}u;
 
 struct MechanicalPairResidual {
   barrier_dx: vec3<f32>,
@@ -4001,15 +5572,140 @@ struct MechanicalPairResidual {
   valid: u32,
 };
 
-// particleCount is constructor-bounded below 2^31, so the peer high bit is a
-// solver-private cache lane. Measure owns each directed CSR row and records
+struct MechanicalMatchingWallVelocityProjection {
+  velocity: vec3<f32>,
+  kinetic_delta_j: f32,
+  clipped: u32,
+  failure_code: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingAxisWallConstraint {
+  inward_scalar_sign: f32,
+  geometry_active: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingAxisActiveSetResult {
+  primary_u: f32,
+  center_u: f32,
+  secondary_u: f32,
+  primary_lambda: f32,
+  secondary_lambda: f32,
+  wall_mask: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingFourBlockAxisResult {
+  velocity: vec4<f32>,
+  objective: f32,
+  contact_mask: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingFourBlockBoxAxisResult {
+  velocity: vec4<f32>,
+  contact_lambda: vec3<f32>,
+  objective: f32,
+  contact_mask: u32,
+  wall_mask: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingFourWallEnergyAllocation {
+  delta_j: vec4<f32>,
+  valid: u32,
+};
+
+struct MechanicalMatchingFourPathCandidate {
+  body_0_index: u32,
+  body_1_index: u32,
+  body_2_index: u32,
+  body_3_index: u32,
+  edge_0_forward_cursor: u32,
+  edge_0_reverse_cursor: u32,
+  edge_1_forward_cursor: u32,
+  edge_1_reverse_cursor: u32,
+  edge_2_forward_cursor: u32,
+  edge_2_reverse_cursor: u32,
+  light_mass_ratio: f32,
+  bridge_rank: u32,
+  found: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingVelocityRefinement {
+  low_velocity: vec3<f32>,
+  high_velocity: vec3<f32>,
+  low_pair_kinetic_delta_j: f32,
+  high_pair_kinetic_delta_j: f32,
+  low_wall_kinetic_delta_j: f32,
+  high_wall_kinetic_delta_j: f32,
+  low_pair_impulse: vec3<f32>,
+  high_pair_impulse: vec3<f32>,
+  round_count: u32,
+  failure_code: u32,
+  valid: u32,
+};
+
+struct MechanicalMatchingThreeBlockResult {
+  center_index: u32,
+  primary_index: u32,
+  secondary_index: u32,
+  center_primary_cursor: u32,
+  primary_center_cursor: u32,
+  center_secondary_cursor: u32,
+  secondary_center_cursor: u32,
+  center_velocity: vec3<f32>,
+  primary_velocity: vec3<f32>,
+  secondary_velocity: vec3<f32>,
+  center_kinetic_delta_j: f32,
+  primary_kinetic_delta_j: f32,
+  secondary_kinetic_delta_j: f32,
+  center_wall_kinetic_delta_j: f32,
+  primary_wall_kinetic_delta_j: f32,
+  secondary_wall_kinetic_delta_j: f32,
+  pair_heat_j: f32,
+  center_primary_impulse: vec3<f32>,
+  primary_impulse: vec3<f32>,
+  center_secondary_impulse: vec3<f32>,
+  secondary_impulse: vec3<f32>,
+  tertiary_index: u32,
+  center_tertiary_cursor: u32,
+  tertiary_center_cursor: u32,
+  tertiary_velocity: vec3<f32>,
+  tertiary_kinetic_delta_j: f32,
+  tertiary_wall_kinetic_delta_j: f32,
+  center_tertiary_impulse: vec3<f32>,
+  tertiary_impulse: vec3<f32>,
+  member_count: u32,
+  block_found: u32,
+  applied: u32,
+  failure_code: u32,
+  valid: u32,
+  topology: u32,
+  path_owner: u32,
+};
+
+// Particle dispatch is constructor-bounded far below 2^30, so both peer high
+// bits are solver-private cache lanes. Measure owns each directed CSR row and records
 // whether the edge has a law in the unchanged iteration input. Solve and
 // energy allocation can then skip the broad retained closure edges that were
-// measured inactive without evaluating the swept pair law two more times.
-// Final residual verification restores the public peer indices before the
-// graph can be published or retained by another consumer.
+// measured inactive without evaluating the swept pair law two more times. The
+// matching owner keeps the second bit once a frozen cursor has ever become
+// active, so expansion owns never-active rows and selection owns ever-active
+// rows instead of both evaluating the complete incident CSR. Final residual
+// verification restores public peer indices before publication or retention.
 const MECHANICAL_SOLVER_EDGE_INACTIVE_BIT: u32 = 0x80000000u;
-const MECHANICAL_SOLVER_EDGE_PEER_MASK: u32 = 0x7fffffffu;
+const MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT: u32 = 0x40000000u;
+const MECHANICAL_SOLVER_EDGE_PEER_MASK: u32 = 0x3fffffffu;
+const MECHANICAL_MATCHING_OWNER_ACTIVE_COUNT_WORD: u32 = 3u;
+const MECHANICAL_MATCHING_OWNER_ACTIVE_CURSOR_COUNT_WORD: u32 = 4u;
+const MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS}u;
+const MECHANICAL_MATCHING_OWNER_FRONTIER_BIT: u32 = 0x00000001u;
+const MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT: u32 = 0x00000002u;
+const MECHANICAL_MATCHING_OWNER_CONTACT_BIT: u32 = 0x80000000u;
 
 fn mechanical_solver_full_path_enabled() -> bool {
   return atomicLoad(&graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
@@ -4022,6 +5718,14 @@ fn mechanical_solver_peer_index(encoded_peer: u32) -> u32 {
 
 fn mechanical_solver_edge_inactive(encoded_peer: u32) -> bool {
   return (encoded_peer & MECHANICAL_SOLVER_EDGE_INACTIVE_BIT) != 0u;
+}
+
+fn mechanical_matching_edge_ever_active(encoded_peer: u32) -> bool {
+  return (encoded_peer & MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT) != 0u;
+}
+
+fn mechanical_matching_mark_edge_inactive(encoded_peer: u32) -> u32 {
+  return encoded_peer | MECHANICAL_SOLVER_EDGE_INACTIVE_BIT;
 }
 
 fn mechanical_solver_encode_measured_peer(
@@ -4045,6 +5749,153 @@ fn mechanical_solver_finite3(value: vec3<f32>) -> bool {
     && mechanical_solver_finite(value.z);
 }
 
+fn mechanical_diagnostic_trace_header_valid() -> bool {
+  let capacity_valid =
+    arrayLength(&mechanical_diagnostic_trace)
+      >= MECHANICAL_DIAGNOSTIC_TRACE_WORDS;
+  if (!capacity_valid) { return false; }
+  let valid =
+    atomicLoad(&mechanical_diagnostic_trace[0u])
+        == MECHANICAL_DIAGNOSTIC_TRACE_MAGIC
+      && atomicLoad(&mechanical_diagnostic_trace[1u])
+        == MECHANICAL_DIAGNOSTIC_TRACE_VERSION
+      && atomicLoad(&mechanical_diagnostic_trace[3u])
+        == mechanical_params.generation_id
+      && atomicLoad(&mechanical_diagnostic_trace[4u])
+        == mechanical_params.storage_generation
+      && atomicLoad(&mechanical_diagnostic_trace[5u])
+        == mechanical_params.physics_tick
+      && atomicLoad(&mechanical_diagnostic_trace[6u])
+        == mechanical_params.physics_substep
+      && atomicLoad(&mechanical_diagnostic_trace[7u])
+        == mechanical_params.position_epoch
+      && atomicLoad(&mechanical_diagnostic_trace[8u])
+        == mechanical_params.topology_epoch
+      && atomicLoad(&mechanical_diagnostic_trace[9u])
+        == mechanical_params.support_epoch
+      && atomicLoad(&mechanical_diagnostic_trace[10u])
+        == mechanical_params.particle_count
+      && atomicLoad(&mechanical_diagnostic_trace[11u])
+        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+  if (!valid) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+  }
+  return valid;
+}
+
+fn mechanical_diagnostic_trace_load_f32(word: u32) -> f32 {
+  return bitcast<f32>(atomicLoad(&mechanical_diagnostic_trace[word]));
+}
+
+fn mechanical_diagnostic_trace_store_f32(word: u32, value: f32) {
+  atomicStore(&mechanical_diagnostic_trace[word], bitcast<u32>(value));
+}
+
+fn mechanical_diagnostic_target_tail_header_valid() -> bool {
+  if (
+    arrayLength(&mechanical_diagnostic_trace)
+      < MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS
+  ) { return false; }
+  let header = MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+  let target_a = atomicLoad(&mechanical_diagnostic_trace[header + 6u]);
+  let target_b = atomicLoad(&mechanical_diagnostic_trace[header + 7u]);
+  let valid =
+    atomicLoad(&mechanical_diagnostic_trace[header])
+        == MECHANICAL_DIAGNOSTIC_TARGET_TAIL_MAGIC
+      && atomicLoad(&mechanical_diagnostic_trace[header + 1u])
+        == MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION
+      && (
+        atomicLoad(&mechanical_diagnostic_trace[header + 2u])
+          & MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_VALID
+      ) != 0u
+      && (
+        atomicLoad(&mechanical_diagnostic_trace[header + 2u])
+          & MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID
+      ) == 0u
+      && atomicLoad(&mechanical_diagnostic_trace[header + 3u])
+        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      && atomicLoad(&mechanical_diagnostic_trace[header + 4u])
+        == MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+      && atomicLoad(&mechanical_diagnostic_trace[header + 5u])
+        == MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS
+      && target_a < mechanical_params.particle_count
+      && target_b < mechanical_params.particle_count
+      && target_a != target_b;
+  if (!valid) {
+    atomicOr(
+      &mechanical_diagnostic_trace[header + 2u],
+      MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID
+    );
+  }
+  return valid;
+}
+
+fn mechanical_diagnostic_target_index(target_slot: u32) -> u32 {
+  return atomicLoad(
+    &mechanical_diagnostic_trace[
+      MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD + 6u + target_slot
+    ]
+  );
+}
+
+fn mechanical_diagnostic_target_row_word(
+  pass_index: u32,
+  target_slot: u32,
+  row_word: u32
+) -> u32 {
+  return MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD
+    + (
+      pass_index * MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+        + target_slot
+    ) * MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS
+    + row_word;
+}
+
+fn mechanical_diagnostic_target_row_store_f32(
+  pass_index: u32,
+  target_slot: u32,
+  row_word: u32,
+  value: f32
+) {
+  mechanical_diagnostic_trace_store_f32(
+    mechanical_diagnostic_target_row_word(
+      pass_index,
+      target_slot,
+      row_word
+    ),
+    value
+  );
+}
+
+fn mechanical_diagnostic_target_row_store_vec3(
+  pass_index: u32,
+  target_slot: u32,
+  row_word: u32,
+  value: vec3<f32>
+) {
+  mechanical_diagnostic_target_row_store_f32(
+    pass_index,
+    target_slot,
+    row_word,
+    value.x
+  );
+  mechanical_diagnostic_target_row_store_f32(
+    pass_index,
+    target_slot,
+    row_word + 1u,
+    value.y
+  );
+  mechanical_diagnostic_target_row_store_f32(
+    pass_index,
+    target_slot,
+    row_word + 2u,
+    value.z
+  );
+}
+
 fn mechanical_solver_zero_pair(valid: u32) -> MechanicalPairResidual {
   return MechanicalPairResidual(
     vec3<f32>(0.0),
@@ -4062,6 +5913,17 @@ fn mechanical_solver_zero_pair(valid: u32) -> MechanicalPairResidual {
 
 fn mechanical_solver_cbrt(volume_m3: f32) -> f32 {
   return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
+}
+
+fn mechanical_solver_wall_boundary_tolerance_m(
+  boundary_m: f32,
+  opposite_boundary_m: f32
+) -> f32 {
+  let span_m = abs(opposite_boundary_m - boundary_m);
+  return min(
+    8.0 * 1.1920929e-7 * max(abs(boundary_m), 1.0e-12),
+    0.25 * span_m
+  );
 }
 
 fn mechanical_solver_source_row_base(index: u32) -> u32 {
@@ -4170,13 +6032,309 @@ fn mechanical_solver_coincidence_normal(
   return normalized * select(-1.0, 1.0, self_index > other_index);
 }
 
+struct MechanicalFiniteVolumeContact {
+  normal: vec3<f32>,
+  response_normal: vec3<f32>,
+  response_projection: f32,
+  support_distance_m: f32,
+  overlap_m: f32,
+  swept_contact: u32,
+  admitted: u32,
+};
+
+fn mechanical_solver_aabb_tangent_zero_tolerance_m(
+  delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32
+) -> f32 {
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let geometric_scale_m = max(
+    max(
+      max(abs(delta_m.x), max(abs(delta_m.y), abs(delta_m.z))),
+      max(self_edge_m, other_edge_m)
+    ),
+    max(half_sum_m, 1.0e-12)
+  );
+  // Reject edge/corner-only contacts whose apparent tangential overlap is
+  // solely binary32 subtraction roundoff. Unlike the normal shell, this is a
+  // strict zero-area predicate and never admits a mechanical constraint.
+  return 16.0 * 1.1920929e-7 * geometric_scale_m;
+}
+
+fn mechanical_solver_aabb_face(
+  delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32,
+  normal_tolerance_m: f32
+) -> vec2<u32> {
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let separation_m = abs(delta_m) - vec3<f32>(half_sum_m);
+  var normal_axis = 0u;
+  if (separation_m.y > separation_m.x) { normal_axis = 1u; }
+  if (
+    separation_m.z
+      > select(separation_m.x, separation_m.y, normal_axis == 1u)
+  ) { normal_axis = 2u; }
+  if (
+    separation_m.x > normal_tolerance_m
+    || separation_m.y > normal_tolerance_m
+    || separation_m.z > normal_tolerance_m
+  ) { return vec2<u32>(0u); }
+  var tangent_a = 0.0;
+  var tangent_b = 0.0;
+  if (normal_axis == 0u) {
+    tangent_a = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.y)
+    );
+    tangent_b = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.z)
+    );
+  } else if (normal_axis == 1u) {
+    tangent_a = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.x)
+    );
+    tangent_b = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.z)
+    );
+  } else {
+    tangent_a = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.x)
+    );
+    tangent_b = min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m.y)
+    );
+  }
+  let tangent_zero_tolerance_m =
+    mechanical_solver_aabb_tangent_zero_tolerance_m(
+      delta_m,
+      self_edge_m,
+      other_edge_m
+    );
+  return vec2<u32>(
+    normal_axis,
+    select(
+      0u,
+      1u,
+      tangent_a > tangent_zero_tolerance_m
+        && tangent_b > tangent_zero_tolerance_m
+    )
+  );
+}
+
+fn mechanical_solver_aabb_normal_roundoff_tolerance_m(
+  delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32
+) -> f32 {
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let geometric_scale_m = max(
+    max(
+      max(abs(delta_m.x), max(abs(delta_m.y), abs(delta_m.z))),
+      max(self_edge_m, other_edge_m)
+    ),
+    max(half_sum_m, 1.0e-12)
+  );
+  // Bound the numerical contact shell to eight binary32 roundoff steps at the
+  // local cell scale, with a hard 1e-4 support-relative cap. The response
+  // overlap remains max(..., 0), so this only retains a closing velocity
+  // constraint and never pulls a separated pair together.
+  return min(
+    8.0 * 1.1920929e-7 * geometric_scale_m,
+    1.0e-4 * half_sum_m
+  );
+}
+
+fn mechanical_solver_swept_aabb_axis_interval(
+  start_m: f32,
+  sweep_m: f32,
+  half_sum_m: f32
+) -> vec3<f32> {
+  if (abs(sweep_m) <= 1.0e-12) {
+    if (abs(start_m) > half_sum_m) { return vec3<f32>(0.0); }
+    return vec3<f32>(-3.402823e+38, 3.402823e+38, 1.0);
+  }
+  let first_t = (-half_sum_m - start_m) / sweep_m;
+  let second_t = (half_sum_m - start_m) / sweep_m;
+  return vec3<f32>(
+    min(first_t, second_t),
+    max(first_t, second_t),
+    1.0
+  );
+}
+
+fn mechanical_solver_finite_volume_contact(
+  self_index: u32,
+  other_index: u32,
+  delta_m: vec3<f32>,
+  epoch_delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32
+) -> MechanicalFiniteVolumeContact {
+  let rejected = MechanicalFiniteVolumeContact(
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0.0,
+    0.0,
+    0.0,
+    0u,
+    0u
+  );
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let normal_roundoff_tolerance_m =
+    mechanical_solver_aabb_normal_roundoff_tolerance_m(
+      delta_m,
+      self_edge_m,
+      other_edge_m
+    );
+  let current_face = mechanical_solver_aabb_face(
+    delta_m,
+    self_edge_m,
+    other_edge_m,
+    normal_roundoff_tolerance_m
+  );
+  let sweep_delta_m = delta_m - epoch_delta_m;
+  var swept_admitted = false;
+  var impact_t = 0.0;
+  var impact_delta_m = vec3<f32>(0.0);
+  var impact_normal_axis = 0u;
+  if (length(sweep_delta_m) > 1.0e-12) {
+    let interval_x = mechanical_solver_swept_aabb_axis_interval(
+      epoch_delta_m.x,
+      sweep_delta_m.x,
+      half_sum_m
+    );
+    let interval_y = mechanical_solver_swept_aabb_axis_interval(
+      epoch_delta_m.y,
+      sweep_delta_m.y,
+      half_sum_m
+    );
+    let interval_z = mechanical_solver_swept_aabb_axis_interval(
+      epoch_delta_m.z,
+      sweep_delta_m.z,
+      half_sum_m
+    );
+    if (interval_x.z != 0.0 && interval_y.z != 0.0 && interval_z.z != 0.0) {
+      let entry_t = max(interval_x.x, max(interval_y.x, interval_z.x));
+      let exit_t = min(interval_x.y, min(interval_y.y, interval_z.y));
+      if (entry_t <= exit_t && exit_t >= 0.0 && entry_t <= 1.0) {
+        impact_t = clamp(entry_t, 0.0, 1.0);
+        impact_delta_m = epoch_delta_m + impact_t * sweep_delta_m;
+        let impact_face = mechanical_solver_aabb_face(
+          impact_delta_m,
+          self_edge_m,
+          other_edge_m,
+          mechanical_solver_aabb_normal_roundoff_tolerance_m(
+            impact_delta_m,
+            self_edge_m,
+            other_edge_m
+          )
+        );
+        impact_normal_axis = impact_face.x;
+        swept_admitted = impact_face.y != 0u;
+      }
+    }
+  }
+  let cohort_inverted = dot(epoch_delta_m, delta_m) <= 0.0;
+  var source_delta_m = vec3<f32>(0.0);
+  var source_normal_axis = 0u;
+  var admitted = false;
+  if (
+    swept_admitted
+    && (
+      current_face.y == 0u
+      || cohort_inverted
+      || max(
+        abs(epoch_delta_m.x),
+        max(abs(epoch_delta_m.y), abs(epoch_delta_m.z))
+      ) >= half_sum_m
+    )
+  ) {
+    source_delta_m = impact_delta_m;
+    source_normal_axis = impact_normal_axis;
+    admitted = true;
+  } else if (current_face.y != 0u) {
+    source_delta_m = delta_m;
+    source_normal_axis = current_face.x;
+    admitted = true;
+  }
+  // A center-vector inversion can occur while one tangential slab stays
+  // disjoint. Require an actual current or swept finite-area face.
+  if (!admitted) { return rejected; }
+  let coincidence_normal = mechanical_solver_coincidence_normal(
+    self_index,
+    other_index
+  );
+  let source_normal_component = select(
+    source_delta_m.x,
+    select(source_delta_m.y, source_delta_m.z, source_normal_axis == 2u),
+    source_normal_axis != 0u
+  );
+  let coincidence_normal_component = select(
+    coincidence_normal.x,
+    select(
+      coincidence_normal.y,
+      coincidence_normal.z,
+      source_normal_axis == 2u
+    ),
+    source_normal_axis != 0u
+  );
+  let normal_sign = select(
+    select(-1.0, 1.0, coincidence_normal_component >= 0.0),
+    select(-1.0, 1.0, source_normal_component >= 0.0),
+    abs(source_normal_component) > 1.0e-12
+  );
+  var normal = vec3<f32>(0.0);
+  if (source_normal_axis == 0u) {
+    normal.x = normal_sign;
+  } else if (source_normal_axis == 1u) {
+    normal.y = normal_sign;
+  } else {
+    normal.z = normal_sign;
+  }
+  // This finite-volume law has no rotational cell degree of freedom. Apply
+  // only the admitted face-normal response so an off-axis sweep cannot create
+  // equal-and-opposite artificial tangential material momentum.
+  let response_normal = normal;
+  let response_projection = 1.0;
+  let support_distance_m = half_sum_m;
+  let overlap_m = max(
+    support_distance_m - dot(delta_m, normal),
+    0.0
+  );
+  if (
+    !mechanical_solver_finite3(normal)
+    || !mechanical_solver_finite3(response_normal)
+    || !mechanical_solver_finite(response_projection)
+    || response_projection <= 0.0
+    || !mechanical_solver_finite(support_distance_m)
+    || !mechanical_solver_finite(overlap_m)
+  ) { return rejected; }
+  return MechanicalFiniteVolumeContact(
+    normal,
+    response_normal,
+    response_projection,
+    support_distance_m,
+    overlap_m,
+    select(0u, 1u, swept_admitted),
+    1u
+  );
+}
+
 fn mechanical_solver_pair_response(
   self_index: u32,
   other_index: u32,
   self_mass: f32,
   other_mass: f32,
   overlap: f32,
-  normal: vec3<f32>,
+  constraint_normal: vec3<f32>,
+  response_normal: vec3<f32>,
+  response_projection: f32,
   unilateral: bool,
   include_soft: bool
 ) -> MechanicalPairResidual {
@@ -4186,7 +6344,50 @@ fn mechanical_solver_pair_response(
     / (self_inverse_mass + other_inverse_mass);
   let self_velocity = input_state[self_index * 2u + 1u].xyz;
   let other_velocity = input_state[other_index * 2u + 1u].xyz;
-  let approach = dot(self_velocity - other_velocity, normal);
+  let approach = dot(
+    self_velocity - other_velocity,
+    constraint_normal
+  );
+  var relative_dv = vec3<f32>(0.0);
+  if (unilateral && approach < 0.0) {
+    let proposed_relative_dv = -approach
+      / max(response_projection, 1.0e-6)
+      * response_normal;
+    let central_linear_work_speed_squared = dot(
+      self_velocity - other_velocity,
+      proposed_relative_dv
+    );
+    let kinetic_delta_speed_squared =
+      2.0 * central_linear_work_speed_squared
+        + dot(proposed_relative_dv, proposed_relative_dv);
+    let kinetic_tolerance_speed_squared =
+      64.0 * 1.1920929e-7 * max(
+        dot(
+          self_velocity - other_velocity,
+          self_velocity - other_velocity
+        ),
+        1.0
+      );
+    if (
+      central_linear_work_speed_squared > 0.0
+      || kinetic_delta_speed_squared > kinetic_tolerance_speed_squared
+    ) {
+      let radial_approach = dot(
+        self_velocity - other_velocity,
+        response_normal
+      );
+      let radial_dv = max(-radial_approach, 0.0) * response_normal;
+      let velocity_after_radial =
+        self_velocity - other_velocity + radial_dv;
+      let face_dv = max(
+        -dot(velocity_after_radial, constraint_normal),
+        0.0
+      ) * constraint_normal;
+      relative_dv = radial_dv + face_dv;
+    } else {
+      relative_dv = proposed_relative_dv;
+    }
+  }
   var result = mechanical_solver_zero_pair(1u);
   result.active_pair = 1u;
   result.unilateral = select(0u, 1u, unilateral);
@@ -4197,22 +6398,40 @@ fn mechanical_solver_pair_response(
     unilateral
   );
   if (unilateral) {
-    result.barrier_dx = inverse_mass_share * overlap * normal;
-    if (approach < 0.0) {
-      result.barrier_dv = -inverse_mass_share * approach * normal;
-      result.velocity_normal = normal;
+    result.barrier_dx = inverse_mass_share
+      * overlap
+      / max(response_projection, 1.0e-6)
+      * response_normal;
+    if (length(relative_dv) > 1.0e-12) {
+      result.barrier_dv = inverse_mass_share * relative_dv;
+      // The oblique response p f^T / dot(p,f) is an idempotent projection:
+      // its eigenvalues remain 0/1 even when its singular value exceeds one.
+      // Retain p in the Gershgorin basis so an isolated edge receives its
+      // exact one-pass projection; the coupled trust scale and explicit
+      // kinetic-energy guard remain authoritative for contact networks.
+      let relative_dv_length = length(relative_dv);
+      result.velocity_normal = select(
+        constraint_normal,
+        relative_dv / max(relative_dv_length, 1.0e-30),
+        relative_dv_length > 1.0e-12
+      );
     }
   } else if (include_soft) {
     result.soft_dx = mechanical_params.relaxation
-      * inverse_mass_share * overlap * normal;
+      * inverse_mass_share * overlap * constraint_normal;
     if (approach < 0.0) {
       result.soft_dv = -mechanical_params.normal_velocity_damping
-        * inverse_mass_share * approach * normal;
-      result.velocity_normal = normal;
+        * inverse_mass_share * approach * constraint_normal;
+      result.velocity_normal = constraint_normal;
     }
   }
   if (
-    !mechanical_solver_finite3(result.barrier_dx)
+    !mechanical_solver_finite3(constraint_normal)
+    || !mechanical_solver_finite3(response_normal)
+    || !mechanical_solver_finite(response_projection)
+    || !mechanical_solver_finite3(relative_dv)
+    || response_projection <= 0.0
+    || !mechanical_solver_finite3(result.barrier_dx)
     || !mechanical_solver_finite3(result.barrier_dv)
     || !mechanical_solver_finite3(result.soft_dx)
     || !mechanical_solver_finite3(result.soft_dv)
@@ -4300,87 +6519,114 @@ fn mechanical_solver_pair(
       other_pos_mass.w,
       overlap,
       soft_normal,
+      soft_normal,
+      1.0,
       false,
       include_soft
     );
   }
   let epoch_delta = mechanical_solver_epoch_position(self_index)
     - mechanical_solver_epoch_position(other_index);
-  let sweep_delta = delta - epoch_delta;
-  let sweep_length_sq = dot(sweep_delta, sweep_delta);
-  let closest_t = select(
-    0.0,
-    clamp(
-      -dot(epoch_delta, sweep_delta) / max(sweep_length_sq, 1.0e-30),
-      0.0,
-      1.0
-    ),
-    sweep_length_sq > 1.0e-18
+  let finite_volume_contact = mechanical_solver_finite_volume_contact(
+    self_index,
+    other_index,
+    delta,
+    epoch_delta,
+    self_diameter,
+    other_diameter
   );
-  let closest_delta = epoch_delta + closest_t * sweep_delta;
-  let swept_distance = length(closest_delta);
-  let swept_contact = unilateral && swept_distance < rest_distance;
-  if (overlap <= 0.0 && !swept_contact) {
+  if (finite_volume_contact.admitted == 0u) {
     return mechanical_solver_zero_pair(1u);
-  }
-  var swept_impact_t = -1.0;
-  var swept_impact_normal = vec3<f32>(0.0);
-  if (swept_contact && sweep_length_sq > 1.0e-18) {
-    let sweep_b = dot(epoch_delta, sweep_delta);
-    let sweep_c = dot(epoch_delta, epoch_delta)
-      - rest_distance * rest_distance;
-    let sweep_discriminant = sweep_b * sweep_b - sweep_length_sq * sweep_c;
-    if (
-      sweep_c >= -1.0e-6 * max(rest_distance * rest_distance, 1.0)
-      && sweep_discriminant >= 0.0
-    ) {
-      let entry_denominator = -sweep_b + sqrt(max(sweep_discriminant, 0.0));
-      let candidate_t = select(
-        -1.0,
-        sweep_c / max(entry_denominator, 1.0e-30),
-        entry_denominator > 1.0e-18
-      );
-      if (
-        mechanical_solver_finite(candidate_t)
-        && candidate_t >= -1.0e-6
-        && candidate_t <= 1.000001
-      ) {
-        let impact_t = clamp(candidate_t, 0.0, 1.0);
-        let impact_delta = epoch_delta + impact_t * sweep_delta;
-        let impact_distance = length(impact_delta);
-        if (impact_distance > 1.0e-9) {
-          swept_impact_t = impact_t;
-          swept_impact_normal = impact_delta / impact_distance;
-        }
-      }
-    }
-  }
-  var normal = vec3<f32>(0.0, 1.0, 0.0);
-  let cohort_inverted = swept_contact && dot(epoch_delta, delta) <= 0.0;
-  if (swept_impact_t >= 0.0) {
-    normal = swept_impact_normal;
-    overlap = max(rest_distance - dot(delta, normal), 0.0);
-  } else if (cohort_inverted && length(epoch_delta) > 1.0e-9) {
-    normal = epoch_delta / length(epoch_delta);
-    overlap = max(rest_distance - dot(delta, normal), 0.0);
-  } else if (distance_m > 1.0e-9) {
-    normal = delta / distance_m;
-  } else if (swept_distance > 1.0e-9) {
-    normal = closest_delta / swept_distance;
-  } else {
-    normal = mechanical_solver_coincidence_normal(self_index, other_index);
-    distance_m = 0.0;
   }
   return mechanical_solver_pair_response(
     self_index,
     other_index,
     self_pos_mass.w,
     other_pos_mass.w,
-    overlap,
-    normal,
+    finite_volume_contact.overlap_m,
+    finite_volume_contact.normal,
+    finite_volume_contact.response_normal,
+    finite_volume_contact.response_projection,
     true,
     include_soft
   );
+}
+
+fn mechanical_measure_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 19u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount4}u
+      + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount8}u
+    + (iteration - 8u);
+}
+
+fn mechanical_solve_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 23u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount4}u
+      + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount8}u
+    + (iteration - 8u);
+}
+
+fn mechanical_energy_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 32u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .energyMeasureCount4}u + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+    .energyMeasureCount8}u + (iteration - 8u);
+}
+
+fn mechanical_pre_solve_position_residual_word(iteration: u32) -> u32 {
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+    .preSolveMaxPositionResidualOrderedF32_0}u + iteration;
+}
+
+fn mechanical_pre_solve_position_violation_ratio_word(iteration: u32) -> u32 {
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+    .preSolveMaxPositionViolationRatioOrderedF32_0}u + iteration;
+}
+
+fn mechanical_pre_solve_velocity_residual_word(iteration: u32) -> u32 {
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+    .preSolveMaxVelocityResidualOrderedF32_0}u + iteration;
+}
+
+fn mechanical_iteration_stage_bit(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 1u << (6u + iteration); }
+  if (iteration < 8u) { return 1u << (18u + iteration - 4u); }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATIONS_8_15}u;
+}
+
+fn mechanical_energy_iteration_stage_bit(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 1u << (13u + iteration); }
+  if (iteration < 8u) { return 1u << (22u + iteration - 4u); }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE
+    .ENERGY_ITERATIONS_8_15}u;
+}
+
+fn mechanical_solver_wall_projection_bound(self_index: u32) -> f32 {
+  let position = input_state[self_index * 2u].xyz;
+  let volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
+  var clearance = 0.5 * mechanical_solver_cbrt(volume);
+  if (mechanical_params.grid_spacing_m > 0.0) {
+    clearance = min(clearance, 0.5 * mechanical_params.grid_spacing_m);
+  }
+  let min_dimension = min(
+    mechanical_params.box_dims_m.x,
+    min(mechanical_params.box_dims_m.y, mechanical_params.box_dims_m.z)
+  );
+  if (min_dimension > 0.0) {
+    clearance = min(clearance, 0.49 * min_dimension);
+  }
+  let lower = vec3<f32>(clearance);
+  let upper = max(lower, mechanical_params.box_dims_m - lower);
+  return length(clamp(position, lower, upper) - position);
 }
 
 fn mechanical_measure_iteration(
@@ -4390,12 +6636,14 @@ fn mechanical_measure_iteration(
 ) {
   if (self_index >= mechanical_params.particle_count) { return; }
   if (!mechanical_solver_full_path_enabled()) { return; }
-  let previous_energy_ready = atomicLoad(
-    &graph_control[31u + iteration]
-  ) == mechanical_params.particle_count
+  let previous_iteration = select(0u, iteration - 1u, iteration > 0u);
+  let previous_energy_ready = iteration > 0u
+    && atomicLoad(
+      &graph_control[mechanical_energy_count_word(previous_iteration)]
+    ) == mechanical_params.particle_count
     && (
       atomicLoad(&graph_control[15u])
-        & (1u << (12u + iteration))
+        & mechanical_energy_iteration_stage_bit(previous_iteration)
     ) != 0u;
   let prior_ready = select(
     atomicLoad(&graph_control[16u]) == mechanical_params.particle_count
@@ -4415,7 +6663,10 @@ fn mechanical_measure_iteration(
   }
   if (!mechanical_solver_selected(self_index)) {
     particle_scales[self_index] = vec4<f32>(1.0);
-    atomicAdd(&graph_control[19u + iteration], 1u);
+    atomicAdd(
+      &graph_control[mechanical_measure_count_word(iteration)],
+      1u
+    );
     if (self_index == 0u) { atomicAdd(&traversal_evidence[28u], 1u); }
     return;
   }
@@ -4439,6 +6690,10 @@ fn mechanical_measure_iteration(
   var velocity_tensor_11 = 0.0;
   var velocity_tensor_12 = 0.0;
   var velocity_tensor_22 = 0.0;
+  var max_position_residual_m = 0.0;
+  var max_position_violation_ratio = 0.0;
+  var max_velocity_residual_m_per_s = 0.0;
+  let self_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
   for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
     let other_index = mechanical_solver_peer_index(csr_peers[cursor]);
     let pair = mechanical_solver_pair(
@@ -4458,6 +6713,33 @@ fn mechanical_measure_iteration(
       pair.active_pair != 0u
     );
     if (pair.active_pair == 0u) { continue; }
+    if (pair.unilateral == 1u) {
+      let other_volume = max(
+        source_mechanics[other_index * 8u + 4u].w,
+        0.0
+      );
+      let rest_distance_m = 0.5 * (
+        mechanical_solver_cbrt(self_volume)
+          + mechanical_solver_cbrt(other_volume)
+      );
+      let position_tolerance_m = max(
+        1.0e-5,
+        ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION}
+          * rest_distance_m
+      );
+      max_position_residual_m = max(
+        max_position_residual_m,
+        pair.position_residual
+      );
+      max_position_violation_ratio = max(
+        max_position_violation_ratio,
+        pair.position_residual / position_tolerance_m
+      );
+      max_velocity_residual_m_per_s = max(
+        max_velocity_residual_m_per_s,
+        pair.velocity_residual
+      );
+    }
     barrier_dx_triangle_sum_m = barrier_dx_triangle_sum_m
       + length(pair.barrier_dx);
     soft_dx_triangle_sum_m = soft_dx_triangle_sum_m
@@ -4490,21 +6772,30 @@ fn mechanical_measure_iteration(
         + inverse_mass_share * direction.z * direction.z;
     }
   }
-  let self_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
   let self_diameter_m = mechanical_solver_cbrt(self_volume);
   let initial_displacement_m = length(
     input_state[self_index * 2u].xyz
       - mechanical_solver_epoch_position(self_index)
   );
+  let current_wall_projection_m =
+    mechanical_solver_wall_projection_bound(self_index);
   let position_trust_capacity_m = select(
-    self_diameter_m + initial_displacement_m,
+    ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS}.0
+      * self_diameter_m
+      + 2.0 * initial_displacement_m
+      + current_wall_projection_m,
     particle_scales[self_index].z,
     iteration > 0u
   );
-  let remaining_position_trust_m = select(
-    position_trust_capacity_m,
-    particle_scales[self_index].w,
-    iteration > 0u
+  // The graph retains every peer reachable inside this epoch ball. Recompute
+  // radial slack from the current iteration state instead of permanently
+  // debiting oscillatory path length, while reserving this round's complete
+  // orthogonal wall projection.
+  let remaining_position_trust_m = max(
+    0.0,
+    position_trust_capacity_m
+      - initial_displacement_m
+      - current_wall_projection_m
   );
   let position_triangle_sum_m = barrier_dx_triangle_sum_m
     + soft_dx_triangle_sum_m;
@@ -4532,20 +6823,24 @@ fn mechanical_measure_iteration(
     position_triangle_sum_m > 1.0e-12
   );
   // Each reciprocal pair uses min(endpoint scales). The symmetric tensor is
-  // the row's inverse-mass-weighted sum of normal projectors. Its Gershgorin
-  // bound preserves the non-expansive velocity proof for the complete row.
+  // the diagonal block row's inverse-mass-weighted sum of response projectors.
+  // It is positive semidefinite, so its trace is a coordinate-invariant upper
+  // bound on the largest eigenvalue and is exact for one rank-one contact.
+  // Reciprocal pair impulses form a graph Laplacian with equal off-diagonal
+  // neighbour blocks, so the complete block-row bound is twice the diagonal
+  // tensor bound. Omitting that second half admits the equal-mass contact-sheet
+  // mode alpha*lambda=2, whose Jacobi eigenvalue is exactly -1.
   // Do not additionally cap velocity by max-pair / length(row sum): that
   // legacy single-vector trust bound throttles valid multi-contact rows even
   // when the tensor proves their combined reciprocal impulse is stable.
   // Position retains its triangle-sum trust certificate independently.
-  let velocity_operator_bound = max(
-    velocity_tensor_00 + abs(velocity_tensor_01) + abs(velocity_tensor_02),
-    max(
-      velocity_tensor_11 + abs(velocity_tensor_01) + abs(velocity_tensor_12),
-      velocity_tensor_22 + abs(velocity_tensor_02) + abs(velocity_tensor_12)
-    )
+  let velocity_operator_bound =
+    velocity_tensor_00 + velocity_tensor_11 + velocity_tensor_22;
+  let velocity_stability_scale = 1.0 / max(
+    ${SCHROEDER_SPATIAL_MECHANICAL_RECIPROCAL_LAPLACIAN_BOUND_FACTOR}.0
+      * velocity_operator_bound,
+    1.0
   );
-  let velocity_stability_scale = 1.0 / max(velocity_operator_bound, 1.0);
   let scale = vec4<f32>(
     position_trust_scale,
     velocity_stability_scale,
@@ -4554,6 +6849,7 @@ fn mechanical_measure_iteration(
   );
   if (
     !mechanical_solver_finite(initial_displacement_m)
+    || !mechanical_solver_finite(current_wall_projection_m)
     || !mechanical_solver_finite(position_trust_capacity_m)
     || !mechanical_solver_finite(remaining_position_trust_m)
     || !mechanical_solver_finite(position_sum_length_m)
@@ -4573,8 +6869,25 @@ fn mechanical_measure_iteration(
     );
     return;
   }
+  atomicMax(
+    &graph_control[mechanical_pre_solve_position_residual_word(iteration)],
+    bitcast<u32>(max_position_residual_m)
+  );
+  atomicMax(
+    &graph_control[
+      mechanical_pre_solve_position_violation_ratio_word(iteration)
+    ],
+    bitcast<u32>(max_position_violation_ratio)
+  );
+  atomicMax(
+    &graph_control[mechanical_pre_solve_velocity_residual_word(iteration)],
+    bitcast<u32>(max_velocity_residual_m_per_s)
+  );
   particle_scales[self_index] = scale;
-  atomicAdd(&graph_control[19u + iteration], 1u);
+  atomicAdd(
+    &graph_control[mechanical_measure_count_word(iteration)],
+    1u
+  );
   if (self_index == 0u) { atomicAdd(&traversal_evidence[28u], 1u); }
 }
 
@@ -4586,11 +6899,16 @@ fn mechanical_solver_pair_scale(
   let other_scale = particle_scales[other_index];
   let position_scale = min(self_scale.x, other_scale.x);
   let velocity_scale = min(self_scale.y, other_scale.y);
+  // A swept finite-volume projection is conservative only while its central
+  // position rollback and impulse retain the same scalar multiplier. Use the
+  // stricter of the independently proven trust/stability factors for both;
+  // this remains inside each bound and preserves Δr = Δt·Δu.
+  let coupled_scale = min(position_scale, velocity_scale);
   return vec4<f32>(
-    position_scale,
-    velocity_scale,
-    position_scale,
-    velocity_scale
+    coupled_scale,
+    coupled_scale,
+    coupled_scale,
+    coupled_scale
   );
 }
 
@@ -4678,7 +6996,7 @@ fn mechanical_solve_iteration(
   output_state[self_index * 2u] = pos_mass;
   output_state[self_index * 2u + 1u] = vel_u;
   if (
-    atomicLoad(&graph_control[19u + iteration])
+    atomicLoad(&graph_control[mechanical_measure_count_word(iteration)])
       != mechanical_params.particle_count
     || atomicLoad(&graph_control[14u]) != 0u
   ) {
@@ -4689,12 +7007,15 @@ fn mechanical_solve_iteration(
     return;
   }
   if (!mechanical_solver_selected(self_index) || pos_mass.w <= 0.0) {
-    atomicAdd(&graph_control[23u + iteration], 1u);
+    atomicAdd(
+      &graph_control[mechanical_solve_count_word(iteration)],
+      1u
+    );
     if (self_index == 0u) {
       atomicAdd(&traversal_evidence[29u], 1u);
       atomicOr(
         &graph_control[15u],
-        (1u << (6u + iteration))
+        mechanical_iteration_stage_bit(iteration)
       );
     }
     return;
@@ -4795,30 +7116,56 @@ fn mechanical_solve_iteration(
     vec3<f32>(wall_clearance),
     mechanical_params.box_dims_m - vec3<f32>(wall_clearance)
   );
+  let lower = vec3<f32>(wall_clearance);
+  let lower_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(lower.x, upper.x),
+    mechanical_solver_wall_boundary_tolerance_m(lower.y, upper.y),
+    mechanical_solver_wall_boundary_tolerance_m(lower.z, upper.z)
+  );
+  let upper_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(upper.x, lower.x),
+    mechanical_solver_wall_boundary_tolerance_m(upper.y, lower.y),
+    mechanical_solver_wall_boundary_tolerance_m(upper.z, lower.z)
+  );
   if (position.x < wall_clearance) {
     position.x = wall_clearance;
-    if (velocity.x < 0.0) { velocity.x = 0.0; }
-  }
-  if (position.x > upper.x) {
+  } else if (position.x > upper.x) {
     position.x = upper.x;
-    if (velocity.x > 0.0) { velocity.x = 0.0; }
   }
   if (position.y < wall_clearance) {
     position.y = wall_clearance;
-    if (velocity.y < 0.0) { velocity.y = 0.0; }
-  }
-  if (position.y > upper.y) {
+  } else if (position.y > upper.y) {
     position.y = upper.y;
-    if (velocity.y > 0.0) { velocity.y = 0.0; }
   }
   if (position.z < wall_clearance) {
     position.z = wall_clearance;
-    if (velocity.z < 0.0) { velocity.z = 0.0; }
-  }
-  if (position.z > upper.z) {
+  } else if (position.z > upper.z) {
     position.z = upper.z;
-    if (velocity.z > 0.0) { velocity.z = 0.0; }
   }
+  if (
+    position.x <= lower.x + lower_tolerance_m.x
+    && velocity.x < 0.0
+  ) { velocity.x = 0.0; }
+  if (
+    position.x >= upper.x - upper_tolerance_m.x
+    && velocity.x > 0.0
+  ) { velocity.x = 0.0; }
+  if (
+    position.y <= lower.y + lower_tolerance_m.y
+    && velocity.y < 0.0
+  ) { velocity.y = 0.0; }
+  if (
+    position.y >= upper.y - upper_tolerance_m.y
+    && velocity.y > 0.0
+  ) { velocity.y = 0.0; }
+  if (
+    position.z <= lower.z + lower_tolerance_m.z
+    && velocity.z < 0.0
+  ) { velocity.z = 0.0; }
+  if (
+    position.z >= upper.z - upper_tolerance_m.z
+    && velocity.z > 0.0
+  ) { velocity.z = 0.0; }
   if (!mechanical_solver_finite3(position) || !mechanical_solver_finite3(velocity)) {
     atomicOr(
       &graph_control[14u],
@@ -4897,10 +7244,16 @@ fn mechanical_solve_iteration(
   );
   output_state[self_index * 2u] = vec4<f32>(position, pos_mass.w);
   output_state[self_index * 2u + 1u] = vec4<f32>(velocity, vel_u.w);
-  atomicAdd(&graph_control[23u + iteration], 1u);
+  atomicAdd(
+    &graph_control[mechanical_solve_count_word(iteration)],
+    1u
+  );
   if (self_index == 0u) {
     atomicAdd(&traversal_evidence[29u], 1u);
-    atomicOr(&graph_control[15u], (1u << (6u + iteration)));
+    atomicOr(
+      &graph_control[15u],
+      mechanical_iteration_stage_bit(iteration)
+    );
   }
 }
 
@@ -4967,7 +7320,7 @@ fn mechanical_allocate_energy_iteration(
   if (self_index >= mechanical_params.particle_count) { return; }
   if (!mechanical_solver_full_path_enabled()) { return; }
   if (
-    atomicLoad(&graph_control[23u + iteration])
+    atomicLoad(&graph_control[mechanical_solve_count_word(iteration)])
       != mechanical_params.particle_count
     || atomicLoad(&graph_control[14u]) != 0u
   ) {
@@ -5057,6 +7410,10 @@ fn mechanical_allocate_energy_iteration(
   let position_trust_capacity_m = particle_scales[self_index].z;
   let prior_position_trust_m = particle_scales[self_index].w;
   let spent_position_trust_m = length(realized_position_dx_m);
+  let next_epoch_displacement_m = length(
+    output_state[self_index * 2u].xyz
+      - mechanical_solver_epoch_position(self_index)
+  );
   let position_trust_tolerance = max(
     1.0e-6,
     64.0 * 1.1920929e-7 * max(position_trust_capacity_m, 1.0)
@@ -5065,11 +7422,14 @@ fn mechanical_allocate_energy_iteration(
     !mechanical_solver_finite(position_trust_capacity_m)
     || !mechanical_solver_finite(prior_position_trust_m)
     || !mechanical_solver_finite(spent_position_trust_m)
+    || !mechanical_solver_finite(next_epoch_displacement_m)
     || position_trust_capacity_m < 0.0
     || prior_position_trust_m < 0.0
     || prior_position_trust_m > position_trust_capacity_m
     || spent_position_trust_m
       > prior_position_trust_m + position_trust_tolerance
+    || next_epoch_displacement_m
+      > position_trust_capacity_m + position_trust_tolerance
   ) {
     atomicOr(
       &graph_control[14u],
@@ -5079,7 +7439,7 @@ fn mechanical_allocate_energy_iteration(
   }
   let remaining_position_trust_m = max(
     0.0,
-    prior_position_trust_m - spent_position_trust_m
+    position_trust_capacity_m - next_epoch_displacement_m
   );
   let pair_delta_k_j = budget.y - linear_loss_share_j;
   let wall_heat_j = budget.w;
@@ -5124,20 +7484,21 @@ fn mechanical_allocate_energy_iteration(
     cumulative.w
   );
   energy_ledger[energy_base + 1u] = cumulative;
-  // Lanes z/w are not read by reciprocal pair scaling. Carry the trust
-  // certificate to the next measure, then restore the public four-scale row
-  // after the final round.
-  if (iteration + 1u < mechanical_params.solver_iteration_count) {
-    particle_scales[self_index].z = position_trust_capacity_m;
-    particle_scales[self_index].w = remaining_position_trust_m;
-  } else {
-    particle_scales[self_index].z = particle_scales[self_index].x;
-    particle_scales[self_index].w = particle_scales[self_index].y;
-  }
-  atomicAdd(&graph_control[32u + iteration], 1u);
+  // Lanes z/w carry the epoch-ball certificate through the deterministic
+  // conflict-free cleanup that follows the Jacobi warm start. A dedicated
+  // terminal pass restores the public four-scale row before verification.
+  particle_scales[self_index].z = position_trust_capacity_m;
+  particle_scales[self_index].w = remaining_position_trust_m;
+  atomicAdd(
+    &graph_control[mechanical_energy_count_word(iteration)],
+    1u
+  );
   if (self_index == 0u) {
     atomicAdd(&traversal_evidence[32u], 1u);
-    atomicOr(&graph_control[15u], (1u << (13u + iteration)));
+    atomicOr(
+      &graph_control[15u],
+      mechanical_energy_iteration_stage_bit(iteration)
+    );
   }
 }
 
@@ -5157,12 +7518,31 @@ fn verify_contact_energy(
     iteration < mechanical_params.solver_iteration_count;
     iteration = iteration + 1u) {
     energy_stages_ready = energy_stages_ready
-      && atomicLoad(&graph_control[32u + iteration])
+      && atomicLoad(&graph_control[mechanical_energy_count_word(iteration)])
         == mechanical_params.particle_count
       && (
-        atomicLoad(&graph_control[15u]) & (1u << (13u + iteration))
+        atomicLoad(&graph_control[15u])
+          & mechanical_energy_iteration_stage_bit(iteration)
       ) != 0u;
   }
+  energy_stages_ready = energy_stages_ready
+    && atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupPassCount}u]
+    ) == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    && atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupTrustRestoreCount}u]
+    ) == mechanical_params.particle_count
+    && (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_CLEANUP}u
+    ) != 0u
+    && (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE
+          .MATCHING_TRUST_RESTORED}u
+    ) != 0u;
   let prior_failure = atomicLoad(&graph_control[14u]) != 0u;
   let energy_admitted = full_solver_path && energy_stages_ready && !prior_failure;
   var totals = vec4<f32>(0.0);
@@ -5303,72 +7683,7675 @@ fn verify_contact_energy(
   );
 }
 
-@compute @workgroup_size(64)
-fn measure_iteration_0(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_measure_iteration(global_id.x, 0u, true);
+fn mechanical_runtime_iteration_valid(iteration: u32) -> bool {
+  return iteration < mechanical_params.solver_iteration_count
+    && iteration < ${SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS}u;
 }
 
 @compute @workgroup_size(64)
-fn solve_iteration_0(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_solve_iteration(global_id.x, 0u, true);
-}
-
-@compute @workgroup_size(64)
-fn allocate_energy_iteration_0(
+fn measure_runtime_iteration(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-  mechanical_allocate_energy_iteration(global_id.x, 0u, true);
+  let iteration = mechanical_solver_iteration.iteration;
+  if (!mechanical_runtime_iteration_valid(iteration)) {
+    if (global_id.x == 0u) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+      );
+    }
+    return;
+  }
+  mechanical_measure_iteration(global_id.x, iteration, iteration == 0u);
 }
 
 @compute @workgroup_size(64)
-fn measure_iteration_1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_measure_iteration(global_id.x, 1u, false);
-}
-
-@compute @workgroup_size(64)
-fn solve_iteration_1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_solve_iteration(global_id.x, 1u, false);
-}
-
-@compute @workgroup_size(64)
-fn allocate_energy_iteration_1(
+fn solve_runtime_iteration(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-  mechanical_allocate_energy_iteration(global_id.x, 1u, false);
+  let iteration = mechanical_solver_iteration.iteration;
+  if (!mechanical_runtime_iteration_valid(iteration)) {
+    if (global_id.x == 0u) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+      );
+    }
+    return;
+  }
+  mechanical_solve_iteration(global_id.x, iteration, iteration == 0u);
 }
 
 @compute @workgroup_size(64)
-fn measure_iteration_2(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_measure_iteration(global_id.x, 2u, false);
-}
-
-@compute @workgroup_size(64)
-fn solve_iteration_2(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_solve_iteration(global_id.x, 2u, false);
-}
-
-@compute @workgroup_size(64)
-fn allocate_energy_iteration_2(
+fn allocate_energy_runtime_iteration(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-  mechanical_allocate_energy_iteration(global_id.x, 2u, false);
+  let iteration = mechanical_solver_iteration.iteration;
+  if (!mechanical_runtime_iteration_valid(iteration)) {
+    if (global_id.x == 0u) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+      );
+    }
+    return;
+  }
+  mechanical_allocate_energy_iteration(
+    global_id.x,
+    iteration,
+    iteration == 0u
+  );
+}
+
+fn mechanical_matching_cleanup_header_valid() -> bool {
+  return arrayLength(&traversal_evidence)
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS}u
+    && atomicLoad(&traversal_evidence[0u])
+      == ${MATCHING_CLEANUP_CONTROL_MAGIC}u
+    && atomicLoad(&traversal_evidence[1u])
+      == ${MATCHING_CLEANUP_CONTROL_VERSION}u
+    && atomicLoad(&traversal_evidence[2u])
+      == mechanical_params.generation_id
+    && atomicLoad(&traversal_evidence[3u])
+      == mechanical_params.storage_generation
+    && atomicLoad(&traversal_evidence[4u])
+      == mechanical_params.physics_tick
+    && atomicLoad(&traversal_evidence[5u])
+      == mechanical_params.physics_substep
+    && atomicLoad(&traversal_evidence[6u])
+      == mechanical_params.position_epoch
+    && atomicLoad(&traversal_evidence[7u])
+      == mechanical_params.topology_epoch
+    && atomicLoad(&traversal_evidence[8u])
+      == mechanical_params.support_epoch
+    && atomicLoad(&traversal_evidence[9u])
+      == mechanical_params.particle_count
+    && atomicLoad(&traversal_evidence[10u])
+      == mechanical_params.solver_iteration_count
+    && atomicLoad(&traversal_evidence[11u])
+      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+}
+
+fn mechanical_matching_selection_count_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_SELECTION_COUNT_WORD}u + pass_index;
+}
+
+fn mechanical_matching_copy_count_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_COPY_COUNT_WORD}u + pass_index;
+}
+
+fn mechanical_matching_apply_count_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_APPLY_COUNT_WORD}u + pass_index;
+}
+
+fn mechanical_matching_wall_count_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_WALL_COUNT_WORD}u + pass_index;
+}
+
+fn mechanical_matching_applied_pair_count_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD}u + pass_index;
+}
+
+fn mechanical_matching_max_position_ratio_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD}u + pass_index;
+}
+
+fn mechanical_matching_max_velocity_residual_word(pass_index: u32) -> u32 {
+  return ${MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD}u + pass_index;
+}
+
+fn mechanical_matching_jacobi_ready() -> bool {
+  let final_iteration = mechanical_params.solver_iteration_count - 1u;
+  return mechanical_solver_full_path_enabled()
+    && atomicLoad(&graph_control[14u]) == 0u
+    && atomicLoad(
+      &graph_control[mechanical_energy_count_word(final_iteration)]
+    ) == mechanical_params.particle_count
+    && (
+      atomicLoad(&graph_control[15u])
+        & mechanical_energy_iteration_stage_bit(final_iteration)
+    ) != 0u;
+}
+
+fn mechanical_matching_jacobi_residual_converged() -> bool {
+  let final_iteration = mechanical_params.solver_iteration_count - 1u;
+  let position_ratio = bitcast<f32>(atomicLoad(
+    &graph_control[
+      mechanical_pre_solve_position_violation_ratio_word(final_iteration)
+    ]
+  ));
+  let velocity_residual_m_per_s = bitcast<f32>(atomicLoad(
+    &graph_control[
+      mechanical_pre_solve_velocity_residual_word(final_iteration)
+    ]
+  ));
+  return mechanical_solver_finite(position_ratio)
+    && mechanical_solver_finite(velocity_residual_m_per_s)
+    && position_ratio <= 1.0
+    && velocity_residual_m_per_s <= ${
+      SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+        .toExponential(1)
+    };
+}
+
+fn mechanical_matching_current_pass() -> u32 {
+  return atomicLoad(
+    &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .matchingCleanupPassCount}u]
+  );
+}
+
+fn mechanical_matching_prior_applied_pair_count(pass_index: u32) -> u32 {
+  if (pass_index == 0u) { return 0u; }
+  return atomicLoad(
+    &traversal_evidence[
+      mechanical_matching_applied_pair_count_word(pass_index - 1u)
+    ]
+  );
+}
+
+fn mechanical_matching_position_tolerance(
+  low_index: u32,
+  high_index: u32
+) -> f32 {
+  let low_volume = max(source_mechanics[low_index * 8u + 4u].w, 0.0);
+  let high_volume = max(source_mechanics[high_index * 8u + 4u].w, 0.0);
+  let rest_distance_m = 0.5 * (
+    mechanical_solver_cbrt(low_volume)
+      + mechanical_solver_cbrt(high_volume)
+  );
+  return max(
+    1.0e-5,
+    ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION}
+      * rest_distance_m
+  );
+}
+
+fn mechanical_matching_edge_rank(low_index: u32, high_index: u32) -> u32 {
+  var rank = (low_index * 2654435761u)
+    ^ (high_index * 2246822519u)
+    ^ 0x9e3779b9u;
+  rank = (rank ^ (rank >> 16u)) * 2246822519u;
+  rank = (rank ^ (rank >> 13u)) * 3266489917u;
+  return rank ^ (rank >> 16u);
+}
+
+fn mechanical_matching_constraint_code(normal: vec3<f32>) -> f32 {
+  var axis = 0u;
+  if (abs(normal.y) > abs(normal.x)) { axis = 1u; }
+  if (
+    abs(normal.z)
+      > select(abs(normal.x), abs(normal.y), axis == 1u)
+  ) { axis = 2u; }
+  let component = select(
+    normal.x,
+    select(normal.y, normal.z, axis == 2u),
+    axis != 0u
+  );
+  let sign_code = select(0u, 1u, component >= 0.0);
+  return f32(1u + 2u * axis + sign_code);
+}
+
+fn mechanical_matching_constraint_code_valid(constraint: vec4<f32>) -> bool {
+  let code = abs(constraint.w);
+  return mechanical_solver_finite(code)
+    && code >= 1.0
+    && code <= 6.0
+    && code == floor(code);
+}
+
+fn mechanical_matching_constraint_normal(
+  constraint: vec4<f32>
+) -> vec3<f32> {
+  let encoded = u32(abs(constraint.w)) - 1u;
+  let axis = encoded / 2u;
+  let sign = select(-1.0, 1.0, (encoded & 1u) != 0u);
+  var normal = vec3<f32>(0.0);
+  if (axis == 0u) {
+    normal.x = sign;
+  } else if (axis == 1u) {
+    normal.y = sign;
+  } else {
+    normal.z = sign;
+  }
+  return normal;
+}
+
+fn mechanical_matching_constraint_face_active(
+  current_delta: vec3<f32>,
+  low_edge_m: f32,
+  high_edge_m: f32,
+  constraint_normal: vec3<f32>
+) -> bool {
+  let half_sum_m = 0.5 * (low_edge_m + high_edge_m);
+  var normal_axis = 0u;
+  if (abs(constraint_normal.y) > abs(constraint_normal.x)) {
+    normal_axis = 1u;
+  }
+  if (
+    abs(constraint_normal.z)
+      > select(
+        abs(constraint_normal.x),
+        abs(constraint_normal.y),
+        normal_axis == 1u
+      )
+  ) {
+    normal_axis = 2u;
+  }
+  var tangent_a_m = current_delta.y;
+  var tangent_b_m = current_delta.z;
+  if (normal_axis == 1u) {
+    tangent_a_m = current_delta.x;
+    tangent_b_m = current_delta.z;
+  } else if (normal_axis == 2u) {
+    tangent_a_m = current_delta.x;
+    tangent_b_m = current_delta.y;
+  }
+  let tangent_zero_tolerance_m =
+    mechanical_solver_aabb_tangent_zero_tolerance_m(
+      current_delta,
+      low_edge_m,
+      high_edge_m
+    );
+  return dot(current_delta, constraint_normal)
+      <= half_sum_m
+        + mechanical_solver_aabb_normal_roundoff_tolerance_m(
+          current_delta,
+          low_edge_m,
+          high_edge_m
+        )
+    && half_sum_m - abs(tangent_a_m) > tangent_zero_tolerance_m
+    && half_sum_m - abs(tangent_b_m) > tangent_zero_tolerance_m;
+}
+
+fn mechanical_matching_positive_constraint_swept_active(
+  low_index: u32,
+  high_index: u32,
+  current_delta: vec3<f32>,
+  low_edge_m: f32,
+  high_edge_m: f32,
+  constraint_normal: vec3<f32>
+) -> bool {
+  let epoch_delta = mechanical_solver_epoch_position(low_index)
+    - mechanical_solver_epoch_position(high_index);
+  let swept_contact = mechanical_solver_finite_volume_contact(
+    low_index,
+    high_index,
+    current_delta,
+    epoch_delta,
+    low_edge_m,
+    high_edge_m
+  );
+  return swept_contact.admitted != 0u
+    && swept_contact.swept_contact != 0u
+    && dot(swept_contact.normal, constraint_normal) > 1.0 - 1.0e-6;
+}
+
+fn mechanical_matching_separating_normal(
+  low_index: u32,
+  high_index: u32,
+  current_delta: vec3<f32>
+) -> vec3<f32> {
+  let coincidence_normal = mechanical_solver_coincidence_normal(
+    low_index,
+    high_index
+  );
+  let source = select(
+    coincidence_normal,
+    current_delta,
+    length(current_delta) > 1.0e-12
+  );
+  var axis = 0u;
+  if (abs(source.y) > abs(source.x)) { axis = 1u; }
+  if (
+    abs(source.z)
+      > select(abs(source.x), abs(source.y), axis == 1u)
+  ) { axis = 2u; }
+  let component = select(
+    source.x,
+    select(source.y, source.z, axis == 2u),
+    axis != 0u
+  );
+  let sign = select(-1.0, 1.0, component >= 0.0);
+  var normal = vec3<f32>(0.0);
+  if (axis == 0u) {
+    normal.x = sign;
+  } else if (axis == 1u) {
+    normal.y = sign;
+  } else {
+    normal.z = sign;
+  }
+  return normal;
+}
+
+fn mechanical_matching_constraint_pair(
+  low_index: u32,
+  high_index: u32,
+  constraint_cursor: u32
+) -> MechanicalPairResidual {
+  let constraint = matching_constraints[constraint_cursor];
+  if (all(constraint == vec4<f32>(0.0))) {
+    return mechanical_solver_zero_pair(1u);
+  }
+  let low_pos_mass = input_state[low_index * 2u];
+  let high_pos_mass = input_state[high_index * 2u];
+  let low_volume = max(source_mechanics[low_index * 8u + 4u].w, 0.0);
+  let high_volume = max(source_mechanics[high_index * 8u + 4u].w, 0.0);
+  if (
+    low_pos_mass.w <= 0.0
+    || high_pos_mass.w <= 0.0
+    || low_volume <= 0.0
+    || high_volume <= 0.0
+    || !mechanical_solver_finite3(constraint.xyz)
+    || !mechanical_matching_constraint_code_valid(constraint)
+  ) {
+    return mechanical_solver_zero_pair(0u);
+  }
+  let constraint_normal = mechanical_matching_constraint_normal(constraint);
+  let response_normal = constraint.xyz;
+  let response_projection = dot(response_normal, constraint_normal);
+  let response_normal_length = length(response_normal);
+  let current_delta = low_pos_mass.xyz - high_pos_mass.xyz;
+  let low_edge_m = mechanical_solver_cbrt(low_volume);
+  let high_edge_m = mechanical_solver_cbrt(high_volume);
+  let support_distance_m = 0.5 * (low_edge_m + high_edge_m);
+  let overlap_m = max(
+    support_distance_m - dot(current_delta, constraint_normal),
+    0.0
+  );
+  if (
+    !mechanical_solver_finite3(constraint_normal)
+    || !mechanical_solver_finite(response_normal_length)
+    || abs(response_normal_length - 1.0) > 1.0e-3
+    || !mechanical_solver_finite(response_projection)
+    || response_projection <= 1.0e-6
+    || !mechanical_solver_finite3(current_delta)
+    || !mechanical_solver_finite(support_distance_m)
+    || !mechanical_solver_finite(overlap_m)
+  ) {
+    return mechanical_solver_zero_pair(0u);
+  }
+  // Both initially admitted and dormant constraints describe finite faces.
+  // Keeping a positive constraint as an infinite halfspace after tangential
+  // support is lost produces equal-and-opposite lateral impulses between
+  // already-disjoint cells.
+  let current_face_active = mechanical_matching_constraint_face_active(
+    current_delta,
+    low_edge_m,
+    high_edge_m,
+    constraint_normal
+  );
+  let positive_swept_face_active = constraint.w > 0.0
+    && !current_face_active
+    && mechanical_matching_positive_constraint_swept_active(
+      low_index,
+      high_index,
+      current_delta,
+      low_edge_m,
+      high_edge_m,
+      constraint_normal
+    );
+  if (!current_face_active && !positive_swept_face_active) {
+    return mechanical_solver_zero_pair(1u);
+  }
+  let fixed_pair = mechanical_solver_pair_response(
+    low_index,
+    high_index,
+    low_pos_mass.w,
+    high_pos_mass.w,
+    overlap_m,
+    constraint_normal,
+    response_normal,
+    response_projection,
+    true,
+    false
+  );
+  if (
+    fixed_pair.valid == 0u
+    || !mechanical_solver_finite3(fixed_pair.barrier_dx)
+    || !mechanical_solver_finite3(fixed_pair.barrier_dv)
+    || !mechanical_solver_finite(fixed_pair.position_residual)
+    || !mechanical_solver_finite(fixed_pair.velocity_residual)
+  ) {
+    return mechanical_solver_zero_pair(0u);
+  }
+  return fixed_pair;
+}
+
+fn mechanical_matching_project_wall_velocity(
+  particle_index: u32,
+  position: vec3<f32>,
+  input_velocity: vec3<f32>,
+  mass_kg: f32
+) -> MechanicalMatchingWallVelocityProjection {
+  var velocity = input_velocity;
+  var clipped = 0u;
+  let rest_volume = max(
+    source_mechanics[particle_index * 8u + 4u].w,
+    0.0
+  );
+  var wall_clearance = 0.0;
+  if (rest_volume > 0.0) {
+    wall_clearance = 0.5 * mechanical_solver_cbrt(rest_volume);
+    if (mechanical_params.grid_spacing_m > 0.0) {
+      wall_clearance = min(
+        wall_clearance,
+        0.5 * mechanical_params.grid_spacing_m
+      );
+    }
+    let min_dimension = min(
+      mechanical_params.box_dims_m.x,
+      min(mechanical_params.box_dims_m.y, mechanical_params.box_dims_m.z)
+    );
+    if (min_dimension > 0.0) {
+      wall_clearance = min(wall_clearance, 0.49 * min_dimension);
+    }
+  }
+  let lower = vec3<f32>(wall_clearance);
+  let upper = max(lower, mechanical_params.box_dims_m - lower);
+  let lower_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(lower.x, upper.x),
+    mechanical_solver_wall_boundary_tolerance_m(lower.y, upper.y),
+    mechanical_solver_wall_boundary_tolerance_m(lower.z, upper.z)
+  );
+  let upper_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(upper.x, lower.x),
+    mechanical_solver_wall_boundary_tolerance_m(upper.y, lower.y),
+    mechanical_solver_wall_boundary_tolerance_m(upper.z, lower.z)
+  );
+  if (
+    position.x <= lower.x + lower_tolerance_m.x
+    && velocity.x < 0.0
+  ) {
+    velocity.x = 0.0;
+    clipped = 1u;
+  } else if (
+    position.x >= upper.x - upper_tolerance_m.x
+    && velocity.x > 0.0
+  ) {
+    velocity.x = 0.0;
+    clipped = 1u;
+  }
+  if (
+    position.y <= lower.y + lower_tolerance_m.y
+    && velocity.y < 0.0
+  ) {
+    velocity.y = 0.0;
+    clipped = 1u;
+  } else if (
+    position.y >= upper.y - upper_tolerance_m.y
+    && velocity.y > 0.0
+  ) {
+    velocity.y = 0.0;
+    clipped = 1u;
+  }
+  if (
+    position.z <= lower.z + lower_tolerance_m.z
+    && velocity.z < 0.0
+  ) {
+    velocity.z = 0.0;
+    clipped = 1u;
+  } else if (
+    position.z >= upper.z - upper_tolerance_m.z
+    && velocity.z > 0.0
+  ) {
+    velocity.z = 0.0;
+    clipped = 1u;
+  }
+  let kinetic_delta_j = 0.5 * mass_kg * (
+    dot(velocity, velocity) - dot(input_velocity, input_velocity)
+  );
+  let kinetic_conditioning_j = 0.5 * mass_kg * (
+    dot(velocity, velocity) + dot(input_velocity, input_velocity)
+  );
+  let kinetic_tolerance_j = max(
+    1.0e-6,
+    64.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0)
+  );
+  let valid = select(
+    0u,
+    1u,
+    mass_kg > 0.0
+      && mechanical_solver_finite3(position)
+      && mechanical_solver_finite3(velocity)
+      && mechanical_solver_finite(kinetic_delta_j)
+      && kinetic_delta_j <= kinetic_tolerance_j
+  );
+  let failure_code = select(
+    ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+    ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+    mechanical_solver_finite(kinetic_delta_j)
+      && kinetic_delta_j > kinetic_tolerance_j
+  );
+  return MechanicalMatchingWallVelocityProjection(
+    velocity,
+    kinetic_delta_j,
+    clipped,
+    failure_code,
+    valid
+  );
+}
+
+fn mechanical_matching_relative_velocity_delta(
+  relative_velocity: vec3<f32>,
+  constraint: vec4<f32>
+) -> vec3<f32> {
+  let constraint_normal =
+    mechanical_matching_constraint_normal(constraint);
+  let response_normal = constraint.xyz;
+  let response_projection = dot(response_normal, constraint_normal);
+  let approach_m_per_s = dot(relative_velocity, constraint_normal);
+  if (approach_m_per_s >= 0.0) { return vec3<f32>(0.0); }
+  var relative_dv =
+    -approach_m_per_s
+      / max(response_projection, 1.0e-6)
+      * response_normal;
+  let central_linear_work_speed_squared = dot(
+    relative_velocity,
+    relative_dv
+  );
+  let kinetic_delta_speed_squared =
+    2.0 * central_linear_work_speed_squared
+      + dot(relative_dv, relative_dv);
+  let kinetic_tolerance_speed_squared =
+    64.0 * 1.1920929e-7
+      * max(dot(relative_velocity, relative_velocity), 1.0);
+  if (
+    central_linear_work_speed_squared > 0.0
+    || kinetic_delta_speed_squared > kinetic_tolerance_speed_squared
+  ) {
+    let radial_dv = max(
+      -dot(relative_velocity, response_normal),
+      0.0
+    ) * response_normal;
+    let velocity_after_radial = relative_velocity + radial_dv;
+    let face_dv = max(
+      -dot(velocity_after_radial, constraint_normal),
+      0.0
+    ) * constraint_normal;
+    relative_dv = radial_dv + face_dv;
+  }
+  return relative_dv;
+}
+
+fn mechanical_matching_refine_wall_velocity_pair(
+  low_index: u32,
+  high_index: u32,
+  low_position: vec3<f32>,
+  high_position: vec3<f32>,
+  low_initial_velocity: vec3<f32>,
+  high_initial_velocity: vec3<f32>,
+  low_mass_kg: f32,
+  high_mass_kg: f32,
+  low_initial_dv: vec3<f32>,
+  high_initial_dv: vec3<f32>,
+  constraint: vec4<f32>
+) -> MechanicalMatchingVelocityRefinement {
+  var result = MechanicalMatchingVelocityRefinement(
+    low_initial_velocity,
+    high_initial_velocity,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0u,
+    0u,
+    1u
+  );
+  let constraint_normal =
+    mechanical_matching_constraint_normal(constraint);
+  let response_normal = constraint.xyz;
+  let response_projection = dot(response_normal, constraint_normal);
+  let pair_mass_kg = low_mass_kg + high_mass_kg;
+  if (
+    !(low_mass_kg > 0.0)
+    || !(high_mass_kg > 0.0)
+    || !(pair_mass_kg > 0.0)
+    || !mechanical_solver_finite3(constraint_normal)
+    || !mechanical_solver_finite3(response_normal)
+    || !mechanical_solver_finite(response_projection)
+    || response_projection <= 1.0e-6
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let low_inverse_mass_share = high_mass_kg / pair_mass_kg;
+  var low_velocity = low_initial_velocity;
+  var high_velocity = high_initial_velocity;
+  var prior_wall_clipped = true;
+  for (
+    var refinement_round = 0u;
+    refinement_round
+      < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_WALL_REFINEMENT_ROUNDS}u;
+    refinement_round = refinement_round + 1u
+  ) {
+    let relative_velocity = low_velocity - high_velocity;
+    let approach_m_per_s = dot(relative_velocity, constraint_normal);
+    if (
+      refinement_round > 0u
+      && (
+        !prior_wall_clipped
+        || approach_m_per_s >= -${
+          SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+            .toExponential(1)
+        }
+      )
+    ) {
+      break;
+    }
+    var low_dv = low_initial_dv;
+    var high_dv = high_initial_dv;
+    if (refinement_round > 0u) {
+      let relative_dv = mechanical_matching_relative_velocity_delta(
+        relative_velocity,
+        constraint
+      );
+      low_dv = low_inverse_mass_share * relative_dv;
+      high_dv = -(low_mass_kg / high_mass_kg) * low_dv;
+    }
+    let low_pair_velocity = low_velocity + low_dv;
+    let high_pair_velocity = high_velocity + high_dv;
+    let pair_momentum_residual =
+      low_mass_kg * low_dv + high_mass_kg * high_dv;
+    let pair_momentum_conditioning =
+      low_mass_kg * length(low_dv)
+        + high_mass_kg * length(high_dv);
+    let pair_momentum_tolerance = max(
+      1.0e-6,
+      128.0 * 1.1920929e-7 * max(pair_momentum_conditioning, 1.0)
+    );
+    let low_pair_kinetic_delta_j = 0.5 * low_mass_kg * (
+      dot(low_pair_velocity, low_pair_velocity)
+        - dot(low_velocity, low_velocity)
+    );
+    let high_pair_kinetic_delta_j = 0.5 * high_mass_kg * (
+      dot(high_pair_velocity, high_pair_velocity)
+        - dot(high_velocity, high_velocity)
+    );
+    let pair_kinetic_delta_j =
+      low_pair_kinetic_delta_j + high_pair_kinetic_delta_j;
+    let pair_kinetic_conditioning_j =
+      0.5 * low_mass_kg * (
+        dot(low_pair_velocity, low_pair_velocity)
+          + dot(low_velocity, low_velocity)
+      )
+      + 0.5 * high_mass_kg * (
+        dot(high_pair_velocity, high_pair_velocity)
+          + dot(high_velocity, high_velocity)
+      );
+    let pair_kinetic_tolerance_j = max(
+      1.0e-6,
+      128.0 * 1.1920929e-7 * max(pair_kinetic_conditioning_j, 1.0)
+    );
+    if (
+      !mechanical_solver_finite3(low_pair_velocity)
+      || !mechanical_solver_finite3(high_pair_velocity)
+      || !mechanical_solver_finite3(pair_momentum_residual)
+      || length(pair_momentum_residual) > pair_momentum_tolerance
+      || !mechanical_solver_finite(low_pair_kinetic_delta_j)
+      || !mechanical_solver_finite(high_pair_kinetic_delta_j)
+      || !mechanical_solver_finite(pair_kinetic_delta_j)
+      || pair_kinetic_delta_j > pair_kinetic_tolerance_j
+    ) {
+      result.failure_code = select(
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+        mechanical_solver_finite(pair_kinetic_delta_j)
+          && pair_kinetic_delta_j > pair_kinetic_tolerance_j
+      );
+      result.valid = 0u;
+      break;
+    }
+    result.low_pair_kinetic_delta_j =
+      result.low_pair_kinetic_delta_j + low_pair_kinetic_delta_j;
+    result.high_pair_kinetic_delta_j =
+      result.high_pair_kinetic_delta_j + high_pair_kinetic_delta_j;
+    result.low_pair_impulse =
+      result.low_pair_impulse + low_mass_kg * low_dv;
+    result.high_pair_impulse =
+      result.high_pair_impulse + high_mass_kg * high_dv;
+    let low_wall = mechanical_matching_project_wall_velocity(
+      low_index,
+      low_position,
+      low_pair_velocity,
+      low_mass_kg
+    );
+    let high_wall = mechanical_matching_project_wall_velocity(
+      high_index,
+      high_position,
+      high_pair_velocity,
+      high_mass_kg
+    );
+    if (low_wall.valid == 0u || high_wall.valid == 0u) {
+      result.failure_code = select(
+        high_wall.failure_code,
+        low_wall.failure_code,
+        low_wall.valid == 0u
+      );
+      result.valid = 0u;
+      break;
+    }
+    result.low_wall_kinetic_delta_j =
+      result.low_wall_kinetic_delta_j + low_wall.kinetic_delta_j;
+    result.high_wall_kinetic_delta_j =
+      result.high_wall_kinetic_delta_j + high_wall.kinetic_delta_j;
+    low_velocity = low_wall.velocity;
+    high_velocity = high_wall.velocity;
+    result.round_count = result.round_count + 1u;
+    prior_wall_clipped = low_wall.clipped != 0u || high_wall.clipped != 0u;
+  }
+  result.low_velocity = low_velocity;
+  result.high_velocity = high_velocity;
+  if (result.valid == 0u) { return result; }
+  let aggregate_pair_kinetic_delta_j =
+    result.low_pair_kinetic_delta_j
+      + result.high_pair_kinetic_delta_j;
+  let aggregate_pair_momentum_residual =
+    result.low_pair_impulse + result.high_pair_impulse;
+  let aggregate_pair_momentum_conditioning =
+    length(result.low_pair_impulse) + length(result.high_pair_impulse);
+  let aggregate_pair_momentum_tolerance = max(
+    1.0e-6,
+    128.0 * 1.1920929e-7
+      * max(aggregate_pair_momentum_conditioning, 1.0)
+  );
+  let aggregate_kinetic_conditioning_j =
+    0.5 * low_mass_kg * (
+      dot(low_initial_velocity, low_initial_velocity)
+        + dot(result.low_velocity, result.low_velocity)
+    )
+    + 0.5 * high_mass_kg * (
+      dot(high_initial_velocity, high_initial_velocity)
+        + dot(result.high_velocity, result.high_velocity)
+    );
+  let aggregate_kinetic_tolerance_j = max(
+    1.0e-6,
+    128.0 * 1.1920929e-7 * max(aggregate_kinetic_conditioning_j, 1.0)
+  );
+  if (
+    result.round_count == 0u
+    || !mechanical_solver_finite3(result.low_velocity)
+    || !mechanical_solver_finite3(result.high_velocity)
+    || !mechanical_solver_finite3(result.low_pair_impulse)
+    || !mechanical_solver_finite3(result.high_pair_impulse)
+    || !mechanical_solver_finite3(aggregate_pair_momentum_residual)
+    || length(aggregate_pair_momentum_residual)
+      > aggregate_pair_momentum_tolerance
+    || !mechanical_solver_finite(aggregate_pair_kinetic_delta_j)
+    || aggregate_pair_kinetic_delta_j > aggregate_kinetic_tolerance_j
+    || !mechanical_solver_finite(result.low_wall_kinetic_delta_j)
+    || !mechanical_solver_finite(result.high_wall_kinetic_delta_j)
+    || result.low_wall_kinetic_delta_j > aggregate_kinetic_tolerance_j
+    || result.high_wall_kinetic_delta_j > aggregate_kinetic_tolerance_j
+  ) {
+    result.failure_code = select(
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+      (
+        mechanical_solver_finite(aggregate_pair_kinetic_delta_j)
+        && aggregate_pair_kinetic_delta_j
+          > aggregate_kinetic_tolerance_j
+      )
+        || (
+          mechanical_solver_finite(result.low_wall_kinetic_delta_j)
+          && result.low_wall_kinetic_delta_j
+            > aggregate_kinetic_tolerance_j
+        )
+        || (
+          mechanical_solver_finite(result.high_wall_kinetic_delta_j)
+          && result.high_wall_kinetic_delta_j
+            > aggregate_kinetic_tolerance_j
+        )
+    );
+    result.valid = 0u;
+  }
+  return result;
+}
+
+fn mechanical_matching_zero_three_block() ->
+  MechanicalMatchingThreeBlockResult {
+  return MechanicalMatchingThreeBlockResult(
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    vec3<f32>(0.0),
+    0.0,
+    0.0,
+    vec3<f32>(0.0),
+    vec3<f32>(0.0),
+    0u,
+    0u,
+    0u,
+    0u,
+    1u,
+    0u,
+    0u
+  );
+}
+
+fn mechanical_matching_center_oriented_vector(
+  center_index: u32,
+  other_index: u32,
+  canonical_vector: vec3<f32>
+) -> vec3<f32> {
+  return select(
+    -canonical_vector,
+    canonical_vector,
+    center_index == min(center_index, other_index)
+  );
+}
+
+fn mechanical_matching_axis_wall_constraint(
+  particle_index: u32,
+  position: vec3<f32>,
+  axis_normal: vec3<f32>
+) -> MechanicalMatchingAxisWallConstraint {
+  var result = MechanicalMatchingAxisWallConstraint(0.0, 0u, 1u);
+  if (
+    particle_index >= mechanical_params.particle_count
+    || !mechanical_solver_finite3(position)
+    || !mechanical_solver_finite3(axis_normal)
+    || !mechanical_solver_finite3(mechanical_params.box_dims_m)
+  ) {
+    result.valid = 0u;
+    return result;
+  }
+  var axis = 0u;
+  if (abs(axis_normal.y) > abs(axis_normal.x)) { axis = 1u; }
+  if (
+    abs(axis_normal.z)
+      > select(abs(axis_normal.x), abs(axis_normal.y), axis == 1u)
+  ) { axis = 2u; }
+  let normal_component = select(
+    axis_normal.x,
+    select(axis_normal.y, axis_normal.z, axis == 2u),
+    axis != 0u
+  );
+  let position_component = select(
+    position.x,
+    select(position.y, position.z, axis == 2u),
+    axis != 0u
+  );
+  let box_component = select(
+    mechanical_params.box_dims_m.x,
+    select(
+      mechanical_params.box_dims_m.y,
+      mechanical_params.box_dims_m.z,
+      axis == 2u
+    ),
+    axis != 0u
+  );
+  let rest_volume =
+    source_mechanics[particle_index * 8u + 4u].w;
+  if (
+    abs(abs(normal_component) - 1.0) > 1.0e-6
+    || !mechanical_solver_finite(position_component)
+    || !mechanical_solver_finite(box_component)
+    || !mechanical_solver_finite(rest_volume)
+    || box_component <= 0.0
+    || rest_volume < 0.0
+  ) {
+    result.valid = 0u;
+    return result;
+  }
+  var wall_clearance = 0.0;
+  if (rest_volume > 0.0) {
+    wall_clearance = 0.5 * mechanical_solver_cbrt(rest_volume);
+    if (mechanical_params.grid_spacing_m > 0.0) {
+      wall_clearance = min(
+        wall_clearance,
+        0.5 * mechanical_params.grid_spacing_m
+      );
+    }
+    let min_dimension = min(
+      mechanical_params.box_dims_m.x,
+      min(mechanical_params.box_dims_m.y, mechanical_params.box_dims_m.z)
+    );
+    if (min_dimension > 0.0) {
+      wall_clearance = min(wall_clearance, 0.49 * min_dimension);
+    }
+  }
+  let lower = wall_clearance;
+  let upper = max(lower, box_component - wall_clearance);
+  let lower_tolerance_m =
+    mechanical_solver_wall_boundary_tolerance_m(lower, upper);
+  let upper_tolerance_m =
+    mechanical_solver_wall_boundary_tolerance_m(upper, lower);
+  let at_lower = position_component <= lower + lower_tolerance_m;
+  let at_upper = position_component >= upper - upper_tolerance_m;
+  if (at_lower && at_upper) {
+    result.valid = 0u;
+    return result;
+  }
+  if (at_lower) {
+    result.inward_scalar_sign = normal_component;
+    result.geometry_active = 1u;
+  } else if (at_upper) {
+    result.inward_scalar_sign = -normal_component;
+    result.geometry_active = 1u;
+  }
+  return result;
+}
+
+fn mechanical_matching_axis_contact_normal_valid(
+  normal: vec3<f32>
+) -> bool {
+  if (!mechanical_solver_finite3(normal)) { return false; }
+  let abs_normal = abs(normal);
+  let x_valid =
+    abs_normal.x <= 1.0e-6 || abs(abs_normal.x - 1.0) <= 1.0e-6;
+  let y_valid =
+    abs_normal.y <= 1.0e-6 || abs(abs_normal.y - 1.0) <= 1.0e-6;
+  let z_valid =
+    abs_normal.z <= 1.0e-6 || abs(abs_normal.z - 1.0) <= 1.0e-6;
+  return x_valid
+    && y_valid
+    && z_valid
+    && abs(abs_normal.x + abs_normal.y + abs_normal.z - 1.0)
+      <= 1.0e-6;
+}
+
+// Materialize the primal velocity of one enumerated scalar active set from its
+// connected components. Broadcasting one shared f32 value makes every active
+// contact equality bit-identical instead of accepting inverse-mass roundoff
+// under a tolerance wider than the public residual certificate.
+fn mechanical_matching_three_block_axis_primal(
+  primary_wall_fixed: bool,
+  center_wall_fixed: bool,
+  secondary_wall_fixed: bool,
+  primary_contact_active: bool,
+  secondary_contact_active: bool,
+  masses_kg: vec3<f32>,
+  input_u: vec3<f32>
+) -> vec3<f32> {
+  if (primary_contact_active && secondary_contact_active) {
+    if (
+      primary_wall_fixed
+      || center_wall_fixed
+      || secondary_wall_fixed
+    ) {
+      return vec3<f32>(0.0);
+    }
+    let shared_u = (
+      masses_kg.x * input_u.x
+        + masses_kg.y * input_u.y
+        + masses_kg.z * input_u.z
+    ) / (masses_kg.x + masses_kg.y + masses_kg.z);
+    return vec3<f32>(shared_u);
+  }
+  if (primary_contact_active) {
+    let primary_center_u = select(
+      (
+        masses_kg.x * input_u.x
+          + masses_kg.y * input_u.y
+      ) / (masses_kg.x + masses_kg.y),
+      0.0,
+      primary_wall_fixed || center_wall_fixed
+    );
+    return vec3<f32>(
+      primary_center_u,
+      primary_center_u,
+      select(input_u.z, 0.0, secondary_wall_fixed)
+    );
+  }
+  if (secondary_contact_active) {
+    let center_secondary_u = select(
+      (
+        masses_kg.y * input_u.y
+          + masses_kg.z * input_u.z
+      ) / (masses_kg.y + masses_kg.z),
+      0.0,
+      center_wall_fixed || secondary_wall_fixed
+    );
+    return vec3<f32>(
+      select(input_u.x, 0.0, primary_wall_fixed),
+      center_secondary_u,
+      center_secondary_u
+    );
+  }
+  return vec3<f32>(
+    select(input_u.x, 0.0, primary_wall_fixed),
+    select(input_u.y, 0.0, center_wall_fixed),
+    select(input_u.z, 0.0, secondary_wall_fixed)
+  );
+}
+
+// Project one Cartesian lane of a three-particle contact block onto its two
+// signed contact halfspaces and three box-wall halfspaces. Frozen finite-volume
+// faces and box walls are exact coordinate axes, so the full mass-metric cone
+// projection is the product of three independent scalar projections.
+fn mechanical_matching_three_block_axis_active_set(
+  primary_index: u32,
+  center_index: u32,
+  secondary_index: u32,
+  primary_position: vec3<f32>,
+  center_position: vec3<f32>,
+  secondary_position: vec3<f32>,
+  axis_normal: vec3<f32>,
+  primary_contact_sign: f32,
+  secondary_contact_sign: f32,
+  primary_mass_kg: f32,
+  center_mass_kg: f32,
+  secondary_mass_kg: f32,
+  primary_u: f32,
+  center_u: f32,
+  secondary_u: f32,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingAxisActiveSetResult {
+  var result = MechanicalMatchingAxisActiveSetResult(
+    primary_u,
+    center_u,
+    secondary_u,
+    0.0,
+    0.0,
+    0u,
+    0u
+  );
+  let primary_sign_valid =
+    abs(primary_contact_sign) <= 1.0e-6
+      || abs(abs(primary_contact_sign) - 1.0) <= 1.0e-6;
+  let secondary_sign_valid =
+    abs(secondary_contact_sign) <= 1.0e-6
+      || abs(abs(secondary_contact_sign) - 1.0) <= 1.0e-6;
+  if (
+    !primary_sign_valid
+    || !secondary_sign_valid
+    || !mechanical_solver_finite(primary_mass_kg)
+    || !mechanical_solver_finite(center_mass_kg)
+    || !mechanical_solver_finite(secondary_mass_kg)
+    || !(primary_mass_kg > 0.0)
+    || !(center_mass_kg > 0.0)
+    || !(secondary_mass_kg > 0.0)
+    || !mechanical_solver_finite(primary_u)
+    || !mechanical_solver_finite(center_u)
+    || !mechanical_solver_finite(secondary_u)
+    || !mechanical_solver_finite(velocity_tolerance_m_per_s)
+  ) { return result; }
+  let primary_wall_constraint =
+    mechanical_matching_axis_wall_constraint(
+      primary_index,
+      primary_position,
+      axis_normal
+    );
+  let center_wall_constraint =
+    mechanical_matching_axis_wall_constraint(
+      center_index,
+      center_position,
+      axis_normal
+    );
+  let secondary_wall_constraint =
+    mechanical_matching_axis_wall_constraint(
+      secondary_index,
+      secondary_position,
+      axis_normal
+    );
+  if (
+    primary_wall_constraint.valid == 0u
+    || center_wall_constraint.valid == 0u
+    || secondary_wall_constraint.valid == 0u
+  ) { return result; }
+  let primary_contact_present = abs(primary_contact_sign) > 0.5;
+  let secondary_contact_present = abs(secondary_contact_sign) > 0.5;
+  let primary_inverse_mass = 1.0 / primary_mass_kg;
+  let center_inverse_mass = 1.0 / center_mass_kg;
+  let secondary_inverse_mass = 1.0 / secondary_mass_kg;
+  let velocity_conditioning = max(
+    max(abs(primary_u), abs(center_u)),
+    max(abs(secondary_u), 1.0)
+  );
+  let arithmetic_tolerance_m_per_s = max(
+    velocity_tolerance_m_per_s,
+    128.0 * 1.1920929e-7 * velocity_conditioning
+  );
+  let impulse_conditioning = (
+    primary_mass_kg + center_mass_kg + secondary_mass_kg
+  ) * velocity_conditioning;
+  let impulse_tolerance = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(impulse_conditioning, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite(primary_inverse_mass)
+    || !mechanical_solver_finite(center_inverse_mass)
+    || !mechanical_solver_finite(secondary_inverse_mass)
+    || !mechanical_solver_finite(arithmetic_tolerance_m_per_s)
+    || !mechanical_solver_finite(impulse_tolerance)
+  ) { return result; }
+  var best_found = false;
+  var best_objective = 3.0e38;
+  for (
+    var wall_mask = 0u;
+    wall_mask < 8u;
+    wall_mask = wall_mask + 1u
+  ) {
+    let primary_wall_fixed = (wall_mask & 1u) != 0u;
+    let center_wall_fixed = (wall_mask & 2u) != 0u;
+    let secondary_wall_fixed = (wall_mask & 4u) != 0u;
+    if (
+      (primary_wall_fixed && primary_wall_constraint.geometry_active == 0u)
+      || (center_wall_fixed && center_wall_constraint.geometry_active == 0u)
+      || (
+        secondary_wall_fixed
+        && secondary_wall_constraint.geometry_active == 0u
+      )
+    ) { continue; }
+    let primary_q = select(primary_u, 0.0, primary_wall_fixed);
+    let center_q = select(center_u, 0.0, center_wall_fixed);
+    let secondary_q = select(secondary_u, 0.0, secondary_wall_fixed);
+    let primary_d = select(
+      primary_inverse_mass,
+      0.0,
+      primary_wall_fixed
+    );
+    let center_d = select(
+      center_inverse_mass,
+      0.0,
+      center_wall_fixed
+    );
+    let secondary_d = select(
+      secondary_inverse_mass,
+      0.0,
+      secondary_wall_fixed
+    );
+    let primary_residual =
+      primary_contact_sign * (center_q - primary_q);
+    let secondary_residual =
+      secondary_contact_sign * (center_q - secondary_q);
+    let matrix_11 = primary_d + center_d;
+    let matrix_22 = center_d + secondary_d;
+    let matrix_12 =
+      primary_contact_sign * secondary_contact_sign * center_d;
+    for (
+      var contact_mask = 0u;
+      contact_mask < 4u;
+      contact_mask = contact_mask + 1u
+    ) {
+      let primary_contact_active = (contact_mask & 1u) != 0u;
+      let secondary_contact_active = (contact_mask & 2u) != 0u;
+      if (
+        (primary_contact_active && !primary_contact_present)
+        || (secondary_contact_active && !secondary_contact_present)
+      ) { continue; }
+      var candidate_valid = true;
+      var primary_lambda = 0.0;
+      var secondary_lambda = 0.0;
+      if (primary_contact_active && secondary_contact_active) {
+        let determinant =
+          matrix_11 * matrix_22 - matrix_12 * matrix_12;
+        let determinant_conditioning =
+          abs(matrix_11 * matrix_22) + abs(matrix_12 * matrix_12);
+        let determinant_tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7
+            * max(determinant_conditioning, 1.0e-12)
+        );
+        if (
+          mechanical_solver_finite(determinant)
+          && determinant > determinant_tolerance
+        ) {
+          primary_lambda = (
+            -primary_residual * matrix_22
+              + matrix_12 * secondary_residual
+          ) / determinant;
+          secondary_lambda = (
+            -matrix_11 * secondary_residual
+              + matrix_12 * primary_residual
+          ) / determinant;
+        } else if (
+          abs(primary_residual) > arithmetic_tolerance_m_per_s
+          || abs(secondary_residual) > arithmetic_tolerance_m_per_s
+        ) {
+          candidate_valid = false;
+        }
+      } else if (primary_contact_active) {
+        let diagonal_tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(abs(matrix_11), 1.0e-12)
+        );
+        if (matrix_11 > diagonal_tolerance) {
+          primary_lambda = -primary_residual / matrix_11;
+        } else if (
+          abs(primary_residual) > arithmetic_tolerance_m_per_s
+        ) {
+          candidate_valid = false;
+        }
+      } else if (secondary_contact_active) {
+        let diagonal_tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(abs(matrix_22), 1.0e-12)
+        );
+        if (matrix_22 > diagonal_tolerance) {
+          secondary_lambda = -secondary_residual / matrix_22;
+        } else if (
+          abs(secondary_residual) > arithmetic_tolerance_m_per_s
+        ) {
+          candidate_valid = false;
+        }
+      }
+      if (
+        !candidate_valid
+        || !mechanical_solver_finite(primary_lambda)
+        || !mechanical_solver_finite(secondary_lambda)
+        || primary_lambda < -impulse_tolerance
+        || secondary_lambda < -impulse_tolerance
+      ) { continue; }
+      primary_lambda = max(0.0, primary_lambda);
+      secondary_lambda = max(0.0, secondary_lambda);
+      let primary_pair_impulse =
+        -primary_contact_sign * primary_lambda;
+      let center_pair_impulse =
+        primary_contact_sign * primary_lambda
+          + secondary_contact_sign * secondary_lambda;
+      let secondary_pair_impulse =
+        -secondary_contact_sign * secondary_lambda;
+      let candidate_u = mechanical_matching_three_block_axis_primal(
+        primary_wall_fixed,
+        center_wall_fixed,
+        secondary_wall_fixed,
+        primary_contact_active,
+        secondary_contact_active,
+        vec3<f32>(
+          primary_mass_kg,
+          center_mass_kg,
+          secondary_mass_kg
+        ),
+        vec3<f32>(primary_u, center_u, secondary_u)
+      );
+      let candidate_primary_u = candidate_u.x;
+      let candidate_center_u = candidate_u.y;
+      let candidate_secondary_u = candidate_u.z;
+      let candidate_primary_residual =
+        primary_contact_sign
+          * (candidate_center_u - candidate_primary_u);
+      let candidate_secondary_residual =
+        secondary_contact_sign
+          * (candidate_center_u - candidate_secondary_u);
+      var contact_feasible = true;
+      if (primary_contact_present) {
+        contact_feasible = contact_feasible && select(
+          candidate_primary_residual >= -velocity_tolerance_m_per_s,
+          abs(candidate_primary_residual)
+            <= velocity_tolerance_m_per_s,
+          primary_contact_active
+        );
+      }
+      if (secondary_contact_present) {
+        contact_feasible = contact_feasible && select(
+          candidate_secondary_residual >= -velocity_tolerance_m_per_s,
+          abs(candidate_secondary_residual)
+            <= velocity_tolerance_m_per_s,
+          secondary_contact_active
+        );
+      }
+      if (!contact_feasible) { continue; }
+      let primary_total_impulse =
+        primary_mass_kg * (candidate_primary_u - primary_u);
+      let center_total_impulse =
+        center_mass_kg * (candidate_center_u - center_u);
+      let secondary_total_impulse =
+        secondary_mass_kg * (candidate_secondary_u - secondary_u);
+      let primary_wall_impulse =
+        primary_total_impulse - primary_pair_impulse;
+      let center_wall_impulse =
+        center_total_impulse - center_pair_impulse;
+      let secondary_wall_impulse =
+        secondary_total_impulse - secondary_pair_impulse;
+      var wall_feasible = true;
+      if (primary_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_primary_u) <= velocity_tolerance_m_per_s
+          && primary_wall_constraint.inward_scalar_sign
+            * primary_wall_impulse >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(primary_wall_impulse) <= impulse_tolerance;
+        if (primary_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && primary_wall_constraint.inward_scalar_sign
+              * candidate_primary_u >= -velocity_tolerance_m_per_s;
+        }
+      }
+      if (center_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_center_u) <= velocity_tolerance_m_per_s
+          && center_wall_constraint.inward_scalar_sign
+            * center_wall_impulse >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(center_wall_impulse) <= impulse_tolerance;
+        if (center_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && center_wall_constraint.inward_scalar_sign
+              * candidate_center_u >= -velocity_tolerance_m_per_s;
+        }
+      }
+      if (secondary_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_secondary_u) <= velocity_tolerance_m_per_s
+          && secondary_wall_constraint.inward_scalar_sign
+            * secondary_wall_impulse >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(secondary_wall_impulse) <= impulse_tolerance;
+        if (secondary_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && secondary_wall_constraint.inward_scalar_sign
+              * candidate_secondary_u >= -velocity_tolerance_m_per_s;
+        }
+      }
+      let objective =
+        primary_mass_kg
+          * (candidate_primary_u - primary_u)
+          * (candidate_primary_u - primary_u)
+        + center_mass_kg
+          * (candidate_center_u - center_u)
+          * (candidate_center_u - center_u)
+        + secondary_mass_kg
+          * (candidate_secondary_u - secondary_u)
+          * (candidate_secondary_u - secondary_u);
+      if (
+        !wall_feasible
+        || !mechanical_solver_finite(candidate_primary_u)
+        || !mechanical_solver_finite(candidate_center_u)
+        || !mechanical_solver_finite(candidate_secondary_u)
+        || !mechanical_solver_finite(primary_wall_impulse)
+        || !mechanical_solver_finite(center_wall_impulse)
+        || !mechanical_solver_finite(secondary_wall_impulse)
+        || !mechanical_solver_finite(objective)
+      ) { continue; }
+      if (!best_found || objective < best_objective) {
+        best_found = true;
+        best_objective = objective;
+        result.primary_u = candidate_primary_u;
+        result.center_u = candidate_center_u;
+        result.secondary_u = candidate_secondary_u;
+        result.primary_lambda = primary_lambda;
+        result.secondary_lambda = secondary_lambda;
+        result.wall_mask = wall_mask;
+      }
+    }
+  }
+  result.valid = select(0u, 1u, best_found);
+  return result;
+}
+
+fn mechanical_matching_wall_energy_allocation(
+  wall_kinetic_delta_j: f32,
+  masses_kg: vec3<f32>,
+  wall_mask: u32,
+  kinetic_tolerance_j: f32
+) -> vec4<f32> {
+  var allocation = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  if (
+    !mechanical_solver_finite(wall_kinetic_delta_j)
+    || !mechanical_solver_finite3(masses_kg)
+    || !mechanical_solver_finite(kinetic_tolerance_j)
+  ) {
+    allocation.w = 0.0;
+    return allocation;
+  }
+  if (wall_mask == 0u) {
+    if (abs(wall_kinetic_delta_j) > kinetic_tolerance_j) {
+      allocation.w = 0.0;
+    }
+    return allocation;
+  }
+  let fixed_mass_kg =
+    select(0.0, masses_kg.x, (wall_mask & 1u) != 0u)
+      + select(0.0, masses_kg.y, (wall_mask & 2u) != 0u)
+      + select(0.0, masses_kg.z, (wall_mask & 4u) != 0u);
+  if (
+    !(fixed_mass_kg > 0.0)
+    || !mechanical_solver_finite(fixed_mass_kg)
+  ) {
+    allocation.w = 0.0;
+    return allocation;
+  }
+  allocation.x = select(
+    0.0,
+    wall_kinetic_delta_j * masses_kg.x / fixed_mass_kg,
+    (wall_mask & 1u) != 0u
+  );
+  allocation.y = select(
+    0.0,
+    wall_kinetic_delta_j * masses_kg.y / fixed_mass_kg,
+    (wall_mask & 2u) != 0u
+  );
+  allocation.z = select(
+    0.0,
+    wall_kinetic_delta_j * masses_kg.z / fixed_mass_kg,
+    (wall_mask & 4u) != 0u
+  );
+  return allocation;
+}
+
+// Exact fixed-cost projection for every axis-aligned three-contact/wall
+// configuration. Each lane enumerates 8 wall masks x 4 contact masks, so the
+// total work is 3 x 8 x 4 candidates independent of particle count or degree.
+fn mechanical_matching_three_block_box_wall_active_set(
+  seed: MechanicalMatchingThreeBlockResult,
+  primary_normal: vec3<f32>,
+  secondary_normal: vec3<f32>,
+  primary_pos_mass: vec4<f32>,
+  center_pos_mass: vec4<f32>,
+  secondary_pos_mass: vec4<f32>,
+  primary_velocity: vec3<f32>,
+  center_velocity: vec3<f32>,
+  secondary_velocity: vec3<f32>,
+  contact_primary_velocity: vec3<f32>,
+  contact_center_velocity: vec3<f32>,
+  contact_secondary_velocity: vec3<f32>,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingThreeBlockResult {
+  var result = seed;
+  if (
+    !mechanical_matching_axis_contact_normal_valid(primary_normal)
+    || !mechanical_matching_axis_contact_normal_valid(secondary_normal)
+    || !mechanical_solver_finite3(primary_velocity)
+    || !mechanical_solver_finite3(center_velocity)
+    || !mechanical_solver_finite3(secondary_velocity)
+    || !mechanical_solver_finite3(contact_primary_velocity)
+    || !mechanical_solver_finite3(contact_center_velocity)
+    || !mechanical_solver_finite3(contact_secondary_velocity)
+  ) { return result; }
+  let primary_mass_kg = primary_pos_mass.w;
+  let center_mass_kg = center_pos_mass.w;
+  let secondary_mass_kg = secondary_pos_mass.w;
+  let x_axis = mechanical_matching_three_block_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    vec3<f32>(1.0, 0.0, 0.0),
+    primary_normal.x,
+    secondary_normal.x,
+    primary_mass_kg,
+    center_mass_kg,
+    secondary_mass_kg,
+    primary_velocity.x,
+    center_velocity.x,
+    secondary_velocity.x,
+    velocity_tolerance_m_per_s
+  );
+  let y_axis = mechanical_matching_three_block_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    vec3<f32>(0.0, 1.0, 0.0),
+    primary_normal.y,
+    secondary_normal.y,
+    primary_mass_kg,
+    center_mass_kg,
+    secondary_mass_kg,
+    primary_velocity.y,
+    center_velocity.y,
+    secondary_velocity.y,
+    velocity_tolerance_m_per_s
+  );
+  let z_axis = mechanical_matching_three_block_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    vec3<f32>(0.0, 0.0, 1.0),
+    primary_normal.z,
+    secondary_normal.z,
+    primary_mass_kg,
+    center_mass_kg,
+    secondary_mass_kg,
+    primary_velocity.z,
+    center_velocity.z,
+    secondary_velocity.z,
+    velocity_tolerance_m_per_s
+  );
+  if (x_axis.valid == 0u || y_axis.valid == 0u || z_axis.valid == 0u) {
+    return result;
+  }
+  let resolved_primary_velocity = vec3<f32>(
+    x_axis.primary_u,
+    y_axis.primary_u,
+    z_axis.primary_u
+  );
+  let resolved_center_velocity = vec3<f32>(
+    x_axis.center_u,
+    y_axis.center_u,
+    z_axis.center_u
+  );
+  let resolved_secondary_velocity = vec3<f32>(
+    x_axis.secondary_u,
+    y_axis.secondary_u,
+    z_axis.secondary_u
+  );
+  let primary_impulse = vec3<f32>(
+    -primary_normal.x * x_axis.primary_lambda,
+    -primary_normal.y * y_axis.primary_lambda,
+    -primary_normal.z * z_axis.primary_lambda
+  );
+  let center_primary_impulse = -primary_impulse;
+  let secondary_impulse = vec3<f32>(
+    -secondary_normal.x * x_axis.secondary_lambda,
+    -secondary_normal.y * y_axis.secondary_lambda,
+    -secondary_normal.z * z_axis.secondary_lambda
+  );
+  let center_secondary_impulse = -secondary_impulse;
+  let final_primary_residual = dot(
+    resolved_center_velocity - resolved_primary_velocity,
+    primary_normal
+  );
+  let final_secondary_residual = dot(
+    resolved_center_velocity - resolved_secondary_velocity,
+    secondary_normal
+  );
+  let pair_momentum_residual =
+    primary_impulse
+      + center_primary_impulse
+      + center_secondary_impulse
+      + secondary_impulse;
+  let pair_momentum_conditioning =
+    length(primary_impulse)
+      + length(center_primary_impulse)
+      + length(center_secondary_impulse)
+      + length(secondary_impulse);
+  let pair_momentum_tolerance = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7
+      * max(pair_momentum_conditioning, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite3(resolved_primary_velocity)
+    || !mechanical_solver_finite3(resolved_center_velocity)
+    || !mechanical_solver_finite3(resolved_secondary_velocity)
+    || !mechanical_solver_finite3(primary_impulse)
+    || !mechanical_solver_finite3(center_primary_impulse)
+    || !mechanical_solver_finite3(center_secondary_impulse)
+    || !mechanical_solver_finite3(secondary_impulse)
+    || !mechanical_solver_finite3(pair_momentum_residual)
+    || length(pair_momentum_residual) > pair_momentum_tolerance
+    || !mechanical_solver_finite(final_primary_residual)
+    || !mechanical_solver_finite(final_secondary_residual)
+    || final_primary_residual < -velocity_tolerance_m_per_s
+    || final_secondary_residual < -velocity_tolerance_m_per_s
+  ) { return result; }
+  let resolved_primary_wall = mechanical_matching_project_wall_velocity(
+    seed.primary_index,
+    primary_pos_mass.xyz,
+    resolved_primary_velocity,
+    primary_mass_kg
+  );
+  let resolved_center_wall = mechanical_matching_project_wall_velocity(
+    seed.center_index,
+    center_pos_mass.xyz,
+    resolved_center_velocity,
+    center_mass_kg
+  );
+  let resolved_secondary_wall = mechanical_matching_project_wall_velocity(
+    seed.secondary_index,
+    secondary_pos_mass.xyz,
+    resolved_secondary_velocity,
+    secondary_mass_kg
+  );
+  if (
+    resolved_primary_wall.valid == 0u
+    || resolved_center_wall.valid == 0u
+    || resolved_secondary_wall.valid == 0u
+    || resolved_primary_wall.clipped != 0u
+    || resolved_center_wall.clipped != 0u
+    || resolved_secondary_wall.clipped != 0u
+  ) { return result; }
+  let primary_pair_kinetic_delta_j = 0.5 * primary_mass_kg * (
+    dot(contact_primary_velocity, contact_primary_velocity)
+      - dot(primary_velocity, primary_velocity)
+  );
+  let center_pair_kinetic_delta_j = 0.5 * center_mass_kg * (
+    dot(contact_center_velocity, contact_center_velocity)
+      - dot(center_velocity, center_velocity)
+  );
+  let secondary_pair_kinetic_delta_j = 0.5 * secondary_mass_kg * (
+    dot(contact_secondary_velocity, contact_secondary_velocity)
+      - dot(secondary_velocity, secondary_velocity)
+  );
+  let pair_kinetic_delta_j =
+    primary_pair_kinetic_delta_j
+      + center_pair_kinetic_delta_j
+      + secondary_pair_kinetic_delta_j;
+  let wall_kinetic_delta_x_j = 0.5 * (
+    primary_mass_kg * (
+      resolved_primary_velocity.x * resolved_primary_velocity.x
+        - contact_primary_velocity.x * contact_primary_velocity.x
+    )
+      + center_mass_kg * (
+        resolved_center_velocity.x * resolved_center_velocity.x
+          - contact_center_velocity.x * contact_center_velocity.x
+      )
+      + secondary_mass_kg * (
+        resolved_secondary_velocity.x * resolved_secondary_velocity.x
+          - contact_secondary_velocity.x * contact_secondary_velocity.x
+      )
+  );
+  let wall_kinetic_delta_y_j = 0.5 * (
+    primary_mass_kg * (
+      resolved_primary_velocity.y * resolved_primary_velocity.y
+        - contact_primary_velocity.y * contact_primary_velocity.y
+    )
+      + center_mass_kg * (
+        resolved_center_velocity.y * resolved_center_velocity.y
+          - contact_center_velocity.y * contact_center_velocity.y
+      )
+      + secondary_mass_kg * (
+        resolved_secondary_velocity.y * resolved_secondary_velocity.y
+          - contact_secondary_velocity.y * contact_secondary_velocity.y
+      )
+  );
+  let wall_kinetic_delta_z_j = 0.5 * (
+    primary_mass_kg * (
+      resolved_primary_velocity.z * resolved_primary_velocity.z
+        - contact_primary_velocity.z * contact_primary_velocity.z
+    )
+      + center_mass_kg * (
+        resolved_center_velocity.z * resolved_center_velocity.z
+          - contact_center_velocity.z * contact_center_velocity.z
+      )
+      + secondary_mass_kg * (
+        resolved_secondary_velocity.z * resolved_secondary_velocity.z
+          - contact_secondary_velocity.z * contact_secondary_velocity.z
+      )
+  );
+  let wall_kinetic_delta_j =
+    wall_kinetic_delta_x_j
+      + wall_kinetic_delta_y_j
+      + wall_kinetic_delta_z_j;
+  let total_kinetic_delta_j = 0.5 * (
+    primary_mass_kg * (
+      dot(resolved_primary_velocity, resolved_primary_velocity)
+        - dot(primary_velocity, primary_velocity)
+    )
+      + center_mass_kg * (
+        dot(resolved_center_velocity, resolved_center_velocity)
+          - dot(center_velocity, center_velocity)
+      )
+      + secondary_mass_kg * (
+        dot(resolved_secondary_velocity, resolved_secondary_velocity)
+          - dot(secondary_velocity, secondary_velocity)
+      )
+  );
+  let kinetic_conditioning_j = 0.5 * (
+    primary_mass_kg * (
+      dot(primary_velocity, primary_velocity)
+        + dot(contact_primary_velocity, contact_primary_velocity)
+        + dot(resolved_primary_velocity, resolved_primary_velocity)
+    )
+      + center_mass_kg * (
+        dot(center_velocity, center_velocity)
+          + dot(contact_center_velocity, contact_center_velocity)
+          + dot(resolved_center_velocity, resolved_center_velocity)
+      )
+      + secondary_mass_kg * (
+        dot(secondary_velocity, secondary_velocity)
+          + dot(contact_secondary_velocity, contact_secondary_velocity)
+          + dot(resolved_secondary_velocity, resolved_secondary_velocity)
+      )
+  );
+  let kinetic_tolerance_j = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0e-6)
+  );
+  let masses_kg = vec3<f32>(
+    primary_mass_kg,
+    center_mass_kg,
+    secondary_mass_kg
+  );
+  let x_wall_allocation = mechanical_matching_wall_energy_allocation(
+    wall_kinetic_delta_x_j,
+    masses_kg,
+    x_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let y_wall_allocation = mechanical_matching_wall_energy_allocation(
+    wall_kinetic_delta_y_j,
+    masses_kg,
+    y_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let z_wall_allocation = mechanical_matching_wall_energy_allocation(
+    wall_kinetic_delta_z_j,
+    masses_kg,
+    z_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let wall_allocations =
+    x_wall_allocation.xyz
+      + y_wall_allocation.xyz
+      + z_wall_allocation.xyz;
+  if (
+    x_wall_allocation.w == 0.0
+    || y_wall_allocation.w == 0.0
+    || z_wall_allocation.w == 0.0
+    || !mechanical_solver_finite(primary_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(center_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(secondary_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(pair_kinetic_delta_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_x_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_y_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_z_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_j)
+    || !mechanical_solver_finite(total_kinetic_delta_j)
+    || !mechanical_solver_finite3(wall_allocations)
+    || pair_kinetic_delta_j > kinetic_tolerance_j
+    || wall_kinetic_delta_x_j > kinetic_tolerance_j
+    || wall_kinetic_delta_y_j > kinetic_tolerance_j
+    || wall_kinetic_delta_z_j > kinetic_tolerance_j
+    || wall_kinetic_delta_j > kinetic_tolerance_j
+    || wall_allocations.x > kinetic_tolerance_j
+    || wall_allocations.y > kinetic_tolerance_j
+    || wall_allocations.z > kinetic_tolerance_j
+    || abs(
+      total_kinetic_delta_j
+        - pair_kinetic_delta_j
+        - wall_kinetic_delta_j
+    ) > kinetic_tolerance_j
+  ) { return result; }
+  result.primary_velocity = resolved_primary_velocity;
+  result.center_velocity = resolved_center_velocity;
+  result.secondary_velocity = resolved_secondary_velocity;
+  result.primary_kinetic_delta_j = primary_pair_kinetic_delta_j;
+  result.center_kinetic_delta_j = center_pair_kinetic_delta_j;
+  result.secondary_kinetic_delta_j = secondary_pair_kinetic_delta_j;
+  result.primary_wall_kinetic_delta_j = wall_allocations.x;
+  result.center_wall_kinetic_delta_j = wall_allocations.y;
+  result.secondary_wall_kinetic_delta_j = wall_allocations.z;
+  result.pair_heat_j = max(0.0, -pair_kinetic_delta_j);
+  result.primary_impulse = primary_impulse;
+  result.center_primary_impulse = center_primary_impulse;
+  result.center_secondary_impulse = center_secondary_impulse;
+  result.secondary_impulse = secondary_impulse;
+  result.applied = 1u;
+  return result;
+}
+
+fn mechanical_matching_inbound_candidate_better(
+  candidate_priority: f32,
+  candidate_face_alignment: f32,
+  candidate_rank: u32,
+  candidate_low: u32,
+  candidate_high: u32,
+  incumbent_priority: f32,
+  incumbent_face_alignment: f32,
+  incumbent_rank: u32,
+  incumbent_low: u32,
+  incumbent_high: u32
+) -> bool {
+  return candidate_priority > incumbent_priority
+    || (
+      candidate_priority == incumbent_priority
+      && (
+        candidate_face_alignment > incumbent_face_alignment
+        || (
+          candidate_face_alignment == incumbent_face_alignment
+          && (
+            candidate_rank < incumbent_rank
+            || (
+              candidate_rank == incumbent_rank
+              && (
+                candidate_low < incumbent_low
+                || (
+                  candidate_low == incumbent_low
+                  && candidate_high < incumbent_high
+                )
+              )
+            )
+          )
+        )
+      )
+  );
+}
+
+fn mechanical_matching_zero_four_path_candidate() ->
+  MechanicalMatchingFourPathCandidate {
+  return MechanicalMatchingFourPathCandidate(
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0xffffffffu,
+    0.0,
+    0xffffffffu,
+    0u,
+    1u
+  );
+}
+
+// Lift the particle matching into a matching of two already-disjoint mutual
+// pairs. An inactive contact may bridge those pairs after the prior sweep.
+// Ranking by the strict-light mass ratio makes both mutual pairs choose the
+// same ill-conditioned bridge; the reciprocal-choice check in the caller
+// makes the merged four-body write race-free without atomics.
+fn mechanical_matching_four_path_candidate(
+  mutual_low: u32,
+  mutual_high: u32,
+  published_total: u32
+) -> MechanicalMatchingFourPathCandidate {
+  var result = mechanical_matching_zero_four_path_candidate();
+  if (
+    mutual_low >= mutual_high
+    || mutual_high >= mechanical_params.particle_count
+    || published_total > arrayLength(&csr_peers)
+    || published_total > arrayLength(&matching_constraints)
+  ) {
+    result.valid = 0u;
+    return result;
+  }
+  let low_selection = energy_ledger[mechanical_energy_base(mutual_low)];
+  let high_selection = energy_ledger[mechanical_energy_base(mutual_high)];
+  if (
+    bitcast<u32>(low_selection.x) != mutual_high
+    || bitcast<u32>(high_selection.x) != mutual_low
+  ) { return result; }
+  for (var endpoint_slot = 0u; endpoint_slot < 2u;
+    endpoint_slot = endpoint_slot + 1u) {
+    let current_index = select(
+      mutual_low,
+      mutual_high,
+      endpoint_slot != 0u
+    );
+    let current_partner = select(
+      mutual_high,
+      mutual_low,
+      endpoint_slot != 0u
+    );
+    let current_selection = select(
+      low_selection,
+      high_selection,
+      endpoint_slot != 0u
+    );
+    let current_partner_selection = select(
+      high_selection,
+      low_selection,
+      endpoint_slot != 0u
+    );
+    let begin = source_offsets[current_index];
+    let end = source_offsets[current_index + 1u];
+    if (begin > end || end > published_total) {
+      result.valid = 0u;
+      return result;
+    }
+    for (var bridge_cursor = begin; bridge_cursor < end;
+      bridge_cursor = bridge_cursor + 1u) {
+      let encoded_bridge_peer = csr_peers[bridge_cursor];
+      let bridge_peer = mechanical_solver_peer_index(encoded_bridge_peer);
+      if (
+        bridge_peer == current_partner
+        || bridge_peer >= mechanical_params.particle_count
+        || !mechanical_solver_edge_inactive(encoded_bridge_peer)
+      ) { continue; }
+      let peer_selection =
+        energy_ledger[mechanical_energy_base(bridge_peer)];
+      let peer_partner = bitcast<u32>(peer_selection.x);
+      if (
+        peer_partner >= mechanical_params.particle_count
+        || peer_partner == current_index
+        || peer_partner == current_partner
+        || peer_partner == bridge_peer
+      ) { continue; }
+      let peer_partner_selection =
+        energy_ledger[mechanical_energy_base(peer_partner)];
+      if (bitcast<u32>(peer_partner_selection.x) != bridge_peer) {
+        continue;
+      }
+      let peer_begin = source_offsets[bridge_peer];
+      let peer_end = source_offsets[bridge_peer + 1u];
+      if (peer_begin > peer_end || peer_end > published_total) {
+        result.valid = 0u;
+        return result;
+      }
+      var bridge_reverse_cursor = 0xffffffffu;
+      for (var cursor = peer_begin; cursor < peer_end;
+        cursor = cursor + 1u) {
+        if (
+          mechanical_solver_peer_index(csr_peers[cursor]) == current_index
+        ) {
+          bridge_reverse_cursor = cursor;
+          break;
+        }
+      }
+      if (
+        bridge_reverse_cursor == 0xffffffffu
+        || !mechanical_solver_edge_inactive(
+          csr_peers[bridge_reverse_cursor]
+        )
+      ) { continue; }
+      let current_mass = input_state[current_index * 2u].w;
+      let current_partner_mass = input_state[current_partner * 2u].w;
+      let peer_mass = input_state[bridge_peer * 2u].w;
+      let peer_partner_mass = input_state[peer_partner * 2u].w;
+      if (
+        !(current_mass > 0.0)
+        || !(current_partner_mass > 0.0)
+        || !(peer_mass > 0.0)
+        || !(peer_partner_mass > 0.0)
+        || !mechanical_solver_finite(current_mass)
+        || !mechanical_solver_finite(current_partner_mass)
+        || !mechanical_solver_finite(peer_mass)
+        || !mechanical_solver_finite(peer_partner_mass)
+      ) {
+        result.valid = 0u;
+        return result;
+      }
+      let current_is_light = current_mass < peer_mass
+        && current_mass < current_partner_mass;
+      let peer_is_light = peer_mass < current_mass
+        && peer_mass < peer_partner_mass;
+      if (current_is_light == peer_is_light) { continue; }
+      let bridge_pair = mechanical_matching_constraint_pair(
+        min(current_index, bridge_peer),
+        max(current_index, bridge_peer),
+        bridge_cursor
+      );
+      if (bridge_pair.valid == 0u) {
+        result.valid = 0u;
+        return result;
+      }
+      if (
+        bridge_pair.active_pair == 0u
+        || bridge_pair.unilateral == 0u
+      ) { continue; }
+      var candidate = mechanical_matching_zero_four_path_candidate();
+      if (current_is_light) {
+        candidate.body_0_index = current_partner;
+        candidate.body_1_index = current_index;
+        candidate.body_2_index = bridge_peer;
+        candidate.body_3_index = peer_partner;
+        candidate.edge_0_forward_cursor = bitcast<u32>(current_selection.z);
+        candidate.edge_0_reverse_cursor =
+          bitcast<u32>(current_partner_selection.z);
+        candidate.edge_1_forward_cursor = bridge_cursor;
+        candidate.edge_1_reverse_cursor = bridge_reverse_cursor;
+        candidate.edge_2_forward_cursor = bitcast<u32>(peer_selection.z);
+        candidate.edge_2_reverse_cursor =
+          bitcast<u32>(peer_partner_selection.z);
+      } else {
+        candidate.body_0_index = peer_partner;
+        candidate.body_1_index = bridge_peer;
+        candidate.body_2_index = current_index;
+        candidate.body_3_index = current_partner;
+        candidate.edge_0_forward_cursor = bitcast<u32>(peer_selection.z);
+        candidate.edge_0_reverse_cursor =
+          bitcast<u32>(peer_partner_selection.z);
+        candidate.edge_1_forward_cursor = bridge_reverse_cursor;
+        candidate.edge_1_reverse_cursor = bridge_cursor;
+        candidate.edge_2_forward_cursor = bitcast<u32>(current_selection.z);
+        candidate.edge_2_reverse_cursor =
+          bitcast<u32>(current_partner_selection.z);
+      }
+      let body_0_mass = input_state[candidate.body_0_index * 2u].w;
+      let body_1_mass = input_state[candidate.body_1_index * 2u].w;
+      let body_2_mass = input_state[candidate.body_2_index * 2u].w;
+      candidate.light_mass_ratio = min(body_0_mass, body_2_mass)
+        / body_1_mass;
+      candidate.bridge_rank = mechanical_matching_edge_rank(
+        min(candidate.body_1_index, candidate.body_2_index),
+        max(candidate.body_1_index, candidate.body_2_index)
+      );
+      candidate.found = 1u;
+      let better = result.found == 0u
+        || candidate.light_mass_ratio > result.light_mass_ratio
+        || (
+          candidate.light_mass_ratio == result.light_mass_ratio
+          && (
+            candidate.bridge_rank < result.bridge_rank
+            || (
+              candidate.bridge_rank == result.bridge_rank
+              && (
+                candidate.body_0_index < result.body_0_index
+                || (
+                  candidate.body_0_index == result.body_0_index
+                  && candidate.body_1_index < result.body_1_index
+                )
+              )
+            )
+          )
+        );
+      if (better) { result = candidate; }
+    }
+  }
+  return result;
+}
+
+// Exact mass-metric projection for the path 0--1--2--3 on one Cartesian
+// lane. The eight active masks reduce to explicit connected-component pools.
+fn mechanical_matching_four_path_axis_active_set(
+  edge_0_sign: f32,
+  edge_1_sign: f32,
+  edge_2_sign: f32,
+  masses_kg: vec4<f32>,
+  input_u: vec4<f32>,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingFourBlockAxisResult {
+  var result = MechanicalMatchingFourBlockAxisResult(
+    input_u,
+    0.0,
+    0u,
+    0u
+  );
+  let edge_0_present = abs(edge_0_sign) > 0.5;
+  let edge_1_present = abs(edge_1_sign) > 0.5;
+  let edge_2_present = abs(edge_2_sign) > 0.5;
+  if (
+    !(masses_kg.x > 0.0)
+    || !(masses_kg.y > 0.0)
+    || !(masses_kg.z > 0.0)
+    || !(masses_kg.w > 0.0)
+    || !mechanical_solver_finite(masses_kg.x)
+    || !mechanical_solver_finite(masses_kg.y)
+    || !mechanical_solver_finite(masses_kg.z)
+    || !mechanical_solver_finite(masses_kg.w)
+    || !mechanical_solver_finite(input_u.x)
+    || !mechanical_solver_finite(input_u.y)
+    || !mechanical_solver_finite(input_u.z)
+    || !mechanical_solver_finite(input_u.w)
+  ) { return result; }
+  for (var contact_mask = 0u; contact_mask < 8u;
+    contact_mask = contact_mask + 1u) {
+    let edge_0_active = (contact_mask & 1u) != 0u;
+    let edge_1_active = (contact_mask & 2u) != 0u;
+    let edge_2_active = (contact_mask & 4u) != 0u;
+    if (
+      (edge_0_active && !edge_0_present)
+      || (edge_1_active && !edge_1_present)
+      || (edge_2_active && !edge_2_present)
+    ) { continue; }
+    var candidate_u = input_u;
+    if (contact_mask == 1u || contact_mask == 5u) {
+      let shared_01 = (
+        masses_kg.x * input_u.x + masses_kg.y * input_u.y
+      ) / (masses_kg.x + masses_kg.y);
+      candidate_u.x = shared_01;
+      candidate_u.y = shared_01;
+    }
+    if (contact_mask == 2u) {
+      let shared_12 = (
+        masses_kg.y * input_u.y + masses_kg.z * input_u.z
+      ) / (masses_kg.y + masses_kg.z);
+      candidate_u.y = shared_12;
+      candidate_u.z = shared_12;
+    }
+    if (contact_mask == 4u || contact_mask == 5u) {
+      let shared_23 = (
+        masses_kg.z * input_u.z + masses_kg.w * input_u.w
+      ) / (masses_kg.z + masses_kg.w);
+      candidate_u.z = shared_23;
+      candidate_u.w = shared_23;
+    }
+    if (contact_mask == 3u) {
+      let shared_012 = (
+        masses_kg.x * input_u.x
+          + masses_kg.y * input_u.y
+          + masses_kg.z * input_u.z
+      ) / (masses_kg.x + masses_kg.y + masses_kg.z);
+      candidate_u.x = shared_012;
+      candidate_u.y = shared_012;
+      candidate_u.z = shared_012;
+    }
+    if (contact_mask == 6u) {
+      let shared_123 = (
+        masses_kg.y * input_u.y
+          + masses_kg.z * input_u.z
+          + masses_kg.w * input_u.w
+      ) / (masses_kg.y + masses_kg.z + masses_kg.w);
+      candidate_u.y = shared_123;
+      candidate_u.z = shared_123;
+      candidate_u.w = shared_123;
+    }
+    if (contact_mask == 7u) {
+      let shared_0123 = dot(masses_kg, input_u)
+        / (masses_kg.x + masses_kg.y + masses_kg.z + masses_kg.w);
+      candidate_u = vec4<f32>(shared_0123);
+    }
+    let residual = vec3<f32>(
+      edge_0_sign * (candidate_u.y - candidate_u.x),
+      edge_1_sign * (candidate_u.y - candidate_u.z),
+      edge_2_sign * (candidate_u.z - candidate_u.w)
+    );
+    if (
+      (edge_0_present
+        && residual.x < -velocity_tolerance_m_per_s)
+      || (edge_1_present
+        && residual.y < -velocity_tolerance_m_per_s)
+      || (edge_2_present
+        && residual.z < -velocity_tolerance_m_per_s)
+    ) { continue; }
+    let delta_u = candidate_u - input_u;
+    let objective = dot(masses_kg, delta_u * delta_u);
+    if (
+      !mechanical_solver_finite(candidate_u.x)
+      || !mechanical_solver_finite(candidate_u.y)
+      || !mechanical_solver_finite(candidate_u.z)
+      || !mechanical_solver_finite(candidate_u.w)
+      || !mechanical_solver_finite3(residual)
+      || !mechanical_solver_finite(objective)
+    ) { continue; }
+    if (result.valid == 0u || objective < result.objective) {
+      result.velocity = candidate_u;
+      result.objective = objective;
+      result.contact_mask = contact_mask;
+      result.valid = 1u;
+    }
+  }
+  return result;
+}
+
+// A four-body star has one center and three leaves. On one Cartesian lane,
+// every active contact equality therefore joins another leaf to the center's
+// single pooled component. Enumerating the eight contact masks gives the
+// exact mass-metric projection without an iterative per-candidate solve.
+fn mechanical_matching_four_block_axis_active_set(
+  primary_contact_sign: f32,
+  secondary_contact_sign: f32,
+  tertiary_contact_sign: f32,
+  masses_kg: vec4<f32>,
+  input_u: vec4<f32>,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingFourBlockAxisResult {
+  var result = MechanicalMatchingFourBlockAxisResult(
+    input_u,
+    0.0,
+    0u,
+    0u
+  );
+  let primary_sign_valid = abs(primary_contact_sign) <= 1.0e-6
+    || abs(abs(primary_contact_sign) - 1.0) <= 1.0e-6;
+  let secondary_sign_valid = abs(secondary_contact_sign) <= 1.0e-6
+    || abs(abs(secondary_contact_sign) - 1.0) <= 1.0e-6;
+  let tertiary_sign_valid = abs(tertiary_contact_sign) <= 1.0e-6
+    || abs(abs(tertiary_contact_sign) - 1.0) <= 1.0e-6;
+  if (
+    !primary_sign_valid
+    || !secondary_sign_valid
+    || !tertiary_sign_valid
+    || !(masses_kg.x > 0.0)
+    || !(masses_kg.y > 0.0)
+    || !(masses_kg.z > 0.0)
+    || !(masses_kg.w > 0.0)
+    || !mechanical_solver_finite(masses_kg.x)
+    || !mechanical_solver_finite(masses_kg.y)
+    || !mechanical_solver_finite(masses_kg.z)
+    || !mechanical_solver_finite(masses_kg.w)
+    || !mechanical_solver_finite(input_u.x)
+    || !mechanical_solver_finite(input_u.y)
+    || !mechanical_solver_finite(input_u.z)
+    || !mechanical_solver_finite(input_u.w)
+    || !mechanical_solver_finite(velocity_tolerance_m_per_s)
+  ) { return result; }
+  let primary_present = abs(primary_contact_sign) > 0.5;
+  let secondary_present = abs(secondary_contact_sign) > 0.5;
+  let tertiary_present = abs(tertiary_contact_sign) > 0.5;
+  for (var contact_mask = 0u; contact_mask < 8u;
+    contact_mask = contact_mask + 1u) {
+    let primary_active = (contact_mask & 1u) != 0u;
+    let secondary_active = (contact_mask & 2u) != 0u;
+    let tertiary_active = (contact_mask & 4u) != 0u;
+    if (
+      (primary_active && !primary_present)
+      || (secondary_active && !secondary_present)
+      || (tertiary_active && !tertiary_present)
+    ) { continue; }
+    var pooled_mass_kg = masses_kg.y;
+    var pooled_momentum = masses_kg.y * input_u.y;
+    if (primary_active) {
+      pooled_mass_kg = pooled_mass_kg + masses_kg.x;
+      pooled_momentum = pooled_momentum + masses_kg.x * input_u.x;
+    }
+    if (secondary_active) {
+      pooled_mass_kg = pooled_mass_kg + masses_kg.z;
+      pooled_momentum = pooled_momentum + masses_kg.z * input_u.z;
+    }
+    if (tertiary_active) {
+      pooled_mass_kg = pooled_mass_kg + masses_kg.w;
+      pooled_momentum = pooled_momentum + masses_kg.w * input_u.w;
+    }
+    if (
+      !(pooled_mass_kg > 0.0)
+      || !mechanical_solver_finite(pooled_mass_kg)
+      || !mechanical_solver_finite(pooled_momentum)
+    ) { continue; }
+    let shared_u = pooled_momentum / pooled_mass_kg;
+    var candidate_u = input_u;
+    candidate_u.y = shared_u;
+    if (primary_active) { candidate_u.x = shared_u; }
+    if (secondary_active) { candidate_u.z = shared_u; }
+    if (tertiary_active) { candidate_u.w = shared_u; }
+    let primary_residual =
+      primary_contact_sign * (candidate_u.y - candidate_u.x);
+    let secondary_residual =
+      secondary_contact_sign * (candidate_u.y - candidate_u.z);
+    let tertiary_residual =
+      tertiary_contact_sign * (candidate_u.y - candidate_u.w);
+    if (
+      (primary_present
+        && primary_residual < -velocity_tolerance_m_per_s)
+      || (secondary_present
+        && secondary_residual < -velocity_tolerance_m_per_s)
+      || (tertiary_present
+        && tertiary_residual < -velocity_tolerance_m_per_s)
+    ) { continue; }
+    let delta_u = candidate_u - input_u;
+    let objective = dot(masses_kg, delta_u * delta_u);
+    if (
+      !mechanical_solver_finite(shared_u)
+      || !mechanical_solver_finite(candidate_u.x)
+      || !mechanical_solver_finite(candidate_u.y)
+      || !mechanical_solver_finite(candidate_u.z)
+      || !mechanical_solver_finite(candidate_u.w)
+      || !mechanical_solver_finite(primary_residual)
+      || !mechanical_solver_finite(secondary_residual)
+      || !mechanical_solver_finite(tertiary_residual)
+      || !mechanical_solver_finite(objective)
+    ) { continue; }
+    if (result.valid == 0u || objective < result.objective) {
+      result.velocity = candidate_u;
+      result.objective = objective;
+      result.contact_mask = contact_mask;
+      result.valid = 1u;
+    }
+  }
+  return result;
+}
+
+// Exact fixed-cost projection for one lane of a four-body star coupled to
+// axis-aligned box walls. Every candidate is a closed KKT active set:
+// 16 wall masks x 8 contact masks, independent of particle count or degree.
+fn mechanical_matching_four_block_box_axis_active_set(
+  primary_index: u32,
+  center_index: u32,
+  secondary_index: u32,
+  tertiary_index: u32,
+  primary_position: vec3<f32>,
+  center_position: vec3<f32>,
+  secondary_position: vec3<f32>,
+  tertiary_position: vec3<f32>,
+  axis_normal: vec3<f32>,
+  primary_contact_sign: f32,
+  secondary_contact_sign: f32,
+  tertiary_contact_sign: f32,
+  masses_kg: vec4<f32>,
+  input_u: vec4<f32>,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingFourBlockBoxAxisResult {
+  var result = MechanicalMatchingFourBlockBoxAxisResult(
+    input_u,
+    vec3<f32>(0.0),
+    0.0,
+    0u,
+    0u,
+    0u
+  );
+  let primary_sign_valid = abs(primary_contact_sign) <= 1.0e-6
+    || abs(abs(primary_contact_sign) - 1.0) <= 1.0e-6;
+  let secondary_sign_valid = abs(secondary_contact_sign) <= 1.0e-6
+    || abs(abs(secondary_contact_sign) - 1.0) <= 1.0e-6;
+  let tertiary_sign_valid = abs(tertiary_contact_sign) <= 1.0e-6
+    || abs(abs(tertiary_contact_sign) - 1.0) <= 1.0e-6;
+  if (
+    !primary_sign_valid
+    || !secondary_sign_valid
+    || !tertiary_sign_valid
+    || !(masses_kg.x > 0.0)
+    || !(masses_kg.y > 0.0)
+    || !(masses_kg.z > 0.0)
+    || !(masses_kg.w > 0.0)
+    || !mechanical_solver_finite(masses_kg.x)
+    || !mechanical_solver_finite(masses_kg.y)
+    || !mechanical_solver_finite(masses_kg.z)
+    || !mechanical_solver_finite(masses_kg.w)
+    || !mechanical_solver_finite(input_u.x)
+    || !mechanical_solver_finite(input_u.y)
+    || !mechanical_solver_finite(input_u.z)
+    || !mechanical_solver_finite(input_u.w)
+    || !mechanical_solver_finite(velocity_tolerance_m_per_s)
+  ) { return result; }
+  let primary_wall_constraint = mechanical_matching_axis_wall_constraint(
+    primary_index,
+    primary_position,
+    axis_normal
+  );
+  let center_wall_constraint = mechanical_matching_axis_wall_constraint(
+    center_index,
+    center_position,
+    axis_normal
+  );
+  let secondary_wall_constraint = mechanical_matching_axis_wall_constraint(
+    secondary_index,
+    secondary_position,
+    axis_normal
+  );
+  let tertiary_wall_constraint = mechanical_matching_axis_wall_constraint(
+    tertiary_index,
+    tertiary_position,
+    axis_normal
+  );
+  if (
+    primary_wall_constraint.valid == 0u
+    || center_wall_constraint.valid == 0u
+    || secondary_wall_constraint.valid == 0u
+    || tertiary_wall_constraint.valid == 0u
+  ) { return result; }
+  let primary_present = abs(primary_contact_sign) > 0.5;
+  let secondary_present = abs(secondary_contact_sign) > 0.5;
+  let tertiary_present = abs(tertiary_contact_sign) > 0.5;
+  let inverse_mass = vec4<f32>(
+    1.0 / masses_kg.x,
+    1.0 / masses_kg.y,
+    1.0 / masses_kg.z,
+    1.0 / masses_kg.w
+  );
+  let velocity_conditioning = max(
+    max(abs(input_u.x), abs(input_u.y)),
+    max(max(abs(input_u.z), abs(input_u.w)), 1.0)
+  );
+  let arithmetic_tolerance_m_per_s = max(
+    velocity_tolerance_m_per_s,
+    128.0 * 1.1920929e-7 * velocity_conditioning
+  );
+  let impulse_conditioning = (
+    masses_kg.x + masses_kg.y + masses_kg.z + masses_kg.w
+  ) * velocity_conditioning;
+  let impulse_tolerance = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(impulse_conditioning, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite(inverse_mass.x)
+    || !mechanical_solver_finite(inverse_mass.y)
+    || !mechanical_solver_finite(inverse_mass.z)
+    || !mechanical_solver_finite(inverse_mass.w)
+    || !mechanical_solver_finite(arithmetic_tolerance_m_per_s)
+    || !mechanical_solver_finite(impulse_tolerance)
+  ) { return result; }
+  for (var wall_mask = 0u; wall_mask < 16u;
+    wall_mask = wall_mask + 1u) {
+    let primary_wall_fixed = (wall_mask & 1u) != 0u;
+    let center_wall_fixed = (wall_mask & 2u) != 0u;
+    let secondary_wall_fixed = (wall_mask & 4u) != 0u;
+    let tertiary_wall_fixed = (wall_mask & 8u) != 0u;
+    if (
+      (primary_wall_fixed
+        && primary_wall_constraint.geometry_active == 0u)
+      || (center_wall_fixed
+        && center_wall_constraint.geometry_active == 0u)
+      || (secondary_wall_fixed
+        && secondary_wall_constraint.geometry_active == 0u)
+      || (tertiary_wall_fixed
+        && tertiary_wall_constraint.geometry_active == 0u)
+    ) { continue; }
+    let q = vec4<f32>(
+      select(input_u.x, 0.0, primary_wall_fixed),
+      select(input_u.y, 0.0, center_wall_fixed),
+      select(input_u.z, 0.0, secondary_wall_fixed),
+      select(input_u.w, 0.0, tertiary_wall_fixed)
+    );
+    let d = vec4<f32>(
+      select(inverse_mass.x, 0.0, primary_wall_fixed),
+      select(inverse_mass.y, 0.0, center_wall_fixed),
+      select(inverse_mass.z, 0.0, secondary_wall_fixed),
+      select(inverse_mass.w, 0.0, tertiary_wall_fixed)
+    );
+    let residual = vec3<f32>(
+      primary_contact_sign * (q.y - q.x),
+      secondary_contact_sign * (q.y - q.z),
+      tertiary_contact_sign * (q.y - q.w)
+    );
+    let diagonal = vec3<f32>(d.x + d.y, d.z + d.y, d.w + d.y);
+    let cross_12 = primary_contact_sign
+      * secondary_contact_sign * d.y;
+    let cross_13 = primary_contact_sign
+      * tertiary_contact_sign * d.y;
+    let cross_23 = secondary_contact_sign
+      * tertiary_contact_sign * d.y;
+    for (var contact_mask = 0u; contact_mask < 8u;
+      contact_mask = contact_mask + 1u) {
+      let primary_active = (contact_mask & 1u) != 0u;
+      let secondary_active = (contact_mask & 2u) != 0u;
+      let tertiary_active = (contact_mask & 4u) != 0u;
+      if (
+        (primary_active && !primary_present)
+        || (secondary_active && !secondary_present)
+        || (tertiary_active && !tertiary_present)
+      ) { continue; }
+      var candidate_valid = true;
+      var contact_lambda = vec3<f32>(0.0);
+      if (contact_mask == 1u) {
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(abs(diagonal.x), 1.0e-12)
+        );
+        if (diagonal.x > tolerance) {
+          contact_lambda.x = -residual.x / diagonal.x;
+        } else if (abs(residual.x) > arithmetic_tolerance_m_per_s) {
+          candidate_valid = false;
+        }
+      } else if (contact_mask == 2u) {
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(abs(diagonal.y), 1.0e-12)
+        );
+        if (diagonal.y > tolerance) {
+          contact_lambda.y = -residual.y / diagonal.y;
+        } else if (abs(residual.y) > arithmetic_tolerance_m_per_s) {
+          candidate_valid = false;
+        }
+      } else if (contact_mask == 4u) {
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(abs(diagonal.z), 1.0e-12)
+        );
+        if (diagonal.z > tolerance) {
+          contact_lambda.z = -residual.z / diagonal.z;
+        } else if (abs(residual.z) > arithmetic_tolerance_m_per_s) {
+          candidate_valid = false;
+        }
+      } else if (contact_mask == 3u) {
+        let determinant = diagonal.x * diagonal.y
+          - cross_12 * cross_12;
+        let conditioning = abs(diagonal.x * diagonal.y)
+          + abs(cross_12 * cross_12);
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(conditioning, 1.0e-12)
+        );
+        if (determinant > tolerance) {
+          contact_lambda.x = (
+            -residual.x * diagonal.y + cross_12 * residual.y
+          ) / determinant;
+          contact_lambda.y = (
+            -diagonal.x * residual.y + cross_12 * residual.x
+          ) / determinant;
+        } else if (
+          abs(residual.x) > arithmetic_tolerance_m_per_s
+          || abs(residual.y) > arithmetic_tolerance_m_per_s
+        ) { candidate_valid = false; }
+      } else if (contact_mask == 5u) {
+        let determinant = diagonal.x * diagonal.z
+          - cross_13 * cross_13;
+        let conditioning = abs(diagonal.x * diagonal.z)
+          + abs(cross_13 * cross_13);
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(conditioning, 1.0e-12)
+        );
+        if (determinant > tolerance) {
+          contact_lambda.x = (
+            -residual.x * diagonal.z + cross_13 * residual.z
+          ) / determinant;
+          contact_lambda.z = (
+            -diagonal.x * residual.z + cross_13 * residual.x
+          ) / determinant;
+        } else if (
+          abs(residual.x) > arithmetic_tolerance_m_per_s
+          || abs(residual.z) > arithmetic_tolerance_m_per_s
+        ) { candidate_valid = false; }
+      } else if (contact_mask == 6u) {
+        let determinant = diagonal.y * diagonal.z
+          - cross_23 * cross_23;
+        let conditioning = abs(diagonal.y * diagonal.z)
+          + abs(cross_23 * cross_23);
+        let tolerance = max(
+          1.0e-12,
+          64.0 * 1.1920929e-7 * max(conditioning, 1.0e-12)
+        );
+        if (determinant > tolerance) {
+          contact_lambda.y = (
+            -residual.y * diagonal.z + cross_23 * residual.z
+          ) / determinant;
+          contact_lambda.z = (
+            -diagonal.y * residual.z + cross_23 * residual.y
+          ) / determinant;
+        } else if (
+          abs(residual.y) > arithmetic_tolerance_m_per_s
+          || abs(residual.z) > arithmetic_tolerance_m_per_s
+        ) { candidate_valid = false; }
+      } else if (contact_mask == 7u) {
+        let cofactor_11 = diagonal.y * diagonal.z
+          - cross_23 * cross_23;
+        let cofactor_12 = cross_13 * cross_23
+          - cross_12 * diagonal.z;
+        let cofactor_13 = cross_12 * cross_23
+          - diagonal.y * cross_13;
+        let cofactor_22 = diagonal.x * diagonal.z
+          - cross_13 * cross_13;
+        let cofactor_23 = cross_12 * cross_13
+          - diagonal.x * cross_23;
+        let cofactor_33 = diagonal.x * diagonal.y
+          - cross_12 * cross_12;
+        let determinant = diagonal.x * cofactor_11
+          + cross_12 * cofactor_12
+          + cross_13 * cofactor_13;
+        let conditioning = abs(diagonal.x * diagonal.y * diagonal.z)
+          + 2.0 * abs(cross_12 * cross_13 * cross_23)
+          + abs(diagonal.x * cross_23 * cross_23)
+          + abs(diagonal.y * cross_13 * cross_13)
+          + abs(diagonal.z * cross_12 * cross_12);
+        let tolerance = max(
+          1.0e-12,
+          128.0 * 1.1920929e-7 * max(conditioning, 1.0e-12)
+        );
+        if (determinant > tolerance) {
+          let rhs = -residual;
+          contact_lambda = vec3<f32>(
+            dot(vec3<f32>(cofactor_11, cofactor_12, cofactor_13), rhs),
+            dot(vec3<f32>(cofactor_12, cofactor_22, cofactor_23), rhs),
+            dot(vec3<f32>(cofactor_13, cofactor_23, cofactor_33), rhs)
+          ) / determinant;
+        } else if (
+          abs(residual.x) > arithmetic_tolerance_m_per_s
+          || abs(residual.y) > arithmetic_tolerance_m_per_s
+          || abs(residual.z) > arithmetic_tolerance_m_per_s
+        ) { candidate_valid = false; }
+      }
+      if (
+        !candidate_valid
+        || !mechanical_solver_finite3(contact_lambda)
+        || contact_lambda.x < -impulse_tolerance
+        || contact_lambda.y < -impulse_tolerance
+        || contact_lambda.z < -impulse_tolerance
+      ) { continue; }
+      contact_lambda = max(contact_lambda, vec3<f32>(0.0));
+      var pooled_mass_kg = masses_kg.y;
+      var pooled_momentum = masses_kg.y * input_u.y;
+      if (primary_active) {
+        pooled_mass_kg = pooled_mass_kg + masses_kg.x;
+        pooled_momentum = pooled_momentum + masses_kg.x * input_u.x;
+      }
+      if (secondary_active) {
+        pooled_mass_kg = pooled_mass_kg + masses_kg.z;
+        pooled_momentum = pooled_momentum + masses_kg.z * input_u.z;
+      }
+      if (tertiary_active) {
+        pooled_mass_kg = pooled_mass_kg + masses_kg.w;
+        pooled_momentum = pooled_momentum + masses_kg.w * input_u.w;
+      }
+      let component_wall_fixed = center_wall_fixed
+        || (primary_active && primary_wall_fixed)
+        || (secondary_active && secondary_wall_fixed)
+        || (tertiary_active && tertiary_wall_fixed);
+      let shared_u = select(
+        pooled_momentum / pooled_mass_kg,
+        0.0,
+        component_wall_fixed
+      );
+      var candidate_u = vec4<f32>(
+        select(input_u.x, 0.0, primary_wall_fixed),
+        select(input_u.y, 0.0, center_wall_fixed),
+        select(input_u.z, 0.0, secondary_wall_fixed),
+        select(input_u.w, 0.0, tertiary_wall_fixed)
+      );
+      candidate_u.y = shared_u;
+      if (primary_active) { candidate_u.x = shared_u; }
+      if (secondary_active) { candidate_u.z = shared_u; }
+      if (tertiary_active) { candidate_u.w = shared_u; }
+      let candidate_residual = vec3<f32>(
+        primary_contact_sign * (candidate_u.y - candidate_u.x),
+        secondary_contact_sign * (candidate_u.y - candidate_u.z),
+        tertiary_contact_sign * (candidate_u.y - candidate_u.w)
+      );
+      var contact_feasible = true;
+      if (primary_present) {
+        contact_feasible = contact_feasible && select(
+          candidate_residual.x >= -velocity_tolerance_m_per_s,
+          abs(candidate_residual.x) <= velocity_tolerance_m_per_s,
+          primary_active
+        );
+      }
+      if (secondary_present) {
+        contact_feasible = contact_feasible && select(
+          candidate_residual.y >= -velocity_tolerance_m_per_s,
+          abs(candidate_residual.y) <= velocity_tolerance_m_per_s,
+          secondary_active
+        );
+      }
+      if (tertiary_present) {
+        contact_feasible = contact_feasible && select(
+          candidate_residual.z >= -velocity_tolerance_m_per_s,
+          abs(candidate_residual.z) <= velocity_tolerance_m_per_s,
+          tertiary_active
+        );
+      }
+      if (!contact_feasible) { continue; }
+      let pair_impulse = vec4<f32>(
+        -primary_contact_sign * contact_lambda.x,
+        primary_contact_sign * contact_lambda.x
+          + secondary_contact_sign * contact_lambda.y
+          + tertiary_contact_sign * contact_lambda.z,
+        -secondary_contact_sign * contact_lambda.y,
+        -tertiary_contact_sign * contact_lambda.z
+      );
+      let total_impulse = masses_kg * (candidate_u - input_u);
+      let wall_impulse = total_impulse - pair_impulse;
+      var wall_feasible = true;
+      if (primary_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_u.x) <= velocity_tolerance_m_per_s
+          && primary_wall_constraint.inward_scalar_sign * wall_impulse.x
+            >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(wall_impulse.x) <= impulse_tolerance;
+        if (primary_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && primary_wall_constraint.inward_scalar_sign * candidate_u.x
+              >= -velocity_tolerance_m_per_s;
+        }
+      }
+      if (center_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_u.y) <= velocity_tolerance_m_per_s
+          && center_wall_constraint.inward_scalar_sign * wall_impulse.y
+            >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(wall_impulse.y) <= impulse_tolerance;
+        if (center_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && center_wall_constraint.inward_scalar_sign * candidate_u.y
+              >= -velocity_tolerance_m_per_s;
+        }
+      }
+      if (secondary_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_u.z) <= velocity_tolerance_m_per_s
+          && secondary_wall_constraint.inward_scalar_sign * wall_impulse.z
+            >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(wall_impulse.z) <= impulse_tolerance;
+        if (secondary_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && secondary_wall_constraint.inward_scalar_sign * candidate_u.z
+              >= -velocity_tolerance_m_per_s;
+        }
+      }
+      if (tertiary_wall_fixed) {
+        wall_feasible = wall_feasible
+          && abs(candidate_u.w) <= velocity_tolerance_m_per_s
+          && tertiary_wall_constraint.inward_scalar_sign * wall_impulse.w
+            >= -impulse_tolerance;
+      } else {
+        wall_feasible = wall_feasible
+          && abs(wall_impulse.w) <= impulse_tolerance;
+        if (tertiary_wall_constraint.geometry_active != 0u) {
+          wall_feasible = wall_feasible
+            && tertiary_wall_constraint.inward_scalar_sign * candidate_u.w
+              >= -velocity_tolerance_m_per_s;
+        }
+      }
+      let delta_u = candidate_u - input_u;
+      let objective = dot(masses_kg, delta_u * delta_u);
+      if (
+        !wall_feasible
+        || !mechanical_solver_finite(candidate_u.x)
+        || !mechanical_solver_finite(candidate_u.y)
+        || !mechanical_solver_finite(candidate_u.z)
+        || !mechanical_solver_finite(candidate_u.w)
+        || !mechanical_solver_finite3(candidate_residual)
+        || !mechanical_solver_finite(wall_impulse.x)
+        || !mechanical_solver_finite(wall_impulse.y)
+        || !mechanical_solver_finite(wall_impulse.z)
+        || !mechanical_solver_finite(wall_impulse.w)
+        || !mechanical_solver_finite(objective)
+      ) { continue; }
+      if (result.valid == 0u || objective < result.objective) {
+        result.velocity = candidate_u;
+        result.contact_lambda = contact_lambda;
+        result.objective = objective;
+        result.contact_mask = contact_mask;
+        result.wall_mask = wall_mask;
+        result.valid = 1u;
+      }
+    }
+  }
+  return result;
+}
+
+fn mechanical_matching_four_wall_energy_allocation(
+  wall_kinetic_delta_j: f32,
+  masses_kg: vec4<f32>,
+  wall_mask: u32,
+  kinetic_tolerance_j: f32
+) -> MechanicalMatchingFourWallEnergyAllocation {
+  var result = MechanicalMatchingFourWallEnergyAllocation(
+    vec4<f32>(0.0),
+    1u
+  );
+  if (
+    !mechanical_solver_finite(wall_kinetic_delta_j)
+    || !mechanical_solver_finite(masses_kg.x)
+    || !mechanical_solver_finite(masses_kg.y)
+    || !mechanical_solver_finite(masses_kg.z)
+    || !mechanical_solver_finite(masses_kg.w)
+    || !mechanical_solver_finite(kinetic_tolerance_j)
+  ) {
+    result.valid = 0u;
+    return result;
+  }
+  if (wall_mask == 0u) {
+    if (abs(wall_kinetic_delta_j) > kinetic_tolerance_j) {
+      result.valid = 0u;
+    }
+    return result;
+  }
+  let fixed_mass_kg =
+    select(0.0, masses_kg.x, (wall_mask & 1u) != 0u)
+      + select(0.0, masses_kg.y, (wall_mask & 2u) != 0u)
+      + select(0.0, masses_kg.z, (wall_mask & 4u) != 0u)
+      + select(0.0, masses_kg.w, (wall_mask & 8u) != 0u);
+  if (!(fixed_mass_kg > 0.0) || !mechanical_solver_finite(fixed_mass_kg)) {
+    result.valid = 0u;
+    return result;
+  }
+  result.delta_j = vec4<f32>(
+    select(
+      0.0,
+      wall_kinetic_delta_j * masses_kg.x / fixed_mass_kg,
+      (wall_mask & 1u) != 0u
+    ),
+    select(
+      0.0,
+      wall_kinetic_delta_j * masses_kg.y / fixed_mass_kg,
+      (wall_mask & 2u) != 0u
+    ),
+    select(
+      0.0,
+      wall_kinetic_delta_j * masses_kg.z / fixed_mass_kg,
+      (wall_mask & 4u) != 0u
+    ),
+    select(
+      0.0,
+      wall_kinetic_delta_j * masses_kg.w / fixed_mass_kg,
+      (wall_mask & 8u) != 0u
+    )
+  );
+  return result;
+}
+
+fn mechanical_matching_four_block_box_wall_active_set(
+  seed: MechanicalMatchingThreeBlockResult,
+  primary_normal: vec3<f32>,
+  secondary_normal: vec3<f32>,
+  tertiary_normal: vec3<f32>,
+  primary_pos_mass: vec4<f32>,
+  center_pos_mass: vec4<f32>,
+  secondary_pos_mass: vec4<f32>,
+  tertiary_pos_mass: vec4<f32>,
+  primary_velocity: vec3<f32>,
+  center_velocity: vec3<f32>,
+  secondary_velocity: vec3<f32>,
+  tertiary_velocity: vec3<f32>,
+  contact_primary_velocity: vec3<f32>,
+  contact_center_velocity: vec3<f32>,
+  contact_secondary_velocity: vec3<f32>,
+  contact_tertiary_velocity: vec3<f32>,
+  velocity_tolerance_m_per_s: f32
+) -> MechanicalMatchingThreeBlockResult {
+  var result = seed;
+  let masses_kg = vec4<f32>(
+    primary_pos_mass.w,
+    center_pos_mass.w,
+    secondary_pos_mass.w,
+    tertiary_pos_mass.w
+  );
+  let x_axis = mechanical_matching_four_block_box_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    seed.tertiary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    tertiary_pos_mass.xyz,
+    vec3<f32>(1.0, 0.0, 0.0),
+    primary_normal.x,
+    secondary_normal.x,
+    tertiary_normal.x,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.x,
+      center_velocity.x,
+      secondary_velocity.x,
+      tertiary_velocity.x
+    ),
+    velocity_tolerance_m_per_s
+  );
+  let y_axis = mechanical_matching_four_block_box_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    seed.tertiary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    tertiary_pos_mass.xyz,
+    vec3<f32>(0.0, 1.0, 0.0),
+    primary_normal.y,
+    secondary_normal.y,
+    tertiary_normal.y,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.y,
+      center_velocity.y,
+      secondary_velocity.y,
+      tertiary_velocity.y
+    ),
+    velocity_tolerance_m_per_s
+  );
+  let z_axis = mechanical_matching_four_block_box_axis_active_set(
+    seed.primary_index,
+    seed.center_index,
+    seed.secondary_index,
+    seed.tertiary_index,
+    primary_pos_mass.xyz,
+    center_pos_mass.xyz,
+    secondary_pos_mass.xyz,
+    tertiary_pos_mass.xyz,
+    vec3<f32>(0.0, 0.0, 1.0),
+    primary_normal.z,
+    secondary_normal.z,
+    tertiary_normal.z,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.z,
+      center_velocity.z,
+      secondary_velocity.z,
+      tertiary_velocity.z
+    ),
+    velocity_tolerance_m_per_s
+  );
+  if (x_axis.valid == 0u || y_axis.valid == 0u || z_axis.valid == 0u) {
+    return result;
+  }
+  let active_contact_mask = x_axis.contact_mask
+    | y_axis.contact_mask
+    | z_axis.contact_mask;
+  if ((active_contact_mask & 7u) != 7u) { return result; }
+  let resolved_primary_velocity = vec3<f32>(
+    x_axis.velocity.x,
+    y_axis.velocity.x,
+    z_axis.velocity.x
+  );
+  let resolved_center_velocity = vec3<f32>(
+    x_axis.velocity.y,
+    y_axis.velocity.y,
+    z_axis.velocity.y
+  );
+  let resolved_secondary_velocity = vec3<f32>(
+    x_axis.velocity.z,
+    y_axis.velocity.z,
+    z_axis.velocity.z
+  );
+  let resolved_tertiary_velocity = vec3<f32>(
+    x_axis.velocity.w,
+    y_axis.velocity.w,
+    z_axis.velocity.w
+  );
+  let primary_impulse = vec3<f32>(
+    -primary_normal.x * x_axis.contact_lambda.x,
+    -primary_normal.y * y_axis.contact_lambda.x,
+    -primary_normal.z * z_axis.contact_lambda.x
+  );
+  let secondary_impulse = vec3<f32>(
+    -secondary_normal.x * x_axis.contact_lambda.y,
+    -secondary_normal.y * y_axis.contact_lambda.y,
+    -secondary_normal.z * z_axis.contact_lambda.y
+  );
+  let tertiary_impulse = vec3<f32>(
+    -tertiary_normal.x * x_axis.contact_lambda.z,
+    -tertiary_normal.y * y_axis.contact_lambda.z,
+    -tertiary_normal.z * z_axis.contact_lambda.z
+  );
+  let center_primary_impulse = -primary_impulse;
+  let center_secondary_impulse = -secondary_impulse;
+  let center_tertiary_impulse = -tertiary_impulse;
+  let primary_residual = dot(
+    resolved_center_velocity - resolved_primary_velocity,
+    primary_normal
+  );
+  let secondary_residual = dot(
+    resolved_center_velocity - resolved_secondary_velocity,
+    secondary_normal
+  );
+  let tertiary_residual = dot(
+    resolved_center_velocity - resolved_tertiary_velocity,
+    tertiary_normal
+  );
+  let primary_contact_impulse = -dot(primary_impulse, primary_normal);
+  let secondary_contact_impulse = -dot(
+    secondary_impulse,
+    secondary_normal
+  );
+  let tertiary_contact_impulse = -dot(
+    tertiary_impulse,
+    tertiary_normal
+  );
+  let impulse_conditioning = max(
+    max(length(primary_impulse), length(secondary_impulse)),
+    length(tertiary_impulse)
+  );
+  let impulse_tolerance = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(impulse_conditioning, 1.0e-6)
+  );
+  let pair_momentum_residual = primary_impulse
+    + center_primary_impulse
+    + secondary_impulse
+    + center_secondary_impulse
+    + tertiary_impulse
+    + center_tertiary_impulse;
+  if (
+    !mechanical_solver_finite3(resolved_primary_velocity)
+    || !mechanical_solver_finite3(resolved_center_velocity)
+    || !mechanical_solver_finite3(resolved_secondary_velocity)
+    || !mechanical_solver_finite3(resolved_tertiary_velocity)
+    || !mechanical_solver_finite3(primary_impulse)
+    || !mechanical_solver_finite3(secondary_impulse)
+    || !mechanical_solver_finite3(tertiary_impulse)
+    || !mechanical_solver_finite3(pair_momentum_residual)
+    || !mechanical_solver_finite(primary_residual)
+    || !mechanical_solver_finite(secondary_residual)
+    || !mechanical_solver_finite(tertiary_residual)
+    || primary_residual < -velocity_tolerance_m_per_s
+    || secondary_residual < -velocity_tolerance_m_per_s
+    || tertiary_residual < -velocity_tolerance_m_per_s
+    || !(primary_contact_impulse > 0.0)
+    || !(secondary_contact_impulse > 0.0)
+    || !(tertiary_contact_impulse > 0.0)
+    || length(primary_impulse
+      + primary_contact_impulse * primary_normal) > impulse_tolerance
+    || length(secondary_impulse
+      + secondary_contact_impulse * secondary_normal) > impulse_tolerance
+    || length(tertiary_impulse
+      + tertiary_contact_impulse * tertiary_normal) > impulse_tolerance
+    || length(pair_momentum_residual) > impulse_tolerance
+  ) { return result; }
+  let resolved_primary_wall = mechanical_matching_project_wall_velocity(
+    seed.primary_index,
+    primary_pos_mass.xyz,
+    resolved_primary_velocity,
+    primary_pos_mass.w
+  );
+  let resolved_center_wall = mechanical_matching_project_wall_velocity(
+    seed.center_index,
+    center_pos_mass.xyz,
+    resolved_center_velocity,
+    center_pos_mass.w
+  );
+  let resolved_secondary_wall = mechanical_matching_project_wall_velocity(
+    seed.secondary_index,
+    secondary_pos_mass.xyz,
+    resolved_secondary_velocity,
+    secondary_pos_mass.w
+  );
+  let resolved_tertiary_wall = mechanical_matching_project_wall_velocity(
+    seed.tertiary_index,
+    tertiary_pos_mass.xyz,
+    resolved_tertiary_velocity,
+    tertiary_pos_mass.w
+  );
+  if (
+    resolved_primary_wall.valid == 0u
+    || resolved_center_wall.valid == 0u
+    || resolved_secondary_wall.valid == 0u
+    || resolved_tertiary_wall.valid == 0u
+    || resolved_primary_wall.clipped != 0u
+    || resolved_center_wall.clipped != 0u
+    || resolved_secondary_wall.clipped != 0u
+    || resolved_tertiary_wall.clipped != 0u
+  ) { return result; }
+  let primary_pair_kinetic_delta_j = 0.5 * primary_pos_mass.w * (
+    dot(contact_primary_velocity, contact_primary_velocity)
+      - dot(primary_velocity, primary_velocity)
+  );
+  let center_pair_kinetic_delta_j = 0.5 * center_pos_mass.w * (
+    dot(contact_center_velocity, contact_center_velocity)
+      - dot(center_velocity, center_velocity)
+  );
+  let secondary_pair_kinetic_delta_j = 0.5 * secondary_pos_mass.w * (
+    dot(contact_secondary_velocity, contact_secondary_velocity)
+      - dot(secondary_velocity, secondary_velocity)
+  );
+  let tertiary_pair_kinetic_delta_j = 0.5 * tertiary_pos_mass.w * (
+    dot(contact_tertiary_velocity, contact_tertiary_velocity)
+      - dot(tertiary_velocity, tertiary_velocity)
+  );
+  let pair_kinetic_delta_j = primary_pair_kinetic_delta_j
+    + center_pair_kinetic_delta_j
+    + secondary_pair_kinetic_delta_j
+    + tertiary_pair_kinetic_delta_j;
+  let wall_kinetic_delta_x_j = 0.5 * dot(masses_kg, vec4<f32>(
+    resolved_primary_velocity.x * resolved_primary_velocity.x
+      - contact_primary_velocity.x * contact_primary_velocity.x,
+    resolved_center_velocity.x * resolved_center_velocity.x
+      - contact_center_velocity.x * contact_center_velocity.x,
+    resolved_secondary_velocity.x * resolved_secondary_velocity.x
+      - contact_secondary_velocity.x * contact_secondary_velocity.x,
+    resolved_tertiary_velocity.x * resolved_tertiary_velocity.x
+      - contact_tertiary_velocity.x * contact_tertiary_velocity.x
+  ));
+  let wall_kinetic_delta_y_j = 0.5 * dot(masses_kg, vec4<f32>(
+    resolved_primary_velocity.y * resolved_primary_velocity.y
+      - contact_primary_velocity.y * contact_primary_velocity.y,
+    resolved_center_velocity.y * resolved_center_velocity.y
+      - contact_center_velocity.y * contact_center_velocity.y,
+    resolved_secondary_velocity.y * resolved_secondary_velocity.y
+      - contact_secondary_velocity.y * contact_secondary_velocity.y,
+    resolved_tertiary_velocity.y * resolved_tertiary_velocity.y
+      - contact_tertiary_velocity.y * contact_tertiary_velocity.y
+  ));
+  let wall_kinetic_delta_z_j = 0.5 * dot(masses_kg, vec4<f32>(
+    resolved_primary_velocity.z * resolved_primary_velocity.z
+      - contact_primary_velocity.z * contact_primary_velocity.z,
+    resolved_center_velocity.z * resolved_center_velocity.z
+      - contact_center_velocity.z * contact_center_velocity.z,
+    resolved_secondary_velocity.z * resolved_secondary_velocity.z
+      - contact_secondary_velocity.z * contact_secondary_velocity.z,
+    resolved_tertiary_velocity.z * resolved_tertiary_velocity.z
+      - contact_tertiary_velocity.z * contact_tertiary_velocity.z
+  ));
+  let wall_kinetic_delta_j = wall_kinetic_delta_x_j
+    + wall_kinetic_delta_y_j
+    + wall_kinetic_delta_z_j;
+  let total_kinetic_delta_j = 0.5 * dot(masses_kg, vec4<f32>(
+    dot(resolved_primary_velocity, resolved_primary_velocity)
+      - dot(primary_velocity, primary_velocity),
+    dot(resolved_center_velocity, resolved_center_velocity)
+      - dot(center_velocity, center_velocity),
+    dot(resolved_secondary_velocity, resolved_secondary_velocity)
+      - dot(secondary_velocity, secondary_velocity),
+    dot(resolved_tertiary_velocity, resolved_tertiary_velocity)
+      - dot(tertiary_velocity, tertiary_velocity)
+  ));
+  let kinetic_conditioning_j = 0.5 * dot(masses_kg, vec4<f32>(
+    dot(primary_velocity, primary_velocity)
+      + dot(contact_primary_velocity, contact_primary_velocity)
+      + dot(resolved_primary_velocity, resolved_primary_velocity),
+    dot(center_velocity, center_velocity)
+      + dot(contact_center_velocity, contact_center_velocity)
+      + dot(resolved_center_velocity, resolved_center_velocity),
+    dot(secondary_velocity, secondary_velocity)
+      + dot(contact_secondary_velocity, contact_secondary_velocity)
+      + dot(resolved_secondary_velocity, resolved_secondary_velocity),
+    dot(tertiary_velocity, tertiary_velocity)
+      + dot(contact_tertiary_velocity, contact_tertiary_velocity)
+      + dot(resolved_tertiary_velocity, resolved_tertiary_velocity)
+  ));
+  let kinetic_tolerance_j = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0e-6)
+  );
+  let x_wall_allocation = mechanical_matching_four_wall_energy_allocation(
+    wall_kinetic_delta_x_j,
+    masses_kg,
+    x_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let y_wall_allocation = mechanical_matching_four_wall_energy_allocation(
+    wall_kinetic_delta_y_j,
+    masses_kg,
+    y_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let z_wall_allocation = mechanical_matching_four_wall_energy_allocation(
+    wall_kinetic_delta_z_j,
+    masses_kg,
+    z_axis.wall_mask,
+    kinetic_tolerance_j
+  );
+  let wall_allocations = x_wall_allocation.delta_j
+    + y_wall_allocation.delta_j
+    + z_wall_allocation.delta_j;
+  if (
+    x_wall_allocation.valid == 0u
+    || y_wall_allocation.valid == 0u
+    || z_wall_allocation.valid == 0u
+    || !mechanical_solver_finite(primary_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(center_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(secondary_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(tertiary_pair_kinetic_delta_j)
+    || !mechanical_solver_finite(pair_kinetic_delta_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_x_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_y_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_z_j)
+    || !mechanical_solver_finite(wall_kinetic_delta_j)
+    || !mechanical_solver_finite(total_kinetic_delta_j)
+    || !mechanical_solver_finite(wall_allocations.x)
+    || !mechanical_solver_finite(wall_allocations.y)
+    || !mechanical_solver_finite(wall_allocations.z)
+    || !mechanical_solver_finite(wall_allocations.w)
+    || pair_kinetic_delta_j > kinetic_tolerance_j
+    || wall_kinetic_delta_x_j > kinetic_tolerance_j
+    || wall_kinetic_delta_y_j > kinetic_tolerance_j
+    || wall_kinetic_delta_z_j > kinetic_tolerance_j
+    || wall_kinetic_delta_j > kinetic_tolerance_j
+    || wall_allocations.x > kinetic_tolerance_j
+    || wall_allocations.y > kinetic_tolerance_j
+    || wall_allocations.z > kinetic_tolerance_j
+    || wall_allocations.w > kinetic_tolerance_j
+    || abs(total_kinetic_delta_j
+      - pair_kinetic_delta_j
+      - wall_kinetic_delta_j) > kinetic_tolerance_j
+  ) { return result; }
+  result.primary_velocity = resolved_primary_velocity;
+  result.center_velocity = resolved_center_velocity;
+  result.secondary_velocity = resolved_secondary_velocity;
+  result.tertiary_velocity = resolved_tertiary_velocity;
+  result.primary_kinetic_delta_j = primary_pair_kinetic_delta_j;
+  result.center_kinetic_delta_j = center_pair_kinetic_delta_j;
+  result.secondary_kinetic_delta_j = secondary_pair_kinetic_delta_j;
+  result.tertiary_kinetic_delta_j = tertiary_pair_kinetic_delta_j;
+  result.primary_wall_kinetic_delta_j = wall_allocations.x;
+  result.center_wall_kinetic_delta_j = wall_allocations.y;
+  result.secondary_wall_kinetic_delta_j = wall_allocations.z;
+  result.tertiary_wall_kinetic_delta_j = wall_allocations.w;
+  result.pair_heat_j = max(0.0, -pair_kinetic_delta_j);
+  result.primary_impulse = primary_impulse;
+  result.center_primary_impulse = center_primary_impulse;
+  result.secondary_impulse = secondary_impulse;
+  result.center_secondary_impulse = center_secondary_impulse;
+  result.tertiary_impulse = tertiary_impulse;
+  result.center_tertiary_impulse = center_tertiary_impulse;
+  result.member_count = 4u;
+  result.applied = 1u;
+  return result;
+}
+
+// Merge two reciprocal matching edges joined by one previously processed
+// bridge. The pair-level reciprocal choice gives exclusive ownership to the
+// lexicographically later mutual pair. Besides making the production write
+// race-free, that order lets the single-invocation diagnostic replay inspect
+// the non-owner before the owner repurposes both pairs' selection scratch.
+// This is the exact four-node path that a pairwise sweep otherwise contracts
+// only by the small light/heavy mass ratio.
+fn mechanical_matching_four_path_block(
+  mutual_low: u32,
+  mutual_high: u32,
+  published_total: u32
+) -> MechanicalMatchingThreeBlockResult {
+  var result = mechanical_matching_zero_three_block();
+  let candidate = mechanical_matching_four_path_candidate(
+    mutual_low,
+    mutual_high,
+    published_total
+  );
+  if (candidate.valid == 0u) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (candidate.found == 0u) { return result; }
+  let edge_0_low = min(candidate.body_0_index, candidate.body_1_index);
+  let edge_0_high = max(candidate.body_0_index, candidate.body_1_index);
+  let edge_2_low = min(candidate.body_2_index, candidate.body_3_index);
+  let edge_2_high = max(candidate.body_2_index, candidate.body_3_index);
+  let current_is_edge_0 = mutual_low == edge_0_low
+    && mutual_high == edge_0_high;
+  let current_is_edge_2 = mutual_low == edge_2_low
+    && mutual_high == edge_2_high;
+  if (!current_is_edge_0 && !current_is_edge_2) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  let partner_low = select(edge_0_low, edge_2_low, current_is_edge_0);
+  let partner_high = select(edge_0_high, edge_2_high, current_is_edge_0);
+  let reciprocal_candidate = mechanical_matching_four_path_candidate(
+    partner_low,
+    partner_high,
+    published_total
+  );
+  if (reciprocal_candidate.valid == 0u) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    reciprocal_candidate.found == 0u
+    || reciprocal_candidate.body_0_index != candidate.body_0_index
+    || reciprocal_candidate.body_1_index != candidate.body_1_index
+    || reciprocal_candidate.body_2_index != candidate.body_2_index
+    || reciprocal_candidate.body_3_index != candidate.body_3_index
+    || reciprocal_candidate.edge_1_forward_cursor
+      != candidate.edge_1_forward_cursor
+    || reciprocal_candidate.edge_1_reverse_cursor
+      != candidate.edge_1_reverse_cursor
+  ) { return result; }
+  result.primary_index = candidate.body_0_index;
+  result.center_index = candidate.body_1_index;
+  result.secondary_index = candidate.body_2_index;
+  result.tertiary_index = candidate.body_3_index;
+  result.center_primary_cursor = candidate.edge_0_forward_cursor;
+  result.primary_center_cursor = candidate.edge_0_reverse_cursor;
+  result.center_secondary_cursor = candidate.edge_1_forward_cursor;
+  result.secondary_center_cursor = candidate.edge_1_reverse_cursor;
+  // For topology 1 these two legacy carrier fields name the 2--3 edge.
+  result.center_tertiary_cursor = candidate.edge_2_forward_cursor;
+  result.tertiary_center_cursor = candidate.edge_2_reverse_cursor;
+  result.block_found = 1u;
+  result.member_count = 4u;
+  result.topology = 1u;
+  result.path_owner = select(0u, 1u, mutual_low > partner_low);
+  if (
+    candidate.edge_0_forward_cursor >= published_total
+    || candidate.edge_0_reverse_cursor >= published_total
+    || candidate.edge_1_forward_cursor >= published_total
+    || candidate.edge_1_reverse_cursor >= published_total
+    || candidate.edge_2_forward_cursor >= published_total
+    || candidate.edge_2_reverse_cursor >= published_total
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_0_forward_cursor]
+    ) != candidate.body_0_index
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_0_reverse_cursor]
+    ) != candidate.body_1_index
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_1_forward_cursor]
+    ) != candidate.body_2_index
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_1_reverse_cursor]
+    ) != candidate.body_1_index
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_2_forward_cursor]
+    ) != candidate.body_3_index
+    || mechanical_solver_peer_index(
+      csr_peers[candidate.edge_2_reverse_cursor]
+    ) != candidate.body_2_index
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  let edge_0_pair = mechanical_matching_constraint_pair(
+    edge_0_low,
+    edge_0_high,
+    candidate.edge_0_forward_cursor
+  );
+  let edge_1_low = min(candidate.body_1_index, candidate.body_2_index);
+  let edge_1_high = max(candidate.body_1_index, candidate.body_2_index);
+  let edge_1_pair = mechanical_matching_constraint_pair(
+    edge_1_low,
+    edge_1_high,
+    candidate.edge_1_forward_cursor
+  );
+  let edge_2_pair = mechanical_matching_constraint_pair(
+    edge_2_low,
+    edge_2_high,
+    candidate.edge_2_forward_cursor
+  );
+  let edge_0_constraint =
+    matching_constraints[candidate.edge_0_forward_cursor];
+  let edge_0_reverse_constraint =
+    matching_constraints[candidate.edge_0_reverse_cursor];
+  let edge_1_constraint =
+    matching_constraints[candidate.edge_1_forward_cursor];
+  let edge_1_reverse_constraint =
+    matching_constraints[candidate.edge_1_reverse_cursor];
+  let edge_2_constraint =
+    matching_constraints[candidate.edge_2_forward_cursor];
+  let edge_2_reverse_constraint =
+    matching_constraints[candidate.edge_2_reverse_cursor];
+  if (
+    edge_0_pair.valid == 0u
+    || edge_1_pair.valid == 0u
+    || edge_2_pair.valid == 0u
+    || edge_0_pair.active_pair == 0u
+    || edge_1_pair.active_pair == 0u
+    || edge_2_pair.active_pair == 0u
+    || edge_0_pair.unilateral == 0u
+    || edge_1_pair.unilateral == 0u
+    || edge_2_pair.unilateral == 0u
+    || length(edge_0_constraint.xyz - edge_0_reverse_constraint.xyz)
+      > 1.0e-5
+    || length(edge_1_constraint.xyz - edge_1_reverse_constraint.xyz)
+      > 1.0e-5
+    || length(edge_2_constraint.xyz - edge_2_reverse_constraint.xyz)
+      > 1.0e-5
+    || edge_0_constraint.w != edge_0_reverse_constraint.w
+    || edge_1_constraint.w != edge_1_reverse_constraint.w
+    || edge_2_constraint.w != edge_2_reverse_constraint.w
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let body_0_pos_mass = input_state[candidate.body_0_index * 2u];
+  let body_1_pos_mass = input_state[candidate.body_1_index * 2u];
+  let body_2_pos_mass = input_state[candidate.body_2_index * 2u];
+  let body_3_pos_mass = input_state[candidate.body_3_index * 2u];
+  let body_0_velocity = input_state[candidate.body_0_index * 2u + 1u].xyz;
+  let body_1_velocity = input_state[candidate.body_1_index * 2u + 1u].xyz;
+  let body_2_velocity = input_state[candidate.body_2_index * 2u + 1u].xyz;
+  let body_3_velocity = input_state[candidate.body_3_index * 2u + 1u].xyz;
+  let masses_kg = vec4<f32>(
+    body_0_pos_mass.w,
+    body_1_pos_mass.w,
+    body_2_pos_mass.w,
+    body_3_pos_mass.w
+  );
+  if (
+    !(masses_kg.x > 0.0)
+    || !(masses_kg.y > 0.0)
+    || !(masses_kg.z > 0.0)
+    || !(masses_kg.w > 0.0)
+    || !mechanical_solver_finite3(body_0_velocity)
+    || !mechanical_solver_finite3(body_1_velocity)
+    || !mechanical_solver_finite3(body_2_velocity)
+    || !mechanical_solver_finite3(body_3_velocity)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let edge_0_normal = mechanical_matching_center_oriented_vector(
+    candidate.body_1_index,
+    candidate.body_0_index,
+    mechanical_matching_constraint_normal(edge_0_constraint)
+  );
+  let edge_1_normal = mechanical_matching_center_oriented_vector(
+    candidate.body_1_index,
+    candidate.body_2_index,
+    mechanical_matching_constraint_normal(edge_1_constraint)
+  );
+  let edge_2_normal = mechanical_matching_center_oriented_vector(
+    candidate.body_2_index,
+    candidate.body_3_index,
+    mechanical_matching_constraint_normal(edge_2_constraint)
+  );
+  let edge_0_response = mechanical_matching_center_oriented_vector(
+    candidate.body_1_index,
+    candidate.body_0_index,
+    edge_0_constraint.xyz
+  );
+  let edge_1_response = mechanical_matching_center_oriented_vector(
+    candidate.body_1_index,
+    candidate.body_2_index,
+    edge_1_constraint.xyz
+  );
+  let edge_2_response = mechanical_matching_center_oriented_vector(
+    candidate.body_2_index,
+    candidate.body_3_index,
+    edge_2_constraint.xyz
+  );
+  if (
+    !mechanical_matching_axis_contact_normal_valid(edge_0_normal)
+    || !mechanical_matching_axis_contact_normal_valid(edge_1_normal)
+    || !mechanical_matching_axis_contact_normal_valid(edge_2_normal)
+    || length(edge_0_response - edge_0_normal) > 1.0e-5
+    || length(edge_1_response - edge_1_normal) > 1.0e-5
+    || length(edge_2_response - edge_2_normal) > 1.0e-5
+  ) { return result; }
+  let edge_0_tolerance = mechanical_matching_position_tolerance(
+    edge_0_low,
+    edge_0_high
+  );
+  let edge_1_tolerance = mechanical_matching_position_tolerance(
+    edge_1_low,
+    edge_1_high
+  );
+  let edge_2_tolerance = mechanical_matching_position_tolerance(
+    edge_2_low,
+    edge_2_high
+  );
+  let edge_0_low_mass = input_state[edge_0_low * 2u].w;
+  let edge_0_high_mass = input_state[edge_0_high * 2u].w;
+  let edge_1_low_mass = input_state[edge_1_low * 2u].w;
+  let edge_1_high_mass = input_state[edge_1_high * 2u].w;
+  let edge_2_low_mass = input_state[edge_2_low * 2u].w;
+  let edge_2_high_mass = input_state[edge_2_high * 2u].w;
+  let edge_0_position_ratio = edge_0_pair.position_residual
+    / edge_0_tolerance;
+  let edge_1_position_ratio = edge_1_pair.position_residual
+    / edge_1_tolerance;
+  let edge_2_position_ratio = edge_2_pair.position_residual
+    / edge_2_tolerance;
+  let edge_0_update_ratio = length(edge_0_pair.barrier_dx)
+    * (1.0 + edge_0_low_mass / edge_0_high_mass) / edge_0_tolerance;
+  let edge_1_update_ratio = length(edge_1_pair.barrier_dx)
+    * (1.0 + edge_1_low_mass / edge_1_high_mass) / edge_1_tolerance;
+  let edge_2_update_ratio = length(edge_2_pair.barrier_dx)
+    * (1.0 + edge_2_low_mass / edge_2_high_mass) / edge_2_tolerance;
+  if (
+    edge_0_position_ratio > 0.5
+    || edge_1_position_ratio > 0.5
+    || edge_2_position_ratio > 0.5
+    || edge_0_update_ratio > 0.5
+    || edge_1_update_ratio > 0.5
+    || edge_2_update_ratio > 0.5
+  ) { return result; }
+  let x_axis = mechanical_matching_four_path_axis_active_set(
+    edge_0_normal.x,
+    edge_1_normal.x,
+    edge_2_normal.x,
+    masses_kg,
+    vec4<f32>(
+      body_0_velocity.x,
+      body_1_velocity.x,
+      body_2_velocity.x,
+      body_3_velocity.x
+    ),
+    1.0e-5
+  );
+  let y_axis = mechanical_matching_four_path_axis_active_set(
+    edge_0_normal.y,
+    edge_1_normal.y,
+    edge_2_normal.y,
+    masses_kg,
+    vec4<f32>(
+      body_0_velocity.y,
+      body_1_velocity.y,
+      body_2_velocity.y,
+      body_3_velocity.y
+    ),
+    1.0e-5
+  );
+  let z_axis = mechanical_matching_four_path_axis_active_set(
+    edge_0_normal.z,
+    edge_1_normal.z,
+    edge_2_normal.z,
+    masses_kg,
+    vec4<f32>(
+      body_0_velocity.z,
+      body_1_velocity.z,
+      body_2_velocity.z,
+      body_3_velocity.z
+    ),
+    1.0e-5
+  );
+  if (x_axis.valid == 0u || y_axis.valid == 0u || z_axis.valid == 0u) {
+    return result;
+  }
+  if (
+    ((x_axis.contact_mask | y_axis.contact_mask | z_axis.contact_mask) & 7u)
+      != 7u
+  ) { return result; }
+  let body_0_resolved_velocity = vec3<f32>(
+    x_axis.velocity.x,
+    y_axis.velocity.x,
+    z_axis.velocity.x
+  );
+  let body_1_resolved_velocity = vec3<f32>(
+    x_axis.velocity.y,
+    y_axis.velocity.y,
+    z_axis.velocity.y
+  );
+  let body_2_resolved_velocity = vec3<f32>(
+    x_axis.velocity.z,
+    y_axis.velocity.z,
+    z_axis.velocity.z
+  );
+  let body_3_resolved_velocity = vec3<f32>(
+    x_axis.velocity.w,
+    y_axis.velocity.w,
+    z_axis.velocity.w
+  );
+  let edge_0_residual = dot(
+    body_1_resolved_velocity - body_0_resolved_velocity,
+    edge_0_normal
+  );
+  let edge_1_residual = dot(
+    body_1_resolved_velocity - body_2_resolved_velocity,
+    edge_1_normal
+  );
+  let edge_2_residual = dot(
+    body_2_resolved_velocity - body_3_resolved_velocity,
+    edge_2_normal
+  );
+  if (
+    edge_0_residual < -1.0e-5
+    || edge_1_residual < -1.0e-5
+    || edge_2_residual < -1.0e-5
+  ) { return result; }
+  let body_0_wall = mechanical_matching_project_wall_velocity(
+    candidate.body_0_index,
+    body_0_pos_mass.xyz,
+    body_0_resolved_velocity,
+    body_0_pos_mass.w
+  );
+  let body_1_wall = mechanical_matching_project_wall_velocity(
+    candidate.body_1_index,
+    body_1_pos_mass.xyz,
+    body_1_resolved_velocity,
+    body_1_pos_mass.w
+  );
+  let body_2_wall = mechanical_matching_project_wall_velocity(
+    candidate.body_2_index,
+    body_2_pos_mass.xyz,
+    body_2_resolved_velocity,
+    body_2_pos_mass.w
+  );
+  let body_3_wall = mechanical_matching_project_wall_velocity(
+    candidate.body_3_index,
+    body_3_pos_mass.xyz,
+    body_3_resolved_velocity,
+    body_3_pos_mass.w
+  );
+  if (
+    body_0_wall.valid == 0u
+    || body_1_wall.valid == 0u
+    || body_2_wall.valid == 0u
+    || body_3_wall.valid == 0u
+    || body_0_wall.clipped != 0u
+    || body_1_wall.clipped != 0u
+    || body_2_wall.clipped != 0u
+    || body_3_wall.clipped != 0u
+  ) { return result; }
+  let body_0_impulse = body_0_pos_mass.w
+    * (body_0_wall.velocity - body_0_velocity);
+  let body_1_impulse = body_1_pos_mass.w
+    * (body_1_wall.velocity - body_1_velocity);
+  let body_2_impulse = body_2_pos_mass.w
+    * (body_2_wall.velocity - body_2_velocity);
+  let body_3_impulse = body_3_pos_mass.w
+    * (body_3_wall.velocity - body_3_velocity);
+  let edge_0_lambda = -dot(body_0_impulse, edge_0_normal);
+  let edge_2_lambda = -dot(body_3_impulse, edge_2_normal);
+  let edge_0_body_1_impulse = edge_0_lambda * edge_0_normal;
+  let edge_1_lambda = dot(
+    body_1_impulse - edge_0_body_1_impulse,
+    edge_1_normal
+  );
+  let edge_1_body_1_impulse = edge_1_lambda * edge_1_normal;
+  let edge_1_body_2_impulse = -edge_1_body_1_impulse;
+  let edge_2_body_2_impulse = edge_2_lambda * edge_2_normal;
+  let edge_0_body_0_impulse = -edge_0_body_1_impulse;
+  let edge_2_body_3_impulse = -edge_2_body_2_impulse;
+  let impulse_conditioning = length(body_0_impulse)
+    + length(body_1_impulse)
+    + length(body_2_impulse)
+    + length(body_3_impulse);
+  let impulse_tolerance = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(impulse_conditioning, 1.0e-6)
+  );
+  if (
+    !(edge_0_lambda > 0.0)
+    || !(edge_1_lambda > 0.0)
+    || !(edge_2_lambda > 0.0)
+    || length(body_0_impulse - edge_0_body_0_impulse)
+      > impulse_tolerance
+    || length(
+      body_1_impulse
+        - edge_0_body_1_impulse
+        - edge_1_body_1_impulse
+    ) > impulse_tolerance
+    || length(
+      body_2_impulse
+        - edge_1_body_2_impulse
+        - edge_2_body_2_impulse
+    ) > impulse_tolerance
+    || length(body_3_impulse - edge_2_body_3_impulse)
+      > impulse_tolerance
+    || length(
+      body_0_impulse + body_1_impulse
+        + body_2_impulse + body_3_impulse
+    ) > impulse_tolerance
+  ) { return result; }
+  let body_0_kinetic_delta_j = 0.5 * body_0_pos_mass.w * (
+    dot(body_0_wall.velocity, body_0_wall.velocity)
+      - dot(body_0_velocity, body_0_velocity)
+  );
+  let body_1_kinetic_delta_j = 0.5 * body_1_pos_mass.w * (
+    dot(body_1_wall.velocity, body_1_wall.velocity)
+      - dot(body_1_velocity, body_1_velocity)
+  );
+  let body_2_kinetic_delta_j = 0.5 * body_2_pos_mass.w * (
+    dot(body_2_wall.velocity, body_2_wall.velocity)
+      - dot(body_2_velocity, body_2_velocity)
+  );
+  let body_3_kinetic_delta_j = 0.5 * body_3_pos_mass.w * (
+    dot(body_3_wall.velocity, body_3_wall.velocity)
+      - dot(body_3_velocity, body_3_velocity)
+  );
+  let aggregate_kinetic_delta_j = body_0_kinetic_delta_j
+    + body_1_kinetic_delta_j
+    + body_2_kinetic_delta_j
+    + body_3_kinetic_delta_j;
+  let kinetic_conditioning_j = 0.5 * dot(masses_kg, vec4<f32>(
+    dot(body_0_velocity, body_0_velocity)
+      + dot(body_0_wall.velocity, body_0_wall.velocity),
+    dot(body_1_velocity, body_1_velocity)
+      + dot(body_1_wall.velocity, body_1_wall.velocity),
+    dot(body_2_velocity, body_2_velocity)
+      + dot(body_2_wall.velocity, body_2_wall.velocity),
+    dot(body_3_velocity, body_3_velocity)
+      + dot(body_3_wall.velocity, body_3_wall.velocity)
+  ));
+  let kinetic_tolerance_j = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite(aggregate_kinetic_delta_j)
+    || aggregate_kinetic_delta_j > kinetic_tolerance_j
+  ) { return result; }
+  result.primary_velocity = body_0_wall.velocity;
+  result.center_velocity = body_1_wall.velocity;
+  result.secondary_velocity = body_2_wall.velocity;
+  result.tertiary_velocity = body_3_wall.velocity;
+  result.primary_kinetic_delta_j = body_0_kinetic_delta_j;
+  result.center_kinetic_delta_j = body_1_kinetic_delta_j;
+  result.secondary_kinetic_delta_j = body_2_kinetic_delta_j;
+  result.tertiary_kinetic_delta_j = body_3_kinetic_delta_j;
+  result.primary_wall_kinetic_delta_j = body_0_wall.kinetic_delta_j;
+  result.center_wall_kinetic_delta_j = body_1_wall.kinetic_delta_j;
+  result.secondary_wall_kinetic_delta_j = body_2_wall.kinetic_delta_j;
+  result.tertiary_wall_kinetic_delta_j = body_3_wall.kinetic_delta_j;
+  result.pair_heat_j = max(0.0, -aggregate_kinetic_delta_j);
+  result.primary_impulse = edge_0_body_0_impulse;
+  result.center_primary_impulse = edge_0_body_1_impulse;
+  result.center_secondary_impulse = edge_1_body_1_impulse;
+  result.secondary_impulse = edge_1_body_2_impulse;
+  result.center_tertiary_impulse = edge_2_body_2_impulse;
+  result.tertiary_impulse = edge_2_body_3_impulse;
+  result.applied = 1u;
+  return result;
+}
+
+// Extend the proven three-body helper only for the degree-three contact star.
+// Contact-only cases use the lighter eight-mask projection; wall-coupled
+// cases use the exact 16 x 8 per-axis active set above.
+fn mechanical_matching_four_block(
+  seed: MechanicalMatchingThreeBlockResult,
+  primary_pair: MechanicalPairResidual,
+  secondary_pair: MechanicalPairResidual,
+  tertiary_pair: MechanicalPairResidual
+) -> MechanicalMatchingThreeBlockResult {
+  var result = seed;
+  if (
+    seed.center_index >= mechanical_params.particle_count
+    || seed.primary_index >= mechanical_params.particle_count
+    || seed.secondary_index >= mechanical_params.particle_count
+    || seed.tertiary_index >= mechanical_params.particle_count
+    || seed.center_index == seed.primary_index
+    || seed.center_index == seed.secondary_index
+    || seed.center_index == seed.tertiary_index
+    || seed.primary_index == seed.secondary_index
+    || seed.primary_index == seed.tertiary_index
+    || seed.secondary_index == seed.tertiary_index
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  let primary_pos_mass = input_state[seed.primary_index * 2u];
+  let center_pos_mass = input_state[seed.center_index * 2u];
+  let secondary_pos_mass = input_state[seed.secondary_index * 2u];
+  let tertiary_pos_mass = input_state[seed.tertiary_index * 2u];
+  if (
+    !(primary_pos_mass.w > center_pos_mass.w)
+    || !(secondary_pos_mass.w > center_pos_mass.w)
+    || !(tertiary_pos_mass.w > center_pos_mass.w)
+    || !(center_pos_mass.w > 0.0)
+    || !mechanical_solver_finite3(primary_pos_mass.xyz)
+    || !mechanical_solver_finite3(center_pos_mass.xyz)
+    || !mechanical_solver_finite3(secondary_pos_mass.xyz)
+    || !mechanical_solver_finite3(tertiary_pos_mass.xyz)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let center_primary_constraint =
+    matching_constraints[seed.center_primary_cursor];
+  let primary_center_constraint =
+    matching_constraints[seed.primary_center_cursor];
+  let center_secondary_constraint =
+    matching_constraints[seed.center_secondary_cursor];
+  let secondary_center_constraint =
+    matching_constraints[seed.secondary_center_cursor];
+  let center_tertiary_constraint =
+    matching_constraints[seed.center_tertiary_cursor];
+  let tertiary_center_constraint =
+    matching_constraints[seed.tertiary_center_cursor];
+  if (
+    primary_pair.valid == 0u
+    || secondary_pair.valid == 0u
+    || tertiary_pair.valid == 0u
+    || primary_pair.active_pair == 0u
+    || secondary_pair.active_pair == 0u
+    || tertiary_pair.active_pair == 0u
+    || primary_pair.unilateral == 0u
+    || secondary_pair.unilateral == 0u
+    || tertiary_pair.unilateral == 0u
+    || length(
+      center_primary_constraint.xyz - primary_center_constraint.xyz
+    ) > 1.0e-5
+    || length(
+      center_secondary_constraint.xyz - secondary_center_constraint.xyz
+    ) > 1.0e-5
+    || length(
+      center_tertiary_constraint.xyz - tertiary_center_constraint.xyz
+    ) > 1.0e-5
+    || center_primary_constraint.w != primary_center_constraint.w
+    || center_secondary_constraint.w != secondary_center_constraint.w
+    || center_tertiary_constraint.w != tertiary_center_constraint.w
+    || !mechanical_matching_constraint_code_valid(
+      center_primary_constraint
+    )
+    || !mechanical_matching_constraint_code_valid(
+      center_secondary_constraint
+    )
+    || !mechanical_matching_constraint_code_valid(
+      center_tertiary_constraint
+    )
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let primary_normal = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.primary_index,
+    mechanical_matching_constraint_normal(center_primary_constraint)
+  );
+  let secondary_normal = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.secondary_index,
+    mechanical_matching_constraint_normal(center_secondary_constraint)
+  );
+  let tertiary_normal = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.tertiary_index,
+    mechanical_matching_constraint_normal(center_tertiary_constraint)
+  );
+  let primary_response = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.primary_index,
+    center_primary_constraint.xyz
+  );
+  let secondary_response = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.secondary_index,
+    center_secondary_constraint.xyz
+  );
+  let tertiary_response = mechanical_matching_center_oriented_vector(
+    seed.center_index,
+    seed.tertiary_index,
+    center_tertiary_constraint.xyz
+  );
+  if (
+    !mechanical_matching_axis_contact_normal_valid(primary_normal)
+    || !mechanical_matching_axis_contact_normal_valid(secondary_normal)
+    || !mechanical_matching_axis_contact_normal_valid(tertiary_normal)
+    || !mechanical_solver_finite3(primary_response)
+    || !mechanical_solver_finite3(secondary_response)
+    || !mechanical_solver_finite3(tertiary_response)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    length(primary_response - primary_normal) > 1.0e-5
+    || length(secondary_response - secondary_normal) > 1.0e-5
+    || length(tertiary_response - tertiary_normal) > 1.0e-5
+    || dot(primary_response, primary_normal) <= 1.0e-6
+    || dot(secondary_response, secondary_normal) <= 1.0e-6
+    || dot(tertiary_response, tertiary_normal) <= 1.0e-6
+  ) { return seed; }
+  let primary_low = min(seed.center_index, seed.primary_index);
+  let primary_high = max(seed.center_index, seed.primary_index);
+  let secondary_low = min(seed.center_index, seed.secondary_index);
+  let secondary_high = max(seed.center_index, seed.secondary_index);
+  let tertiary_low = min(seed.center_index, seed.tertiary_index);
+  let tertiary_high = max(seed.center_index, seed.tertiary_index);
+  let primary_tolerance =
+    mechanical_matching_position_tolerance(primary_low, primary_high);
+  let secondary_tolerance =
+    mechanical_matching_position_tolerance(secondary_low, secondary_high);
+  let tertiary_tolerance =
+    mechanical_matching_position_tolerance(tertiary_low, tertiary_high);
+  let primary_low_mass = input_state[primary_low * 2u].w;
+  let primary_high_mass = input_state[primary_high * 2u].w;
+  let secondary_low_mass = input_state[secondary_low * 2u].w;
+  let secondary_high_mass = input_state[secondary_high * 2u].w;
+  let tertiary_low_mass = input_state[tertiary_low * 2u].w;
+  let tertiary_high_mass = input_state[tertiary_high * 2u].w;
+  let primary_position_ratio =
+    primary_pair.position_residual / primary_tolerance;
+  let secondary_position_ratio =
+    secondary_pair.position_residual / secondary_tolerance;
+  let tertiary_position_ratio =
+    tertiary_pair.position_residual / tertiary_tolerance;
+  let primary_update_ratio = length(primary_pair.barrier_dx)
+    * (1.0 + primary_low_mass / primary_high_mass)
+    / primary_tolerance;
+  let secondary_update_ratio = length(secondary_pair.barrier_dx)
+    * (1.0 + secondary_low_mass / secondary_high_mass)
+    / secondary_tolerance;
+  let tertiary_update_ratio = length(tertiary_pair.barrier_dx)
+    * (1.0 + tertiary_low_mass / tertiary_high_mass)
+    / tertiary_tolerance;
+  if (
+    !mechanical_solver_finite(primary_position_ratio)
+    || !mechanical_solver_finite(secondary_position_ratio)
+    || !mechanical_solver_finite(tertiary_position_ratio)
+    || !mechanical_solver_finite(primary_update_ratio)
+    || !mechanical_solver_finite(secondary_update_ratio)
+    || !mechanical_solver_finite(tertiary_update_ratio)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    primary_position_ratio > 0.5
+    || secondary_position_ratio > 0.5
+    || tertiary_position_ratio > 0.5
+    || primary_update_ratio > 0.5
+    || secondary_update_ratio > 0.5
+    || tertiary_update_ratio > 0.5
+  ) { return seed; }
+  let primary_velocity = input_state[seed.primary_index * 2u + 1u].xyz;
+  let center_velocity = input_state[seed.center_index * 2u + 1u].xyz;
+  let secondary_velocity =
+    input_state[seed.secondary_index * 2u + 1u].xyz;
+  let tertiary_velocity =
+    input_state[seed.tertiary_index * 2u + 1u].xyz;
+  let primary_relative_velocity = dot(
+    center_velocity - primary_velocity,
+    primary_normal
+  );
+  if (
+    !mechanical_solver_finite3(primary_velocity)
+    || !mechanical_solver_finite3(center_velocity)
+    || !mechanical_solver_finite3(secondary_velocity)
+    || !mechanical_solver_finite3(tertiary_velocity)
+    || !mechanical_solver_finite(primary_relative_velocity)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (!(primary_relative_velocity < -1.0e-5)) { return seed; }
+  let masses_kg = vec4<f32>(
+    primary_pos_mass.w,
+    center_pos_mass.w,
+    secondary_pos_mass.w,
+    tertiary_pos_mass.w
+  );
+  let x_axis = mechanical_matching_four_block_axis_active_set(
+    primary_normal.x,
+    secondary_normal.x,
+    tertiary_normal.x,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.x,
+      center_velocity.x,
+      secondary_velocity.x,
+      tertiary_velocity.x
+    ),
+    1.0e-5
+  );
+  let y_axis = mechanical_matching_four_block_axis_active_set(
+    primary_normal.y,
+    secondary_normal.y,
+    tertiary_normal.y,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.y,
+      center_velocity.y,
+      secondary_velocity.y,
+      tertiary_velocity.y
+    ),
+    1.0e-5
+  );
+  let z_axis = mechanical_matching_four_block_axis_active_set(
+    primary_normal.z,
+    secondary_normal.z,
+    tertiary_normal.z,
+    masses_kg,
+    vec4<f32>(
+      primary_velocity.z,
+      center_velocity.z,
+      secondary_velocity.z,
+      tertiary_velocity.z
+    ),
+    1.0e-5
+  );
+  if (x_axis.valid == 0u || y_axis.valid == 0u || z_axis.valid == 0u) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let active_contact_mask = x_axis.contact_mask
+    | y_axis.contact_mask
+    | z_axis.contact_mask;
+  if ((active_contact_mask & 7u) != 7u) { return seed; }
+  let proposed_primary_velocity =
+    vec3<f32>(x_axis.velocity.x, y_axis.velocity.x, z_axis.velocity.x);
+  let proposed_center_velocity =
+    vec3<f32>(x_axis.velocity.y, y_axis.velocity.y, z_axis.velocity.y);
+  let proposed_secondary_velocity =
+    vec3<f32>(x_axis.velocity.z, y_axis.velocity.z, z_axis.velocity.z);
+  let proposed_tertiary_velocity =
+    vec3<f32>(x_axis.velocity.w, y_axis.velocity.w, z_axis.velocity.w);
+  let primary_residual = dot(
+    proposed_center_velocity - proposed_primary_velocity,
+    primary_normal
+  );
+  let secondary_residual = dot(
+    proposed_center_velocity - proposed_secondary_velocity,
+    secondary_normal
+  );
+  let tertiary_residual = dot(
+    proposed_center_velocity - proposed_tertiary_velocity,
+    tertiary_normal
+  );
+  if (
+    !mechanical_solver_finite3(proposed_primary_velocity)
+    || !mechanical_solver_finite3(proposed_center_velocity)
+    || !mechanical_solver_finite3(proposed_secondary_velocity)
+    || !mechanical_solver_finite3(proposed_tertiary_velocity)
+    || !mechanical_solver_finite(primary_residual)
+    || !mechanical_solver_finite(secondary_residual)
+    || !mechanical_solver_finite(tertiary_residual)
+    || primary_residual < -1.0e-5
+    || secondary_residual < -1.0e-5
+    || tertiary_residual < -1.0e-5
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let primary_wall = mechanical_matching_project_wall_velocity(
+    seed.primary_index,
+    primary_pos_mass.xyz,
+    proposed_primary_velocity,
+    primary_pos_mass.w
+  );
+  let center_wall = mechanical_matching_project_wall_velocity(
+    seed.center_index,
+    center_pos_mass.xyz,
+    proposed_center_velocity,
+    center_pos_mass.w
+  );
+  let secondary_wall = mechanical_matching_project_wall_velocity(
+    seed.secondary_index,
+    secondary_pos_mass.xyz,
+    proposed_secondary_velocity,
+    secondary_pos_mass.w
+  );
+  let tertiary_wall = mechanical_matching_project_wall_velocity(
+    seed.tertiary_index,
+    tertiary_pos_mass.xyz,
+    proposed_tertiary_velocity,
+    tertiary_pos_mass.w
+  );
+  if (
+    primary_wall.valid == 0u
+    || center_wall.valid == 0u
+    || secondary_wall.valid == 0u
+    || tertiary_wall.valid == 0u
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    primary_wall.clipped != 0u
+    || center_wall.clipped != 0u
+    || secondary_wall.clipped != 0u
+    || tertiary_wall.clipped != 0u
+  ) {
+    return mechanical_matching_four_block_box_wall_active_set(
+      seed,
+      primary_normal,
+      secondary_normal,
+      tertiary_normal,
+      primary_pos_mass,
+      center_pos_mass,
+      secondary_pos_mass,
+      tertiary_pos_mass,
+      primary_velocity,
+      center_velocity,
+      secondary_velocity,
+      tertiary_velocity,
+      proposed_primary_velocity,
+      proposed_center_velocity,
+      proposed_secondary_velocity,
+      proposed_tertiary_velocity,
+      1.0e-5
+    );
+  }
+  let primary_kinetic_delta_j = 0.5 * primary_pos_mass.w * (
+    dot(primary_wall.velocity, primary_wall.velocity)
+      - dot(primary_velocity, primary_velocity)
+  );
+  let center_kinetic_delta_j = 0.5 * center_pos_mass.w * (
+    dot(center_wall.velocity, center_wall.velocity)
+      - dot(center_velocity, center_velocity)
+  );
+  let secondary_kinetic_delta_j = 0.5 * secondary_pos_mass.w * (
+    dot(secondary_wall.velocity, secondary_wall.velocity)
+      - dot(secondary_velocity, secondary_velocity)
+  );
+  let tertiary_kinetic_delta_j = 0.5 * tertiary_pos_mass.w * (
+    dot(tertiary_wall.velocity, tertiary_wall.velocity)
+      - dot(tertiary_velocity, tertiary_velocity)
+  );
+  let primary_impulse = primary_pos_mass.w
+    * (primary_wall.velocity - primary_velocity);
+  let center_impulse = center_pos_mass.w
+    * (center_wall.velocity - center_velocity);
+  let secondary_impulse = secondary_pos_mass.w
+    * (secondary_wall.velocity - secondary_velocity);
+  let tertiary_impulse = tertiary_pos_mass.w
+    * (tertiary_wall.velocity - tertiary_velocity);
+  let primary_contact_impulse = -dot(primary_impulse, primary_normal);
+  let secondary_contact_impulse = -dot(
+    secondary_impulse,
+    secondary_normal
+  );
+  let tertiary_contact_impulse = -dot(
+    tertiary_impulse,
+    tertiary_normal
+  );
+  let impulse_conditioning = max(
+    max(length(primary_impulse), length(secondary_impulse)),
+    length(tertiary_impulse)
+  );
+  let impulse_tolerance = max(
+    1.0e-10,
+    128.0 * 1.1920929e-7 * max(impulse_conditioning, 1.0e-6)
+  );
+  if (
+    !(primary_contact_impulse > 0.0)
+    || !(secondary_contact_impulse > 0.0)
+    || !(tertiary_contact_impulse > 0.0)
+    || length(
+      primary_impulse + primary_contact_impulse * primary_normal
+    ) > impulse_tolerance
+    || length(
+      secondary_impulse + secondary_contact_impulse * secondary_normal
+    ) > impulse_tolerance
+    || length(
+      tertiary_impulse + tertiary_contact_impulse * tertiary_normal
+    ) > impulse_tolerance
+  ) { return seed; }
+  let aggregate_kinetic_delta_j = primary_kinetic_delta_j
+    + center_kinetic_delta_j
+    + secondary_kinetic_delta_j
+    + tertiary_kinetic_delta_j;
+  let aggregate_momentum_residual = primary_impulse
+    + center_impulse
+    + secondary_impulse
+    + tertiary_impulse;
+  let momentum_conditioning = length(primary_impulse)
+    + length(center_impulse)
+    + length(secondary_impulse)
+    + length(tertiary_impulse);
+  let momentum_tolerance = max(
+    1.0e-6,
+    256.0 * 1.1920929e-7 * max(momentum_conditioning, 1.0)
+  );
+  let kinetic_conditioning_j = 0.5 * (
+    primary_pos_mass.w * (
+      dot(primary_velocity, primary_velocity)
+        + dot(primary_wall.velocity, primary_wall.velocity)
+    )
+      + center_pos_mass.w * (
+        dot(center_velocity, center_velocity)
+          + dot(center_wall.velocity, center_wall.velocity)
+      )
+      + secondary_pos_mass.w * (
+        dot(secondary_velocity, secondary_velocity)
+          + dot(secondary_wall.velocity, secondary_wall.velocity)
+      )
+      + tertiary_pos_mass.w * (
+        dot(tertiary_velocity, tertiary_velocity)
+          + dot(tertiary_wall.velocity, tertiary_wall.velocity)
+      )
+  );
+  let kinetic_tolerance_j = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite(primary_kinetic_delta_j)
+    || !mechanical_solver_finite(center_kinetic_delta_j)
+    || !mechanical_solver_finite(secondary_kinetic_delta_j)
+    || !mechanical_solver_finite(tertiary_kinetic_delta_j)
+    || !mechanical_solver_finite(aggregate_kinetic_delta_j)
+    || !mechanical_solver_finite3(primary_impulse)
+    || !mechanical_solver_finite3(center_impulse)
+    || !mechanical_solver_finite3(secondary_impulse)
+    || !mechanical_solver_finite3(tertiary_impulse)
+    || !mechanical_solver_finite3(aggregate_momentum_residual)
+    || length(aggregate_momentum_residual) > momentum_tolerance
+    || aggregate_kinetic_delta_j > kinetic_tolerance_j
+  ) {
+    result.failure_code = select(
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+      mechanical_solver_finite(aggregate_kinetic_delta_j)
+        && aggregate_kinetic_delta_j > kinetic_tolerance_j
+    );
+    result.valid = 0u;
+    return result;
+  }
+  result.primary_velocity = primary_wall.velocity;
+  result.center_velocity = center_wall.velocity;
+  result.secondary_velocity = secondary_wall.velocity;
+  result.tertiary_velocity = tertiary_wall.velocity;
+  result.primary_kinetic_delta_j = primary_kinetic_delta_j;
+  result.center_kinetic_delta_j = center_kinetic_delta_j;
+  result.secondary_kinetic_delta_j = secondary_kinetic_delta_j;
+  result.tertiary_kinetic_delta_j = tertiary_kinetic_delta_j;
+  result.primary_wall_kinetic_delta_j = primary_wall.kinetic_delta_j;
+  result.center_wall_kinetic_delta_j = center_wall.kinetic_delta_j;
+  result.secondary_wall_kinetic_delta_j = secondary_wall.kinetic_delta_j;
+  result.tertiary_wall_kinetic_delta_j = tertiary_wall.kinetic_delta_j;
+  result.pair_heat_j = max(0.0, -aggregate_kinetic_delta_j);
+  result.primary_impulse = primary_impulse;
+  result.center_primary_impulse = -primary_impulse;
+  result.secondary_impulse = secondary_impulse;
+  result.center_secondary_impulse = -secondary_impulse;
+  result.tertiary_impulse = tertiary_impulse;
+  result.center_tertiary_impulse = -tertiary_impulse;
+  result.member_count = 4u;
+  result.applied = 1u;
+  return result;
+}
+
+// A lighter carrier constrained by heavier peers is a coupled star, not a
+// sequence of independent pair projections. Detect the race-free selection
+// shape rooted at one mutual primary edge, retain the top two deterministic
+// inbound selectors, and attempt the four-body projection before the proven
+// three-body fallback. This helper is shared by production and diagnostic
+// replay and intentionally performs no storage writes or atomics.
+fn mechanical_matching_three_block(
+  mutual_low: u32,
+  mutual_high: u32,
+  low_cursor: u32,
+  high_cursor: u32,
+  published_total: u32
+) -> MechanicalMatchingThreeBlockResult {
+  var result = mechanical_matching_zero_three_block();
+  if (
+    mutual_low >= mutual_high
+    || mutual_high >= mechanical_params.particle_count
+    || published_total > arrayLength(&csr_peers)
+    || published_total > arrayLength(&matching_constraints)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  let low_begin = source_offsets[mutual_low];
+  let low_end = source_offsets[mutual_low + 1u];
+  let high_begin = source_offsets[mutual_high];
+  let high_end = source_offsets[mutual_high + 1u];
+  if (
+    low_begin > low_end
+    || high_begin > high_end
+    || low_end > published_total
+    || high_end > published_total
+    || low_cursor < low_begin
+    || low_cursor >= low_end
+    || high_cursor < high_begin
+    || high_cursor >= high_end
+    || mechanical_solver_peer_index(csr_peers[low_cursor]) != mutual_high
+    || mechanical_solver_peer_index(csr_peers[high_cursor]) != mutual_low
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  let low_constraint = matching_constraints[low_cursor];
+  let high_constraint = matching_constraints[high_cursor];
+  let primary_pair = mechanical_matching_constraint_pair(
+    mutual_low,
+    mutual_high,
+    low_cursor
+  );
+  if (
+    primary_pair.valid == 0u
+    || length(low_constraint.xyz - high_constraint.xyz) > 1.0e-5
+    || !mechanical_matching_constraint_code_valid(low_constraint)
+    || !mechanical_matching_constraint_code_valid(high_constraint)
+    || low_constraint.w != high_constraint.w
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (primary_pair.active_pair == 0u || primary_pair.unilateral == 0u) {
+    return result;
+  }
+  let low_pos_mass = input_state[mutual_low * 2u];
+  let high_pos_mass = input_state[mutual_high * 2u];
+  if (
+    !(low_pos_mass.w > 0.0)
+    || !(high_pos_mass.w > 0.0)
+    || !mechanical_solver_finite3(low_pos_mass.xyz)
+    || !mechanical_solver_finite3(high_pos_mass.xyz)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (low_pos_mass.w == high_pos_mass.w) { return result; }
+  let center_is_low = low_pos_mass.w < high_pos_mass.w;
+  let center_index = select(mutual_high, mutual_low, center_is_low);
+  let primary_index = select(mutual_low, mutual_high, center_is_low);
+  let center_pos_mass = select(high_pos_mass, low_pos_mass, center_is_low);
+  let primary_pos_mass = select(low_pos_mass, high_pos_mass, center_is_low);
+  let center_primary_cursor = select(
+    high_cursor,
+    low_cursor,
+    center_is_low
+  );
+  let primary_center_cursor = select(
+    low_cursor,
+    high_cursor,
+    center_is_low
+  );
+  result.center_index = center_index;
+  result.primary_index = primary_index;
+  result.center_primary_cursor = center_primary_cursor;
+  result.primary_center_cursor = primary_center_cursor;
+  // The exact active-set projection below is valid for every positive mass
+  // triple. Mass only orients ownership around one strictly lighter center;
+  // a ratio threshold would strand otherwise solvable unequal-mass blocks.
+  if (primary_pos_mass.w <= center_pos_mass.w) { return result; }
+
+  let center_begin = source_offsets[center_index];
+  let center_end = source_offsets[center_index + 1u];
+  if (center_begin > center_end || center_end > published_total) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+    result.valid = 0u;
+    return result;
+  }
+  var eligible_inbound_count = 0u;
+  var secondary_index = 0xffffffffu;
+  var center_secondary_cursor = 0xffffffffu;
+  var secondary_center_cursor = 0xffffffffu;
+  var secondary_pair = mechanical_solver_zero_pair(1u);
+  var secondary_priority = -1.0;
+  var secondary_face_alignment = 0.0;
+  var secondary_rank = 0xffffffffu;
+  var secondary_order_low = 0xffffffffu;
+  var secondary_order_high = 0xffffffffu;
+  var tertiary_index = 0xffffffffu;
+  var center_tertiary_cursor = 0xffffffffu;
+  var tertiary_center_cursor = 0xffffffffu;
+  var tertiary_pair = mechanical_solver_zero_pair(1u);
+  var tertiary_priority = -1.0;
+  var tertiary_face_alignment = 0.0;
+  var tertiary_rank = 0xffffffffu;
+  var tertiary_order_low = 0xffffffffu;
+  var tertiary_order_high = 0xffffffffu;
+  for (
+    var cursor = center_begin;
+    cursor < center_end;
+    cursor = cursor + 1u
+  ) {
+    let candidate_index =
+      mechanical_solver_peer_index(csr_peers[cursor]);
+    if (
+      candidate_index == primary_index
+      || candidate_index >= mechanical_params.particle_count
+    ) { continue; }
+    let candidate_selection =
+      energy_ledger[mechanical_energy_base(candidate_index)];
+    let candidate_selected_peer = bitcast<u32>(candidate_selection.x);
+    var candidate_cursor = bitcast<u32>(candidate_selection.z);
+    var uses_independent_reservation = false;
+    if (candidate_selected_peer != center_index) {
+      candidate_cursor = bitcast<u32>(candidate_selection.w);
+      uses_independent_reservation = true;
+      // A vertex in another reciprocal primary match is owned by that match
+      // for this pass.  A merely non-reciprocal ordinary selection performs no
+      // write, so its independently published inactive support remains safe
+      // for this center's coupled block.
+      if (candidate_selected_peer < mechanical_params.particle_count) {
+        let selected_peer_selection = energy_ledger[
+          mechanical_energy_base(candidate_selected_peer)
+        ];
+        if (bitcast<u32>(selected_peer_selection.x) == candidate_index) {
+          continue;
+        }
+      }
+    }
+    let candidate_begin = source_offsets[candidate_index];
+    let candidate_end = source_offsets[candidate_index + 1u];
+    if (
+      candidate_begin > candidate_end
+      || candidate_end > published_total
+    ) {
+      result.failure_code =
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+      result.valid = 0u;
+      return result;
+    }
+    let candidate_cursor_valid = candidate_cursor >= candidate_begin
+      && candidate_cursor < candidate_end
+      && mechanical_solver_peer_index(csr_peers[candidate_cursor])
+        == center_index;
+    if (!candidate_cursor_valid) {
+      if (uses_independent_reservation) { continue; }
+      result.failure_code =
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u;
+      result.valid = 0u;
+      return result;
+    }
+    if (
+      uses_independent_reservation
+      && (
+        !mechanical_solver_edge_inactive(csr_peers[cursor])
+        || !mechanical_solver_edge_inactive(csr_peers[candidate_cursor])
+      )
+    ) { continue; }
+    let candidate_pos_mass = input_state[candidate_index * 2u];
+    if (
+      !(candidate_pos_mass.w > 0.0)
+      || !mechanical_solver_finite3(candidate_pos_mass.xyz)
+    ) {
+      result.failure_code =
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+      result.valid = 0u;
+      return result;
+    }
+    if (candidate_pos_mass.w <= center_pos_mass.w) { continue; }
+    let candidate_pair = mechanical_matching_constraint_pair(
+      min(center_index, candidate_index),
+      max(center_index, candidate_index),
+      cursor
+    );
+    let center_constraint = matching_constraints[cursor];
+    let candidate_constraint = matching_constraints[candidate_cursor];
+    if (
+      candidate_pair.valid == 0u
+      || length(center_constraint.xyz - candidate_constraint.xyz) > 1.0e-5
+      || !mechanical_matching_constraint_code_valid(center_constraint)
+      || !mechanical_matching_constraint_code_valid(candidate_constraint)
+      || center_constraint.w != candidate_constraint.w
+    ) {
+      result.failure_code =
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+      result.valid = 0u;
+      return result;
+    }
+    if (
+      candidate_pair.active_pair == 0u
+      || candidate_pair.unilateral == 0u
+    ) { continue; }
+    let candidate_low = min(center_index, candidate_index);
+    let candidate_high = max(center_index, candidate_index);
+    let candidate_low_mass = input_state[candidate_low * 2u].w;
+    let candidate_high_mass = input_state[candidate_high * 2u].w;
+    let candidate_position_tolerance =
+      mechanical_matching_position_tolerance(
+        candidate_low,
+        candidate_high
+      );
+    let candidate_position_ratio = candidate_pair.position_residual
+      / candidate_position_tolerance;
+    let candidate_position_update_ratio = length(candidate_pair.barrier_dx)
+      * (1.0 + candidate_low_mass / max(candidate_high_mass, 1.0e-30))
+      / candidate_position_tolerance;
+    let candidate_velocity_ratio = candidate_pair.velocity_residual / ${
+      SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+        .toExponential(1)
+    };
+    let candidate_priority = max(
+      max(candidate_position_ratio, candidate_position_update_ratio),
+      candidate_velocity_ratio
+    );
+    let candidate_rank = mechanical_matching_edge_rank(
+      candidate_low,
+      candidate_high
+    );
+    let candidate_normal = mechanical_matching_constraint_normal(
+      center_constraint
+    );
+    let candidate_face_alignment = max(
+      abs(candidate_normal.x),
+      max(abs(candidate_normal.y), abs(candidate_normal.z))
+    );
+    if (
+      !mechanical_solver_finite(candidate_priority)
+      || !mechanical_solver_finite3(candidate_normal)
+    ) {
+      result.failure_code =
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+      result.valid = 0u;
+      return result;
+    }
+    let secondary_better = mechanical_matching_inbound_candidate_better(
+      candidate_priority,
+      candidate_face_alignment,
+      candidate_rank,
+      candidate_low,
+      candidate_high,
+      secondary_priority,
+      secondary_face_alignment,
+      secondary_rank,
+      secondary_order_low,
+      secondary_order_high
+    );
+    eligible_inbound_count = eligible_inbound_count + 1u;
+    if (secondary_better) {
+      if (secondary_index < mechanical_params.particle_count) {
+        tertiary_index = secondary_index;
+        center_tertiary_cursor = center_secondary_cursor;
+        tertiary_center_cursor = secondary_center_cursor;
+        tertiary_pair = secondary_pair;
+        tertiary_priority = secondary_priority;
+        tertiary_face_alignment = secondary_face_alignment;
+        tertiary_rank = secondary_rank;
+        tertiary_order_low = secondary_order_low;
+        tertiary_order_high = secondary_order_high;
+      }
+      secondary_index = candidate_index;
+      center_secondary_cursor = cursor;
+      secondary_center_cursor = candidate_cursor;
+      secondary_pair = candidate_pair;
+      secondary_priority = candidate_priority;
+      secondary_face_alignment = candidate_face_alignment;
+      secondary_rank = candidate_rank;
+      secondary_order_low = candidate_low;
+      secondary_order_high = candidate_high;
+    } else if (mechanical_matching_inbound_candidate_better(
+      candidate_priority,
+      candidate_face_alignment,
+      candidate_rank,
+      candidate_low,
+      candidate_high,
+      tertiary_priority,
+      tertiary_face_alignment,
+      tertiary_rank,
+      tertiary_order_low,
+      tertiary_order_high
+    )) {
+      tertiary_index = candidate_index;
+      center_tertiary_cursor = cursor;
+      tertiary_center_cursor = candidate_cursor;
+      tertiary_pair = candidate_pair;
+      tertiary_priority = candidate_priority;
+      tertiary_face_alignment = candidate_face_alignment;
+      tertiary_rank = candidate_rank;
+      tertiary_order_low = candidate_low;
+      tertiary_order_high = candidate_high;
+    }
+  }
+  // Several heavier peers may reserve the same lighter center, but only its
+  // mutual primary can launch a block in this pass. Retain at most two inbound
+  // supports with the same deterministic ordering as the matching sweep. The
+  // four-body projection is exact only for the closed degree-three star; a
+  // higher-degree center must stay on the proven three-body path because a
+  // truncated projection can immediately reactivate an omitted contact.
+  if (eligible_inbound_count == 0u) { return result; }
+  result.block_found = 1u;
+  result.secondary_index = secondary_index;
+  result.center_secondary_cursor = center_secondary_cursor;
+  result.secondary_center_cursor = secondary_center_cursor;
+  result.member_count = 3u;
+  let terminal_star_window = mechanical_matching_current_pass() + 16u
+    >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+  if (eligible_inbound_count == 2u && terminal_star_window) {
+    result.tertiary_index = tertiary_index;
+    result.center_tertiary_cursor = center_tertiary_cursor;
+    result.tertiary_center_cursor = tertiary_center_cursor;
+    let four_block = mechanical_matching_four_block(
+      result,
+      primary_pair,
+      secondary_pair,
+      tertiary_pair
+    );
+    if (four_block.valid == 0u || four_block.applied != 0u) {
+      return four_block;
+    }
+  }
+
+  let center_primary_constraint =
+    matching_constraints[center_primary_cursor];
+  let center_secondary_constraint =
+    matching_constraints[center_secondary_cursor];
+  let primary_normal = mechanical_matching_center_oriented_vector(
+    center_index,
+    primary_index,
+    mechanical_matching_constraint_normal(center_primary_constraint)
+  );
+  let secondary_normal = mechanical_matching_center_oriented_vector(
+    center_index,
+    secondary_index,
+    mechanical_matching_constraint_normal(center_secondary_constraint)
+  );
+  let primary_response = mechanical_matching_center_oriented_vector(
+    center_index,
+    primary_index,
+    center_primary_constraint.xyz
+  );
+  let secondary_response = mechanical_matching_center_oriented_vector(
+    center_index,
+    secondary_index,
+    center_secondary_constraint.xyz
+  );
+  if (
+    !mechanical_solver_finite3(primary_normal)
+    || !mechanical_solver_finite3(secondary_normal)
+    || !mechanical_solver_finite3(primary_response)
+    || !mechanical_solver_finite3(secondary_response)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    length(primary_response - primary_normal) > 1.0e-5
+    || length(secondary_response - secondary_normal) > 1.0e-5
+    || dot(primary_response, primary_normal) <= 1.0e-6
+    || dot(secondary_response, secondary_normal) <= 1.0e-6
+  ) { return result; }
+
+  let primary_position_tolerance =
+    mechanical_matching_position_tolerance(mutual_low, mutual_high);
+  let secondary_low = min(center_index, secondary_index);
+  let secondary_high = max(center_index, secondary_index);
+  let secondary_low_mass = input_state[secondary_low * 2u].w;
+  let secondary_high_mass = input_state[secondary_high * 2u].w;
+  let secondary_position_tolerance =
+    mechanical_matching_position_tolerance(secondary_low, secondary_high);
+  let primary_position_ratio =
+    primary_pair.position_residual / primary_position_tolerance;
+  let primary_position_update_ratio =
+    length(primary_pair.barrier_dx)
+      * (1.0 + low_pos_mass.w / high_pos_mass.w)
+      / primary_position_tolerance;
+  let secondary_position_ratio =
+    secondary_pair.position_residual / secondary_position_tolerance;
+  let secondary_position_update_ratio =
+    length(secondary_pair.barrier_dx)
+      * (1.0 + secondary_low_mass / secondary_high_mass)
+      / secondary_position_tolerance;
+  if (
+    !mechanical_solver_finite(primary_position_ratio)
+    || !mechanical_solver_finite(primary_position_update_ratio)
+    || !mechanical_solver_finite(secondary_position_ratio)
+    || !mechanical_solver_finite(secondary_position_update_ratio)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    primary_position_ratio > 0.5
+    || primary_position_update_ratio > 0.5
+    || secondary_position_ratio > 0.5
+    || secondary_position_update_ratio > 0.5
+  ) { return result; }
+
+  let center_velocity = input_state[center_index * 2u + 1u].xyz;
+  let primary_velocity = input_state[primary_index * 2u + 1u].xyz;
+  let secondary_pos_mass = input_state[secondary_index * 2u];
+  let secondary_velocity = input_state[secondary_index * 2u + 1u].xyz;
+  let primary_relative_velocity = dot(
+    center_velocity - primary_velocity,
+    primary_normal
+  );
+  let secondary_relative_velocity = dot(
+    center_velocity - secondary_velocity,
+    secondary_normal
+  );
+  if (
+    !mechanical_solver_finite3(center_velocity)
+    || !mechanical_solver_finite3(primary_velocity)
+    || !mechanical_solver_finite3(secondary_velocity)
+    || !mechanical_solver_finite(primary_relative_velocity)
+    || !mechanical_solver_finite(secondary_relative_velocity)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  // The mutual primary is the currently violated edge. The reserved secondary
+  // was already processed in this sweep and is normally satisfied here; it
+  // must still participate when the primary-only projection would reactivate
+  // it. The dual active-set test below decides whether its multiplier is
+  // positive.
+  if (!(primary_relative_velocity < -1.0e-5)) { return result; }
+
+  let center_inverse_mass = 1.0 / center_pos_mass.w;
+  let primary_inverse_mass = 1.0 / primary_pos_mass.w;
+  let secondary_inverse_mass = 1.0 / secondary_pos_mass.w;
+  let effective_primary_mass =
+    center_inverse_mass + primary_inverse_mass;
+  let effective_secondary_mass =
+    center_inverse_mass + secondary_inverse_mass;
+  let effective_cross_mass =
+    center_inverse_mass * dot(primary_normal, secondary_normal);
+  let effective_determinant =
+    effective_primary_mass * effective_secondary_mass
+      - effective_cross_mass * effective_cross_mass;
+  let determinant_conditioning =
+    abs(effective_primary_mass * effective_secondary_mass)
+      + abs(effective_cross_mass * effective_cross_mass);
+  let determinant_tolerance = max(
+    1.0e-12,
+    64.0 * 1.1920929e-7 * max(determinant_conditioning, 1.0e-12)
+  );
+  if (
+    !mechanical_solver_finite(center_inverse_mass)
+    || !mechanical_solver_finite(primary_inverse_mass)
+    || !mechanical_solver_finite(secondary_inverse_mass)
+    || !mechanical_solver_finite(effective_primary_mass)
+    || !mechanical_solver_finite(effective_secondary_mass)
+    || !mechanical_solver_finite(effective_cross_mass)
+    || !mechanical_solver_finite(effective_determinant)
+    || effective_determinant <= determinant_tolerance
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let primary_rhs = -primary_relative_velocity;
+  let secondary_rhs = -secondary_relative_velocity;
+  let primary_lambda = (
+    primary_rhs * effective_secondary_mass
+      - effective_cross_mass * secondary_rhs
+  ) / effective_determinant;
+  let secondary_lambda = (
+    effective_primary_mass * secondary_rhs
+      - effective_cross_mass * primary_rhs
+  ) / effective_determinant;
+  if (
+    !mechanical_solver_finite(primary_lambda)
+    || !mechanical_solver_finite(secondary_lambda)
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  // A negative multiplier means the exact active set contains only one edge;
+  // leave that case to the ordinary pair projection rather than applying an
+  // attractive contact impulse.
+  if (!(primary_lambda > 0.0) || !(secondary_lambda > 0.0)) {
+    return result;
+  }
+  let center_impulse = primary_lambda * primary_normal
+    + secondary_lambda * secondary_normal;
+  let primary_impulse = -primary_lambda * primary_normal;
+  let secondary_impulse = -secondary_lambda * secondary_normal;
+  let block_masses_kg = vec3<f32>(
+    primary_pos_mass.w,
+    center_pos_mass.w,
+    secondary_pos_mass.w
+  );
+  let x_contact_primal = mechanical_matching_three_block_axis_primal(
+    false,
+    false,
+    false,
+    abs(primary_normal.x) > 0.5,
+    abs(secondary_normal.x) > 0.5,
+    block_masses_kg,
+    vec3<f32>(
+      primary_velocity.x,
+      center_velocity.x,
+      secondary_velocity.x
+    )
+  );
+  let y_contact_primal = mechanical_matching_three_block_axis_primal(
+    false,
+    false,
+    false,
+    abs(primary_normal.y) > 0.5,
+    abs(secondary_normal.y) > 0.5,
+    block_masses_kg,
+    vec3<f32>(
+      primary_velocity.y,
+      center_velocity.y,
+      secondary_velocity.y
+    )
+  );
+  let z_contact_primal = mechanical_matching_three_block_axis_primal(
+    false,
+    false,
+    false,
+    abs(primary_normal.z) > 0.5,
+    abs(secondary_normal.z) > 0.5,
+    block_masses_kg,
+    vec3<f32>(
+      primary_velocity.z,
+      center_velocity.z,
+      secondary_velocity.z
+    )
+  );
+  let proposed_primary_velocity = vec3<f32>(
+    x_contact_primal.x,
+    y_contact_primal.x,
+    z_contact_primal.x
+  );
+  let proposed_center_velocity = vec3<f32>(
+    x_contact_primal.y,
+    y_contact_primal.y,
+    z_contact_primal.y
+  );
+  let proposed_secondary_velocity = vec3<f32>(
+    x_contact_primal.z,
+    y_contact_primal.z,
+    z_contact_primal.z
+  );
+  let proposed_primary_residual = dot(
+    proposed_center_velocity - proposed_primary_velocity,
+    primary_normal
+  );
+  let proposed_secondary_residual = dot(
+    proposed_center_velocity - proposed_secondary_velocity,
+    secondary_normal
+  );
+  let block_residual_tolerance_m_per_s = 1.0e-5;
+  if (
+    !mechanical_solver_finite3(center_impulse)
+    || !mechanical_solver_finite3(primary_impulse)
+    || !mechanical_solver_finite3(secondary_impulse)
+    || !mechanical_solver_finite3(proposed_primary_velocity)
+    || !mechanical_solver_finite3(proposed_center_velocity)
+    || !mechanical_solver_finite3(proposed_secondary_velocity)
+    || !mechanical_solver_finite(proposed_primary_residual)
+    || !mechanical_solver_finite(proposed_secondary_residual)
+    || abs(proposed_primary_residual)
+      > block_residual_tolerance_m_per_s
+    || abs(proposed_secondary_residual)
+      > block_residual_tolerance_m_per_s
+  ) {
+    result.failure_code =
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u;
+    result.valid = 0u;
+    return result;
+  }
+  let primary_wall = mechanical_matching_project_wall_velocity(
+    primary_index,
+    primary_pos_mass.xyz,
+    proposed_primary_velocity,
+    primary_pos_mass.w
+  );
+  let center_wall = mechanical_matching_project_wall_velocity(
+    center_index,
+    center_pos_mass.xyz,
+    proposed_center_velocity,
+    center_pos_mass.w
+  );
+  let secondary_wall = mechanical_matching_project_wall_velocity(
+    secondary_index,
+    secondary_pos_mass.xyz,
+    proposed_secondary_velocity,
+    secondary_pos_mass.w
+  );
+  if (
+    primary_wall.valid == 0u
+    || center_wall.valid == 0u
+    || secondary_wall.valid == 0u
+  ) {
+    result.failure_code = select(
+      select(
+        secondary_wall.failure_code,
+        center_wall.failure_code,
+        center_wall.valid == 0u
+      ),
+      primary_wall.failure_code,
+      primary_wall.valid == 0u
+    );
+    result.valid = 0u;
+    return result;
+  }
+  if (
+    primary_wall.clipped != 0u
+    || center_wall.clipped != 0u
+    || secondary_wall.clipped != 0u
+  ) {
+    return mechanical_matching_three_block_box_wall_active_set(
+      result,
+      primary_normal,
+      secondary_normal,
+      primary_pos_mass,
+      center_pos_mass,
+      secondary_pos_mass,
+      primary_velocity,
+      center_velocity,
+      secondary_velocity,
+      proposed_primary_velocity,
+      proposed_center_velocity,
+      proposed_secondary_velocity,
+      block_residual_tolerance_m_per_s
+    );
+  }
+  let primary_kinetic_delta_j = 0.5 * primary_pos_mass.w * (
+    dot(primary_wall.velocity, primary_wall.velocity)
+      - dot(primary_velocity, primary_velocity)
+  );
+  let center_kinetic_delta_j = 0.5 * center_pos_mass.w * (
+    dot(center_wall.velocity, center_wall.velocity)
+      - dot(center_velocity, center_velocity)
+  );
+  let secondary_kinetic_delta_j = 0.5 * secondary_pos_mass.w * (
+    dot(secondary_wall.velocity, secondary_wall.velocity)
+      - dot(secondary_velocity, secondary_velocity)
+  );
+  let realized_primary_impulse =
+    primary_pos_mass.w * (primary_wall.velocity - primary_velocity);
+  let realized_center_impulse =
+    center_pos_mass.w * (center_wall.velocity - center_velocity);
+  let realized_secondary_impulse =
+    secondary_pos_mass.w * (secondary_wall.velocity - secondary_velocity);
+  let aggregate_kinetic_delta_j =
+    primary_kinetic_delta_j
+      + center_kinetic_delta_j
+      + secondary_kinetic_delta_j;
+  let aggregate_momentum_residual =
+    realized_primary_impulse
+      + realized_center_impulse
+      + realized_secondary_impulse;
+  let momentum_conditioning =
+    length(realized_primary_impulse)
+      + length(realized_center_impulse)
+      + length(realized_secondary_impulse);
+  let momentum_tolerance = max(
+    1.0e-6,
+    256.0 * 1.1920929e-7 * max(momentum_conditioning, 1.0)
+  );
+  let kinetic_conditioning_j = 0.5 * (
+    primary_pos_mass.w * (
+      dot(primary_velocity, primary_velocity)
+        + dot(primary_wall.velocity, primary_wall.velocity)
+    )
+      + center_pos_mass.w * (
+      dot(center_velocity, center_velocity)
+        + dot(center_wall.velocity, center_wall.velocity)
+    )
+      + secondary_pos_mass.w * (
+      dot(secondary_velocity, secondary_velocity)
+        + dot(secondary_wall.velocity, secondary_wall.velocity)
+    )
+  );
+  let kinetic_tolerance_j = max(
+    1.0e-10,
+    256.0 * 1.1920929e-7 * max(kinetic_conditioning_j, 1.0e-6)
+  );
+  if (
+    !mechanical_solver_finite3(primary_wall.velocity)
+    || !mechanical_solver_finite3(center_wall.velocity)
+    || !mechanical_solver_finite3(secondary_wall.velocity)
+    || !mechanical_solver_finite(primary_kinetic_delta_j)
+    || !mechanical_solver_finite(center_kinetic_delta_j)
+    || !mechanical_solver_finite(secondary_kinetic_delta_j)
+    || !mechanical_solver_finite(aggregate_kinetic_delta_j)
+    || !mechanical_solver_finite3(realized_primary_impulse)
+    || !mechanical_solver_finite3(realized_center_impulse)
+    || !mechanical_solver_finite3(realized_secondary_impulse)
+    || !mechanical_solver_finite3(aggregate_momentum_residual)
+    || length(aggregate_momentum_residual) > momentum_tolerance
+    || aggregate_kinetic_delta_j > kinetic_tolerance_j
+  ) {
+    result.failure_code = select(
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+      mechanical_solver_finite(aggregate_kinetic_delta_j)
+        && aggregate_kinetic_delta_j > kinetic_tolerance_j
+    );
+    result.valid = 0u;
+    return result;
+  }
+  result.center_velocity = center_wall.velocity;
+  result.primary_velocity = primary_wall.velocity;
+  result.secondary_velocity = secondary_wall.velocity;
+  result.center_kinetic_delta_j = center_kinetic_delta_j;
+  result.primary_kinetic_delta_j = primary_kinetic_delta_j;
+  result.secondary_kinetic_delta_j = secondary_kinetic_delta_j;
+  result.pair_heat_j = max(0.0, -aggregate_kinetic_delta_j);
+  result.primary_impulse = realized_primary_impulse;
+  result.center_primary_impulse = -realized_primary_impulse;
+  result.secondary_impulse = realized_secondary_impulse;
+  result.center_secondary_impulse = -realized_secondary_impulse;
+  result.applied = 1u;
+  return result;
 }
 
 @compute @workgroup_size(64)
-fn measure_iteration_3(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_measure_iteration(global_id.x, 3u, false);
-}
-
-@compute @workgroup_size(64)
-fn solve_iteration_3(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  mechanical_solve_iteration(global_id.x, 3u, false);
-}
-
-@compute @workgroup_size(64)
-fn allocate_energy_iteration_3(
+fn initialize_matching_cleanup_constraints(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-  mechanical_allocate_energy_iteration(global_id.x, 3u, false);
+  let self_index = global_id.x;
+  let owner_word_count =
+    MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE
+      + mechanical_params.particle_count;
+  if (self_index == 0u) {
+    if (arrayLength(&matching_cleanup_dispatch) < owner_word_count) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+      );
+    } else {
+      atomicStore(
+        &matching_cleanup_dispatch[0u],
+        select(
+          0u,
+          (mechanical_params.particle_count + 63u) / 64u,
+          mechanical_solver_full_path_enabled()
+        )
+      );
+      atomicStore(&matching_cleanup_dispatch[1u], 1u);
+      atomicStore(&matching_cleanup_dispatch[2u], 1u);
+    }
+  }
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (arrayLength(&matching_cleanup_dispatch) < owner_word_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  let total = atomicLoad(&graph_control[12u]);
+  if (
+    !mechanical_matching_jacobi_ready()
+    || begin > end
+    || end > total
+    || total > arrayLength(&matching_constraints)
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
+    );
+    return;
+  }
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let peer_index = mechanical_solver_peer_index(csr_peers[cursor]);
+    let low_index = min(self_index, peer_index);
+    let high_index = max(self_index, peer_index);
+    let low_class = mechanical_solver_phase_class(low_index);
+    let high_class = mechanical_solver_phase_class(high_index);
+    let eligible_unilateral_pair =
+      low_class != 0u
+      && high_class != 0u
+      && !mechanical_solver_same_phase_lineage(low_index, high_index)
+      && !mechanical_solver_same_body_solid_pair(low_index, high_index)
+      && mechanical_solver_unilateral_pair(low_index, high_index);
+    var constraint = vec4<f32>(0.0);
+    let low_pos_mass = input_state[low_index * 2u];
+    let high_pos_mass = input_state[high_index * 2u];
+    let low_volume = max(source_mechanics[low_index * 8u + 4u].w, 0.0);
+    let high_volume = max(source_mechanics[high_index * 8u + 4u].w, 0.0);
+    if (
+      eligible_unilateral_pair
+      && low_pos_mass.w > 0.0
+      && high_pos_mass.w > 0.0
+      && low_volume > 0.0
+      && high_volume > 0.0
+    ) {
+      let current_delta = low_pos_mass.xyz - high_pos_mass.xyz;
+      let epoch_delta = mechanical_solver_epoch_position(low_index)
+        - mechanical_solver_epoch_position(high_index);
+      let finite_volume_contact = mechanical_solver_finite_volume_contact(
+        low_index,
+        high_index,
+        current_delta,
+        epoch_delta,
+        mechanical_solver_cbrt(low_volume),
+        mechanical_solver_cbrt(high_volume)
+      );
+      let separating_normal = mechanical_matching_separating_normal(
+        low_index,
+        high_index,
+        current_delta
+      );
+      let constraint_normal = select(
+        separating_normal,
+        finite_volume_contact.normal,
+        finite_volume_contact.admitted != 0u
+      );
+      let response_normal = select(
+        constraint_normal,
+        finite_volume_contact.response_normal,
+        finite_volume_contact.admitted != 0u
+      );
+      let response_projection = dot(response_normal, constraint_normal);
+      if (
+        !mechanical_solver_finite3(constraint_normal)
+        || !mechanical_solver_finite3(response_normal)
+        || abs(length(constraint_normal) - 1.0) > 1.0e-3
+        || abs(length(response_normal) - 1.0) > 1.0e-3
+        || !mechanical_solver_finite(response_projection)
+        || response_projection <= 1.0e-6
+      ) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+        );
+        return;
+      }
+      // A fixed supporting halfspace makes the colored cleanup a sequence of
+      // projections onto immutable convex constraints. xyz preserves the face
+      // response and abs(w) exactly encodes its axis/sign. Positive codes were
+      // admitted at initialization. Negative codes remain dormant until
+      // cleanup motion reaches that same finite-volume face. Evaluation also
+      // requires every positive row to retain finite tangential face support,
+      // preventing a frozen face from becoming an infinite lateral barrier.
+      let constraint_code =
+        mechanical_matching_constraint_code(constraint_normal);
+      constraint = vec4<f32>(
+        response_normal,
+        select(
+          -constraint_code,
+          constraint_code,
+          finite_volume_contact.admitted != 0u
+        )
+      );
+    }
+    matching_constraints[cursor] = constraint;
+    // Jacobi owns this bit before cleanup, while matching owns it afterward.
+    // Strip every row once here so a dormant row that joins the monotone
+    // frontier later cannot inherit a stale Jacobi "already processed" mark.
+    csr_peers[cursor] = peer_index;
+    if (constraint.w != 0.0) {
+      let frozen_pair = mechanical_matching_constraint_pair(
+        low_index,
+        high_index,
+        cursor
+      );
+      if (frozen_pair.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+        );
+        return;
+      }
+      if (
+        frozen_pair.active_pair != 0u
+        && frozen_pair.unilateral != 0u
+      ) {
+        csr_peers[cursor] =
+          peer_index | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
+        let contact_flags = MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+          | MECHANICAL_MATCHING_OWNER_CONTACT_BIT;
+        atomicOr(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ],
+          contact_flags
+        );
+        atomicOr(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
+          ],
+          contact_flags
+        );
+      }
+    }
+  }
+  let input_pos_mass = input_state[self_index * 2u];
+  let input_vel_u = input_state[self_index * 2u + 1u];
+  let rest_volume = max(
+    source_mechanics[self_index * 8u + 4u].w,
+    0.0
+  );
+  let wall_projection_bound_m =
+    mechanical_solver_wall_projection_bound(self_index);
+  let wall_velocity = mechanical_matching_project_wall_velocity(
+    self_index,
+    input_pos_mass.xyz,
+    input_vel_u.xyz,
+    input_pos_mass.w
+  );
+  let zero_volume_wall_position_active = rest_volume <= 0.0
+    && (
+      any(input_pos_mass.xyz < vec3<f32>(0.0))
+      || any(input_pos_mass.xyz > mechanical_params.box_dims_m)
+    );
+  let wall_active = (rest_volume > 0.0 && wall_projection_bound_m > 0.0)
+    || zero_volume_wall_position_active
+    || wall_velocity.clipped != 0u
+    || (input_pos_mass.w > 0.0 && wall_velocity.valid == 0u)
+    || !mechanical_solver_finite3(input_pos_mass.xyz)
+    || !mechanical_solver_finite3(input_vel_u.xyz)
+    || !mechanical_solver_finite(wall_projection_bound_m);
+  let invalid_index = 0xffffffffu;
+  energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
+    bitcast<f32>(invalid_index),
+    0.0,
+    bitcast<f32>(invalid_index),
+    bitcast<f32>(invalid_index)
+  );
+  if (wall_active) {
+    atomicOr(
+      &matching_cleanup_dispatch[
+        MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+      ],
+      MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+    );
+  }
+}
+
+fn mechanical_matching_preflight(pass_index: u32) -> bool {
+  if (
+    !mechanical_matching_cleanup_header_valid()
+    || !mechanical_matching_jacobi_ready()
+    || arrayLength(&matching_constraints)
+      < mechanical_params.directed_pair_capacity
+    || pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return false;
+  }
+  if (
+    pass_index > 0u
+    && atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_wall_count_word(pass_index - 1u)
+      ]
+    ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return false;
+  }
+  return true;
+}
+
+fn select_matching_cleanup_edge_for_index(
+  self_index: u32,
+  force_full_selection: bool
+) {
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (!mechanical_matching_preflight(pass_index)) { return; }
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  let total = atomicLoad(&graph_control[12u]);
+  if (begin > end || end > total) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
+    );
+    return;
+  }
+  let begin_new_sweep = pass_index == 0u
+    || mechanical_matching_prior_applied_pair_count(pass_index) == 0u;
+  if (begin_new_sweep) {
+    // The CSR high bit is solver-private and final verification always strips
+    // it before publication. Reuse it as one fixed-order sweep marker.
+    for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+      csr_peers[cursor] = csr_peers[cursor]
+        & (MECHANICAL_SOLVER_EDGE_PEER_MASK
+          | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT);
+    }
+  }
+  if (
+    pass_index == 0u
+    && mechanical_matching_jacobi_residual_converged()
+  ) {
+    let final_iteration = mechanical_params.solver_iteration_count - 1u;
+    let position_ratio = atomicLoad(
+      &graph_control[
+        mechanical_pre_solve_position_violation_ratio_word(final_iteration)
+      ]
+    );
+    let velocity_residual = atomicLoad(
+      &graph_control[
+        mechanical_pre_solve_velocity_residual_word(final_iteration)
+      ]
+    );
+    var invalid_index = 0xffffffffu;
+    energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
+      bitcast<f32>(invalid_index),
+      0.0,
+      bitcast<f32>(invalid_index),
+      bitcast<f32>(invalid_index)
+    );
+    atomicMax(
+      &traversal_evidence[
+        mechanical_matching_max_position_ratio_word(pass_index)
+      ],
+      position_ratio
+    );
+    atomicMax(
+      &traversal_evidence[
+        mechanical_matching_max_velocity_residual_word(pass_index)
+      ],
+      velocity_residual
+    );
+    atomicAdd(
+      &traversal_evidence[
+        mechanical_matching_selection_count_word(pass_index)
+      ],
+      1u
+    );
+    return;
+  }
+  var best_peer = 0xffffffffu;
+  var best_low = 0xffffffffu;
+  var best_high = 0xffffffffu;
+  var best_rank = 0xffffffffu;
+  var best_cursor = 0xffffffffu;
+  var best_priority = 0.0;
+  var best_face_alignment = 0.0;
+  var reserved_peer = 0xffffffffu;
+  var reserved_low = 0xffffffffu;
+  var reserved_high = 0xffffffffu;
+  var reserved_rank = 0xffffffffu;
+  var reserved_cursor = 0xffffffffu;
+  var reserved_priority = -1.0;
+  var reserved_face_alignment = 0.0;
+  var row_max_position_ratio = 0.0;
+  var row_max_velocity_residual_m_per_s = 0.0;
+  let owner_flags = atomicLoad(
+    &matching_cleanup_dispatch[
+      MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+    ]
+  );
+  // The production owner partitions dormant discovery from known-active
+  // selection. The standalone diagnostic/legacy topology has no expansion
+  // phase, so its wrapper forces the historical complete row scan.
+  let full_selection = force_full_selection
+    || (owner_flags & MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT) != 0u;
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let encoded_peer = csr_peers[cursor];
+    if (
+      !full_selection
+      && !mechanical_matching_edge_ever_active(encoded_peer)
+    ) { continue; }
+    let peer_index = mechanical_solver_peer_index(encoded_peer);
+    let low_index = min(self_index, peer_index);
+    let high_index = max(self_index, peer_index);
+    let pair = mechanical_matching_constraint_pair(
+      low_index,
+      high_index,
+      cursor
+    );
+    if (pair.valid == 0u) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+      );
+      return;
+    }
+    if (pair.active_pair == 0u || pair.unilateral == 0u) { continue; }
+    if (!mechanical_matching_edge_ever_active(encoded_peer)) {
+      csr_peers[cursor] =
+        encoded_peer | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
+    }
+    let position_ratio = pair.position_residual
+      / mechanical_matching_position_tolerance(low_index, high_index);
+    let low_mass = input_state[low_index * 2u].w;
+    let high_mass = input_state[high_index * 2u].w;
+    let position_update_ratio = length(pair.barrier_dx)
+      * (1.0 + low_mass / max(high_mass, 1.0e-30))
+      / mechanical_matching_position_tolerance(low_index, high_index);
+    let velocity_ratio = pair.velocity_residual / ${
+      SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+        .toExponential(1)
+    };
+    let priority = max(
+      max(position_ratio, position_update_ratio),
+      velocity_ratio
+    );
+    row_max_position_ratio = max(row_max_position_ratio, position_ratio);
+    row_max_velocity_residual_m_per_s = max(
+      row_max_velocity_residual_m_per_s,
+      pair.velocity_residual
+    );
+    let edge_rank = mechanical_matching_edge_rank(low_index, high_index);
+    let constraint_normal = mechanical_matching_constraint_normal(
+      matching_constraints[cursor]
+    );
+    let face_alignment = max(
+      abs(constraint_normal.x),
+      max(abs(constraint_normal.y), abs(constraint_normal.z))
+    );
+    let self_mass = select(high_mass, low_mass, self_index == low_index);
+    let peer_mass = select(low_mass, high_mass, self_index == low_index);
+    let reserved_better = priority > reserved_priority
+      || (
+        priority == reserved_priority
+        && (
+          face_alignment > reserved_face_alignment
+          || (
+            face_alignment == reserved_face_alignment
+            && (
+              edge_rank < reserved_rank
+              || (
+                edge_rank == reserved_rank
+                && (
+                  low_index < reserved_low
+                  || (
+                    low_index == reserved_low
+                    && high_index < reserved_high
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+    // A processed edge stays part of the frozen contact intersection even
+    // while its residual is satisfied. Retain one deterministic heavy-to-light
+    // support cursor independently of the ordinary unprocessed selection. The
+    // next overlapping mutual pair can then project all three vertices even
+    // when this heavy endpoint also has an unrelated non-reciprocal edge. The
+    // strict orientation and single cursor reserve the vertex for at most one
+    // block without atomics.
+    if (
+      mechanical_solver_edge_inactive(encoded_peer)
+      && self_mass > peer_mass
+      && reserved_better
+    ) {
+      reserved_peer = peer_index;
+      reserved_low = low_index;
+      reserved_high = high_index;
+      reserved_rank = edge_rank;
+      reserved_cursor = cursor;
+      reserved_priority = priority;
+      reserved_face_alignment = face_alignment;
+    }
+    let better = priority > best_priority
+      || (
+        priority == best_priority
+        && (
+          face_alignment > best_face_alignment
+          || (
+            face_alignment == best_face_alignment
+            && (
+              edge_rank < best_rank
+              || (
+                edge_rank == best_rank
+                && (
+                  low_index < best_low
+                  || (low_index == best_low && high_index < best_high)
+                )
+              )
+            )
+          )
+        )
+      );
+    if (
+      priority > 1.0
+      && !mechanical_solver_edge_inactive(encoded_peer)
+      && better
+    ) {
+      best_peer = peer_index;
+      best_low = low_index;
+      best_high = high_index;
+      best_rank = edge_rank;
+      best_cursor = cursor;
+      best_priority = priority;
+      best_face_alignment = face_alignment;
+    }
+  }
+  if (
+    best_peer >= mechanical_params.particle_count
+    && reserved_peer < mechanical_params.particle_count
+  ) {
+    best_peer = reserved_peer;
+    best_low = reserved_low;
+    best_high = reserved_high;
+    best_rank = reserved_rank;
+    best_cursor = reserved_cursor;
+    best_priority = reserved_priority;
+    best_face_alignment = reserved_face_alignment;
+  }
+  energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
+    bitcast<f32>(best_peer),
+    best_priority,
+    bitcast<f32>(best_cursor),
+    bitcast<f32>(reserved_cursor)
+  );
+  if (full_selection) {
+    atomicAnd(
+      &matching_cleanup_dispatch[
+        MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+      ],
+      ~MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+    );
+  }
+  atomicMax(
+    &traversal_evidence[
+      mechanical_matching_max_position_ratio_word(pass_index)
+    ],
+    bitcast<u32>(row_max_position_ratio)
+  );
+  atomicMax(
+    &traversal_evidence[
+      mechanical_matching_max_velocity_residual_word(pass_index)
+    ],
+    bitcast<u32>(row_max_velocity_residual_m_per_s)
+  );
+  atomicAdd(
+    &traversal_evidence[mechanical_matching_selection_count_word(pass_index)],
+    1u
+  );
+}
+
+@compute @workgroup_size(64)
+fn select_matching_cleanup_edge(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  select_matching_cleanup_edge_for_index(global_id.x, true);
+}
+
+fn copy_matching_cleanup_state_for_index(self_index: u32) {
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) {
+    // The host keeps a deterministic ping-pong schedule. Once the GPU has
+    // certified convergence, propagate only the terminal state so that the
+    // fixed encoded parity remains truthful without repeating pair scans.
+    output_state[self_index * 2u] = input_state[self_index * 2u];
+    output_state[self_index * 2u + 1u] =
+      input_state[self_index * 2u + 1u];
+    return;
+  }
+  if (
+    !mechanical_matching_preflight(pass_index)
+    || atomicLoad(
+        &traversal_evidence[
+          mechanical_matching_selection_count_word(pass_index)
+        ]
+      ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  output_state[self_index * 2u] = input_state[self_index * 2u];
+  output_state[self_index * 2u + 1u] = input_state[self_index * 2u + 1u];
+  atomicAdd(
+    &traversal_evidence[mechanical_matching_copy_count_word(pass_index)],
+    1u
+  );
+}
+
+@compute @workgroup_size(64)
+fn copy_matching_cleanup_state(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  copy_matching_cleanup_state_for_index(global_id.x);
+}
+
+fn apply_matching_cleanup_edge_for_index(self_index: u32) {
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (
+    !mechanical_matching_preflight(pass_index)
+    || atomicLoad(
+        &traversal_evidence[
+          mechanical_matching_copy_count_word(pass_index)
+        ]
+      ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  let selection = energy_ledger[mechanical_energy_base(self_index)];
+  let peer_index = bitcast<u32>(selection.x);
+  if (peer_index < mechanical_params.particle_count && self_index < peer_index) {
+    let peer_selection = energy_ledger[mechanical_energy_base(peer_index)];
+    if (bitcast<u32>(peer_selection.x) == self_index) {
+      let low_index = self_index;
+      let high_index = peer_index;
+      let low_cursor = bitcast<u32>(selection.z);
+      let high_cursor = bitcast<u32>(peer_selection.z);
+      let low_begin = source_offsets[low_index];
+      let low_end = source_offsets[low_index + 1u];
+      let high_begin = source_offsets[high_index];
+      let high_end = source_offsets[high_index + 1u];
+      if (
+        low_cursor < low_begin
+        || low_cursor >= low_end
+        || high_cursor < high_begin
+        || high_cursor >= high_end
+        || mechanical_solver_peer_index(csr_peers[low_cursor]) != high_index
+        || mechanical_solver_peer_index(csr_peers[high_cursor]) != low_index
+      ) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
+        );
+        return;
+      }
+      let pair = mechanical_matching_constraint_pair(
+        low_index,
+        high_index,
+        low_cursor
+      );
+      let low_constraint = matching_constraints[low_cursor];
+      let high_constraint = matching_constraints[high_cursor];
+      if (
+        pair.valid == 0u
+        || pair.active_pair == 0u
+        || pair.unilateral == 0u
+        || length(low_constraint.xyz - high_constraint.xyz) > 1.0e-5
+        || !mechanical_matching_constraint_code_valid(low_constraint)
+        || !mechanical_matching_constraint_code_valid(high_constraint)
+        || low_constraint.w != high_constraint.w
+      ) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+        );
+        return;
+      }
+      let low_pos_mass = input_state[low_index * 2u];
+      let high_pos_mass = input_state[high_index * 2u];
+      let low_vel_u = input_state[low_index * 2u + 1u];
+      let high_vel_u = input_state[high_index * 2u + 1u];
+      if (!(low_pos_mass.w > 0.0) || !(high_pos_mass.w > 0.0)) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+        );
+        return;
+      }
+      let published_total = atomicLoad(&graph_control[12u]);
+      let terminal_path_window = pass_index + 16u
+        >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+      var three_block = mechanical_matching_zero_three_block();
+      if (terminal_path_window) {
+        three_block = mechanical_matching_four_path_block(
+          low_index,
+          high_index,
+          published_total
+        );
+      }
+      if (three_block.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          select(
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+            three_block.failure_code,
+            three_block.failure_code != 0u
+          )
+        );
+        return;
+      }
+      if (
+        three_block.applied != 0u
+        && three_block.topology == 1u
+        && three_block.path_owner == 0u
+      ) {
+        atomicAdd(
+          &traversal_evidence[
+            mechanical_matching_apply_count_word(pass_index)
+          ],
+          1u
+        );
+        return;
+      }
+      if (three_block.applied == 0u) {
+        three_block = mechanical_matching_three_block(
+          low_index,
+          high_index,
+          low_cursor,
+          high_cursor,
+          published_total
+        );
+      }
+      if (three_block.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          select(
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+            three_block.failure_code,
+            three_block.failure_code != 0u
+          )
+        );
+        return;
+      }
+      if (
+        three_block.applied != 0u
+        && three_block.member_count == 4u
+      ) {
+        let center_index = three_block.center_index;
+        let primary_index = three_block.primary_index;
+        let secondary_index = three_block.secondary_index;
+        let tertiary_index = three_block.tertiary_index;
+        let center_pos_mass = input_state[center_index * 2u];
+        let primary_pos_mass = input_state[primary_index * 2u];
+        let secondary_pos_mass = input_state[secondary_index * 2u];
+        let tertiary_pos_mass = input_state[tertiary_index * 2u];
+        let aggregate_mass = center_pos_mass.w
+          + primary_pos_mass.w
+          + secondary_pos_mass.w
+          + tertiary_pos_mass.w;
+        let center_cumulative =
+          energy_ledger[mechanical_energy_base(center_index) + 1u];
+        let primary_cumulative =
+          energy_ledger[mechanical_energy_base(primary_index) + 1u];
+        let secondary_cumulative =
+          energy_ledger[mechanical_energy_base(secondary_index) + 1u];
+        let tertiary_cumulative =
+          energy_ledger[mechanical_energy_base(tertiary_index) + 1u];
+        let center_next_pair_heat_j = center_cumulative.y
+          + three_block.pair_heat_j * center_pos_mass.w / aggregate_mass;
+        let primary_next_pair_heat_j = primary_cumulative.y
+          + three_block.pair_heat_j * primary_pos_mass.w / aggregate_mass;
+        let secondary_next_pair_heat_j = secondary_cumulative.y
+          + three_block.pair_heat_j * secondary_pos_mass.w / aggregate_mass;
+        let tertiary_next_pair_heat_j = tertiary_cumulative.y
+          + three_block.pair_heat_j * tertiary_pos_mass.w / aggregate_mass;
+        let center_next_wall_heat_j = center_cumulative.z
+          + max(0.0, -three_block.center_wall_kinetic_delta_j);
+        let primary_next_wall_heat_j = primary_cumulative.z
+          + max(0.0, -three_block.primary_wall_kinetic_delta_j);
+        let secondary_next_wall_heat_j = secondary_cumulative.z
+          + max(0.0, -three_block.secondary_wall_kinetic_delta_j);
+        let tertiary_next_wall_heat_j = tertiary_cumulative.z
+          + max(0.0, -three_block.tertiary_wall_kinetic_delta_j);
+        let center_next_u = center_cumulative.w
+          + (center_next_pair_heat_j + center_next_wall_heat_j)
+            / center_pos_mass.w;
+        let primary_next_u = primary_cumulative.w
+          + (primary_next_pair_heat_j + primary_next_wall_heat_j)
+            / primary_pos_mass.w;
+        let secondary_next_u = secondary_cumulative.w
+          + (secondary_next_pair_heat_j + secondary_next_wall_heat_j)
+            / secondary_pos_mass.w;
+        let tertiary_next_u = tertiary_cumulative.w
+          + (tertiary_next_pair_heat_j + tertiary_next_wall_heat_j)
+            / tertiary_pos_mass.w;
+        if (
+          !(aggregate_mass > 0.0)
+          || !mechanical_solver_finite(center_next_pair_heat_j)
+          || !mechanical_solver_finite(primary_next_pair_heat_j)
+          || !mechanical_solver_finite(secondary_next_pair_heat_j)
+          || !mechanical_solver_finite(tertiary_next_pair_heat_j)
+          || !mechanical_solver_finite(center_next_wall_heat_j)
+          || !mechanical_solver_finite(primary_next_wall_heat_j)
+          || !mechanical_solver_finite(secondary_next_wall_heat_j)
+          || !mechanical_solver_finite(tertiary_next_wall_heat_j)
+          || !mechanical_solver_finite(center_next_u)
+          || !mechanical_solver_finite(primary_next_u)
+          || !mechanical_solver_finite(secondary_next_u)
+          || !mechanical_solver_finite(tertiary_next_u)
+          || center_next_u < 0.0
+          || primary_next_u < 0.0
+          || secondary_next_u < 0.0
+          || tertiary_next_u < 0.0
+        ) {
+          atomicOr(
+            &graph_control[14u],
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+              .NEGATIVE_INTERNAL_ENERGY}u
+          );
+          return;
+        }
+        output_state[center_index * 2u] = center_pos_mass;
+        output_state[primary_index * 2u] = primary_pos_mass;
+        output_state[secondary_index * 2u] = secondary_pos_mass;
+        output_state[tertiary_index * 2u] = tertiary_pos_mass;
+        output_state[center_index * 2u + 1u] =
+          vec4<f32>(three_block.center_velocity, center_next_u);
+        output_state[primary_index * 2u + 1u] =
+          vec4<f32>(three_block.primary_velocity, primary_next_u);
+        output_state[secondary_index * 2u + 1u] =
+          vec4<f32>(three_block.secondary_velocity, secondary_next_u);
+        output_state[tertiary_index * 2u + 1u] =
+          vec4<f32>(three_block.tertiary_velocity, tertiary_next_u);
+        energy_ledger[mechanical_energy_base(center_index) + 1u] =
+          vec4<f32>(
+            center_cumulative.x + three_block.center_kinetic_delta_j,
+            center_next_pair_heat_j,
+            center_next_wall_heat_j,
+            center_cumulative.w
+          );
+        energy_ledger[mechanical_energy_base(primary_index) + 1u] =
+          vec4<f32>(
+            primary_cumulative.x + three_block.primary_kinetic_delta_j,
+            primary_next_pair_heat_j,
+            primary_next_wall_heat_j,
+            primary_cumulative.w
+          );
+        energy_ledger[mechanical_energy_base(secondary_index) + 1u] =
+          vec4<f32>(
+            secondary_cumulative.x
+              + three_block.secondary_kinetic_delta_j,
+            secondary_next_pair_heat_j,
+            secondary_next_wall_heat_j,
+            secondary_cumulative.w
+          );
+        energy_ledger[mechanical_energy_base(tertiary_index) + 1u] =
+          vec4<f32>(
+            tertiary_cumulative.x
+              + three_block.tertiary_kinetic_delta_j,
+            tertiary_next_pair_heat_j,
+            tertiary_next_wall_heat_j,
+            tertiary_cumulative.w
+          );
+        csr_peers[three_block.center_primary_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.center_primary_cursor]
+          );
+        csr_peers[three_block.primary_center_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.primary_center_cursor]
+          );
+        csr_peers[three_block.center_secondary_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.center_secondary_cursor]
+          );
+        csr_peers[three_block.secondary_center_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.secondary_center_cursor]
+          );
+        csr_peers[three_block.center_tertiary_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.center_tertiary_cursor]
+          );
+        csr_peers[three_block.tertiary_center_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.tertiary_center_cursor]
+          );
+        atomicAdd(
+          &traversal_evidence[
+            mechanical_matching_applied_pair_count_word(pass_index)
+          ],
+          3u
+        );
+        atomicAdd(
+          &traversal_evidence[
+            mechanical_matching_apply_count_word(pass_index)
+          ],
+          1u
+        );
+        return;
+      }
+      if (three_block.applied != 0u) {
+        let center_index = three_block.center_index;
+        let primary_index = three_block.primary_index;
+        let secondary_index = three_block.secondary_index;
+        let center_pos_mass = input_state[center_index * 2u];
+        let primary_pos_mass = input_state[primary_index * 2u];
+        let secondary_pos_mass = input_state[secondary_index * 2u];
+        let aggregate_mass =
+          center_pos_mass.w + primary_pos_mass.w + secondary_pos_mass.w;
+        let center_cumulative =
+          energy_ledger[mechanical_energy_base(center_index) + 1u];
+        let primary_cumulative =
+          energy_ledger[mechanical_energy_base(primary_index) + 1u];
+        let secondary_cumulative =
+          energy_ledger[mechanical_energy_base(secondary_index) + 1u];
+        let center_next_pair_heat_j =
+          center_cumulative.y
+            + three_block.pair_heat_j * center_pos_mass.w / aggregate_mass;
+        let primary_next_pair_heat_j =
+          primary_cumulative.y
+            + three_block.pair_heat_j * primary_pos_mass.w / aggregate_mass;
+        let secondary_next_pair_heat_j =
+          secondary_cumulative.y
+            + three_block.pair_heat_j * secondary_pos_mass.w / aggregate_mass;
+        let center_next_wall_heat_j =
+          center_cumulative.z
+            + max(0.0, -three_block.center_wall_kinetic_delta_j);
+        let primary_next_wall_heat_j =
+          primary_cumulative.z
+            + max(0.0, -three_block.primary_wall_kinetic_delta_j);
+        let secondary_next_wall_heat_j =
+          secondary_cumulative.z
+            + max(0.0, -three_block.secondary_wall_kinetic_delta_j);
+        let center_next_u = center_cumulative.w
+          + (center_next_pair_heat_j + center_next_wall_heat_j)
+            / center_pos_mass.w;
+        let primary_next_u = primary_cumulative.w
+          + (primary_next_pair_heat_j + primary_next_wall_heat_j)
+            / primary_pos_mass.w;
+        let secondary_next_u = secondary_cumulative.w
+          + (secondary_next_pair_heat_j + secondary_next_wall_heat_j)
+            / secondary_pos_mass.w;
+        if (
+          !(aggregate_mass > 0.0)
+          || !mechanical_solver_finite(center_next_pair_heat_j)
+          || !mechanical_solver_finite(primary_next_pair_heat_j)
+          || !mechanical_solver_finite(secondary_next_pair_heat_j)
+          || !mechanical_solver_finite(center_next_wall_heat_j)
+          || !mechanical_solver_finite(primary_next_wall_heat_j)
+          || !mechanical_solver_finite(secondary_next_wall_heat_j)
+          || !mechanical_solver_finite(center_next_u)
+          || !mechanical_solver_finite(primary_next_u)
+          || !mechanical_solver_finite(secondary_next_u)
+          || center_next_u < 0.0
+          || primary_next_u < 0.0
+          || secondary_next_u < 0.0
+        ) {
+          atomicOr(
+            &graph_control[14u],
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+              .NEGATIVE_INTERNAL_ENERGY}u
+          );
+          return;
+        }
+        // The block is velocity-only by admission. Preserving all three input
+        // positions avoids resolving one face by increasing the opposite
+        // overlap; the shared normal projection changes no tangential lane.
+        output_state[center_index * 2u] = center_pos_mass;
+        output_state[primary_index * 2u] = primary_pos_mass;
+        output_state[secondary_index * 2u] = secondary_pos_mass;
+        output_state[center_index * 2u + 1u] =
+          vec4<f32>(three_block.center_velocity, center_next_u);
+        output_state[primary_index * 2u + 1u] =
+          vec4<f32>(three_block.primary_velocity, primary_next_u);
+        output_state[secondary_index * 2u + 1u] =
+          vec4<f32>(three_block.secondary_velocity, secondary_next_u);
+        energy_ledger[mechanical_energy_base(center_index) + 1u] =
+          vec4<f32>(
+            center_cumulative.x + three_block.center_kinetic_delta_j,
+            center_next_pair_heat_j,
+            center_next_wall_heat_j,
+            center_cumulative.w
+          );
+        energy_ledger[mechanical_energy_base(primary_index) + 1u] =
+          vec4<f32>(
+            primary_cumulative.x + three_block.primary_kinetic_delta_j,
+            primary_next_pair_heat_j,
+            primary_next_wall_heat_j,
+            primary_cumulative.w
+          );
+        energy_ledger[mechanical_energy_base(secondary_index) + 1u] =
+          vec4<f32>(
+            secondary_cumulative.x + three_block.secondary_kinetic_delta_j,
+            secondary_next_pair_heat_j,
+            secondary_next_wall_heat_j,
+            secondary_cumulative.w
+          );
+        csr_peers[three_block.center_primary_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.center_primary_cursor]
+          );
+        csr_peers[three_block.primary_center_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.primary_center_cursor]
+          );
+        csr_peers[three_block.center_secondary_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.center_secondary_cursor]
+          );
+        csr_peers[three_block.secondary_center_cursor] =
+          mechanical_matching_mark_edge_inactive(
+            csr_peers[three_block.secondary_center_cursor]
+          );
+        atomicAdd(
+          &traversal_evidence[
+            mechanical_matching_applied_pair_count_word(pass_index)
+          ],
+          2u
+        );
+        atomicAdd(
+          &traversal_evidence[
+            mechanical_matching_apply_count_word(pass_index)
+          ],
+          1u
+        );
+        return;
+      }
+      let high_mass_ratio = low_pos_mass.w / high_pos_mass.w;
+      let low_dx_unscaled = pair.barrier_dx;
+      let high_dx_unscaled = -high_mass_ratio * low_dx_unscaled;
+      let low_scale = particle_scales[low_index];
+      let high_scale = particle_scales[high_index];
+      let low_dx_scale = select(
+        1.0,
+        min(1.0, low_scale.w / max(length(low_dx_unscaled), 1.0e-30)),
+        length(low_dx_unscaled) > 1.0e-12
+      );
+      let high_dx_scale = select(
+        1.0,
+        min(1.0, high_scale.w / max(length(high_dx_unscaled), 1.0e-30)),
+        length(high_dx_unscaled) > 1.0e-12
+      );
+      let position_scale = min(low_dx_scale, high_dx_scale);
+      let low_position = low_pos_mass.xyz
+        + position_scale * low_dx_unscaled;
+      let high_position = high_pos_mass.xyz
+        + position_scale * high_dx_unscaled;
+      let low_epoch_displacement = length(
+        low_position - mechanical_solver_epoch_position(low_index)
+      );
+      let high_epoch_displacement = length(
+        high_position - mechanical_solver_epoch_position(high_index)
+      );
+      let trust_tolerance_m = max(
+        1.0e-6,
+        64.0 * 1.1920929e-7 * max(max(low_scale.z, high_scale.z), 1.0)
+      );
+      if (
+        !mechanical_solver_finite3(low_position)
+        || !mechanical_solver_finite3(high_position)
+        || low_scale.z < 0.0
+        || high_scale.z < 0.0
+        || low_epoch_displacement > low_scale.z + trust_tolerance_m
+        || high_epoch_displacement > high_scale.z + trust_tolerance_m
+      ) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+        );
+        return;
+      }
+      let low_initial_dv = pair.barrier_dv;
+      let high_initial_dv = -high_mass_ratio * low_initial_dv;
+      let refinement = mechanical_matching_refine_wall_velocity_pair(
+        low_index,
+        high_index,
+        low_position,
+        high_position,
+        low_vel_u.xyz,
+        high_vel_u.xyz,
+        low_pos_mass.w,
+        high_pos_mass.w,
+        low_initial_dv,
+        high_initial_dv,
+        low_constraint
+      );
+      if (refinement.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          select(
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+            refinement.failure_code,
+            refinement.failure_code != 0u
+          )
+        );
+        return;
+      }
+      let pair_kinetic_delta_j =
+        refinement.low_pair_kinetic_delta_j
+          + refinement.high_pair_kinetic_delta_j;
+      let pair_heat_j = max(0.0, -pair_kinetic_delta_j);
+      let pair_mass = low_pos_mass.w + high_pos_mass.w;
+      let low_mass_fraction = low_pos_mass.w / pair_mass;
+      let high_mass_fraction = high_pos_mass.w / pair_mass;
+      let low_heat_j = pair_heat_j * low_mass_fraction;
+      let high_heat_j = pair_heat_j * high_mass_fraction;
+      let low_wall_heat_j = max(
+        0.0,
+        -refinement.low_wall_kinetic_delta_j
+      );
+      let high_wall_heat_j = max(
+        0.0,
+        -refinement.high_wall_kinetic_delta_j
+      );
+      let low_cumulative =
+        energy_ledger[mechanical_energy_base(low_index) + 1u];
+      let high_cumulative =
+        energy_ledger[mechanical_energy_base(high_index) + 1u];
+      let low_next_pair_heat_j = low_cumulative.y + low_heat_j;
+      let high_next_pair_heat_j = high_cumulative.y + high_heat_j;
+      let low_next_wall_heat_j = low_cumulative.z + low_wall_heat_j;
+      let high_next_wall_heat_j = high_cumulative.z + high_wall_heat_j;
+      let low_next_u = low_cumulative.w
+        + (low_next_pair_heat_j + low_next_wall_heat_j) / low_pos_mass.w;
+      let high_next_u = high_cumulative.w
+        + (high_next_pair_heat_j + high_next_wall_heat_j) / high_pos_mass.w;
+      if (
+        !mechanical_solver_finite(low_next_u)
+        || !mechanical_solver_finite(high_next_u)
+        || low_next_u < 0.0
+        || high_next_u < 0.0
+      ) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+            .NEGATIVE_INTERNAL_ENERGY}u
+        );
+        return;
+      }
+      output_state[low_index * 2u] =
+        vec4<f32>(low_position, low_pos_mass.w);
+      output_state[high_index * 2u] =
+        vec4<f32>(high_position, high_pos_mass.w);
+      output_state[low_index * 2u + 1u] =
+        vec4<f32>(refinement.low_velocity, low_next_u);
+      output_state[high_index * 2u + 1u] =
+        vec4<f32>(refinement.high_velocity, high_next_u);
+      energy_ledger[mechanical_energy_base(low_index) + 1u] = vec4<f32>(
+        low_cumulative.x + refinement.low_pair_kinetic_delta_j,
+        low_next_pair_heat_j,
+        low_next_wall_heat_j,
+        low_cumulative.w
+      );
+      energy_ledger[mechanical_energy_base(high_index) + 1u] = vec4<f32>(
+        high_cumulative.x + refinement.high_pair_kinetic_delta_j,
+        high_next_pair_heat_j,
+        high_next_wall_heat_j,
+        high_cumulative.w
+      );
+      csr_peers[low_cursor] = mechanical_matching_mark_edge_inactive(
+        csr_peers[low_cursor]
+      );
+      csr_peers[high_cursor] = mechanical_matching_mark_edge_inactive(
+        csr_peers[high_cursor]
+      );
+      atomicAdd(
+        &traversal_evidence[
+          mechanical_matching_applied_pair_count_word(pass_index)
+        ],
+        1u
+      );
+    }
+  }
+  atomicAdd(
+    &traversal_evidence[mechanical_matching_apply_count_word(pass_index)],
+    1u
+  );
+}
+
+@compute @workgroup_size(64)
+fn apply_matching_cleanup_edge(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  apply_matching_cleanup_edge_for_index(global_id.x);
+}
+
+fn mechanical_diagnostic_capture_target_local_base(
+  pass_index: u32,
+  target_slot: u32
+) {
+  let target_index = mechanical_diagnostic_target_index(target_slot);
+  let selection =
+    energy_ledger[mechanical_energy_base(target_index)];
+  let selected_peer = bitcast<u32>(selection.x);
+  let target_cursor = bitcast<u32>(selection.z);
+  let row =
+    mechanical_diagnostic_target_row_word(pass_index, target_slot, 0u);
+  var reciprocal_cursor = 0xffffffffu;
+  var peer_mass_kg = 0.0;
+  var flags =
+    MECHANICAL_DIAGNOSTIC_TARGET_ROW_LOCAL_CAPTURE_COMPLETE;
+  if (selected_peer < mechanical_params.particle_count) {
+    flags = flags | MECHANICAL_DIAGNOSTIC_TARGET_ROW_SELECTED;
+    peer_mass_kg = input_state[selected_peer * 2u].w;
+    let peer_selection =
+      energy_ledger[mechanical_energy_base(selected_peer)];
+    if (bitcast<u32>(peer_selection.x) == target_index) {
+      flags = flags | MECHANICAL_DIAGNOSTIC_TARGET_ROW_RECIPROCAL;
+      reciprocal_cursor = bitcast<u32>(peer_selection.z);
+    }
+  }
+  let input_pos_mass = input_state[target_index * 2u];
+  let input_vel_u = input_state[target_index * 2u + 1u];
+  let local_pos_mass = output_state[target_index * 2u];
+  let local_vel_u = output_state[target_index * 2u + 1u];
+  atomicStore(&mechanical_diagnostic_trace[row], pass_index);
+  atomicStore(&mechanical_diagnostic_trace[row + 1u], target_index);
+  atomicStore(&mechanical_diagnostic_trace[row + 2u], selected_peer);
+  atomicStore(&mechanical_diagnostic_trace[row + 3u], target_cursor);
+  atomicStore(&mechanical_diagnostic_trace[row + 4u], reciprocal_cursor);
+  atomicStore(&mechanical_diagnostic_trace[row + 7u], flags);
+  mechanical_diagnostic_target_row_store_vec3(
+    pass_index,
+    target_slot,
+    11u,
+    input_pos_mass.xyz
+  );
+  mechanical_diagnostic_target_row_store_vec3(
+    pass_index,
+    target_slot,
+    14u,
+    input_vel_u.xyz
+  );
+  mechanical_diagnostic_target_row_store_vec3(
+    pass_index,
+    target_slot,
+    17u,
+    local_pos_mass.xyz
+  );
+  mechanical_diagnostic_target_row_store_vec3(
+    pass_index,
+    target_slot,
+    20u,
+    local_vel_u.xyz
+  );
+  mechanical_diagnostic_target_row_store_f32(
+    pass_index,
+    target_slot,
+    31u,
+    peer_mass_kg
+  );
+}
+
+fn mechanical_diagnostic_capture_target_refinement(
+  pass_index: u32,
+  low_index: u32,
+  high_index: u32,
+  low_position: vec3<f32>,
+  high_position: vec3<f32>,
+  low_initial_velocity: vec3<f32>,
+  high_initial_velocity: vec3<f32>,
+  low_mass_kg: f32,
+  high_mass_kg: f32,
+  low_initial_dv: vec3<f32>,
+  high_initial_dv: vec3<f32>,
+  constraint: vec4<f32>,
+  refinement: MechanicalMatchingVelocityRefinement
+) {
+  let constraint_normal =
+    mechanical_matching_constraint_normal(constraint);
+  let low_round_zero_wall =
+    mechanical_matching_project_wall_velocity(
+      low_index,
+      low_position,
+      low_initial_velocity + low_initial_dv,
+      low_mass_kg
+    );
+  let high_round_zero_wall =
+    mechanical_matching_project_wall_velocity(
+      high_index,
+      high_position,
+      high_initial_velocity + high_initial_dv,
+      high_mass_kg
+    );
+  let pre_approach_residual_m_per_s = max(
+    -dot(
+      low_initial_velocity - high_initial_velocity,
+      constraint_normal
+    ),
+    0.0
+  );
+  let post_approach_residual_m_per_s = max(
+    -dot(
+      refinement.low_velocity - refinement.high_velocity,
+      constraint_normal
+    ),
+    0.0
+  );
+  for (
+    var target_slot = 0u;
+    target_slot < MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+    target_slot = target_slot + 1u
+  ) {
+    let target_index = mechanical_diagnostic_target_index(target_slot);
+    if (target_index != low_index && target_index != high_index) {
+      continue;
+    }
+    let row =
+      mechanical_diagnostic_target_row_word(pass_index, target_slot, 0u);
+    let target_is_low = target_index == low_index;
+    let other_target =
+      mechanical_diagnostic_target_index(1u - target_slot);
+    var flags =
+      atomicLoad(&mechanical_diagnostic_trace[row + 7u])
+        | MECHANICAL_DIAGNOSTIC_TARGET_ROW_APPLIED;
+    if (target_is_low) {
+      flags =
+        flags | MECHANICAL_DIAGNOSTIC_TARGET_ROW_TARGET_IS_LOW;
+    }
+    if (other_target == low_index || other_target == high_index) {
+      flags =
+        flags
+          | MECHANICAL_DIAGNOSTIC_TARGET_ROW_PAIR_CONTAINS_BOTH_TARGETS;
+    }
+    let target_round_zero_clipped = select(
+      high_round_zero_wall.clipped,
+      low_round_zero_wall.clipped,
+      target_is_low
+    );
+    let peer_round_zero_clipped = select(
+      low_round_zero_wall.clipped,
+      high_round_zero_wall.clipped,
+      target_is_low
+    );
+    if (target_round_zero_clipped != 0u) {
+      flags =
+        flags
+          | MECHANICAL_DIAGNOSTIC_TARGET_ROW_ROUND_ZERO_TARGET_WALL_CLIPPED;
+    }
+    if (peer_round_zero_clipped != 0u) {
+      flags =
+        flags
+          | MECHANICAL_DIAGNOSTIC_TARGET_ROW_ROUND_ZERO_PEER_WALL_CLIPPED;
+    }
+    atomicStore(
+      &mechanical_diagnostic_trace[row + 5u],
+      bitcast<u32>(i32(round(constraint.w)))
+    );
+    atomicStore(
+      &mechanical_diagnostic_trace[row + 6u],
+      refinement.round_count
+    );
+    atomicStore(&mechanical_diagnostic_trace[row + 7u], flags);
+    mechanical_diagnostic_target_row_store_vec3(
+      pass_index,
+      target_slot,
+      8u,
+      constraint.xyz
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      29u,
+      pre_approach_residual_m_per_s
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      30u,
+      post_approach_residual_m_per_s
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      31u,
+      select(low_mass_kg, high_mass_kg, target_is_low)
+    );
+  }
+}
+
+fn mechanical_diagnostic_accumulate_pair_impulse(
+  pass_index: u32,
+  first_index: u32,
+  second_index: u32,
+  first_impulse: vec3<f32>,
+  second_impulse: vec3<f32>
+) {
+  if (
+    !mechanical_solver_finite3(first_impulse)
+    || !mechanical_solver_finite3(second_impulse)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  let first_material_bits =
+    bitcast<u32>(source_thermo[first_index * 3u].x);
+  let second_material_bits =
+    bitcast<u32>(source_thermo[second_index * 3u].x);
+  if (first_material_bits != second_material_bits) {
+    atomicAdd(&mechanical_diagnostic_trace[17u], 1u);
+  }
+  let material_a_bits = atomicLoad(&mechanical_diagnostic_trace[12u]);
+  let material_b_bits = atomicLoad(&mechanical_diagnostic_trace[13u]);
+  let first_is_a_second_is_b =
+    first_material_bits == material_a_bits
+      && second_material_bits == material_b_bits;
+  let first_is_b_second_is_a =
+    first_material_bits == material_b_bits
+      && second_material_bits == material_a_bits;
+  if (!first_is_a_second_is_b && !first_is_b_second_is_a) { return; }
+  let impulse_a = select(
+    second_impulse,
+    first_impulse,
+    first_is_a_second_is_b
+  );
+  let impulse_b = select(
+    first_impulse,
+    second_impulse,
+    first_is_a_second_is_b
+  );
+  let material_a_impulse = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(20u),
+    mechanical_diagnostic_trace_load_f32(21u),
+    mechanical_diagnostic_trace_load_f32(22u)
+  ) + impulse_a;
+  let material_b_impulse = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(23u),
+    mechanical_diagnostic_trace_load_f32(24u),
+    mechanical_diagnostic_trace_load_f32(25u)
+  ) + impulse_b;
+  let momentum_residual = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(26u),
+    mechanical_diagnostic_trace_load_f32(27u),
+    mechanical_diagnostic_trace_load_f32(28u)
+  ) + first_impulse + second_impulse;
+  if (
+    !mechanical_solver_finite3(material_a_impulse)
+    || !mechanical_solver_finite3(material_b_impulse)
+    || !mechanical_solver_finite3(momentum_residual)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  atomicAdd(&mechanical_diagnostic_trace[16u], 1u);
+  atomicMin(&mechanical_diagnostic_trace[18u], pass_index);
+  atomicStore(&mechanical_diagnostic_trace[19u], pass_index);
+  mechanical_diagnostic_trace_store_f32(20u, material_a_impulse.x);
+  mechanical_diagnostic_trace_store_f32(21u, material_a_impulse.y);
+  mechanical_diagnostic_trace_store_f32(22u, material_a_impulse.z);
+  mechanical_diagnostic_trace_store_f32(23u, material_b_impulse.x);
+  mechanical_diagnostic_trace_store_f32(24u, material_b_impulse.y);
+  mechanical_diagnostic_trace_store_f32(25u, material_b_impulse.z);
+  mechanical_diagnostic_trace_store_f32(26u, momentum_residual.x);
+  mechanical_diagnostic_trace_store_f32(27u, momentum_residual.y);
+  mechanical_diagnostic_trace_store_f32(28u, momentum_residual.z);
+  let lateral_impulse = length(vec2<f32>(impulse_a.x, impulse_a.z));
+  if (
+    lateral_impulse
+      > mechanical_diagnostic_trace_load_f32(29u)
+  ) {
+    mechanical_diagnostic_trace_store_f32(29u, lateral_impulse);
+    atomicStore(
+      &mechanical_diagnostic_trace[30u],
+      min(first_index, second_index)
+    );
+    atomicStore(
+      &mechanical_diagnostic_trace[31u],
+      max(first_index, second_index)
+    );
+  }
+  atomicOr(
+    &mechanical_diagnostic_trace[2u],
+    MECHANICAL_DIAGNOSTIC_TRACE_APPLY_OBSERVED
+  );
+}
+
+fn mechanical_diagnostic_capture_target_three_block(
+  pass_index: u32,
+  block: MechanicalMatchingThreeBlockResult
+) {
+  if (!mechanical_diagnostic_target_tail_header_valid()) { return; }
+  for (
+    var target_slot = 0u;
+    target_slot < MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+    target_slot = target_slot + 1u
+  ) {
+    let target_index = mechanical_diagnostic_target_index(target_slot);
+    let target_is_tertiary = block.member_count == 4u
+      && target_index == block.tertiary_index;
+    if (
+      target_index != block.center_index
+      && target_index != block.primary_index
+      && target_index != block.secondary_index
+      && !target_is_tertiary
+    ) { continue; }
+    let selection =
+      energy_ledger[mechanical_energy_base(target_index)];
+    let selected_peer = bitcast<u32>(selection.x);
+    let selected_cursor = bitcast<u32>(selection.z);
+    if (
+      selected_peer >= mechanical_params.particle_count
+      || selected_cursor >= arrayLength(&matching_constraints)
+      || selected_cursor >= arrayLength(&csr_peers)
+      || mechanical_solver_peer_index(csr_peers[selected_cursor])
+        != selected_peer
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let low_index = min(target_index, selected_peer);
+    let high_index = max(target_index, selected_peer);
+    let constraint = matching_constraints[selected_cursor];
+    let constraint_normal =
+      mechanical_matching_constraint_normal(constraint);
+    let low_input_velocity = input_state[low_index * 2u + 1u].xyz;
+    let high_input_velocity = input_state[high_index * 2u + 1u].xyz;
+    let low_output_velocity = output_state[low_index * 2u + 1u].xyz;
+    let high_output_velocity = output_state[high_index * 2u + 1u].xyz;
+    let row =
+      mechanical_diagnostic_target_row_word(pass_index, target_slot, 0u);
+    var flags =
+      atomicLoad(&mechanical_diagnostic_trace[row + 7u])
+        | MECHANICAL_DIAGNOSTIC_TARGET_ROW_APPLIED
+        | MECHANICAL_DIAGNOSTIC_TARGET_ROW_THREE_BLOCK_APPLIED;
+    if (target_index == low_index) {
+      flags = flags | MECHANICAL_DIAGNOSTIC_TARGET_ROW_TARGET_IS_LOW;
+    }
+    let other_target =
+      mechanical_diagnostic_target_index(1u - target_slot);
+    if (other_target == low_index || other_target == high_index) {
+      flags =
+        flags
+          | MECHANICAL_DIAGNOSTIC_TARGET_ROW_PAIR_CONTAINS_BOTH_TARGETS;
+    }
+    atomicStore(
+      &mechanical_diagnostic_trace[row + 5u],
+      bitcast<u32>(i32(round(constraint.w)))
+    );
+    atomicStore(&mechanical_diagnostic_trace[row + 6u], 1u);
+    atomicStore(&mechanical_diagnostic_trace[row + 7u], flags);
+    mechanical_diagnostic_target_row_store_vec3(
+      pass_index,
+      target_slot,
+      8u,
+      constraint.xyz
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      29u,
+      max(
+        -dot(
+          low_input_velocity - high_input_velocity,
+          constraint_normal
+        ),
+        0.0
+      )
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      30u,
+      max(
+        -dot(
+          low_output_velocity - high_output_velocity,
+          constraint_normal
+        ),
+        0.0
+      )
+    );
+    mechanical_diagnostic_target_row_store_f32(
+      pass_index,
+      target_slot,
+      31u,
+      input_state[selected_peer * 2u].w
+    );
+  }
+}
+
+// Diagnostic-only deterministic replay. It runs in a separate dispatch after
+// every apply invocation has finished, so it may safely repurpose the dead
+// selection y/z/w lanes without racing the production matching dispatch.
+// Replaying the exact pure helper also proves the traced impulse excludes wall
+// momentum while the production output includes the interleaved wall clips.
+@compute @workgroup_size(1)
+fn replay_matching_cleanup_refinement_trace() {
+  if (!mechanical_diagnostic_trace_header_valid()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (
+    atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_apply_count_word(pass_index)
+      ]
+    ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  let target_tail_valid =
+    mechanical_diagnostic_target_tail_header_valid();
+  if (target_tail_valid) {
+    for (
+      var target_slot = 0u;
+      target_slot < MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+      target_slot = target_slot + 1u
+    ) {
+      mechanical_diagnostic_capture_target_local_base(
+        pass_index,
+        target_slot
+      );
+    }
+    let header = MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+    let prior_local_capture_count = atomicAdd(
+      &mechanical_diagnostic_trace[header + 8u],
+      MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+    );
+    if (
+      prior_local_capture_count
+          + MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+          * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS}u
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[header + 2u],
+        MECHANICAL_DIAGNOSTIC_TARGET_TAIL_LOCAL_CAPTURE_COMPLETE
+      );
+    }
+  }
+  let published_total = atomicLoad(&graph_control[12u]);
+  if (
+    published_total > arrayLength(&csr_peers)
+    || published_total > arrayLength(&matching_constraints)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  for (
+    var low_index = 0u;
+    low_index < mechanical_params.particle_count;
+    low_index = low_index + 1u
+  ) {
+    let selection = energy_ledger[mechanical_energy_base(low_index)];
+    let high_index = bitcast<u32>(selection.x);
+    if (
+      high_index <= low_index
+      || high_index >= mechanical_params.particle_count
+    ) { continue; }
+    let high_selection =
+      energy_ledger[mechanical_energy_base(high_index)];
+    if (bitcast<u32>(high_selection.x) != low_index) { continue; }
+    let low_cursor = bitcast<u32>(selection.z);
+    let high_cursor = bitcast<u32>(high_selection.z);
+    if (
+      low_cursor >= arrayLength(&matching_constraints)
+      || high_cursor >= arrayLength(&matching_constraints)
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let low_constraint = matching_constraints[low_cursor];
+    let high_constraint = matching_constraints[high_cursor];
+    let low_pos_mass = input_state[low_index * 2u];
+    let high_pos_mass = input_state[high_index * 2u];
+    let low_initial_velocity = input_state[low_index * 2u + 1u].xyz;
+    let high_initial_velocity = input_state[high_index * 2u + 1u].xyz;
+    if (
+      !(low_pos_mass.w > 0.0)
+      || !(high_pos_mass.w > 0.0)
+      || length(low_constraint.xyz - high_constraint.xyz) > 1.0e-5
+      || !mechanical_matching_constraint_code_valid(low_constraint)
+      || !mechanical_matching_constraint_code_valid(high_constraint)
+      || low_constraint.w != high_constraint.w
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let terminal_path_window = pass_index + 16u
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+    var three_block = mechanical_matching_zero_three_block();
+    if (terminal_path_window) {
+      three_block = mechanical_matching_four_path_block(
+        low_index,
+        high_index,
+        published_total
+      );
+    }
+    if (three_block.valid == 0u) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    if (
+      three_block.applied != 0u
+      && three_block.topology == 1u
+      && three_block.path_owner == 0u
+    ) { continue; }
+    if (three_block.applied == 0u) {
+      three_block = mechanical_matching_three_block(
+        low_index,
+        high_index,
+        low_cursor,
+        high_cursor,
+        published_total
+      );
+    }
+    if (three_block.valid == 0u) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let primary_markers_inactive =
+      mechanical_solver_edge_inactive(csr_peers[low_cursor])
+      && mechanical_solver_edge_inactive(csr_peers[high_cursor]);
+    if (
+      three_block.applied != 0u
+      && three_block.member_count == 4u
+    ) {
+      let all_block_markers_inactive = primary_markers_inactive
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.center_secondary_cursor]
+        )
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.secondary_center_cursor]
+        )
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.center_tertiary_cursor]
+        )
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.tertiary_center_cursor]
+        );
+      let center_output_pos_mass =
+        output_state[three_block.center_index * 2u];
+      let primary_output_pos_mass =
+        output_state[three_block.primary_index * 2u];
+      let secondary_output_pos_mass =
+        output_state[three_block.secondary_index * 2u];
+      let tertiary_output_pos_mass =
+        output_state[three_block.tertiary_index * 2u];
+      let center_output_velocity =
+        output_state[three_block.center_index * 2u + 1u].xyz;
+      let primary_output_velocity =
+        output_state[three_block.primary_index * 2u + 1u].xyz;
+      let secondary_output_velocity =
+        output_state[three_block.secondary_index * 2u + 1u].xyz;
+      let tertiary_output_velocity =
+        output_state[three_block.tertiary_index * 2u + 1u].xyz;
+      let block_replay_conditioning = max(
+        max(
+          max(
+            length(center_output_velocity),
+            length(primary_output_velocity)
+          ),
+          max(
+            length(secondary_output_velocity),
+            length(tertiary_output_velocity)
+          )
+        ),
+        max(
+          max(
+            length(three_block.center_velocity),
+            length(three_block.primary_velocity)
+          ),
+          max(
+            length(three_block.secondary_velocity),
+            length(three_block.tertiary_velocity)
+          )
+        )
+      );
+      let block_replay_tolerance_m_per_s = max(
+        1.0e-6,
+        64.0 * 1.1920929e-7 * max(block_replay_conditioning, 1.0)
+      );
+      if (
+        !all_block_markers_inactive
+        || any(
+          center_output_pos_mass
+            != input_state[three_block.center_index * 2u]
+        )
+        || any(
+          primary_output_pos_mass
+            != input_state[three_block.primary_index * 2u]
+        )
+        || any(
+          secondary_output_pos_mass
+            != input_state[three_block.secondary_index * 2u]
+        )
+        || any(
+          tertiary_output_pos_mass
+            != input_state[three_block.tertiary_index * 2u]
+        )
+        || length(
+          center_output_velocity - three_block.center_velocity
+        ) > block_replay_tolerance_m_per_s
+        || length(
+          primary_output_velocity - three_block.primary_velocity
+        ) > block_replay_tolerance_m_per_s
+        || length(
+          secondary_output_velocity - three_block.secondary_velocity
+        ) > block_replay_tolerance_m_per_s
+        || length(
+          tertiary_output_velocity - three_block.tertiary_velocity
+        ) > block_replay_tolerance_m_per_s
+      ) {
+        atomicOr(
+          &mechanical_diagnostic_trace[2u],
+          MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+        );
+        return;
+      }
+      if (target_tail_valid) {
+        mechanical_diagnostic_capture_target_three_block(
+          pass_index,
+          three_block
+        );
+      }
+      mechanical_diagnostic_accumulate_pair_impulse(
+        pass_index,
+        three_block.secondary_index,
+        three_block.center_index,
+        three_block.secondary_impulse,
+        three_block.center_secondary_impulse
+      );
+      if (three_block.topology == 0u) {
+        mechanical_diagnostic_accumulate_pair_impulse(
+          pass_index,
+          three_block.tertiary_index,
+          three_block.center_index,
+          three_block.tertiary_impulse,
+          three_block.center_tertiary_impulse
+        );
+      }
+      let center_selection =
+        energy_ledger[mechanical_energy_base(three_block.center_index)];
+      let primary_selection =
+        energy_ledger[mechanical_energy_base(three_block.primary_index)];
+      let secondary_selection =
+        energy_ledger[mechanical_energy_base(three_block.secondary_index)];
+      let tertiary_selection =
+        energy_ledger[mechanical_energy_base(three_block.tertiary_index)];
+      energy_ledger[mechanical_energy_base(three_block.center_index)] =
+        vec4<f32>(
+          center_selection.x,
+          three_block.center_primary_impulse
+        );
+      energy_ledger[mechanical_energy_base(three_block.primary_index)] =
+        vec4<f32>(
+          primary_selection.x,
+          three_block.primary_impulse
+        );
+      energy_ledger[mechanical_energy_base(three_block.secondary_index)] =
+        vec4<f32>(
+          secondary_selection.x,
+          select(
+            three_block.secondary_impulse,
+            three_block.center_tertiary_impulse,
+            three_block.topology == 1u
+          )
+        );
+      energy_ledger[mechanical_energy_base(three_block.tertiary_index)] =
+        vec4<f32>(
+          tertiary_selection.x,
+          three_block.tertiary_impulse
+        );
+      continue;
+    }
+    if (three_block.applied != 0u) {
+      let all_block_markers_inactive =
+        primary_markers_inactive
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.center_secondary_cursor]
+        )
+        && mechanical_solver_edge_inactive(
+          csr_peers[three_block.secondary_center_cursor]
+        );
+      let center_output_pos_mass =
+        output_state[three_block.center_index * 2u];
+      let primary_output_pos_mass =
+        output_state[three_block.primary_index * 2u];
+      let secondary_output_pos_mass =
+        output_state[three_block.secondary_index * 2u];
+      let center_output_velocity =
+        output_state[three_block.center_index * 2u + 1u].xyz;
+      let primary_output_velocity =
+        output_state[three_block.primary_index * 2u + 1u].xyz;
+      let secondary_output_velocity =
+        output_state[three_block.secondary_index * 2u + 1u].xyz;
+      let block_replay_conditioning = max(
+        max(
+          length(center_output_velocity),
+          length(primary_output_velocity)
+        ),
+        max(
+          length(secondary_output_velocity),
+          max(
+            length(three_block.center_velocity),
+            max(
+              length(three_block.primary_velocity),
+              length(three_block.secondary_velocity)
+            )
+          )
+        )
+      );
+      let block_replay_tolerance_m_per_s = max(
+        1.0e-6,
+        64.0 * 1.1920929e-7 * max(block_replay_conditioning, 1.0)
+      );
+      if (
+        !all_block_markers_inactive
+        || any(
+          center_output_pos_mass
+            != input_state[three_block.center_index * 2u]
+        )
+        || any(
+          primary_output_pos_mass
+            != input_state[three_block.primary_index * 2u]
+        )
+        || any(
+          secondary_output_pos_mass
+            != input_state[three_block.secondary_index * 2u]
+        )
+        || length(
+          center_output_velocity - three_block.center_velocity
+        ) > block_replay_tolerance_m_per_s
+        || length(
+          primary_output_velocity - three_block.primary_velocity
+        ) > block_replay_tolerance_m_per_s
+        || length(
+          secondary_output_velocity - three_block.secondary_velocity
+        ) > block_replay_tolerance_m_per_s
+      ) {
+        atomicOr(
+          &mechanical_diagnostic_trace[2u],
+          MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+        );
+        return;
+      }
+      if (target_tail_valid) {
+        mechanical_diagnostic_capture_target_three_block(
+          pass_index,
+          three_block
+        );
+      }
+      // Keep the primary mutual edge in the established scratch ABI. The
+      // secondary selector is non-mutual, so account that edge directly and
+      // separately rather than folding the center's net impulse into one pair.
+      mechanical_diagnostic_accumulate_pair_impulse(
+        pass_index,
+        three_block.secondary_index,
+        three_block.center_index,
+        three_block.secondary_impulse,
+        three_block.center_secondary_impulse
+      );
+      let center_selection =
+        energy_ledger[mechanical_energy_base(three_block.center_index)];
+      let primary_selection =
+        energy_ledger[mechanical_energy_base(three_block.primary_index)];
+      let secondary_selection =
+        energy_ledger[mechanical_energy_base(three_block.secondary_index)];
+      energy_ledger[mechanical_energy_base(three_block.center_index)] =
+        vec4<f32>(
+          center_selection.x,
+          three_block.center_primary_impulse
+        );
+      energy_ledger[mechanical_energy_base(three_block.primary_index)] =
+        vec4<f32>(
+          primary_selection.x,
+          three_block.primary_impulse
+        );
+      energy_ledger[mechanical_energy_base(three_block.secondary_index)] =
+        vec4<f32>(
+          secondary_selection.x,
+          three_block.secondary_impulse
+        );
+      continue;
+    }
+    // An unused support may already be an inactive reservation from an
+    // earlier pass, so its post-apply marker has no unique expected polarity.
+    // The mutual primary is the only edge this fallback must retire.
+    if (!primary_markers_inactive) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let pair_mass_kg = low_pos_mass.w + high_pos_mass.w;
+    let initial_relative_dv = mechanical_matching_relative_velocity_delta(
+      low_initial_velocity - high_initial_velocity,
+      low_constraint
+    );
+    let low_initial_dv =
+      high_pos_mass.w / pair_mass_kg * initial_relative_dv;
+    let high_initial_dv =
+      -(low_pos_mass.w / high_pos_mass.w) * low_initial_dv;
+    let refinement = mechanical_matching_refine_wall_velocity_pair(
+      low_index,
+      high_index,
+      output_state[low_index * 2u].xyz,
+      output_state[high_index * 2u].xyz,
+      low_initial_velocity,
+      high_initial_velocity,
+      low_pos_mass.w,
+      high_pos_mass.w,
+      low_initial_dv,
+      high_initial_dv,
+      low_constraint
+    );
+    let low_output_velocity = output_state[low_index * 2u + 1u].xyz;
+    let high_output_velocity = output_state[high_index * 2u + 1u].xyz;
+    let replay_conditioning = max(
+      max(length(low_output_velocity), length(high_output_velocity)),
+      max(
+        length(refinement.low_velocity),
+        length(refinement.high_velocity)
+      )
+    );
+    let replay_tolerance_m_per_s = max(
+      1.0e-6,
+      64.0 * 1.1920929e-7 * max(replay_conditioning, 1.0)
+    );
+    if (
+      refinement.valid == 0u
+      || !mechanical_solver_finite3(refinement.low_pair_impulse)
+      || !mechanical_solver_finite3(refinement.high_pair_impulse)
+      || length(refinement.low_velocity - low_output_velocity)
+        > replay_tolerance_m_per_s
+      || length(refinement.high_velocity - high_output_velocity)
+        > replay_tolerance_m_per_s
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    if (target_tail_valid) {
+      mechanical_diagnostic_capture_target_refinement(
+        pass_index,
+        low_index,
+        high_index,
+        output_state[low_index * 2u].xyz,
+        output_state[high_index * 2u].xyz,
+        low_initial_velocity,
+        high_initial_velocity,
+        low_pos_mass.w,
+        high_pos_mass.w,
+        low_initial_dv,
+        high_initial_dv,
+        low_constraint,
+        refinement
+      );
+    }
+    energy_ledger[mechanical_energy_base(low_index)] = vec4<f32>(
+      selection.x,
+      refinement.low_pair_impulse
+    );
+    energy_ledger[mechanical_energy_base(high_index)] = vec4<f32>(
+      high_selection.x,
+      refinement.high_pair_impulse
+    );
+  }
+}
+
+fn mechanical_diagnostic_capture_target_post_wall(pass_index: u32) {
+  if (!mechanical_diagnostic_target_tail_header_valid()) { return; }
+  let header = MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+  if (
+    atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_wall_count_word(pass_index)
+      ]
+    ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[header + 2u],
+      MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID
+    );
+    return;
+  }
+  for (
+    var target_slot = 0u;
+    target_slot < MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+    target_slot = target_slot + 1u
+  ) {
+    let target_index = mechanical_diagnostic_target_index(target_slot);
+    let row =
+      mechanical_diagnostic_target_row_word(pass_index, target_slot, 0u);
+    let post_wall_pos_mass = output_state[target_index * 2u];
+    let post_wall_vel_u = output_state[target_index * 2u + 1u];
+    let local_position = vec3<f32>(
+      mechanical_diagnostic_trace_load_f32(row + 17u),
+      mechanical_diagnostic_trace_load_f32(row + 18u),
+      mechanical_diagnostic_trace_load_f32(row + 19u)
+    );
+    let local_velocity = vec3<f32>(
+      mechanical_diagnostic_trace_load_f32(row + 20u),
+      mechanical_diagnostic_trace_load_f32(row + 21u),
+      mechanical_diagnostic_trace_load_f32(row + 22u)
+    );
+    mechanical_diagnostic_target_row_store_vec3(
+      pass_index,
+      target_slot,
+      23u,
+      post_wall_pos_mass.xyz
+    );
+    mechanical_diagnostic_target_row_store_vec3(
+      pass_index,
+      target_slot,
+      26u,
+      post_wall_vel_u.xyz
+    );
+    var flags =
+      atomicLoad(&mechanical_diagnostic_trace[row + 7u])
+        | MECHANICAL_DIAGNOSTIC_TARGET_ROW_POST_WALL_CAPTURE_COMPLETE;
+    if (
+      any(post_wall_pos_mass.xyz != local_position)
+      || any(post_wall_vel_u.xyz != local_velocity)
+    ) {
+      flags =
+        flags | MECHANICAL_DIAGNOSTIC_TARGET_ROW_POST_WALL_CHANGED;
+    }
+    atomicStore(&mechanical_diagnostic_trace[row + 7u], flags);
+  }
+  let prior_post_wall_capture_count = atomicAdd(
+    &mechanical_diagnostic_trace[header + 9u],
+    MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+  );
+  if (
+    prior_post_wall_capture_count
+        + MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+        * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS}u
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[header + 2u],
+      MECHANICAL_DIAGNOSTIC_TARGET_TAIL_POST_WALL_CAPTURE_COMPLETE
+    );
+  }
+}
+
+// Diagnostic-only single-invocation reduction. The apply dispatch publishes
+// each mutual pair's complete local-refinement impulse through the replay
+// dispatch into its now-dead selection scratch row. After the wall dispatch,
+// this reducer also captures the targeted post-wall state. Pair impulses
+// exclude wall momentum by construction. No production pipeline binds the
+// trace slot.
+@compute @workgroup_size(1)
+fn trace_matching_cleanup_apply() {
+  if (!mechanical_diagnostic_trace_header_valid()) { return; }
+  if (
+    (
+      atomicLoad(&mechanical_diagnostic_trace[2u])
+        & MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    ) != 0u
+  ) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (
+    atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_apply_count_word(pass_index)
+      ]
+    ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  mechanical_diagnostic_capture_target_post_wall(pass_index);
+  let material_a_bits = atomicLoad(&mechanical_diagnostic_trace[12u]);
+  let material_b_bits = atomicLoad(&mechanical_diagnostic_trace[13u]);
+  var material_a_impulse = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(20u),
+    mechanical_diagnostic_trace_load_f32(21u),
+    mechanical_diagnostic_trace_load_f32(22u)
+  );
+  var material_b_impulse = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(23u),
+    mechanical_diagnostic_trace_load_f32(24u),
+    mechanical_diagnostic_trace_load_f32(25u)
+  );
+  var momentum_residual = vec3<f32>(
+    mechanical_diagnostic_trace_load_f32(26u),
+    mechanical_diagnostic_trace_load_f32(27u),
+    mechanical_diagnostic_trace_load_f32(28u)
+  );
+  var largest_lateral_impulse =
+    mechanical_diagnostic_trace_load_f32(29u);
+  var configured_pair_count =
+    atomicLoad(&mechanical_diagnostic_trace[16u]);
+  var cross_material_pair_count =
+    atomicLoad(&mechanical_diagnostic_trace[17u]);
+  var first_configured_pass =
+    atomicLoad(&mechanical_diagnostic_trace[18u]);
+  var last_configured_pass =
+    atomicLoad(&mechanical_diagnostic_trace[19u]);
+  var largest_low_index =
+    atomicLoad(&mechanical_diagnostic_trace[30u]);
+  var largest_high_index =
+    atomicLoad(&mechanical_diagnostic_trace[31u]);
+  var pass_configured_pair_count = 0u;
+  for (
+    var low_index = 0u;
+    low_index < mechanical_params.particle_count;
+    low_index = low_index + 1u
+  ) {
+    let selection = energy_ledger[mechanical_energy_base(low_index)];
+    let high_index = bitcast<u32>(selection.x);
+    if (
+      high_index <= low_index
+      || high_index >= mechanical_params.particle_count
+    ) { continue; }
+    let high_selection =
+      energy_ledger[mechanical_energy_base(high_index)];
+    if (bitcast<u32>(high_selection.x) != low_index) { continue; }
+    let low_impulse = selection.yzw;
+    let high_impulse = high_selection.yzw;
+    if (
+      !mechanical_solver_finite3(low_impulse)
+      || !mechanical_solver_finite3(high_impulse)
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let low_material_bits =
+      bitcast<u32>(source_thermo[low_index * 3u].x);
+    let high_material_bits =
+      bitcast<u32>(source_thermo[high_index * 3u].x);
+    if (low_material_bits != high_material_bits) {
+      cross_material_pair_count = cross_material_pair_count + 1u;
+    }
+    let low_is_a_high_is_b =
+      low_material_bits == material_a_bits
+      && high_material_bits == material_b_bits;
+    let low_is_b_high_is_a =
+      low_material_bits == material_b_bits
+      && high_material_bits == material_a_bits;
+    if (!low_is_a_high_is_b && !low_is_b_high_is_a) { continue; }
+    configured_pair_count = configured_pair_count + 1u;
+    pass_configured_pair_count = pass_configured_pair_count + 1u;
+    first_configured_pass = min(first_configured_pass, pass_index);
+    last_configured_pass = pass_index;
+    let impulse_a = select(
+      high_impulse,
+      low_impulse,
+      low_is_a_high_is_b
+    );
+    let impulse_b = select(
+      low_impulse,
+      high_impulse,
+      low_is_a_high_is_b
+    );
+    material_a_impulse = material_a_impulse + impulse_a;
+    material_b_impulse = material_b_impulse + impulse_b;
+    momentum_residual = momentum_residual + low_impulse + high_impulse;
+    let lateral_impulse = length(vec2<f32>(impulse_a.x, impulse_a.z));
+    if (lateral_impulse > largest_lateral_impulse) {
+      largest_lateral_impulse = lateral_impulse;
+      largest_low_index = low_index;
+      largest_high_index = high_index;
+    }
+  }
+  if (
+    !mechanical_solver_finite3(material_a_impulse)
+    || !mechanical_solver_finite3(material_b_impulse)
+    || !mechanical_solver_finite3(momentum_residual)
+    || !mechanical_solver_finite(largest_lateral_impulse)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  atomicStore(&mechanical_diagnostic_trace[16u], configured_pair_count);
+  atomicStore(
+    &mechanical_diagnostic_trace[17u],
+    cross_material_pair_count
+  );
+  atomicStore(
+    &mechanical_diagnostic_trace[18u],
+    first_configured_pass
+  );
+  atomicStore(
+    &mechanical_diagnostic_trace[19u],
+    last_configured_pass
+  );
+  mechanical_diagnostic_trace_store_f32(20u, material_a_impulse.x);
+  mechanical_diagnostic_trace_store_f32(21u, material_a_impulse.y);
+  mechanical_diagnostic_trace_store_f32(22u, material_a_impulse.z);
+  mechanical_diagnostic_trace_store_f32(23u, material_b_impulse.x);
+  mechanical_diagnostic_trace_store_f32(24u, material_b_impulse.y);
+  mechanical_diagnostic_trace_store_f32(25u, material_b_impulse.z);
+  mechanical_diagnostic_trace_store_f32(26u, momentum_residual.x);
+  mechanical_diagnostic_trace_store_f32(27u, momentum_residual.y);
+  mechanical_diagnostic_trace_store_f32(28u, momentum_residual.z);
+  mechanical_diagnostic_trace_store_f32(29u, largest_lateral_impulse);
+  atomicStore(&mechanical_diagnostic_trace[30u], largest_low_index);
+  atomicStore(&mechanical_diagnostic_trace[31u], largest_high_index);
+  atomicAdd(&mechanical_diagnostic_trace[14u], 1u);
+  atomicOr(
+    &mechanical_diagnostic_trace[2u],
+    MECHANICAL_DIAGNOSTIC_TRACE_IMPULSE_FINITE
+  );
+  if (pass_configured_pair_count > 0u) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_APPLY_OBSERVED
+    );
+  }
+}
+
+fn project_matching_cleanup_walls_for_index(self_index: u32) {
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (
+    !mechanical_matching_preflight(pass_index)
+    || atomicLoad(
+        &traversal_evidence[
+          mechanical_matching_apply_count_word(pass_index)
+        ]
+      ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  let pos_mass = output_state[self_index * 2u];
+  let vel_u = output_state[self_index * 2u + 1u];
+  var position = pos_mass.xyz;
+  var velocity = vel_u.xyz;
+  let rest_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
+  var wall_clearance = 0.0;
+  if (rest_volume > 0.0) {
+    wall_clearance = 0.5 * mechanical_solver_cbrt(rest_volume);
+    if (mechanical_params.grid_spacing_m > 0.0) {
+      wall_clearance = min(
+        wall_clearance,
+        0.5 * mechanical_params.grid_spacing_m
+      );
+    }
+    let min_dimension = min(
+      mechanical_params.box_dims_m.x,
+      min(mechanical_params.box_dims_m.y, mechanical_params.box_dims_m.z)
+    );
+    if (min_dimension > 0.0) {
+      wall_clearance = min(wall_clearance, 0.49 * min_dimension);
+    }
+  }
+  let lower = vec3<f32>(wall_clearance);
+  let upper = max(lower, mechanical_params.box_dims_m - lower);
+  let lower_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(lower.x, upper.x),
+    mechanical_solver_wall_boundary_tolerance_m(lower.y, upper.y),
+    mechanical_solver_wall_boundary_tolerance_m(lower.z, upper.z)
+  );
+  let upper_tolerance_m = vec3<f32>(
+    mechanical_solver_wall_boundary_tolerance_m(upper.x, lower.x),
+    mechanical_solver_wall_boundary_tolerance_m(upper.y, lower.y),
+    mechanical_solver_wall_boundary_tolerance_m(upper.z, lower.z)
+  );
+  if (position.x < lower.x) {
+    position.x = lower.x;
+  } else if (position.x > upper.x) {
+    position.x = upper.x;
+  }
+  if (position.y < lower.y) {
+    position.y = lower.y;
+  } else if (position.y > upper.y) {
+    position.y = upper.y;
+  }
+  if (position.z < lower.z) {
+    position.z = lower.z;
+  } else if (position.z > upper.z) {
+    position.z = upper.z;
+  }
+  if (
+    position.x <= lower.x + lower_tolerance_m.x
+    && velocity.x < 0.0
+  ) { velocity.x = 0.0; }
+  if (
+    position.x >= upper.x - upper_tolerance_m.x
+    && velocity.x > 0.0
+  ) { velocity.x = 0.0; }
+  if (
+    position.y <= lower.y + lower_tolerance_m.y
+    && velocity.y < 0.0
+  ) { velocity.y = 0.0; }
+  if (
+    position.y >= upper.y - upper_tolerance_m.y
+    && velocity.y > 0.0
+  ) { velocity.y = 0.0; }
+  if (
+    position.z <= lower.z + lower_tolerance_m.z
+    && velocity.z < 0.0
+  ) { velocity.z = 0.0; }
+  if (
+    position.z >= upper.z - upper_tolerance_m.z
+    && velocity.z > 0.0
+  ) { velocity.z = 0.0; }
+  let wall_kinetic_delta_j = 0.5 * pos_mass.w * (
+    dot(velocity, velocity) - dot(vel_u.xyz, vel_u.xyz)
+  );
+  let wall_conditioning_j = 0.5 * pos_mass.w * (
+    dot(velocity, velocity) + dot(vel_u.xyz, vel_u.xyz)
+  );
+  let wall_tolerance_j = max(
+    1.0e-6,
+    64.0 * 1.1920929e-7 * max(wall_conditioning_j, 1.0)
+  );
+  let scale = particle_scales[self_index];
+  let epoch_displacement_m = length(
+    position - mechanical_solver_epoch_position(self_index)
+  );
+  let trust_tolerance_m = max(
+    1.0e-6,
+    64.0 * 1.1920929e-7 * max(scale.z, 1.0)
+  );
+  if (
+    !mechanical_solver_finite3(position)
+    || !mechanical_solver_finite3(velocity)
+    || !mechanical_solver_finite(wall_kinetic_delta_j)
+    || scale.z < 0.0
+    || wall_kinetic_delta_j > wall_tolerance_j
+    || epoch_displacement_m > scale.z + trust_tolerance_m
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      select(
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ENERGY_GAIN}u,
+        mechanical_solver_finite(wall_kinetic_delta_j)
+          && wall_kinetic_delta_j > wall_tolerance_j
+      )
+    );
+    return;
+  }
+  let wall_heat_j = max(0.0, -wall_kinetic_delta_j);
+  let cumulative = energy_ledger[mechanical_energy_base(self_index) + 1u];
+  let next_wall_heat_j = cumulative.z + wall_heat_j;
+  let next_u = select(
+    vel_u.w,
+    cumulative.w
+      + (cumulative.y + next_wall_heat_j) / pos_mass.w,
+    pos_mass.w > 0.0
+  );
+  if (!mechanical_solver_finite(next_u) || next_u < 0.0) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+        .NEGATIVE_INTERNAL_ENERGY}u
+    );
+    return;
+  }
+  output_state[self_index * 2u] = vec4<f32>(position, pos_mass.w);
+  output_state[self_index * 2u + 1u] = vec4<f32>(velocity, next_u);
+  energy_ledger[mechanical_energy_base(self_index) + 1u] = vec4<f32>(
+    cumulative.x,
+    cumulative.y,
+    next_wall_heat_j,
+    cumulative.w
+  );
+  particle_scales[self_index].w = max(0.0, scale.z - epoch_displacement_m);
+  atomicAdd(
+    &traversal_evidence[mechanical_matching_wall_count_word(pass_index)],
+    1u
+  );
+}
+
+@compute @workgroup_size(64)
+fn project_matching_cleanup_walls(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  project_matching_cleanup_walls_for_index(global_id.x);
+}
+
+fn finalize_matching_cleanup_pass_body() {
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  if (arrayLength(&matching_cleanup_dispatch) < 3u) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) { return; }
+  if (
+    !mechanical_matching_preflight(pass_index)
+    || atomicLoad(
+      &traversal_evidence[mechanical_matching_wall_count_word(pass_index)]
+    ) != mechanical_params.particle_count
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  if (
+    atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_applied_pair_count_word(pass_index)
+      ]
+    ) == 0u
+  ) {
+    let terminal_position_ratio = atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_max_position_ratio_word(pass_index)
+      ]
+    );
+    let terminal_velocity_residual = atomicLoad(
+      &traversal_evidence[
+        mechanical_matching_max_velocity_residual_word(pass_index)
+      ]
+    );
+    if (
+      bitcast<f32>(terminal_position_ratio) <= 1.0
+      && bitcast<f32>(terminal_velocity_residual) <= ${
+        SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+          .toExponential(1)
+      }
+      && (pass_index & 1u)
+        == ${((SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES - 1) & 1)}u
+    ) {
+      // No unprocessed violated edge remains and the all-edge residual is
+      // certified. Convergence is accepted only on the fixed terminal-buffer
+      // parity. An otherwise-terminal opposite-parity pass advances once so
+      // the following conflict-free copy publishes the identical state into
+      // the host's deterministic final buffer. Then latch the particle
+      // dispatch to zero and synthesize the unused evidence tail on-GPU.
+      for (
+        var completed_pass = pass_index + 1u;
+        completed_pass
+          < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+        completed_pass = completed_pass + 1u
+      ) {
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_selection_count_word(completed_pass)
+          ],
+          mechanical_params.particle_count
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_copy_count_word(completed_pass)
+          ],
+          mechanical_params.particle_count
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_apply_count_word(completed_pass)
+          ],
+          mechanical_params.particle_count
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_wall_count_word(completed_pass)
+          ],
+          mechanical_params.particle_count
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_applied_pair_count_word(completed_pass)
+          ],
+          0u
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_max_position_ratio_word(completed_pass)
+          ],
+          terminal_position_ratio
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_max_velocity_residual_word(completed_pass)
+          ],
+          terminal_velocity_residual
+        );
+      }
+      atomicStore(
+        &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+          .matchingCleanupPassCount}u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      );
+      atomicOr(
+        &graph_control[15u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_CLEANUP}u
+      );
+      atomicStore(&matching_cleanup_dispatch[0u], 0u);
+      atomicStore(&matching_cleanup_dispatch[1u], 1u);
+      atomicStore(&matching_cleanup_dispatch[2u], 1u);
+      return;
+    }
+    // A zero matching with residual remaining is the delimiter between fixed
+    // edge-order sweeps: every currently violated edge was already processed.
+    // Advance once; the next selection pass clears the private CSR markers.
+  }
+  let prior_pass = atomicAdd(
+    &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .matchingCleanupPassCount}u],
+    1u
+  );
+  if (
+    prior_pass + 1u
+      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+  ) {
+    atomicOr(
+      &graph_control[15u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.MATCHING_CLEANUP}u
+    );
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_matching_cleanup_pass() {
+  finalize_matching_cleanup_pass_body();
+}
+
+@compute @workgroup_size(64)
+fn restore_matching_cleanup_trust(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let self_index = global_id.x;
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let final_pass =
+    ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES - 1}u;
+  if (
+    atomicLoad(&graph_control[14u]) != 0u
+    || arrayLength(&matching_constraints)
+      < mechanical_params.directed_pair_capacity
+    || mechanical_matching_current_pass()
+      != ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    || atomicLoad(
+      &traversal_evidence[mechanical_matching_wall_count_word(final_pass)]
+    ) != mechanical_params.particle_count
+    || (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_CLEANUP}u
+    ) == 0u
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+    );
+    return;
+  }
+  particle_scales[self_index].z = particle_scales[self_index].x;
+  particle_scales[self_index].w = particle_scales[self_index].y;
+  atomicAdd(
+    &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .matchingCleanupTrustRestoreCount}u],
+    1u
+  );
+  if (self_index == 0u) {
+    atomicOr(
+      &graph_control[15u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE
+        .MATCHING_TRUST_RESTORED}u
+    );
+  }
 }
 
 @compute @workgroup_size(64)
@@ -5400,24 +15383,49 @@ fn verify_contact_residual(
       csr_peers[cursor] = mechanical_solver_peer_index(csr_peers[cursor]);
     }
   }
-  if (
-    atomicLoad(&graph_control[26u]) != mechanical_params.particle_count
+  let final_iteration =
+    mechanical_params.solver_iteration_count - 1u;
+  let solver_stages_incomplete = (
+    atomicLoad(
+      &graph_control[mechanical_solve_count_word(final_iteration)]
+    ) != mechanical_params.particle_count
     || (
       atomicLoad(&graph_control[15u])
-        & ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_3}u
+        & mechanical_iteration_stage_bit(final_iteration)
     ) == 0u
     || (
       atomicLoad(&graph_control[15u])
         & ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_VERIFIED}u
     ) == 0u
-    || atomicLoad(&graph_control[14u]) != 0u
-  ) {
+    || atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupPassCount}u]
+    ) != ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    || atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupTrustRestoreCount}u]
+    ) != mechanical_params.particle_count
+    || (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_CLEANUP}u
+    ) == 0u
+    || (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE
+          .MATCHING_TRUST_RESTORED}u
+    ) == 0u
+  );
+  if (solver_stages_incomplete) {
     atomicOr(
       &graph_control[14u],
       ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
     );
     return;
   }
+  // Residual workgroups publish into one sticky word. A sibling can report a
+  // real residual before this invocation reaches the preflight; preserve that
+  // primary bit without relabelling completed solver work as incomplete.
+  if (atomicLoad(&graph_control[14u]) != 0u) { return; }
   if (!row_bounds_valid) {
     atomicOr(
       &graph_control[14u],
@@ -5429,10 +15437,16 @@ fn verify_contact_residual(
   var max_velocity_residual = 0.0;
   for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
     let other_index = csr_peers[cursor];
-    // Residual verification deliberately remeasures every retained edge after
-    // the final correction. An edge inactive in the iteration-3 input can be
-    // activated by that correction or by the wall projection.
-    let pair = mechanical_solver_pair(self_index, other_index, false);
+    // Certify the same immutable supporting halfspace and swept response frame
+    // used by selection and application. Recomputing finite-volume geometry
+    // here would certify a different constraint family than cleanup solved.
+    let low_index = min(self_index, other_index);
+    let high_index = max(self_index, other_index);
+    let pair = mechanical_matching_constraint_pair(
+      low_index,
+      high_index,
+      cursor
+    );
     if (pair.valid == 0u) {
       atomicOr(
         &graph_control[14u],
@@ -5454,14 +15468,21 @@ fn verify_contact_residual(
         mechanical_solver_cbrt(self_volume)
           + mechanical_solver_cbrt(other_volume)
       );
-      let position_tolerance = max(1.0e-5, 0.02 * rest_distance);
+      let position_tolerance = max(
+        1.0e-5,
+        ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION}
+          * rest_distance
+      );
       if (pair.position_residual > position_tolerance) {
         atomicOr(
           &graph_control[14u],
           ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.POSITION_RESIDUAL}u
         );
       }
-      if (pair.velocity_residual > 1.0e-3) {
+      if (pair.velocity_residual > ${
+        SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S
+          .toExponential(1)
+      }) {
         atomicOr(
           &graph_control[14u],
           ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.VELOCITY_RESIDUAL}u
@@ -5501,6 +15522,1463 @@ fn verify_contact_residual(
     );
   }
 }
+
+// The production verifier is fail-closed and siblings may observe its sticky
+// bit before scanning their own rows. These diagnostic passes independently
+// measure the complete terminal constraint set, then choose one deterministic
+// global CSR cursor and materialize it without changing production evidence.
+@compute @workgroup_size(64)
+fn measure_terminal_residual_trace(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let self_index = global_id.x;
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_diagnostic_trace_header_valid()) { return; }
+  if (self_index == 0u) {
+    atomicStore(
+      &mechanical_diagnostic_trace[15u],
+      atomicLoad(&graph_control[14u])
+    );
+    atomicStore(
+      &mechanical_diagnostic_trace[62u],
+      atomicLoad(&graph_control[28u])
+    );
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_TERMINAL_MEASURED
+    );
+  }
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  if (begin > end || end > arrayLength(&csr_peers)) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let other_index = mechanical_solver_peer_index(csr_peers[cursor]);
+    if (other_index >= mechanical_params.particle_count) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let pair = mechanical_matching_constraint_pair(
+      min(self_index, other_index),
+      max(self_index, other_index),
+      cursor
+    );
+    if (pair.valid == 0u) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    if (pair.active_pair == 0u || pair.unilateral == 0u) { continue; }
+    atomicMax(
+      &mechanical_diagnostic_trace[32u],
+      bitcast<u32>(pair.velocity_residual)
+    );
+    atomicAdd(&mechanical_diagnostic_trace[63u], 1u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn select_terminal_residual_trace(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let self_index = global_id.x;
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_diagnostic_trace_header_valid()) { return; }
+  let terminal_max_bits =
+    atomicLoad(&mechanical_diagnostic_trace[32u]);
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  if (begin > end || end > arrayLength(&csr_peers)) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let other_index = mechanical_solver_peer_index(csr_peers[cursor]);
+    if (other_index >= mechanical_params.particle_count) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    let pair = mechanical_matching_constraint_pair(
+      min(self_index, other_index),
+      max(self_index, other_index),
+      cursor
+    );
+    if (pair.valid == 0u) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+      return;
+    }
+    if (
+      pair.active_pair == 1u
+      && pair.unilateral == 1u
+      && bitcast<u32>(pair.velocity_residual) == terminal_max_bits
+    ) {
+      atomicMin(&mechanical_diagnostic_trace[33u], cursor);
+    }
+  }
+}
+
+@compute @workgroup_size(1)
+fn materialize_terminal_residual_trace() {
+  if (!mechanical_diagnostic_trace_header_valid()) { return; }
+  let winner_cursor = atomicLoad(&mechanical_diagnostic_trace[33u]);
+  let production_max_bits = atomicLoad(&mechanical_diagnostic_trace[62u]);
+  let measured_max_bits = atomicLoad(&mechanical_diagnostic_trace[32u]);
+  if (production_max_bits == measured_max_bits) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_PRODUCTION_MAX_MATCH
+    );
+  }
+  if (mechanical_diagnostic_target_tail_header_valid()) {
+    let header = MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+    let expected_target_capture_count =
+      atomicLoad(&mechanical_diagnostic_trace[14u])
+        * MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
+    let local_capture_count =
+      atomicLoad(&mechanical_diagnostic_trace[header + 8u]);
+    let post_wall_capture_count =
+      atomicLoad(&mechanical_diagnostic_trace[header + 9u]);
+    if (
+      local_capture_count == expected_target_capture_count
+      && post_wall_capture_count == expected_target_capture_count
+    ) {
+      atomicOr(
+        &mechanical_diagnostic_trace[header + 2u],
+        MECHANICAL_DIAGNOSTIC_TARGET_TAIL_LOCAL_CAPTURE_COMPLETE
+          | MECHANICAL_DIAGNOSTIC_TARGET_TAIL_POST_WALL_CAPTURE_COMPLETE
+      );
+    } else {
+      atomicOr(
+        &mechanical_diagnostic_trace[header + 2u],
+        MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID
+      );
+    }
+  }
+  if (winner_cursor == 0xffffffffu) {
+    if (atomicLoad(&mechanical_diagnostic_trace[63u]) != 0u) {
+      atomicOr(
+        &mechanical_diagnostic_trace[2u],
+        MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+      );
+    }
+    return;
+  }
+  var source_index = 0xffffffffu;
+  for (
+    var candidate = 0u;
+    candidate < mechanical_params.particle_count;
+    candidate = candidate + 1u
+  ) {
+    let begin = source_offsets[candidate];
+    let end = source_offsets[candidate + 1u];
+    if (winner_cursor >= begin && winner_cursor < end) {
+      source_index = candidate;
+      break;
+    }
+  }
+  if (
+    source_index == 0xffffffffu
+    || winner_cursor >= arrayLength(&csr_peers)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  let peer_index =
+    mechanical_solver_peer_index(csr_peers[winner_cursor]);
+  if (peer_index >= mechanical_params.particle_count) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  let low_index = min(source_index, peer_index);
+  let high_index = max(source_index, peer_index);
+  var reciprocal_cursor = 0xffffffffu;
+  let peer_begin = source_offsets[peer_index];
+  let peer_end = source_offsets[peer_index + 1u];
+  for (
+    var cursor = peer_begin;
+    cursor < peer_end;
+    cursor = cursor + 1u
+  ) {
+    if (
+      mechanical_solver_peer_index(csr_peers[cursor]) == source_index
+    ) {
+      reciprocal_cursor = cursor;
+      break;
+    }
+  }
+  let pair = mechanical_matching_constraint_pair(
+    low_index,
+    high_index,
+    winner_cursor
+  );
+  let constraint = matching_constraints[winner_cursor];
+  if (
+    reciprocal_cursor == 0xffffffffu
+    || pair.valid == 0u
+    || pair.active_pair == 0u
+    || pair.unilateral == 0u
+    || !mechanical_matching_constraint_code_valid(constraint)
+  ) {
+    atomicOr(
+      &mechanical_diagnostic_trace[2u],
+      MECHANICAL_DIAGNOSTIC_TRACE_INVALID
+    );
+    return;
+  }
+  let constraint_normal =
+    mechanical_matching_constraint_normal(constraint);
+  let low_pos_mass = input_state[low_index * 2u];
+  let high_pos_mass = input_state[high_index * 2u];
+  let low_velocity = input_state[low_index * 2u + 1u].xyz;
+  let high_velocity = input_state[high_index * 2u + 1u].xyz;
+  let low_material =
+    u32(round(source_thermo[low_index * 3u].x));
+  let high_material =
+    u32(round(source_thermo[high_index * 3u].x));
+  var low_domain = 0u;
+  var high_domain = 0u;
+  if (mechanical_params.identity_enabled != 0u) {
+    low_domain = source_identity[low_index];
+    high_domain = source_identity[high_index];
+  }
+  atomicStore(&mechanical_diagnostic_trace[34u], source_index);
+  atomicStore(&mechanical_diagnostic_trace[35u], peer_index);
+  atomicStore(&mechanical_diagnostic_trace[36u], low_index);
+  atomicStore(&mechanical_diagnostic_trace[37u], high_index);
+  atomicStore(&mechanical_diagnostic_trace[38u], reciprocal_cursor);
+  atomicStore(
+    &mechanical_diagnostic_trace[39u],
+    bitcast<u32>(i32(round(constraint.w)))
+  );
+  mechanical_diagnostic_trace_store_f32(40u, pair.position_residual);
+  mechanical_diagnostic_trace_store_f32(41u, pair.velocity_residual);
+  mechanical_diagnostic_trace_store_f32(42u, constraint.x);
+  mechanical_diagnostic_trace_store_f32(43u, constraint.y);
+  mechanical_diagnostic_trace_store_f32(44u, constraint.z);
+  mechanical_diagnostic_trace_store_f32(45u, constraint_normal.x);
+  mechanical_diagnostic_trace_store_f32(46u, constraint_normal.y);
+  mechanical_diagnostic_trace_store_f32(47u, constraint_normal.z);
+  atomicStore(&mechanical_diagnostic_trace[48u], low_material);
+  atomicStore(&mechanical_diagnostic_trace[49u], high_material);
+  atomicStore(
+    &mechanical_diagnostic_trace[50u],
+    mechanical_solver_phase_class(low_index)
+  );
+  atomicStore(
+    &mechanical_diagnostic_trace[51u],
+    mechanical_solver_phase_class(high_index)
+  );
+  atomicStore(&mechanical_diagnostic_trace[52u], low_domain);
+  atomicStore(&mechanical_diagnostic_trace[53u], high_domain);
+  mechanical_diagnostic_trace_store_f32(54u, low_pos_mass.w);
+  mechanical_diagnostic_trace_store_f32(55u, high_pos_mass.w);
+  let relative_velocity = low_velocity - high_velocity;
+  mechanical_diagnostic_trace_store_f32(56u, relative_velocity.x);
+  mechanical_diagnostic_trace_store_f32(57u, relative_velocity.y);
+  mechanical_diagnostic_trace_store_f32(58u, relative_velocity.z);
+  mechanical_diagnostic_trace_store_f32(59u, pair.barrier_dv.x);
+  mechanical_diagnostic_trace_store_f32(60u, pair.barrier_dv.y);
+  mechanical_diagnostic_trace_store_f32(61u, pair.barrier_dv.z);
+  if (mechanical_diagnostic_target_tail_header_valid()) {
+    let header = MECHANICAL_DIAGNOSTIC_TARGET_TAIL_HEADER_WORD;
+    let target_a = mechanical_diagnostic_target_index(0u);
+    let target_b = mechanical_diagnostic_target_index(1u);
+    let target_a_matches =
+      target_a == low_index || target_a == high_index;
+    let target_b_matches =
+      target_b == low_index || target_b == high_index;
+    let exact_pair_match =
+      target_a_matches
+        && target_b_matches
+        && target_a != target_b;
+    var target_match_bits = 0u;
+    if (target_a_matches) {
+      target_match_bits = target_match_bits | 1u;
+    }
+    if (target_b_matches) {
+      target_match_bits = target_match_bits | 2u;
+    }
+    if (exact_pair_match) {
+      target_match_bits = target_match_bits | 4u;
+      atomicOr(
+        &mechanical_diagnostic_trace[header + 2u],
+        MECHANICAL_DIAGNOSTIC_TARGET_TAIL_WINNER_TARGET_MATCH
+      );
+    }
+    atomicStore(
+      &mechanical_diagnostic_trace[header + 10u],
+      target_match_bits
+    );
+  }
+  atomicOr(
+    &mechanical_diagnostic_trace[2u],
+    MECHANICAL_DIAGNOSTIC_TRACE_WINNER_MATERIALIZED
+  );
+}
+
+`;
+
+export const schroederSpatialMechanicalGraphSolverWgsl = /* wgsl */ `
+${schroederSpatialMechanicalGraphSolverCoreWgsl}
+
+struct MechanicalMatchingOwnerFrontierCounts {
+  active_count: u32,
+  contact_count: u32,
+  active_cursor_count: u32,
+  valid: u32,
+};
+
+var<workgroup> mechanical_matching_owner_active_count: atomic<u32>;
+var<workgroup> mechanical_matching_owner_contact_count: atomic<u32>;
+var<workgroup> mechanical_matching_owner_cursor_count: atomic<u32>;
+var<workgroup> mechanical_matching_owner_count_invalid: atomic<u32>;
+
+fn mechanical_matching_owner_frontier_counts(
+  lane: u32,
+  published_total: u32
+) -> MechanicalMatchingOwnerFrontierCounts {
+  var result = MechanicalMatchingOwnerFrontierCounts(0u, 0u, 0u, 0u);
+  if (lane == 0u) {
+    atomicStore(&mechanical_matching_owner_active_count, 0u);
+    atomicStore(&mechanical_matching_owner_contact_count, 0u);
+    atomicStore(&mechanical_matching_owner_cursor_count, 0u);
+    atomicStore(&mechanical_matching_owner_count_invalid, 0u);
+  }
+  workgroupBarrier();
+  var local_active_count = 0u;
+  var local_contact_count = 0u;
+  var local_cursor_count = 0u;
+  var local_invalid = 0u;
+  if (
+    arrayLength(&source_offsets) < mechanical_params.particle_count + 1u
+    || published_total > arrayLength(&matching_constraints)
+    || published_total > arrayLength(&csr_peers)
+  ) {
+    local_invalid = 1u;
+  } else {
+    for (
+      var self_index = lane;
+      self_index < mechanical_params.particle_count;
+      self_index = self_index + 128u
+    ) {
+      let flags = atomicLoad(
+        &matching_cleanup_dispatch[
+          MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+        ]
+      );
+      let frontier_active =
+        (flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u;
+      let contact_active =
+        (flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u;
+      if (
+        (flags & ~(MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+          | MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+          | MECHANICAL_MATCHING_OWNER_CONTACT_BIT)) != 0u
+        || (contact_active && !frontier_active)
+      ) {
+        local_invalid = 1u;
+        continue;
+      }
+      if (frontier_active) {
+        let begin = source_offsets[self_index];
+        let end = source_offsets[self_index + 1u];
+        if (begin > end || end > published_total) {
+          local_invalid = 1u;
+          continue;
+        }
+        let degree = end - begin;
+        if (local_cursor_count > published_total - degree) {
+          local_invalid = 1u;
+          continue;
+        }
+        local_active_count = local_active_count + 1u;
+        local_cursor_count = local_cursor_count + degree;
+      }
+      if (contact_active) {
+        local_contact_count = local_contact_count + 1u;
+      }
+    }
+  }
+  if (local_invalid != 0u) {
+    atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+  } else {
+    atomicAdd(
+      &mechanical_matching_owner_active_count,
+      local_active_count
+    );
+    atomicAdd(
+      &mechanical_matching_owner_contact_count,
+      local_contact_count
+    );
+    let prior_cursor_count = atomicAdd(
+      &mechanical_matching_owner_cursor_count,
+      local_cursor_count
+    );
+    if (prior_cursor_count > published_total - local_cursor_count) {
+      atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+    }
+  }
+  workgroupBarrier();
+  if (atomicLoad(&mechanical_matching_owner_count_invalid) != 0u) {
+    return result;
+  }
+  result.active_count =
+    atomicLoad(&mechanical_matching_owner_active_count);
+  result.contact_count =
+    atomicLoad(&mechanical_matching_owner_contact_count);
+  result.active_cursor_count =
+    atomicLoad(&mechanical_matching_owner_cursor_count);
+  result.valid = 1u;
+  return result;
+}
+
+@compute @workgroup_size(128)
+fn run_matching_cleanup_global_owner(
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let lane = local_id.x;
+  let owner_word_count =
+    MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE
+      + mechanical_params.particle_count;
+  if (lane == 0u) {
+    mechanical_matching_persistent_pass =
+      mechanical_matching_current_pass();
+    mechanical_matching_persistent_active_count = 0u;
+    mechanical_matching_persistent_contact_count = 0u;
+    mechanical_matching_persistent_dispatch_active = 0u;
+    if (
+      mechanical_solver_full_path_enabled()
+      && arrayLength(&matching_cleanup_dispatch) < owner_word_count
+    ) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.ITERATION_INCOMPLETE}u
+      );
+    } else if (
+      mechanical_solver_full_path_enabled()
+      && mechanical_matching_persistent_pass
+        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      && atomicLoad(&graph_control[14u]) == 0u
+    ) {
+      mechanical_matching_persistent_dispatch_active = 1u;
+    }
+  }
+  let dispatch_active = workgroupUniformLoad(
+    &mechanical_matching_persistent_dispatch_active
+  );
+  // The host retains the exact 512-dispatch logical horizon. Once the prior
+  // owner quantum has synthesized the terminal receipt tail (or failed
+  // closed), make every remaining directly encoded quantum a uniform early
+  // return instead of executing its otherwise-unavoidable barrier skeleton.
+  // This is entirely GPU-resident and does not add an indirect usage, host
+  // observation, or queue fence.
+  if (dispatch_active == 0u) {
+    if (lane == 0u && arrayLength(&matching_cleanup_dispatch) >= 3u) {
+      atomicStore(&matching_cleanup_dispatch[0u], 0u);
+      atomicStore(&matching_cleanup_dispatch[1u], 1u);
+      atomicStore(&matching_cleanup_dispatch[2u], 1u);
+    }
+    return;
+  }
+  storageBarrier();
+
+  for (
+    var owner_pass = 0u;
+    owner_pass
+      < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH}u;
+    owner_pass = owner_pass + 1u
+  ) {
+    if (lane == 0u) {
+      mechanical_matching_persistent_pass =
+        mechanical_matching_current_pass();
+      mechanical_matching_persistent_active_count = 0u;
+      mechanical_matching_persistent_contact_count = 0u;
+    }
+    let published_total_before_expansion = atomicLoad(&graph_control[12u]);
+    let frontier_counts_before_expansion =
+      mechanical_matching_owner_frontier_counts(
+        lane,
+        published_total_before_expansion
+      );
+    if (lane == 0u) {
+      if (frontier_counts_before_expansion.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+            .CSR_BOUNDS_OR_RANK}u
+        );
+      } else {
+        mechanical_matching_persistent_active_count =
+          frontier_counts_before_expansion.active_count;
+        mechanical_matching_persistent_contact_count =
+          frontier_counts_before_expansion.contact_count;
+        atomicStore(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_COUNT_WORD
+          ],
+          frontier_counts_before_expansion.active_count
+        );
+        atomicStore(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_CURSOR_COUNT_WORD
+          ],
+          frontier_counts_before_expansion.active_cursor_count
+        );
+        if (
+          frontier_counts_before_expansion.active_count
+            > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+          || frontier_counts_before_expansion.active_cursor_count
+            > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS}u
+        ) {
+          atomicOr(
+            &graph_control[14u],
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+              .ITERATION_INCOMPLETE}u
+          );
+        }
+      }
+    }
+    workgroupBarrier();
+    storageBarrier();
+    let expand_frontier = mechanical_solver_full_path_enabled()
+      && mechanical_matching_persistent_pass
+        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      && arrayLength(&matching_cleanup_dispatch) >= owner_word_count
+      && atomicLoad(&graph_control[14u]) == 0u;
+
+    // The frontier is monotone for the complete cleanup. Only a particle that
+    // already moved through contact or wall projection can wake a frozen
+    // dormant face. Scan those rows before selection and admit both endpoints
+    // in the same logical pass. Two unflagged endpoints never move, so their
+    // dormant constraint cannot become active behind this frontier.
+    if (expand_frontier) {
+      let published_total = atomicLoad(&graph_control[12u]);
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
+          continue;
+        }
+        let begin = source_offsets[self_index];
+        let end = source_offsets[self_index + 1u];
+        if (
+          begin > end
+          || end > published_total
+          || published_total > arrayLength(&matching_constraints)
+          || published_total > arrayLength(&csr_peers)
+        ) {
+          atomicOr(
+            &graph_control[14u],
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+              .CSR_BOUNDS_OR_RANK}u
+          );
+          continue;
+        }
+        for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+          let encoded_peer = csr_peers[cursor];
+          let peer_index = mechanical_solver_peer_index(encoded_peer);
+          if (peer_index >= mechanical_params.particle_count) {
+            atomicOr(
+              &graph_control[14u],
+              ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+                .CSR_BOUNDS_OR_RANK}u
+            );
+            continue;
+          }
+          // Known-active constraints are re-evaluated by deterministic row
+          // selection below. Expansion owns only dormant discovery, so a
+          // steady-state cursor executes the pair law in just one phase; its
+          // first active transition is deliberately rechecked by selection.
+          if (mechanical_matching_edge_ever_active(encoded_peer)) {
+            continue;
+          }
+          let low_index = min(self_index, peer_index);
+          let high_index = max(self_index, peer_index);
+          let pair = mechanical_matching_constraint_pair(
+            low_index,
+            high_index,
+            cursor
+          );
+          if (pair.valid == 0u) {
+            atomicOr(
+              &graph_control[14u],
+              ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+            );
+          } else if (pair.active_pair != 0u && pair.unilateral != 0u) {
+            csr_peers[cursor] =
+              encoded_peer | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
+            let contact_flags = MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+              | MECHANICAL_MATCHING_OWNER_CONTACT_BIT;
+            atomicOr(
+              &matching_cleanup_dispatch[
+                MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+              ],
+              contact_flags
+            );
+            let peer_prior_flags = atomicOr(
+              &matching_cleanup_dispatch[
+                MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
+              ],
+              contact_flags
+            );
+            // A just-admitted peer may already have passed expansion in this
+            // workgroup. Give it one complete selection scan so its reverse
+            // cursor is visible in this same logical pass; selection records
+            // active cursors and clears this transient flag afterward.
+            if (
+              (peer_prior_flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) == 0u
+            ) {
+              atomicOr(
+                &matching_cleanup_dispatch[
+                  MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
+                ],
+                MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+              );
+            }
+          }
+        }
+      }
+    }
+    storageBarrier();
+
+    let published_total_after_expansion = atomicLoad(&graph_control[12u]);
+    let frontier_counts_after_expansion =
+      mechanical_matching_owner_frontier_counts(
+        lane,
+        published_total_after_expansion
+      );
+    if (lane == 0u && expand_frontier) {
+      if (frontier_counts_after_expansion.valid == 0u) {
+        atomicOr(
+          &graph_control[14u],
+          ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+            .CSR_BOUNDS_OR_RANK}u
+        );
+      } else if (atomicLoad(&graph_control[14u]) == 0u) {
+        mechanical_matching_persistent_active_count =
+          frontier_counts_after_expansion.active_count;
+        mechanical_matching_persistent_contact_count =
+          frontier_counts_after_expansion.contact_count;
+        atomicStore(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_COUNT_WORD
+          ],
+          frontier_counts_after_expansion.active_count
+        );
+        atomicStore(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_CURSOR_COUNT_WORD
+          ],
+          frontier_counts_after_expansion.active_cursor_count
+        );
+        if (
+          frontier_counts_after_expansion.active_count
+            > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+          || frontier_counts_after_expansion.active_cursor_count
+            > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS}u
+          || (
+            mechanical_matching_persistent_pass + 16u
+              >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+            && frontier_counts_after_expansion.active_cursor_count
+              > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS}u
+          )
+        ) {
+          atomicOr(
+            &graph_control[14u],
+            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+              .ITERATION_INCOMPLETE}u
+          );
+        }
+      }
+    }
+    workgroupBarrier();
+    storageBarrier();
+    let execute_pass = mechanical_solver_full_path_enabled()
+      && mechanical_matching_persistent_pass
+        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      && atomicLoad(&graph_control[14u]) == 0u;
+
+    if (lane == 0u && execute_pass) {
+      atomicStore(
+        &traversal_evidence[
+          mechanical_matching_selection_count_word(
+            mechanical_matching_persistent_pass
+          )
+        ],
+        mechanical_params.particle_count
+          - mechanical_matching_persistent_contact_count
+      );
+      if (
+        mechanical_matching_persistent_pass == 0u
+        && mechanical_matching_jacobi_residual_converged()
+      ) {
+        let final_iteration = mechanical_params.solver_iteration_count - 1u;
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_max_position_ratio_word(0u)
+          ],
+          atomicLoad(
+            &graph_control[
+              mechanical_pre_solve_position_violation_ratio_word(
+                final_iteration
+              )
+            ]
+          )
+        );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_max_velocity_residual_word(0u)
+          ],
+          atomicLoad(
+            &graph_control[
+              mechanical_pre_solve_velocity_residual_word(final_iteration)
+            ]
+          )
+        );
+      }
+    }
+    storageBarrier();
+
+    if (execute_pass) {
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u) {
+          select_matching_cleanup_edge_for_index(self_index, false);
+        }
+      }
+    }
+    storageBarrier();
+
+    if (lane == 0u && execute_pass) {
+      atomicStore(
+        &traversal_evidence[
+          mechanical_matching_copy_count_word(
+            mechanical_matching_persistent_pass
+          )
+        ],
+        mechanical_params.particle_count
+          - mechanical_matching_persistent_active_count
+      );
+    }
+    storageBarrier();
+
+    if (execute_pass) {
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+          copy_matching_cleanup_state_for_index(self_index);
+        }
+      }
+    }
+    storageBarrier();
+
+    if (lane == 0u && execute_pass) {
+      atomicStore(
+        &traversal_evidence[
+          mechanical_matching_apply_count_word(
+            mechanical_matching_persistent_pass
+          )
+        ],
+        mechanical_params.particle_count
+          - mechanical_matching_persistent_contact_count
+      );
+    }
+    storageBarrier();
+
+    if (execute_pass) {
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u) {
+          apply_matching_cleanup_edge_for_index(self_index);
+        }
+      }
+    }
+    storageBarrier();
+
+    if (lane == 0u && execute_pass) {
+      atomicStore(
+        &traversal_evidence[
+          mechanical_matching_wall_count_word(
+            mechanical_matching_persistent_pass
+          )
+        ],
+        mechanical_params.particle_count
+          - mechanical_matching_persistent_active_count
+      );
+    }
+    storageBarrier();
+
+    if (execute_pass) {
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+          project_matching_cleanup_walls_for_index(self_index);
+        }
+      }
+    }
+    storageBarrier();
+
+    if (execute_pass) {
+      for (
+        var self_index = lane;
+        self_index < mechanical_params.particle_count;
+        self_index = self_index + 128u
+      ) {
+        let flags = atomicLoad(
+          &matching_cleanup_dispatch[
+            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+          ]
+        );
+        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+          input_state[self_index * 2u] = output_state[self_index * 2u];
+          input_state[self_index * 2u + 1u] =
+            output_state[self_index * 2u + 1u];
+        }
+      }
+    }
+    storageBarrier();
+
+    if (lane == 0u && execute_pass) {
+      finalize_matching_cleanup_pass_body();
+    }
+    storageBarrier();
+  }
+  if (lane == 0u && arrayLength(&matching_cleanup_dispatch) >= 3u) {
+    atomicStore(
+      &matching_cleanup_dispatch[0u],
+      select(
+        0u,
+        1u,
+        mechanical_solver_full_path_enabled()
+          && mechanical_matching_current_pass()
+            < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+          && atomicLoad(&graph_control[14u]) == 0u
+      )
+    );
+  }
+}
+`;
+
+export const schroederSpatialMechanicalInterfaceReceiptWgsl = /* wgsl */ `
+${mechanicalContactGraphParamsWgsl}
+
+@group(0) @binding(0) var<storage, read> final_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> source_identity: array<u32>;
+@group(0) @binding(4) var<storage, read> csr_peers: array<u32>;
+@group(0) @binding(5) var<storage, read> source_offsets: array<u32>;
+@group(0) @binding(6) var<storage, read_write> graph_control:
+  array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> interface_receipt:
+  array<atomic<u32>>;
+@group(0) @binding(8) var<uniform> mechanical_params:
+  MechanicalProposalParams;
+@group(0) @binding(9) var<storage, read> spatial_source_rows:
+  array<f32>;
+
+const INTERFACE_RECEIPT_HEADER_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS}u;
+const INTERFACE_RECEIPT_ROW_WORDS: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS}u;
+const INTERFACE_RECEIPT_STATUS_BUILDING: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_BUILDING}u;
+const INTERFACE_RECEIPT_STATUS_READY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY}u;
+const INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
+const INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+
+fn interface_receipt_finite(value: f32) -> bool {
+  return value == value && abs(value) <= 3.402823466e+38;
+}
+
+fn interface_receipt_invalid_value() -> f32 {
+  // Keep the payload runtime-derived so WGSL implementations do not reject a
+  // constant NaN during shader validation. Either infinity (zero payload) or
+  // NaN (nonzero payload) is rejected by interface_receipt_finite.
+  return bitcast<f32>(mechanical_params.generation_id | 0x7f800000u);
+}
+
+fn interface_receipt_cbrt(volume_m3: f32) -> f32 {
+  return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
+}
+
+struct InterfaceReceiptFace {
+  area_m2: f32,
+  normal_axis: u32,
+  admitted: u32,
+};
+
+fn interface_receipt_interval_overlap_m(
+  delta_m: f32,
+  self_edge_m: f32,
+  other_edge_m: f32
+) -> f32 {
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  return max(
+    0.0,
+    min(
+      min(self_edge_m, other_edge_m),
+      half_sum_m - abs(delta_m)
+    )
+  );
+}
+
+fn interface_receipt_tangent_zero_tolerance_m(
+  delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32
+) -> f32 {
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let geometric_scale_m = max(
+    max(
+      max(abs(delta_m.x), max(abs(delta_m.y), abs(delta_m.z))),
+      max(self_edge_m, other_edge_m)
+    ),
+    max(half_sum_m, 1.0e-12)
+  );
+  return 16.0 * 1.1920929e-7 * geometric_scale_m;
+}
+
+fn interface_receipt_face_at_delta(
+  delta_m: vec3<f32>,
+  self_edge_m: f32,
+  other_edge_m: f32,
+  normal_tolerance_m: f32
+) -> InterfaceReceiptFace {
+  let rejected = InterfaceReceiptFace(0.0, 0u, 0u);
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let separation_m = abs(delta_m) - vec3<f32>(half_sum_m);
+  var normal_axis = 0u;
+  var normal_separation_m = separation_m.x;
+  if (separation_m.y > normal_separation_m) {
+    normal_axis = 1u;
+    normal_separation_m = separation_m.y;
+  }
+  if (separation_m.z > normal_separation_m) {
+    normal_axis = 2u;
+    normal_separation_m = separation_m.z;
+  }
+  if (normal_separation_m > normal_tolerance_m) { return rejected; }
+  var overlap_a_m = 0.0;
+  var overlap_b_m = 0.0;
+  if (normal_axis == 0u) {
+    overlap_a_m = interface_receipt_interval_overlap_m(
+      delta_m.y,
+      self_edge_m,
+      other_edge_m
+    );
+    overlap_b_m = interface_receipt_interval_overlap_m(
+      delta_m.z,
+      self_edge_m,
+      other_edge_m
+    );
+  } else if (normal_axis == 1u) {
+    overlap_a_m = interface_receipt_interval_overlap_m(
+      delta_m.x,
+      self_edge_m,
+      other_edge_m
+    );
+    overlap_b_m = interface_receipt_interval_overlap_m(
+      delta_m.z,
+      self_edge_m,
+      other_edge_m
+    );
+  } else {
+    overlap_a_m = interface_receipt_interval_overlap_m(
+      delta_m.x,
+      self_edge_m,
+      other_edge_m
+    );
+    overlap_b_m = interface_receipt_interval_overlap_m(
+      delta_m.y,
+      self_edge_m,
+      other_edge_m
+    );
+  }
+  let tangent_zero_tolerance_m =
+    interface_receipt_tangent_zero_tolerance_m(
+      delta_m,
+      self_edge_m,
+      other_edge_m
+    );
+  if (
+    overlap_a_m <= tangent_zero_tolerance_m
+    || overlap_b_m <= tangent_zero_tolerance_m
+  ) { return rejected; }
+  let area_m2 = overlap_a_m * overlap_b_m;
+  if (!interface_receipt_finite(area_m2) || area_m2 <= 0.0) {
+    return rejected;
+  }
+  return InterfaceReceiptFace(area_m2, normal_axis, 1u);
+}
+
+fn interface_receipt_swept_axis_interval(
+  start_m: f32,
+  sweep_m: f32,
+  half_sum_m: f32
+) -> vec3<f32> {
+  if (abs(sweep_m) <= 1.0e-12) {
+    if (abs(start_m) > half_sum_m) { return vec3<f32>(0.0); }
+    return vec3<f32>(-3.402823e+38, 3.402823e+38, 1.0);
+  }
+  let first_t = (-half_sum_m - start_m) / sweep_m;
+  let second_t = (half_sum_m - start_m) / sweep_m;
+  return vec3<f32>(
+    min(first_t, second_t),
+    max(first_t, second_t),
+    1.0
+  );
+}
+
+fn interface_receipt_epoch_position(index: u32) -> vec3<f32> {
+  let base = index * 16u;
+  return vec3<f32>(
+    spatial_source_rows[base + 12u],
+    spatial_source_rows[base + 13u],
+    spatial_source_rows[base + 14u]
+  );
+}
+
+fn interface_receipt_phase_class(index: u32) -> u32 {
+  let row5 = source_mechanics[index * 8u + 5u];
+  let row6 = source_mechanics[index * 8u + 6u];
+  if (row5.x > 0.5) { return 2u; }
+  if (row6.z > 0.5 && row6.z < 1.5) { return 1u; }
+  return 0u;
+}
+
+fn interface_receipt_same_phase_lineage(
+  self_index: u32,
+  other_index: u32
+) -> bool {
+  let capacity = mechanical_params.phase_lineage_capacity;
+  return capacity > 0u
+    && mechanical_params.phase_lane_count > 1u
+    && self_index < capacity * mechanical_params.phase_lane_count
+    && other_index < capacity * mechanical_params.phase_lane_count
+    && self_index % capacity == other_index % capacity;
+}
+
+fn interface_receipt_same_body_solid(
+  self_index: u32,
+  other_index: u32
+) -> bool {
+  if (
+    interface_receipt_phase_class(self_index) != 2u
+    || interface_receipt_phase_class(other_index) != 2u
+  ) { return false; }
+  let self_material = source_thermo[self_index * 3u].x;
+  let other_material = source_thermo[other_index * 3u].x;
+  if (abs(self_material - other_material) >= 0.5) { return false; }
+  if (mechanical_params.identity_enabled == 0u) { return true; }
+  let self_domain = source_identity[self_index];
+  let other_domain = source_identity[other_index];
+  return self_domain == 0u
+    || other_domain == 0u
+    || self_domain == other_domain;
+}
+
+fn interface_receipt_unilateral_pair(
+  self_index: u32,
+  other_index: u32
+) -> bool {
+  let self_class = interface_receipt_phase_class(self_index);
+  let other_class = interface_receipt_phase_class(other_index);
+  if (self_class == 0u || other_class == 0u) { return false; }
+  let self_material = source_thermo[self_index * 3u].x;
+  let other_material = source_thermo[other_index * 3u].x;
+  if (abs(self_material - other_material) >= 0.5) { return true; }
+  if (
+    (self_class == 2u && other_class == 1u)
+    || (self_class == 1u && other_class == 2u)
+  ) { return true; }
+  if (
+    self_class != 2u
+    || other_class != 2u
+    || mechanical_params.identity_enabled == 0u
+  ) { return false; }
+  let self_domain = source_identity[self_index];
+  let other_domain = source_identity[other_index];
+  return self_domain != 0u
+    && other_domain != 0u
+    && self_domain != other_domain;
+}
+
+fn interface_receipt_pair_value(
+  self_index: u32,
+  other_index: u32
+) -> f32 {
+  // Receipt v2 refines the already-authenticated mechanical CSR; it does not
+  // claim a second, complete AABB neighbor traversal. The broad mixed-law
+  // envelope contains the campaign's staggered face candidates while keeping
+  // receipt materialization O(E) in the retained directed graph.
+  if (
+    self_index >= mechanical_params.particle_count
+    || other_index >= mechanical_params.particle_count
+    || self_index == other_index
+    || interface_receipt_same_phase_lineage(self_index, other_index)
+    || interface_receipt_same_body_solid(self_index, other_index)
+    || !interface_receipt_unilateral_pair(self_index, other_index)
+  ) { return 0.0; }
+  let self_pos_mass = final_state[self_index * 2u];
+  let other_pos_mass = final_state[other_index * 2u];
+  let self_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
+  let other_volume = max(
+    source_mechanics[other_index * 8u + 4u].w,
+    0.0
+  );
+  if (
+    self_pos_mass.w <= 0.0
+    || other_pos_mass.w <= 0.0
+    || self_volume <= 0.0
+    || other_volume <= 0.0
+  ) { return -1.0; }
+  let self_edge_m = interface_receipt_cbrt(self_volume);
+  let other_edge_m = interface_receipt_cbrt(other_volume);
+  let half_sum_m = 0.5 * (self_edge_m + other_edge_m);
+  let tolerance_m = max(
+    1.0e-5,
+    ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION}
+      * half_sum_m
+  );
+  let final_delta = self_pos_mass.xyz - other_pos_mass.xyz;
+  if (
+    !interface_receipt_finite(self_edge_m)
+    || !interface_receipt_finite(other_edge_m)
+    || !interface_receipt_finite(half_sum_m)
+    || !interface_receipt_finite(tolerance_m)
+    || !interface_receipt_finite(final_delta.x)
+    || !interface_receipt_finite(final_delta.y)
+    || !interface_receipt_finite(final_delta.z)
+  ) {
+    return interface_receipt_invalid_value();
+  }
+  let final_face = interface_receipt_face_at_delta(
+    final_delta,
+    self_edge_m,
+    other_edge_m,
+    tolerance_m
+  );
+  if (final_face.admitted != 0u) { return final_face.area_m2; }
+  // The unilateral solver owns swept-impact semantics. Preserve the exact
+  // finite-volume face at first AABB impact even when later constraint cleanup
+  // leaves the endpoints separated.
+  let epoch_delta = interface_receipt_epoch_position(self_index)
+    - interface_receipt_epoch_position(other_index);
+  let sweep_delta = final_delta - epoch_delta;
+  if (
+    !interface_receipt_finite(epoch_delta.x)
+    || !interface_receipt_finite(epoch_delta.y)
+    || !interface_receipt_finite(epoch_delta.z)
+    || !interface_receipt_finite(sweep_delta.x)
+    || !interface_receipt_finite(sweep_delta.y)
+    || !interface_receipt_finite(sweep_delta.z)
+  ) {
+    return interface_receipt_invalid_value();
+  }
+  let interval_x = interface_receipt_swept_axis_interval(
+    epoch_delta.x,
+    sweep_delta.x,
+    half_sum_m
+  );
+  let interval_y = interface_receipt_swept_axis_interval(
+    epoch_delta.y,
+    sweep_delta.y,
+    half_sum_m
+  );
+  let interval_z = interface_receipt_swept_axis_interval(
+    epoch_delta.z,
+    sweep_delta.z,
+    half_sum_m
+  );
+  if (
+    interval_x.z == 0.0
+    || interval_y.z == 0.0
+    || interval_z.z == 0.0
+  ) { return -1.0; }
+  if (
+    !interface_receipt_finite(interval_x.x)
+    || !interface_receipt_finite(interval_x.y)
+    || !interface_receipt_finite(interval_y.x)
+    || !interface_receipt_finite(interval_y.y)
+    || !interface_receipt_finite(interval_z.x)
+    || !interface_receipt_finite(interval_z.y)
+  ) { return interface_receipt_invalid_value(); }
+  let entry_t = max(interval_x.x, max(interval_y.x, interval_z.x));
+  let exit_t = min(interval_x.y, min(interval_y.y, interval_z.y));
+  if (entry_t > exit_t || exit_t < 0.0 || entry_t > 1.0) { return -1.0; }
+  let impact_t = clamp(entry_t, 0.0, 1.0);
+  let impact_face = interface_receipt_face_at_delta(
+    epoch_delta + impact_t * sweep_delta,
+    self_edge_m,
+    other_edge_m,
+    0.0
+  );
+  if (impact_face.admitted == 0u) { return -1.0; }
+  return impact_face.area_m2;
+}
+
+fn interface_receipt_static_header_valid() -> bool {
+  return arrayLength(&interface_receipt)
+      >= INTERFACE_RECEIPT_HEADER_WORDS
+    && atomicLoad(&interface_receipt[0u])
+      == ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC >>> 0}u
+    && atomicLoad(&interface_receipt[1u])
+      == ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION}u
+    && atomicLoad(&interface_receipt[2u])
+      == mechanical_params.generation_id
+    && atomicLoad(&interface_receipt[3u])
+      == mechanical_params.storage_generation
+    && atomicLoad(&interface_receipt[4u])
+      == mechanical_params.physics_tick
+    && atomicLoad(&interface_receipt[5u])
+      == mechanical_params.physics_substep
+    && atomicLoad(&interface_receipt[6u])
+      == mechanical_params.position_epoch
+    && atomicLoad(&interface_receipt[7u])
+      == mechanical_params.topology_epoch
+    && atomicLoad(&interface_receipt[8u])
+      == mechanical_params.support_epoch
+    && atomicLoad(&interface_receipt[9u])
+      == bitcast<u32>(mechanical_params.apply_selected_level)
+    && atomicLoad(&interface_receipt[10u])
+      == mechanical_params.particle_count
+    && atomicLoad(&interface_receipt[11u])
+      == mechanical_params.directed_pair_capacity
+    && atomicLoad(&interface_receipt[12u])
+      == mechanical_params.particle_count + 1u
+    && atomicLoad(&interface_receipt[13u])
+      == atomicLoad(&graph_control[12u]);
+}
+
+@compute @workgroup_size(1)
+fn initialize_contact_interface_receipt(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (global_id.x != 0u) { return; }
+  let total = atomicLoad(&graph_control[12u]);
+  let offset_words = mechanical_params.particle_count + 1u;
+  let available_words = arrayLength(&interface_receipt);
+  let prefix_words = INTERFACE_RECEIPT_HEADER_WORDS + offset_words;
+  let layout_valid = total <= mechanical_params.directed_pair_capacity
+    && prefix_words <= available_words
+    && total <= (available_words - prefix_words) / INTERFACE_RECEIPT_ROW_WORDS;
+  atomicStore(
+    &interface_receipt[0u],
+    ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC >>> 0}u
+  );
+  atomicStore(
+    &interface_receipt[1u],
+    ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION}u
+  );
+  atomicStore(&interface_receipt[2u], mechanical_params.generation_id);
+  atomicStore(&interface_receipt[3u], mechanical_params.storage_generation);
+  atomicStore(&interface_receipt[4u], mechanical_params.physics_tick);
+  atomicStore(&interface_receipt[5u], mechanical_params.physics_substep);
+  atomicStore(&interface_receipt[6u], mechanical_params.position_epoch);
+  atomicStore(&interface_receipt[7u], mechanical_params.topology_epoch);
+  atomicStore(&interface_receipt[8u], mechanical_params.support_epoch);
+  atomicStore(
+    &interface_receipt[9u],
+    bitcast<u32>(mechanical_params.apply_selected_level)
+  );
+  atomicStore(&interface_receipt[10u], mechanical_params.particle_count);
+  atomicStore(
+    &interface_receipt[11u],
+    mechanical_params.directed_pair_capacity
+  );
+  atomicStore(&interface_receipt[12u], offset_words);
+  atomicStore(&interface_receipt[13u], total);
+  atomicStore(&interface_receipt[14u], 0u);
+  atomicStore(
+    &interface_receipt[15u],
+    select(
+      INTERFACE_RECEIPT_STATUS_READY
+        | INTERFACE_RECEIPT_STATUS_FAIL_CLOSED,
+      INTERFACE_RECEIPT_STATUS_BUILDING,
+      layout_valid
+    )
+  );
+}
+
+@compute @workgroup_size(64)
+fn materialize_contact_interface_receipt(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let self_index = global_id.x;
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (
+    !interface_receipt_static_header_valid()
+    || atomicLoad(&interface_receipt[15u])
+      != INTERFACE_RECEIPT_STATUS_BUILDING
+    || atomicLoad(&graph_control[14u]) != 0u
+    || atomicLoad(&graph_control[17u]) != mechanical_params.particle_count
+    || (
+      atomicLoad(&graph_control[15u])
+        & ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.RESIDUAL_VERIFIED}u
+    ) == 0u
+  ) {
+    atomicOr(
+      &interface_receipt[15u],
+      INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    );
+    return;
+  }
+  let total = atomicLoad(&interface_receipt[13u]);
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  if (begin > end || end > total) {
+    atomicOr(
+      &interface_receipt[15u],
+      INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    );
+    return;
+  }
+  let offset_base = INTERFACE_RECEIPT_HEADER_WORDS;
+  atomicStore(&interface_receipt[offset_base + self_index], begin);
+  if (self_index + 1u == mechanical_params.particle_count) {
+    atomicStore(
+      &interface_receipt[offset_base + mechanical_params.particle_count],
+      end
+    );
+  }
+  let row_base = offset_base + mechanical_params.particle_count + 1u;
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let peer_index = csr_peers[cursor];
+    let pair_value = interface_receipt_pair_value(
+      self_index,
+      peer_index
+    );
+    if (!interface_receipt_finite(pair_value)) {
+      atomicOr(
+        &interface_receipt[15u],
+        INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+      );
+      return;
+    }
+    let row = row_base + cursor * INTERFACE_RECEIPT_ROW_WORDS;
+    atomicStore(&interface_receipt[row], peer_index);
+    atomicStore(&interface_receipt[row + 1u], bitcast<u32>(pair_value));
+  }
+  atomicAdd(&interface_receipt[14u], end - begin);
+}
+
+@compute @workgroup_size(1)
+fn seal_contact_interface_receipt(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (global_id.x != 0u) { return; }
+  let required_stages =
+    ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.RESIDUAL_VERIFIED}u
+    | ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.PROPOSAL_PUBLISHED}u
+    | ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.COMMITTED}u
+    | ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_CLEANUP}u
+    | ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE.MATCHING_TRUST_RESTORED}u;
+  let admitted =
+    interface_receipt_static_header_valid()
+    && atomicLoad(&interface_receipt[15u])
+      == INTERFACE_RECEIPT_STATUS_BUILDING
+    && atomicLoad(&interface_receipt[14u])
+      == atomicLoad(&interface_receipt[13u])
+    && atomicLoad(&graph_control[14u]) == 0u
+    && atomicLoad(&graph_control[16u]) == mechanical_params.particle_count
+    && atomicLoad(&graph_control[17u]) == mechanical_params.particle_count
+    && atomicLoad(&graph_control[18u]) == mechanical_params.particle_count
+    && atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupPassCount}u]
+    ) == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    && atomicLoad(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupTrustRestoreCount}u]
+    ) == mechanical_params.particle_count
+    && (atomicLoad(&graph_control[15u]) & required_stages)
+      == required_stages;
+  if (!admitted) {
+    atomicStore(
+      &interface_receipt[15u],
+      INTERFACE_RECEIPT_STATUS_READY
+        | INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    );
+    return;
+  }
+  atomicOr(
+    &graph_control[15u],
+    ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE
+      .CONTACT_INTERFACE_RECEIPT_PUBLISHED}u
+  );
+  atomicStore(
+    &interface_receipt[15u],
+    INTERFACE_RECEIPT_STATUS_READY | INTERFACE_RECEIPT_STATUS_ADMITTED
+  );
+}
 `;
 
 export const schroederSpatialMechanicalProposalApplyWgsl = /* wgsl */ `
@@ -5513,6 +16991,8 @@ ${mechanicalContactGraphParamsWgsl}
 @group(0) @binding(4) var<storage, read_write> graph_control: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> mechanical_params: MechanicalProposalParams;
+@group(0) @binding(7) var<storage, read_write> matching_cleanup_control:
+  array<atomic<u32>>;
 
 fn mechanical_publish_finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823466e+38;
@@ -5522,6 +17002,36 @@ fn mechanical_publish_finite3(value: vec3<f32>) -> bool {
   return mechanical_publish_finite(value.x)
     && mechanical_publish_finite(value.y)
     && mechanical_publish_finite(value.z);
+}
+
+fn mechanical_publish_measure_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 19u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount4}u
+      + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount8}u
+    + (iteration - 8u);
+}
+
+fn mechanical_publish_solve_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 23u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount4}u
+      + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount8}u
+    + (iteration - 8u);
+}
+
+fn mechanical_publish_energy_count_word(iteration: u32) -> u32 {
+  if (iteration < 4u) { return 32u + iteration; }
+  if (iteration < 8u) {
+    return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .energyMeasureCount4}u + (iteration - 4u);
+  }
+  return ${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+    .energyMeasureCount8}u + (iteration - 8u);
 }
 
 fn mechanical_publish_header_word(word: u32) -> u32 {
@@ -5586,6 +17096,35 @@ fn mechanical_publish_graph_header_valid() -> bool {
       == mechanical_params.directed_pair_capacity;
 }
 
+fn mechanical_publish_matching_cleanup_header_valid() -> bool {
+  return arrayLength(&matching_cleanup_control)
+      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS}u
+    && atomicLoad(&matching_cleanup_control[0u])
+      == ${MATCHING_CLEANUP_CONTROL_MAGIC}u
+    && atomicLoad(&matching_cleanup_control[1u])
+      == ${MATCHING_CLEANUP_CONTROL_VERSION}u
+    && atomicLoad(&matching_cleanup_control[2u])
+      == mechanical_params.generation_id
+    && atomicLoad(&matching_cleanup_control[3u])
+      == mechanical_params.storage_generation
+    && atomicLoad(&matching_cleanup_control[4u])
+      == mechanical_params.physics_tick
+    && atomicLoad(&matching_cleanup_control[5u])
+      == mechanical_params.physics_substep
+    && atomicLoad(&matching_cleanup_control[6u])
+      == mechanical_params.position_epoch
+    && atomicLoad(&matching_cleanup_control[7u])
+      == mechanical_params.topology_epoch
+    && atomicLoad(&matching_cleanup_control[8u])
+      == mechanical_params.support_epoch
+    && atomicLoad(&matching_cleanup_control[9u])
+      == mechanical_params.particle_count
+    && atomicLoad(&matching_cleanup_control[10u])
+      == mechanical_params.solver_iteration_count
+    && atomicLoad(&matching_cleanup_control[11u])
+      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+}
+
 @compute @workgroup_size(64)
 fn publish_contact_proposal(
   @builtin(global_invocation_id) global_id: vec3<u32>
@@ -5647,7 +17186,7 @@ fn publish_contact_proposal(
 // The retained graph remains authoritative even when it has no rows: this
 // path is reached only after exact traversal, the source-count scan, and the
 // finalized append/CSR counters all agree on zero directed pairs.  It avoids
-// running four vacuous Jacobi rounds over every particle while publishing the
+// running sixteen vacuous Jacobi rounds over every particle while publishing the
 // same zero proposal rows and authenticated completion evidence.
 @compute @workgroup_size(64)
 fn complete_zero_contact_proposal(
@@ -5664,7 +17203,9 @@ fn complete_zero_contact_proposal(
   let zero_graph_admitted =
     mechanical_publish_header_valid()
     && mechanical_publish_graph_header_valid()
-    && mechanical_params.solver_iteration_count == 4u
+    && mechanical_publish_matching_cleanup_header_valid()
+    && mechanical_params.solver_iteration_count
+      == ${SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS}u
     && atomicLoad(&graph_control[11u]) == 0u
     && atomicLoad(&graph_control[12u]) == 0u
     && atomicLoad(&graph_control[13u]) == 0u
@@ -5709,7 +17250,7 @@ fn complete_zero_contact_proposal(
       + particle_index * 2u;
   proposal_rows[proposal_row] = vec4<f32>(0.0);
   proposal_rows[proposal_row + 1u] = vec4<f32>(0.0);
-  // Scratch B is the normal four-round final state buffer.  Initializing it
+  // Scratch B is the normal even-round final state buffer. Initializing it
   // from the immutable post-G2P state lets the ordinary seal/commit path
   // remain the sole public-state publication path.
   output_state[particle_index * 2u] = original_position;
@@ -5717,16 +17258,98 @@ fn complete_zero_contact_proposal(
   atomicAdd(&graph_control[16u], 1u);
   atomicAdd(&graph_control[17u], 1u);
   atomicAdd(&graph_control[18u], 1u);
-  for (var iteration = 0u; iteration < 4u; iteration = iteration + 1u) {
-    atomicAdd(&graph_control[19u + iteration], 1u);
-    atomicAdd(&graph_control[23u + iteration], 1u);
-    atomicAdd(&graph_control[32u + iteration], 1u);
+  for (var iteration = 0u;
+    iteration < mechanical_params.solver_iteration_count;
+    iteration = iteration + 1u) {
+    atomicAdd(
+      &graph_control[mechanical_publish_measure_count_word(iteration)],
+      1u
+    );
+    atomicAdd(
+      &graph_control[mechanical_publish_solve_count_word(iteration)],
+      1u
+    );
+    atomicAdd(
+      &graph_control[mechanical_publish_energy_count_word(iteration)],
+      1u
+    );
   }
   if (particle_index == 0u) {
     atomicAdd(&traversal_evidence[26u], 1u);
-    atomicAdd(&traversal_evidence[28u], 4u);
-    atomicAdd(&traversal_evidence[29u], 4u);
-    atomicAdd(&traversal_evidence[32u], 4u);
+    atomicAdd(
+      &traversal_evidence[28u],
+      mechanical_params.solver_iteration_count
+    );
+    atomicAdd(
+      &traversal_evidence[29u],
+      mechanical_params.solver_iteration_count
+    );
+    atomicAdd(
+      &traversal_evidence[32u],
+      mechanical_params.solver_iteration_count
+    );
+    // The authenticated zero-edge route is an explicit solver bypass: no
+    // conflict graph exists to clean up, but it still synthesizes the same
+    // terminal cleanup certificate required by publication consumers.
+    atomicStore(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupPassCount}u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    );
+    atomicStore(
+      &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+        .matchingCleanupTrustRestoreCount}u],
+      mechanical_params.particle_count
+    );
+    for (
+      var cleanup_pass = 0u;
+      cleanup_pass
+        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+      cleanup_pass = cleanup_pass + 1u
+    ) {
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_SELECTION_COUNT_WORD}u + cleanup_pass
+        ],
+        mechanical_params.particle_count
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_COPY_COUNT_WORD}u + cleanup_pass
+        ],
+        mechanical_params.particle_count
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_APPLY_COUNT_WORD}u + cleanup_pass
+        ],
+        mechanical_params.particle_count
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_WALL_COUNT_WORD}u + cleanup_pass
+        ],
+        mechanical_params.particle_count
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD}u + cleanup_pass
+        ],
+        0u
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD}u + cleanup_pass
+        ],
+        0u
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD}u + cleanup_pass
+        ],
+        0u
+      );
+    }
     atomicOr(
       &graph_control[15u],
       ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.GRAPH_VERIFIED}u
@@ -5734,12 +17357,26 @@ fn complete_zero_contact_proposal(
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_1}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_2}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_3}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_4}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_5}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_6}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATION_7}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.RESIDUAL_VERIFIED}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_0}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_1}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_2}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_3}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_4}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_5}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_6}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_ITERATION_7}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ITERATIONS_8_15}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE
+        .ENERGY_ITERATIONS_8_15}u
       | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.ENERGY_VERIFIED}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE.MATCHING_CLEANUP}u
+      | ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_STAGE
+        .MATCHING_TRUST_RESTORED}u
     );
   }
 }
@@ -5851,11 +17488,77 @@ function createBuffer(device, label, size, usage) {
   }), device);
 }
 
+function prepareMechanicalProposalCapture({
+  request,
+  device,
+  particleCount,
+  controlByteLength,
+  evidenceByteLength,
+  matchingCleanupByteLength
+}) {
+  if (!request) return null;
+  const { record, sequenceIndex, sequenceStepCount } = request;
+  if (record.destroyed) {
+    throw new Error('mechanical proposal capture was destroyed before encode');
+  }
+  if (record.nextSequenceIndex !== sequenceIndex) {
+    throw new Error(
+      'mechanical proposal capture sequence advanced before this proposal encoded'
+    );
+  }
+  const layout = createMechanicalProposalCaptureLayout({
+    sequenceStepCount,
+    particleCount,
+    controlByteLength,
+    evidenceByteLength,
+    matchingCleanupByteLength
+  });
+  if (!record.buffer) {
+    const maxBufferSize = finiteNumber(
+      device?.limits?.maxBufferSize,
+      Number.MAX_SAFE_INTEGER
+    );
+    if (layout.totalByteLength > maxBufferSize) {
+      throw new RangeError(
+        'mechanical proposal capture exceeds the device maxBufferSize limit'
+      );
+    }
+    record.buffer = createBuffer(
+      device,
+      'ulg-schroeder-spatial-mechanical-proposal-capture',
+      layout.totalByteLength,
+      GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+    );
+    record.device = device;
+    record.particleCount = particleCount;
+    record.layout = layout;
+  } else if (
+    record.device !== device
+    || record.particleCount !== particleCount
+    || record.layout?.totalByteLength !== layout.totalByteLength
+    || record.layout?.history?.strideByteLength
+      !== layout.history.strideByteLength
+  ) {
+    throw new Error(
+      'mechanical proposal capture device, particle count, or layout changed'
+    );
+  }
+  return Object.freeze({
+    record,
+    sequenceIndex,
+    sequenceStepCount,
+    buffer: record.buffer,
+    layout: record.layout
+  });
+}
+
 function destroyMechanicalProposalPoolSlot(slot) {
   if (!slot || slot.destroyed === true) return false;
   for (const buffer of [
     slot.proposalBuffer,
     slot.evidenceBuffer,
+    slot.matchingCleanupControlBuffer,
+    slot.matchingConstraintBuffer,
     slot.supportBuffer,
     slot.sourceCountBuffer,
     slot.sourceOffsetBuffer,
@@ -5869,6 +17572,7 @@ function destroyMechanicalProposalPoolSlot(slot) {
     slot.conditionalDispatchBuffer,
     slot.expectationBuffer,
     slot.paramsBuffer,
+    slot.solverIterationParamsBuffer,
     slot.identityDisabledBuffer
   ]) buffer?.destroy?.();
   slot.sourceCountScan?.destroy?.();
@@ -5894,18 +17598,11 @@ function mechanicalProposalPoolSlot(
   // power of two. The old rounding doubled all fixed buffers at 32,769 rows
   // and collapsed an 8 MiB graph from 278,503 directed rows to 32,743.
   const capacity = exactU32(particleCount, 'particleCount', { positive: true });
-  const maximumDirectedPairCapacity = Math.max(
-    1,
-    Math.min(
-      0xffff_ffff,
-      Math.trunc(
-        finiteNumber(
-          device.limits?.maxComputeWorkgroupsPerDimension,
-          65535
-        )
-      ) * WORKGROUP_SIZE
-    )
-  );
+  if (capacity >= 0x4000_0000) {
+    throw new RangeError(
+      'canonical mechanical particleCount must leave two private CSR flag bits'
+    );
+  }
   const deviceLimits = {
     maxBufferSize: Number.isFinite(device.limits?.maxBufferSize)
       ? device.limits.maxBufferSize
@@ -5916,6 +17613,28 @@ function mechanicalProposalPoolSlot(
       ? device.limits.maxStorageBufferBindingSize
       : Number.MAX_SAFE_INTEGER
   };
+  const matchingConstraintDeviceCapacity = Math.floor(
+    Math.min(
+      deviceLimits.maxBufferSize,
+      deviceLimits.maxStorageBufferBindingSize
+    ) / MATCHING_CONSTRAINT_BYTES_PER_DIRECTED_PAIR
+  );
+  if (matchingConstraintDeviceCapacity < 1) {
+    throw new RangeError(
+      'canonical mechanical matching-constraint storage cannot retain one '
+      + 'directed row on this device'
+    );
+  }
+  const maximumDirectedPairCapacity = Math.min(
+    0xffff_ffff,
+    Math.trunc(
+      finiteNumber(
+        device.limits?.maxComputeWorkgroupsPerDimension,
+        65535
+      )
+    ) * WORKGROUP_SIZE,
+    matchingConstraintDeviceCapacity
+  );
   const deviceCapacityPlan = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: capacity,
     maximumDirectedPairCapacity,
@@ -5936,28 +17655,90 @@ function mechanicalProposalPoolSlot(
       + `directed rows per particle for ${capacity} particles on this device`
     );
   }
+  const matchingCleanupOwnerWorkspaceWordLength =
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS
+      + capacity;
+  const matchingCleanupOwnerWorkspaceByteLength =
+    matchingCleanupOwnerWorkspaceWordLength
+      * Uint32Array.BYTES_PER_ELEMENT;
+  if (
+    !Number.isSafeInteger(matchingCleanupOwnerWorkspaceByteLength)
+    || matchingCleanupOwnerWorkspaceByteLength > deviceLimits.maxBufferSize
+    || matchingCleanupOwnerWorkspaceByteLength
+      > deviceLimits.maxStorageBufferBindingSize
+  ) {
+    throw new RangeError(
+      'canonical mechanical matching-cleanup owner workspace exceeds device '
+      + 'buffer limits'
+    );
+  }
+  const matchingCleanupOwnerExtraByteLength = Math.max(
+    0,
+    matchingCleanupOwnerWorkspaceByteLength
+      - deviceCapacityPlan.layout.bufferLayouts.conditionalDispatch.byteLength
+  );
+  const totalBytesPerDirectedPair =
+    deviceCapacityPlan.bytesPerDirectedPair
+      + MATCHING_CONSTRAINT_BYTES_PER_DIRECTED_PAIR;
   const defaultPairGraphByteBudget = Math.max(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_BYTES_DEFAULT,
     deviceCapacityPlan.fixedRetainedByteLength
+      + matchingCleanupOwnerExtraByteLength
       + minimumDirectedPairCapacity
-        * deviceCapacityPlan.bytesPerDirectedPair
+        * totalBytesPerDirectedPair
   );
   const resolvedPairGraphByteBudget = pairGraphByteBudget == null
     ? defaultPairGraphByteBudget
     : pairGraphByteBudget;
+  const budgetDirectedPairCapacity = Math.floor(
+    (
+      resolvedPairGraphByteBudget
+        - deviceCapacityPlan.fixedRetainedByteLength
+        - matchingCleanupOwnerExtraByteLength
+    ) / totalBytesPerDirectedPair
+  );
+  if (budgetDirectedPairCapacity < minimumDirectedPairCapacity) {
+    throw new RangeError(
+      `canonical mechanical pair graph maxRetainedBytes `
+      + `${resolvedPairGraphByteBudget} cannot admit the required `
+      + `${minimumDirectedPairCapacity} directed pairs after fixed retained `
+      + `buffers, owner flags, and private matching constraints; `
+      + `device/budget capacity is `
+      + `${Math.max(0, budgetDirectedPairCapacity)}`
+    );
+  }
   const graphPlan = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: capacity,
-    maximumDirectedPairCapacity,
+    maximumDirectedPairCapacity: Math.min(
+      maximumDirectedPairCapacity,
+      budgetDirectedPairCapacity
+    ),
     minimumDirectedPairCapacity,
     maxRetainedBytes: resolvedPairGraphByteBudget,
     deviceLimits
   });
   const graphLayout = graphPlan.layout;
+  const matchingConstraintByteLength =
+    graphLayout.directedPairCapacity
+      * MATCHING_CONSTRAINT_BYTES_PER_DIRECTED_PAIR;
+  const totalRetainedByteLength =
+    graphLayout.retainedByteLength
+      + matchingConstraintByteLength
+      + matchingCleanupOwnerExtraByteLength;
+  if (totalRetainedByteLength > resolvedPairGraphByteBudget) {
+    throw new RangeError(
+      `canonical mechanical pair graph retained byte length `
+      + `${totalRetainedByteLength} exceeds configured budget `
+      + `${resolvedPairGraphByteBudget}`
+    );
+  }
   const exactArenaIndex = exactU32(
     Math.max(0, Math.trunc(finiteNumber(arenaIndex, 0))),
     'generation.execution.arenaIndex'
   );
   const key = String(exactArenaIndex);
+  const solverIterationUniformPlan =
+    mechanicalSolverIterationUniformPlan(device);
   let slot = devicePools.get(key);
   if (slot?.inUseGenerationId != null) {
     throw new Error(
@@ -5969,7 +17750,20 @@ function mechanicalProposalPoolSlot(
     && slot.destroyed !== true
     && slot.capacity >= capacity
     && slot.directedPairCapacity >= graphLayout.directedPairCapacity
-    && slot.graphLayout?.retainedByteLength <= resolvedPairGraphByteBudget
+    && slot.matchingCleanupControlBuffer
+    && slot.matchingConstraintBuffer
+    && slot.conditionalDispatchBuffer?.size
+      >= matchingCleanupOwnerWorkspaceByteLength
+    && slot.solverIterationParamsBuffer
+    && slot.solverIterationParamsStrideBytes
+      === solverIterationUniformPlan.strideBytes
+    && slot.graphLayout?.schema
+      === ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA
+    && slot.graphLayout?.controlWords
+      === SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS
+    && slot.graphLayout?.matchingCleanupControlWords
+      === SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+    && slot.totalRetainedByteLength <= resolvedPairGraphByteBudget
   );
   const priorAllocationCount = slot?.totalBufferCreationCount ?? 0;
   if (!cacheHit) {
@@ -6000,19 +17794,36 @@ function mechanicalProposalPoolSlot(
         graphUsage
       );
       slot = {
-      arenaIndex: exactArenaIndex,
-      capacity,
-      directedPairCapacity: graphLayout.directedPairCapacity,
-      minimumDirectedPairCapacity,
-      graphLayout,
-      pairGraphByteBudget: resolvedPairGraphByteBudget,
-      proposalBuffer,
-      evidenceBuffer: createTrackedBuffer(
-        device,
-        `ulg-schroeder-spatial-mechanical-contact-graph-evidence-${key}`,
-        bufferLayout.evidence.byteLength,
-        graphUsage
-      ),
+        arenaIndex: exactArenaIndex,
+        capacity,
+        directedPairCapacity: graphLayout.directedPairCapacity,
+        minimumDirectedPairCapacity,
+        graphLayout,
+        matchingConstraintByteLength,
+        matchingCleanupOwnerWorkspaceWordLength,
+        matchingCleanupOwnerWorkspaceByteLength,
+        matchingCleanupOwnerExtraByteLength,
+        totalRetainedByteLength,
+        pairGraphByteBudget: resolvedPairGraphByteBudget,
+        proposalBuffer,
+        evidenceBuffer: createTrackedBuffer(
+          device,
+          `ulg-schroeder-spatial-mechanical-contact-graph-evidence-${key}`,
+          bufferLayout.evidence.byteLength,
+          graphUsage
+        ),
+        matchingCleanupControlBuffer: createTrackedBuffer(
+          device,
+          `ulg-schroeder-spatial-mechanical-matching-cleanup-control-${key}`,
+          bufferLayout.matchingCleanupControl.byteLength,
+          graphUsage
+        ),
+        matchingConstraintBuffer: createTrackedBuffer(
+          device,
+          `ulg-schroeder-spatial-mechanical-matching-constraints-${key}`,
+          matchingConstraintByteLength,
+          graphUsage
+        ),
       supportBuffer: createTrackedBuffer(
         device,
         `ulg-schroeder-spatial-mechanical-global-support-bound-${key}`,
@@ -6083,8 +17894,9 @@ function mechanicalProposalPoolSlot(
       conditionalDispatchBuffer: createTrackedBuffer(
         device,
         `ulg-schroeder-spatial-mechanical-contact-graph-conditional-${key}`,
-        bufferLayout.conditionalDispatch.byteLength,
-        GPU_BUFFER_USAGE.INDIRECT
+        matchingCleanupOwnerWorkspaceByteLength,
+        GPU_BUFFER_USAGE.STORAGE
+          | GPU_BUFFER_USAGE.INDIRECT
           | GPU_BUFFER_USAGE.COPY_SRC
           | GPU_BUFFER_USAGE.COPY_DST
       ),
@@ -6100,6 +17912,14 @@ function mechanicalProposalPoolSlot(
         MECHANICAL_PARAMS_BYTES,
         GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       ),
+      solverIterationParamsBuffer: createTrackedBuffer(
+        device,
+        `ulg-schroeder-spatial-mechanical-solver-iterations-${key}`,
+        solverIterationUniformPlan.byteLength,
+        GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      ),
+      solverIterationParamsStrideBytes:
+        solverIterationUniformPlan.strideBytes,
       identityDisabledBuffer: createTrackedBuffer(
         device,
         `ulg-schroeder-spatial-mechanical-identity-disabled-${key}`,
@@ -6112,10 +17932,15 @@ function mechanicalProposalPoolSlot(
       generation: null,
       releaseScheduled: false,
       totalBufferCreationCount: priorAllocationCount
-        + 16
+        + 18
         + sourceCountScan.allocationEntries().length,
       acquisitionCount: 0
       };
+      device.queue.writeBuffer(
+        slot.solverIterationParamsBuffer,
+        0,
+        solverIterationUniformPlan.values
+      );
     } catch (error) {
       for (const buffer of allocatedBuffers) buffer?.destroy?.();
       sourceCountScan?.destroy?.();
@@ -6150,7 +17975,11 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   selectedLevel = null,
   pairGraphByteBudget = null,
   retainCompleteAuthenticatedCellCliques = false,
-  gpuTimestampRecorder = null
+  gpuTimestampRecorder = null,
+  diagnosticTrace = null,
+  capture = null,
+  sequenceIndex = null,
+  sequenceStepCount = null
 } = {}) {
   const particleCount = Math.max(0, Math.trunc(finiteNumber(
     sphParticleState?.particleCount ?? mlsMpmParticleState?.particleCount,
@@ -6164,6 +17993,11 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'canonical mechanical aggregate-summary preflight requires particleCount below 2^31'
     );
   }
+  const captureRequest = resolveMechanicalProposalCaptureRequest({
+    capture,
+    sequenceIndex,
+    sequenceStepCount
+  });
   const immutableSelectedLevel = selectedLevel == null
     ? MECHANICAL_APPLY_ALL_LEVELS
     : exactI32(Number(selectedLevel), 'selectedLevel');
@@ -6186,6 +18020,12 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     generation,
     sphParticleUpload,
     mlsMpmParticleUpload,
+    particleCount
+  });
+  const resolvedDiagnosticTrace = resolveMechanicalDiagnosticTrace({
+    device,
+    diagnosticTrace,
+    execution: authority.execution,
     particleCount
   });
   const aggregateView = generation?.aggregateView || null;
@@ -6409,6 +18249,14 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   }));
   device.queue.writeBuffer(evidenceBuffer, 0, evidenceInitial);
   device.queue.writeBuffer(
+    pool.matchingCleanupControlBuffer,
+    0,
+    createMechanicalMatchingCleanupControlHeader(
+      authority.execution,
+      particleCount
+    )
+  );
+  device.queue.writeBuffer(
     proposalBuffer,
     0,
     createMechanicalProposalHeader(authority.execution, particleCount)
@@ -6443,7 +18291,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     computeBufferBinding(9, 'storage')
   ];
   const solverBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(0, 'storage'),
     computeBufferBinding(1, 'storage'),
     computeBufferBinding(2, 'read-only-storage'),
     computeBufferBinding(3, 'read-only-storage'),
@@ -6457,6 +18305,111 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     computeBufferBinding(11, 'uniform'),
     computeBufferBinding(12, 'storage')
   ];
+  const solverIterationBindings = [
+    ...solverBindings,
+    computeBufferBinding(16, 'uniform', {
+      minBindingSize: MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
+    })
+  ];
+  const residualVerifyBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage')
+  ];
+  const matchingConstraintInitializerBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(14, 'storage')
+  ];
+  const matchingCleanupBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(14, 'storage')
+  ];
+  const diagnosticRefinementReplayBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticApplyTraceBindings = [
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticTerminalTraceBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticMaterializeTraceBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const interfaceReceiptBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'read-only-storage')
+  ];
   const applyBindings = [
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(1, 'read-only-storage'),
@@ -6464,7 +18417,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
     computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'uniform')
+    computeBufferBinding(6, 'uniform'),
+    computeBufferBinding(7, 'storage')
   ];
   const createPipeline = ({ cacheKey, label, code, entryPoint, bindings }) => (
     createCachedExplicitComputePipeline(device, {
@@ -6476,7 +18430,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     })
   );
   const initializePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v8',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v11',
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize',
     code: schroederSpatialMechanicalGraphControlWgsl,
     entryPoint: 'initialize_contact_graph',
@@ -6485,16 +18439,34 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   const mechanicalProjectionVariant = aggregateHierarchyEnabled
     ? 'aggregate'
     : (activeRankViewEnabled ? 'active-rank' : 'flat');
+  const directoryAbiVersion = exactU32(
+    authority.execution.directoryAbiVersion
+      ?? generation?.directoryAbiVersion
+      ?? 1,
+    'execution.directoryAbiVersion',
+    { positive: true }
+  );
+  if (directoryAbiVersion !== 1 && directoryAbiVersion !== 2) {
+    throw new RangeError(
+      `canonical mechanical proposal does not support directory ABI v${directoryAbiVersion}`
+    );
+  }
   const mechanicalBuildWgsl = aggregateHierarchyEnabled
-    ? schroederSpatialMechanicalProposalWgsl
+    ? (directoryAbiVersion === 2
+      ? schroederSpatialMechanicalProposalV2Wgsl
+      : schroederSpatialMechanicalProposalWgsl)
     : (activeRankViewEnabled
-      ? schroederSpatialMechanicalProposalActiveRankWgsl
-      : schroederSpatialMechanicalProposalFlatWgsl);
+      ? (directoryAbiVersion === 2
+        ? schroederSpatialMechanicalProposalV2ActiveRankWgsl
+        : schroederSpatialMechanicalProposalActiveRankWgsl)
+      : (directoryAbiVersion === 2
+        ? schroederSpatialMechanicalProposalV2FlatWgsl
+        : schroederSpatialMechanicalProposalFlatWgsl));
   const reductionPipeline = createPipeline({
     cacheKey:
       `ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.${
         mechanicalProjectionVariant
-      }.v7`,
+      }.directory-v${directoryAbiVersion}.v12`,
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction',
     code: mechanicalBuildWgsl,
     entryPoint: 'reduce_support',
@@ -6503,109 +18475,254 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   const materializePipeline = createPipeline({
     cacheKey: `ulg-schroeder-spatial-mechanical-contact-graph-traversal.${
       mechanicalProjectionVariant
-      }.v11`,
+    }.directory-v${directoryAbiVersion}.v16`,
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-traversal',
     code: mechanicalBuildWgsl,
     entryPoint: 'materialize_contact_graph',
     bindings: buildBindings
   });
   const finalizeCountsPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v8',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v11',
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts',
     code: schroederSpatialMechanicalGraphControlWgsl,
     entryPoint: 'finalize_contact_graph_counts',
     bindings: controlBindings
   });
   const scatterPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v8',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v11',
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr',
     code: schroederSpatialMechanicalGraphControlWgsl,
     entryPoint: 'scatter_contact_graph_csr',
     bindings: controlBindings
   });
   const validatePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v9',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v12',
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr',
     code: schroederSpatialMechanicalGraphControlWgsl,
     entryPoint: 'validate_contact_graph_csr',
     bindings: controlBindings
   });
   const indexPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v4',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v7',
     label: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr',
     code: schroederSpatialMechanicalGraphControlWgsl,
     entryPoint: 'index_contact_graph_csr',
     bindings: controlBindings
   });
-  const solverPipelines = Array.from(
-    { length: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS },
-    (_, iteration) => Object.freeze({
-      measure: createPipeline({
-        cacheKey:
-          `ulg-schroeder-spatial-mechanical-contact-graph-measure-${iteration}.v12`,
-        label:
-          `ulg-schroeder-spatial-mechanical-contact-graph-measure-${iteration}`,
-        code: schroederSpatialMechanicalGraphSolverWgsl,
-        entryPoint: `measure_iteration_${iteration}`,
-        bindings: solverBindings
-      }),
-      solve: createPipeline({
-        cacheKey:
-          `ulg-schroeder-spatial-mechanical-contact-graph-solve-${iteration}.v12`,
-        label:
-          `ulg-schroeder-spatial-mechanical-contact-graph-solve-${iteration}`,
-        code: schroederSpatialMechanicalGraphSolverWgsl,
-        entryPoint: `solve_iteration_${iteration}`,
-        bindings: solverBindings
-      }),
-      allocateEnergy: createPipeline({
-        cacheKey:
-          `ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-${iteration}.v9`,
-        label:
-          `ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-${iteration}`,
-        code: schroederSpatialMechanicalGraphSolverWgsl,
-        entryPoint: `allocate_energy_iteration_${iteration}`,
-        bindings: solverBindings
-      })
+  const solverPipelines = Object.freeze({
+    measure: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v2',
+      label:
+        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'measure_runtime_iteration',
+      bindings: solverIterationBindings
+    }),
+    solve: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v2',
+      label:
+        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'solve_runtime_iteration',
+      bindings: solverIterationBindings
+    }),
+    allocateEnergy: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v2',
+      label:
+        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'allocate_energy_runtime_iteration',
+      bindings: solverIterationBindings
     })
-  );
+  });
+  const initializeMatchingConstraintsPipeline = createPipeline({
+    cacheKey:
+      'ulg-schroeder-spatial-mechanical-matching-constraints-initialize.v22',
+    label:
+      'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
+    code: schroederSpatialMechanicalGraphSolverWgsl,
+    entryPoint: 'initialize_matching_cleanup_constraints',
+    bindings: matchingConstraintInitializerBindings
+  });
+  const matchingCleanupPipelines = resolvedDiagnosticTrace
+    ? Object.freeze({
+    select: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-select.v27',
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-select',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'select_matching_cleanup_edge',
+      bindings: matchingCleanupBindings
+    }),
+    copy: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-copy.v24',
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-copy',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'copy_matching_cleanup_state',
+      bindings: matchingCleanupBindings
+    }),
+    apply: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-apply.v29',
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-apply',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'apply_matching_cleanup_edge',
+      bindings: matchingCleanupBindings
+    }),
+    walls: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-walls.v25',
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-walls',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'project_matching_cleanup_walls',
+      bindings: matchingCleanupBindings
+    }),
+    finalize: createPipeline({
+      cacheKey:
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize.v24',
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize',
+      code: schroederSpatialMechanicalGraphSolverWgsl,
+      entryPoint: 'finalize_matching_cleanup_pass',
+      bindings: matchingCleanupBindings
+    })
+  })
+    : null;
+  const matchingCleanupOwnerPipeline = resolvedDiagnosticTrace
+      ? null
+      : createPipeline({
+        cacheKey:
+          'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner.v12',
+        label:
+          'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
+        code: schroederSpatialMechanicalGraphSolverWgsl,
+        entryPoint: 'run_matching_cleanup_global_owner',
+        bindings: matchingCleanupBindings
+      });
+  const restoreMatchingTrustPipeline = createPipeline({
+    cacheKey:
+      'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust.v24',
+    label:
+      'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust',
+    code: schroederSpatialMechanicalGraphSolverWgsl,
+    entryPoint: 'restore_matching_cleanup_trust',
+    bindings: matchingCleanupBindings
+  });
   const verifyPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-residual-verify.v12',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-residual-verify.v35',
     label: 'ulg-schroeder-spatial-mechanical-contact-residual-verify',
     code: schroederSpatialMechanicalGraphSolverWgsl,
     entryPoint: 'verify_contact_residual',
-    bindings: solverBindings
+    bindings: residualVerifyBindings
   });
+  const diagnosticTracePipelines = resolvedDiagnosticTrace
+    ? Object.freeze({
+        replay: createPipeline({
+          cacheKey:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay.v6',
+          label:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay',
+          code: schroederSpatialMechanicalGraphSolverWgsl,
+          entryPoint: 'replay_matching_cleanup_refinement_trace',
+          bindings: diagnosticRefinementReplayBindings
+        }),
+        apply: createPipeline({
+          cacheKey:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply.v7',
+          label:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply',
+          code: schroederSpatialMechanicalGraphSolverWgsl,
+          entryPoint: 'trace_matching_cleanup_apply',
+          bindings: diagnosticApplyTraceBindings
+        }),
+        measure: createPipeline({
+          cacheKey:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure.v3',
+          label:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure',
+          code: schroederSpatialMechanicalGraphSolverWgsl,
+          entryPoint: 'measure_terminal_residual_trace',
+          bindings: diagnosticTerminalTraceBindings
+        }),
+        select: createPipeline({
+          cacheKey:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-select.v3',
+          label:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-select',
+          code: schroederSpatialMechanicalGraphSolverWgsl,
+          entryPoint: 'select_terminal_residual_trace',
+          bindings: diagnosticTerminalTraceBindings
+        }),
+        materialize: createPipeline({
+          cacheKey:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize.v4',
+          label:
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize',
+          code: schroederSpatialMechanicalGraphSolverWgsl,
+          entryPoint: 'materialize_terminal_residual_trace',
+          bindings: diagnosticMaterializeTraceBindings
+        })
+      })
+    : null;
   const verifyEnergyPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-energy-verify.v10',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-energy-verify.v27',
     label: 'ulg-schroeder-spatial-mechanical-contact-energy-verify',
     code: schroederSpatialMechanicalGraphSolverWgsl,
     entryPoint: 'verify_contact_energy',
     bindings: solverBindings
   });
+  const initializeInterfaceReceiptPipeline = createPipeline({
+    cacheKey:
+      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v5',
+    label:
+      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
+    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    entryPoint: 'initialize_contact_interface_receipt',
+    bindings: interfaceReceiptBindings
+  });
+  const materializeInterfaceReceiptPipeline = createPipeline({
+    cacheKey:
+      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v5',
+    label:
+      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
+    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    entryPoint: 'materialize_contact_interface_receipt',
+    bindings: interfaceReceiptBindings
+  });
+  const sealInterfaceReceiptPipeline = createPipeline({
+    cacheKey:
+      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v5',
+    label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal',
+    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    entryPoint: 'seal_contact_interface_receipt',
+    bindings: interfaceReceiptBindings
+  });
   const publishPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-publish.v5',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-publish.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-publish',
     code: schroederSpatialMechanicalProposalApplyWgsl,
     entryPoint: 'publish_contact_proposal',
     bindings: applyBindings
   });
   const zeroContactCompletePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v2',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v8',
     label: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete',
     code: schroederSpatialMechanicalProposalApplyWgsl,
     entryPoint: 'complete_zero_contact_proposal',
     bindings: applyBindings
   });
   const sealPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-seal.v5',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-seal.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-seal',
     code: schroederSpatialMechanicalProposalApplyWgsl,
     entryPoint: 'seal_contact_proposal',
     bindings: applyBindings
   });
   const commitPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-commit.v5',
+    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-commit.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-commit',
     code: schroederSpatialMechanicalProposalApplyWgsl,
     entryPoint: 'commit_contact_proposal',
@@ -6644,7 +18761,12 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 8, resource: { buffer: paramsBuffer } },
     { binding: 9, resource: { buffer: supportBuffer } }
   ];
-  const solverEntries = (inputStateBuffer, outputStateBuffer, mechanicsBuffer) => [
+  const solverEntries = (
+    inputStateBuffer,
+    outputStateBuffer,
+    mechanicsBuffer,
+    traversalControlBuffer = evidenceBuffer
+  ) => [
     { binding: 0, resource: { buffer: inputStateBuffer } },
     { binding: 1, resource: { buffer: outputStateBuffer } },
     { binding: 2, resource: { buffer: authority.thermoBuffer } },
@@ -6655,9 +18777,164 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 7, resource: { buffer: pool.scaleBuffer } },
     { binding: 8, resource: { buffer: pool.graphControlBuffer } },
     { binding: 9, resource: { buffer: spatialSourceBuffer } },
-    { binding: 10, resource: { buffer: evidenceBuffer } },
+    { binding: 10, resource: { buffer: traversalControlBuffer } },
     { binding: 11, resource: { buffer: paramsBuffer } },
     { binding: 12, resource: { buffer: pool.energyLedgerBuffer } }
+  ];
+  const solverIterationEntries = (
+    inputStateBuffer,
+    outputStateBuffer,
+    mechanicsBuffer,
+    iteration
+  ) => [
+    ...solverEntries(inputStateBuffer, outputStateBuffer, mechanicsBuffer),
+    {
+      binding: 16,
+      resource: {
+        buffer: pool.solverIterationParamsBuffer,
+        offset: iteration * pool.solverIterationParamsStrideBytes,
+        size: MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
+      }
+    }
+  ];
+  const residualVerifyEntries = (
+    inputStateBuffer,
+    mechanicsBuffer,
+    traversalControlBuffer = evidenceBuffer
+  ) => [
+    { binding: 0, resource: { buffer: inputStateBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    { binding: 10, resource: { buffer: traversalControlBuffer } },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } }
+  ];
+  const matchingConstraintInitializerEntries = (
+    inputStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: inputStateBuffer } },
+    { binding: 2, resource: { buffer: authority.thermoBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 4, resource: { buffer: identityBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 12, resource: { buffer: pool.energyLedgerBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } },
+    { binding: 14, resource: { buffer: pool.conditionalDispatchBuffer } }
+  ];
+  const matchingCleanupEntries = (
+    inputStateBuffer,
+    outputStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: inputStateBuffer } },
+    { binding: 1, resource: { buffer: outputStateBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 7, resource: { buffer: pool.scaleBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    {
+      binding: 10,
+      resource: { buffer: pool.matchingCleanupControlBuffer }
+    },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 12, resource: { buffer: pool.energyLedgerBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } },
+    { binding: 14, resource: { buffer: pool.conditionalDispatchBuffer } }
+  ];
+  const diagnosticTraceResource = resolvedDiagnosticTrace
+    ? {
+        buffer: resolvedDiagnosticTrace.buffer,
+        offset: resolvedDiagnosticTrace.byteOffset,
+        size: resolvedDiagnosticTrace.byteLength
+      }
+    : null;
+  const diagnosticRefinementReplayEntries = (
+    inputStateBuffer,
+    outputStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: inputStateBuffer } },
+    { binding: 1, resource: { buffer: outputStateBuffer } },
+    { binding: 2, resource: { buffer: authority.thermoBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    {
+      binding: 10,
+      resource: { buffer: pool.matchingCleanupControlBuffer }
+    },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 12, resource: { buffer: pool.energyLedgerBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } },
+    { binding: 15, resource: diagnosticTraceResource }
+  ];
+  const diagnosticApplyTraceEntries = (outputStateBuffer) => [
+    { binding: 1, resource: { buffer: outputStateBuffer } },
+    { binding: 2, resource: { buffer: authority.thermoBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    {
+      binding: 10,
+      resource: { buffer: pool.matchingCleanupControlBuffer }
+    },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 12, resource: { buffer: pool.energyLedgerBuffer } },
+    { binding: 15, resource: diagnosticTraceResource }
+  ];
+  const diagnosticTerminalTraceEntries = (
+    finalStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: finalStateBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 8, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } },
+    { binding: 15, resource: diagnosticTraceResource }
+  ];
+  const diagnosticMaterializeTraceEntries = (
+    finalStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: finalStateBuffer } },
+    { binding: 2, resource: { buffer: authority.thermoBuffer } },
+    { binding: 3, resource: { buffer: mechanicsBuffer } },
+    { binding: 4, resource: { buffer: identityBuffer } },
+    { binding: 5, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    { binding: 11, resource: { buffer: paramsBuffer } },
+    { binding: 13, resource: { buffer: pool.matchingConstraintBuffer } },
+    { binding: 15, resource: diagnosticTraceResource }
+  ];
+  const interfaceReceiptEntries = (
+    finalStateBuffer,
+    mechanicsBuffer
+  ) => [
+    { binding: 0, resource: { buffer: finalStateBuffer } },
+    { binding: 1, resource: { buffer: authority.thermoBuffer } },
+    { binding: 2, resource: { buffer: mechanicsBuffer } },
+    { binding: 3, resource: { buffer: identityBuffer } },
+    { binding: 4, resource: { buffer: pool.directedPeerBuffer } },
+    { binding: 5, resource: { buffer: pool.sourceOffsetBuffer } },
+    { binding: 6, resource: { buffer: pool.graphControlBuffer } },
+    { binding: 7, resource: { buffer: pool.appendStagingBuffer } },
+    { binding: 8, resource: { buffer: paramsBuffer } },
+    { binding: 9, resource: { buffer: spatialSourceBuffer } }
   ];
   const applyEntries = (originalStateBuffer, finalStateBuffer, outputStateBuffer) => [
     { binding: 0, resource: { buffer: originalStateBuffer } },
@@ -6666,7 +18943,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 3, resource: { buffer: outputStateBuffer } },
     { binding: 4, resource: { buffer: pool.graphControlBuffer } },
     { binding: 5, resource: { buffer: evidenceBuffer } },
-    { binding: 6, resource: { buffer: paramsBuffer } }
+    { binding: 6, resource: { buffer: paramsBuffer } },
+    { binding: 7, resource: { buffer: pool.matchingCleanupControlBuffer } }
   ];
   const bindGroup = (pipelineInfo, entries, label) => device.createBindGroup({
     label,
@@ -6736,6 +19014,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   let released = false;
   let releaseScheduled = false;
   let releasePromise = null;
+  let submissionObserved = false;
   const releaseLease = () => {
     if (released) return false;
     released = true;
@@ -6765,13 +19044,60 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       },
       (error) => {
         releaseScheduled = false;
-        lifecycleStatus = encodeAttempted ? 'encoded' : 'prepared';
+        lifecycleStatus = submissionObserved
+          ? 'submitted'
+          : (encodeAttempted ? 'encoded' : 'prepared');
         pool.releaseScheduled = false;
         releasePromise = null;
         throw error;
       }
     );
     return true;
+  };
+  const markSubmittedWork = () => {
+    if (
+      released
+      || releaseScheduled
+      || submissionObserved
+      || lifecycleStatus !== 'encoded'
+    ) return false;
+    submissionObserved = true;
+    lifecycleStatus = 'submitted';
+    return true;
+  };
+  const canReleaseQueueOrdered = () => (
+    released !== true
+    && releaseScheduled !== true
+    && submissionObserved === true
+    && lifecycleStatus === 'submitted'
+    && (
+      !preparedScan
+      || (
+        typeof pool.sourceCountScan.canReleasePreparedQueueOrdered === 'function'
+        && typeof pool.sourceCountScan.releasePreparedQueueOrdered === 'function'
+        && pool.sourceCountScan.canReleasePreparedQueueOrdered(
+          preparedScan
+        ) === true
+      )
+    )
+  );
+  const releaseQueueOrdered = () => {
+    if (!canReleaseQueueOrdered()) {
+      throw new Error(
+        'queue-ordered mechanical proposal release requires an exact submitted idle proposal'
+      );
+    }
+    if (preparedScan) {
+      const scanReleased =
+        pool.sourceCountScan.releasePreparedQueueOrdered(preparedScan);
+      if (scanReleased !== true) {
+        throw new Error(
+          'queue-ordered mechanical proposal scan owner did not confirm release'
+        );
+      }
+      preparedScan = null;
+    }
+    return releaseLease();
   };
   const contactGraph = Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
@@ -6789,13 +19115,32 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     candidateCapacityBytes: candidateBytesCapacity,
     configuredRetainedByteBudget: pool.pairGraphByteBudget,
     retainedByteLength: pool.graphLayout.retainedByteLength,
+    matchingConstraintByteLength: pool.matchingConstraintByteLength,
+    matchingCleanupOwnerWorkspaceWordLength:
+      pool.matchingCleanupOwnerWorkspaceWordLength,
+    matchingCleanupOwnerWorkspaceByteLength:
+      pool.matchingCleanupOwnerWorkspaceByteLength,
+    totalRetainedByteLength: pool.totalRetainedByteLength,
     appendRecordStrideWords: 3,
     directedRowWords: 1,
     sourceCountBuffer: pool.sourceCountBuffer,
     sourceOffsetBuffer: pool.sourceOffsetBuffer,
     appendStagingBuffer: pool.appendStagingBuffer,
     directedPeerBuffer: pool.directedPeerBuffer,
+    interfaceReceiptBuffer: pool.appendStagingBuffer,
+    interfaceReceiptSchema:
+      ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA,
+    interfaceReceiptHeaderWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+    interfaceReceiptRowWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+    sourceThermoBuffer: authority.thermoBuffer,
+    sourceIdentityBuffer: identityBuffer,
+    identityEnabled: Boolean(authority.identityBuffer),
+    phaseLineageCapacity: phaseCarrierPlan.lineageCapacity,
+    phaseLaneCount: phaseCarrierPlan.phaseLaneCount,
     controlBuffer: pool.graphControlBuffer,
+    matchingCleanupControlBuffer: pool.matchingCleanupControlBuffer,
     indirectDispatchBuffer: pool.indirectDispatchBuffer,
     indirectDispatchOffsetBytes: 0,
     conditionalDispatchBuffer: pool.conditionalDispatchBuffer,
@@ -6811,6 +19156,41 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     energyLedgerByteOffset: MECHANICAL_PROPOSAL_HEADER_BYTES,
     energyLedgerAliasLifetime: 'solver-scratch-until-proposal-publication',
     layout: pool.graphLayout
+  });
+  const contactInterfaceReceipt = Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA,
+    status: 'schroeder-spatial-mechanical-interface-receipt-deferred',
+    ready: true,
+    generation,
+    device,
+    generationId: authority.execution.generationId,
+    storageGeneration: authority.execution.storageGeneration,
+    physicsTick: authority.execution.physicsTick,
+    physicsSubstep: authority.execution.physicsSubstep,
+    positionEpoch: authority.execution.positionEpoch,
+    topologyEpoch: authority.execution.topologyEpoch,
+    supportEpoch: authority.execution.supportEpoch,
+    selectedLevel: immutableSelectedLevel,
+    particleCount,
+    directedPairCapacity: pool.directedPairCapacity,
+    buffer: pool.appendStagingBuffer,
+    bufferAliasRole:
+      'post-scatter-mechanical-append-staging-interface-receipt',
+    headerWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+    rowWords: SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+    signedAreaPolicy:
+      'positive-active-area-negative-inactive-interface-zero-non-interface',
+    sourceThermoBuffer: authority.thermoBuffer,
+    sourceIdentityBuffer: identityBuffer,
+    identityEnabled: Boolean(authority.identityBuffer),
+    phaseLineageCapacity: phaseCarrierPlan.lineageCapacity,
+    phaseLaneCount: phaseCarrierPlan.phaseLaneCount,
+    fullParticleReadbackPerformed: false,
+    hostSummaryReadbackPerformed: false,
+    failClosed: true,
+    get released() { return released; },
+    get releaseScheduled() { return releaseScheduled; }
   });
   const artifact = {
     schema: ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_SCHEMA,
@@ -6835,13 +19215,34 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     multiConsumerTraversal: true,
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
     solverIterationCount: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    matchingCleanupLogicalPassCount:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+    matchingCleanupEncodedPassCount: resolvedDiagnosticTrace
+      ? SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
+    matchingCleanupOwnerPassesPerDispatch: resolvedDiagnosticTrace
+      ? null
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    matchingCleanupOwnerDispatchCount: resolvedDiagnosticTrace
+      ? 0
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
+    matchingCleanupOwnerMaxActiveParticles: resolvedDiagnosticTrace
+      ? null
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES,
+    matchingCleanupOwnerMaxIncidentCursors: resolvedDiagnosticTrace
+      ? null
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS,
+    matchingCleanupOwnerTerminalMaxIncidentCursors: resolvedDiagnosticTrace
+      ? null
+      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS,
     solverPolicy:
-      'retained-csr-four-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit',
+      'retained-csr-sixteen-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-512-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit',
     aggregateHierarchyEnabled,
     aggregateAdmissionStatus,
     activeRankViewEnabled,
     activeRankViewAdmissionStatus,
     spatialProjectionMode: mechanicalProjectionVariant,
+    directoryAbiVersion,
     aggregateSummaryCapability:
       aggregateHierarchyEnabled
         ? 'homogeneous-domain-summary-exact-record-status-v1'
@@ -6849,13 +19250,22 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           ? 'base-epoch-active-rank-prefix-source-index-v1'
           : 'not-bound-flat-canonical-directory-fallback'),
     contactGraph,
+    contactInterfaceReceipt,
     graphControlBuffer: pool.graphControlBuffer,
+    matchingCleanupControlBuffer: pool.matchingCleanupControlBuffer,
     indirectDispatchBuffer: pool.indirectDispatchBuffer,
     conditionalDispatchBuffer: pool.conditionalDispatchBuffer,
     sourceCountBuffer: pool.sourceCountBuffer,
     sourceOffsetBuffer: pool.sourceOffsetBuffer,
     appendStagingBuffer: pool.appendStagingBuffer,
     directedPeerBuffer: pool.directedPeerBuffer,
+    interfaceReceiptBuffer: pool.appendStagingBuffer,
+    interfaceReceiptSchema:
+      ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA,
+    interfaceReceiptHeaderWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+    interfaceReceiptRowWords:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
     scratchStateABuffer: pool.scratchStateABuffer,
     scratchStateBBuffer: pool.scratchStateBBuffer,
     scaleBuffer: pool.scaleBuffer,
@@ -6865,6 +19275,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     energyLedgerByteOffset: MECHANICAL_PROPOSAL_HEADER_BYTES,
     energyLedgerAliasLifetime: 'solver-scratch-until-proposal-publication',
     energyLedgerRowStrideFloats: 8,
+    diagnosticTrace: resolvedDiagnosticTrace,
     consumerAuthentications: Object.freeze([...consumerAuthentications]),
     consumerReceipts,
     consumerReceipt(consumerId) {
@@ -6910,6 +19321,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     candidateByteBudget: candidateBytesCapacity,
     configuredRetainedByteBudget: pool.pairGraphByteBudget,
     retainedGraphByteLength: pool.graphLayout.retainedByteLength,
+    matchingConstraintByteLength: pool.matchingConstraintByteLength,
+    matchingCleanupOwnerWorkspaceByteLength:
+      pool.matchingCleanupOwnerWorkspaceByteLength,
+    totalRetainedGraphByteLength: pool.totalRetainedByteLength,
     minimumDirectedPairsPerParticle:
       SCHROEDER_SPATIAL_MECHANICAL_MIN_DIRECTED_PAIRS_PER_PARTICLE,
     minimumDirectedPairCapacity: pool.minimumDirectedPairCapacity,
@@ -6970,11 +19385,24 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           'mechanical proposal apply stateBuffer is smaller than the authenticated particle state'
         );
       }
+      const capturePlan = prepareMechanicalProposalCapture({
+        request: captureRequest,
+        device,
+        particleCount,
+        controlByteLength:
+          pool.graphLayout.bufferLayouts.control.byteLength,
+        evidenceByteLength:
+          SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS
+            * Uint32Array.BYTES_PER_ELEMENT,
+        matchingCleanupByteLength:
+          pool.graphLayout.bufferLayouts.matchingCleanupControl.byteLength
+      });
       encodeAttempted = true;
       lifecycleStatus = 'encoding';
       try {
         encoder.clearBuffer(supportBuffer);
         encoder.clearBuffer(pool.sourceCountBuffer);
+        encoder.clearBuffer(pool.conditionalDispatchBuffer);
         const buildTimestamp = beginContactTimestamp(encoder, 'build');
         const firstControlBindGroup = bindGroup(
           initializePipeline,
@@ -7123,7 +19551,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           pool.graphLayout.conditionalDispatchSourceOffsetBytes,
           pool.conditionalDispatchBuffer,
           0,
-          pool.graphLayout.bufferLayouts.conditionalDispatch.byteLength
+          3 * Uint32Array.BYTES_PER_ELEMENT
         );
 
         const encodeScatterAndValidation = (pass) => {
@@ -7175,32 +19603,183 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           inputStateBuffer,
           outputStateBuffer
         ) => {
-          const pipelines = solverPipelines[iteration];
-          const entries = solverEntries(
+          const entries = solverIterationEntries(
             inputStateBuffer,
             outputStateBuffer,
+            canonicalMechanicsBuffer,
+            iteration
+          );
+          const iterationBindGroup = bindGroup(
+            solverPipelines.measure,
+            entries,
+            `ulg-schroeder-spatial-mechanical-contact-graph-iteration-${iteration}-bind-group`
+          );
+          pass.setPipeline(solverPipelines.measure.pipeline);
+          pass.setBindGroup(0, iterationBindGroup);
+          pass.dispatchWorkgroups(workgroups);
+          pass.setPipeline(solverPipelines.solve.pipeline);
+          pass.setBindGroup(0, iterationBindGroup);
+          pass.dispatchWorkgroups(workgroups);
+          pass.setPipeline(solverPipelines.allocateEnergy.pipeline);
+          pass.setBindGroup(0, iterationBindGroup);
+          pass.dispatchWorkgroups(workgroups);
+        };
+        const createMatchingCleanupBindGroups = (
+          cleanupInputStateBuffer,
+          cleanupOutputStateBuffer,
+          orientation
+        ) => {
+          const entries = matchingCleanupEntries(
+            cleanupInputStateBuffer,
+            cleanupOutputStateBuffer,
             canonicalMechanicsBuffer
           );
-          pass.setPipeline(pipelines.measure.pipeline);
-          pass.setBindGroup(0, bindGroup(
-            pipelines.measure,
-            entries,
-            `ulg-schroeder-spatial-mechanical-contact-graph-measure-${iteration}-bind-group`
-          ));
+          return Object.freeze({
+            initialize: bindGroup(
+              initializeMatchingConstraintsPipeline,
+              matchingConstraintInitializerEntries(
+                cleanupInputStateBuffer,
+                canonicalMechanicsBuffer
+              ),
+              `ulg-schroeder-spatial-mechanical-matching-constraints-initialize-${orientation}-bind-group`
+            ),
+            ...Object.fromEntries(
+            Object.entries(matchingCleanupPipelines || {}).map(
+              ([stage, pipeline]) => [
+                stage,
+                bindGroup(
+                  pipeline,
+                  entries,
+                  `ulg-schroeder-spatial-mechanical-matching-cleanup-${stage}-${orientation}-bind-group`
+                )
+              ]
+            )
+            ),
+            owner: matchingCleanupOwnerPipeline
+              ? bindGroup(
+                  matchingCleanupOwnerPipeline,
+                  entries,
+                  `ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner-${orientation}-bind-group`
+                )
+              : null,
+            restoreTrust: bindGroup(
+              restoreMatchingTrustPipeline,
+              entries,
+              `ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust-${orientation}-bind-group`
+            ),
+            traceReplay: diagnosticTracePipelines
+              ? bindGroup(
+                  diagnosticTracePipelines.replay,
+                  diagnosticRefinementReplayEntries(
+                    cleanupInputStateBuffer,
+                    cleanupOutputStateBuffer,
+                    canonicalMechanicsBuffer
+                  ),
+                  `ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay-${orientation}-bind-group`
+                )
+              : null,
+            traceApply: diagnosticTracePipelines
+              ? bindGroup(
+                  diagnosticTracePipelines.apply,
+                  diagnosticApplyTraceEntries(cleanupOutputStateBuffer),
+                  `ulg-schroeder-spatial-mechanical-diagnostic-trace-apply-${orientation}-bind-group`
+                )
+              : null
+          });
+        };
+        const matchingCleanupBindGroups = Object.freeze({
+          aToB: createMatchingCleanupBindGroups(
+            pool.scratchStateABuffer,
+            pool.scratchStateBBuffer,
+            'a-to-b'
+          ),
+          bToA: createMatchingCleanupBindGroups(
+            pool.scratchStateBBuffer,
+            pool.scratchStateABuffer,
+            'b-to-a'
+          )
+        });
+        const matchingCleanupBindGroupsFor = (cleanupInputStateBuffer) => (
+          cleanupInputStateBuffer === pool.scratchStateABuffer
+            ? matchingCleanupBindGroups.aToB
+            : matchingCleanupBindGroups.bToA
+        );
+        const encodeMatchingCleanupPass = (
+          pass,
+          cleanupInputStateBuffer,
+          initializeConstraints = false
+        ) => {
+          if (!matchingCleanupPipelines) {
+            throw new Error(
+              'legacy mechanical matching cleanup requires diagnostic trace mode'
+            );
+          }
+          const groups = matchingCleanupBindGroupsFor(
+            cleanupInputStateBuffer
+          );
+          if (initializeConstraints) {
+            pass.setPipeline(initializeMatchingConstraintsPipeline.pipeline);
+            pass.setBindGroup(0, groups.initialize);
+            pass.dispatchWorkgroups(workgroups);
+          }
+          for (const stage of ['select', 'copy', 'apply']) {
+            const pipeline = matchingCleanupPipelines[stage];
+            pass.setPipeline(pipeline.pipeline);
+            pass.setBindGroup(0, groups[stage]);
+            pass.dispatchWorkgroups(workgroups);
+          }
+          if (diagnosticTracePipelines) {
+            pass.setPipeline(diagnosticTracePipelines.replay.pipeline);
+            pass.setBindGroup(0, groups.traceReplay);
+            pass.dispatchWorkgroups(1);
+          }
+          pass.setPipeline(matchingCleanupPipelines.walls.pipeline);
+          pass.setBindGroup(0, groups.walls);
           pass.dispatchWorkgroups(workgroups);
-          pass.setPipeline(pipelines.solve.pipeline);
-          pass.setBindGroup(0, bindGroup(
-            pipelines.solve,
-            entries,
-            `ulg-schroeder-spatial-mechanical-contact-graph-solve-${iteration}-bind-group`
-          ));
+          if (diagnosticTracePipelines) {
+            pass.setPipeline(diagnosticTracePipelines.apply.pipeline);
+            pass.setBindGroup(0, groups.traceApply);
+            pass.dispatchWorkgroups(1);
+          }
+          pass.setPipeline(matchingCleanupPipelines.finalize.pipeline);
+          pass.setBindGroup(0, groups.finalize);
+          pass.dispatchWorkgroups(1);
+        };
+        const encodeMatchingCleanupOwner = (
+          pass,
+          cleanupInputStateBuffer
+        ) => {
+          if (!matchingCleanupOwnerPipeline) {
+            throw new Error(
+              'mechanical matching cleanup owner is unavailable in diagnostic trace mode'
+            );
+          }
+          const groups = matchingCleanupBindGroupsFor(
+            cleanupInputStateBuffer
+          );
+          pass.setPipeline(initializeMatchingConstraintsPipeline.pipeline);
+          pass.setBindGroup(0, groups.initialize);
           pass.dispatchWorkgroups(workgroups);
-          pass.setPipeline(pipelines.allocateEnergy.pipeline);
-          pass.setBindGroup(0, bindGroup(
-            pipelines.allocateEnergy,
-            entries,
-            `ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-${iteration}-bind-group`
-          ));
+          pass.setPipeline(matchingCleanupOwnerPipeline.pipeline);
+          pass.setBindGroup(0, groups.owner);
+          for (
+            let ownerDispatch = 0;
+            ownerDispatch
+              < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES;
+            ownerDispatch += 1
+          ) {
+            pass.dispatchWorkgroups(1);
+          }
+        };
+        const encodeMatchingTrustRestore = (
+          pass,
+          finalCleanupStateBuffer
+        ) => {
+          const groups = matchingCleanupBindGroupsFor(
+            finalCleanupStateBuffer
+          );
+          pass.setPipeline(restoreMatchingTrustPipeline.pipeline);
+          pass.setBindGroup(0, groups.restoreTrust);
           pass.dispatchWorkgroups(workgroups);
         };
         const encodeVerification = (
@@ -7213,6 +19792,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             outputStateBuffer,
             canonicalMechanicsBuffer
           );
+          const residualEntries = residualVerifyEntries(
+            finalStateBuffer,
+            canonicalMechanicsBuffer
+          );
           pass.setPipeline(verifyEnergyPipeline.pipeline);
           pass.setBindGroup(0, bindGroup(
             verifyEnergyPipeline,
@@ -7223,8 +19806,57 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           pass.setPipeline(verifyPipeline.pipeline);
           pass.setBindGroup(0, bindGroup(
             verifyPipeline,
-            entries,
+            residualEntries,
             'ulg-schroeder-spatial-mechanical-contact-residual-verify-bind-group'
+          ));
+          pass.dispatchWorkgroups(workgroups);
+          if (diagnosticTracePipelines) {
+            const diagnosticTerminalEntries =
+              diagnosticTerminalTraceEntries(
+                finalStateBuffer,
+                canonicalMechanicsBuffer
+              );
+            pass.setPipeline(diagnosticTracePipelines.measure.pipeline);
+            pass.setBindGroup(0, bindGroup(
+              diagnosticTracePipelines.measure,
+              diagnosticTerminalEntries,
+              'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure-bind-group'
+            ));
+            pass.dispatchWorkgroups(workgroups);
+            pass.setPipeline(diagnosticTracePipelines.select.pipeline);
+            pass.setBindGroup(0, bindGroup(
+              diagnosticTracePipelines.select,
+              diagnosticTerminalEntries,
+              'ulg-schroeder-spatial-mechanical-diagnostic-trace-select-bind-group'
+            ));
+            pass.dispatchWorkgroups(workgroups);
+            pass.setPipeline(diagnosticTracePipelines.materialize.pipeline);
+            pass.setBindGroup(0, bindGroup(
+              diagnosticTracePipelines.materialize,
+              diagnosticMaterializeTraceEntries(
+                finalStateBuffer,
+                canonicalMechanicsBuffer
+              ),
+              'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize-bind-group'
+            ));
+            pass.dispatchWorkgroups(1);
+          }
+          const receiptEntries = interfaceReceiptEntries(
+            finalStateBuffer,
+            canonicalMechanicsBuffer
+          );
+          pass.setPipeline(initializeInterfaceReceiptPipeline.pipeline);
+          pass.setBindGroup(0, bindGroup(
+            initializeInterfaceReceiptPipeline,
+            receiptEntries,
+            'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize-bind-group'
+          ));
+          pass.dispatchWorkgroups(1);
+          pass.setPipeline(materializeInterfaceReceiptPipeline.pipeline);
+          pass.setBindGroup(0, bindGroup(
+            materializeInterfaceReceiptPipeline,
+            receiptEntries,
+            'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize-bind-group'
           ));
           pass.dispatchWorkgroups(workgroups);
         };
@@ -7241,6 +19873,14 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             : inputStateBuffer;
           inputStateBuffer = completedOutputBuffer;
         };
+        const advanceMatchingCleanupState = () => {
+          const completedOutputBuffer = outputStateBuffer;
+          outputStateBuffer = inputStateBuffer;
+          inputStateBuffer = completedOutputBuffer;
+        };
+        const legacyMatchingCleanupActive = Boolean(
+          diagnosticTracePipelines
+        );
         if (contactTimestampActive) {
           const validationTimestamp = beginContactTimestamp(
             encoder,
@@ -7275,6 +19915,58 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             endContactTimestamp(encoder, iterationTimestamp);
             advanceSolverState(iteration);
           }
+          if (legacyMatchingCleanupActive) {
+            for (
+              let cleanupPass = 0;
+              cleanupPass < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+              cleanupPass += 1
+            ) {
+              const cleanupTimestamp = beginContactTimestamp(
+                encoder,
+                `matching-cleanup-${cleanupPass}`
+              );
+              const cleanupPassEncoder = encoder.beginComputePass({
+                label:
+                  `ulg-schroeder-spatial-mechanical-matching-cleanup-${cleanupPass}`
+              });
+              encodeMatchingCleanupPass(
+                cleanupPassEncoder,
+                inputStateBuffer,
+                cleanupPass === 0
+              );
+              advanceMatchingCleanupState();
+              if (
+                cleanupPass + 1
+                  === SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+              ) {
+                encodeMatchingTrustRestore(
+                  cleanupPassEncoder,
+                  inputStateBuffer
+                );
+              }
+              cleanupPassEncoder.end();
+              endContactTimestamp(encoder, cleanupTimestamp);
+            }
+          } else {
+            const cleanupTimestamp = beginContactTimestamp(
+              encoder,
+              'matching-cleanup-global-owner'
+            );
+            const cleanupPassEncoder = encoder.beginComputePass({
+              label:
+                'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner'
+            });
+            encodeMatchingCleanupOwner(
+              cleanupPassEncoder,
+              inputStateBuffer
+            );
+            encodeMatchingTrustRestore(
+              cleanupPassEncoder,
+              inputStateBuffer
+            );
+            cleanupPassEncoder.end();
+            endContactTimestamp(encoder, cleanupTimestamp);
+          }
           const verificationTimestamp = beginContactTimestamp(
             encoder,
             'energy-residual-verify'
@@ -7307,16 +19999,57 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             );
             advanceSolverState(iteration);
           }
-          encodeVerification(secondPass, inputStateBuffer, outputStateBuffer);
-          secondPass.end();
+          if (legacyMatchingCleanupActive) {
+            // Graph zero-edge completion uses conditionalDispatchBuffer as
+            // indirect arguments in secondPass. Diagnostic cleanup binds that
+            // buffer writable, so WebGPU requires a distinct usage scope.
+            secondPass.end();
+            const diagnosticCleanupPass = encoder.beginComputePass({
+              label:
+                'ulg-schroeder-spatial-mechanical-matching-cleanup-diagnostic'
+            });
+            for (
+              let cleanupPass = 0;
+              cleanupPass < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+              cleanupPass += 1
+            ) {
+              encodeMatchingCleanupPass(
+                diagnosticCleanupPass,
+                inputStateBuffer,
+                cleanupPass === 0
+              );
+              advanceMatchingCleanupState();
+            }
+            encodeMatchingTrustRestore(
+              diagnosticCleanupPass,
+              inputStateBuffer
+            );
+            encodeVerification(
+              diagnosticCleanupPass,
+              inputStateBuffer,
+              outputStateBuffer
+            );
+            diagnosticCleanupPass.end();
+          } else {
+            // The graph's zero-edge completion reads conditionalDispatchBuffer
+            // as indirect arguments above. WebGPU forbids binding that same
+            // buffer writable in one compute-pass usage scope, so the owner
+            // gets a distinct pass before it writes its compact workspace.
+            secondPass.end();
+            const cleanupPass = encoder.beginComputePass({
+              label:
+                'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner'
+            });
+            encodeMatchingCleanupOwner(cleanupPass, inputStateBuffer);
+            encodeMatchingTrustRestore(cleanupPass, inputStateBuffer);
+            encodeVerification(cleanupPass, inputStateBuffer, outputStateBuffer);
+            cleanupPass.end();
+          }
         }
-        // Four Jacobi rounds finish in scratch B. The zero-edge completion
-        // writes that same buffer before the shared seal/commit stages, so
-        // no host-side graph-count readback or divergent publication route is
-        // needed.
-        const finalStateBuffer = (
-          SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS % 2 === 0
-        ) ? pool.scratchStateBBuffer : pool.scratchStateABuffer;
+        // Diagnostic replay tracks every legacy ping-pong swap. Production's
+        // single global owner copies each completed output back into this
+        // fixed input buffer before advancing the exact global pass clock.
+        const finalStateBuffer = inputStateBuffer;
 
         const publishTimestamp = beginContactTimestamp(encoder, 'publish');
         const publishPass = encoder.beginComputePass({
@@ -7360,10 +20093,106 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           'ulg-schroeder-spatial-mechanical-proposal-commit-bind-group'
         ));
         commitPass.dispatchWorkgroups(workgroups);
+        commitPass.setPipeline(sealInterfaceReceiptPipeline.pipeline);
+        commitPass.setBindGroup(0, bindGroup(
+          sealInterfaceReceiptPipeline,
+          interfaceReceiptEntries(
+            finalStateBuffer,
+            canonicalMechanicsBuffer
+          ),
+          'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal-bind-group'
+        ));
+        commitPass.dispatchWorkgroups(1);
         commitPass.end();
         endContactTimestamp(encoder, commitTimestamp);
-        encodedDispatchCount = 25 + preparedScan.encodedDispatchCount;
-        encodedComputePassCount = contactTimestampActive ? 13 : 6;
+        if (capturePlan) {
+          const history = capturePlan.layout.history;
+          const historyByteOffset =
+            history.byteOffset
+            + capturePlan.sequenceIndex * history.strideByteLength;
+          encoder.copyBufferToBuffer(
+            pool.graphControlBuffer,
+            0,
+            capturePlan.buffer,
+            historyByteOffset + history.control.byteOffset,
+            history.control.byteLength
+          );
+          encoder.copyBufferToBuffer(
+            evidenceBuffer,
+            0,
+            capturePlan.buffer,
+            historyByteOffset + history.evidence.byteOffset,
+            history.evidence.byteLength
+          );
+          encoder.copyBufferToBuffer(
+            pool.matchingCleanupControlBuffer,
+            0,
+            capturePlan.buffer,
+            historyByteOffset + history.matchingCleanup.byteOffset,
+            history.matchingCleanup.byteLength
+          );
+          if (
+            capturePlan.sequenceIndex
+              === capturePlan.sequenceStepCount - 1
+          ) {
+            const finalLayout = capturePlan.layout.final;
+            encoder.copyBufferToBuffer(
+              canonicalStateBuffer,
+              0,
+              capturePlan.buffer,
+              finalLayout.state.byteOffset,
+              finalLayout.state.byteLength
+            );
+            encoder.copyBufferToBuffer(
+              authority.thermoBuffer,
+              0,
+              capturePlan.buffer,
+              finalLayout.thermo.byteOffset,
+              finalLayout.thermo.byteLength
+            );
+            encoder.copyBufferToBuffer(
+              canonicalMechanicsBuffer,
+              0,
+              capturePlan.buffer,
+              finalLayout.mechanics.byteOffset,
+              finalLayout.mechanics.byteLength
+            );
+            encoder.copyBufferToBuffer(
+              identityBuffer,
+              0,
+              capturePlan.buffer,
+              finalLayout.identity.byteOffset,
+              finalLayout.identity.byteLength
+            );
+          }
+        }
+        encodedDispatchCount =
+          18
+          + 3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+          + (
+            legacyMatchingCleanupActive
+              ? 5 * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+              : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+          )
+          + (
+            diagnosticTracePipelines
+              ? 2 * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES + 3
+              : 0
+          )
+          + preparedScan.encodedDispatchCount;
+        encodedComputePassCount = contactTimestampActive
+          ? 9
+            + SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+            + (
+              legacyMatchingCleanupActive
+                ? SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+                : 1
+            )
+          : 7;
+        if (capturePlan) {
+          capturePlan.record.lastProposal = artifact;
+          capturePlan.record.nextSequenceIndex += 1;
+        }
         lifecycleStatus = 'encoded';
         return true;
       } catch (error) {
@@ -7380,6 +20209,9 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     cleanupTemporaryBuffersAfterSubmittedWork() {
       return false;
     },
+    markSubmittedWork,
+    canReleaseQueueOrdered,
+    releaseQueueOrdered,
     releaseAfterSubmittedWork,
     destroy: releaseAfterSubmittedWork,
     get lifecycleStatus() { return lifecycleStatus; },
@@ -7387,7 +20219,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     get encodedComputePassCount() { return encodedComputePassCount; },
     get released() { return released; },
     get releaseScheduled() { return releaseScheduled; },
-    get releasePromise() { return releasePromise; }
+    get releasePromise() { return releasePromise; },
+    get submissionObserved() { return submissionObserved; }
   };
   Object.freeze(artifact);
   pool.inUseGenerationId = authority.execution.generationId;
@@ -7404,6 +20237,7 @@ export function schroederSpatialMechanicalProposalMatchesContract(
 ) {
   const traversalBuffers = proposal?.evidence?.traversalBuffers;
   const contactGraph = proposal?.contactGraph;
+  const contactInterfaceReceipt = proposal?.contactInterfaceReceipt;
   return Boolean(
     proposal
     && Object.isFrozen(proposal)
@@ -7417,12 +20251,26 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && (
       proposal.lifecycleStatus === 'prepared'
       || proposal.lifecycleStatus === 'encoded'
+      || proposal.lifecycleStatus === 'submitted'
     )
     && proposal.released !== true
     && proposal.releaseScheduled !== true
     && proposal.generation === generation
     && proposal.generationId === generation?.execution?.generationId
     && proposal.supportEpoch === generation?.execution?.supportEpoch
+    && contactInterfaceReceipt?.schema
+      === ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA
+    && contactInterfaceReceipt.ready === true
+    && contactInterfaceReceipt.generation === generation
+    && contactInterfaceReceipt.device === device
+    && contactInterfaceReceipt.buffer === proposal.appendStagingBuffer
+    && contactInterfaceReceipt.generationId === proposal.generationId
+    && contactInterfaceReceipt.supportEpoch === proposal.supportEpoch
+    && contactInterfaceReceipt.selectedLevel === proposal.selectedLevel
+    && contactInterfaceReceipt.particleCount === proposal.particleCount
+    && contactInterfaceReceipt.fullParticleReadbackPerformed === false
+    && contactInterfaceReceipt.hostSummaryReadbackPerformed === false
+    && contactInterfaceReceipt.failClosed === true
     && proposal.traversalCount
       === SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
     && proposal.solverIterationCount
@@ -7439,6 +20287,10 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && proposal.fullParticleReadbackPerformed === false
     && webGpuBufferMatchesDevice(proposal.proposalBuffer, device)
     && webGpuBufferMatchesDevice(proposal.evidence?.buffer, device)
+    && webGpuBufferMatchesDevice(
+      proposal.matchingCleanupControlBuffer,
+      device
+    )
     && webGpuBufferMatchesDevice(proposal.scaleBuffer, device)
     && webGpuBufferMatchesDevice(proposal.energyLedgerBuffer, device)
     && proposal.energyLedgerBuffer === proposal.proposalBuffer
@@ -7464,6 +20316,10 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && webGpuBufferMatchesDevice(contactGraph.appendStagingBuffer, device)
     && webGpuBufferMatchesDevice(contactGraph.directedPeerBuffer, device)
     && webGpuBufferMatchesDevice(contactGraph.controlBuffer, device)
+    && webGpuBufferMatchesDevice(
+      contactGraph.matchingCleanupControlBuffer,
+      device
+    )
     && webGpuBufferMatchesDevice(contactGraph.indirectDispatchBuffer, device)
     && webGpuBufferMatchesDevice(contactGraph.conditionalDispatchBuffer, device)
     && webGpuBufferMatchesDevice(contactGraph.scratchStateABuffer, device)
@@ -7476,6 +20332,8 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && contactGraph.energyLedgerAliasLifetime
       === 'solver-scratch-until-proposal-publication'
     && contactGraph.controlBuffer === proposal.graphControlBuffer
+    && contactGraph.matchingCleanupControlBuffer
+      === proposal.matchingCleanupControlBuffer
     && contactGraph.indirectDispatchBuffer === proposal.indirectDispatchBuffer
     && contactGraph.conditionalDispatchBuffer
       === proposal.conditionalDispatchBuffer

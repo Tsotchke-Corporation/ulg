@@ -17,6 +17,8 @@ import {
   particleThermalState,
   phaseMassSummary,
   normalizeSphPhysicalLawGroups,
+  pendingSphPhysicalLawGroups,
+  resolveSphSurfaceTensionLawAdmission,
   waterVaporOpticalStateFromGasSummary
 } from '../src/runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
@@ -25,6 +27,7 @@ import { createDerivedMaterialClosure, deriveMaterialProperties } from '../src/r
 import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import {
+  buildSphGpuParticleBuffers,
   buildMlsMpmGpuParticleBuffers,
   decodeMlsMpmGpuParticleRows
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -157,6 +160,61 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
       + demo.counts.spareProductSlots
       + demo.counts.phaseCompanionSlots
   );
+  const primarySpareIndices = demo.state.particles
+    .map((particle, index) => (
+      particle.spareProductSlot === true ? index : -1
+    ))
+    .filter((index) => index >= 0);
+  const spareContinuityDomainIds = primarySpareIndices.map(
+    (index) => demo.state.particles[index].initialBodyDomainId
+  );
+  assert.equal(primarySpareIndices.length, demo.counts.spareProductSlots);
+  assert.ok(spareContinuityDomainIds.every((domainId) => domainId > 0));
+  assert.equal(
+    new Set(spareContinuityDomainIds).size,
+    spareContinuityDomainIds.length,
+    'each dormant product lineage must have a distinct solid continuity domain'
+  );
+  const packedParticles = buildSphGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing
+  });
+  const liveContinuityDomainIds = new Set(
+    demo.state.particles
+      .map((particle, index) => (
+        particle.massKg > 0
+        && particle.phaseCompanionSlot !== true
+          ? packedParticles.identity[index]
+          : 0
+      ))
+      .filter((domainId) => domainId > 0)
+  );
+  assert.ok(
+    spareContinuityDomainIds.every(
+      (domainId) => !liveContinuityDomainIds.has(domainId)
+    ),
+    'reserved product domains must not collide with initial bodies'
+  );
+  for (let spare = 0; spare < primarySpareIndices.length; spare += 1) {
+    const primaryIndex = primarySpareIndices[spare];
+    const domainId = spareContinuityDomainIds[spare];
+    assert.equal(packedParticles.identity[primaryIndex], domainId);
+    const phaseCompanionIndices = demo.state.particles
+      .map((particle, index) => (
+        particle.phaseCompanionSlot === true
+        && particle.phaseCarrierLineageIndex === primaryIndex
+          ? index
+          : -1
+      ))
+      .filter((index) => index >= 0);
+    assert.equal(phaseCompanionIndices.length, 3);
+    assert.ok(
+      phaseCompanionIndices.every(
+        (index) => packedParticles.identity[index] === domainId
+      ),
+      'every reserved phase lane must preserve its product lineage identity'
+    );
+  }
   assert.equal(demo.dropMaterial, 'fe');
   assert.equal(demo.baseMaterial, 'h2o');
   const fe = demo.state.particles.filter((p) => p.material === 'fe');
@@ -316,6 +374,79 @@ test('base block edge derivation shares the fixed matter-quantum geometry policy
       baseParticleEdge: 8
     }),
     /scenario\.ice\.edgeM must be a positive finite number/
+  );
+});
+
+test('scene length scale preserves density, contact, counts, and cubic mass similarity', () => {
+  const scale = 0.028;
+  const referenceDriver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario(),
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1
+  });
+  const reference = referenceDriver.demo;
+  const scaledScenario = createSphPhaseScenario({
+    sceneLengthScale: scale,
+    boxDimensionsM: [5, 5, 5],
+    wallModel: 'adiabatic'
+  });
+  const scaledDriver = createSphPhaseDemo({
+    scenario: scaledScenario,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1
+  });
+  const scaled = scaledDriver.demo;
+  const totalMass = (demo, material) => demo.state.particles
+    .filter((particle) => particle.material === material && particle.massKg > 0)
+    .reduce((sum, particle) => sum + particle.massKg, 0);
+  const base = scaled.state.particles.filter(
+    (particle) => particle.material === 'h2o' && particle.massKg > 0
+  );
+  const drop = scaled.state.particles.filter(
+    (particle) => particle.material === 'fe' && particle.massKg > 0
+  );
+  const baseContactY = Math.max(
+    ...base.map((particle) => particle.x[1] + particle.restParticleRadiusM)
+  );
+  const dropContactY = Math.min(
+    ...drop.map((particle) => particle.x[1] - particle.restParticleRadiusM)
+  );
+
+  assert.equal(scaled.scenario.sceneLengthScale, scale);
+  assert.deepEqual(scaled.scenario.box.dimensionsM, [0.14, 0.14, 0.14]);
+  assert.equal(scaled.counts.drop, reference.counts.drop);
+  assert.equal(scaled.counts.base, reference.counts.base);
+  near(
+    scaled.initialParticleSpacing.drop.densityKgPerM3,
+    reference.initialParticleSpacing.drop.densityKgPerM3
+  );
+  near(
+    scaled.initialParticleSpacing.base.densityKgPerM3,
+    reference.initialParticleSpacing.base.densityKgPerM3
+  );
+  near(
+    scaled.initialParticleSpacing.drop.spacingM,
+    reference.initialParticleSpacing.drop.spacingM * scale,
+    1e-12
+  );
+  near(
+    scaled.initialParticleSpacing.base.spacingM,
+    reference.initialParticleSpacing.base.spacingM * scale,
+    1e-12
+  );
+  near(totalMass(scaled, 'fe'), totalMass(reference, 'fe') * scale ** 3, 1e-12);
+  near(totalMass(scaled, 'h2o'), totalMass(reference, 'h2o') * scale ** 3, 1e-12);
+  near(baseContactY, dropContactY, 1e-10);
+  assert.equal(scaled.scenario.walls.model, 'adiabatic');
+  assert.equal(scaled.scenario.wallReservoirAuthority.exchangeEnabled, false);
+  near(
+    scaledDriver.demo.gpuMechanics.gridSpacingM,
+    referenceDriver.demo.gpuMechanics.gridSpacingM * scale,
+    1e-12
   );
 });
 
@@ -793,7 +924,7 @@ test('particle phase + temperature come from the closure energy', () => {
   assert.ok(summary.byMaterialPhase.h2o.solid > 0);
 });
 
-test('demo initializes hydrostatic pressure only for wall-supported condensed blocks', () => {
+test('demo hydrostatic initialization inverts the packed per-phase constitutive law', () => {
   const driver = createSphPhaseDemo({
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
@@ -810,9 +941,27 @@ test('demo initializes hydrostatic pressure only for wall-supported condensed bl
 
   assert.equal(driver.demo.initialHydrostaticState.status, 'hydrostatic-initialization-applied');
   assert.ok(base.some((p) => p.mpmJ < 1));
-  assert.ok(minBaseJ > 0.999, `hydrostatic pre-compression is too large for liquid water: ${minBaseJ}`);
+  assert.ok(minBaseJ > 0 && minBaseJ <= 1);
   assert.ok(base.every((p) => p.hydrostaticInitialization?.status === 'initialized-supported-condensed-block'));
-  assert.ok(base.every((p) => p.hydrostaticInitialization?.volumeRatioModel === 'raw-closure-bulk-modulus'));
+  assert.ok(base.every((p) => p.hydrostaticInitialization?.volumeRatioModel === 'per-phase-cfl-tait-eos'));
+  for (const particle of base) {
+    const receipt = particle.hydrostaticInitialization;
+    assert.equal(receipt.phaseSoundSpeedScale > 0, true);
+    assert.equal(receipt.effectiveBulkModulusPa > 0, true);
+    assert.equal(receipt.effectiveShearModulusPa, 0);
+    const recoveredPressurePa = receipt.effectiveBulkModulusPa / 7
+      * (particle.mpmJ ** -7 - 1);
+    near(
+      recoveredPressurePa,
+      receipt.pressurePa,
+      Math.max(1e-8, receipt.pressurePa * 1e-10)
+    );
+    near(
+      particle.mpmF[0] * particle.mpmF[4] * particle.mpmF[8],
+      particle.mpmJ,
+      1e-12
+    );
+  }
   assert.ok(base.some((p) => p.particleSizeState?.status === 'pressure-adjusted-current-volume'));
   assert.ok(base.every((p) => p.particleSizeState?.source === 'hydrostatic-material-temperature-pressure-rest-density'));
   assert.ok(base.every((p) => p.restParticleRadiusM === p.particleRadiusM));
@@ -1056,6 +1205,90 @@ test('fluid law groups expose implemented viscosity and pending surface tension'
     driver.demo.lastStepTiming.unsupportedPhysicalLawGroups,
     driver.demo.lastStepTiming.pendingPhysicalLawGroups
   );
+  assert.equal(
+    viewState.surfaceTensionLawAdmission.status,
+    'blocked'
+  );
+  assert.equal(
+    viewState.pendingPhysicalLawGroups[0].status,
+    'pending-unsupported-physical-law-route'
+  );
+});
+
+test('surface tension is admitted only on the exact single-level Schroeder route', () => {
+  const exactConfig = {
+    enabled: true,
+    selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 0,
+    enableTwoLevelMechanics: false
+  };
+  const admitted = resolveSphSurfaceTensionLawAdmission({
+    mechanics: 'mlsmpm',
+    mechanicsLawEnabled: true,
+    schroederSimulationConfig: exactConfig
+  });
+  assert.equal(admitted.status, 'admitted');
+  assert.equal(admitted.levelRole, 'single');
+  assert.deepEqual(
+    pendingSphPhysicalLawGroups(
+      { surfaceTension: true },
+      { surfaceTensionAdmission: admitted }
+    ),
+    []
+  );
+
+  const blockedCases = [
+    {
+      mechanics: 'sph',
+      mechanicsLawEnabled: true,
+      schroederSimulationConfig: exactConfig,
+      blocker: 'surface-tension-requires-mlsmpm'
+    },
+    {
+      mechanics: 'mlsmpm',
+      mechanicsLawEnabled: false,
+      schroederSimulationConfig: exactConfig,
+      blocker: 'surface-tension-requires-mechanics-law'
+    },
+    {
+      mechanics: 'mlsmpm',
+      mechanicsLawEnabled: true,
+      schroederSimulationConfig: { ...exactConfig, enabled: false },
+      blocker: 'surface-tension-requires-schroeder-simulation'
+    },
+    {
+      mechanics: 'mlsmpm',
+      mechanicsLawEnabled: true,
+      schroederSimulationConfig: {
+        ...exactConfig,
+        enableTwoLevelMechanics: true
+      },
+      blocker: 'surface-tension-two-level-route-not-admitted'
+    },
+    {
+      mechanics: 'mlsmpm',
+      mechanicsLawEnabled: true,
+      schroederSimulationConfig: { ...exactConfig, maxLevel: 1 },
+      blocker: 'surface-tension-requires-exact-single-level-range'
+    }
+  ];
+  for (const entry of blockedCases) {
+    const admission = resolveSphSurfaceTensionLawAdmission(entry);
+    assert.equal(admission.status, 'blocked');
+    assert.ok(admission.blockers.includes(entry.blocker));
+    assert.deepEqual(
+      pendingSphPhysicalLawGroups(
+        { surfaceTension: true },
+        { surfaceTensionAdmission: admission }
+      ).map((group) => [group.key, group.status, group.reason]),
+      [[
+        'surfaceTension',
+        'pending-unsupported-physical-law-route',
+        admission.reason
+      ]]
+    );
+  }
 });
 
 test('ambient water demo particles pack and step as liquid MLS-MPM material', () => {
@@ -1129,10 +1362,13 @@ test('sealed gas pressure summary derives baseline air pressure from scenario ga
   assert.equal(pressure.scientificValidation, false);
 });
 
-test('SPH phase view state carries explicit wall temperatures for resident thermal steps', () => {
+test('SPH phase view state carries authoritative ambient and wall temperatures for resident thermal steps', () => {
   const wallFaces = { xMin: 291, xMax: 292, yMin: 293, yMax: 294, zMin: 295, zMax: 296 };
   const demo = buildSphPhaseDemoState({
-    scenario: createSphPhaseScenario({ wallFaces }),
+    scenario: createSphPhaseScenario({
+      wallFaces,
+      ambientTemperatureK: 247.5
+    }),
     dropParticleEdge: 1,
     baseParticleEdge: 1
   });
@@ -1140,6 +1376,71 @@ test('SPH phase view state carries explicit wall temperatures for resident therm
 
   assert.deepEqual(viewState.wallTemperaturesK, wallFaces);
   assert.deepEqual(viewState.scenario.walls.faces, wallFaces);
+  assert.equal(
+    viewState.wallReservoirAuthority.schema,
+    'peercompute.ulg.sph-wall-reservoir-authority.v0'
+  );
+  assert.equal(
+    viewState.wallReservoirAuthority.model,
+    'infinite-fixed-temperature-reservoir'
+  );
+  assert.equal(viewState.wallReservoirAuthority.exchangeEnabled, true);
+  assert.equal(viewState.ambientTemperatureK, 247.5);
+  assert.equal(viewState.scenario.ambientTemperatureK, 247.5);
+  assert.equal(
+    viewState.thermalEnvironmentAuthority.schema,
+    'peercompute.ulg.sph-thermal-environment-authority.v0'
+  );
+  assert.equal(
+    viewState.thermalEnvironmentAuthority.source,
+    'scenario-ambient-temperature-override'
+  );
+  assert.equal(
+    viewState.thermalEnvironmentAuthority.sourceScenarioId,
+    'sph-phase-ice-on-molten-iron'
+  );
+});
+
+test('SPH phase scenario carries six finite wall faces while adiabatic disables exchange', () => {
+  const scenario = createSphPhaseScenario({
+    wallModel: 'adiabatic',
+    wallTemperatureK: 238.5
+  });
+  assert.equal(scenario.walls.model, 'adiabatic');
+  assert.equal(scenario.wallReservoirAuthority.model, 'adiabatic');
+  assert.equal(scenario.wallReservoirAuthority.exchangeEnabled, false);
+  assert.equal(scenario.wallReservoirAuthority.finiteCapacity, false);
+  assert.deepEqual(scenario.wallReservoirAuthority.faces, {
+    xMin: 238.5,
+    xMax: 238.5,
+    yMin: 238.5,
+    yMax: 238.5,
+    zMin: 238.5,
+    zMax: 238.5
+  });
+  assert.throws(
+    () => createSphPhaseScenario({
+      wallFaces: { zMax: Number.POSITIVE_INFINITY }
+    }),
+    /wallTemperaturesK.zMax must be finite/
+  );
+  assert.throws(
+    () => createSphPhaseScenario({ wallModel: 'finite-capacity' }),
+    /wallModel must be/
+  );
+});
+
+test('SPH phase scenario derives ambient from gas temperature and fails closed on nonfinite ambient', () => {
+  const scenario = createSphPhaseScenario({ gasInitialTemperatureK: 241.25 });
+  assert.equal(scenario.ambientTemperatureK, 241.25);
+  assert.equal(
+    scenario.thermalEnvironment.source,
+    'scenario-gas-initial-temperature'
+  );
+  assert.throws(
+    () => createSphPhaseScenario({ ambientTemperatureK: Number.NaN }),
+    /ambientTemperatureK must be finite/
+  );
 });
 
 test('SPH phase view state exposes resolved initial particle spacing', () => {

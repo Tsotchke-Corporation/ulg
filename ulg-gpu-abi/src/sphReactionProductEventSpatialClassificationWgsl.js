@@ -1,6 +1,11 @@
 import {
-  schroederSpatialExactNearTraversalV1Wgsl
+  createSchroederSpatialExactNearTraversalV1Wgsl,
+  createSchroederSpatialExactNearTraversalV2Wgsl
 } from './schroederSpatialExactNearTraversalWgsl.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+} from './schroederSpatialEpoch.js';
 import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1
 } from './schroederSpatialExactNear.js';
@@ -16,7 +21,35 @@ import {
 // against the immutable post-reaction/pre-placement state, and writes one
 // independent decision row per compact event. The host binds the directory's
 // position-authority state only to the displacement envelope pass.
-export const sphReactionProductEventSpatialClassificationWgsl = /* wgsl */ `
+export function createSphReactionProductEventSpatialClassificationWgsl(
+  directoryAbiVersion
+) {
+  const directoryV2 =
+    directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  if (
+    !directoryV2
+    && directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_VERSION
+  ) {
+    throw new RangeError(
+      `unsupported reaction-product placement directory ABI version: ${
+        directoryAbiVersion
+      }`
+    );
+  }
+  const exactNearExpectationType = directoryV2
+    ? 'SchroederSpatialExactNearExpectationV2'
+    : 'SchroederSpatialExactNearExpectationV1';
+  const exactNearSourceCountField = directoryV2
+    ? 'physical_source_count'
+    : 'source_count';
+  const exactNearTraversalWgsl = (
+    directoryV2
+      ? createSchroederSpatialExactNearTraversalV2Wgsl
+      : createSchroederSpatialExactNearTraversalV1Wgsl
+  )({
+    directoryBindingName: 'spatial_directory'
+  });
+  return /* wgsl */ `
 struct ProductEventPlacementParams {
   particle_count: u32,
   event_row_count: u32,
@@ -41,13 +74,13 @@ struct ProductEventPlacementParams {
 @group(0) @binding(3) var<uniform> params: ProductEventPlacementParams;
 @group(0) @binding(6) var<storage, read> compact_counts: array<u32>;
 @group(0) @binding(7) var<storage, read> spatial_directory: array<u32>;
-@group(0) @binding(8) var<uniform> spatial_expectation: SchroederSpatialExactNearExpectationV1;
+@group(0) @binding(8) var<uniform> spatial_expectation: ${exactNearExpectationType};
 @group(0) @binding(9) var<storage, read> frozen_placement_source_state: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read_write> placement_decisions: array<vec4<f32>>;
 @group(0) @binding(11) var<storage, read> placement_control: array<vec4<f32>>;
 @group(0) @binding(12) var<storage, read_write> placement_completion_receipt: array<atomic<u32>>;
 
-${schroederSpatialExactNearTraversalV1Wgsl}
+${exactNearTraversalWgsl}
 
 const PRODUCT_PLACEMENT_SUPPORT_PROFILE_V1: u32 =
   ${SCHROEDER_SPATIAL_SUPPORT_PROFILE_REACTION_PRODUCT_PLACEMENT_V1}u;
@@ -288,7 +321,7 @@ fn classify_product_events(
     || placement_control[0].z != 1.0
     || spatial_expectation.support_profile_id
       != PRODUCT_PLACEMENT_SUPPORT_PROFILE_V1
-    || spatial_expectation.source_count != params.particle_count
+    || spatial_expectation.${exactNearSourceCountField} != params.particle_count
     || !ss_exact_near_directory_admitted(spatial_expectation)
   ) {
     placement_receipt_increment(
@@ -450,7 +483,8 @@ fn classify_product_events(
     );
     for (
       var x_iteration = 0u;
-      x_iteration < spatial_expectation.source_count && x_cursor < level_end;
+      x_iteration < spatial_expectation.${exactNearSourceCountField}
+        && x_cursor < level_end;
       x_iteration = x_iteration + 1u
     ) {
       let x_order = ss_exact_near_cell_key_word(
@@ -484,7 +518,8 @@ fn classify_product_events(
       );
       for (
         var y_iteration = 0u;
-        y_iteration < spatial_expectation.source_count && y_cursor < x_end;
+        y_iteration < spatial_expectation.${exactNearSourceCountField}
+          && y_cursor < x_end;
         y_iteration = y_iteration + 1u
       ) {
         let y_order = ss_exact_near_cell_key_word(
@@ -604,6 +639,16 @@ fn classify_product_events(
   );
 }
 `;
+}
+
+export const sphReactionProductEventSpatialClassificationWgsl =
+  createSphReactionProductEventSpatialClassificationWgsl(
+    SCHROEDER_SPATIAL_EPOCH_VERSION
+  );
+export const sphReactionProductEventSpatialClassificationV2Wgsl =
+  createSphReactionProductEventSpatialClassificationWgsl(
+    SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  );
 
 const productSpareScanParamsWgsl = /* wgsl */ `
 struct ProductSpareScanParams {

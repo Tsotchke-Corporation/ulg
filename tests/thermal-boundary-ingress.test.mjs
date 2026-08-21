@@ -20,7 +20,19 @@ import {
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 const closures = createReferenceMaterialClosures();
-const materialProperties = { h2o: closures.h2o.properties };
+const materialProperties = {
+  h2o: {
+    ...closures.h2o.properties,
+    phases: closures.h2o.properties.phases.map((phase) => ({
+      ...phase,
+      thermalConductivityWPerMK: 1,
+      thermalConductivityProvenance: {
+        source: 'focused-boundary-ingress-fixture',
+        phase: phase.name
+      }
+    }))
+  }
+};
 const waterId = stableOpticalMaterialId('h2o');
 
 function previousPositiveFloat32(value) {
@@ -158,7 +170,7 @@ test('thermal reciprocal budgets cross the sensible-to-latent knot with simultan
       {
         id: 'hot-neighbor',
         material: 'h2o',
-        x: [2.19, 2, 2],
+        x: [2.08, 2, 2],
         v: [0, 0, 0],
         massKg: 1,
         specificInternalEnergyJPerKg:
@@ -167,7 +179,7 @@ test('thermal reciprocal budgets cross the sensible-to-latent knot with simultan
       {
         id: 'cold-neighbor',
         material: 'h2o',
-        x: [1.81, 2, 2],
+        x: [1.92, 2, 2],
         v: [0, 0, 0],
         massKg: 1,
         specificInternalEnergyJPerKg:
@@ -181,7 +193,7 @@ test('thermal reciprocal budgets cross the sensible-to-latent knot with simultan
     thermalMaterialTable,
     wallTemperaturesK: {},
     boxDimsM: [5, 5, 5],
-    dtS: 1e-3,
+    dtS: 1e12,
     conductionRate: 1e12,
     ambientTemperatureK: 0,
     wallRate: 0

@@ -414,6 +414,7 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
       arenaIndex,
       inUse: false,
       token: null,
+      bindGroupCache: new Map(),
       treeBuffer: createBuffer(
         device,
         `${prefix}-tree`,
@@ -730,6 +731,31 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     return releaseOwnedExecution(execution, ownership);
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      ownershipFor(execution);
+      return !releasedExecutions.has(execution)
+        && submittedExecutions.has(execution)
+        && !releaseInFlight.has(execution)
+        && (executionConsumerLeases.get(execution)?.size ?? 0) === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      const error = new Error(
+        'queue-ordered exact-near cell-tree release requires an exact submitted execution with no live consumers'
+      );
+      error.code =
+        'ERR_SCHROEDER_EXACT_CELL_TREE_QUEUE_ORDERED_RELEASE_STALE';
+      throw error;
+    }
+    const ownership = ownershipFor(execution);
+    return releaseOwnedExecution(execution, ownership);
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -770,11 +796,30 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
   }
 
   function bindGroup(pipeline, entries, suffix, arenaIndex) {
-    return device.createBindGroup({
+    const arena = arenas[arenaIndex];
+    const cached = arena.bindGroupCache.get(suffix);
+    const entriesMatch = cached?.entries.length === entries.length
+      && cached.entries.every((left, index) => {
+        const right = entries[index];
+        return left.binding === right.binding
+          && left.resource?.buffer === right.resource?.buffer
+          && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
+          && (left.resource?.size ?? null) === (right.resource?.size ?? null);
+      });
+    if (cached?.pipeline === pipeline && entriesMatch) {
+      return cached.bindGroup;
+    }
+    const created = device.createBindGroup({
       label: `${label}-arena-${arenaIndex}-${suffix}-bindings`,
       layout: pipeline.getBindGroupLayout(0),
       entries
     });
+    arena.bindGroupCache.set(suffix, {
+      pipeline,
+      entries: entries.map(({ binding, resource }) => ({ binding, resource })),
+      bindGroup: created
+    });
+    return created;
   }
 
   function encode(encoder, {
@@ -950,6 +995,7 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
       arena.expectationBuffer.destroy?.();
       arena.paramsBuffer.destroy?.();
       arena.levelParamsBuffer.destroy?.();
+      arena.bindGroupCache.clear();
     }
     runtime.status = 'schroeder-spatial-exact-near-cell-tree-runtime-destroyed';
     return true;
@@ -975,6 +1021,8 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
     releaseExecutionConsumerLease,
     releaseExecutionConsumerLeaseAfter,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     allocationEntries,

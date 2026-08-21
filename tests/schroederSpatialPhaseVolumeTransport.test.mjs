@@ -17,6 +17,12 @@ import {
   schroederSpatialPhaseVolumePressureDragOperatorWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumePressureDragOperatorWgsl.js';
 import {
+  schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl.js';
+import {
+  schroederSpatialPhaseVolumeSurfaceStressTransportWgsl
+} from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeSurfaceStressTransportWgsl.js';
+import {
   schroederSpatialPhaseVolumeTransportWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
 
@@ -84,6 +90,92 @@ test('Slice 9 pressure and drag share one material-neutral conservative operator
   assert.match(source, /drag_alpha = select\([\s\S]*drag_x \/ \(1\.0 \+ drag_x\)/);
   assert.match(source, /drag_heat = max\(0\.0, -drag_kinetic_delta\)/);
   assert.doesNotMatch(source, /\b(h2o|water|steam|hydrogen|sodium)\b/i);
+});
+
+test('Slice 9 surface stress is one material-neutral torque-free central-bond operator', () => {
+  const source = schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl;
+  assert.match(
+    source,
+    /fn schroeder_phase_volume_surface_stress_component\(/
+  );
+  assert.match(
+    source,
+    /surface_tension_n_per_m[\s\S]*gradient_length_m2[\s\S]*grid_spacing_m \* grid_spacing_m \* grid_spacing_m/
+  );
+  assert.match(
+    source,
+    /fn schroeder_phase_volume_surface_stress_bond\(/
+  );
+  assert.match(
+    source,
+    /0\.5\s*\* \(left_component_pa \+ right_component_pa\)/
+  );
+  assert.match(
+    source,
+    /grid_spacing_m\s*\* grid_spacing_m\s*\/ bond_length_cells[\s\S]*\* bond_stress_pa[\s\S]*\* bond_axis/
+  );
+  assert.match(
+    source,
+    /reduced_mass = 1\.0 \/ response_inverse_mass/
+  );
+  assert.match(source, /bond_impulse_ns \* \(impulse_limit \/ impulse_length\)/);
+  assert.doesNotMatch(source, /surface_stress_face|surface_stress_traction/);
+  assert.doesNotMatch(source, /scratch|field_view|internal_compensation/);
+  assert.doesNotMatch(
+    source,
+    /\b(h2o|water|steam|iron|sodium|cohesion|render)\b/i
+  );
+});
+
+test('Slice 9 surface stress is an 18-pass sealed central-bond transaction over exact Cartesian keys', () => {
+  const source = schroederSpatialPhaseVolumeSurfaceStressTransportWgsl;
+  assert.match(source, /fn find_field_key\(/);
+  assert.match(source, /fn surface_stress_bond_neighbor\(/);
+  assert.match(source, /fn surface_stress_bond_delta\(/);
+  assert.match(
+    source,
+    /fn stage_surface_stress_pair\([\s\S]*coordinate % 2u != parity[\s\S]*schroeder_phase_volume_surface_stress_bond\([\s\S]*left_velocity = left_initial_velocity \+ impulse_ns \/ left_mass[\s\S]*right_velocity = right_initial_velocity - impulse_ns \/ right_mass/
+  );
+  assert.match(
+    source,
+    /left_compensation_j =\s*-\(left_kinetic_after - left_kinetic_before\)[\s\S]*right_compensation_j =\s*-\(right_kinetic_after - right_kinetic_before\)/
+  );
+  assert.match(
+    source,
+    /scratch_store\(left_row \+ SCRATCH_STATUS, 0u\)[\s\S]*scratch_store\(right_row \+ SCRATCH_STATUS, 0u\)[\s\S]*scratch_add_compensation\(field_index[\s\S]*scratch_add_compensation\(neighbor[\s\S]*scratch_store\(left_row \+ SCRATCH_STATUS, SCRATCH_ROW_READY\)[\s\S]*scratch_store\(right_row \+ SCRATCH_STATUS, SCRATCH_ROW_READY\)/
+  );
+  for (const axis of ['x', 'y', 'z']) {
+    assert.match(source, new RegExp(`fn stage_surface_stress_${axis}_even\\(`));
+    assert.match(source, new RegExp(`fn stage_surface_stress_${axis}_odd\\(`));
+  }
+  for (const diagonal of [
+    'xy_positive',
+    'xy_negative',
+    'xz_positive',
+    'xz_negative',
+    'yz_positive',
+    'yz_negative'
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`fn stage_surface_stress_${diagonal}_even\\(`)
+    );
+    assert.match(
+      source,
+      new RegExp(`fn stage_surface_stress_${diagonal}_odd\\(`)
+    );
+  }
+  assert.match(source, /params\.max_impulse_fraction \/ 18\.0/);
+  assert.match(
+    source,
+    /params\.surface_stress_enabled == 1u/
+  );
+  assert.match(
+    source,
+    /params\.phase_record_count > 0u/
+  );
+  assert.doesNotMatch(source, /mapAsync/i);
+  assert.doesNotMatch(source, /@binding\([123]\)/);
 });
 
 test('Slice 9 same-level transport validates all staged rows before store-only commit', () => {
@@ -247,18 +339,37 @@ test('native Slice 9 same-level transport applies pressure, drag, and ambient wo
         label: 'native-slice9-same-level-transport-pipeline-layout',
         bindGroupLayouts: [bindGroupLayout]
       });
-      const pipelines = Object.fromEntries([
+      const pipelines = {};
+      for (const entryPoint of [
         'stage_transport',
         'validate_staged_transport',
         'commit_transport'
-      ].map((entryPoint) => [
-        entryPoint,
-        device.createComputePipeline({
-          label: `native-slice9-${entryPoint}`,
-          layout: pipelineLayout,
-          compute: { module, entryPoint }
-        })
-      ]));
+      ]) {
+        try {
+          pipelines[entryPoint] = await device.createComputePipelineAsync({
+            label: `native-slice9-${entryPoint}`,
+            layout: pipelineLayout,
+            compute: { module, entryPoint }
+          });
+        } catch (error) {
+          const lost = await Promise.race([
+            device.lost,
+            new Promise((resolve) => setTimeout(
+              () => resolve(null),
+              1_000
+            ))
+          ]);
+          return {
+            status: 'pipeline-error',
+            entryPoint,
+            error: error?.message || String(error),
+            deviceLost: lost
+              ? { reason: lost.reason, message: lost.message }
+              : null,
+            uncapturedErrors
+          };
+        }
+      }
 
       const f32Bits = (value) => {
         const bytes = new ArrayBuffer(Float32Array.BYTES_PER_ELEMENT);
@@ -395,6 +506,42 @@ test('native Slice 9 same-level transport applies pressure, drag, and ambient wo
           fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING;
         words[receipt + 5] = mutationOutputOrdinal;
         words[receipt + 6] = fieldCount;
+        const pressureStatus =
+          fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_READY
+          | fieldAbi
+            .SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_STATUS_ADMITTED;
+        const pressureRequiredMask =
+          fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL;
+        words[receipt + 24] =
+          fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC;
+        words[receipt + 25] =
+          fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION;
+        words[receipt + 26] = pressureStatus;
+        words[receipt + 27] =
+          fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G;
+        words[receipt + 28] = f32Bits(0);
+        words[receipt + 29] = f32Bits(1);
+        words[receipt + 30] = fieldCount;
+        words[receipt + 31] = mutationInputOrdinal;
+        words[receipt + 32] = pressureRequiredMask;
+        words[receipt + 33] = pressureRequiredMask;
+        words[receipt + 34] = 0;
+        words[receipt + 35] = [
+          words[receipt + 24],
+          words[receipt + 25],
+          words[receipt + 26],
+          words[receipt + 27],
+          words[receipt + 28],
+          words[receipt + 29],
+          words[receipt + 30],
+          words[receipt + 31],
+          words[receipt + 32],
+          identity.generationId,
+          identity.storageGeneration,
+          identity.physicsTick,
+          identity.physicsSubstep,
+          fieldCompletionOrdinal
+        ].reduce((seal, value) => (seal ^ value) >>> 0, 0);
 
         const condensedState = fieldLayout.stateOffsetWords;
         const gasState = condensedState + fieldLayout.stateWords;
@@ -418,6 +565,12 @@ test('native Slice 9 same-level transport applies pressure, drag, and ambient wo
           f32Bits(0),
           1
         ], gasState);
+        const pressureOffset = fieldLayout.stateOffsetWords
+          + fieldCapacity * fieldLayout.stateWords;
+        words.set([
+          f32Bits(0), f32Bits(1), f32Bits(0), 1,
+          f32Bits(4), f32Bits(1), f32Bits(4), 1
+        ], pressureOffset);
         return words;
       };
 

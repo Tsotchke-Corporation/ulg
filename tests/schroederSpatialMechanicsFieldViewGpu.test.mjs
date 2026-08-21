@@ -72,6 +72,16 @@ function createFakeEncoder() {
     clearBuffer(buffer, offset = 0, size = null) {
       events.push({ kind: 'clear', buffer, offset, size });
     },
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      events.push({
+        kind: 'copy',
+        source,
+        sourceOffset,
+        destination,
+        destinationOffset,
+        size
+      });
+    },
     beginComputePass(descriptor = {}) {
       const event = { kind: 'pass', descriptor, commands: [] };
       events.push(event);
@@ -176,14 +186,17 @@ function createOwnedTestBuffer(device, descriptor) {
 function createDirectoryV2MechanicsParent(device, {
   physicalSourceCount = 4,
   physicalSourceCapacity = physicalSourceCount,
-  buildOrdinal = 17
+  buildOrdinal = 17,
+  suppliedSourceBuffer = null,
+  suppliedIdentityBuffer = null,
+  identityOverrides = {}
 } = {}) {
-  const sourceBuffer = createOwnedTestBuffer(device, {
+  const sourceBuffer = suppliedSourceBuffer || createOwnedTestBuffer(device, {
     label: 'mechanics-field-v2-source',
     size: physicalSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   });
-  const identityBuffer = createOwnedTestBuffer(device, {
+  const identityBuffer = suppliedIdentityBuffer || createOwnedTestBuffer(device, {
     label: 'mechanics-field-v2-identity',
     size: physicalSourceCount * Uint32Array.BYTES_PER_ELEMENT,
     usage: 128
@@ -201,7 +214,8 @@ function createDirectoryV2MechanicsParent(device, {
     topologyEpoch: 19,
     chartEpoch: 23,
     levelEpoch: 29,
-    supportEpoch: 31
+    supportEpoch: 31,
+    ...identityOverrides
   });
   const activeLayout = createSchroederSpatialActiveSourceViewLayout({
     physicalSourceCapacity,
@@ -617,6 +631,10 @@ test('directory-v2 mechanics-field WGSL maps active work to stable physical iden
   );
   assert.match(
     schroederSpatialMechanicsFieldViewV2Wgsl,
+    /params\.candidate_count == active_source_view\[44u\]/
+  );
+  assert.doesNotMatch(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
     /params\.candidate_count == params\.source_count \* 27u/
   );
   assert.match(
@@ -765,7 +783,6 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
   assert.ok(runtime.allocationEntries().some(({ role }) => (
     role.endsWith('radix-gpu-count-control')
   )));
-
   const exactAuthority = fixture.parentMechanicsView.activeSourceCountAuthority;
   fixture.parentMechanicsView.activeSourceCountAuthority = {
     ...exactAuthority
@@ -799,6 +816,18 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
   });
   assert.equal(device.buffers.length, bufferCountBeforeEncode);
   assert.equal(field.gpuBufferCreationCountDuringEncode, 0);
+  const candidateKeyEntry = runtime.allocationEntries().find(({ role }) => (
+    role === 'mechanics-field-candidate-keys'
+  ));
+  assert.ok(candidateKeyEntry?.buffer);
+  assert.equal(
+    candidateKeyEntry.buffer.size,
+    field.layout.candidateCapacity
+      * 12
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(field.candidateKeyBuffer, candidateKeyEntry.buffer);
+  assert.equal(runtime.ownsExecution(field), true);
   assert.equal(field.bufferAllocationCountDuringEncode, 0);
   assert.equal(
     field.sourceAuthorityVersion,
@@ -806,8 +835,9 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
   );
   assert.equal(field.sourceCount, 4);
   assert.equal(field.physicalSourceCount, 4);
+  assert.equal(field.activeSourceCapacity, 8);
   assert.equal(field.candidateCount, null);
-  assert.equal(field.candidateCapacity, 108);
+  assert.equal(field.candidateCapacity, 216);
   assert.equal(field.layout.candidateCapacity, 216);
   assert.equal(Object.hasOwn(field, 'activeSourceCount'), false);
   assert.equal(
@@ -897,7 +927,7 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
     43,
     30,
     37,
-    108,
+    216,
     3,
     3,
     64,
@@ -919,6 +949,200 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
   field.activeSourceCountAuthority = originalFieldAuthority;
 
   assert.equal(await runtime.releaseExecutionAfter(field), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('mechanics-field arenas reuse exact immutable bind groups', () => {
+  const device = createFakeDevice();
+  const fixture = createDirectoryV2MechanicsParent(device, {
+    physicalSourceCount: 4,
+    physicalSourceCapacity: 8,
+    buildOrdinal: 37
+  });
+  const runtime = createSchroederSpatialMechanicsFieldViewGpu(device, {
+    maxSourceCount: 8,
+    gridNodeCount: 8,
+    gridDims: [2, 2, 2],
+    gridShift: 1,
+    gridSpacingM: 0.25,
+    arenaCount: 1,
+    enableDirectoryV2: true
+  });
+  const args = {
+    sourceBuffer: fixture.sourceBuffer,
+    identityBuffer: fixture.identityBuffer,
+    sourceCount: 4,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    identityStrideWords: 1,
+    selectedLevel: 0,
+    parentMechanicsView: fixture.parentMechanicsView
+  };
+  const first = runtime.encode(device.createCommandEncoder(), args);
+  const firstP2gWorkspace = runtime.p2gWorkspaceForExecution(first);
+  const p2gLayout = {};
+  const p2gEntries = [
+    { binding: 0, resource: { buffer: firstP2gWorkspace.paramsBuffer } }
+  ];
+  const consumerBindGroupCount = device.bindGroups.length;
+  const firstConsumerBindGroup = runtime.createExactConsumerBindGroup(first, {
+    cacheKey: 'test-p2g-main',
+    layout: p2gLayout,
+    entries: p2gEntries,
+    label: 'test-p2g-main-bindings'
+  });
+  assert.equal(
+    runtime.createExactConsumerBindGroup(first, {
+      cacheKey: 'test-p2g-main',
+      layout: p2gLayout,
+      entries: p2gEntries,
+      label: 'test-p2g-main-bindings'
+    }),
+    firstConsumerBindGroup
+  );
+  assert.equal(device.bindGroups.length, consumerBindGroupCount + 1);
+  const explicitBindGroupCount = device.bindGroups.filter(
+    (group) => group.label?.endsWith('-bindings')
+  ).length;
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = runtime.encode(device.createCommandEncoder(), args);
+  assert.equal(
+    device.bindGroups.filter((group) => group.label?.endsWith('-bindings')).length,
+    explicitBindGroupCount
+  );
+  assert.equal(runtime.p2gWorkspaceForExecution(second), firstP2gWorkspace);
+  assert.equal(
+    runtime.createExactConsumerBindGroup(second, {
+      cacheKey: 'test-p2g-main',
+      layout: p2gLayout,
+      entries: p2gEntries,
+      label: 'test-p2g-main-bindings'
+    }),
+    firstConsumerBindGroup
+  );
+  assert.equal(device.bindGroups.length, consumerBindGroupCount + 1);
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('directory-v2 topology successor copies immutable topology into fresh mutable state', async () => {
+  const device = createFakeDevice();
+  const predecessorFixture = createDirectoryV2MechanicsParent(device, {
+    physicalSourceCount: 4,
+    physicalSourceCapacity: 8,
+    buildOrdinal: 37
+  });
+  const runtime = createSchroederSpatialMechanicsFieldViewGpu(device, {
+    maxSourceCount: 8,
+    activeSourceCapacity: 8,
+    gridNodeCount: 8,
+    gridDims: [2, 2, 2],
+    gridShift: 1,
+    gridSpacingM: 0.25,
+    arenaCount: 2,
+    enableDirectoryV2: true
+  });
+  const predecessorEncoder = device.createCommandEncoder();
+  const predecessor = runtime.encode(predecessorEncoder, {
+    sourceBuffer: predecessorFixture.sourceBuffer,
+    identityBuffer: predecessorFixture.identityBuffer,
+    sourceCount: 4,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    identityStrideWords: 1,
+    selectedLevel: 0,
+    parentMechanicsView: predecessorFixture.parentMechanicsView
+  });
+  predecessorFixture.markParentSubmitted();
+  runtime.markExecutionSubmitted(predecessor);
+
+  const successorSourceBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-v2-successor-source',
+    size: 4 * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const successorFixture = createDirectoryV2MechanicsParent(device, {
+    physicalSourceCount: 4,
+    physicalSourceCapacity: 8,
+    buildOrdinal: 38,
+    suppliedSourceBuffer: successorSourceBuffer,
+    suppliedIdentityBuffer: predecessorFixture.identityBuffer,
+    identityOverrides: {
+      generationId: 42,
+      storageGeneration: 12,
+      physicsSubstep: 1,
+      positionEpoch: 18
+    }
+  });
+  const successorEncoder = device.createCommandEncoder();
+  const successor = runtime.encodeTopologySuccessor(successorEncoder, {
+    topologyPredecessor: predecessor,
+    sourceBuffer: successorFixture.sourceBuffer,
+    identityBuffer: successorFixture.identityBuffer,
+    sourceCount: 4,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    identityStrideWords: 1,
+    selectedLevel: 0,
+    parentMechanicsView: successorFixture.parentMechanicsView
+  });
+
+  assert.equal(successor.topologyConstructionMode, 'conservative-successor-copy');
+  assert.equal(successor.topologyPredecessorGenerationId, predecessor.generationId);
+  assert.notEqual(successor.fieldViewBuffer, predecessor.fieldViewBuffer);
+  assert.notEqual(
+    successor.stableCandidateOrderBuffer,
+    predecessor.stableCandidateOrderBuffer
+  );
+  assert.equal(successor.encodedComputePassCount, 1);
+  assert.equal(successor.encodedDispatchCount, 1);
+  assert.deepEqual(runtime.stateMutationState(successor), {
+    ordinal: 0,
+    encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+    operation: 'topology-successor-ready',
+    pending: false,
+    publicationLocked: false,
+    quarantined: false
+  });
+  const copies = successorEncoder.events.filter(({ kind }) => kind === 'copy');
+  assert.equal(copies.length, 2);
+  assert.deepEqual(copies[0], {
+    kind: 'copy',
+    source: predecessor.fieldViewBuffer,
+    sourceOffset: 0,
+    destination: successor.fieldViewBuffer,
+    destinationOffset: 0,
+    size: successor.layout.accumulatorOffsetWords * Uint32Array.BYTES_PER_ELEMENT
+  });
+  assert.equal(copies[1].source, predecessor.stableCandidateOrderBuffer);
+  assert.equal(copies[1].destination, successor.stableCandidateOrderBuffer);
+  const mutableClear = successorEncoder.events.find(({ kind, buffer }) => (
+    kind === 'clear' && buffer === successor.fieldViewBuffer
+  ));
+  assert.equal(
+    mutableClear.offset,
+    successor.layout.accumulatorOffsetWords * Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    mutableClear.size,
+    successor.layout.byteLength - mutableClear.offset
+  );
+  const successorPass = successorEncoder.events.find(({ kind, descriptor }) => (
+    kind === 'pass' && descriptor.label?.endsWith('FinalizeTopologySuccessor')
+  ));
+  assert.deepEqual(successorPass.commands.at(-1).dispatch, [1, 1, 1]);
+
+  successorFixture.markParentSubmitted();
+  runtime.markExecutionSubmitted(successor);
+  const successorAdmission =
+    validateSchroederSpatialMechanicsFieldViewDescriptor(successor);
+  assert.equal(
+    successorAdmission.admitted,
+    true,
+    successorAdmission.status
+  );
+  assert.equal(runtime.releaseExecutionQueueOrdered(successor), true);
+  assert.equal(await runtime.releaseExecutionAfter(predecessor), true);
   assert.equal(runtime.destroy(), true);
 });
 
@@ -1442,7 +1666,10 @@ test('mechanics-field construction is one exact GPU-count packed-radix topology'
   assert.equal(field.routeControlWordLength, 0);
   assert.equal(field.radixGateCount, 0);
   assert.equal(field.radixSortKeyWordCount, 3);
-  assert.equal(field.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
+  assert.equal(
+    field.radixHistogramScanMode,
+    'gpu-count-fixed-hierarchical-fused-top'
+  );
   assert.equal(field.candidateCount, null);
   assert.equal(field.stableCandidateOrderCount, null);
   assert.equal(
@@ -1483,7 +1710,7 @@ test('mechanics-field construction is one exact GPU-count packed-radix topology'
   assert.equal(field.encodedComputePassCount, 6);
   assert.equal(
     field.ownerRuntime.pipelineCount,
-    8 + field.ownerRuntime.arenaCount * 22
+    9 + field.ownerRuntime.arenaCount * 23
   );
   assert.equal(field.ownerRuntime.allocationEntries().some(({ role }) => (
     role === 'mechanics-field-route-control'
@@ -1811,6 +2038,45 @@ test('unmodified mechanics-field publication locks discard without retiring the 
     field,
     replacementLock
   ), true);
+});
+
+test('mechanics-field publication locks retire queue-ordered without a host fence', async () => {
+  const device = createFakeDevice();
+  const { generation } = createSubmittedMechanicsFieldGeneration(device);
+  const field = generation.mechanicsFieldView;
+  const runtime = field.ownerRuntime;
+  const publicationLock = runtime.acquireStatePublicationLock(field, {
+    owner: Object.freeze({ kind: 'exact-successor-retirement-test' })
+  });
+  const mutation = runtime.reserveStateMutation(field, {
+    expectedOrdinal: 0,
+    expectedEncoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+    outputEncoding:
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
+    operation: 'private-state-consumed-by-exact-queued-successor',
+    publicationLock
+  });
+  runtime.markStateMutationSubmitted(mutation);
+
+  let hostQueueFenceCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    hostQueueFenceCount += 1;
+    return new Promise(() => {});
+  };
+  assert.equal(
+    await runtime.retireStatePublicationLockQueueOrdered(
+      field,
+      publicationLock
+    ),
+    true
+  );
+  assert.equal(hostQueueFenceCount, 0);
+  assert.equal(field.released, true);
+  assert.equal(runtime.ownsExecution(field), false);
+  assert.equal(
+    await runtime.executionRetirementCompletionPromise(field),
+    true
+  );
 });
 
 test('mechanics-field quarantine retirement uses runtime evidence and never reuses a retired arena', async () => {
@@ -3477,7 +3743,10 @@ test('native mechanics field applies gravity across duplicate stencils and copie
   ]);
   assert.deepEqual(native.dispatch, [1, 1, 1]);
   assert.equal(native.radixSortKeyWordCount, 3);
-  assert.equal(native.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
+  assert.equal(
+    native.radixHistogramScanMode,
+    'gpu-count-fixed-hierarchical'
+  );
   assert.equal(
     native.constructionRoutePolicy,
     'gpu-authenticated-directory-v2-indirect-gpu-count-radix'
@@ -3879,7 +4148,10 @@ test('native staged mechanics-field P2G is bitwise deterministic across fresh ex
     native.stateEncoding,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
   );
-  assert.equal(native.radixHistogramScanMode, 'gpu-count-fixed-hierarchical');
+  assert.equal(
+    native.radixHistogramScanMode,
+    'gpu-count-fixed-hierarchical-fused-top'
+  );
   assert.equal(new Set(native.hashes).size, 1);
   assert.deepEqual(native.contributionCounts, new Array(27).fill(320));
   assert.ok(native.massMin > 0);

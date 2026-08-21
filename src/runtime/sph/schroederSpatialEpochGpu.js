@@ -71,6 +71,9 @@ import {
   createSchroederSpatialMechanicsFieldViewGpu
 } from './schroederSpatialMechanicsFieldViewGpu.js';
 import {
+  createSchroederSpatialMechanicsFieldPairGpu
+} from './schroederSpatialMechanicsFieldPairGpu.js';
+import {
   createSchroederSpatialPhaseVolumeMomentGpu
 } from './schroederSpatialPhaseVolumeMomentGpu.js';
 import {
@@ -98,6 +101,9 @@ import {
   validateSchroederFrozenFineSubstepAuthorityProof,
   validateSchroederPostClosureLevelAssignment
 } from './schroederFrozenLevelAssignmentRefreshGpu.js';
+import {
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export {
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
@@ -129,14 +135,109 @@ const DIRECT_SPATIAL_EPOCH_ARENA_COUNT_MAX = 8;
 const DIRECT_MECHANICS_VIEW_RUNTIME_CACHE_LIMIT = 4;
 const DIRECT_MECHANICS_FIELD_VIEW_RUNTIME_READY =
   'schroeder-spatial-mechanics-field-view-gpu-runtime-ready';
+const DIRECT_MECHANICS_FIELD_PAIR_RUNTIME_READY =
+  'schroeder-spatial-mechanics-field-pair-gpu-runtime-ready';
 const directSpatialEpochRuntimeCache = new WeakMap();
 const exactNearConsumerAuthentications = new WeakMap();
 const finalizedExactNearConsumerReceipts = new WeakSet();
 const residentExactNearConsumerBindingReceipts = new WeakSet();
 
+function spatialDirectorySignificantDigitRows(plan) {
+  // The public exact key remains lexicographic u32x5:
+  // [chart, signed-order level, signed-order cell x/y/z]. GPU radix rows are
+  // visited from the least-significant word, so the three unconstrained cell
+  // coordinates occupy rows 0..23. A boxed exact-near plan may additionally
+  // carry GPU-enforced cell intervals; omit only nibbles that are uniform
+  // throughout those intervals. General plans retain every coordinate row.
+  const rows = [];
+  const cellMin = Array.from(plan?.atlas?.cellMin || []);
+  const cellCount = Array.from(plan?.atlas?.cellCount || []);
+  const boundedCells = cellMin.length === 3
+    && cellCount.length === 3
+    && cellMin.every((value) => Number.isInteger(value))
+    && cellCount.every((value) => Number.isInteger(value) && value > 0)
+    && cellMin.every((value, axis) => (
+      value >= -0x8000_0000
+      && value + cellCount[axis] - 1 <= 0x7fff_ffff
+    ));
+  if (boundedCells) {
+    // Radix rows visit the least-significant key word first: z, y, x.
+    for (const axis of [2, 1, 0]) {
+      const minOrder = (cellMin[axis] ^ 0x8000_0000) >>> 0;
+      const maxOrder = (
+        (cellMin[axis] + cellCount[axis] - 1) ^ 0x8000_0000
+      ) >>> 0;
+      const rowBase = (2 - axis) * 8;
+      for (let digit = 0; digit < 8; digit += 1) {
+        const divisor = 2 ** (digit * 4);
+        if (
+          Math.floor(minOrder / divisor)
+          !== Math.floor(maxOrder / divisor)
+        ) {
+          rows.push(rowBase + digit);
+        }
+      }
+    }
+  } else {
+    rows.push(...Array.from({ length: 24 }, (_, index) => index));
+  }
+  const minLevel = Number(plan?.queryMinLevel);
+  const maxLevel = Number(plan?.queryMaxLevel);
+  if (
+    Number.isInteger(minLevel)
+    && Number.isInteger(maxLevel)
+    && minLevel >= -0x8000_0000
+    && maxLevel <= 0x7fff_ffff
+    && minLevel <= maxLevel
+  ) {
+    const minOrder = (minLevel ^ 0x8000_0000) >>> 0;
+    const maxOrder = (maxLevel ^ 0x8000_0000) >>> 0;
+    for (let digit = 0; digit < 8; digit += 1) {
+      const divisor = 2 ** (digit * 4);
+      if (
+        Math.floor(minOrder / divisor)
+        !== Math.floor(maxOrder / divisor)
+      ) {
+        rows.push(24 + digit);
+      }
+    }
+  } else {
+    rows.push(...Array.from({ length: 8 }, (_, index) => 24 + index));
+  }
+  return Object.freeze(rows);
+}
+
+function normalizedV2CellAtlas(atlas, plan) {
+  if (atlas == null) return null;
+  const cellMin = Array.from(atlas.cellMin || []);
+  const cellCount = Array.from(atlas.cellCount || []);
+  const ready = cellMin.length === 3
+    && cellCount.length === 3
+    && cellMin.every((value) => Number.isInteger(value))
+    && cellCount.every((value) => Number.isInteger(value) && value > 0)
+    && cellMin.every((value, axis) => (
+      value >= -0x8000_0000
+      && value + cellCount[axis] - 1 <= 0x7fff_ffff
+    ));
+  if (!ready) {
+    throw new RangeError(
+      'directory-v2 atlas must contain three nonempty in-range i32 cell intervals'
+    );
+  }
+  return Object.freeze({
+    chartMin: plan.queryChartId,
+    chartCount: 1,
+    levelMin: plan.queryMinLevel,
+    levelCount: plan.queryMaxLevel - plan.queryMinLevel + 1,
+    cellMin: Object.freeze(cellMin),
+    cellCount: Object.freeze(cellCount)
+  });
+}
+
 export const SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS =
   'schroeder-spatial-exact-near-resident-evidence-bound';
 const ownedSpatialEpochGenerations = new WeakSet();
+const spatialEpochGenerationLineages = new WeakMap();
 const postSubmitCleanupGenerationOrigins = new WeakMap();
 const spatialEpochGenerationRetirements = new WeakMap();
 const spatialEpochGenerationConsumerLeases = new WeakMap();
@@ -1687,7 +1788,7 @@ export function createSchroederSpatialEpochGpu(device, {
     const resolvedSourceFamilyId = sourceFamilyId == null
       ? fnv1a32(sourceFamily)
       : sourceFamilyId;
-    const plan = directoryV2
+    const basePlan = directoryV2
       ? createSchroederSpatialEpochV2BuildPlan({
           physicalSourceCount: resolvedSourceCount,
           physicalSourceCapacity: resolvedMaxSourceCount,
@@ -1735,6 +1836,12 @@ export function createSchroederSpatialEpochGpu(device, {
           sortUniqueOrdinal,
           exactNearQueryProfile
         });
+    const plan = directoryV2 && atlas != null
+      ? Object.freeze({
+          ...basePlan,
+          atlas: normalizedV2CellAtlas(atlas, basePlan)
+        })
+      : basePlan;
     let activeSourceAdmission = null;
     let activeSourceCountAuthority = null;
     if (directoryV2) {
@@ -2003,6 +2110,8 @@ export function createSchroederSpatialEpochGpu(device, {
             maxElementCount: plan.activeSourceCapacity,
             keyWordCount: plan.sortKeyWordCount,
             keyStrideWords: plan.sortKeyStrideWords,
+            significantDigitRows:
+              spatialDirectorySignificantDigitRows(plan),
             generationId: plan.generationId,
             consumerWorkgroupSize: SCHROEDER_SPATIAL_EPOCH_WORKGROUP_SIZE,
             retainedParamsSlotIndex: 0,
@@ -2539,6 +2648,48 @@ export function createSchroederSpatialEpochGpu(device, {
     return finalizeReleaseExecution(execution, ownership, { retirementRecord });
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      const retirementRecord = retirementRecordFor(execution);
+      const ownership = rawOwnedExecutionRecord(execution);
+      return Boolean(
+        !retirementRecord.completed
+        && !deviceLossObserved
+        && !retirementRecord.activeAttempt
+        && ownership
+        && submittedExecutions.has(execution)
+        && ownership.arena.radix.canReleaseExecutionQueueOrdered?.(
+          ownership.radixUnique
+        ) === true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered spatial epoch release requires an exact submitted execution'
+      );
+    }
+    const retirementRecord = retirementRecordFor(execution);
+    const ownership = rawOwnedExecutionRecord(execution);
+    const radixReleased =
+      ownership.arena.radix.releaseExecutionQueueOrdered?.(
+        ownership.radixUnique
+      );
+    if (radixReleased !== true) {
+      throw new Error(
+        'queue-ordered spatial epoch radix owner did not confirm release'
+      );
+    }
+    return finalizeReleaseExecution(execution, ownership, {
+      radixReleased: true,
+      retirementRecord
+    });
+  }
+
   function releaseExecutionAfter(execution, submissionFence) {
     try {
     if (!submissionFence || typeof submissionFence.then !== 'function') {
@@ -2777,6 +2928,8 @@ export function createSchroederSpatialEpochGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     quarantineExecutionAfterDeviceLoss,
     executionRetirementCompletionPromise,
@@ -2790,13 +2943,38 @@ function directSpatialEpochRuntime(
   device,
   sourceCount,
   directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_VERSION,
-  directArenaCount = DIRECT_SPATIAL_EPOCH_ARENA_COUNT
+  directArenaCount = DIRECT_SPATIAL_EPOCH_ARENA_COUNT,
+  requestedActiveSourceCapacity = null
 ) {
   const capacity = positivePowerOfTwoCapacity(sourceCount);
   const resolvedDirectoryAbiVersion = spatialDirectoryAbiVersion(
     directoryAbiVersion
   );
-  const activeSourceCapacity = capacity;
+  const activeSourceCapacity =
+    resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      ? (
+          requestedActiveSourceCapacity == null
+            ? capacity
+            : positiveInteger(
+                requestedActiveSourceCapacity,
+                'activeSourceCapacity',
+                capacity
+              )
+        )
+      : capacity;
+  if (
+    resolvedDirectoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    && requestedActiveSourceCapacity != null
+    && positiveInteger(
+      requestedActiveSourceCapacity,
+      'activeSourceCapacity',
+      capacity
+    ) !== capacity
+  ) {
+    throw new RangeError(
+      'directory-v1 generation requires activeSourceCapacity === physical capacity'
+    );
+  }
   const cellCapacity = activeSourceCapacity;
   const resolvedDirectArenaCount = directSpatialEpochArenaCount(directArenaCount);
   const cacheKey = [
@@ -2830,6 +3008,8 @@ function directSpatialEpochRuntime(
     mechanicsViewRuntimes: new Map(),
     mechanicsFieldViewRuntimes: new Map(),
     mechanicsFieldViewDrainingRuntimes: new Set(),
+    mechanicsFieldPairRuntimes: new Map(),
+    mechanicsFieldPairDrainingRuntimes: new Set(),
     phaseVolumeMomentRuntimes: new Map(),
     phaseVolumeReceiptRuntimes: new Map(),
     phaseVolumeInterfaceProposalRuntimes: new Map(),
@@ -2845,6 +3025,7 @@ function directSpatialEpochRuntime(
     directArenaCount: resolvedDirectArenaCount,
     runtimeCacheKey: cacheKey,
     mechanicsFieldViewDrainingRuntimeLimit: resolvedDirectArenaCount * 2,
+    mechanicsFieldPairDrainingRuntimeLimit: resolvedDirectArenaCount * 2,
     generation: 0,
     buildCount: 0,
     liveGenerations: []
@@ -2862,9 +3043,6 @@ function directActiveSourceViewRuntime(device, entry) {
   if (!entry.activeSourceViewRuntime) {
     entry.activeSourceViewRuntime = createSchroederSpatialActiveSourceViewGpu(device, {
       maxPhysicalSourceCount: entry.capacity,
-      // Stage A deliberately retains the physical tier. A later directory-v2
-      // slice may supply a smaller monotonic live-capacity tier without
-      // changing this projection ABI.
       activeSourceCapacity: entry.activeSourceCapacity,
       arenaCount: entry.directArenaCount,
       label:
@@ -3020,7 +3198,8 @@ function createDirectMechanicsFieldViewRuntime(
   dims
 ) {
   return createSchroederSpatialMechanicsFieldViewGpu(device, {
-    maxSourceCount: entry.capacity,
+    maxPhysicalSourceCount: entry.capacity,
+    activeSourceCapacity: entry.activeSourceCapacity,
     gridNodeCount: mechanicsGrid.gridNodeCount,
     gridDims: dims,
     gridShift: mechanicsGrid.gridShift,
@@ -3116,6 +3295,267 @@ function directMechanicsFieldViewRuntime(device, entry, mechanicsGrid, identityS
       dims
     );
     entry.mechanicsFieldViewRuntimes.set(key, runtime);
+  }
+  return runtime;
+}
+
+function mechanicsFieldPairCacheBackpressure(message) {
+  const error = new Error(message);
+  error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_CACHE_BACKPRESSURE';
+  return error;
+}
+
+function directMechanicsFieldPairActiveExecutions(entry, runtime) {
+  const executions = [];
+  const seen = new Set();
+  for (const generation of entry.liveGenerations) {
+    if (generation.mechanicsFieldPairRuntime !== runtime) continue;
+    const execution = generation.mechanicsFieldPair;
+    if (!execution || execution.released === true) continue;
+    let owned = false;
+    try {
+      owned = runtime.ownsExecution(execution) === true;
+    } catch {
+      owned = false;
+    }
+    if (!owned || seen.has(execution)) {
+      throw mechanicsFieldPairCacheBackpressure(
+        'mechanics field pair cache rollover could not prove every exact live owner'
+      );
+    }
+    seen.add(execution);
+    executions.push(execution);
+  }
+  return executions;
+}
+
+function finalizeDirectMechanicsFieldPairDrain(entry, record) {
+  if (record.destroyed) return true;
+  if (record.retirementConfirmed !== true) return false;
+  if (record.runtime.activeExecutionCount() !== 0) {
+    record.failureReason =
+      'mechanics field pair drain retained an active execution after exact retirement';
+    return false;
+  }
+  try {
+    if (record.runtime.destroy() !== true) {
+      throw new Error(
+        'mechanics field pair draining runtime destruction was replayed'
+      );
+    }
+    record.destroyed = true;
+    entry.mechanicsFieldPairDrainingRuntimes.delete(record);
+    return true;
+  } catch (error) {
+    record.failureReason = error instanceof Error ? error.message : String(error);
+    return false;
+  }
+}
+
+function reapDirectMechanicsFieldPairDrainingRuntimes(entry) {
+  if (!entry?.mechanicsFieldPairDrainingRuntimes) return;
+  for (const record of entry.mechanicsFieldPairDrainingRuntimes) {
+    finalizeDirectMechanicsFieldPairDrain(entry, record);
+  }
+}
+
+function prepareDirectMechanicsFieldPairDrain(entry, key, runtime) {
+  const executions = directMechanicsFieldPairActiveExecutions(entry, runtime);
+  const activeExecutionCount = runtime.activeExecutionCount();
+  if (executions.length !== activeExecutionCount) {
+    throw mechanicsFieldPairCacheBackpressure(
+      'mechanics field pair cache rollover active-owner accounting was incomplete'
+    );
+  }
+  if (
+    executions.length > 0
+    && entry.mechanicsFieldPairDrainingRuntimes.size
+      >= entry.mechanicsFieldPairDrainingRuntimeLimit
+  ) {
+    throw mechanicsFieldPairCacheBackpressure(
+      'mechanics field pair cache draining-runtime bound is exhausted'
+    );
+  }
+  const retirementPromises = executions.map((execution) => {
+    const completion = runtime.executionRetirementCompletionPromise(execution);
+    if (!completion || typeof completion.then !== 'function') {
+      throw mechanicsFieldPairCacheBackpressure(
+        'mechanics field pair cache rollover lost an exact retirement completion'
+      );
+    }
+    return completion;
+  });
+  return { key, runtime, executions, retirementPromises };
+}
+
+function beginDirectMechanicsFieldPairDrain(entry, prepared) {
+  const {
+    key,
+    runtime,
+    executions,
+    retirementPromises
+  } = prepared;
+  if (executions.length === 0) {
+    if (runtime.destroy() !== true) {
+      throw mechanicsFieldPairCacheBackpressure(
+        'idle depleted mechanics field pair runtime destruction was not confirmed'
+      );
+    }
+    return null;
+  }
+  const record = {
+    key,
+    runtime,
+    executions: Object.freeze([...executions]),
+    retirementConfirmed: false,
+    destroyed: false,
+    completionPromise: null,
+    failureReason: null
+  };
+  entry.mechanicsFieldPairDrainingRuntimes.add(record);
+  const completionPromise = Promise.all(retirementPromises).then((confirmed) => {
+    if (confirmed.some((retired) => retired !== true)) {
+      throw new Error(
+        'mechanics field pair draining runtime retirement was not confirmed'
+      );
+    }
+    record.retirementConfirmed = true;
+    if (!finalizeDirectMechanicsFieldPairDrain(entry, record)) {
+      throw new Error(
+        record.failureReason
+        ?? 'mechanics field pair draining runtime remained live after retirement'
+      );
+    }
+    return true;
+  }).catch((error) => {
+    record.failureReason = error instanceof Error ? error.message : String(error);
+    throw error;
+  });
+  record.completionPromise = completionPromise;
+  completionPromise.catch(() => {});
+  return record;
+}
+
+function createDirectMechanicsFieldPairRuntime(
+  device,
+  entry,
+  mechanicsLevelSpecs,
+  identityStrideWords
+) {
+  return createSchroederSpatialMechanicsFieldPairGpu(device, {
+    maxPhysicalSourceCount: entry.capacity,
+    activeSourceCapacity: entry.activeSourceCapacity,
+    levelGrids: mechanicsLevelSpecs.map((levelSpec) => (
+      levelSpec.mechanicsGrid
+    )),
+    identityStrideWords,
+    arenaCount: entry.directArenaCount,
+    label:
+      `ulg-schroeder-direct-mechanics-field-pair-v${entry.directoryAbiVersion}`
+      + `-${entry.capacity}`
+      + `-${mechanicsLevelSpecs.map((levelSpec) => (
+        Array.from(levelSpec.mechanicsGrid.gridDims || []).join('x')
+      )).join('-to-')}`
+      + `-arenas-${entry.directArenaCount}`
+  });
+}
+
+function directMechanicsFieldPairRuntime(
+  device,
+  entry,
+  mechanicsLevelSpecs,
+  identityStrideWords
+) {
+  if (
+    entry.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+    || !Array.isArray(mechanicsLevelSpecs)
+    || mechanicsLevelSpecs.length !== 2
+  ) return null;
+  reapDirectMechanicsFieldPairDrainingRuntimes(entry);
+  const key = [
+    `v${entry.directoryAbiVersion}`,
+    ...mechanicsLevelSpecs.flatMap((levelSpec) => {
+      const grid = levelSpec.mechanicsGrid;
+      const dims = Array.from(grid.gridDims || []);
+      return [
+        levelSpec.selectedLevel,
+        grid.gridNodeCount,
+        dims[0],
+        dims[1],
+        dims[2],
+        grid.gridShift,
+        Math.fround(grid.gridSpacingM)
+      ];
+    }),
+    identityStrideWords
+  ].join(':');
+  let runtime = entry.mechanicsFieldPairRuntimes.get(key);
+  if (runtime) {
+    const availableArenaCount = runtime.availableArenaCount();
+    const irreversiblyDepleted = availableArenaCount === 0
+      && (
+        runtime.retiredArenaCount() > 0
+        || runtime.quarantinedArenaCount() > 0
+      );
+    if (irreversiblyDepleted) {
+      if (
+        runtime.status !== DIRECT_MECHANICS_FIELD_PAIR_RUNTIME_READY
+        || deviceLossTerminalizedSpatialRuntimes.has(runtime)
+        || spatialEpochLostDevices.has(device)
+      ) {
+        throw mechanicsFieldPairCacheBackpressure(
+          'device-loss mechanics field pair runtime cannot be cache-rotated'
+        );
+      }
+      const prepared = prepareDirectMechanicsFieldPairDrain(
+        entry,
+        key,
+        runtime
+      );
+      // Mark (or synchronously complete) the depleted owner's exact drain
+      // before allocating its replacement. Idle owners release their complete
+      // retained footprint first; live owners become visible in the bounded
+      // draining ledger before any replacement allocation can fail. If
+      // construction then fails, the cache remains empty and the next caller
+      // can retry without restoring a destroyed or draining runtime.
+      beginDirectMechanicsFieldPairDrain(entry, prepared);
+      entry.mechanicsFieldPairRuntimes.delete(key);
+      const replacement = createDirectMechanicsFieldPairRuntime(
+        device,
+        entry,
+        mechanicsLevelSpecs,
+        identityStrideWords
+      );
+      entry.mechanicsFieldPairRuntimes.set(key, replacement);
+      return replacement;
+    }
+    entry.mechanicsFieldPairRuntimes.delete(key);
+    entry.mechanicsFieldPairRuntimes.set(key, runtime);
+  }
+  if (!runtime) {
+    if (
+      entry.mechanicsFieldPairRuntimes.size
+        >= DIRECT_MECHANICS_VIEW_RUNTIME_CACHE_LIMIT
+    ) {
+      const retired = [...entry.mechanicsFieldPairRuntimes.entries()].find(
+        ([, candidate]) => candidate.activeExecutionCount?.() === 0
+      );
+      if (!retired) {
+        throw mechanicsFieldPairCacheBackpressure(
+          'mechanics field pair runtime cache is under live-generation backpressure'
+        );
+      }
+      const [retiredKey, retiredRuntime] = retired;
+      entry.mechanicsFieldPairRuntimes.delete(retiredKey);
+      retiredRuntime.destroy();
+    }
+    runtime = createDirectMechanicsFieldPairRuntime(
+      device,
+      entry,
+      mechanicsLevelSpecs,
+      identityStrideWords
+    );
+    entry.mechanicsFieldPairRuntimes.set(key, runtime);
   }
   return runtime;
 }
@@ -3432,9 +3872,11 @@ function directAggregateViewRuntime(device, entry) {
   if (!entry.aggregateViewRuntime) {
     entry.aggregateViewRuntime = createSchroederSpatialAggregateViewGpu(device, {
       maxSourceCount: entry.capacity,
-      cellCapacity: entry.capacity,
+      cellCapacity: entry.activeSourceCapacity,
       arenaCount: entry.directArenaCount,
-      label: `ulg-schroeder-direct-aggregate-view-${entry.capacity}-arenas-${entry.directArenaCount}`
+      label:
+        `ulg-schroeder-direct-aggregate-view-p${entry.capacity}`
+        + `-a${entry.activeSourceCapacity}-arenas-${entry.directArenaCount}`
     });
   }
   return entry.aggregateViewRuntime;
@@ -3444,9 +3886,11 @@ function directExactNearCellTreeRuntime(device, entry) {
   if (!entry.exactNearCellTreeRuntime) {
     entry.exactNearCellTreeRuntime = createSchroederSpatialExactNearCellTreeGpu(device, {
       maxSourceCount: entry.capacity,
-      cellCapacity: entry.capacity,
+      cellCapacity: entry.activeSourceCapacity,
       arenaCount: entry.directArenaCount,
-      label: `ulg-schroeder-direct-exact-near-cell-tree-${entry.capacity}-arenas-${entry.directArenaCount}`
+      label:
+        `ulg-schroeder-direct-exact-near-cell-tree-p${entry.capacity}`
+        + `-a${entry.activeSourceCapacity}-arenas-${entry.directArenaCount}`
     });
   }
   return entry.exactNearCellTreeRuntime;
@@ -3607,6 +4051,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   particleCount = null,
   particleIdentityBuffer = null,
   particleIdentityStrideWords = 1,
+  exactCellAtlas = null,
   particleBufferSet = null,
   laneId = 'direct-schroeder-scene',
   sourceFamily = null,
@@ -3615,11 +4060,27 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   selectedLevel = 0,
   mechanicsLevels = null,
   directArenaCount = DIRECT_SPATIAL_EPOCH_ARENA_COUNT,
+  activeSourceCapacity = null,
   mechanicsFieldForceRadixFallback = false,
+  // The shared-radix paired builder is a performance experiment until its
+  // low-N crossover and lifecycle are accepted. Preserve the established
+  // independent directory-v2 mechanics fields unless callers opt in
+  // explicitly.
+  mechanicsFieldPairV2Enabled = false,
+  // A frozen fine-level G2P preserves the immutable spatial topology at both
+  // mechanics levels. When the caller supplies those exact live predecessor
+  // fields, retain each topology in a fresh arena and rebuild only mutable
+  // state.
+  mechanicsFieldTopologyPredecessors = null,
   // The receipt remains enabled in every production call.  This opt-out is
   // deliberately diagnostic-only: it exists solely to take same-source GPU
   // timestamp A/B evidence while preserving the preceding S9-A sidecar.
   phaseVolumeReceiptEnabled = true,
+  // S9-A/S9-B are mechanics-transport artifacts rather than directory
+  // authority. Keep them enabled by default for existing callers, but allow
+  // an immutable reader contract to omit the complete sidecar family when no
+  // P2G/G2P consumer can observe it (for example the terminal public E*).
+  phaseVolumeSidecarsEnabled = true,
   // Native compatibility tests still execute the retained directory-v1
   // ActiveRank consumer. Production level-assignment generations always use
   // directory v2. The old public boolean is rejected; only a one-shot,
@@ -3631,6 +4092,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   // can consume its sealed local heads and reflux routes; this builder itself
   // does not mutate material state.
   phaseVolumeInterfaceProposalEnabled = false,
+  // Exact-near trees are derived views, not directory authority. Callers that
+  // publish no exact-near reader may omit the tree while retaining the same
+  // canonical directory, mechanics, hierarchy, and phase-volume generation.
+  exactNearCellTreeEnabled = true,
   gpuTimestampRecorder = null
 } = {}) {
   if (!device?.createCommandEncoder || !device?.queue?.submit) {
@@ -3641,6 +4106,40 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   if (typeof phaseVolumeReceiptEnabled !== 'boolean') {
     throw new TypeError(
       'phaseVolumeReceiptEnabled must be a boolean when collecting diagnostic A/B evidence'
+    );
+  }
+  if (typeof phaseVolumeSidecarsEnabled !== 'boolean') {
+    throw new TypeError(
+      'phaseVolumeSidecarsEnabled must be a boolean derived from the immutable reader contract'
+    );
+  }
+  if (typeof mechanicsFieldPairV2Enabled !== 'boolean') {
+    throw new TypeError(
+      'mechanicsFieldPairV2Enabled must be a boolean'
+    );
+  }
+  const resolvedMechanicsFieldTopologyPredecessors =
+    mechanicsFieldTopologyPredecessors == null
+      ? []
+      : Array.from(mechanicsFieldTopologyPredecessors);
+  if (
+    resolvedMechanicsFieldTopologyPredecessors.length > 0
+    && mechanicsFieldPairV2Enabled
+  ) {
+    throw new TypeError(
+      'mechanics-field topology successor reuse is incompatible with paired-v2 construction'
+    );
+  }
+  if (
+    resolvedMechanicsFieldTopologyPredecessors.some(
+      (predecessor) => !predecessor || !Number.isInteger(predecessor.selectedLevel)
+    )
+    || new Set(resolvedMechanicsFieldTopologyPredecessors.map(
+      (predecessor) => predecessor.selectedLevel
+    )).size !== resolvedMechanicsFieldTopologyPredecessors.length
+  ) {
+    throw new TypeError(
+      'mechanicsFieldTopologyPredecessors must contain unique selected-level fields'
     );
   }
   if (nativeTestLegacyLevelAssignmentDirectoryV1 !== undefined) {
@@ -3657,6 +4156,11 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   if (typeof phaseVolumeInterfaceProposalEnabled !== 'boolean') {
     throw new TypeError(
       'phaseVolumeInterfaceProposalEnabled must be a boolean for the read-only S9-C topology mount'
+    );
+  }
+  if (typeof exactNearCellTreeEnabled !== 'boolean') {
+    throw new TypeError(
+      'exactNearCellTreeEnabled must be a boolean derived from the immutable reader contract'
     );
   }
   if (spatialEpochLostDevices.has(device)) {
@@ -3703,6 +4207,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3723,6 +4230,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3736,6 +4246,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3744,6 +4257,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   if (
     phaseVolumeInterfaceProposalEnabled
     && (
+      phaseVolumeSidecarsEnabled !== true
+      ||
       phaseVolumeReceiptEnabled !== true
       || mechanicsLevelSpecs.length !== 2
     )
@@ -3751,11 +4266,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     return {
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-phase-volume-interface-proposal-rejected-level-contract',
-      reason: 'read-only S9-C interface topology requires enabled S9-B receipts on exactly two mechanics levels',
+      reason: 'read-only S9-C interface topology requires enabled S9-A/S9-B sidecars on exactly two mechanics levels',
       errorCode: 'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY',
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3775,6 +4293,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3802,6 +4323,9 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ready: false,
       selected: false,
       source,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: false,
+      mechanicsFieldConstructionMode: 'not-built',
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
@@ -3815,6 +4339,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   let mechanicsViewRuntime = null;
   let mechanicsFieldViewExecution = null;
   let mechanicsFieldViewRuntime = null;
+  let mechanicsFieldPairExecution = null;
+  let mechanicsFieldPairRuntime = null;
   let phaseVolumeMomentExecution = null;
   let phaseVolumeMomentRuntime = null;
   let phaseVolumeReceiptExecution = null;
@@ -3859,7 +4385,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       device,
       source.sourceCount,
       directoryAbiVersion,
-      directArenaCount
+      directArenaCount,
+      activeSourceCapacity
     );
     const { entry, cacheHit } = cache;
     const resolvedSourceFamily = sourceFamily || (
@@ -3886,6 +4413,19 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           physicsSubstep: source.physicsSubstep
       })
       : null;
+    const markGenerationQueueBoundary = (stage, extra = {}) => (
+      gpuTimestampRecorder?.markQueueBoundary?.({
+        producerId: `schroeder-spatial-generation-${stage}`,
+        stage,
+        generationId,
+        laneId,
+        sourceFamily: resolvedSourceFamily,
+        physicsTick: source.physicsTick,
+        physicsSubstep: source.physicsSubstep,
+        ...extra
+      })
+    );
+    markGenerationQueueBoundary('generation-start');
     if (
       directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
       && source.sourceRowLayoutId
@@ -3931,12 +4471,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           activeSourceViewTimestampSpan
         );
       }
+      markGenerationQueueBoundary('after-active-source-upload');
     }
     execution = entry.runtime.encode(encoder, {
       sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
       sourceCount: source.sourceCount,
       sourceRowLayoutId: source.sourceRowLayoutId,
       sortMode: 'lexicographic-u32x5',
+      atlas: exactCellAtlas,
       generationId,
       leaseToken: generationId,
       sourceFamily: resolvedSourceFamily,
@@ -3973,11 +4515,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         'directory v2 did not retain its exact encoded ActiveSource authority'
       );
     }
-    // The exact cell hierarchy is intentionally independent of mechanics,
-    // rendering, and aggregate-tree admission.  It is derived once from the
-    // authenticated directory whenever that directory carries the exact-near
-    // profile required by canonical reaction discovery.
-    if (execution.exactNearQueryProfile?.ready === true) {
+    markGenerationQueueBoundary('after-directory-upload');
+    // The exact cell hierarchy remains independent of mechanics, rendering,
+    // and aggregate-tree admission, but is materialized only when this
+    // generation's immutable reader set contains an exact-near consumer.
+    if (
+      exactNearCellTreeEnabled
+      && execution.exactNearQueryProfile?.ready === true
+    ) {
       exactNearCellTreeRuntime = directExactNearCellTreeRuntime(device, entry);
       const exactNearCellTreeTimestampSpan = gpuTimestampRecorder?.active === true
         && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
@@ -4003,6 +4548,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           exactNearCellTreeTimestampSpan
         );
       }
+      markGenerationQueueBoundary('after-exact-near-upload');
     }
     const viewBuildTimestampSpan = gpuTimestampRecorder?.active === true
       && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
@@ -4017,6 +4563,114 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           physicsSubstep: source.physicsSubstep
         })
       : null;
+    const resolvedParticleIdentityStrideWords = particleIdentityBuffer
+      ? positiveInteger(
+          particleIdentityStrideWords,
+          'particleIdentityStrideWords',
+          16
+        )
+      : null;
+    if (
+      particleIdentityBuffer
+      && !webGpuBufferMatchesDevice(particleIdentityBuffer, device)
+    ) {
+      throw new TypeError(
+        'mechanics field identity buffer must belong to the generation device'
+      );
+    }
+    const encodePhaseVolumeSidecars = (levelView) => {
+      if (
+        !phaseVolumeSidecarsEnabled
+        || !phaseVolumeMomentSourceAdmitted
+        || !levelView.mechanicsFieldView
+      ) {
+        return;
+      }
+      levelView.phaseVolumeMomentRuntime = directPhaseVolumeMomentRuntime(
+        device,
+        entry,
+        levelView.mechanicsFieldView
+      );
+      const phaseVolumeMomentTimestampSpan = gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+        ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+            producerId: 'schroeder-spatial-phase-volume-moment-build',
+            stage: 'phase-volume-moment-build',
+            spanClass: 'same-production-command-encoder',
+            generationId,
+            laneId,
+            selectedLevel: levelView.selectedLevel,
+            sourceFamily: resolvedSourceFamily,
+            physicsTick: source.physicsTick,
+            physicsSubstep: source.physicsSubstep
+          })
+        : null;
+      levelView.phaseVolumeMoment = levelView.phaseVolumeMomentRuntime.encode(
+        encoder,
+        {
+          sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
+          sourceMechanicsBuffer: source.sourceMechanicsBuffer,
+          sourceMechanicsBufferBorrowed: true,
+          mechanicsFieldView: levelView.mechanicsFieldView,
+          gpuTimestampRecorder,
+          timestampMetadata: {
+            laneId,
+            sourceFamily: resolvedSourceFamily,
+            physicsTick: source.physicsTick,
+            physicsSubstep: source.physicsSubstep
+          }
+        }
+      );
+      if (phaseVolumeMomentTimestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(
+          encoder,
+          phaseVolumeMomentTimestampSpan
+        );
+      }
+      if (!phaseVolumeReceiptEnabled) return;
+      levelView.phaseVolumeReceiptRuntime = directPhaseVolumeReceiptRuntime(
+        device,
+        entry,
+        levelView.phaseVolumeMoment
+      );
+      const phaseVolumeReceiptTimestampSpan = gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+        && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
+        ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+            producerId: 'schroeder-spatial-phase-volume-receipt-build',
+            stage: 'phase-volume-receipt-build',
+            spanClass: 'same-production-command-encoder',
+            generationId,
+            laneId,
+            selectedLevel: levelView.selectedLevel,
+            sourceFamily: resolvedSourceFamily,
+            physicsTick: source.physicsTick,
+            physicsSubstep: source.physicsSubstep
+          })
+        : null;
+      levelView.phaseVolumeReceipt = levelView.phaseVolumeReceiptRuntime.encode(
+        encoder,
+        {
+          phaseVolumeMoment: levelView.phaseVolumeMoment,
+          gpuTimestampRecorder,
+          timestampMetadata: {
+            laneId,
+            sourceFamily: resolvedSourceFamily,
+            physicsTick: source.physicsTick,
+            physicsSubstep: source.physicsSubstep
+          }
+        }
+      );
+      if (phaseVolumeReceiptTimestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(
+          encoder,
+          phaseVolumeReceiptTimestampSpan
+        );
+      }
+    };
+    // Encode every compact parent first. The retained pair builder must see
+    // both exact unsubmitted parents before it can share one ActiveSource-sized
+    // radix across their fine/coarse child dictionaries.
     for (const levelSpec of mechanicsLevelSpecs) {
       const levelMechanicsViewRuntime = directMechanicsViewRuntime(
         device,
@@ -4037,23 +4691,23 @@ export function runSchroederSpatialEpochGenerationWebGpu({
             physicsSubstep: source.physicsSubstep
           })
         : null;
-      const levelMechanicsViewExecution = levelMechanicsViewRuntime?.encode(encoder, {
-        sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
-        sourceCount: source.sourceCount,
-        sourceRowLayoutId: source.sourceRowLayoutId,
-        selectedLevel: levelSpec.selectedLevel,
-        spatialExecution: execution
-      });
+      const levelMechanicsViewExecution = levelMechanicsViewRuntime?.encode(
+        encoder,
+        {
+          sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
+          sourceCount: source.sourceCount,
+          sourceRowLayoutId: source.sourceRowLayoutId,
+          selectedLevel: levelSpec.selectedLevel,
+          spatialExecution: execution
+        }
+      );
       if (mechanicsViewTimestampSpan) {
         gpuTimestampRecorder.endEncoderSpan(
           encoder,
           mechanicsViewTimestampSpan
         );
       }
-      // Record the compact execution before acquiring the paired field arena.
-      // Field acquisition can fail under authentic backpressure; cleanup must
-      // still own and discard the already-acquired compact execution.
-      const levelView = {
+      mechanicsLevelViews.push({
         selectedLevel: levelSpec.selectedLevel,
         mechanicsGrid: levelSpec.mechanicsGrid,
         mechanicsView: levelMechanicsViewExecution,
@@ -4064,85 +4718,133 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         phaseVolumeMomentRuntime: null,
         phaseVolumeReceipt: null,
         phaseVolumeReceiptRuntime: null
-      };
-      mechanicsLevelViews.push(levelView);
-      if (particleIdentityBuffer) {
-        if (!webGpuBufferMatchesDevice(particleIdentityBuffer, device)) {
-          throw new TypeError(
-            'mechanics field identity buffer must belong to the generation device'
-          );
-        }
-        levelView.mechanicsFieldViewRuntime = directMechanicsFieldViewRuntime(
-          device,
-          entry,
-          levelSpec.mechanicsGrid,
-          positiveInteger(particleIdentityStrideWords, 'particleIdentityStrideWords', 16)
-        );
-        const mechanicsFieldTimestampSpan = gpuTimestampRecorder?.active === true
-          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+      });
+      if (!particleIdentityBuffer) {
+        markGenerationQueueBoundary('after-mechanics-level-upload', {
+          selectedLevel: levelSpec.selectedLevel
+        });
+      }
+    }
+    markGenerationQueueBoundary('after-mechanics-parent-views');
+    if (mechanicsFieldPairV2Enabled
+      && particleIdentityBuffer
+      && mechanicsLevelViews.length === 2
+      && directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION) {
+      mechanicsFieldPairRuntime = directMechanicsFieldPairRuntime(
+        device,
+        entry,
+        mechanicsLevelSpecs,
+        resolvedParticleIdentityStrideWords
+      );
+      const mechanicsFieldPairTimestampSpan =
+        gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
           ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
-              producerId: 'schroeder-spatial-mechanics-field-view-build',
-              stage: 'mechanics-field-view-build',
+              producerId: 'schroeder-spatial-mechanics-field-pair-build',
+              stage: 'mechanics-field-pair-build',
               spanClass: 'same-production-command-encoder',
               generationId,
               laneId,
-              selectedLevel: levelSpec.selectedLevel,
+              selectedLevels: mechanicsLevelViews.map(
+                (levelView) => levelView.selectedLevel
+              ),
               sourceFamily: resolvedSourceFamily,
               physicsTick: source.physicsTick,
               physicsSubstep: source.physicsSubstep
             })
           : null;
-        levelView.mechanicsFieldView = levelView.mechanicsFieldViewRuntime.encode(encoder, {
-          sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
-          identityBuffer: particleIdentityBuffer,
-          sourceCount: source.sourceCount,
-          sourceRowLayoutId: source.sourceRowLayoutId,
-          identityStrideWords: particleIdentityStrideWords,
-          selectedLevel: levelSpec.selectedLevel,
-          parentMechanicsView: levelMechanicsViewExecution,
-          forceRadixFallback:
-            directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
-              ? false
-              : mechanicsFieldForceRadixFallback,
-          gpuTimestampRecorder,
-          timestampMetadata: {
-            laneId,
-            sourceFamily: resolvedSourceFamily,
-            physicsTick: source.physicsTick,
-            physicsSubstep: source.physicsSubstep
-          }
-        });
-        if (mechanicsFieldTimestampSpan) {
-          gpuTimestampRecorder.endEncoderSpan(
-            encoder,
-            mechanicsFieldTimestampSpan
+      mechanicsFieldPairExecution = mechanicsFieldPairRuntime.encode(encoder, {
+        sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
+        identityBuffer: particleIdentityBuffer,
+        sourceCount: source.sourceCount,
+        sourceRowLayoutId: source.sourceRowLayoutId,
+        identityStrideWords: resolvedParticleIdentityStrideWords,
+        levelViews: mechanicsLevelViews.map((levelView) => ({
+          selectedLevel: levelView.selectedLevel,
+          parentMechanicsView: levelView.mechanicsView
+        })),
+        gpuTimestampRecorder,
+        timestampMetadata: {
+          laneId,
+          sourceFamily: resolvedSourceFamily,
+          physicsTick: source.physicsTick,
+          physicsSubstep: source.physicsSubstep
+        }
+      });
+      if (mechanicsFieldPairTimestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(
+          encoder,
+          mechanicsFieldPairTimestampSpan
+        );
+      }
+      const pairedFields = mechanicsFieldPairExecution?.mechanicsFieldViews;
+      if (!Array.isArray(pairedFields) || pairedFields.length !== 2) {
+        throw new Error(
+          'paired mechanics field runtime did not publish exactly two child views'
+        );
+      }
+      for (let index = 0; index < mechanicsLevelViews.length; index += 1) {
+        const levelView = mechanicsLevelViews[index];
+        const child = pairedFields[index];
+        if (
+          child?.parentMechanicsView !== levelView.mechanicsView
+          || child?.selectedLevel !== levelView.selectedLevel
+          || child?.ownerRuntime !== mechanicsFieldPairRuntime
+          || child?.pairExecution !== mechanicsFieldPairExecution
+        ) {
+          throw new Error(
+            'paired mechanics field runtime published a mismatched child lineage'
           );
         }
-        if (phaseVolumeMomentSourceAdmitted) {
-          levelView.phaseVolumeMomentRuntime = directPhaseVolumeMomentRuntime(
-            device,
-            entry,
-            levelView.mechanicsFieldView
-          );
-          const phaseVolumeMomentTimestampSpan = gpuTimestampRecorder?.active === true
-            && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+        levelView.mechanicsFieldView = child;
+        levelView.mechanicsFieldViewRuntime = mechanicsFieldPairRuntime;
+      }
+    } else if (particleIdentityBuffer) {
+      for (const levelView of mechanicsLevelViews) {
+        levelView.mechanicsFieldViewRuntime = directMechanicsFieldViewRuntime(
+          device,
+          entry,
+          levelView.mechanicsGrid,
+          resolvedParticleIdentityStrideWords
+        );
+        const mechanicsFieldTimestampSpan =
+          gpuTimestampRecorder?.active === true
+          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
             ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
-                producerId: 'schroeder-spatial-phase-volume-moment-build',
-                stage: 'phase-volume-moment-build',
+                producerId: 'schroeder-spatial-mechanics-field-view-build',
+                stage: 'mechanics-field-view-build',
                 spanClass: 'same-production-command-encoder',
                 generationId,
                 laneId,
-                selectedLevel: levelSpec.selectedLevel,
+                selectedLevel: levelView.selectedLevel,
                 sourceFamily: resolvedSourceFamily,
                 physicsTick: source.physicsTick,
                 physicsSubstep: source.physicsSubstep
               })
             : null;
-          levelView.phaseVolumeMoment = levelView.phaseVolumeMomentRuntime.encode(encoder, {
+        const mechanicsFieldTopologyPredecessor =
+          resolvedMechanicsFieldTopologyPredecessors.find(
+            (predecessor) => predecessor.selectedLevel === levelView.selectedLevel
+          ) ?? null;
+        const topologySuccessorRequested =
+          mechanicsFieldTopologyPredecessor != null;
+        levelView.mechanicsFieldView = levelView.mechanicsFieldViewRuntime[
+          topologySuccessorRequested ? 'encodeTopologySuccessor' : 'encode'
+        ](encoder, {
+            ...(topologySuccessorRequested
+              ? { topologyPredecessor: mechanicsFieldTopologyPredecessor }
+              : {}),
             sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
-            sourceMechanicsBuffer: source.sourceMechanicsBuffer,
-            sourceMechanicsBufferBorrowed: true,
-            mechanicsFieldView: levelView.mechanicsFieldView,
+            identityBuffer: particleIdentityBuffer,
+            sourceCount: source.sourceCount,
+            sourceRowLayoutId: source.sourceRowLayoutId,
+            identityStrideWords: resolvedParticleIdentityStrideWords,
+            selectedLevel: levelView.selectedLevel,
+            parentMechanicsView: levelView.mechanicsView,
+            forceRadixFallback:
+              directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+                ? false
+                : mechanicsFieldForceRadixFallback,
             gpuTimestampRecorder,
             timestampMetadata: {
               laneId,
@@ -4151,51 +4853,21 @@ export function runSchroederSpatialEpochGenerationWebGpu({
               physicsSubstep: source.physicsSubstep
             }
           });
-          if (phaseVolumeMomentTimestampSpan) {
-            gpuTimestampRecorder.endEncoderSpan(
-              encoder,
-              phaseVolumeMomentTimestampSpan
-            );
-          }
-          if (phaseVolumeReceiptEnabled) {
-            levelView.phaseVolumeReceiptRuntime = directPhaseVolumeReceiptRuntime(
-              device,
-              entry,
-              levelView.phaseVolumeMoment
-            );
-            const phaseVolumeReceiptTimestampSpan = gpuTimestampRecorder?.active === true
-              && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
-              && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
-              ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
-                  producerId: 'schroeder-spatial-phase-volume-receipt-build',
-                  stage: 'phase-volume-receipt-build',
-                  spanClass: 'same-production-command-encoder',
-                  generationId,
-                  laneId,
-                  selectedLevel: levelSpec.selectedLevel,
-                  sourceFamily: resolvedSourceFamily,
-                  physicsTick: source.physicsTick,
-                  physicsSubstep: source.physicsSubstep
-                })
-              : null;
-            levelView.phaseVolumeReceipt = levelView.phaseVolumeReceiptRuntime.encode(encoder, {
-              phaseVolumeMoment: levelView.phaseVolumeMoment,
-              gpuTimestampRecorder,
-              timestampMetadata: {
-                laneId,
-                sourceFamily: resolvedSourceFamily,
-                physicsTick: source.physicsTick,
-                physicsSubstep: source.physicsSubstep
-              }
-            });
-            if (phaseVolumeReceiptTimestampSpan) {
-              gpuTimestampRecorder.endEncoderSpan(
-                encoder,
-                phaseVolumeReceiptTimestampSpan
-              );
-            }
-          }
+        if (mechanicsFieldTimestampSpan) {
+          gpuTimestampRecorder.endEncoderSpan(
+            encoder,
+            mechanicsFieldTimestampSpan
+          );
         }
+      }
+    }
+    markGenerationQueueBoundary('after-mechanics-fields');
+    if (particleIdentityBuffer) {
+      for (const levelView of mechanicsLevelViews) {
+        encodePhaseVolumeSidecars(levelView);
+        markGenerationQueueBoundary('after-mechanics-level-upload', {
+          selectedLevel: levelView.selectedLevel
+        });
       }
     }
     mechanicsViewExecution = mechanicsLevelViews[0]?.mechanicsView || null;
@@ -4213,11 +4885,34 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         mechanicsLevelViews[0].mechanicsGrid,
         mechanicsLevelViews[1].mechanicsGrid
       );
+      const hierarchyViewTimestampSpan =
+        gpuTimestampRecorder?.active === true
+        && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+          ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+              producerId: 'schroeder-spatial-hierarchy-view-build',
+              stage: 'hierarchy-view-build',
+              spanClass: 'same-production-command-encoder',
+              generationId,
+              laneId,
+              fineLevel: mechanicsLevelViews[0].selectedLevel,
+              coarseLevel: mechanicsLevelViews[1].selectedLevel,
+              sourceFamily: resolvedSourceFamily,
+              physicsTick: source.physicsTick,
+              physicsSubstep: source.physicsSubstep
+            })
+          : null;
       hierarchyViewExecution = hierarchyViewRuntime.encode(encoder, {
         spatialExecution: execution,
         fineMechanicsView: mechanicsLevelViews[0].mechanicsView,
         coarseMechanicsView: mechanicsLevelViews[1].mechanicsView
       });
+      if (hierarchyViewTimestampSpan) {
+        gpuTimestampRecorder.endEncoderSpan(
+          encoder,
+          hierarchyViewTimestampSpan
+        );
+      }
+      markGenerationQueueBoundary('after-hierarchy-upload');
       if (mechanicsLevelViews.every((levelView) => levelView.mechanicsFieldView)) {
         parentFieldViewRuntime = directParentFieldViewRuntime(
           device,
@@ -4227,12 +4922,36 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           mechanicsLevelViews[0].mechanicsFieldView.fieldCapacity,
           mechanicsLevelViews[1].mechanicsFieldView.fieldCapacity
         );
+        const parentFieldViewTimestampSpan =
+          gpuTimestampRecorder?.active === true
+          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+            ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+                producerId: 'schroeder-spatial-parent-field-view-build',
+                stage: 'parent-field-view-build',
+                spanClass: 'same-production-command-encoder',
+                generationId,
+                laneId,
+                fineLevel: mechanicsLevelViews[0].selectedLevel,
+                coarseLevel: mechanicsLevelViews[1].selectedLevel,
+                sourceFamily: resolvedSourceFamily,
+                physicsTick: source.physicsTick,
+                physicsSubstep: source.physicsSubstep
+              })
+            : null;
         parentFieldViewExecution = parentFieldViewRuntime.encode(encoder, {
           mechanicsFieldViews: mechanicsLevelViews.map(
             (levelView) => levelView.mechanicsFieldView
           ),
-          hierarchyView: hierarchyViewExecution
+          hierarchyView: hierarchyViewExecution,
+          gpuTimestampRecorder
         });
+        if (parentFieldViewTimestampSpan) {
+          gpuTimestampRecorder.endEncoderSpan(
+            encoder,
+            parentFieldViewTimestampSpan
+          );
+        }
+        markGenerationQueueBoundary('after-parent-field-upload');
       }
     }
     if (phaseVolumeInterfaceProposalEnabled) {
@@ -4270,14 +4989,23 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           }
         }
       );
+      markGenerationQueueBoundary('after-phase-volume-interface-upload');
     }
     if (particleBufferSet) {
       aggregateViewRuntime = directAggregateViewRuntime(device, entry);
       aggregateViewExecution = aggregateViewRuntime.encode(encoder, {
         spatialExecution: execution,
         spatialSource: source,
-        particleBufferSet
+        particleBufferSet,
+        gpuTimestampRecorder,
+        timestampMetadata: {
+          laneId,
+          sourceFamily: resolvedSourceFamily,
+          physicsTick: source.physicsTick,
+          physicsSubstep: source.physicsSubstep
+        }
       });
+      markGenerationQueueBoundary('after-aggregate-upload');
     }
     if (viewBuildTimestampSpan) {
       gpuTimestampRecorder.endEncoderSpan(
@@ -4291,8 +5019,18 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         generationCommandEncoderTimestampSpan
       );
     }
+    gpuTimestampRecorder?.markQueueBoundary?.({
+      producerId: 'schroeder-spatial-generation-pre-submit-boundary',
+      stage: 'generation-pre-submit-boundary',
+      generationId,
+      laneId,
+      sourceFamily: resolvedSourceFamily,
+      physicsTick: source.physicsTick,
+      physicsSubstep: source.physicsSubstep
+    });
     device.queue.submit([encoder.finish()]);
     submissionPerformed = true;
+    markGenerationQueueBoundary('after-generation-submit');
     if (!markSubmittedOrConfirm(
       activeSourceViewRuntime,
       activeSourceViewExecution
@@ -4310,10 +5048,16 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     ))) {
       throw new Error('compact mechanics view runtime did not authenticate the submitted execution');
     }
-    if (mechanicsLevelViews.some((levelView) => !markSubmittedOrConfirm(
-      levelView.mechanicsFieldViewRuntime,
-      levelView.mechanicsFieldView
-    ))) {
+    const mechanicsFieldsSubmitted = mechanicsFieldPairExecution
+      ? markSubmittedOrConfirm(
+          mechanicsFieldPairRuntime,
+          mechanicsFieldPairExecution
+        )
+      : mechanicsLevelViews.every((levelView) => markSubmittedOrConfirm(
+          levelView.mechanicsFieldViewRuntime,
+          levelView.mechanicsFieldView
+        ));
+    if (!mechanicsFieldsSubmitted) {
       throw new Error('mechanics field view runtime did not authenticate the submitted execution');
     }
     if (mechanicsLevelViews.some((levelView) => !markSubmittedOrConfirm(
@@ -4346,6 +5090,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     if (!markSubmittedOrConfirm(exactNearCellTreeRuntime, exactNearCellTreeExecution)) {
       throw new Error('exact-near cell tree runtime did not authenticate the submitted execution');
     }
+    markGenerationQueueBoundary('after-generation-acknowledgement');
     entry.generation = generationId;
     entry.buildCount += 1;
     const generation = {
@@ -4364,11 +5109,29 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       mechanicsViewRuntime,
       mechanicsFieldView: mechanicsFieldViewExecution,
       mechanicsFieldViewRuntime,
+      mechanicsFieldPair: mechanicsFieldPairExecution,
+      mechanicsFieldPairRuntime,
+      mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+      mechanicsFieldPairV2Enabled: mechanicsFieldPairExecution != null,
+      mechanicsFieldTopologySuccessorCount: mechanicsLevelViews.filter(
+        (levelView) => (
+          levelView.mechanicsFieldView?.topologyConstructionMode
+            === 'conservative-successor-copy'
+        )
+      ).length,
+      mechanicsFieldConstructionMode: mechanicsFieldPairExecution
+        ? 'paired-v2-shared-radix'
+        : (mechanicsLevelViews.some(
+            (levelView) => levelView.mechanicsFieldView != null
+          )
+            ? 'independent-v2'
+            : 'not-built'),
       phaseVolumeMoment: phaseVolumeMomentExecution,
       phaseVolumeMomentRuntime,
       phaseVolumeReceipt: phaseVolumeReceiptExecution,
       phaseVolumeReceiptRuntime,
       phaseVolumeReceiptEnabled,
+      phaseVolumeSidecarsEnabled,
       phaseVolumeInterfaceProposal: phaseVolumeInterfaceProposalExecution,
       phaseVolumeInterfaceProposalRuntime,
       phaseVolumeInterfaceProposalEnabled,
@@ -4387,12 +5150,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       aggregateViewRuntime,
       exactNearCellTree: exactNearCellTreeExecution,
       exactNearCellTreeRuntime,
+      exactNearCellTreeEnabled,
       directoryAbiVersion,
       nativeTestLegacyLevelAssignmentDirectoryV1:
         nativeTestLegacyLevelAssignmentDirectoryV1Armed,
       directorySchema: execution.schema,
       directoryRuntimeCacheKey: entry.runtimeCacheKey,
       runtimeCapacity: entry.capacity,
+      activeSourceCapacity: entry.activeSourceCapacity,
       directArenaCount: entry.directArenaCount,
       arenaCapacity: entry.runtime.arenaCount,
       runtimeCacheHit: cacheHit,
@@ -4409,7 +5174,14 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       configurable: false
     });
     ownedSpatialEpochGenerations.add(generation);
+    spatialEpochGenerationLineages.set(generation, Object.freeze({
+      device,
+      levelAssignment,
+      directRuntimeEntry: entry,
+      generationId
+    }));
     entry.liveGenerations.push(generation);
+    markGenerationQueueBoundary('after-generation-publication');
     return generation;
   } catch (error) {
     if (
@@ -4435,12 +5207,17 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       const mechanicsSubmitted = mechanicsLevelViews.every((levelView) => (
         markSubmittedOrConfirm(levelView.mechanicsViewRuntime, levelView.mechanicsView)
       ));
-      const mechanicsFieldSubmitted = mechanicsLevelViews.every((levelView) => (
-        markSubmittedOrConfirm(
-          levelView.mechanicsFieldViewRuntime,
-          levelView.mechanicsFieldView
-        )
-      ));
+      const mechanicsFieldSubmitted = mechanicsFieldPairExecution
+        ? markSubmittedOrConfirm(
+            mechanicsFieldPairRuntime,
+            mechanicsFieldPairExecution
+          )
+        : mechanicsLevelViews.every((levelView) => (
+            markSubmittedOrConfirm(
+              levelView.mechanicsFieldViewRuntime,
+              levelView.mechanicsFieldView
+            )
+          ));
       const phaseVolumeMomentSubmitted = mechanicsLevelViews.every((levelView) => (
         markSubmittedOrConfirm(
           levelView.phaseVolumeMomentRuntime,
@@ -4504,10 +5281,22 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           mechanicsViewRuntime,
           mechanicsFieldView: mechanicsFieldViewExecution,
           mechanicsFieldViewRuntime,
+          mechanicsFieldPair: mechanicsFieldPairExecution,
+          mechanicsFieldPairRuntime,
+          mechanicsFieldPairV2Requested: mechanicsFieldPairV2Enabled,
+          mechanicsFieldPairV2Enabled: mechanicsFieldPairExecution != null,
+          mechanicsFieldConstructionMode: mechanicsFieldPairExecution
+            ? 'paired-v2-shared-radix'
+            : (mechanicsLevelViews.some(
+                (levelView) => levelView.mechanicsFieldView != null
+              )
+                ? 'independent-v2'
+                : 'not-built'),
           phaseVolumeMoment: phaseVolumeMomentExecution,
           phaseVolumeMomentRuntime,
           phaseVolumeReceipt: phaseVolumeReceiptExecution,
           phaseVolumeReceiptRuntime,
+          phaseVolumeSidecarsEnabled,
           phaseVolumeInterfaceProposal: phaseVolumeInterfaceProposalExecution,
           phaseVolumeInterfaceProposalRuntime,
           phaseVolumeInterfaceProposalEnabled,
@@ -4526,6 +5315,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           aggregateViewRuntime,
           exactNearCellTree: exactNearCellTreeExecution,
           exactNearCellTreeRuntime,
+          exactNearCellTreeEnabled,
           directoryAbiVersion,
           directorySchema: execution.schema,
           directoryRuntimeCacheKey: cache.entry.runtimeCacheKey,
@@ -4622,14 +5412,6 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       }
       for (const levelView of mechanicsLevelViews) {
         try {
-          levelView.mechanicsViewRuntime?.releaseExecution?.(
-            levelView.mechanicsView,
-            { discardedEncoder: true }
-          );
-        } catch {
-          // Preserve the original build/admission error.
-        }
-        try {
           levelView.phaseVolumeReceiptRuntime?.releaseExecution?.(
             levelView.phaseVolumeReceipt,
             { discardedEncoder: true }
@@ -4645,9 +5427,29 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         } catch {
           // Preserve the original build/admission error.
         }
+      }
+      try {
+        mechanicsFieldPairRuntime?.releaseExecution?.(
+          mechanicsFieldPairExecution,
+          { discardedEncoder: true }
+        );
+      } catch {
+        // Preserve the original build/admission error.
+      }
+      for (const levelView of mechanicsLevelViews) {
+        if (!mechanicsFieldPairExecution) {
+          try {
+            levelView.mechanicsFieldViewRuntime?.releaseExecution?.(
+              levelView.mechanicsFieldView,
+              { discardedEncoder: true }
+            );
+          } catch {
+            // Preserve the original build/admission error.
+          }
+        }
         try {
-          levelView.mechanicsFieldViewRuntime?.releaseExecution?.(
-            levelView.mechanicsFieldView,
+          levelView.mechanicsViewRuntime?.releaseExecution?.(
+            levelView.mechanicsView,
             { discardedEncoder: true }
           );
         } catch {
@@ -4670,6 +5472,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         || error?.code === 'ERR_SCHROEDER_ACTIVE_SOURCE_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_ARENA_EXHAUSTED'
+        || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_RECEIPT_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_ARENA_EXHAUSTED'
@@ -4679,6 +5482,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         || error?.code === 'ERR_SCHROEDER_EXACT_CELL_TREE_ARENA_EXHAUSTED'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_VIEW_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE'
+        || error?.code === 'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_MOMENT_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_RECEIPT_CACHE_BACKPRESSURE'
         || error?.code === 'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_CACHE_BACKPRESSURE'
@@ -4703,6 +5507,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       releasePromise: postSubmitCleanupGeneration?.releasePromise ?? null,
       postSubmitCleanupError,
       runtimeCapacity: cache?.entry?.capacity ?? null,
+      activeSourceCapacity: cache?.entry?.activeSourceCapacity ?? null,
       directArenaCount: cache?.entry?.directArenaCount ?? null,
       arenaCapacity: cache?.entry?.runtime?.arenaCount ?? null,
       runtimeCacheHit: Boolean(cache?.cacheHit)
@@ -5448,6 +6253,13 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
       generation.backpressureStatus = waitCount > 0
         ? 'schroeder-spatial-epoch-generation-backpressure-resolved'
         : 'schroeder-spatial-epoch-generation-backpressure-not-required';
+      generation.fullParticleReadbackPerformed = false;
+      generation.fullParticleReadbackFree = true;
+      Object.assign(generation, createGpuReadbackTelemetry({
+        scope: 'schroeder-spatial-epoch-generation',
+        hostQueueFenceCount: waitCount,
+        awaitedBackpressureHostQueueFenceCount: waitCount
+      }));
       return generation;
     }
 
@@ -5465,7 +6277,8 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
       options.levelAssignment
         ? SCHROEDER_SPATIAL_EPOCH_V2_VERSION
         : SCHROEDER_SPATIAL_EPOCH_VERSION,
-      options.directArenaCount
+      options.directArenaCount,
+      options.activeSourceCapacity
     );
     const scheduledReleases = entry.liveGenerations
       .map((liveGeneration) => liveGeneration?.releasePromise)
@@ -5521,6 +6334,9 @@ export async function runSchroederSpatialEpochGenerationWithBackpressureWebGpu(
           (levelView) => levelView.mechanicsFieldView == null
             || levelView.mechanicsFieldView.released === true
         ),
+        mechanicsFieldPairReleased:
+          liveGeneration?.mechanicsFieldPair == null
+          || liveGeneration.mechanicsFieldPair.released === true,
         phaseVolumeMomentReleased: generationMechanicsLevelViews(liveGeneration).every(
           (levelView) => levelView.phaseVolumeMoment == null
             || levelView.phaseVolumeMoment.released === true
@@ -5576,7 +6392,7 @@ function generationOwnedArtifacts(generation) {
       execution: levelView.mechanicsView,
       runtime: levelView.mechanicsViewRuntime
     }] : []),
-    ...(levelView.mechanicsFieldView ? [{
+    ...(!generation?.mechanicsFieldPair && levelView.mechanicsFieldView ? [{
       role: `mechanics-field-view-level-${levelView.selectedLevel}`,
       execution: levelView.mechanicsFieldView,
       runtime: levelView.mechanicsFieldViewRuntime
@@ -5593,7 +6409,19 @@ function generationOwnedArtifacts(generation) {
       execution: levelView.phaseVolumeMoment,
       runtime: levelView.phaseVolumeMomentRuntime
     }] : [])
-  ]), ...(generation?.parentFieldView ? [{
+  ]), ...(generation?.mechanicsFieldPair ? [{
+    // Both public child field views share this exact arena and radix owner.
+    // Retire it once; releasing either child would atomically retire the same
+    // pair and double-scheduling both children is not valid ownership.
+    role: 'mechanics-field-pair',
+    execution: generation.mechanicsFieldPair,
+    runtime: generation.mechanicsFieldPairRuntime,
+    childExecutions: Object.freeze(
+      generationMechanicsLevelViews(generation)
+        .map((levelView) => levelView.mechanicsFieldView)
+        .filter(Boolean)
+    )
+  }] : []), ...(generation?.parentFieldView ? [{
     role: 'spatial-parent-field-view',
     execution: generation.parentFieldView,
     runtime: generation.parentFieldViewRuntime
@@ -5662,15 +6490,23 @@ function waitForSpatialEpochGenerationConsumerDrain(generation) {
 
 function releaseOwnedSpatialEpochGenerationConsumerLease(lease, record) {
   if (!record?.active) return false;
+  // The WeakMap record and exact membership set are authoritative. Public
+  // lease fields are telemetry only: a consumer may freeze the accepted lease
+  // after admission, and that must not strand the private borrow.
   record.active = false;
   record.releaseScheduled = false;
-  lease.status =
-    'schroeder-spatial-epoch-generation-consumer-lease-released';
-  lease.releaseScheduled = false;
+  record.releasePromise = null;
   spatialEpochGenerationConsumerLeases
     .get(record.generation)
     ?.delete(lease);
   resolveSpatialEpochGenerationConsumerDrain(record.generation);
+  bestEffortPublicField(
+    lease,
+    'status',
+    'schroeder-spatial-epoch-generation-consumer-lease-released'
+  );
+  bestEffortPublicField(lease, 'releaseScheduled', false);
+  bestEffortPublicField(lease, 'releasePromise', null);
   return true;
 }
 
@@ -5705,8 +6541,6 @@ export function ownsSchroederSpatialEpochGenerationConsumerLease(
   return Boolean(
     record.generation === ownedGeneration
     && spatialEpochGenerationConsumerLeaseSet(ownedGeneration).has(lease)
-    && lease?.generation === ownedGeneration
-    && lease?.releaseScheduled !== true
   );
 }
 
@@ -5717,11 +6551,15 @@ export function acquireSchroederSpatialEpochGenerationConsumerLease(
   } = {}
 ) {
   const ownedGeneration = exactOwnedSpatialEpochGeneration(generation);
+  const retirementRecord = spatialEpochGenerationRetirements.get(
+    ownedGeneration
+  );
   if (
     ownedGeneration.ready !== true
     || ownedGeneration.selected !== true
     || ownedGeneration.releaseScheduled === true
     || ownedGeneration.execution?.released === true
+    || retirementRecord?.queueOrderedTerminal === true
   ) {
     const error = new Error(
       'spatial epoch generation consumer lease requires one live generation'
@@ -5744,7 +6582,8 @@ export function acquireSchroederSpatialEpochGenerationConsumerLease(
   const record = {
     generation: ownedGeneration,
     active: true,
-    releaseScheduled: false
+    releaseScheduled: false,
+    releasePromise: null
   };
   Object.defineProperty(lease, 'released', {
     get() { return record.active !== true; },
@@ -5802,29 +6641,212 @@ export function releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(
     throw error;
   }
   if (!record.active) return Promise.resolve(false);
-  if (record.releaseScheduled) return lease.releasePromise;
+  if (record.releaseScheduled) return record.releasePromise;
   record.releaseScheduled = true;
-  lease.releaseScheduled = true;
-  lease.status =
-    'schroeder-spatial-epoch-generation-consumer-lease-release-scheduled';
+  bestEffortPublicField(lease, 'releaseScheduled', true);
+  bestEffortPublicField(
+    lease,
+    'status',
+    'schroeder-spatial-epoch-generation-consumer-lease-release-scheduled'
+  );
   const completion = Promise.resolve(submissionFence)
     .then(() => releaseOwnedSpatialEpochGenerationConsumerLease(lease, record))
     .catch((error) => {
       if (record.active) {
         record.releaseScheduled = false;
-        lease.releaseScheduled = false;
-        lease.status =
-          'schroeder-spatial-epoch-generation-consumer-lease-release-blocked';
+        record.releasePromise = null;
+        bestEffortPublicField(lease, 'releaseScheduled', false);
+        bestEffortPublicField(lease, 'releasePromise', null);
+        bestEffortPublicField(
+          lease,
+          'status',
+          'schroeder-spatial-epoch-generation-consumer-lease-release-blocked'
+        );
       }
       throw error;
     });
-  lease.releasePromise = completion;
+  record.releasePromise = completion;
+  bestEffortPublicField(lease, 'releasePromise', completion);
   completion.catch(() => {});
   return completion;
 }
 
+function queueOrderedGenerationConsumerLeaseOnlyRetirementContext(
+  lease,
+  generation,
+  device
+) {
+  const consumerLeaseRecord =
+    spatialEpochGenerationConsumerLeaseOwnership.get(lease);
+  if (!consumerLeaseRecord) {
+    const error = new Error(
+      'foreign spatial epoch generation consumer lease'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_FOREIGN_CONSUMER_LEASE';
+    throw error;
+  }
+
+  const ownedGeneration = exactOwnedSpatialEpochGeneration(generation);
+  if (
+    ownedGeneration !== generation
+    || consumerLeaseRecord.generation !== ownedGeneration
+  ) {
+    const error = new Error(
+      'queue-ordered consumer lease retirement requires its exact source generation'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_GENERATION_MISMATCH';
+    throw error;
+  }
+
+  const lineage = spatialEpochGenerationLineages.get(ownedGeneration);
+  const deviceId = webGpuDeviceId(device);
+  if (
+    lineage?.device !== device
+    || deviceId == null
+    || ownedGeneration.execution?.deviceId !== deviceId
+    || !ownedGeneration.execution?.directoryBuffer
+    || !webGpuBufferMatchesDevice(
+      ownedGeneration.execution.directoryBuffer,
+      device
+    )
+  ) {
+    const error = new Error(
+      'queue-ordered consumer lease retirement requires the exact source-generation device'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_DEVICE_MISMATCH';
+    throw error;
+  }
+
+  const retirementRecord = spatialEpochGenerationRetirements.get(
+    ownedGeneration
+  );
+  const artifacts = retirementRecord?.artifacts
+    ?? generationOwnedArtifacts(ownedGeneration);
+  const generationIsReleasing = Boolean(
+    ownedGeneration.ready !== true
+    || ownedGeneration.selected !== true
+    || ownedGeneration.releaseScheduled === true
+    || ownedGeneration.execution?.released === true
+    || retirementRecord?.activeAttempt
+    || retirementRecord?.lossRequested === true
+    || retirementRecord?.queueOrderedTerminal === true
+    || retirementRecord?.completed === true
+    || !ownedGeneration.directRuntimeEntry?.liveGenerations?.includes(
+      ownedGeneration
+    )
+    || artifacts.length === 0
+    || artifacts.some(({ execution, runtime }) => (
+      execution?.released === true
+      || runtime !== execution?.ownerRuntime
+      || runtime?.deviceId !== deviceId
+      || runtime?.ownsExecution?.(execution) !== true
+    ))
+  );
+  if (generationIsReleasing) {
+    const error = new Error(
+      'queue-ordered consumer lease retirement requires one live non-releasing source generation'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_GENERATION_RELEASING';
+    throw error;
+  }
+
+  if (consumerLeaseRecord.releaseScheduled === true) {
+    const error = new Error(
+      'queue-ordered consumer lease retirement cannot supersede a scheduled lease release'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_CONSUMER_LEASE_RELEASE_SCHEDULED';
+    throw error;
+  }
+  if (consumerLeaseRecord.active !== true) {
+    return { consumerLeaseRecord, ownedGeneration, active: false };
+  }
+  if (
+    !spatialEpochGenerationConsumerLeases
+      .get(ownedGeneration)
+      ?.has(lease)
+  ) {
+    const error = new Error(
+      'queue-ordered consumer lease retirement requires exact live lease ownership'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_MISMATCH';
+    throw error;
+  }
+  return { consumerLeaseRecord, ownedGeneration, active: true };
+}
+
+/**
+ * Authenticate one source-generation consumer lease for synchronous retirement
+ * after the caller has already enqueued that lease's final same-queue GPU
+ * consumer. This capability retires only the lease: it neither schedules nor
+ * releases any generation artifact and it never creates a host queue fence.
+ */
+export function canReleaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+  lease,
+  generation,
+  device
+) {
+  try {
+    return queueOrderedGenerationConsumerLeaseOnlyRetirementContext(
+      lease,
+      generation,
+      device
+    ).active;
+  } catch {
+    return false;
+  }
+}
+
+export function releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer(
+  lease,
+  generation,
+  device
+) {
+  const {
+    consumerLeaseRecord,
+    active
+  } = queueOrderedGenerationConsumerLeaseOnlyRetirementContext(
+    lease,
+    generation,
+    device
+  );
+  if (!active) return false;
+  const released = releaseOwnedSpatialEpochGenerationConsumerLease(
+    lease,
+    consumerLeaseRecord
+  );
+  if (released) {
+    bestEffortPublicField(
+      lease,
+      'status',
+      'schroeder-spatial-epoch-generation-consumer-lease-released-queue-ordered-after-final-consumer'
+    );
+  }
+  return released;
+}
+
+function bestEffortPublicField(target, key, value) {
+  try {
+    return Reflect.set(target, key, value);
+  } catch {
+    return false;
+  }
+}
+
 function mirrorGenerationRetirement(record, values) {
-  for (const alias of record.aliases) Object.assign(alias, values);
+  // Mirrors are deliberately observational. Update each field independently
+  // so a frozen alias, a non-writable telemetry field, or one hostile setter
+  // cannot poison the private retirement state or suppress sibling mirrors.
+  for (const alias of record.aliases) {
+    for (const [key, value] of Object.entries(values)) {
+      bestEffortPublicField(alias, key, value);
+    }
+  }
 }
 
 function generationRetirementRecord(generation, device) {
@@ -5872,6 +6894,10 @@ function generationRetirementRecord(generation, device) {
       completed: false,
       activeAttempt: null,
       nextAttemptOrdinal: 0,
+      releaseAttemptCount: 0,
+      releaseFailureCount: 0,
+      queueOrderedTerminal: false,
+      queueOrderedFailureReason: null,
       deviceLossEvidence: null,
       lossRequested: false,
       capability: null
@@ -5900,7 +6926,7 @@ function generationRetirementRecord(generation, device) {
   if (generation !== ownedGeneration) {
     record.aliases.add(generation);
     spatialEpochGenerationRetirements.set(generation, record);
-    Object.assign(generation, {
+    mirrorGenerationRetirement(record, {
       releaseScheduled: ownedGeneration.releaseScheduled,
       releaseStatus: ownedGeneration.releaseStatus,
       releaseReason: ownedGeneration.releaseReason,
@@ -5922,6 +6948,7 @@ function removeLiveSpatialEpochGeneration(record) {
   const index = entry.liveGenerations.indexOf(record.generation);
   if (index >= 0) entry.liveGenerations.splice(index, 1);
   reapDirectMechanicsFieldViewDrainingRuntimes(entry);
+  reapDirectMechanicsFieldPairDrainingRuntimes(entry);
 }
 
 function terminalizeSpatialArtifactRuntimeAfterDeviceLoss(runtime) {
@@ -5938,6 +6965,8 @@ function terminalizeSpatialArtifactRuntimeAfterDeviceLoss(runtime) {
 
 function completeSpatialEpochGenerationRetirement(record, {
   deviceLost = false,
+  queueOrderedSuccessor = false,
+  queueOrderedFinalConsumer = false,
   operationResults = []
 } = {}) {
   if (record.completed) return true;
@@ -5958,6 +6987,10 @@ function completeSpatialEpochGenerationRetirement(record, {
     releaseScheduled: true,
     releaseStatus: deviceLost
       ? 'spatial-epoch-generation-device-loss-retired'
+      : queueOrderedSuccessor
+        ? 'spatial-epoch-generation-released-queue-ordered-after-exact-successor'
+        : queueOrderedFinalConsumer
+          ? 'spatial-epoch-generation-released-queue-ordered-after-final-consumer'
       : 'spatial-epoch-generation-released-after-final-consumer',
     releaseReason: null,
     releaseOperationResults: operationResults
@@ -5971,7 +7004,10 @@ function validateLiveGenerationArtifacts(record) {
   for (const artifact of record.artifacts) {
     if (artifact.execution?.released === true) continue;
     const exactMechanicsFieldRetirementInFlight =
-      artifact.role.startsWith('mechanics-field-view-level-')
+      (
+        artifact.role.startsWith('mechanics-field-view-level-')
+        || artifact.role === 'mechanics-field-pair'
+      )
       && artifact.runtime?.isExecutionRetirementInFlight?.(
         artifact.execution
       ) === true;
@@ -6021,7 +7057,10 @@ function retireGenerationArtifactAfterDeviceLoss(
     return runtime.quarantineExecutionAfterDeviceLoss(execution);
   }
   if (
-    artifact.role.startsWith('mechanics-field-view-level-')
+    (
+      artifact.role.startsWith('mechanics-field-view-level-')
+      || artifact.role === 'mechanics-field-pair'
+    )
     && typeof runtime?.stateMutationState === 'function'
     && typeof runtime?.quarantineCurrentStateArtifact === 'function'
     && typeof runtime?.retireQuarantinedExecutionAfter === 'function'
@@ -6044,6 +7083,17 @@ function retireGenerationArtifactAfterDeviceLoss(
 
 function retireGenerationMechanicsFieldAtCurrentQueueBoundary(artifact) {
   const { runtime, execution } = artifact;
+  const quarantinedChild = artifact.childExecutions?.find(
+    (childExecution) => (
+      runtime.isStateArtifactQuarantined?.(childExecution) === true
+    )
+  ) ?? null;
+  if (
+    quarantinedChild
+    && typeof runtime?.retireQuarantinedExecutionAfter === 'function'
+  ) {
+    return runtime.retireQuarantinedExecutionAfter(quarantinedChild);
+  }
   if (
     typeof runtime?.isStateArtifactQuarantined === 'function'
     && typeof runtime?.retireQuarantinedExecutionAfter === 'function'
@@ -6144,6 +7194,14 @@ function startSpatialEpochGenerationRetirement(record, {
     return lossAttempt;
   }
 
+  if (record.queueOrderedTerminal) {
+    const error = new Error(
+      'generation is quarantined after an unconfirmed queue-ordered retirement'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL';
+    throw error;
+  }
   if (record.lossRequested) {
     return startSpatialEpochGenerationRetirement(record, { deviceLost: true });
   }
@@ -6250,7 +7308,10 @@ function startSpatialEpochGenerationRetirement(record, {
   const earlyRuntimeOwnedReleases = new Map();
   for (const artifact of activeArtifacts) {
     if (
-      artifact.role.startsWith('mechanics-field-view-level-')
+      (
+        artifact.role.startsWith('mechanics-field-view-level-')
+        || artifact.role === 'mechanics-field-pair'
+      )
       && artifact.runtime?.releaseFencePolicy
         === 'runtime-owned-current-queue-at-invocation'
     ) {
@@ -6301,6 +7362,7 @@ function startSpatialEpochGenerationRetirement(record, {
           ? rejected.reason.message
           : String(rejected.reason))
       : 'generation owner did not confirm spatial epoch release';
+    record.releaseFailureCount += 1;
     mirrorGenerationRetirement(record, {
       releaseScheduled: false,
       releasePromise: null,
@@ -6308,22 +7370,494 @@ function startSpatialEpochGenerationRetirement(record, {
         ? 'spatial-epoch-generation-device-loss-retirement-blocked'
         : 'spatial-epoch-generation-release-unconfirmed',
       releaseReason: reason,
-      releaseFailureCount: (record.generation.releaseFailureCount ?? 0) + 1,
+      releaseFailureCount: record.releaseFailureCount,
       releaseOperationResults: operationResults
     });
     return false;
   });
   attempt.promise = normalAttempt;
+  record.releaseAttemptCount += 1;
   mirrorGenerationRetirement(record, {
     releaseScheduled: true,
     releaseReason: null,
     releaseStatus:
       'spatial-epoch-generation-release-scheduled-after-final-consumer',
-    releaseAttemptCount: (record.generation.releaseAttemptCount ?? 0) + 1,
+    releaseAttemptCount: record.releaseAttemptCount,
     releasePromise: normalAttempt
   });
   normalAttempt.catch(() => {});
   return normalAttempt;
+}
+
+function queueOrderedGenerationArtifactRank(role) {
+  if (role === 'phase-volume-interface-proposal') return 0;
+  if (
+    role === 'spatial-aggregate-view'
+    || role === 'spatial-exact-near-cell-tree'
+  ) return 1;
+  if (role === 'spatial-parent-field-view') return 2;
+  if (role.startsWith('phase-volume-receipt-level-')) return 3;
+  if (role.startsWith('phase-volume-moment-level-')) return 4;
+  if (
+    role === 'mechanics-field-pair'
+    || role.startsWith('mechanics-field-view-level-')
+  ) return 5;
+  if (role === 'spatial-hierarchy-view') return 6;
+  if (role.startsWith('compact-mechanics-view-level-')) return 7;
+  if (role === 'spatial-directory') return 8;
+  if (role === 'spatial-active-source-view') return 9;
+  return 10;
+}
+
+function queueOrderedGenerationRetirementContext(
+  generation,
+  device,
+  { consumerLease = null } = {}
+) {
+  const ownedGeneration = exactOwnedSpatialEpochGeneration(generation);
+  const lineage = spatialEpochGenerationLineages.get(ownedGeneration);
+  if (
+    ownedGeneration !== generation
+    || lineage?.device !== device
+    || generation?.selected !== true
+    || generation?.ready !== true
+  ) {
+    const error = new Error(
+      'queue-ordered generation retirement requires exact same-device live lineage'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_LINEAGE_MISMATCH';
+    throw error;
+  }
+  const record = generationRetirementRecord(ownedGeneration, device);
+  if (record.queueOrderedTerminal) {
+    const error = new Error(
+      'queue-ordered generation retirement is terminal after an unconfirmed cleanup'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL';
+    throw error;
+  }
+  const consumerLeases =
+    spatialEpochGenerationConsumerLeases.get(ownedGeneration) ?? new Set();
+  let consumerLeaseRecord = null;
+  if (consumerLease != null) {
+    consumerLeaseRecord =
+      spatialEpochGenerationConsumerLeaseOwnership.get(consumerLease);
+    if (
+      !consumerLeaseRecord
+      || consumerLeaseRecord.generation !== ownedGeneration
+      || consumerLeaseRecord.active !== true
+      || consumerLeaseRecord.releaseScheduled === true
+      || consumerLeases.size !== 1
+      || !consumerLeases.has(consumerLease)
+    ) {
+      const error = new Error(
+        'queue-ordered generation retirement requires the exact sole live consumer lease'
+      );
+      error.code =
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_CONSUMER_LEASE_MISMATCH';
+      throw error;
+    }
+  }
+  if (
+    record.lossRequested
+    || record.activeAttempt
+    || (consumerLease == null && consumerLeases.size !== 0)
+  ) {
+    const error = new Error(
+      'queue-ordered generation retirement requires an idle generation with no live consumer leases'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_GENERATION_BUSY';
+    throw error;
+  }
+  const artifacts = record.artifacts
+    .filter((artifact) => artifact.execution?.released !== true)
+    .map((artifact, index) => ({ ...artifact, sourceIndex: index }))
+    .sort((a, b) => (
+      queueOrderedGenerationArtifactRank(a.role)
+      - queueOrderedGenerationArtifactRank(b.role)
+      || a.sourceIndex - b.sourceIndex
+    ));
+  if (artifacts.some((artifact) => (
+    artifact.runtime !== artifact.execution?.ownerRuntime
+    || artifact.runtime?.deviceId !== record.deviceId
+    || artifact.runtime?.ownsExecution?.(artifact.execution) !== true
+    || artifact.runtime?.isExecutionSubmitted?.(artifact.execution) !== true
+    || typeof artifact.runtime?.canReleaseExecutionQueueOrdered !== 'function'
+    || typeof artifact.runtime?.releaseExecutionQueueOrdered !== 'function'
+    || artifact.runtime.canReleaseExecutionQueueOrdered(
+      artifact.execution
+    ) !== true
+  ))) {
+    const error = new Error(
+      'queue-ordered generation retirement requires every artifact to be exactly submitted and idle'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_ARTIFACT_STALE';
+    throw error;
+  }
+  return { record, artifacts, consumerLeaseRecord };
+}
+
+function queueOrderedSuccessorRetirementContext(
+  priorGeneration,
+  successorGeneration,
+  device
+) {
+  const prior = exactOwnedSpatialEpochGeneration(priorGeneration);
+  const successor = exactOwnedSpatialEpochGeneration(successorGeneration);
+  const priorLineage = spatialEpochGenerationLineages.get(prior);
+  const successorLineage = spatialEpochGenerationLineages.get(successor);
+  const priorAssignment = priorLineage?.levelAssignment;
+  const successorAssignment = successorLineage?.levelAssignment;
+  if (
+    prior !== priorGeneration
+    || successor !== successorGeneration
+    || prior === successor
+    || priorLineage?.device !== device
+    || successorLineage?.device !== device
+    || priorLineage.directRuntimeEntry !== successorLineage.directRuntimeEntry
+    || successorLineage.generationId !== priorLineage.generationId + 1
+    || !priorAssignment?.assignmentBuffer
+    || successorAssignment?.sourceAssignmentBuffer
+      !== priorAssignment.assignmentBuffer
+    || successor?.selected !== true
+    || successor?.ready !== true
+    || successor?.releaseScheduled === true
+    || successor?.execution?.released === true
+  ) {
+    const error = new Error(
+      'queue-ordered generation retirement requires exact adjacent same-device predecessor/successor lineage'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_SUCCESSOR_MISMATCH';
+    throw error;
+  }
+  const successorArtifacts = generationOwnedArtifacts(successor);
+  if (successorArtifacts.some((artifact) => (
+    artifact.runtime !== artifact.execution?.ownerRuntime
+    || artifact.runtime?.deviceId !== webGpuDeviceId(device)
+    || artifact.runtime?.ownsExecution?.(artifact.execution) !== true
+    || artifact.runtime?.isExecutionSubmitted?.(artifact.execution) !== true
+  ))) {
+    const error = new Error(
+      'queue-ordered generation retirement requires a fully submitted exact successor family'
+    );
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_SUCCESSOR_UNSUBMITTED';
+    throw error;
+  }
+  try {
+    return queueOrderedGenerationRetirementContext(prior, device);
+  } catch (error) {
+    if (
+      error?.code
+        === 'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_GENERATION_BUSY'
+    ) {
+      error.code =
+        'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_PREDECESSOR_BUSY';
+    }
+    throw error;
+  }
+}
+
+export function canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+  priorGeneration,
+  successorGeneration,
+  device
+) {
+  try {
+    const { record } = queueOrderedSuccessorRetirementContext(
+      priorGeneration,
+      successorGeneration,
+      device
+    );
+    return record.completed !== true;
+  } catch {
+    return false;
+  }
+}
+
+function queueOrderedGenerationCleanupOperation(
+  owner,
+  release,
+  confirmRelease
+) {
+  let value;
+  let thrown = null;
+  try {
+    value = release();
+  } catch (error) {
+    thrown = error instanceof Error ? error : new Error(String(error));
+  }
+  let confirmed = false;
+  try {
+    confirmed = confirmRelease(value) === true;
+  } catch (error) {
+    if (!thrown) {
+      thrown = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (!confirmed && !thrown) {
+    thrown = new Error(
+      `queue-ordered generation owner ${owner} did not confirm release`
+    );
+  }
+  return {
+    result: {
+      owner,
+      status: thrown ? 'rejected' : 'fulfilled',
+      confirmed,
+      reason: thrown?.message ?? null
+    },
+    // A wrapper may throw after its exact private owner already released the
+    // execution. Final state is authoritative, so only still-live resources
+    // quarantine the generation.
+    failure: confirmed ? null : thrown
+  };
+}
+
+function releaseQueueOrderedGenerationArtifacts(
+  record,
+  artifacts,
+  {
+    mode,
+    releaseStatus,
+    failureStatus,
+    completionOptions,
+    consumerLease = null,
+    consumerLeaseRecord = null,
+    combinedConsumerLease = false
+  }
+) {
+  if (record.completed) return false;
+  const attempt = {
+    mode,
+    ordinal: ++record.nextAttemptOrdinal,
+    promise: record.completionPromise,
+    operations: []
+  };
+  record.activeAttempt = attempt;
+  record.releaseAttemptCount += 1;
+  mirrorGenerationRetirement(record, {
+    releaseScheduled: true,
+    releaseReason: null,
+    releaseStatus,
+    releaseAttemptCount: record.releaseAttemptCount,
+    releasePromise: record.completionPromise
+  });
+
+  // All owned executions are attempted even when an earlier owner throws.
+  // Release the sole consumer lease last so a child failure cannot strand it.
+  const outcomes = artifacts.map((artifact) => (
+    queueOrderedGenerationCleanupOperation(
+      artifact.role,
+      () => artifact.runtime.releaseExecutionQueueOrdered(
+        artifact.execution
+      ),
+      () => artifact.execution?.released === true
+    )
+  ));
+  if (combinedConsumerLease) {
+    outcomes.push(queueOrderedGenerationCleanupOperation(
+      'generation-consumer-lease',
+      () => (
+        consumerLeaseRecord
+          ? releaseOwnedSpatialEpochGenerationConsumerLease(
+              consumerLease,
+              consumerLeaseRecord
+            )
+          : false
+      ),
+      () => Boolean(
+        consumerLeaseRecord
+        && consumerLeaseRecord.active !== true
+        && !spatialEpochGenerationConsumerLeaseSet(
+          record.generation
+        ).has(consumerLease)
+      )
+    ));
+  }
+  const operationResults = outcomes.map(({ result }) => result);
+  attempt.operations = operationResults;
+  const generationReleased = generationArtifactsReleased(record);
+  const leaseReleased = !combinedConsumerLease || Boolean(
+    consumerLeaseRecord
+    && consumerLeaseRecord.active !== true
+    && !spatialEpochGenerationConsumerLeaseSet(record.generation).has(
+      consumerLease
+    )
+  );
+  if (
+    generationReleased
+    && leaseReleased
+    && outcomes.every(({ result }) => result.confirmed === true)
+  ) {
+    return completeSpatialEpochGenerationRetirement(record, {
+      ...completionOptions,
+      operationResults
+    });
+  }
+
+  const failures = outcomes
+    .map(({ failure }) => failure)
+    .filter(Boolean);
+  if (!generationReleased && failures.length === 0) {
+    failures.push(new Error(
+      'queue-ordered generation cleanup left an owned artifact live'
+    ));
+  }
+  if (!leaseReleased && failures.length === 0) {
+    failures.push(new Error(
+      'queue-ordered generation cleanup left its consumer lease live'
+    ));
+  }
+  const error = new AggregateError(
+    failures,
+    'queue-ordered generation retirement quarantined one or more still-live owners'
+  );
+  error.code =
+    'ERR_SCHROEDER_SPATIAL_GENERATION_QUEUE_ORDERED_RETIREMENT_TERMINAL';
+  error.operationResults = operationResults;
+  record.activeAttempt = null;
+  record.queueOrderedTerminal = true;
+  record.queueOrderedFailureReason = error;
+  record.releaseFailureCount += 1;
+  mirrorGenerationRetirement(record, {
+    releaseScheduled: true,
+    releasePromise: record.completionPromise,
+    releaseStatus: failureStatus,
+    releaseReason: error.message,
+    releaseFailureCount: record.releaseFailureCount,
+    releaseOperationResults: operationResults,
+    queueOrderedFailedOwners: Object.freeze(operationResults
+      .filter(({ confirmed }) => confirmed !== true)
+      .map(({ owner }) => owner))
+  });
+  throw error;
+}
+
+export function releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor(
+  priorGeneration,
+  successorGeneration,
+  device
+) {
+  const { record, artifacts } = queueOrderedSuccessorRetirementContext(
+    priorGeneration,
+    successorGeneration,
+    device
+  );
+  return releaseQueueOrderedGenerationArtifacts(record, artifacts, {
+    mode: 'queue-ordered-successor',
+    releaseStatus:
+      'spatial-epoch-generation-queue-ordered-release-after-exact-successor',
+    failureStatus:
+      'spatial-epoch-generation-queue-ordered-retirement-quarantined',
+    completionOptions: { queueOrderedSuccessor: true }
+  });
+}
+
+export function canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+  generation,
+  device
+) {
+  try {
+    const { record } = queueOrderedGenerationRetirementContext(
+      generation,
+      device
+    );
+    return record.completed !== true;
+  } catch {
+    return false;
+  }
+}
+
+export function canReleaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+  consumerLease,
+  generation,
+  device
+) {
+  try {
+    const { record } = queueOrderedGenerationRetirementContext(
+      generation,
+      device,
+      { consumerLease }
+    );
+    return record.completed !== true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseQueueOrderedGenerationAfterFinalConsumer(
+  record,
+  artifacts,
+  {
+    consumerLease = null,
+    consumerLeaseRecord = null,
+    combinedConsumerLease = false
+  } = {}
+) {
+  return releaseQueueOrderedGenerationArtifacts(record, artifacts, {
+    mode: combinedConsumerLease
+      ? 'queue-ordered-consumer-lease-and-final-consumer'
+      : 'queue-ordered-final-consumer',
+    releaseStatus: combinedConsumerLease
+      ? 'spatial-epoch-generation-queue-ordered-release-after-exact-consumer-lease'
+      : 'spatial-epoch-generation-queue-ordered-release-after-final-consumer',
+    failureStatus: combinedConsumerLease
+      ? 'spatial-epoch-generation-queue-ordered-consumer-lease-retirement-quarantined'
+      : 'spatial-epoch-generation-queue-ordered-final-consumer-retirement-quarantined',
+    completionOptions: { queueOrderedFinalConsumer: true },
+    consumerLease,
+    consumerLeaseRecord,
+    combinedConsumerLease
+  });
+}
+
+/**
+ * Retire one exact generation at the current queue boundary after its owner
+ * has authenticated that the final consumer submission is already enqueued.
+ * Arena reuse remains safe because every later queue write/submit is ordered
+ * after those consumers; exceptional and device-loss cleanup retain their
+ * fence/evidence paths.
+ */
+export function releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+  generation,
+  device
+) {
+  const { record, artifacts } = queueOrderedGenerationRetirementContext(
+    generation,
+    device
+  );
+  return releaseQueueOrderedGenerationAfterFinalConsumer(record, artifacts);
+}
+
+export function releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer(
+  consumerLease,
+  generation,
+  device
+) {
+  const {
+    record,
+    artifacts,
+    consumerLeaseRecord
+  } = queueOrderedGenerationRetirementContext(
+    generation,
+    device,
+    { consumerLease }
+  );
+  return releaseQueueOrderedGenerationAfterFinalConsumer(
+    record,
+    artifacts,
+    {
+      consumerLease,
+      consumerLeaseRecord,
+      combinedConsumerLease: true
+    }
+  );
 }
 
 export function schroederSpatialEpochGenerationRetirementCapability(

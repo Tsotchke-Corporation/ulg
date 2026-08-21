@@ -9,6 +9,10 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATE_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION
 } from './schroederSpatialMechanicsFieldView.js';
+import {
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_RADIX_KEY_WORDS
+} from './schroederSpatialParentFieldView.js';
 
 export const schroederSpatialParentFieldViewWgsl = /* wgsl */ `
 struct SchroederSpatialParentFieldViewParams {
@@ -63,7 +67,7 @@ struct SchroederSpatialParentFieldViewParams {
   workgroup_size: u32,
   exact_level_count: u32,
   cleared_words: u32,
-  pad0: u32,
+  max_compute_workgroups_per_dimension: u32,
   pad1: u32,
   pad2: u32,
   pad3: u32,
@@ -131,7 +135,9 @@ const STATUS_LEVEL_CONTRACT: u32 = 32u;
 const STATUS_CLIPPED_SUPPORT: u32 = 64u;
 const STATUS_TRANSFER_RESIDUAL: u32 = 128u;
 const INVALID_INDEX: u32 = 0xffffffffu;
-const KEY_WORDS: u32 = 4u;
+const KEY_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS}u;
+const RADIX_KEY_WORDS: u32 = ${SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_RADIX_KEY_WORDS}u;
+const RADIX_MATERIAL_MASK: u32 = 0x00ffffffu;
 const MAX_FINE_EDGES: u32 = 8u;
 
 fn output_store(word: u32, value: u32) {
@@ -140,6 +146,28 @@ fn output_store(word: u32, value: u32) {
 
 fn output_load(word: u32) -> u32 {
   return atomicLoad(&parent_field_view[word]);
+}
+
+fn flattened_invocation_index(
+  global_id: vec3<u32>,
+  workgroup_count: vec3<u32>
+) -> u32 {
+  return global_id.x
+    + global_id.y * workgroup_count.x * params.workgroup_size;
+}
+
+fn bounded_dispatch_shape(invocation_count: u32) -> vec3<u32> {
+  if (invocation_count == 0u) { return vec3<u32>(0u); }
+  let workgroup_size = max(params.workgroup_size, 1u);
+  let group_count = (invocation_count + workgroup_size - 1u)
+    / workgroup_size;
+  let dispatch_limit = max(
+    params.max_compute_workgroups_per_dimension,
+    1u
+  );
+  let dispatch_x = min(group_count, dispatch_limit);
+  let dispatch_y = (group_count + dispatch_x - 1u) / dispatch_x;
+  return vec3<u32>(dispatch_x, dispatch_y, 1u);
 }
 
 fn finite_f32(value: f32) -> bool {
@@ -405,11 +433,10 @@ fn field_key_word(
 }
 
 fn candidate_store_invalid(candidate_index: u32) {
-  let base = candidate_index * KEY_WORDS;
+  let base = candidate_index * RADIX_KEY_WORDS;
   candidate_keys[base] = INVALID_INDEX;
   candidate_keys[base + 1u] = INVALID_INDEX;
   candidate_keys[base + 2u] = INVALID_INDEX;
-  candidate_keys[base + 3u] = INVALID_INDEX;
 }
 
 fn candidate_store_key(
@@ -419,11 +446,10 @@ fn candidate_store_key(
   material: u32,
   domain: u32
 ) {
-  let base = candidate_index * KEY_WORDS;
+  let base = candidate_index * RADIX_KEY_WORDS;
   candidate_keys[base] = parent_dense_node;
-  candidate_keys[base + 1u] = family;
-  candidate_keys[base + 2u] = material;
-  candidate_keys[base + 3u] = domain;
+  candidate_keys[base + 1u] = (family << 24u) | material;
+  candidate_keys[base + 2u] = domain;
 }
 
 fn hierarchy_fine_compact_index(dense_node: u32) -> u32 {
@@ -479,11 +505,45 @@ fn dense_coords(index: u32, ny: u32, nz: u32) -> vec3<i32> {
   return vec3<i32>(i32(x), i32(remainder / nz), i32(remainder % nz));
 }
 
+// Publish an authenticated live prefix for the radix runtime. Fine candidate
+// rows retain their fixed eight-wide per-field layout, while coarse rows begin
+// immediately after the live fine prefix. This preserves every downstream
+// candidate index without sorting the unused capacity tail.
+@compute @workgroup_size(1)
+fn prepare_candidate_count() {
+  let fine_admitted = fine_field_admission_mask() == 0u;
+  let coarse_admitted = coarse_field_admission_mask() == 0u;
+  let hierarchy_is_admitted = hierarchy_admitted();
+  let fine_count = select(0u, fine_field_view[34u], fine_admitted);
+  let coarse_count = select(0u, coarse_field_view[34u], coarse_admitted);
+  var candidate_count = 0u;
+  if (
+    fine_admitted
+    && coarse_admitted
+    && hierarchy_is_admitted
+    && fine_count <= params.fine_field_capacity
+    && coarse_count <= params.coarse_field_capacity
+  ) {
+    candidate_count = fine_count * MAX_FINE_EDGES + coarse_count;
+    if (candidate_count > params.candidate_capacity) {
+      candidate_count = 0u;
+      atomicAdd(&parent_field_view[40u], 1u);
+    }
+  }
+  output_store(72u, candidate_count);
+  let candidate_dispatch = bounded_dispatch_shape(candidate_count);
+  output_store(60u, candidate_dispatch.x);
+  output_store(61u, candidate_dispatch.y);
+  output_store(62u, candidate_dispatch.z);
+  output_store(63u, params.completion_ordinal);
+}
+
 @compute @workgroup_size(64)
 fn emit_fine_parent_candidates(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index = flattened_invocation_index(global_id, workgroup_count);
   if (field_index >= params.fine_field_capacity) { return; }
   let candidate_base = field_index * MAX_FINE_EDGES;
   for (var edge = 0u; edge < MAX_FINE_EDGES; edge = edge + 1u) {
@@ -546,11 +606,13 @@ fn emit_fine_parent_candidates(
 
 @compute @workgroup_size(64)
 fn emit_coarse_native_candidates(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index = flattened_invocation_index(global_id, workgroup_count);
   if (field_index >= params.coarse_field_capacity) { return; }
-  let candidate_index = params.fine_candidate_capacity + field_index;
+  let fine_count = min(fine_field_view[34u], params.fine_field_capacity);
+  let candidate_index = fine_count * MAX_FINE_EDGES + field_index;
   candidate_store_invalid(candidate_index);
   output_store(params.coarse_native_map_offset_words + field_index, INVALID_INDEX);
   if (!coarse_field_admitted() || !hierarchy_admitted()) {
@@ -572,11 +634,10 @@ fn emit_coarse_native_candidates(
 }
 
 fn candidate_is_invalid(candidate_index: u32) -> bool {
-  let base = candidate_index * KEY_WORDS;
+  let base = candidate_index * RADIX_KEY_WORDS;
   return candidate_keys[base] == INVALID_INDEX
     && candidate_keys[base + 1u] == INVALID_INDEX
-    && candidate_keys[base + 2u] == INVALID_INDEX
-    && candidate_keys[base + 3u] == INVALID_INDEX;
+    && candidate_keys[base + 2u] == INVALID_INDEX;
 }
 
 fn unique_count_without_sentinel() -> u32 {
@@ -585,14 +646,13 @@ fn unique_count_without_sentinel() -> u32 {
   if (unique_count == 0u || unique_count > params.parent_field_capacity + 1u) {
     return unique_count;
   }
-  let last = (unique_count - 1u) * KEY_WORDS;
+  let last = (unique_count - 1u) * RADIX_KEY_WORDS;
   if (
     last <= arrayLength(&unique_keys)
-    && KEY_WORDS <= arrayLength(&unique_keys) - last
+    && RADIX_KEY_WORDS <= arrayLength(&unique_keys) - last
     && unique_keys[last] == INVALID_INDEX
     && unique_keys[last + 1u] == INVALID_INDEX
     && unique_keys[last + 2u] == INVALID_INDEX
-    && unique_keys[last + 3u] == INVALID_INDEX
   ) {
     return unique_count - 1u;
   }
@@ -601,11 +661,17 @@ fn unique_count_without_sentinel() -> u32 {
 
 @compute @workgroup_size(64)
 fn materialize_candidate_union_indices(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
 ) {
-  let sorted_position = global_id.x;
+  let sorted_position = flattened_invocation_index(
+    global_id,
+    workgroup_count
+  );
+  let live_candidate_count = output_load(72u);
   if (
-    sorted_position >= params.candidate_capacity
+    sorted_position >= live_candidate_count
+    || sorted_position >= params.candidate_capacity
     || sorted_position >= arrayLength(&sorted_candidate_indices)
     || sorted_position >= arrayLength(&unique_group_by_sorted_position)
   ) {
@@ -631,16 +697,20 @@ fn materialize_candidate_union_indices(
     }
   }
   candidate_union_indices[candidate_index] = union_index;
-  if (candidate_index >= params.fine_candidate_capacity) {
-    let coarse_index = candidate_index - params.fine_candidate_capacity;
+  let live_fine_candidate_count = min(
+    fine_field_view[34u],
+    params.fine_field_capacity
+  ) * MAX_FINE_EDGES;
+  if (candidate_index >= live_fine_candidate_count) {
+    let coarse_index = candidate_index - live_fine_candidate_count;
     output_store(params.coarse_native_map_offset_words + coarse_index, union_index);
   }
 }
 
 fn unique_key_strictly_less(left: u32, right: u32) -> bool {
-  let left_base = left * KEY_WORDS;
-  let right_base = right * KEY_WORDS;
-  for (var word = 0u; word < KEY_WORDS; word = word + 1u) {
+  let left_base = left * RADIX_KEY_WORDS;
+  let right_base = right * RADIX_KEY_WORDS;
+  for (var word = 0u; word < RADIX_KEY_WORDS; word = word + 1u) {
     let a = unique_keys[left_base + word];
     let b = unique_keys[right_base + word];
     if (a < b) { return true; }
@@ -651,24 +721,31 @@ fn unique_key_strictly_less(left: u32, right: u32) -> bool {
 
 @compute @workgroup_size(64)
 fn assemble_parent_field_keys(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
 ) {
-  let parent_index = global_id.x;
+  let parent_index = flattened_invocation_index(
+    global_id,
+    workgroup_count
+  );
   let parent_count = unique_count_without_sentinel();
   if (parent_index >= parent_count || parent_index >= params.parent_field_capacity) {
     return;
   }
-  let source = parent_index * KEY_WORDS;
-  let destination = params.parent_key_offset_words + source;
+  let source = parent_index * RADIX_KEY_WORDS;
+  let destination = params.parent_key_offset_words + parent_index * KEY_WORDS;
   let ordered = parent_index == 0u
     || unique_key_strictly_less(parent_index - 1u, parent_index);
-  let family = unique_keys[source + 1u];
-  let domain = unique_keys[source + 3u];
+  let packed_identity = unique_keys[source + 1u];
+  let family = packed_identity >> 24u;
+  let material = packed_identity & RADIX_MATERIAL_MASK;
+  let domain = unique_keys[source + 2u];
   let key_valid = unique_keys[source] < params.coarse_grid_node_count
     && family >= 1u
     && family <= 4u
-    && unique_keys[source + 2u] >= 1u
-    && unique_keys[source + 2u] <= 0x00ffffffu
+    && material >= 1u
+    && material <= RADIX_MATERIAL_MASK
+    && ((family << 24u) | material) == packed_identity
     && select(domain == 0u, domain != 0u, family == 1u);
   if (!ordered || !key_valid) {
     atomicAdd(&parent_field_view[71u], 1u);
@@ -676,7 +753,7 @@ fn assemble_parent_field_keys(
   }
   output_store(destination, unique_keys[source]);
   output_store(destination + 1u, family);
-  output_store(destination + 2u, unique_keys[source + 2u]);
+  output_store(destination + 2u, material);
   output_store(destination + 3u, domain);
 }
 
@@ -697,9 +774,10 @@ fn output_parent_key_matches(
 
 @compute @workgroup_size(64)
 fn scatter_fine_field_edges(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
 ) {
-  let field_index = global_id.x;
+  let field_index = flattened_invocation_index(global_id, workgroup_count);
   if (field_index >= params.fine_field_capacity) { return; }
   let edge_base = fine_edge_offsets[field_index];
   output_store(params.fine_edge_offset_offset_words + field_index, edge_base);
@@ -791,14 +869,15 @@ fn finalize_parent_field_view() {
   let fine_admitted = fine_admission_mask == 0u;
   let coarse_admitted = coarse_admission_mask == 0u;
   let hierarchy_is_admitted = hierarchy_admitted();
+  let candidate_count = output_load(72u);
   let unique_ready = arrayLength(&unique_evidence) >= 8u
     && unique_evidence[0u] == params.generation_id
-    && unique_evidence[1u] == params.candidate_capacity
+    && unique_evidence[1u] == candidate_count
     && unique_evidence[3u] == 1u
     && unique_evidence[4u] == 0u
-    && unique_evidence[5u] == KEY_WORDS
-    && unique_evidence[6u] == KEY_WORDS
-    && unique_evidence[7u] == 1u;
+    && unique_evidence[5u] == RADIX_KEY_WORDS
+    && unique_evidence[6u] == RADIX_KEY_WORDS
+    && unique_evidence[7u] == 3u;
   let fine_count = select(0u, fine_field_view[34u], fine_admitted);
   let coarse_count = select(0u, coarse_field_view[34u], coarse_admitted);
   let parent_count = unique_count_without_sentinel();
@@ -854,23 +933,12 @@ fn finalize_parent_field_view() {
     if (clipped != 0u) { status = status | STATUS_CLIPPED_SUPPORT; }
     if (!residuals_admitted) { status = status | STATUS_TRANSFER_RESIDUAL; }
   }
-  let dispatch_x = select(
-    0u,
-    (parent_count + max(params.workgroup_size, 1u) - 1u)
-      / max(params.workgroup_size, 1u),
-    admitted && parent_count > 0u
+  let dispatch = bounded_dispatch_shape(select(0u, parent_count, admitted));
+  let fine_dispatch = bounded_dispatch_shape(
+    select(0u, fine_count, admitted)
   );
-  let fine_dispatch_x = select(
-    0u,
-    (fine_count + max(params.workgroup_size, 1u) - 1u)
-      / max(params.workgroup_size, 1u),
-    admitted && fine_count > 0u
-  );
-  let coarse_dispatch_x = select(
-    0u,
-    (coarse_count + max(params.workgroup_size, 1u) - 1u)
-      / max(params.workgroup_size, 1u),
-    admitted && coarse_count > 0u
+  let coarse_dispatch = bounded_dispatch_shape(
+    select(0u, coarse_count, admitted)
   );
   output_store(0u, PARENT_FIELD_MAGIC);
   output_store(1u, PARENT_FIELD_VERSION);
@@ -932,17 +1000,17 @@ fn finalize_parent_field_view() {
   output_store(57u, select(0u, unique_evidence[0u], unique_ready));
   output_store(58u, select(0u, unique_evidence[1u], unique_ready));
   output_store(59u, select(0u, unique_evidence[2u], unique_ready));
-  output_store(60u, dispatch_x);
-  output_store(61u, select(0u, 1u, dispatch_x > 0u));
-  output_store(62u, select(0u, 1u, dispatch_x > 0u));
+  output_store(60u, dispatch.x);
+  output_store(61u, dispatch.y);
+  output_store(62u, dispatch.z);
   output_store(63u, params.completion_ordinal);
-  output_store(64u, fine_dispatch_x);
-  output_store(65u, select(0u, 1u, fine_dispatch_x > 0u));
-  output_store(66u, select(0u, 1u, fine_dispatch_x > 0u));
+  output_store(64u, fine_dispatch.x);
+  output_store(65u, fine_dispatch.y);
+  output_store(66u, fine_dispatch.z);
   output_store(67u, params.exact_level_count);
-  output_store(68u, coarse_dispatch_x);
-  output_store(69u, select(0u, 1u, coarse_dispatch_x > 0u));
-  output_store(70u, select(0u, 1u, coarse_dispatch_x > 0u));
+  output_store(68u, coarse_dispatch.x);
+  output_store(69u, coarse_dispatch.y);
+  output_store(70u, coarse_dispatch.z);
   output_store(71u, invalid_key);
   output_store(72u, select(0u, edge_count + coarse_count, admitted));
   output_store(73u, select(0u, coarse_count, admitted));

@@ -24,11 +24,13 @@ import {
   createMlsMpmGridSpec,
   createProjectionParamsArray,
   createMlsMpmP2gGridProjectionParityReport,
+  mlsMpmMechanicsFieldProductRouteCertificateWgsl,
   projectMlsMpmP2gGridCpu,
   resolveMlsMpmP2gBackendPolicy,
   runMlsMpmP2gGridProjectionWebGpu,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   runMlsMpmP2gGridProjectionWithOptionalWebGpu,
+  validateLocallySubmittedMlsMpmActiveSourceDenseP2g,
   validateLocallySubmittedMlsMpmMechanicsFieldP2g
 } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
@@ -58,7 +60,11 @@ import {
   createSchroederFrozenLevelAssignmentRefreshGpu
 } from '../src/runtime/sph/schroederFrozenLevelAssignmentRefreshGpu.js';
 import {
+  SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS,
   runMlsMpmGridUpdateWebGpu,
+  validateLocallySubmittedMlsMpmActiveSourceDenseGridUpdate,
   validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate,
   validateSubmittedMlsMpmMechanicsFieldGridUpdate
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
@@ -78,7 +84,27 @@ import {
   destroyMlsMpmResidentStepBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  SCHROEDER_SPATIAL_EPOCH_READER,
+  SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
+  admitSchroederSpatialEpochTransactionReader,
+  createSchroederSpatialEpochTransaction
+} from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
+import {
+  buildMlsMpmMechanicsMaterialTable
+} from '../src/runtime/sph/sphMechanicsMaterialTable.js';
+import {
+  runSchroederSpatialMechanicalProposalWebGpu
+} from '../src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
+import {
+  destroyMlsMpmMechanicsMaterialPhaseUpload,
+  uploadMlsMpmMechanicsMaterialPhaseRecords
+} from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  createResidentProductEventCountControlWords,
+  registerResidentProductEventCountAuthority
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-5) {
   assert.ok(
@@ -255,6 +281,86 @@ function productEventRows({
   return rows;
 }
 
+function gpuResidentProductHistory(fixture, {
+  routingId = 1,
+  rowCapacity = 65,
+  liveRowCount = 1,
+  generation = 73,
+  seal = 0x7a51c30d
+} = {}) {
+  const { device } = fixture;
+  const rows = new Float32Array(
+    rowCapacity * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+  );
+  rows.set(productEventRows({
+    position: [0.5, 0.5, 0.5],
+    massKg: 1,
+    routingId,
+    phaseId: routingId === 1 ? 3 : 2,
+    visibleMassKg: 0,
+    unplacedMassKg: 1,
+    status: 1
+  }));
+  const productEventBuffer = device.createBuffer({
+    label: `mechanics-field-product-history-route-${routingId}`,
+    size: rows.byteLength,
+    usage: 128 | 4 | 8
+  });
+  tagWebGpuBufferDevice(productEventBuffer, device);
+  device.queue.writeBuffer(productEventBuffer, 0, rows);
+  const controlOffsetBytes = 256;
+  const controlBuffer = device.createBuffer({
+    label: `mechanics-field-product-history-control-route-${routingId}`,
+    size: controlOffsetBytes + 256,
+    usage: 128 | 4 | 8 | 256
+  });
+  const residentProductMass = {
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-merged-gpu-resident',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventBuffer.size,
+    productEventRowCount: rowCapacity,
+    productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    productEventActiveEventCount: null,
+    unplacedProductMassKg: 1,
+    consumeMassPolicy: 'unplaced-product-mass-only',
+    eosCouplingStatus: 'resident-product-mass-p2g-eos-sidecar-ready'
+  };
+  const authority = registerResidentProductEventCountAuthority(
+    residentProductMass,
+    {
+      device,
+      controlBuffer,
+      controlOffsetBytes,
+      rowCapacity,
+      rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      generation,
+      seal
+    }
+  );
+  device.queue.writeBuffer(
+    controlBuffer,
+    controlOffsetBytes,
+    createResidentProductEventCountControlWords({
+      liveRowCount,
+      rowCapacity,
+      rowStrideVec4: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
+      generation,
+      seal
+    })
+  );
+  return {
+    authority,
+    controlBuffer,
+    controlOffsetBytes,
+    productEventBuffer,
+    residentProductMass,
+    rowCapacity,
+    rows
+  };
+}
+
 function webGpuNavigator() {
   return {
     gpu: {
@@ -271,18 +377,24 @@ function webGpuNavigator() {
 
 function fakeP2gDevice() {
   const createdBuffers = [];
+  const createdPipelines = [];
   const bindGroups = [];
   const dispatches = [];
+  const passTrace = [];
   const writes = [];
   const clears = [];
+  const copies = [];
   const submissions = [];
   const shaderModules = [];
   const device = {
     createdBuffers,
+    createdPipelines,
     bindGroups,
     dispatches,
+    passTrace,
     writes,
     clears,
+    copies,
     submissions,
     shaderModules,
     limits: {
@@ -334,6 +446,7 @@ function fakeP2gDevice() {
       return { bindGroupLayouts: desc.bindGroupLayouts };
     },
     createComputePipeline(desc) {
+      createdPipelines.push(desc);
       return {
         desc,
         getBindGroupLayout() {
@@ -351,19 +464,44 @@ function fakeP2gDevice() {
           clears.push({ buffer, offset, size });
         },
         beginComputePass() {
+          let pipeline = null;
           return {
-            setPipeline() {},
+            setPipeline(value) {
+              pipeline = value;
+            },
             setBindGroup() {},
             dispatchWorkgroups(x, y = 1, z = 1) {
               dispatches.push([x, y, z]);
+              passTrace.push({
+                kind: 'direct',
+                entryPoint: pipeline?.desc?.compute?.entryPoint ?? null
+              });
             },
             dispatchWorkgroupsIndirect(buffer, offset = 0) {
               dispatches.push(['indirect', buffer, offset]);
+              passTrace.push({
+                kind: 'indirect',
+                entryPoint: pipeline?.desc?.compute?.entryPoint ?? null
+              });
             },
             end() {}
           };
         },
-        copyBufferToBuffer() {},
+        copyBufferToBuffer(
+          source,
+          sourceOffset,
+          destination,
+          destinationOffset,
+          size
+        ) {
+          copies.push({
+            source,
+            sourceOffset,
+            destination,
+            destinationOffset,
+            size
+          });
+        },
         finish() {
           return {};
         }
@@ -447,7 +585,8 @@ function canonicalSpatialEpochGenerationFixture(device, {
 
 function fusedP2gProducerFixture({
   fineSubstepCount = 1,
-  createMacroAuthority: shouldCreateMacroAuthority = true
+  createMacroAuthority: shouldCreateMacroAuthority = true,
+  mechanicsLevelCount = 2
 } = {}) {
   const device = fakeP2gDevice();
   const { sphParticleState, mlsMpmParticleState } = manualBuffers({
@@ -515,7 +654,7 @@ function fusedP2gProducerFixture({
     levelEpoch: 29,
     supportEpoch: 31,
     minLevel: 0,
-    maxLevel: 1,
+    maxLevel: mechanicsLevelCount > 1 ? 1 : 0,
     chartId: 0,
     baseGridSpacingM: 0.25
   };
@@ -538,14 +677,19 @@ function fusedP2gProducerFixture({
     mechanicsLevels: [
       { selectedLevel: 0, mechanicsGrid: fineGrid },
       { selectedLevel: 1, mechanicsGrid: coarseGrid }
-    ]
+    ].slice(0, mechanicsLevelCount)
   });
   assert.equal(
     generation.ready,
     true,
     `${generation.status}: ${generation.reason ?? 'no reason'}`
   );
-  assert.ok(generation.parentFieldView);
+  if (mechanicsLevelCount > 1) {
+    assert.ok(generation.parentFieldView);
+  } else {
+    assert.equal(generation.parentFieldView, null);
+    assert.equal(generation.mechanicsFieldView?.selectedLevel, 0);
+  }
   const sphParticleUpload = {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
@@ -928,6 +1072,967 @@ async function releaseFusedG2pFixture(fixture, chain, reason) {
   );
   fixture.refluxLedger.destroy();
 }
+
+test('required mechanics-field P2G rejects resident product history without exact GPU live-count authority', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const residentProductMass = residentProductMassFromRows(productEventRows({
+    position: [0.5, 0.5, 0.5],
+    massKg: 1,
+    visibleMassKg: 0,
+    unplacedMassKg: 1,
+    status: 1
+  }));
+  const submissionCountBefore = fixture.device.submissions.length;
+
+  await assert.rejects(
+    runMlsMpmP2gGridProjectionWebGpu({
+      device: fixture.device,
+      sphParticleState: fixture.sphParticleState,
+      mlsMpmParticleState: fixture.mlsMpmParticleState,
+      sphParticleUpload: fixture.sphParticleUpload,
+      mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+      schroederSelectedLevel: 0,
+      schroederSpatialEpochGeneration: fixture.generation,
+      canonicalSpatialRequired: true,
+      mechanicsFieldMode: 'required',
+      residentProductMass,
+      gridSpacingM: 0.25,
+      boxDimsM: [1, 1, 1],
+      dt: 0.005,
+      readbackMode: 'no-full-readback'
+    }),
+    /Mechanics-field P2G requires an exact GPU-authored product-event live-count authority/
+  );
+  assert.equal(fixture.device.submissions.length, submissionCountBefore);
+});
+
+test('required mechanics-field P2G admits exact gas-only GPU product history without scatter, readback, or host fence', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const history = gpuResidentProductHistory(fixture, { routingId: 1 });
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  let hostQueueFenceCount = 0;
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    hostQueueFenceCount += 1;
+    return originalFence.apply(fixture.device.queue, args);
+  };
+  const traceStart = fixture.device.passTrace.length;
+  const dispatchStart = fixture.device.dispatches.length;
+  const bufferStart = fixture.device.createdBuffers.length;
+  const fieldRuntime = fixture.generation.mechanicsFieldView.ownerRuntime;
+  const fieldExecution = fixture.generation.mechanicsFieldView;
+  const candidateKeyEntries = fieldRuntime.allocationEntries().filter(
+    ({ role }) => (
+      role === 'mechanics-field-candidate-keys'
+    )
+  );
+  assert.equal(candidateKeyEntries.length, fieldRuntime.arenaCount);
+  assert.equal(
+    Number(fieldExecution.candidateKeyBuffer?.size),
+    fieldExecution.layout.candidateCapacity
+      * MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    residentProductMass: history.residentProductMass,
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: 0.005,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(hostQueueFenceCount, 0);
+  assert.equal(projection.fullReadbackPerformed, false);
+  assert.equal(projection.normalHotLoopReadbackFree, true);
+  assert.equal(
+    projection.mechanicsFieldP2gContributionBufferOwnership,
+    'mechanics-field-candidate-arena-phase-alias'
+  );
+  assert.equal(
+    projection.mechanicsFieldP2gContributionBufferAllocatedBytes,
+    0
+  );
+  assert.equal(
+    projection.mechanicsFieldP2gContributionBufferRequiredBytes,
+    Number(fieldExecution.candidateKeyBuffer.size)
+  );
+  assert.equal(
+    projection.mechanicsFieldP2gContributionBufferCapacityBytes,
+    Number(fieldExecution.candidateKeyBuffer.size)
+  );
+  assert.equal(
+    projection.mechanicsFieldP2gContributionBufferAllocationPerformed,
+    false
+  );
+  assert.equal(
+    fixture.device.createdBuffers
+      .slice(bufferStart)
+      .some(({ label }) => (
+        label === 'ulg-mls-mpm-staged-p2g-deterministic-field-contributions'
+      )),
+    false,
+    'the resident P2G call must not allocate a fresh contribution buffer'
+  );
+  assert.equal(
+    candidateKeyEntries.every(({ buffer }) => buffer.destroyed === false),
+    true
+  );
+  assert.equal(
+    fixture.device.bindGroups.some(({ entries }) => (
+      entries?.find(({ binding }) => binding === 5)?.resource?.buffer
+        === fieldExecution.candidateKeyBuffer
+    )),
+    true,
+    'staged P2G must bind the exact live field-arena candidate phase alias'
+  );
+  assert.equal(projection.residentProductMassCoupledEventCount, 0);
+  assert.equal(projection.residentProductMassCoupledUnplacedMassKg, 0);
+  assert.equal(
+    projection.residentProductMassProductEventDispatchMode,
+    'gpu-authenticated-gas-only-no-mechanics-scatter'
+  );
+  assert.equal(
+    projection.residentProductMassGridCouplingStatus,
+    'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
+  );
+  assert.equal(
+    fixture.device.createdBuffers
+      .slice(bufferStart)
+      .some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+  assert.equal(
+    fixture.device.copies.some(
+      (copy) => copy.source === history.controlBuffer
+    ),
+    false,
+    'mechanics-field admission binds the control record directly'
+  );
+
+  const mechanicsParamsWrite = fixture.device.writes.findLast(
+    (write) => write.label === 'ulg-mls-mpm-p2g-mechanics-field-params'
+  );
+  assert.ok(mechanicsParamsWrite);
+  assert.equal(
+    new DataView(mechanicsParamsWrite.data).getUint32(36, true),
+    0,
+    'mechanics P2G retains zero resident-product scatter count'
+  );
+  const certificateParamsWrite = fixture.device.writes.findLast(
+    (write) => write.label
+      === 'ulg-mls-mpm-p2g-mechanics-field-product-route-certificate-params'
+  );
+  assert.ok(certificateParamsWrite);
+  assert.equal(certificateParamsWrite.byteLength, 32);
+  const certificateParams = new Uint32Array(certificateParamsWrite.data);
+  assert.deepEqual(Array.from(certificateParams.slice(3, 7)), [
+    history.authority.generation,
+    history.authority.seal,
+    history.rowCapacity,
+    SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+  ]);
+
+  const certificateBindGroup = fixture.device.bindGroups.findLast(
+    ({ entries }) => entries?.some(
+      (entry) => entry.binding === 0
+        && entry.resource?.buffer === history.productEventBuffer
+    ) && entries?.some(
+      (entry) => entry.binding === 2
+        && entry.resource?.buffer === history.controlBuffer
+    )
+  );
+  assert.ok(certificateBindGroup);
+  assert.deepEqual(
+    certificateBindGroup.entries.find((entry) => entry.binding === 2)
+      .resource,
+    {
+      buffer: history.controlBuffer,
+      offset: history.controlOffsetBytes,
+      size: 32
+    }
+  );
+  const trace = fixture.device.passTrace.slice(traceStart);
+  const certificateTraceIndex = trace.findIndex(
+    ({ entryPoint }) => entryPoint === 'certify_resident_product_gas_only'
+  );
+  assert.equal(
+    trace.filter(
+      ({ entryPoint }) => entryPoint === 'certify_resident_product_gas_only'
+    ).length,
+    1
+  );
+  assert.deepEqual(
+    fixture.device.dispatches[dispatchStart + certificateTraceIndex],
+    [2, 1, 1],
+    '65 capacity rows are covered by two 64-lane workgroups'
+  );
+  assert.equal(
+    trace.some(({ entryPoint }) => entryPoint === 'scatter_product_events'),
+    false
+  );
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+});
+
+test('mechanics-field product-route certificate structurally fail-closes a live condensed residual before validation', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const history = gpuResidentProductHistory(fixture, { routingId: 0 });
+  assert.equal(history.rows[10], 0);
+  assert.equal(history.rows[13], 1);
+  const traceStart = fixture.device.passTrace.length;
+  const pipelineStart = fixture.device.createdPipelines.length;
+
+  await runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    residentProductMass: history.residentProductMass,
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: 0.005,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.match(
+    mlsMpmMechanicsFieldProductRouteCertificateWgsl,
+    /product_events\[row_base \+ 2u\]\.z/
+  );
+  assert.match(
+    mlsMpmMechanicsFieldProductRouteCertificateWgsl,
+    /product_events\[row_base \+ 3u\]\.y/
+  );
+  assert.match(
+    mlsMpmMechanicsFieldProductRouteCertificateWgsl,
+    /unplaced_mass_kg > 0\.0 && routing_id != PRODUCT_ROUTE_GAS/
+  );
+  assert.match(
+    mlsMpmMechanicsFieldProductRouteCertificateWgsl,
+    /atomicOr\(&mechanics_field_view\[2u\], FIELD_PRODUCT_ROUTE_REJECTED\)/
+  );
+  assert.match(
+    mlsMpmMechanicsFieldProductRouteCertificateWgsl,
+    /product_history_control\[6u\] == certificate\.expected_generation/
+  );
+  assert.equal(
+    fixture.device.createdPipelines.slice(pipelineStart).some(
+      ({ compute }) => compute?.entryPoint
+        === 'certify_resident_product_gas_only'
+    ),
+    true
+  );
+  assert.equal(
+    fixture.device.createdPipelines.slice(pipelineStart).some(
+      ({ compute }) => compute?.entryPoint === 'scatter_product_events'
+    ),
+    false
+  );
+  const entryPoints = fixture.device.passTrace
+    .slice(traceStart)
+    .map(({ entryPoint }) => entryPoint);
+  const finalPreflightIndex = entryPoints.indexOf(
+    'preflight_mechanics_field_layout'
+  );
+  const certificateIndex = entryPoints.indexOf(
+    'certify_resident_product_gas_only'
+  );
+  const validationIndex = entryPoints.indexOf(
+    'validate_compact_mechanics_nodes'
+  );
+  const clearIndex = entryPoints.indexOf('clear_accumulators');
+  assert.ok(finalPreflightIndex >= 0);
+  assert.ok(certificateIndex > finalPreflightIndex);
+  assert.ok(validationIndex > certificateIndex);
+  assert.ok(clearIndex > validationIndex);
+});
+
+test('canonical spatial v2 dense P2G authenticates one exact level and preserves resident product scatter', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const residentProductMass = residentProductMassFromRows(productEventRows({
+    position: [0.5, 0.5, 0.5],
+    massKg: 1,
+    visibleMassKg: 0,
+    unplacedMassKg: 1,
+    status: 1
+  }));
+  const createdBufferCountBeforeP2g =
+    fixture.device.createdBuffers.length;
+  const submissionCountBeforeP2g = fixture.device.submissions.length;
+  const originalP2gFence = fixture.device.queue.onSubmittedWorkDone;
+  let p2gHostQueueFenceCount = 0;
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    p2gHostQueueFenceCount += 1;
+    return originalP2gFence.apply(fixture.device.queue, args);
+  };
+
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'disabled',
+    residentProductMass,
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: 0.005,
+    retainGridBuffer: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(projection.activeSourceDenseCompatibilityEnabled, true);
+  assert.equal(
+    projection.activeSourceDenseCompatibilityScope,
+    'single-level-exact-query'
+  );
+  assert.equal(
+    projection.activeSourceDenseCompatibilityPreflight,
+    'gpu-one-workgroup-before-particle-and-product-scatter'
+  );
+  assert.equal(
+    projection.gridStateAuthority,
+    'dense-mls-mpm-grid-state-v2-active-source-product-aware'
+  );
+  assert.equal(projection.residentProductMassInputProductEventCount, 1);
+  assert.equal(projection.residentProductMassCoupledEventCount, 1);
+  assert.equal(projection.readbackMode, 'no-full-readback');
+  assert.equal(projection.fullReadbackPerformed, false);
+  assert.ok(projection.gridBuffer);
+  assert.equal(
+    fixture.device.submissions.length,
+    submissionCountBeforeP2g + 1
+  );
+  assert.equal(fixture.device.submissions.at(-1).length, 1);
+  assert.equal(p2gHostQueueFenceCount, 0);
+  assert.equal(projection.hostQueueFenceCount, 0);
+  assert.equal(projection.normalHotLoopReadbackFree, true);
+  assert.equal(projection.queueOrderedCleanupReceipt?.completed, true);
+  assert.equal(
+    projection.queueOrderedCleanupReceipt?.hostQueueFenceCount,
+    0
+  );
+  const p2gAttemptBuffers = fixture.device.createdBuffers.slice(
+    createdBufferCountBeforeP2g
+  );
+  assert.ok(p2gAttemptBuffers.length > 1);
+  assert.equal(
+    p2gAttemptBuffers.every((buffer) => (
+      buffer === projection.gridBuffer || buffer.destroyed === true
+    )),
+    true
+  );
+  assert.equal(projection.gridBuffer.destroyed, false);
+  fixture.device.queue.onSubmittedWorkDone = originalP2gFence;
+
+  const paramsWrite = fixture.device.writes.findLast(
+    (write) => write.label === 'ulg-mls-mpm-p2g-active-source-v2-dense-params'
+  );
+  assert.ok(paramsWrite);
+  assert.equal(paramsWrite.byteLength, 224);
+  const params = new DataView(paramsWrite.data);
+  assert.equal(
+    params.getUint32(144, true),
+    fixture.generation.activeSourceView.physicalSourceCapacity
+  );
+  assert.equal(
+    params.getUint32(148, true),
+    fixture.generation.activeSourceView.activeSourceCapacity
+  );
+  assert.equal(
+    params.getUint32(172, true),
+    fixture.generation.activeSourceView.buildOrdinal
+  );
+  assert.ok(params.getUint32(172, true) > 0);
+  for (let offset = 176; offset < 224; offset += 4) {
+    assert.equal(params.getUint32(offset, true), 0);
+  }
+
+  const denseBindGroup = fixture.device.bindGroups.findLast(
+    (bindGroup) => bindGroup.entries.some(
+      (entry) => entry.binding === 6
+        && entry.resource?.buffer === projection.gridBuffer
+    )
+  );
+  assert.ok(denseBindGroup);
+  assert.equal(
+    denseBindGroup.entries.find((entry) => entry.binding === 7)
+      ?.resource?.buffer,
+    fixture.generation.execution.evidenceBuffer
+  );
+  assert.equal(
+    denseBindGroup.entries.find((entry) => entry.binding === 8)
+      ?.resource?.buffer,
+    fixture.generation.activeSourceView.activeSourceViewBuffer
+  );
+
+  const entryPoints = fixture.device.passTrace.map(
+    (pass) => pass.entryPoint
+  );
+  const preflightIndex = entryPoints.indexOf(
+    'preflight_active_source_dense_single_level'
+  );
+  const mainIndex = entryPoints.indexOf('main', preflightIndex + 1);
+  const productIndex = entryPoints.indexOf(
+    'scatter_product_events',
+    mainIndex + 1
+  );
+  const finalizeIndex = entryPoints.indexOf(
+    'finalize_grid',
+    productIndex + 1
+  );
+  assert.ok(preflightIndex >= 0);
+  assert.ok(mainIndex > preflightIndex);
+  assert.ok(productIndex > mainIndex);
+  assert.ok(finalizeIndex > productIndex);
+  assert.equal(
+    fixture.device.createdBuffers.some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+
+  assert.equal(validateLocallySubmittedMlsMpmActiveSourceDenseP2g(
+    fixture.device,
+    projection,
+    {
+      schroederSpatialEpochGeneration: fixture.generation,
+      selectedLevel: 0,
+      gridBuffer: projection.gridBuffer,
+      requireNoFullReadback: true
+    }
+  ), true);
+  assert.equal(validateLocallySubmittedMlsMpmActiveSourceDenseP2g(
+    fixture.device,
+    { ...projection },
+    {
+      schroederSpatialEpochGeneration: fixture.generation,
+      selectedLevel: 0,
+      gridBuffer: projection.gridBuffer,
+      requireNoFullReadback: true
+    }
+  ), false);
+
+  const gridUpdate = await runMlsMpmGridUpdateWebGpu({
+    device: fixture.device,
+    p2gGridProjection: projection,
+    mechanicsFieldMode: 'disabled',
+    dt: 0.005,
+    gravityMPerS2: [0, -9.80665, 0],
+    boxDimsM: [1, 1, 1],
+    cflFactor: 0.4,
+    retainUpdatedGridBuffer: true,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(gridUpdate.sourceProjection, projection);
+  assert.equal(gridUpdate.activeSourceDenseCompatibilityEnabled, true);
+  assert.equal(
+    gridUpdate.gridStateAuthority,
+    'dense-mls-mpm-grid-state-v2-active-source-product-aware'
+  );
+  assert.equal(gridUpdate.readbackMode, 'no-full-readback');
+  assert.equal(gridUpdate.fullReadbackPerformed, false);
+  assert.ok(gridUpdate.updatedGridBuffer);
+  assert.equal(validateLocallySubmittedMlsMpmActiveSourceDenseGridUpdate(
+    fixture.device,
+    gridUpdate,
+    {
+      sourceProjection: projection,
+      schroederSpatialEpochGeneration: fixture.generation,
+      selectedLevel: 0,
+      updatedGridBuffer: gridUpdate.updatedGridBuffer,
+      revalidateSourceProjection: true
+    }
+  ), true);
+  assert.equal(validateLocallySubmittedMlsMpmActiveSourceDenseGridUpdate(
+    fixture.device,
+    { ...gridUpdate },
+    {
+      sourceProjection: projection,
+      schroederSpatialEpochGeneration: fixture.generation,
+      selectedLevel: 0,
+      updatedGridBuffer: gridUpdate.updatedGridBuffer,
+      revalidateSourceProjection: true
+    }
+  ), false);
+
+  const denseG2pArgs = {
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    dt: 0.005,
+    boxDimsM: [1, 1, 1],
+    internalPressureScale: projection.internalPressureScale,
+    liquidWallDampingAlpha: 0,
+    liquidWallDampingDistanceM: 0,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'disabled',
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  };
+  const submissionCountBeforeCopiedGridUpdate =
+    fixture.device.submissions.length;
+  const outputBufferCountBeforeCopiedGridUpdate =
+    fixture.device.createdBuffers.filter(
+      (buffer) => buffer.label === 'ulg-mls-mpm-g2p-state-out'
+        || buffer.label === 'ulg-mls-mpm-g2p-mechanics-out'
+    ).length;
+  await assert.rejects(
+    runMlsMpmG2pWebGpu({
+      ...denseG2pArgs,
+      gridUpdate: { ...gridUpdate }
+    }),
+    (error) => {
+      assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+      assert.equal(
+        error.status,
+        'active-source-v2-dense-grid-update-provenance-rejected'
+      );
+      return true;
+    }
+  );
+  assert.equal(
+    fixture.device.submissions.length,
+    submissionCountBeforeCopiedGridUpdate
+  );
+  assert.equal(
+    fixture.device.createdBuffers.filter(
+      (buffer) => buffer.label === 'ulg-mls-mpm-g2p-state-out'
+        || buffer.label === 'ulg-mls-mpm-g2p-mechanics-out'
+    ).length,
+    outputBufferCountBeforeCopiedGridUpdate
+  );
+
+  const mechanicalProposal =
+    runSchroederSpatialMechanicalProposalWebGpu({
+      device: fixture.device,
+      generation: fixture.generation,
+      sphParticleState: fixture.sphParticleState,
+      mlsMpmParticleState: fixture.mlsMpmParticleState,
+      sphParticleUpload: fixture.sphParticleUpload,
+      mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+      boxDimsM: [1, 1, 1],
+      gridSpacingM: 0.25,
+      relaxation: 0,
+      normalVelocityDamping: 0,
+      selectedLevel: 0
+    });
+  assert.equal(mechanicalProposal.ready, true);
+  const g2p = await runMlsMpmG2pWebGpu({
+    ...denseG2pArgs,
+    gridUpdate,
+    schroederSpatialMechanicalProposal: mechanicalProposal,
+  });
+  assert.equal(g2p.activeSourceDenseCompatibilityEnabled, true);
+  assert.equal(
+    g2p.activeSourceDenseCompatibilityScope,
+    'single-level-exact-query'
+  );
+  assert.equal(
+    g2p.activeSourceDenseCompatibilityProvenance,
+    'locally-submitted-p2g-grid-update-g2p-chain'
+  );
+  assert.equal(g2p.sourceGridUpdate, gridUpdate);
+  assert.equal(g2p.readbackMode, 'no-full-readback');
+  assert.equal(g2p.fullReadbackPerformed, false);
+  assert.equal(g2p.retainedOutputParticleBuffers, true);
+  assert.equal(
+    fixture.device.createdBuffers.some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+  assert.equal(g2p.destroyOutputParticleBufferComponents({
+    state: true,
+    mechanics: true
+  }), true);
+  assert.equal(mechanicalProposal.releaseAfterSubmittedWork(), true);
+  await mechanicalProposal.releasePromise;
+  gridUpdate.destroyUpdatedGridBuffer();
+  projection.destroyGridBuffer();
+});
+
+test('canonical spatial v2 dense P2G owns exact submitted cleanup across failure windows', async (t) => {
+  const runDenseP2g = (fixture) =>
+    runMlsMpmP2gGridProjectionWebGpu({
+      device: fixture.device,
+      sphParticleState: fixture.sphParticleState,
+      mlsMpmParticleState: fixture.mlsMpmParticleState,
+      sphParticleUpload: fixture.sphParticleUpload,
+      mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+      schroederSelectedLevel: 0,
+      schroederSpatialEpochGeneration: fixture.generation,
+      canonicalSpatialRequired: true,
+      mechanicsFieldMode: 'disabled',
+      gridSpacingM: 0.25,
+      boxDimsM: [1, 1, 1],
+      dt: 0.005,
+      retainGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    });
+
+  await t.test('submit failure destroys every attempted allocation without fencing and permits replay', async () => {
+    const fixture = fusedP2gProducerFixture({
+      createMacroAuthority: false,
+      mechanicsLevelCount: 1
+    });
+    const originalSubmit = fixture.device.queue.submit;
+    const originalFence = fixture.device.queue.onSubmittedWorkDone;
+    let hostQueueFenceCount = 0;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalFence.apply(fixture.device.queue, args);
+    };
+    fixture.device.queue.submit = () => {
+      throw new Error('injected dense P2G queue.submit failure');
+    };
+    const submissionsBefore = fixture.device.submissions.length;
+    const createdBefore = fixture.device.createdBuffers.length;
+
+    await assert.rejects(
+      runDenseP2g(fixture),
+      /injected dense P2G queue\.submit failure/
+    );
+
+    fixture.device.queue.submit = originalSubmit;
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(hostQueueFenceCount, 0);
+    const failedAttemptBuffers =
+      fixture.device.createdBuffers.slice(createdBefore);
+    assert.ok(failedAttemptBuffers.length > 0);
+    assert.equal(
+      failedAttemptBuffers.every((buffer) => buffer.destroyed === true),
+      true
+    );
+
+    const replay = await runDenseP2g(fixture);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(hostQueueFenceCount, 0);
+    assert.equal(replay.normalHotLoopReadbackFree, true);
+    assert.equal(replay.queueOrderedCleanupReceipt?.completed, true);
+    assert.equal(replay.gridBuffer.destroyed, false);
+    replay.destroyGridBuffer();
+    fixture.device.queue.onSubmittedWorkDone = originalFence;
+  });
+
+  await t.test('post-submit provenance failure fences once and destroys the unpublished grid', async () => {
+    const fixture = fusedP2gProducerFixture({
+      createMacroAuthority: false,
+      mechanicsLevelCount: 1
+    });
+    const activeSourceRuntime =
+      fixture.generation.activeSourceView.ownerRuntime;
+    const originalIsExecutionSubmitted =
+      activeSourceRuntime.isExecutionSubmitted;
+    const originalFence = fixture.device.queue.onSubmittedWorkDone;
+    let hostQueueFenceCount = 0;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalFence.apply(fixture.device.queue, args);
+    };
+    const submissionsBefore = fixture.device.submissions.length;
+    const createdBefore = fixture.device.createdBuffers.length;
+    activeSourceRuntime.isExecutionSubmitted = (execution) => (
+      fixture.device.submissions.length > submissionsBefore
+        ? false
+        : originalIsExecutionSubmitted.call(activeSourceRuntime, execution)
+    );
+
+    await assert.rejects(
+      runDenseP2g(fixture),
+      /submitted ActiveSource-v2 dense P2G does not match its exact single-level producer inputs/
+    );
+
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(hostQueueFenceCount, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    const failedAttemptBuffers =
+      fixture.device.createdBuffers.slice(createdBefore);
+    assert.ok(failedAttemptBuffers.length > 0);
+    assert.equal(
+      failedAttemptBuffers.every((buffer) => buffer.destroyed === true),
+      true
+    );
+    assert.equal(
+      failedAttemptBuffers.find(
+        (buffer) => buffer.label === 'ulg-mls-mpm-p2g-grid-out'
+      )?.destroyed,
+      true
+    );
+
+    activeSourceRuntime.isExecutionSubmitted =
+      originalIsExecutionSubmitted;
+    const replay = await runDenseP2g(fixture);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 2);
+    assert.equal(hostQueueFenceCount, 1);
+    assert.equal(replay.queueOrderedCleanupReceipt?.completed, true);
+    replay.destroyGridBuffer();
+    fixture.device.queue.onSubmittedWorkDone = originalFence;
+  });
+});
+
+test('canonical spatial v2 dense P2G copies and authenticates an immutable GPU product count before indirect scatter', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const rowCapacity = 32768;
+  const productEventBuffer = fixture.device.createBuffer({
+    label: 'gpu-count-product-history',
+    size: rowCapacity * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128 | 4 | 8
+  });
+  const controlBuffer = fixture.device.createBuffer({
+    label: 'gpu-count-product-history-control',
+    size: 2 * 256,
+    usage: 128 | 4 | 8 | 256
+  });
+  tagWebGpuBufferDevice(productEventBuffer, fixture.device);
+  const residentProductMass = {
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-merged-gpu-resident',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventBuffer.size,
+    productEventRowCount: rowCapacity,
+    productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    productEventActiveEventCount: null,
+    unplacedProductMassKg: 1,
+    consumeMassPolicy: 'unplaced-product-mass-only',
+    eosCouplingStatus: 'resident-product-mass-p2g-eos-sidecar-ready'
+  };
+  const controlOffsetBytes = 256;
+  const generation = 73;
+  const seal = 0x7a51c30d;
+  const authority = registerResidentProductEventCountAuthority(
+    residentProductMass,
+    {
+      device: fixture.device,
+      controlBuffer,
+      controlOffsetBytes,
+      rowCapacity,
+      rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      generation,
+      seal
+    }
+  );
+  const args = {
+    device: fixture.device,
+    sphParticleState: fixture.sphParticleState,
+    mlsMpmParticleState: fixture.mlsMpmParticleState,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: fixture.generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'disabled',
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: 0.005,
+    retainGridBuffer: true,
+    readbackMode: 'no-full-readback'
+  };
+
+  const submissionCountBeforeTornClone = fixture.device.submissions.length;
+  await assert.rejects(
+    runMlsMpmP2gGridProjectionWebGpu({
+      ...args,
+      residentProductMass: { ...residentProductMass }
+    }),
+    /torn product-event live-count authority/
+  );
+  assert.equal(
+    fixture.device.submissions.length,
+    submissionCountBeforeTornClone
+  );
+
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    ...args,
+    residentProductMass
+  });
+  assert.equal(
+    projection.residentProductMassInputProductEventCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    projection.residentProductMassInputProductEventRowCapacity,
+    rowCapacity
+  );
+  assert.equal(
+    projection.residentProductMassInputProductEventCountHostKnown,
+    false
+  );
+  assert.equal(
+    projection.residentProductMassProductEventDispatchMode,
+    'gpu-authored-indirect-live-count'
+  );
+
+  const paramsWrite = fixture.device.writes.findLast(
+    (write) =>
+      write.label === 'ulg-mls-mpm-p2g-active-source-v2-dense-params'
+  );
+  assert.equal(paramsWrite.byteLength, 224);
+  const params = new DataView(paramsWrite.data);
+  for (let offset = 176; offset < 208; offset += 4) {
+    assert.equal(params.getUint32(offset, true), 0);
+  }
+  assert.equal(params.getUint32(208, true), generation);
+  assert.equal(params.getUint32(212, true), seal);
+  assert.equal(params.getUint32(216, true), rowCapacity);
+  assert.equal(params.getUint32(220, true), 8);
+
+  const paramsBuffer = fixture.device.createdBuffers.findLast(
+    (buffer) =>
+      buffer.label === 'ulg-mls-mpm-p2g-active-source-v2-dense-params'
+  );
+  assert.deepEqual(
+    fixture.device.copies.slice(-2),
+    [
+      {
+        source: controlBuffer,
+        sourceOffset: controlOffsetBytes + 12,
+        destination: paramsBuffer,
+        destinationOffset: 36,
+        size: 4
+      },
+      {
+        source: controlBuffer,
+        sourceOffset: controlOffsetBytes,
+        destination: paramsBuffer,
+        destinationOffset: 176,
+        size: 32
+      }
+    ]
+  );
+  const productDispatch = fixture.device.dispatches.findLast(
+    (dispatch) =>
+      dispatch[0] === 'indirect'
+      && dispatch[1] === controlBuffer
+  );
+  assert.deepEqual(
+    productDispatch,
+    ['indirect', controlBuffer, authority.indirectOffsetBytes]
+  );
+  assert.equal(
+    fixture.device.passTrace.findLast(
+      (pass) => pass.entryPoint === 'scatter_product_events'
+    )?.kind,
+    'indirect'
+  );
+  assert.match(
+    fixture.device.shaderModules.find(
+      (module) =>
+        module.code.includes('preflight_active_source_dense_single_level')
+        && module.code.includes('p2g_product_history_control_admitted')
+    )?.code ?? '',
+    /expected_product_history_row_stride_vec4 == 8u/
+  );
+  assert.equal(
+    fixture.device.createdBuffers.some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+  const wrappedProjection = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+    ...args,
+    residentProductMass,
+    preferWebGpu: true
+  });
+  assert.equal(
+    wrappedProjection.residentProductMassInputProductEventCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    wrappedProjection.residentProductMassInputProductEventRowCapacity,
+    rowCapacity
+  );
+  assert.equal(
+    wrappedProjection.residentProductMassInputProductEventCountHostKnown,
+    false
+  );
+  assert.equal(
+    wrappedProjection.residentProductMassProductEventDispatchMode,
+    'gpu-authored-indirect-live-count'
+  );
+  wrappedProjection.gpuResult.destroyGridBuffer();
+  projection.destroyGridBuffer();
+});
+
+test('canonical spatial v2 dense P2G rejects a multilevel ActiveSource before allocation or submission', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 2
+  });
+  const residentProductMass = residentProductMassFromRows(productEventRows({
+    position: [0.5, 0.5, 0.5],
+    massKg: 1,
+    visibleMassKg: 0,
+    unplacedMassKg: 1,
+    status: 1
+  }));
+  const bufferCountBefore = fixture.device.createdBuffers.length;
+  const pipelineCountBefore = fixture.device.createdPipelines.length;
+  const submissionCountBefore = fixture.device.submissions.length;
+
+  await assert.rejects(
+    runMlsMpmP2gGridProjectionWebGpu({
+      device: fixture.device,
+      sphParticleState: fixture.sphParticleState,
+      mlsMpmParticleState: fixture.mlsMpmParticleState,
+      sphParticleUpload: fixture.sphParticleUpload,
+      mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+      schroederSelectedLevel: 0,
+      schroederSpatialEpochGeneration: fixture.generation,
+      canonicalSpatialRequired: true,
+      mechanicsFieldMode: 'disabled',
+      residentProductMass,
+      gridSpacingM: 0.25,
+      boxDimsM: [1, 1, 1],
+      dt: 0.005,
+      retainGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_CANONICAL_SPATIAL_V2_DENSE_SINGLE_LEVEL_REQUIRED'
+      );
+      assert.match(
+        error.message,
+        /limited to one exact ActiveSource query level/
+      );
+      return true;
+    }
+  );
+  assert.equal(fixture.device.createdBuffers.length, bufferCountBefore);
+  assert.equal(fixture.device.createdPipelines.length, pipelineCountBefore);
+  assert.equal(fixture.device.submissions.length, submissionCountBefore);
+});
 
 async function fusedCoarseTerminalP2gFixture() {
   const fixture = fusedP2gProducerFixture();
@@ -1482,7 +2587,356 @@ test('non-transaction mechanics-field P2G rejects particle-family drift before a
   fixture.refluxLedger.destroy();
 });
 
-test('non-transaction mechanics-field stages quarantine submitted state before failed publication', async (t) => {
+test('single-level S9-A/B surface stress runs the standalone 18-central-bond lifecycle', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const {
+    device,
+    generation,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  } = fixture;
+  const transaction = createSchroederSpatialEpochTransaction({
+    device,
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    twoLevelAuthoritative: false,
+    enabledConsumerReaderIds: [],
+    consumerSupportProfileIds: {}
+  });
+  const readerInputs = {
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  };
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    ...readerInputs
+  }), true);
+
+  const p2gGridProjection = await runMlsMpmP2gGridProjectionWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: generation,
+    canonicalSpatialRequired: true,
+    mechanicsFieldMode: 'required',
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    dt: 0.005,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(
+    p2gGridProjection.mechanicsFieldViewExecution,
+    generation.mechanicsFieldView
+  );
+
+  const zeroCoefficientMaterialTable =
+    buildMlsMpmMechanicsMaterialTable({
+      h2o: {
+        molarMassKgPerMol: 0.018015,
+        phases: [{
+          name: 'liquid',
+          densityKgPerM3: 997,
+          bulkModulusPa: 2.2e9,
+          shearModulusPa: 0,
+          cpJPerKgK: 4184,
+          temperatureRange: [273.15, 373.15]
+        }]
+      }
+    }, {
+      surfaceTensionEnabled: true
+    });
+  const zeroCoefficientUpload =
+    uploadMlsMpmMechanicsMaterialPhaseRecords(
+      device,
+      zeroCoefficientMaterialTable
+    );
+  await assert.rejects(
+    runMlsMpmGridUpdateWebGpu({
+      device,
+      p2gGridProjection,
+      mechanicsFieldMode: 'required',
+      schroederSpatialEpochTransaction: transaction,
+      mechanicsMaterialTable: zeroCoefficientMaterialTable,
+      mechanicsMaterialPhaseUpload: zeroCoefficientUpload,
+      dt: 0.005,
+      gravityMPerS2: [0, -9.80665, 0],
+      boxDimsM: [1, 1, 1],
+      cflFactor: 0.4,
+      readbackMode: 'no-full-readback',
+      retainUpdatedGridBuffer: false
+    }),
+    /lacks a positive mechanics material coefficient/
+  );
+  destroyMlsMpmMechanicsMaterialPhaseUpload(zeroCoefficientUpload);
+
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        dynamicViscosityPaS: 0.001,
+        surfaceTensionNPerM: 0.072,
+        temperatureRange: [273.15, 373.15]
+      }]
+    }
+  }, {
+    viscosityEnabled: true,
+    surfaceTensionEnabled: true
+  });
+  const mechanicsMaterialPhaseUpload =
+    uploadMlsMpmMechanicsMaterialPhaseRecords(
+      device,
+      mechanicsMaterialTable
+    );
+  const traceStart = device.passTrace.length;
+  const update = await runMlsMpmGridUpdateWebGpu({
+    device,
+    p2gGridProjection,
+    mechanicsFieldMode: 'required',
+    schroederSpatialEpochTransaction: transaction,
+    mechanicsMaterialTable,
+    mechanicsMaterialPhaseUpload,
+    dt: 0.005,
+    gravityMPerS2: [0, -9.80665, 0],
+    boxDimsM: [1, 1, 1],
+    cflFactor: 0.4,
+    readbackMode: 'no-full-readback',
+    retainUpdatedGridBuffer: false
+  });
+  const expectedLifecycle = [
+    'initialize_surface_stress',
+    ...SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
+    'validate_surface_stress',
+    'commit_surface_stress'
+  ];
+  const lifecycleSet = new Set(expectedLifecycle);
+  const lifecycleTrace = device.passTrace
+    .slice(traceStart)
+    .filter(({ entryPoint }) => lifecycleSet.has(entryPoint));
+  assert.deepEqual(
+    lifecycleTrace.map(({ entryPoint }) => entryPoint),
+    expectedLifecycle
+  );
+  assert.equal(
+    lifecycleTrace.every(({ kind }) => kind === 'indirect'),
+    true
+  );
+  assert.equal(
+    device.createdPipelines.some(
+      ({ compute }) => compute?.entryPoint === 'stage_transport'
+    ),
+    false
+  );
+  const surfaceBindGroups = device.bindGroups.filter(({ entries }) => (
+    Array.isArray(entries)
+    && entries.map(({ binding }) => binding).join(',') === '0,4,5,6,7'
+  ));
+  assert.equal(
+    surfaceBindGroups.length,
+    1,
+    'the identical explicit surface-stress layout shares one bind group across the lifecycle'
+  );
+
+  assert.equal(update.phaseVolumeSurfaceStressRequested, true);
+  assert.equal(update.phaseVolumeSurfaceStressSubmitted, true);
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_SCHEMA
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.status,
+    ULG_SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_SUBMISSION_STATUS
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.dispatchCount,
+    SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS.length
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.lifecycleDispatchCount,
+    expectedLifecycle.length
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.lifecycleMode,
+    'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit'
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.ambientBuoyancyMode,
+    'field-local-s9ab-current-volume-ambient-source'
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission?.levelRole,
+    'single'
+  );
+  assert.equal(update.phaseVolumeSurfaceStressSubmission?.twoLevel, false);
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission
+      ?.positiveSurfaceTensionPhaseRecordCount,
+    1
+  );
+  assert.equal(
+    update.phaseVolumeSurfaceStressSubmission
+      ?.surfaceTensionCoefficientStatus,
+    'positive-surface-tension-coefficient-ready'
+  );
+  assert.deepEqual(
+    update.phaseVolumeSurfaceStressSubmission?.entryPoints,
+    SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS
+  );
+
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT,
+    ...readerInputs
+  }), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    mechanicsMaterialPhaseUpload
+  );
+});
+
+test('single-level surface stress forces the resident pass DAG instead of fused mechanics', async () => {
+  const fixture = fusedP2gProducerFixture({
+    createMacroAuthority: false,
+    mechanicsLevelCount: 1
+  });
+  const {
+    device,
+    generation,
+    levelAssignment,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  } = fixture;
+  const transaction = createSchroederSpatialEpochTransaction({
+    device,
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    twoLevelAuthoritative: false,
+    enabledConsumerReaderIds: [],
+    consumerSupportProfileIds: {}
+  });
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        dynamicViscosityPaS: 0.001,
+        surfaceTensionNPerM: 0.072,
+        temperatureRange: [273.15, 373.15]
+      }]
+    }
+  }, {
+    viscosityEnabled: true,
+    surfaceTensionEnabled: true
+  });
+  const mechanicsMaterialPhaseUpload =
+    uploadMlsMpmMechanicsMaterialPhaseRecords(
+      device,
+      mechanicsMaterialTable
+    );
+  const progress = [];
+  const traceStart = device.passTrace.length;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederLevelAssignment: levelAssignment,
+    schroederSelectedLevel: 0,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: true,
+    mechanicsMaterialTable,
+    mechanicsRefreshOptions: {
+      mechanicsMaterialPhaseUpload
+    },
+    preferWebGpu: true,
+    device,
+    gridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1],
+    gravityMPerS2: [0, 0, 0],
+    dt: 0.005,
+    readbackMode: 'no-full-readback',
+    fuseNoFullResidentMechanics: true,
+    summaryRunner: null,
+    onResidentStageProgress(event) {
+      if (event.status === 'resident-stage-started') {
+        progress.push(event.stage);
+      }
+    }
+  });
+  assert.equal(step.stageTiming.fusedResidentMechanics, false);
+  assert.equal(progress.includes('fusedMechanics'), false);
+  assert.ok(
+    progress.indexOf('p2gGridProjection')
+      < progress.indexOf('gridUpdate')
+  );
+  assert.ok(
+    progress.indexOf('gridUpdate')
+      < progress.indexOf('g2pReconstruction')
+  );
+
+  const expectedLifecycle = [
+    'initialize_surface_stress',
+    ...SCHROEDER_PHASE_VOLUME_SURFACE_STRESS_ENTRY_POINTS,
+    'validate_surface_stress',
+    'commit_surface_stress'
+  ];
+  const lifecycleSet = new Set(expectedLifecycle);
+  assert.deepEqual(
+    device.passTrace
+      .slice(traceStart)
+      .filter(({ entryPoint }) => lifecycleSet.has(entryPoint))
+      .map(({ entryPoint }) => entryPoint),
+    expectedLifecycle
+  );
+  assert.equal(
+    step.gridUpdate.phaseVolumeSurfaceStressSubmission?.lifecycleMode,
+    'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit'
+  );
+  assert.equal(
+    step.gridUpdate.phaseVolumeSurfaceStressSubmission?.ambientBuoyancyMode,
+    'field-local-s9ab-current-volume-ambient-source'
+  );
+  assert.equal(
+    step.gridUpdate.phaseVolumeSurfaceStressSubmission?.lifecycleDispatchCount,
+    expectedLifecycle.length
+  );
+  assert.equal(
+    step.gridUpdate.phaseVolumeSurfaceStressSubmission?.levelRole,
+    'single'
+  );
+  assert.equal(
+    step.gridUpdate.phaseVolumeSurfaceStressSubmission?.twoLevel,
+    false
+  );
+  destroyMlsMpmResidentStepBuffers(step);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    mechanicsMaterialPhaseUpload
+  );
+});
+
+test('non-transaction mechanics-field P2G uses exact queue-ordered arena ownership', async (t) => {
   const cleanup = async (fixture, reason) => {
     await abortSchroederTwoLevelMacroAuthorityAfter(
       fixture.device,
@@ -1495,17 +2949,163 @@ test('non-transaction mechanics-field stages quarantine submitted state before f
     fixture.refluxLedger.destroy();
   };
 
-  await t.test('P2G keeps the input field provenance pending and quarantined', async () => {
+  await t.test('P2G success retires its arena at one nonempty submit without a host fence', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const fineProjection = await runFusedP2gProducer(fixture);
+    const originalFence = fixture.device.queue.onSubmittedWorkDone;
+    let hostQueueFenceCount = 0;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalFence.apply(fixture.device.queue, args);
+    };
+    const submissionsBefore = fixture.device.submissions.length;
+    const createdBefore = fixture.device.createdBuffers.length;
+
+    const projection = await runCoarseP2gProducer(fixture);
+
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(fixture.device.submissions.at(-1).length, 1);
+    assert.equal(hostQueueFenceCount, 0);
+    assert.equal(projection.normalHotLoopReadbackFree, true);
+    assert.equal(projection.observedHostQueueFenceCount, 0);
+    assert.equal(projection.hostQueueFenceCount, 0);
+    assert.equal(projection.queueOrderedCleanupReceipt?.completed, true);
+    assert.equal(
+      projection.queueOrderedCleanupReceipt?.hostQueueFenceCount,
+      0
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const submittedScratch = fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(submittedScratch.length, 0);
+    for (const borrowed of [
+      fixture.sphParticleUpload.stateBuffer,
+      fixture.sphParticleUpload.thermoBuffer,
+      fixture.sphParticleUpload.identityBuffer,
+      fixture.mlsMpmParticleUpload.mechanicsBuffer,
+      fixture.generation.execution.directoryBuffer,
+      fixture.generation.execution.evidenceBuffer,
+      fixture.generation.parentFieldView.fineFieldView.fieldViewBuffer,
+      fixture.generation.parentFieldView.coarseFieldView.fieldViewBuffer,
+      fixture.generation.parentFieldView.fineFieldView.stableCandidateOrderBuffer,
+      fixture.generation.parentFieldView.coarseFieldView.stableCandidateOrderBuffer
+    ]) {
+      assert.equal(borrowed.destroyed, false);
+    }
+
+    const parentFieldView = fixture.generation.parentFieldView;
+    const workspaceRuntime =
+      createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+        fixture.device,
+        {
+          parentFieldCapacity: parentFieldView.parentFieldCapacity,
+          fineFieldCapacity: parentFieldView.fineFieldCapacity,
+          arenaCount: 1
+        }
+      );
+    const execution = workspaceRuntime.encodePredictors(
+      fixture.device.createCommandEncoder(),
+      {
+        parentFieldView,
+        fineP2gProjection: fineProjection,
+        coarseP2gProjection: projection,
+        dt: fixture.predictorThetaDt,
+        fineDt: fixture.fineDt,
+        macroDt: fixture.macroDt,
+        fineSubstepOrdinal: 0,
+        fineSubstepCount: fixture.fineSubstepCount,
+        gravityMPerS2: [0, -9.80665, 0],
+        boxDimsM: [1, 1, 1],
+        refluxLedger: fixture.refluxLedger,
+        fusedFineSubstepTransaction: fixture.transaction
+      }
+    );
+    assert.equal(workspaceRuntime.ownsExecution(execution), true);
+    assert.equal(
+      workspaceRuntime.releaseExecution(
+        execution,
+        { discardedEncoder: true }
+      ),
+      true
+    );
+    workspaceRuntime.destroy();
+
+    fixture.device.queue.onSubmittedWorkDone = originalFence;
+    await cleanup(fixture, 'standalone P2G zero-fence success cleanup');
+  });
+
+  await t.test('P2G submit failure preserves arena controls and permits an exact same-field replay', async () => {
+    const fixture = fusedP2gProducerFixture();
+    const field = fixture.generation.parentFieldView.coarseFieldView;
+    const fieldRuntime = field.ownerRuntime;
+    const originalSubmit = fixture.device.queue.submit;
+    const originalFence = fixture.device.queue.onSubmittedWorkDone;
+    let hostQueueFenceCount = 0;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalFence.apply(fixture.device.queue, args);
+    };
+    fixture.device.queue.submit = () => {
+      throw new Error('injected standalone P2G queue.submit failure');
+    };
+    const submissionsBefore = fixture.device.submissions.length;
+    const createdBefore = fixture.device.createdBuffers.length;
+
+    await assert.rejects(
+      runCoarseP2gProducer(fixture),
+      /injected standalone P2G queue\.submit failure/
+    );
+
+    fixture.device.queue.submit = originalSubmit;
+    assert.equal(fixture.device.submissions.length, submissionsBefore);
+    assert.equal(hostQueueFenceCount, 0);
+    assert.deepEqual(fieldRuntime.stateMutationState(field), {
+      ordinal: 0,
+      encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+      operation: 'topology-ready',
+      pending: false,
+      publicationLocked: false,
+      quarantined: false
+    });
+    const failedAttemptBuffers =
+      fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(failedAttemptBuffers.length, 0);
+    assert.equal(
+      Object.values(fieldRuntime.p2gWorkspaceForExecution(field))
+        .every((buffer) => buffer.destroyed === false),
+      true
+    );
+
+    const replay = await runCoarseP2gProducer(fixture);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(hostQueueFenceCount, 0);
+    assert.equal(replay.normalHotLoopReadbackFree, true);
+    assert.equal(replay.queueOrderedCleanupReceipt?.completed, true);
+    assert.equal(fieldRuntime.stateMutationState(field).ordinal, 1);
+
+    fixture.device.queue.onSubmittedWorkDone = originalFence;
+    await cleanup(fixture, 'standalone P2G submit replay cleanup');
+  });
+
+  await t.test('P2G post-submit publication failure fences once and quarantines its arena', async () => {
     const fixture = fusedP2gProducerFixture();
     const field = fixture.generation.parentFieldView.coarseFieldView;
     const fieldRuntime = field.ownerRuntime;
     const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const originalFence = fixture.device.queue.onSubmittedWorkDone;
+    let hostQueueFenceCount = 0;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalFence.apply(fixture.device.queue, args);
+    };
     const injected = new Error('injected standalone P2G artifact publication failure');
     fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
     const submissionsBefore = fixture.device.submissions.length;
+    const createdBefore = fixture.device.createdBuffers.length;
 
     await assert.rejects(runCoarseP2gProducer(fixture), (error) => error === injected);
     assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(hostQueueFenceCount, 1);
     assert.deepEqual(fieldRuntime.stateMutationState(field), {
       ordinal: 0,
       encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
@@ -1519,9 +3119,28 @@ test('non-transaction mechanics-field stages quarantine submitted state before f
       stateEncoding:
         SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
     }), false);
+    await new Promise((resolve) => setImmediate(resolve));
+    const failedAttemptBuffers =
+      fixture.device.createdBuffers.slice(createdBefore);
+    assert.equal(failedAttemptBuffers.length, 0);
     fieldRuntime.markStateMutationSubmitted = originalMark;
+    fixture.device.queue.onSubmittedWorkDone = originalFence;
     await cleanup(fixture, 'standalone P2G quarantine test cleanup');
   });
+});
+
+test('non-transaction mechanics-field stages quarantine submitted state before failed publication', async (t) => {
+  const cleanup = async (fixture, reason) => {
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error(reason)
+      }
+    );
+    fixture.refluxLedger.destroy();
+  };
 
   await t.test('grid update keeps P2G provenance pending and quarantined', async () => {
     const fixture = fusedP2gProducerFixture();
@@ -1566,68 +3185,52 @@ test('non-transaction mechanics-field stages quarantine submitted state before f
   });
 
   await t.test('parent coarse terminal quarantines after submission but before publication', async () => {
-    const fixture = fusedP2gProducerFixture();
-    const parentFieldView = fixture.generation.parentFieldView;
+    const { terminal, gridUpdate } = await terminalWorkspaceInputFixture();
+    const fixture = terminal.fixture;
+    const parentFieldView = terminal.successorMicroepoch.parentFieldView;
     const field = parentFieldView.coarseFieldView;
     const fieldRuntime = field.ownerRuntime;
-    const projection = await runCoarseP2gProducer(fixture, fixture.macroDt);
-    const gridUpdate = await runMlsMpmGridUpdateWebGpu({
-      device: fixture.device,
-      p2gGridProjection: projection,
-      mechanicsFieldMode: 'required',
-      mechanicsFieldEnergyReceipt: { deferSeal: true },
-      dt: fixture.macroDt,
-      gravityMPerS2: [0, -9.80665, 0],
-      boxDimsM: [1, 1, 1],
-      cflFactor: 0.4,
-      readbackMode: 'no-full-readback'
-    });
-    const workspaceRuntime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
-      fixture.device,
-      {
-        parentFieldCapacity: parentFieldView.parentFieldCapacity,
-        fineFieldCapacity: parentFieldView.fineFieldCapacity,
-        arenaCount: 1
-      }
+    const workspaceRuntime = terminalWorkspaceRuntime(terminal);
+    const { encoder, artifact } = encodeTerminalWorkspace(
+      terminal,
+      gridUpdate,
+      workspaceRuntime
     );
-    const encoder = fixture.device.createCommandEncoder();
-    const artifact = workspaceRuntime.encodeCoarseTerminal(encoder, {
-      parentFieldView,
-      coarseGridUpdate: gridUpdate,
-      refluxLedger: fixture.refluxLedger,
-      fineSubstepCount: fixture.fineSubstepCount,
-      fineDt: fixture.fineDt
-    });
     const execution = artifact.parentFieldMechanicsWorkspaceExecution;
     fixture.device.queue.submit([encoder.finish()]);
     workspaceRuntime.markTerminalSubmissionObserved(execution);
-    const originalMark = fieldRuntime.markStateMutationSubmitted;
+    const originalMark = fieldRuntime.markStateMutationSequenceStageSubmitted;
     const injected = new Error(
       'injected parent coarse-terminal artifact publication failure'
     );
-    fieldRuntime.markStateMutationSubmitted = () => { throw injected; };
+    fieldRuntime.markStateMutationSequenceStageSubmitted = (...args) => {
+      originalMark(...args);
+      throw injected;
+    };
 
     assert.throws(
       () => workspaceRuntime.markTerminalSubmitted(execution),
       (error) => error === injected
     );
     assert.deepEqual(fieldRuntime.stateMutationState(field), {
-      ordinal: 2,
-      encoding:
-        SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
-      operation: 'grid-update-mass-velocity-gradient-submitted',
+      ordinal: 0,
+      encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+      operation: 'topology-ready',
       pending: true,
-      publicationLocked: false,
+      publicationLocked: true,
       quarantined: true
     });
     assert.equal(workspaceRuntime.isTerminalSubmitted(execution), false);
-    fieldRuntime.markStateMutationSubmitted = originalMark;
+    fieldRuntime.markStateMutationSequenceStageSubmitted = originalMark;
     await workspaceRuntime.releaseExecutionAfter(
       execution,
       fixture.device.queue.onSubmittedWorkDone()
     );
     workspaceRuntime.destroy();
-    await cleanup(fixture, 'parent coarse-terminal quarantine test cleanup');
+    await releaseTerminalP2gFixture(
+      terminal,
+      'parent coarse-terminal quarantine test cleanup'
+    );
   });
 });
 
@@ -1746,27 +3349,60 @@ test('fused WebGPU P2G authenticates strict provenance and poisons post-submit f
 
   await t.test('success advances exactly once and rejects clones', async () => {
     const fixture = fusedP2gProducerFixture();
+    let hostQueueFenceCount = 0;
+    const originalOnSubmittedWorkDone =
+      fixture.device.queue.onSubmittedWorkDone;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalOnSubmittedWorkDone.apply(fixture.device.queue, args);
+    };
     const projection = await runFusedP2g(fixture);
-    const contributionBuffer = fixture.device.createdBuffers.find(({ label }) => (
-      label === 'ulg-mls-mpm-staged-p2g-deterministic-field-contributions'
-    ));
+    assert.equal(hostQueueFenceCount, 0);
+    assert.equal(projection.queueOrderedCleanupReceipt?.completed, true);
+    assert.equal(
+      projection.queueOrderedCleanupReceipt?.hostQueueFenceCount,
+      0
+    );
+    const contributionBuffer =
+      fixture.microepochAuthority.fineFieldView.candidateKeyBuffer;
     const stableOrderBuffer =
       fixture.microepochAuthority.fineFieldView.stableCandidateOrderBuffer;
     assert.ok(contributionBuffer);
+    assert.equal(
+      fixture.device.createdBuffers.some(({ label }) => (
+        label === 'ulg-mls-mpm-staged-p2g-deterministic-field-contributions'
+      )),
+      false
+    );
     // Slice 9 widened the deterministic contribution record to 12 floats: the
     // third vec4 carries weighted represented volume, weighted V*p, and
     // pressure publication evidence alongside the mass/momentum vec4s.
     assert.equal(MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS, 12);
     assert.equal(
       contributionBuffer.size,
-      fixture.sphParticleState.particleCount
-        * 27
+      fixture.microepochAuthority.fineFieldView.layout.candidateCapacity
         * MECHANICS_FIELD_P2G_CONTRIBUTION_FLOATS
         * Float32Array.BYTES_PER_ELEMENT
     );
     assert.equal(
       projection.mechanicsFieldP2gContributionBufferAllocatedBytes,
+      0
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gContributionBufferRequiredBytes,
       contributionBuffer.size
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gContributionBufferCapacityBytes,
+      contributionBuffer.size
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gContributionBufferAllocationPerformed,
+      false
+    );
+    assert.equal(
+      projection.mechanicsFieldP2gContributionBufferOwnership,
+      'mechanics-field-candidate-arena-phase-alias'
     );
     assert.equal(
       projection.mechanicsFieldP2gReductionMode,
@@ -1894,7 +3530,7 @@ test('fused WebGPU P2G authenticates strict provenance and poisons post-submit f
     }
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(contributionBuffer.destroyed, true);
+    assert.equal(contributionBuffer.destroyed, false);
     assert.equal(stableOrderBuffer.destroyed, false);
     assert.deepEqual(schroederFusedFineSubstepTransactionState(
       fixture.device,
@@ -1994,6 +3630,19 @@ test('fused WebGPU P2G authenticates strict provenance and poisons post-submit f
       /exact pending transaction and particle continuation/
     );
     fixture.sphParticleUpload.stateBuffer.size = exactStateBufferSize;
+    assertStillReserved();
+
+    const fieldExecution = fixture.microepochAuthority.fineFieldView;
+    const exactCandidateKeyBufferSize = fieldExecution.candidateKeyBuffer.size;
+    fieldExecution.candidateKeyBuffer.size = exactCandidateKeyBufferSize - 4;
+    await assert.rejects(
+      runFusedP2g(fixture),
+      (error) => (
+        error?.code === 'ERR_MECHANICS_FIELD_P2G_SCRATCH_AUTHORITY'
+        && /capacity-bounded arena candidate buffer/.test(error.message)
+      )
+    );
+    fieldExecution.candidateKeyBuffer.size = exactCandidateKeyBufferSize;
     assertStillReserved();
 
     const foreignStateBuffer = {
@@ -2247,8 +3896,7 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
     ).stageIndex, 1);
     await new Promise((resolve) => setImmediate(resolve));
     const owned = fixture.device.createdBuffers.slice(createdBefore);
-    assert.ok(owned.length > 0);
-    assert.equal(owned.every((buffer) => buffer.destroyed), true);
+    assert.equal(owned.length, 0);
     for (const borrowed of [
       terminal.uploads.sphParticleUpload.stateBuffer,
       terminal.uploads.sphParticleUpload.thermoBuffer,
@@ -2377,8 +4025,7 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
     ).status, 'reserved');
     const awaitDriftAllocations = fixture.device.createdBuffers
       .slice(createdBeforeAwaitDrift);
-    assert.ok(awaitDriftAllocations.length > 0);
-    assert.equal(awaitDriftAllocations.every((buffer) => buffer.destroyed), true);
+    assert.equal(awaitDriftAllocations.length, 0);
     const createdBeforeAbiAwaitDrift = fixture.device.createdBuffers.length;
     const abiPending = runTerminalFixtureP2g(terminal);
     terminal.uploads.sphParticleUpload.identityStrideBytes += 4;
@@ -2395,11 +4042,7 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
     ).status, 'reserved');
     const abiAwaitDriftAllocations = fixture.device.createdBuffers
       .slice(createdBeforeAbiAwaitDrift);
-    assert.ok(abiAwaitDriftAllocations.length > 0);
-    assert.equal(
-      abiAwaitDriftAllocations.every((buffer) => buffer.destroyed),
-      true
-    );
+    assert.equal(abiAwaitDriftAllocations.length, 0);
     const projection = await runTerminalFixtureP2g(terminal);
     assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
       fixture.device,
@@ -2420,10 +4063,14 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
     );
   });
 
-  await t.test('partial create and write failures clean owned buffers and preserve retry', async () => {
+  await t.test('arena-owned P2G controls allocate nothing on the hot path', async () => {
     const terminal = await fusedCoarseTerminalP2gFixture();
-    const { fixture, terminalTransaction } = terminal;
+    const { fixture, successorMicroepoch } = terminal;
     const submissionsBefore = fixture.device.submissions.length;
+    const coarseField = successorMicroepoch.parentFieldView.coarseFieldView;
+    const p2gWorkspace = coarseField.ownerRuntime.p2gWorkspaceForExecution(
+      coarseField
+    );
     const borrowed = [
       terminal.uploads.sphParticleUpload.stateBuffer,
       terminal.uploads.sphParticleUpload.thermoBuffer,
@@ -2431,69 +4078,28 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
       terminal.uploads.mlsMpmParticleUpload.mechanicsBuffer
     ];
     const originalCreateBuffer = fixture.device.createBuffer;
-    const createFailureBuffers = [];
-    fixture.device.createBuffer = (descriptor) => {
-      if (createFailureBuffers.length === 3) {
-        throw new Error('injected terminal P2G createBuffer failure');
-      }
-      const buffer = originalCreateBuffer(descriptor);
-      createFailureBuffers.push(buffer);
-      return buffer;
+    const createdBefore = fixture.device.createdBuffers.length;
+    fixture.device.createBuffer = () => {
+      throw new Error('terminal P2G performed a hot buffer allocation');
     };
-    await assert.rejects(
-      runTerminalFixtureP2g(terminal),
-      /injected terminal P2G createBuffer failure/
-    );
+    const projection = await runTerminalFixtureP2g(terminal);
     fixture.device.createBuffer = originalCreateBuffer;
-    assert.equal(createFailureBuffers.length, 3);
-    assert.equal(createFailureBuffers.every((buffer) => buffer.destroyed), true);
-    assert.equal(fixture.device.submissions.length, submissionsBefore);
-    assert.equal(schroederFusedCoarseTerminalTransactionState(
+    assert.equal(fixture.device.createdBuffers.length, createdBefore);
+    assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.equal(validateLocallySubmittedMlsMpmMechanicsFieldP2g(
       fixture.device,
-      terminalTransaction
-    ).status, 'reserved');
-
-    const originalWriteBuffer = fixture.device.queue.writeBuffer;
-    const writeFailureBuffers = [];
-    let oneShotDestroyCalls = 0;
-    fixture.device.createBuffer = (descriptor) => {
-      const buffer = originalCreateBuffer(descriptor);
-      writeFailureBuffers.push(buffer);
-      if (writeFailureBuffers.length === 1) {
-        const originalDestroy = buffer.destroy.bind(buffer);
-        buffer.destroy = () => {
-          oneShotDestroyCalls += 1;
-          if (oneShotDestroyCalls === 1) {
-            throw new Error('injected terminal P2G one-shot destroy failure');
-          }
-          originalDestroy();
-        };
-      }
-      return buffer;
-    };
-    fixture.device.queue.writeBuffer = () => {
-      throw new Error('injected terminal P2G writeBuffer failure');
-    };
-    await assert.rejects(
-      runTerminalFixtureP2g(terminal),
-      /injected terminal P2G writeBuffer failure/
-    );
-    fixture.device.createBuffer = originalCreateBuffer;
-    fixture.device.queue.writeBuffer = originalWriteBuffer;
-    assert.ok(writeFailureBuffers.length > 0);
-    assert.equal(oneShotDestroyCalls, 2);
-    assert.equal(writeFailureBuffers.every((buffer) => buffer.destroyed), true);
-    assert.equal(fixture.device.submissions.length, submissionsBefore);
-    assert.equal(schroederFusedCoarseTerminalTransactionState(
-      fixture.device,
-      terminalTransaction
-    ).status, 'reserved');
+      projection,
+      terminalP2gOptions(terminal)
+    ), true);
     assert.equal(borrowed.every((buffer) => buffer.destroyed === false), true);
+    assert.equal(
+      Object.values(p2gWorkspace).every((buffer) => buffer.destroyed === false),
+      true
+    );
 
-    await runTerminalFixtureP2g(terminal);
     await releaseTerminalP2gFixture(
       terminal,
-      'terminal P2G partial allocation fixture cleanup'
+      'terminal P2G arena-owned control fixture cleanup'
     );
   });
 
@@ -2565,8 +4171,12 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
       );
       assert.equal(fixture.device.submissions.length, submissionsBefore);
       const failedAttemptBuffers = fixture.device.createdBuffers.slice(createdBefore);
-      assert.ok(failedAttemptBuffers.length > 0);
-      assert.equal(failedAttemptBuffers.every((buffer) => buffer.destroyed), true);
+      assert.equal(failedAttemptBuffers.length, 0);
+      assert.equal(
+        Object.values(fieldRuntime.p2gWorkspaceForExecution(coarseField))
+          .every((buffer) => buffer.destroyed === false),
+        true
+      );
       for (const borrowed of [
         terminal.uploads.sphParticleUpload.stateBuffer,
         terminal.uploads.sphParticleUpload.thermoBuffer,
@@ -2605,26 +4215,10 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
       const fineField = successorMicroepoch.fineFieldView;
       const coarseRuntime = coarseField.ownerRuntime;
       const fineRuntime = fineField.ownerRuntime;
-      const originalCreateBuffer = fixture.device.createBuffer;
       const originalSubmit = fixture.device.queue.submit;
       const originalFence = fixture.device.queue.onSubmittedWorkDone;
-      const created = [];
-      let destroyCalls = 0;
-      fixture.device.createBuffer = (descriptor) => {
-        const buffer = originalCreateBuffer(descriptor);
-        created.push(buffer);
-        if (created.length === 1) {
-          const originalDestroy = buffer.destroy.bind(buffer);
-          buffer.destroy = () => {
-            destroyCalls += 1;
-            if (destroyCalls === 1) {
-              throw new Error('injected terminal P2G cleanup destroy failure');
-            }
-            originalDestroy();
-          };
-        }
-        return buffer;
-      };
+      const createdBefore = fixture.device.createdBuffers.length;
+      const p2gWorkspace = coarseRuntime.p2gWorkspaceForExecution(coarseField);
       const sphUpload = terminal.uploads.sphParticleUpload;
       const exactStateStrideBytes = sphUpload.stateStrideBytes;
       const exactIdentityByteLength = sphUpload.identityBufferByteLength;
@@ -2647,15 +4241,16 @@ test('fused coarse-terminal WebGPU P2G is exact, claimed, and fail-closed', asyn
         runTerminalFixtureP2g(terminal),
         /submission observation is stale|does not match its exact fused producer inputs/
       );
-      fixture.device.createBuffer = originalCreateBuffer;
       fixture.device.queue.submit = originalSubmit;
       fixture.device.queue.onSubmittedWorkDone = originalFence;
       sphUpload.stateStrideBytes = exactStateStrideBytes;
       sphUpload.identityBufferByteLength = exactIdentityByteLength;
       await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(created.length > 0);
-      assert.equal(destroyCalls, 2);
-      assert.equal(created.every((buffer) => buffer.destroyed), true);
+      assert.equal(fixture.device.createdBuffers.length, createdBefore);
+      assert.equal(
+        Object.values(p2gWorkspace).every((buffer) => buffer.destroyed === false),
+        true
+      );
       const state = schroederFusedCoarseTerminalTransactionState(
         fixture.device,
         terminalTransaction
@@ -2760,8 +4355,9 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
     });
     await new Promise((resolve) => setImmediate(resolve));
     const owned = fixture.device.createdBuffers.slice(createdBefore);
-    assert.equal(owned.length, 2);
-    assert.equal(owned.every((buffer) => buffer.destroyed), true);
+    assert.equal(owned.length, 0);
+    assert.equal(update.mechanicsFieldGridUpdateWorkspaceBorrowed, true);
+    assert.equal(update.mechanicsFieldGridUpdateHotPathAllocationCount, 0);
     assert.equal(
       terminal.successorMicroepoch.parentFieldView.coarseFieldView
         .fieldViewBuffer.destroyed,
@@ -2910,48 +4506,16 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
     p2gProjection.dt = exactProjectionDt;
     assertGridReady();
     let failedBuffers = fixture.device.createdBuffers.slice(createdBefore);
-    assert.equal(failedBuffers.length, 2);
-    assert.equal(failedBuffers.every((buffer) => buffer.destroyed), true);
-
-    const originalCreateBuffer = fixture.device.createBuffer;
-    const partialBuffers = [];
-    fixture.device.createBuffer = (descriptor) => {
-      if (partialBuffers.length === 1) {
-        throw new Error('injected terminal grid createBuffer failure');
-      }
-      const buffer = originalCreateBuffer(descriptor);
-      partialBuffers.push(buffer);
-      return buffer;
-    };
-    await assert.rejects(
-      runTerminalFixtureGridUpdate(terminal, p2gProjection),
-      /injected terminal grid createBuffer failure/
-    );
-    fixture.device.createBuffer = originalCreateBuffer;
-    assert.equal(partialBuffers.length, 1);
-    assert.equal(partialBuffers[0].destroyed, true);
+    assert.equal(failedBuffers.length, 0);
     assertGridReady();
 
     const originalWriteBuffer = fixture.device.queue.writeBuffer;
-    const writeBuffers = [];
-    let destroyCalls = 0;
-    fixture.device.createBuffer = (descriptor) => {
-      const buffer = originalCreateBuffer(descriptor);
-      writeBuffers.push(buffer);
-      if (writeBuffers.length === 1) {
-        const originalDestroy = buffer.destroy.bind(buffer);
-        buffer.destroy = () => {
-          destroyCalls += 1;
-          if (destroyCalls === 1) {
-            throw new Error('injected terminal grid destructor failure');
-          }
-          originalDestroy();
-        };
-      }
-      return buffer;
-    };
+    const gridUpdateWorkspace = terminal.successorMicroepoch.parentFieldView
+      .coarseFieldView.ownerRuntime.gridUpdateWorkspaceForExecution(
+        terminal.successorMicroepoch.parentFieldView.coarseFieldView
+      );
     fixture.device.queue.writeBuffer = (buffer, ...args) => {
-      if (buffer.label === 'ulg-mls-mpm-mechanics-field-grid-update-params') {
+      if (buffer === gridUpdateWorkspace.paramsBuffer) {
         throw new Error('injected terminal grid params write failure');
       }
       return originalWriteBuffer(buffer, ...args);
@@ -2960,11 +4524,9 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
       runTerminalFixtureGridUpdate(terminal, p2gProjection),
       /injected terminal grid params write failure/
     );
-    fixture.device.createBuffer = originalCreateBuffer;
     fixture.device.queue.writeBuffer = originalWriteBuffer;
-    assert.equal(writeBuffers.length, 2);
-    assert.equal(destroyCalls, 2);
-    assert.equal(writeBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(gridUpdateWorkspace.paramsBuffer.destroyed, false);
+    assert.equal(gridUpdateWorkspace.indirectBuffer.destroyed, false);
     assertGridReady();
 
     const originalSubmit = fixture.device.queue.submit;
@@ -2978,8 +4540,7 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
     );
     fixture.device.queue.submit = originalSubmit;
     failedBuffers = fixture.device.createdBuffers.slice(createdBefore);
-    assert.equal(failedBuffers.length, 2);
-    assert.equal(failedBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(failedBuffers.length, 0);
     assertGridReady();
     assert.equal(
       terminal.successorMicroepoch.parentFieldView.coarseFieldView
@@ -3044,9 +4605,8 @@ test('fused coarse-terminal WebGPU grid update is exact, claimed, and retry-safe
       fixture.device.queue.onSubmittedWorkDone = originalFence;
       p2gProjection.dt = exactProjectionDt;
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(created.length, 2);
-      assert.equal(destroyCalls, 2);
-      assert.equal(created.every((buffer) => buffer.destroyed), true);
+      assert.equal(created.length, 0);
+      assert.equal(destroyCalls, 0);
       const state = schroederFusedCoarseTerminalTransactionState(
         fixture.device,
         terminalTransaction
@@ -3299,19 +4859,29 @@ test('fused coarse-terminal workspace owns exact reflux submission', async (t) =
       let passOrdinal = 0;
       if (failureMode === 'hostile-encoder') {
         encoder.beginComputePass = (...args) => {
-          passOrdinal += 1;
-          if (passOrdinal === 2) {
-            const hostile = new Error(
-              'injected terminal workspace mid-encoder failure'
-            );
-            Object.defineProperty(hostile, 'code', {
-              value: 'HOSTILE_NON_WRITABLE_CODE',
-              configurable: false,
-              writable: false
-            });
-            throw hostile;
-          }
-          return originalBeginComputePass(...args);
+          const pass = originalBeginComputePass(...args);
+          const injectAfterFirstCommand = (dispatch) => (...dispatchArgs) => {
+            passOrdinal += 1;
+            if (passOrdinal === 2) {
+              const hostile = new Error(
+                'injected terminal workspace mid-encoder failure'
+              );
+              Object.defineProperty(hostile, 'code', {
+                value: 'HOSTILE_NON_WRITABLE_CODE',
+                configurable: false,
+                writable: false
+              });
+              throw hostile;
+            }
+            return dispatch(...dispatchArgs);
+          };
+          pass.dispatchWorkgroups = injectAfterFirstCommand(
+            pass.dispatchWorkgroups.bind(pass)
+          );
+          pass.dispatchWorkgroupsIndirect = injectAfterFirstCommand(
+            pass.dispatchWorkgroupsIndirect.bind(pass)
+          );
+          return pass;
         };
       } else {
         encoder.beginComputePass = (...args) => {
@@ -3572,8 +5142,19 @@ test('fused WebGPU grid update consumes exact P2G once and isolates stale attemp
 
   await t.test('success advances exactly once and rejects clones', async () => {
     const fixture = fusedP2gProducerFixture();
+    let hostQueueFenceCount = 0;
+    const originalOnSubmittedWorkDone =
+      fixture.device.queue.onSubmittedWorkDone;
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      hostQueueFenceCount += 1;
+      return originalOnSubmittedWorkDone.apply(fixture.device.queue, args);
+    };
     const p2gProjection = await runFusedP2gProducer(fixture);
     const update = await runFusedGridUpdateProducer(fixture, p2gProjection);
+    assert.equal(hostQueueFenceCount, 0);
+    assert.equal(update.queueOrderedCleanupReceipt, undefined);
+    assert.equal(update.mechanicsFieldGridUpdateWorkspaceBorrowed, true);
+    assert.equal(update.mechanicsFieldGridUpdateHotPathAllocationCount, 0);
     assert.equal(fixture.device.submissions.length, 3);
     assert.equal(update.mechanicsFieldEnergyReceipt.deferSeal, true);
     assert.equal(update.proposalMode, 'proposal-deferred-to-post-mechanics');
@@ -4304,8 +5885,27 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
     fixture.sphParticleState.state = new Float32Array(16);
     fixture.mlsMpmParticleState.mechanics = new Float32Array(64);
     const submissionsBefore = fixture.device.submissions.length;
+    const traceStart = fixture.device.passTrace.length;
     const g2p = await runFusedG2pProducer(fixture, chain.correction);
     assert.equal(fixture.device.submissions.length, submissionsBefore + 1);
+    assert.deepEqual(
+      fixture.device.passTrace
+        .slice(traceStart)
+        .map(({ entryPoint }) => entryPoint)
+        .filter((entryPoint) => [
+          'claim_g2p_energy_receipt',
+          'measure_g2p_energy_receipt',
+          'consume_g2p_energy_receipt',
+          'consume_g2p_fine_reflux_receipt',
+          'consume_g2p_coarse_reflux_receipt'
+        ].includes(entryPoint)),
+      [
+        'claim_g2p_energy_receipt',
+        'measure_g2p_energy_receipt',
+        'consume_g2p_energy_receipt',
+        'consume_g2p_fine_reflux_receipt'
+      ]
+    );
     assert.equal(g2p.proposalMode, 'proposal-deferred-to-post-mechanics');
     assert.equal(g2p.mechanicalProposalApplied, false);
     assert.equal(g2p.stateBufferByteLength, 8 * Float32Array.BYTES_PER_ELEMENT);
@@ -4604,21 +6204,46 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
 
     let terminalFineRetirementCount = 0;
     let terminalCoarseRetirementCount = 0;
+    let terminalPairRetirementCount = 0;
+    const terminalFieldsShareRuntime =
+      terminalFineRuntime === terminalCoarseRuntime;
     const originalFineRetirement =
       terminalFineRuntime.quarantineExecutionAfterDeviceLoss;
     const originalCoarseRetirement =
       terminalCoarseRuntime.quarantineExecutionAfterDeviceLoss;
-    terminalFineRuntime.quarantineExecutionAfterDeviceLoss = async (...args) => {
-      terminalFineRetirementCount += 1;
-      if (terminalFineRetirementCount === 1) {
-        throw new Error('injected terminal fine-field retirement failure');
-      }
-      return originalFineRetirement(...args);
-    };
-    terminalCoarseRuntime.quarantineExecutionAfterDeviceLoss = async (...args) => {
-      terminalCoarseRetirementCount += 1;
-      return originalCoarseRetirement(...args);
-    };
+    const injectedTerminalRetirementFailure = new Error(
+      'injected terminal fine-field retirement failure'
+    );
+    if (terminalFieldsShareRuntime) {
+      // A v2 paired-field runtime retires both child views through one atomic
+      // arena attempt. Both child calls must observe the same first-attempt
+      // failure; a later retry delegates both calls to the shared owner.
+      const injectedPairRetirement = Promise.reject(
+        injectedTerminalRetirementFailure
+      );
+      injectedPairRetirement.catch(() => {});
+      terminalFineRuntime.quarantineExecutionAfterDeviceLoss = (...args) => {
+        terminalPairRetirementCount += 1;
+        if (terminalPairRetirementCount <= 2) {
+          return injectedPairRetirement;
+        }
+        return originalFineRetirement(...args);
+      };
+    } else {
+      terminalFineRuntime.quarantineExecutionAfterDeviceLoss =
+        async (...args) => {
+          terminalFineRetirementCount += 1;
+          if (terminalFineRetirementCount === 1) {
+            throw injectedTerminalRetirementFailure;
+          }
+          return originalFineRetirement(...args);
+        };
+      terminalCoarseRuntime.quarantineExecutionAfterDeviceLoss =
+        async (...args) => {
+          terminalCoarseRetirementCount += 1;
+          return originalCoarseRetirement(...args);
+        };
+    }
     await chain.runtime.releaseExecutionAfter(
       chain.execution,
       fixture.device.queue.onSubmittedWorkDone()
@@ -4630,23 +6255,46 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
     ), false);
     assert.equal(continuation.stateBuffer, g2p.stateBuffer);
     chain.runtime.destroy();
-    await assert.rejects(
-      abortSchroederTwoLevelMacroAuthorityAfter(
-        fixture.device,
-        fixture.macroAuthority,
-        {
-          microepochAuthority: successorMicroepoch,
-          reason: new Error('first split terminal abort attempt'),
-          deviceLost: true
-        }
-      ),
-      /injected terminal fine-field retirement failure/
+    const firstTerminalAbort = abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: successorMicroepoch,
+        reason: new Error('first split terminal abort attempt'),
+        deviceLost: true
+      }
     );
+    if (terminalFieldsShareRuntime) {
+      await assert.rejects(firstTerminalAbort, (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(
+          error.errors,
+          [
+            injectedTerminalRetirementFailure,
+            injectedTerminalRetirementFailure
+          ]
+        );
+        return true;
+      });
+    } else {
+      await assert.rejects(
+        firstTerminalAbort,
+        /injected terminal fine-field retirement failure/
+      );
+    }
     assert.equal(terminalFineQuarantineCount, 1);
-    assert.equal(terminalFineRetirementCount, 1);
-    assert.equal(terminalCoarseRetirementCount, 1);
+    assert.equal(
+      terminalFieldsShareRuntime
+        ? terminalPairRetirementCount
+        : terminalFineRetirementCount,
+      terminalFieldsShareRuntime ? 2 : 1
+    );
+    assert.equal(terminalCoarseRetirementCount, terminalFieldsShareRuntime ? 0 : 1);
     assert.equal(terminalFineRuntime.ownsExecution(terminalFineField), true);
-    assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), false);
+    assert.equal(
+      terminalCoarseRuntime.ownsExecution(terminalCoarseField),
+      terminalFieldsShareRuntime
+    );
     await abortSchroederTwoLevelMacroAuthorityAfter(
       fixture.device,
       fixture.macroAuthority,
@@ -4656,8 +6304,13 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
         deviceLost: true
       }
     );
-    assert.equal(terminalFineRetirementCount, 2);
-    assert.equal(terminalCoarseRetirementCount, 1);
+    assert.equal(
+      terminalFieldsShareRuntime
+        ? terminalPairRetirementCount
+        : terminalFineRetirementCount,
+      terminalFieldsShareRuntime ? 4 : 2
+    );
+    assert.equal(terminalCoarseRetirementCount, terminalFieldsShareRuntime ? 0 : 1);
     assert.equal(terminalFineRuntime.ownsExecution(terminalFineField), false);
     assert.equal(terminalCoarseRuntime.ownsExecution(terminalCoarseField), false);
 
@@ -4873,9 +6526,16 @@ test('fused WebGPU G2P owns the exact correction and output continuation', async
     fixture.device.createBuffer = originalCreateBuffer;
     fixture.device.queue.writeBuffer = originalWriteBuffer;
     fixture.device.queue.onSubmittedWorkDone = originalOnSubmittedWorkDone;
-    assert.ok(created.length >= 3);
+    assert.ok(created.length >= 2);
     assert.equal(throwingDestroyCalls, 2);
     assert.equal(created.every((buffer) => buffer.destroyed), true);
+    assert.equal(
+      chain.correction.mechanicsFieldViewExecution.ownerRuntime
+        .g2pWorkspaceForExecution(
+          chain.correction.mechanicsFieldViewExecution
+        ).paramsBuffer.destroyed,
+      false
+    );
     assert.equal(schroederFusedFineSubstepTransactionState(
       fixture.device,
       fixture.transaction
@@ -4894,10 +6554,29 @@ test('fused coarse-terminal WebGPU G2P owns the exact final S* output', async (t
     const chain = await submittedTerminalWorkspaceFixture();
     const { terminal } = chain;
     const submissionsBefore = terminal.fixture.device.submissions.length;
+    const traceStart = terminal.fixture.device.passTrace.length;
     const g2p = await runTerminalG2pProducer(chain);
     assert.equal(
       terminal.fixture.device.submissions.length,
       submissionsBefore + 1
+    );
+    assert.deepEqual(
+      terminal.fixture.device.passTrace
+        .slice(traceStart)
+        .map(({ entryPoint }) => entryPoint)
+        .filter((entryPoint) => [
+          'claim_g2p_energy_receipt',
+          'measure_g2p_energy_receipt',
+          'consume_g2p_energy_receipt',
+          'consume_g2p_fine_reflux_receipt',
+          'consume_g2p_coarse_reflux_receipt'
+        ].includes(entryPoint)),
+      [
+        'claim_g2p_energy_receipt',
+        'measure_g2p_energy_receipt',
+        'consume_g2p_energy_receipt',
+        'consume_g2p_coarse_reflux_receipt'
+      ]
     );
     assert.equal(g2p.proposalMode, 'proposal-deferred-to-post-mechanics');
     assert.equal(g2p.mechanicalProposalApplied, false);
@@ -5136,8 +6815,15 @@ test('fused coarse-terminal WebGPU G2P owns the exact final S* output', async (t
     const failedOwnedBuffers = device.createdBuffers
       .slice(createdBefore)
       .filter((buffer) => buffer.label?.startsWith('ulg-mls-mpm-g2p-'));
-    assert.ok(failedOwnedBuffers.length >= 3);
+    assert.ok(failedOwnedBuffers.length >= 2);
     assert.equal(failedOwnedBuffers.every((buffer) => buffer.destroyed), true);
+    assert.equal(
+      terminal.terminalTransaction.coarseFieldView.ownerRuntime
+        .g2pWorkspaceForExecution(
+          terminal.terminalTransaction.coarseFieldView
+        ).paramsBuffer.destroyed,
+      false
+    );
     assert.equal(schroederFusedCoarseTerminalTransactionState(
       device,
       terminal.terminalTransaction
@@ -6081,6 +7767,50 @@ test('optional MLS-MPM P2G grid projection never CPU-fallbacks selected canonica
   );
 });
 
+test('optional canonical P2G preserves structured device-loss reason and message after submission', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const device = fakeP2gDevice();
+  let resolveDeviceLost;
+  device.lost = new Promise((resolve) => {
+    resolveDeviceLost = resolve;
+  });
+  const generation = canonicalSpatialEpochGenerationFixture(device);
+  const lossInfo = Object.freeze({
+    reason: 'unknown',
+    message: 'Dawn queue reset diagnostic'
+  });
+  let runnerCallCount = 0;
+
+  await assert.rejects(
+    runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+      sphParticleState,
+      mlsMpmParticleState,
+      gridSpacingM: 1,
+      boxDimsM: [2, 2, 2],
+      preferWebGpu: true,
+      device,
+      schroederSelectedLevel: 2,
+      schroederSpatialEpochGeneration: generation,
+      canonicalSpatialRequired: true,
+      async webGpuRunner() {
+        runnerCallCount += 1;
+        resolveDeviceLost(lossInfo);
+        await Promise.resolve();
+        return {};
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 'ERR_CANONICAL_SPATIAL_AUTHORITY_REJECTED');
+      assert.equal(error.status, 'canonical-spatial-webgpu-device-lost');
+      assert.match(error.message, /reason=unknown/);
+      assert.match(error.message, /message=Dawn queue reset diagnostic/);
+      assert.equal(error.cause, lossInfo);
+      return true;
+    }
+  );
+  assert.equal(runnerCallCount, 1);
+});
+
 test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU result', async () => {
   const { sphParticleState, mlsMpmParticleState } = manualBuffers();
   const execution = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
@@ -6097,7 +7827,10 @@ test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU resul
         backend: 'webgpu',
         denseGridBufferAllocatedBytes: 4,
         denseAccumulatorBufferAllocatedBytes: 0,
-        mechanicsFieldP2gContributionBufferAllocatedBytes: 864,
+        mechanicsFieldP2gContributionBufferAllocatedBytes: 0,
+        mechanicsFieldP2gContributionBufferRequiredBytes: 864,
+        mechanicsFieldP2gContributionBufferCapacityBytes: 864,
+        mechanicsFieldP2gContributionBufferAllocationPerformed: false,
         mechanicsFieldP2gReductionMode: 'stable-radix-ordered-field-reduction',
         mechanicsFieldP2gReductionOrder:
           'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
@@ -6111,7 +7844,13 @@ test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU resul
   assert.equal(execution.webgpuParity.status, 'pass');
   assert.equal(execution.denseGridBufferAllocatedBytes, 4);
   assert.equal(execution.denseAccumulatorBufferAllocatedBytes, 0);
-  assert.equal(execution.mechanicsFieldP2gContributionBufferAllocatedBytes, 864);
+  assert.equal(execution.mechanicsFieldP2gContributionBufferAllocatedBytes, 0);
+  assert.equal(execution.mechanicsFieldP2gContributionBufferRequiredBytes, 864);
+  assert.equal(execution.mechanicsFieldP2gContributionBufferCapacityBytes, 864);
+  assert.equal(
+    execution.mechanicsFieldP2gContributionBufferAllocationPerformed,
+    false
+  );
   assert.equal(
     execution.mechanicsFieldP2gReductionMode,
     'stable-radix-ordered-field-reduction'

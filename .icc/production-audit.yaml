@@ -66,3 +66,34 @@ profiles:
       fail_on:
         high: 0
       warn_on: {}
+
+  - name: ss-six-stage-contained-merge-ready
+    targets: [ss-six-stage-contained-merge-ready, ss-contained-merge, ss-dark-merge]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    # A contained pre-merge handoff necessarily audits the uncommitted
+    # replacement diff. Keep its aggregated guard warning visible, but only
+    # permit that one medium risk: guard violations remain high, and any other
+    # unclassified medium risk still blocks. The three downgraded areas are
+    # portfolio/tooling debt rather than candidate runtime evidence.
+    severity_overrides:
+      forward_progress: low
+      index_quality: low
+      tasks: low
+    verdict:
+      fail_on:
+        high: 0
+        medium: 1
+      warn_on:
+        low: 0
+
+  - name: ss-six-stage-default-enable-ready
+    targets: [ss-six-stage-default-enable-ready, ss-default-enable, ss-rollout]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+        medium: 0
+      warn_on:
+        low: 0

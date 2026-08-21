@@ -6,9 +6,10 @@
 // precomputed JSON bank records may seed derivation as long as every anchored
 // row carries `reference-fallback` provenance and strict mode can rerun the
 // pure lower-closure path. This module replaces phase-transition boundaries,
-// latent heats, and (when the bank provides them) per-phase densities and heat
-// capacities with bank reference values, records the derived values as
-// residual diagnostics, and stamps the provenance accordingly.
+// latent heats, and (when the bank provides them) per-phase densities, heat
+// capacities, and thermal conductivities with bank reference values, records
+// the derived values as residual diagnostics, and stamps the provenance
+// accordingly.
 import compoundMaterialPropertyBank from '../../../data/material-properties/compounds.json' with { type: 'json' };
 import molecularElectronicBandsBank from '../../../data/material-properties/molecular-electronic-bands.json' with { type: 'json' };
 import {
@@ -62,6 +63,32 @@ function transitionByName(record, name) {
 
 function bankPhase(record, name) {
   return (record.phases || []).find((phase) => phase.name === name) || null;
+}
+
+function bankProvenanceForFamily(record, family) {
+  return (record.provenance || []).find((entry) => entry?.family === family) || null;
+}
+
+function thermalConductivityProvenance(record, bank, phaseName) {
+  const entry = bankProvenanceForFamily(record, 'thermal-conductivity')
+    ?? bankProvenanceForFamily(record, 'phase-mechanics-optical')
+    ?? null;
+  return {
+    schema: 'peercompute.ulg.material-thermal-conductivity-provenance.v0',
+    status: entry?.status ?? 'reference-fallback',
+    source: entry?.source ?? 'material-property-reference-bank',
+    method: entry?.method ?? 'bank reference value held constant within runtime phase segment',
+    units: entry?.units ?? 'W/(m K)',
+    referenceState: entry?.referenceState ?? record.referenceState ?? null,
+    quality: entry?.quality ?? null,
+    applicationPolicy:
+      entry?.applicationPolicy
+      ?? 'reference-state-value-held-constant-within-runtime-phase',
+    references: [...(entry?.references || [])],
+    bank,
+    record: record.key || record.symbol || null,
+    phase: phaseName
+  };
 }
 
 // Spectroscopic gas-phase electronic absorption bands (visible/near-UV continua):
@@ -349,6 +376,38 @@ function anchorDerivedPhaseBoundaries(properties, materialKey) {
         };
         phase.cpJPerKgK = referenceCp;
         anchoredPaths.push(`phases.${phase.name}.cpJPerKgK`);
+      }
+      const referenceConductivity = reference.thermalConductivityWPerMK;
+      if (Number.isFinite(referenceConductivity) && referenceConductivity > 0) {
+        residuals[`${phase.name}ThermalConductivity`] = {
+          derivedThermalConductivityWPerMK: phase.thermalConductivityWPerMK ?? null,
+          referenceThermalConductivityWPerMK: referenceConductivity
+        };
+        phase.thermalConductivityWPerMK = referenceConductivity;
+        phase.thermalConductivityProvenance =
+          thermalConductivityProvenance(record, bank, phase.name);
+        anchoredPaths.push(`phases.${phase.name}.thermalConductivityWPerMK`);
+      }
+      const referenceViscosity = reference.dynamicViscosityPaS;
+      if (Number.isFinite(referenceViscosity) && referenceViscosity >= 0) {
+        residuals[`${phase.name}DynamicViscosity`] = {
+          derivedDynamicViscosityPaS: phase.dynamicViscosityPaS ?? null,
+          referenceDynamicViscosityPaS: referenceViscosity
+        };
+        phase.dynamicViscosityPaS = referenceViscosity;
+        anchoredPaths.push(`phases.${phase.name}.dynamicViscosityPaS`);
+      }
+      const referenceSurfaceTension = reference.surfaceTensionNPerM;
+      if (
+        Number.isFinite(referenceSurfaceTension)
+        && referenceSurfaceTension >= 0
+      ) {
+        residuals[`${phase.name}SurfaceTension`] = {
+          derivedSurfaceTensionNPerM: phase.surfaceTensionNPerM ?? null,
+          referenceSurfaceTensionNPerM: referenceSurfaceTension
+        };
+        phase.surfaceTensionNPerM = referenceSurfaceTension;
+        anchoredPaths.push(`phases.${phase.name}.surfaceTensionNPerM`);
       }
     }
   }

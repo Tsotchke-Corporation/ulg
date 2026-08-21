@@ -36,7 +36,15 @@ import {
   segmentEnergyAbove,
   segmentTemperatureFromEnergyAbove
 } from '../material/thermoState.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  cancelQueueOrderedCleanupClaim,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  createQueueOrderedCleanupClaimIssuer,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../webgpuComputeLayout.js';
 import {
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
@@ -66,6 +74,17 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import {
+  appendGpuReadbackTelemetryObservation,
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
+import {
+  SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT as THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA,
+  ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA,
+  resolveSphThermalEnvironmentAuthority,
+  resolveSphWallReservoirAuthority
+} from '../thermalEnvironmentAuthority.js';
 
 function replaceThermalWgslSection(source, before, after, label) {
   if (!source.includes(before)) {
@@ -264,8 +283,8 @@ fn canonical_thermal_open_reservoir_delta(
 }`;
   let code = replaceThermalWgslSection(
     legacyWgsl,
-    `  ambient_temperature_k: f32,\n  _pad_b: f32,\n  _pad_c: f32,\n};`,
-    `  ambient_temperature_k: f32,\n  canonical_proposal_enabled: u32,\n  canonical_generation_id: u32,\n  canonical_support_epoch: u32,\n  canonical_position_epoch: u32,\n  canonical_topology_epoch: u32,\n  canonical_storage_generation: u32,\n  canonical_physics_tick: u32,\n  canonical_physics_substep: u32,\n  _pad_c: u32,\n  _pad_d: u32,\n};`,
+    `  ambient_temperature_k: f32,\n  _pad_b: f32,\n  ambient_radiation_exchange_enabled: u32,\n};`,
+    `  ambient_temperature_k: f32,\n  canonical_proposal_enabled: u32,\n  canonical_generation_id: u32,\n  canonical_support_epoch: u32,\n  canonical_position_epoch: u32,\n  canonical_topology_epoch: u32,\n  canonical_storage_generation: u32,\n  canonical_physics_tick: u32,\n  canonical_physics_substep: u32,\n  ambient_radiation_exchange_enabled: u32,\n  _pad_d: u32,\n};`,
     'uniform identity extension'
   );
   code = replaceThermalWgslSection(
@@ -387,14 +406,17 @@ const THERMAL_SCOPE = 'sph-thermal-closure-table-conduction-walls';
 const THERMAL_SEGMENT_TYPES = Object.freeze({ phase: 1, plateau: 2 });
 const THERMAL_STATUS = Object.freeze({ ready: 1, missingMaterial: 255 });
 const PAIR_CONDUCTION_RELAXATION_LIMIT = 0.25;
-// Demo-scale pair conduction coefficient. Like the sound speeds, thermal
-// coupling is scaled for an interactive timestep: at the physical-ish rate 15
-// a molten 1900K iron drop needed ~650 sim-seconds to shed its latent heat
-// into surrounding water/ice (verified by live-GPU energy readback), which
-// reads as "no thermal transfer". 1500 keeps the same relaxation clamps and
-// wall-rate ratio while making conduction visible in seconds.
+// Legacy resident-GPU pair coefficient. The CPU reference no longer consumes
+// this demo-scale value: it derives a Fourier conductance from phase bulk
+// conductivity and explicit contact geometry. Keep the option until the GPU
+// producer/apply ABI migrates to the same material-derived law.
 export const SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT = 1500;
-export const SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT = 293;
+export const SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT =
+  THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT;
+export {
+  ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA,
+  ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA
+};
 export const SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
 // Pair radiation truncation range in units of (r_i + r_j); mirrors the WGSL
 // RADIATION_PAIR_RANGE_RADII constant (view factor < ~0.4% beyond it).
@@ -445,6 +467,10 @@ const THERMAL_DEBYE_GRAPH_SAMPLE_COUNT = 32;
 const FACE_IDS = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const thermalOutputCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'thermal-output'
+  });
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -488,6 +514,61 @@ function phaseDensity(properties, phaseName) {
   const exact = properties?.phases?.find((phase) => phase.name === phaseName);
   const fallback = properties?.phases?.find((phase) => phase.densityKgPerM3 > 0);
   return finiteNumber(exact?.densityKgPerM3 ?? fallback?.densityKgPerM3, 0);
+}
+
+function phaseThermalConductivity(properties, phaseName) {
+  const phase = properties?.phases?.find((candidate) => candidate.name === phaseName);
+  const value = Number(phase?.thermalConductivityWPerMK);
+  const ready = Number.isFinite(value) && value > 0;
+  return {
+    ready,
+    value: ready ? value : 0,
+    provenance: {
+      status: ready
+        ? 'closure-phase-thermal-conductivity-ready'
+        : 'closure-phase-thermal-conductivity-missing',
+      source: 'material-properties.phases',
+      phase: phaseName,
+      field: 'thermalConductivityWPerMK',
+      sourceProvenance:
+        phase?.thermalConductivityProvenance
+        ?? properties?.thermalConductivityProvenance
+        ?? properties?.provenance
+        ?? null
+    }
+  };
+}
+
+function harmonicMeanPositive(left, right) {
+  if (!(left > 0) || !(right > 0)) return 0;
+  return (2 * left * right) / (left + right);
+}
+
+function segmentThermalConductivity(properties, segment) {
+  const from = phaseThermalConductivity(
+    properties,
+    segment.type === 'phase' ? segment.phase : segment.from
+  );
+  const to = segment.type === 'phase'
+    ? from
+    : phaseThermalConductivity(properties, segment.to);
+  const value = segment.type === 'phase'
+    ? from.value
+    : harmonicMeanPositive(from.value, to.value);
+  return {
+    ready: value > 0,
+    value,
+    provenance: {
+      status: value > 0
+        ? 'closure-segment-thermal-conductivity-ready'
+        : 'closure-segment-thermal-conductivity-missing',
+      source: segment.type === 'phase'
+        ? 'phase-bulk-conductivity'
+        : 'harmonic-mean-adjacent-phase-bulk-conductivity',
+      from: from.provenance,
+      to: to.provenance
+    }
+  };
 }
 
 function phaseNameOfSegment(segment) {
@@ -625,11 +706,14 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
     if (materialBankWarmInput) materialBankWarmInputMatchedMaterialCount += 1;
     for (const segment of materialSegments) {
       const segmentIndex = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
+      const conductivity = segmentThermalConductivity(properties, segment);
       segmentMetadata[segmentIndex] = {
         ...segment,
         material,
         materialId,
-        segmentIndex
+        segmentIndex,
+        thermalConductivityWPerMK: conductivity.value,
+        thermalConductivityProvenance: conductivity.provenance
       };
       if (segment.type === 'phase') {
         const phaseId = gpuPhaseId(segment.phase);
@@ -645,7 +729,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
           phaseDensity(properties, segment.phase),
           phaseDensity(properties, segment.phase),
           THERMAL_STATUS.ready,
-          0
+          conductivity.value
         );
       } else {
         segments.push(
@@ -660,7 +744,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
           phaseDensity(properties, segment.from),
           phaseDensity(properties, segment.to),
           THERMAL_STATUS.ready,
-          0
+          conductivity.value
         );
       }
     }
@@ -1016,7 +1100,8 @@ function segmentRows(table, segmentIndex) {
     temperatureEndK: table.segments[offset + 7],
     densityFromKgPerM3: table.segments[offset + 8],
     densityToKgPerM3: table.segments[offset + 9],
-    status: table.segments[offset + 10]
+    status: table.segments[offset + 10],
+    thermalConductivityWPerMK: table.segments[offset + 11]
   };
 }
 
@@ -1068,6 +1153,7 @@ export function buildSphThermalPhaseResponseTable(materialPropertiesOrTable = {}
   const graphBySegment = graphIndexBySegment(resolvedGraphSet);
   const records = [];
   const responses = [];
+  const responseThermalConductivities = [];
   const metadata = [];
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
@@ -1097,6 +1183,9 @@ export function buildSphThermalPhaseResponseTable(materialPropertiesOrTable = {}
         1,
         isPlateau ? 1 : 0,
         0
+      );
+      responseThermalConductivities.push(
+        Math.max(0, finiteNumber(segment.thermalConductivityWPerMK, 0))
       );
     }
     const emissivityGray = finiteNumber(table.records[recordOffset + 4], 0);
@@ -1140,6 +1229,12 @@ export function buildSphThermalPhaseResponseTable(materialPropertiesOrTable = {}
     responseStrideFloats: SPH_THERMAL_PHASE_RESPONSE_FLOATS,
     records: new Float32Array(records),
     responses: new Float32Array(responses),
+    // Response-aligned transport sidecar. Keep the public 16-float response
+    // row ABI stable while allowing the phase-aware resident prepass to carry
+    // the selected phase conductivity into its private proposal sidecar.
+    responseThermalConductivities: new Float32Array(
+      responseThermalConductivities
+    ),
     metadata,
     scientificValidation: false,
     materialValidation: false,
@@ -1175,9 +1270,99 @@ export function thermalEmissivityFromTable(table, materialId) {
   return 0;
 }
 
+export function resolveThermalConductivityFromTable(
+  table,
+  materialId,
+  specificInternalEnergyJPerKg
+) {
+  assertPackedSphThermalMaterialTable(table);
+  for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
+    const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
+    if (table.records[recordOffset] !== materialId) continue;
+    const segmentOffset = table.records[recordOffset + 1];
+    const segmentCount = table.records[recordOffset + 2];
+    let selected = segmentOffset;
+    for (let local = 0; local < segmentCount; local += 1) {
+      const candidate = segmentOffset + local;
+      const segment = segmentRows(table, candidate);
+      selected = candidate;
+      if (
+        specificInternalEnergyJPerKg <= segment.energyEndJPerKg
+        || local + 1 === segmentCount
+      ) break;
+    }
+    const segment = segmentRows(table, selected);
+    const value = finiteNumber(segment.thermalConductivityWPerMK, 0);
+    return {
+      ready: value > 0 && segment.status === THERMAL_STATUS.ready,
+      status: value > 0
+        ? 'phase-thermal-conductivity-ready'
+        : 'phase-thermal-conductivity-missing',
+      thermalConductivityWPerMK: Math.max(0, value),
+      segmentIndex: selected,
+      segmentType: segmentTypeName(segment.segmentType),
+      phaseFromId: segment.phaseFromId,
+      phaseToId: segment.phaseToId,
+      provenance:
+        table.segmentMetadata?.[selected]?.thermalConductivityProvenance
+        ?? null
+    };
+  }
+  return {
+    ready: false,
+    status: 'material-thermal-conductivity-missing',
+    thermalConductivityWPerMK: 0,
+    segmentIndex: null,
+    segmentType: null,
+    phaseFromId: GPU_PHASE_IDS.unknown,
+    phaseToId: GPU_PHASE_IDS.unknown,
+    provenance: null
+  };
+}
+
 function particleNominalRadiusM(massKg, restDensityKgPerM3) {
   if (!(massKg > 0) || !(restDensityKgPerM3 > 0)) return 0;
   return Math.cbrt((3 * massKg) / (4 * Math.PI * restDensityKgPerM3));
+}
+
+function conductiveSphereContactGeometry(radiusM, otherRadiusM, distanceM) {
+  const leftRadius = Math.max(0, finiteNumber(radiusM, 0));
+  const rightRadius = Math.max(0, finiteNumber(otherRadiusM, 0));
+  const distance = Math.max(0, finiteNumber(distanceM, 0));
+  const radiusSum = leftRadius + rightRadius;
+  const surfaceGapM = distance - radiusSum;
+  if (!(leftRadius > 0) || !(rightRadius > 0) || surfaceGapM >= 0) {
+    return {
+      contact: false,
+      surfaceGapM,
+      overlapM: Math.max(0, -surfaceGapM),
+      contactAreaM2: 0,
+      conductionPathLengthM: distance
+    };
+  }
+
+  const minRadius = Math.min(leftRadius, rightRadius);
+  let contactRadiusSquaredM2;
+  if (distance === 0 || distance <= Math.abs(leftRadius - rightRadius)) {
+    contactRadiusSquaredM2 = minRadius * minRadius;
+  } else {
+    const planeFromLeftM = (
+      distance * distance
+      + leftRadius * leftRadius
+      - rightRadius * rightRadius
+    ) / (2 * distance);
+    contactRadiusSquaredM2 = Math.max(
+      0,
+      leftRadius * leftRadius - planeFromLeftM * planeFromLeftM
+    );
+  }
+  return {
+    contact: contactRadiusSquaredM2 > 0,
+    surfaceGapM,
+    overlapM: -surfaceGapM,
+    contactAreaM2: Math.PI * contactRadiusSquaredM2,
+    conductionPathLengthM: distance > 0 ? distance : minRadius
+  };
 }
 
 function radiativeViewAreaM2(rI, rJ, distanceM) {
@@ -1920,9 +2105,13 @@ function outputEnvelope({
   thermo,
   wallHeatJ,
   radiativeAmbientHeatJ = 0,
+  ambientRadiationExchangeEnabled = false,
   dtS,
   conductionRate,
   ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  thermalEnvironmentAuthority = null,
+  wallReservoirAuthority = null,
+  requestedWallRate = null,
   wallRate,
   wallLayerM,
   boxDimsM,
@@ -1939,7 +2128,12 @@ function outputEnvelope({
   legacyPrivateSpatialBuildCount = 0,
   legacyFixedCandidateBuildCount = 0,
   legacyExhaustiveTraversalCount = 0,
-  canonicalThermalProposal = null
+  canonicalThermalProposal = null,
+  readbackTelemetry = createGpuReadbackTelemetry({
+    scope: 'sph-thermal-step',
+    complete: false,
+    unknownSources: ['unclassified-thermal-backend']
+  })
 }) {
   const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
     thermalMaterialTable,
@@ -1985,6 +2179,14 @@ function outputEnvelope({
     time: finiteNumber(sphParticleState.time, 0) + dtS,
     dtS,
     conductionRate,
+    ambientTemperatureK,
+    thermalEnvironmentAuthority,
+    ambientRadiationExchangeEnabled,
+    ambientRadiationExchangeAuthority:
+      'wall-reservoir-authority.exchangeEnabled',
+    wallReservoirAuthority,
+    wallExchangeEnabled: wallReservoirAuthority?.exchangeEnabled === true,
+    requestedWallRate,
     wallRate,
     wallLayerM,
     boxDimsM: [...boxDimsM],
@@ -2009,6 +2211,13 @@ function outputEnvelope({
     thermalPairLaw: canonicalThermalProposal || backend === 'cpu-reference'
       ? 'reciprocal-directional-energy-budget-v2'
       : 'legacy-one-sided-aggregate',
+    thermalPairConductanceAuthority: backend === 'cpu-reference'
+      ? 'phase-bulk-conductivity-harmonic-mean'
+      : 'legacy-global-conduction-rate',
+    thermalPairContactGeometryAuthority: backend === 'cpu-reference'
+      ? 'overlapping-sphere-contact-disk-center-path'
+      : 'support-distance-weight',
+    legacyConductionRateEffective: backend !== 'cpu-reference',
     thermalProposalMode: canonicalThermalProposal?.proposalMode ?? null,
     thermalProposalLookupMode:
       classicThermalProposalStage?.lookupMode ?? null,
@@ -2086,8 +2295,13 @@ function outputEnvelope({
         : null,
     canonicalThermalProposal,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
-    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    fullParticleReadbackPerformed:
+      readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackFree:
+      readbackMode === NO_FULL_READBACK_MODE,
+    ...readbackTelemetry,
     wallHeatJ: { ...wallHeatJ },
+    radiativeAmbientHeatJ,
     scientificValidation: false,
     materialValidation: false,
     sphValidation: false,
@@ -2099,11 +2313,14 @@ function outputEnvelope({
 export function runSphThermalStepCpu({
   sphParticleState,
   thermalMaterialTable,
-  wallTemperaturesK = {},
+  wallTemperaturesK,
+  wallReservoirAuthority = null,
+  wallModel,
   boxDimsM = [5, 5, 5],
   dtS = 0,
   conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
-  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  ambientTemperatureK,
+  thermalEnvironmentAuthority = null,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM
 } = {}) {
@@ -2111,6 +2328,27 @@ export function runSphThermalStepCpu({
   if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('runSphThermalStepCpu requires a packed thermal material table');
   }
+  const resolvedThermalEnvironmentAuthority =
+    resolveSphThermalEnvironmentAuthority({
+      ambientTemperatureK,
+      thermalEnvironmentAuthority
+    });
+  const resolvedAmbientTemperatureK =
+    resolvedThermalEnvironmentAuthority.ambientTemperatureK;
+  const resolvedWallReservoirAuthority =
+    resolveSphWallReservoirAuthority({
+      wallTemperaturesK,
+      wallReservoirAuthority,
+      wallModel
+    });
+  const resolvedWallTemperaturesK =
+    resolvedWallReservoirAuthority.faces;
+  const requestedWallRate = wallRate;
+  const effectiveWallRate = resolvedWallReservoirAuthority.exchangeEnabled
+    ? wallRate
+    : 0;
+  const ambientRadiationExchangeEnabled =
+    resolvedWallReservoirAuthority.exchangeEnabled === true;
   const particleCount = sphParticleState.particleCount;
   const dims = finiteVector3(boxDimsM, [5, 5, 5]);
   const dt = finiteNumber(dtS, 0);
@@ -2132,6 +2370,11 @@ export function runSphThermalStepCpu({
     const materialId = sphParticleState.thermo[thermoOffset];
     const specificEnergyJPerKg = Number(sphParticleState.state[stateOffset + 7]);
     const resolvedSourceThermalState = resolveThermalStateFromTable(
+      thermalMaterialTable,
+      materialId,
+      specificEnergyJPerKg
+    );
+    const resolvedThermalConductivity = resolveThermalConductivityFromTable(
       thermalMaterialTable,
       materialId,
       specificEnergyJPerKg
@@ -2168,6 +2411,9 @@ export function runSphThermalStepCpu({
         massKg,
         finiteNumber(sphParticleState.thermo[thermoOffset + 3], 0)
       ),
+      thermalConductivityWPerMK:
+        resolvedThermalConductivity.thermalConductivityWPerMK,
+      thermalConductivityStatus: resolvedThermalConductivity.status,
       emissivity: thermalEmissivityFromTable(thermalMaterialTable, materialId)
     };
   });
@@ -2219,10 +2465,28 @@ export function runSphThermalStepCpu({
       );
 
       let conductionEnergyJ = 0;
-      if (distanceM < pairSupportM) {
+      const contact = conductiveSphereContactGeometry(
+        self.radiusM,
+        other.radiusM,
+        distanceM
+      );
+      if (
+        contact.contact
+        && self.thermalConductivityWPerMK > 0
+        && other.thermalConductivityWPerMK > 0
+        && contact.conductionPathLengthM > 0
+      ) {
+        const pairConductivityWPerMK = harmonicMeanPositive(
+          self.thermalConductivityWPerMK,
+          other.thermalConductivityWPerMK
+        );
+        const pairConductanceWPerK = pairConductivityWPerMK
+          * contact.contactAreaM2
+          / contact.conductionPathLengthM;
         conductionEnergyJ = clampPairConductionEnergy({
-          dE: conductionRate * (other.temperatureK - self.temperatureK)
-            * (1 - distanceM / pairSupportM) * dt,
+          dE: pairConductanceWPerK
+            * (other.temperatureK - self.temperatureK)
+            * dt,
           temperatureK: self.temperatureK,
           otherTemperatureK: other.temperatureK,
           temperatureSlopeKdPerJPerKg: self.temperatureSlopeKdPerJPerKg,
@@ -2326,10 +2590,18 @@ export function runSphThermalStepCpu({
       sphParticleState.state[oi + 1],
       sphParticleState.state[oi + 2]
     ];
-    for (let faceIndex = 0; faceIndex < FACE_IDS.length; faceIndex += 1) {
+    for (
+      let faceIndex = 0;
+      resolvedWallReservoirAuthority.exchangeEnabled
+        && faceIndex < FACE_IDS.length;
+      faceIndex += 1
+    ) {
       const distance = wallDistance(position, dims, faceIndex);
       if (distance >= layer) continue;
-      const faceWallTempK = wallTemp(wallTemperaturesK, FACE_IDS[faceIndex]);
+      const faceWallTempK = wallTemp(
+        resolvedWallTemperaturesK,
+        FACE_IDS[faceIndex]
+      );
       const currentSpecificEnergyJPerKg = carrier.specificEnergyJPerKg + du[i];
       const currentThermalState = resolveThermalStateFromTable(
         thermalMaterialTable,
@@ -2349,7 +2621,12 @@ export function runSphThermalStepCpu({
           currentThermalState.phaseFractions.plasma
         ]
       );
-      const rawDUSpecific = wallRate * (faceWallTempK - currentTemperatureK) * (1 - distance / layer) * dt / mass;
+      const rawDUSpecific =
+        effectiveWallRate
+        * (faceWallTempK - currentTemperatureK)
+        * (1 - distance / layer)
+        * dt
+        / mass;
       const equilibriumLimitedDUSpecific = clampWallSpecificEnergyDelta({
         dUSpecific: rawDUSpecific,
         temperatureK: currentTemperatureK,
@@ -2369,7 +2646,12 @@ export function runSphThermalStepCpu({
     // Ambient gray-body radiation (mirrors the WGSL kernel): full-sphere
     // Stefan-Boltzmann against the box environment; open-system source/sink
     // accounted in radiativeAmbientHeatJ (positive = absorbed by particles).
-    if (carrier.emissivity > 0 && carrier.radiusM > 0 && ambientTemperatureK > 0) {
+    if (
+      ambientRadiationExchangeEnabled
+      && carrier.emissivity > 0
+      && carrier.radiusM > 0
+      && resolvedAmbientTemperatureK > 0
+    ) {
       const surfaceAreaM2 = 4 * Math.PI * carrier.radiusM * carrier.radiusM;
       const currentSpecificEnergyJPerKg = carrier.specificEnergyJPerKg + du[i];
       const currentThermalState = resolveThermalStateFromTable(
@@ -2391,11 +2673,13 @@ export function runSphThermalStepCpu({
         ]
       );
       const rawAmbientDE = carrier.emissivity * SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4
-        * (ambientTemperatureK ** 4 - currentTemperatureK ** 4) * surfaceAreaM2 * dt;
+        * (resolvedAmbientTemperatureK ** 4 - currentTemperatureK ** 4)
+        * surfaceAreaM2
+        * dt;
       const equilibriumLimitedDUSpecific = clampWallSpecificEnergyDelta({
         dUSpecific: rawAmbientDE / mass,
         temperatureK: currentTemperatureK,
-        wallTemperatureK: ambientTemperatureK,
+        wallTemperatureK: resolvedAmbientTemperatureK,
         temperatureSlopeKdPerJPerKg: currentTemperatureSlope
       });
       const ambientDUSpecific = clampOpenReservoirSpecificEnergyDeltaToEnergyDomain({
@@ -2445,10 +2729,14 @@ export function runSphThermalStepCpu({
     thermo,
     wallHeatJ,
     radiativeAmbientHeatJ,
+    ambientRadiationExchangeEnabled,
     dtS: dt,
     conductionRate,
-    ambientTemperatureK,
-    wallRate,
+    ambientTemperatureK: resolvedAmbientTemperatureK,
+    thermalEnvironmentAuthority: resolvedThermalEnvironmentAuthority,
+    wallReservoirAuthority: resolvedWallReservoirAuthority,
+    requestedWallRate,
+    wallRate: effectiveWallRate,
     wallLayerM: layer,
     boxDimsM: dims,
     neighborLookupMode: 'cpu-exhaustive-particle-scan',
@@ -2571,6 +2859,9 @@ function thermalResponseGraphContentFingerprint({
   return [
     typedArrayContentFingerprint(thermalPhaseResponseTable.records),
     typedArrayContentFingerprint(thermalPhaseResponseTable.responses),
+    typedArrayContentFingerprint(
+      thermalPhaseResponseTable.responseThermalConductivities
+    ),
     typedArrayContentFingerprint(thermalClosureGraphBank.nodeRows),
     typedArrayContentFingerprint(thermalClosureGraphBank.sampleRows)
   ].join('|');
@@ -2588,6 +2879,7 @@ export function thermalResponseGraphUploadMatchesDevice(upload, device, {
   const buffersMatch = [
     upload.responseRecordBuffer,
     upload.responseBuffer,
+    upload.responseThermalConductivityBuffer,
     upload.graphNodeBuffer,
     upload.graphSampleBuffer
   ].every((buffer) => buffer && webGpuBufferDevice(buffer) === device);
@@ -2626,6 +2918,11 @@ export function uploadSphThermalResponseGraphBuffers(device, {
     'ulg-sph-thermal-phase-responses',
     resolved.thermalPhaseResponseTable.responses
   );
+  const responseThermalConductivityBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-phase-response-conductivities',
+    resolved.thermalPhaseResponseTable.responseThermalConductivities
+  );
   const graphNodeBuffer = writeStorageBuffer(
     device,
     'ulg-sph-thermal-graph-nodes',
@@ -2654,14 +2951,18 @@ export function uploadSphThermalResponseGraphBuffers(device, {
     sampleCount: resolved.thermalClosureGraphBank.sampleCount,
     responseRecordBuffer,
     responseBuffer,
+    responseThermalConductivityBuffer,
     graphNodeBuffer,
     graphSampleBuffer,
     responseRecordBufferByteLength: resolved.thermalPhaseResponseTable.records.byteLength,
     responseBufferByteLength: resolved.thermalPhaseResponseTable.responses.byteLength,
+    responseThermalConductivityBufferByteLength:
+      resolved.thermalPhaseResponseTable.responseThermalConductivities.byteLength,
     graphNodeBufferByteLength: resolved.thermalClosureGraphBank.nodeRows.byteLength,
     graphSampleBufferByteLength: resolved.thermalClosureGraphBank.sampleRows.byteLength,
     ownsResponseRecordBuffer: true,
     ownsResponseBuffer: true,
+    ownsResponseThermalConductivityBuffer: true,
     ownsGraphNodeBuffer: true,
     ownsGraphSampleBuffer: true,
     thermalClosureGraphSet: resolved.thermalClosureGraphSet,
@@ -2679,6 +2980,9 @@ export function destroySphThermalResponseGraphBuffers(buffers) {
   if (!buffers || buffers.destroyed === true) return;
   if (buffers.ownsResponseRecordBuffer !== false) buffers.responseRecordBuffer?.destroy?.();
   if (buffers.ownsResponseBuffer !== false) buffers.responseBuffer?.destroy?.();
+  if (buffers.ownsResponseThermalConductivityBuffer !== false) {
+    buffers.responseThermalConductivityBuffer?.destroy?.();
+  }
   if (buffers.ownsGraphNodeBuffer !== false) buffers.graphNodeBuffer?.destroy?.();
   if (buffers.ownsGraphSampleBuffer !== false) buffers.graphSampleBuffer?.destroy?.();
   buffers.destroyed = true;
@@ -2943,6 +3247,11 @@ function resolveCanonicalThermalProposal({
     consumerReceipts[consumerId] = receipt;
     consumerAuthentications[consumerId] = authentication;
   }
+  const queueOrderedCanonicalApplyRetirementAuthorized =
+    proposal.hasQueueOrderedCanonicalApplyRetirementAuthority?.({
+      generation,
+      execution
+    }) === true;
   return Object.freeze({
     proposalMode: 'schroeder-spatial-exact-near-v2',
     proposal,
@@ -2954,6 +3263,7 @@ function resolveCanonicalThermalProposal({
     sourceAuthority,
     currentStateBuffer: proposalStateBuffer,
     currentThermoBuffer: proposalThermoBuffer,
+    queueOrderedCanonicalApplyRetirementAuthorized,
     consumerReceipts: Object.freeze(consumerReceipts),
     consumerAuthentications: Object.freeze(consumerAuthentications)
   });
@@ -2973,7 +3283,8 @@ function createParamsArray({
   materialBankWarmInputRowCount = 0,
   neighborBins = null,
   maxPairSupportM = 0,
-  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  ambientTemperatureK,
+  ambientRadiationExchangeEnabled,
   canonicalThermalProposal = null
 }) {
   const buffer = new ArrayBuffer(THERMAL_PARAMS_BYTES);
@@ -3011,7 +3322,8 @@ function createParamsArray({
   view.setUint32(88, binsEnabled ? Math.round(neighborBins.nz) : 0, true);
   view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
   view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
-  view.setFloat32(100, Math.max(0, finiteNumber(ambientTemperatureK, SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT)), true);
+  view.setFloat32(100, ambientTemperatureK, true);
+  view.setUint32(136, ambientRadiationExchangeEnabled ? 1 : 0, true);
   if (canonicalThermalProposal) {
     const execution = canonicalThermalProposal.execution;
     view.setUint32(
@@ -3071,12 +3383,15 @@ export function createSphThermalStepWebGpuEncoderStage({
   proposalThermoBuffer = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
-  wallTemperaturesK = {},
+  wallTemperaturesK,
+  wallReservoirAuthority = null,
+  wallModel,
   boxDimsM = [5, 5, 5],
   dtS = 0,
   smoothingLengthM = sphParticleState?.smoothingLengthM,
   conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
-  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
+  ambientTemperatureK,
+  thermalEnvironmentAuthority = null,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,
@@ -3094,6 +3409,27 @@ export function createSphThermalStepWebGpuEncoderStage({
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphThermalStepWebGpu requires a WebGPU-like device');
   }
+  const resolvedThermalEnvironmentAuthority =
+    resolveSphThermalEnvironmentAuthority({
+      ambientTemperatureK,
+      thermalEnvironmentAuthority
+    });
+  const resolvedAmbientTemperatureK =
+    resolvedThermalEnvironmentAuthority.ambientTemperatureK;
+  const resolvedWallReservoirAuthority =
+    resolveSphWallReservoirAuthority({
+      wallTemperaturesK,
+      wallReservoirAuthority,
+      wallModel
+    });
+  const resolvedWallTemperaturesK =
+    resolvedWallReservoirAuthority.faces;
+  const requestedWallRate = wallRate;
+  const effectiveWallRate = resolvedWallReservoirAuthority.exchangeEnabled
+    ? wallRate
+    : 0;
+  const ambientRadiationExchangeEnabled =
+    resolvedWallReservoirAuthority.exchangeEnabled === true;
   const canonicalGenerationProvided = schroederSpatialEpochGeneration != null;
   const canonicalProposalProvided = schroederSpatialThermalProposal != null;
   if (canonicalGenerationProvided !== canonicalProposalProvided) {
@@ -3301,14 +3637,15 @@ export function createSphThermalStepWebGpuEncoderStage({
     dtS: finiteNumber(dtS, 0),
     smoothingLengthM: finiteNumber(smoothingLengthM, 0),
     conductionRate,
-    wallRate,
+    wallRate: effectiveWallRate,
     wallLayerM: layer,
     boxDimsM: dims,
-    wallTemperaturesK,
+    wallTemperaturesK: resolvedWallTemperaturesK,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
     neighborBins,
     maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
-    ambientTemperatureK,
+    ambientTemperatureK: resolvedAmbientTemperatureK,
+    ambientRadiationExchangeEnabled,
     canonicalThermalProposal
   }));
   const spatialInputBuffer = canonicalThermalProposal.proposalBuffer;
@@ -3366,6 +3703,9 @@ export function createSphThermalStepWebGpuEncoderStage({
   let commonResourcesCleaned = false;
   let outputParticleBuffersDestroyed = false;
   let outputParticleBufferDestroyScheduled = false;
+  let thermalPrimarySubmissionObserved = false;
+  let result = null;
+  let outputParticleBufferCleanupClaim = null;
   const cleanupCommonResources = () => {
     if (commonResourcesCleaned) return false;
     commonResourcesCleaned = true;
@@ -3396,28 +3736,145 @@ export function createSphThermalStepWebGpuEncoderStage({
     outThermoBuffer.destroy?.();
     return true;
   };
+  const registerRetainedOutputCleanupClaim = () => {
+    if (
+      outputParticleBufferCleanupClaim != null
+      || !retainOutputParticleBuffers
+      || thermalPrimarySubmissionObserved !== true
+      || !result
+      || spatialCanonicalThermalProposal
+        ?.queueOrderedCanonicalApplyRetirementAuthorized !== true
+    ) {
+      return outputParticleBufferCleanupClaim;
+    }
+    const sourceAuthority =
+      spatialCanonicalThermalProposal.sourceAuthority;
+    const exactProposal =
+      spatialCanonicalThermalProposal.proposal;
+    if (
+      sourceAuthority !== exactProposal?.thermalProposalSourceAuthority
+      || spatialCanonicalThermalProposal.currentStateBuffer !== stateBuffer
+      || spatialCanonicalThermalProposal.currentThermoBuffer !== thermoBuffer
+    ) {
+      return null;
+    }
+    if (!isLiveThermalProposalSourceAuthority(sourceAuthority, {
+      device,
+      generation: spatialCanonicalThermalProposal.generation,
+      stateBuffer:
+        exactProposal.thermalProposalSourceAuthority.stateBuffer,
+      thermoBuffer:
+        exactProposal.thermalProposalSourceAuthority.thermoBuffer,
+      particleCount: sphParticleState.particleCount
+    })) {
+      return null;
+    }
+    outputParticleBufferCleanupClaim = registerQueueOrderedCleanupClaim(
+      thermalOutputCleanupClaimIssuer,
+      device,
+      {
+        producerOutput: result,
+        cleanup: destroyOutputParticleBuffersNow
+      }
+    );
+    Object.defineProperty(result, 'queueOrderedCleanupClaim', {
+      value: outputParticleBufferCleanupClaim,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    });
+    return outputParticleBufferCleanupClaim;
+  };
   const cleanupSubmittedWork = () => {
     const cleaned = cleanupCommonResources();
     if (!retainOutputParticleBuffers) destroyOutputParticleBuffersNow();
     return cleaned;
   };
   const cleanupAbortedWork = () => {
+    if (outputParticleBufferCleanupClaim != null) {
+      try {
+        cancelQueueOrderedCleanupClaim(
+          outputParticleBufferCleanupClaim,
+          device,
+          {
+            producerOutput: result,
+            cleanup: destroyOutputParticleBuffersNow
+          }
+        );
+      } catch {
+        // A sealed final-consumer claim cannot be cancelled here.
+      }
+    }
     const cleaned = cleanupCommonResources();
     destroyOutputParticleBuffersNow();
     return cleaned;
   };
   const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
-    ? () => {
+    ? ({
+        queueOrderedFinalConsumer = null
+      } = {}) => {
       if (
         outputParticleBuffersDestroyed
         || outputParticleBufferDestroyScheduled
       ) return false;
+      if (queueOrderedFinalConsumer != null) {
+        const receipt = releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          destroyOutputParticleBuffersNow,
+          {
+            queueOrderedFinalConsumer,
+            producerClaim: outputParticleBufferCleanupClaim,
+            producerOutput: result,
+            producerFamily: 'thermal-output'
+          }
+        );
+        if (result) {
+          result.outputParticleBufferCleanupReceipt = receipt;
+          result.outputParticleBufferCleanupStatus = receipt.status;
+          result.outputParticleBufferQueueCompletionMethod =
+            receipt.queueCompletionMethod;
+        }
+        return true;
+      }
+      if (outputParticleBufferCleanupClaim != null) {
+        try {
+          cancelQueueOrderedCleanupClaim(
+            outputParticleBufferCleanupClaim,
+            device,
+            {
+              producerOutput: result,
+              cleanup: destroyOutputParticleBuffersNow
+            }
+          );
+        } catch {
+          // A sealed claim remains owned by its exact final consumer.
+        }
+      }
       outputParticleBufferDestroyScheduled = true;
-      deferSubmittedWorkCleanup(device, destroyOutputParticleBuffersNow);
+      const deferredHostQueueFenceScheduled =
+        deferSubmittedWorkCleanup(device, destroyOutputParticleBuffersNow);
+      if (result) {
+        if (deferredHostQueueFenceScheduled) {
+          appendGpuReadbackTelemetryObservation(result, {
+            hostQueueFenceCount: 1,
+            deferredCleanupHostQueueFenceCount: 1
+          }, {
+            source: 'thermal-output-buffer-cleanup'
+          });
+        }
+        result.outputParticleBufferCleanupStatus =
+          deferredHostQueueFenceScheduled
+            ? 'submitted-output-cleanup-deferred-after-host-queue-fence'
+            : 'submitted-output-cleanup-completed-without-host-queue-fence';
+        result.outputParticleBufferQueueCompletionMethod =
+          deferredHostQueueFenceScheduled
+            ? 'gpu-queue-on-submitted-work-done'
+            : 'synchronous-cleanup-no-queue-fence';
+      }
       return true;
     }
     : null;
-  const result = outputEnvelope({
+  result = outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     thermalMaterialTable,
@@ -3428,9 +3885,15 @@ export function createSphThermalStepWebGpuEncoderStage({
     state,
     thermo,
     wallHeatJ: Object.fromEntries(FACE_IDS.map((faceId) => [faceId, null])),
+    radiativeAmbientHeatJ: null,
+    ambientRadiationExchangeEnabled,
     dtS: finiteNumber(dtS, 0),
     conductionRate,
-    wallRate,
+    ambientTemperatureK: resolvedAmbientTemperatureK,
+    thermalEnvironmentAuthority: resolvedThermalEnvironmentAuthority,
+    wallReservoirAuthority: resolvedWallReservoirAuthority,
+    requestedWallRate,
+    wallRate: effectiveWallRate,
     wallLayerM: layer,
     boxDimsM: dims,
     neighborLookupMode: spatialCanonicalThermalProposal
@@ -3454,7 +3917,18 @@ export function createSphThermalStepWebGpuEncoderStage({
       shaderRowCount: materialBankWarmInputBinding.rowCount,
       bufferSource: materialBankWarmInputBinding.bufferSource
     },
-    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    readbackTelemetry: noFullReadback
+      ? createGpuReadbackTelemetry({
+          scope: 'sph-thermal-step-webgpu',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        })
+      : createGpuReadbackTelemetry({
+          scope: 'sph-thermal-step-webgpu',
+          complete: false,
+          unknownSources: ['full-readback-pending']
+        })
   });
   return {
     schema: 'peercompute.ulg.sph-thermal-encoder-stage.v0',
@@ -3479,8 +3953,15 @@ export function createSphThermalStepWebGpuEncoderStage({
       pass.end();
     },
     markSubmittedWork() {
-      return matchedTimeThermalProposalStage?.markSubmittedWork() ?? false;
+      thermalPrimarySubmissionObserved = true;
+      const marked =
+        matchedTimeThermalProposalStage?.markSubmittedWork() ?? false;
+      registerRetainedOutputCleanupClaim();
+      return marked;
     },
+    queueOrderedCanonicalApplyRetirementAuthorized:
+      spatialCanonicalThermalProposal
+        ?.queueOrderedCanonicalApplyRetirementAuthorized === true,
     cleanupSubmittedWork,
     cleanupAbortedWork
   };
@@ -3510,9 +3991,40 @@ export async function runSphThermalStepWebGpu(args = {}) {
       ]);
       stage.result.state = new Float32Array(stateBytes);
       stage.result.thermo = new Float32Array(thermoBytes);
+      Object.assign(stage.result, createGpuReadbackTelemetry({
+        scope: 'sph-thermal-step-webgpu',
+        mapAsyncCount: 2,
+        readbackBytes:
+          Math.max(4, sphParticleState.state.byteLength)
+          + Math.max(4, sphParticleState.thermo.byteLength)
+      }));
     }
-    if (noFullReadback) {
-      deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+    if (
+      noFullReadback
+      && stage.queueOrderedCanonicalApplyRetirementAuthorized === true
+    ) {
+      // The canonical proposal and apply were encoded in this submission and
+      // the hierarchy authenticated it as their final same-queue consumer.
+      // These are one-shot temporaries, so immediate destruction preserves
+      // queue order without asking the host to observe device idle.
+      stage.cleanupSubmittedWork();
+    } else if (noFullReadback) {
+      const scheduled = deferSubmittedWorkCleanup(
+        device,
+        stage.cleanupSubmittedWork
+      );
+      if (scheduled) {
+        appendGpuReadbackTelemetryObservation(stage.result, {
+          hostQueueFenceCount: 1,
+          deferredCleanupHostQueueFenceCount: 1
+        }, {
+          source: 'thermal-submitted-temporary-cleanup'
+        });
+        stage.result.submittedTemporaryCleanupStatus =
+          'submitted-temporary-cleanup-deferred-after-host-queue-fence';
+        stage.result.submittedTemporaryQueueCompletionMethod =
+          'gpu-queue-on-submitted-work-done';
+      }
     } else {
       stage.cleanupSubmittedWork();
     }

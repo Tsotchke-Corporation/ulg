@@ -23,7 +23,9 @@ import {
   mlsMpmParticleSeparationComputeWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
+  mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl,
   mlsMpmG2pReconstructCanonicalSpatialWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl,
   mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl,
   mlsMpmParticleSeparationApplyCanonicalSpatialWgsl,
   mlsMpmParticleSeparationApplyCanonicalSpatialUnobservedWgsl,
@@ -38,7 +40,18 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  assertQueueOrderedCleanupClaimsRegistered,
+  cancelQueueOrderedCleanupClaim,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  createQueueOrderedCleanupClaimIssuer,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedWork,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
@@ -54,8 +67,16 @@ import {
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
 import {
+  appendGpuReadbackTelemetryObservation,
+  createGpuReadbackTelemetry,
+  mergeGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
+import {
   isSchroederSpatialExactNearResidentConsumerBinding
 } from './schroederSpatialEpochGpu.js';
+import {
+  validateSchroederSingleLevelQueueOrderedCleanupCapability
+} from './schroederSpatialEpochTransaction.js';
 import {
   issuePostSeparationThermalBinAuthority,
   releasePostSeparationThermalBinAuthorityAfterQueue
@@ -89,7 +110,10 @@ export {
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT
 };
-import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from './sphGridUpdateGpuKernel.js';
+import {
+  MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
+  validateLocallySubmittedMlsMpmActiveSourceDenseGridUpdate
+} from './sphGridUpdateGpuKernel.js';
 
 export {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
@@ -137,7 +161,7 @@ const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT = 1;
-const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS = 4;
+const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS = 16;
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_STATUS =
   'schroeder-spatial-mechanical-contact-graph-prepared';
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_MODE =
@@ -145,8 +169,69 @@ const SCHROEDER_MECHANICAL_PROPOSAL_V2_MODE =
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOURCE_POSITION_AUTHORITY =
   'post-g2p-state-with-swept-pre-integration-ss-directory';
 const refluxDummyBuffers = new WeakMap();
+const g2pPipelineBundles = new WeakMap();
 const fusedG2pClaims = new WeakMap();
 const fusedG2pOrigins = new WeakMap();
+const g2pSubmittedTemporaryCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'mls-mpm-g2p-submitted-temporaries'
+  });
+
+function cachedG2pPipelineBundle(device, {
+  variant,
+  shader,
+  bindings,
+  canonicalSpatialAuthority,
+  mechanicsFieldRequired,
+  refluxReceiptStage
+}) {
+  let deviceBundles = g2pPipelineBundles.get(device);
+  if (!deviceBundles) {
+    deviceBundles = new Map();
+    g2pPipelineBundles.set(device, deviceBundles);
+  }
+  const refluxStage = refluxReceiptStage?.[0] ?? 'no-reflux';
+  const key = `${variant}|${refluxStage}`;
+  const cached = deviceBundles.get(key);
+  if (cached) return cached;
+  const reconstruct = createCachedExplicitComputePipeline(device, {
+    cacheKey: `ulg-mls-mpm-g2p-reconstruct.${variant}`,
+    label: 'ulg-mls-mpm-g2p-reconstruct',
+    code: shader,
+    entryPoint: 'main',
+    bindings
+  });
+  const canonicalFinalize = canonicalSpatialAuthority
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey: `ulg-mls-mpm-g2p-reconstruct.finalize-authority.${variant}`,
+        label: 'ulg-mls-mpm-g2p-finalize-spatial-authority',
+        code: shader,
+        entryPoint: 'finalize_canonical_spatial_authority',
+        bindings
+      })
+    : null;
+  const energyReceiptPipelines = mechanicsFieldRequired
+    ? [
+        ['claim', 'claim_g2p_energy_receipt'],
+        ['measure', 'measure_g2p_energy_receipt'],
+        ['consume-field', 'consume_g2p_energy_receipt'],
+        ...(refluxReceiptStage ? [refluxReceiptStage] : [])
+      ].map(([stage, entryPoint]) => createCachedExplicitComputePipeline(device, {
+        cacheKey: `ulg-mls-mpm-g2p-reconstruct.field-energy-${stage}.v3.${variant}`,
+        label: `ulg-mls-mpm-g2p-field-energy-${stage}`,
+        code: shader,
+        entryPoint,
+        bindings
+      }))
+    : [];
+  const bundle = Object.freeze({
+    reconstruct,
+    canonicalFinalize,
+    energyReceiptPipelines: Object.freeze(energyReceiptPipelines)
+  });
+  deviceBundles.set(key, bundle);
+  return bundle;
+}
 
 function crossLevelRefluxBindingBuffer(device, parentFieldWorkspace) {
   const ledger = parentFieldWorkspace?.refluxLedger ?? null;
@@ -694,6 +779,7 @@ function durableSubmittedFusedG2pOutputMatchesOrigin(
       === receipt.outputMechanicsBufferSize
     && receipt.outputStateBufferSize >= receipt.stateBufferByteLength
     && receipt.outputMechanicsBufferSize >= receipt.mechanicsBufferByteLength
+    && receipt.normalHotLoopReadbackFree === true
     && reconstruction?.schema === ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA
     && reconstruction?.backend === 'webgpu'
     && reconstruction?.status === 'reconstructed'
@@ -709,7 +795,6 @@ function durableSubmittedFusedG2pOutputMatchesOrigin(
     && reconstruction?.retainedOutputParticleBuffers === true
     && reconstruction?.readbackMode === NO_FULL_READBACK_MODE
     && reconstruction?.fullReadbackPerformed === false
-    && reconstruction?.normalHotLoopReadbackFree === true
     && (terminalTransaction == null
       || terminalTransaction === receipt.transaction)
   );
@@ -1058,7 +1143,10 @@ function registerSubmittedFusedG2p(device, reconstruction, {
     outputMechanicsBufferSize: Number(outputMechanicsBuffer?.size),
     stateBufferByteLength: reconstruction.stateBufferByteLength,
     mechanicsBufferByteLength: reconstruction.mechanicsBufferByteLength,
-    particleCount: reconstruction.particleCount
+    particleCount: reconstruction.particleCount,
+    // Error cleanup may append recovery-fence telemetry after registration.
+    // Retirement must authenticate the immutable producer-time receipt.
+    normalHotLoopReadbackFree: reconstruction.normalHotLoopReadbackFree
   });
   const origin = Object.seal({
     device,
@@ -1735,7 +1823,12 @@ function outputEnvelope({
   particleScaleStability = null,
   schroederSpatialAuthority = null,
   schroederLevelFilter = null,
-  separationCanonicalSpatialAuthorityGate = false
+  separationCanonicalSpatialAuthorityGate = false,
+  readbackTelemetry = createGpuReadbackTelemetry({
+    scope: 'mls-mpm-g2p',
+    complete: false,
+    unknownSources: ['unclassified-g2p-backend']
+  })
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const particleScaleStabilitySummary = particleScaleStability || summarizeG2pParticleScaleStability({
@@ -1769,7 +1862,9 @@ function outputEnvelope({
     mechanics,
     readbackMode,
     fullReadbackPerformed: !noFullReadback,
-    normalHotLoopReadbackFree: noFullReadback,
+    fullParticleReadbackPerformed: !noFullReadback,
+    fullParticleReadbackFree: noFullReadback,
+    ...readbackTelemetry,
     particleScaleStability: particleScaleStabilitySummary,
     particleScaleStabilitySchema: particleScaleStabilitySummary.schema,
     particleScaleStabilityStatus: particleScaleStabilitySummary.status,
@@ -2320,7 +2415,9 @@ function createCanonicalParamsArray({
   activeSourceBinding = null,
   ...baseParams
 }) {
-  const activeSourceV2 = activeSourceBinding?.activeSourceP2gEnabled === true;
+  const activeSourceV2 =
+    activeSourceBinding?.activeSourceP2gEnabled === true
+    || activeSourceBinding?.activeSourceDenseSingleLevelEnabled === true;
   const buffer = new ArrayBuffer(
     activeSourceV2
       ? G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES
@@ -2403,7 +2500,12 @@ function createCanonicalParamsArray({
     );
     view.setUint32(164, activeSourceBinding.activeSourceFingerprint, true);
     view.setUint32(168, activeSourceBinding.activeSourceDispatchXLimit, true);
-    view.setUint32(172, activeSourceBinding.completionOrdinal, true);
+    view.setUint32(
+      172,
+      activeSourceBinding.activeSourceCompletionOrdinal
+        ?? activeSourceBinding.completionOrdinal,
+      true
+    );
   }
   return buffer;
 }
@@ -2756,13 +2858,17 @@ export async function runMlsMpmG2pWebGpu({
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
+  schroederSpatialEpochTransaction = null,
+  schroederSingleLevelQueueOrderedCleanupCapability = null,
   schroederSpatialMechanicalProposal = null,
+  gpuTimestampRecorder = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
   mechanicsFieldMode = gridUpdate?.mechanicsFieldMode
     ?? MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
+  queueOrderedProducerClaims = [],
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -2824,17 +2930,9 @@ export async function runMlsMpmG2pWebGpu({
   const canonicalSpatialAuthority = schroederSpatialAuthority.enabled === true;
   const mechanicsFieldRequired =
     mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED;
-  if (
-    canonicalSpatialAuthority
+  const canonicalSpatialV2 = canonicalSpatialAuthority
     && schroederSpatialAuthority.directorySchema
-      === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
-    && !mechanicsFieldRequired
-  ) {
-    throw canonicalSpatialExecutionError(
-      'canonical-spatial-v2-mechanics-field-required',
-      'Canonical spatial v2 G2P requires the mechanics-field ActiveSource route'
-    );
-  }
+      === ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA;
   if (mechanicsFieldRequired && !canonicalSpatialAuthority) {
     throw canonicalSpatialExecutionError(
       'mechanics-field-canonical-generation-required',
@@ -2887,6 +2985,47 @@ export async function runMlsMpmG2pWebGpu({
   const fusedTransaction = fusedFineSubstepTransaction
     ?? fusedCoarseTerminalTransaction;
   const fusedG2p = fusedTransaction != null;
+  const singleLevelQueueOrderedCleanupRequested =
+    schroederSingleLevelQueueOrderedCleanupCapability != null;
+  const singleLevelQueueOrderedCleanup = Boolean(
+    singleLevelQueueOrderedCleanupRequested
+    && !fusedG2p
+    && retainOutputParticleBuffers === true
+    && validateSchroederSingleLevelQueueOrderedCleanupCapability(
+      schroederSingleLevelQueueOrderedCleanupCapability,
+      {
+        transaction: schroederSpatialEpochTransaction,
+        device,
+        generation: schroederSpatialEpochGeneration,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        readbackMode
+      }
+    )
+  );
+  if (
+    singleLevelQueueOrderedCleanupRequested
+    && singleLevelQueueOrderedCleanup !== true
+  ) {
+    throw canonicalSpatialExecutionError(
+      'single-level-queue-ordered-cleanup-authority-rejected',
+      'G2P rejected a foreign single-level queue-ordered cleanup capability'
+    );
+  }
+  if (!Array.isArray(queueOrderedProducerClaims)) {
+    throw new TypeError(
+      'queueOrderedProducerClaims must be an array of opaque producer claims'
+    );
+  }
+  if (
+    queueOrderedProducerClaims.length > 0
+    && (!fusedG2p || readbackMode !== NO_FULL_READBACK_MODE)
+  ) {
+    throw canonicalSpatialExecutionError(
+      'queue-ordered-producer-claims-require-fused-resident-g2p',
+      'External queue-ordered producer claims require the exact fused resident G2P final consumer'
+    );
+  }
   const fusedTransactionMode = fusedCoarseTerminalTransaction != null
     ? 'coarse-terminal'
     : 'fine';
@@ -3002,6 +3141,9 @@ export async function runMlsMpmG2pWebGpu({
   let fusedG2pQueueSubmitted = false;
   let fusedG2pCommitted = false;
   let fusedG2pArtifact = null;
+  let reconstruction = null;
+  let queueOrderedSubmissionReceipt = null;
+  let queueOrderedFinalConsumerCapability = null;
   let fusedG2pArtifactLifecycleDelegated = false;
   let postSeparationThermalBinAuthority = null;
   let postSeparationThermalBinAuthorityDelegated = false;
@@ -3044,9 +3186,12 @@ export async function runMlsMpmG2pWebGpu({
   let mechanicsFieldKernelBundle = null;
   let mechanicsFieldBinding = null;
   let mechanicsFieldViewBuffer = null;
+  let fieldExecution = null;
+  let fieldRuntime = null;
   let parentFieldWorkspace = null;
   let activeSourceV2G2pEnabled = false;
-  if (mechanicsFieldRequired) {
+  let activeSourceV2DenseG2pEnabled = false;
+  if (mechanicsFieldRequired || canonicalSpatialV2) {
     mechanicsFieldKernelBundle = await import('./sphMlsMpmGpuStep.js');
     if (!fusedInputsRemainAdmitted()) {
       throw canonicalSpatialExecutionError(
@@ -3071,10 +3216,80 @@ export async function runMlsMpmG2pWebGpu({
         labelPrefix: 'ulg-mls-mpm-staged-g2p'
       });
     activeSourceV2G2pEnabled =
-      mechanicsFieldBinding.activeSourceP2gEnabled === true;
+      mechanicsFieldRequired
+      && mechanicsFieldBinding.activeSourceP2gEnabled === true;
+    activeSourceV2DenseG2pEnabled =
+      canonicalSpatialV2
+      && !mechanicsFieldRequired
+      && mechanicsFieldBinding.activeSourceV2Enabled === true
+      && mechanicsFieldBinding.activeSourceDenseSingleLevelEnabled === true;
+  }
+  if (
+    canonicalSpatialV2
+    && !mechanicsFieldRequired
+    && !activeSourceV2DenseG2pEnabled
+  ) {
+    throw canonicalSpatialExecutionError(
+      'active-source-v2-dense-single-level-required',
+      'Canonical spatial v2 dense G2P is limited to one exact ActiveSource query level'
+    );
+  }
+  if (activeSourceV2DenseG2pEnabled) {
+    if (
+      readbackMode !== NO_FULL_READBACK_MODE
+      || retainOutputParticleBuffers !== true
+    ) {
+      throw canonicalSpatialExecutionError(
+        'active-source-v2-dense-residency-required',
+        'Canonical spatial v2 dense G2P requires retained no-full-readback execution'
+      );
+    }
+    if (
+      Math.ceil(sphParticleState.particleCount / 64)
+        > mechanicsFieldBinding.activeSourceDispatchXLimit
+    ) {
+      throw canonicalSpatialExecutionError(
+        'active-source-v2-dense-dispatch-limit',
+        'Canonical spatial v2 dense G2P physical dispatch exceeds the one-dimensional device limit'
+      );
+    }
+    const sourceProjection = gridUpdate.sourceProjection ?? null;
+    const sourceUpdatedGridBuffer =
+      updatedGridBuffer
+      ?? gridUpdate.gpuResult?.updatedGridBuffer
+      ?? gridUpdate.updatedGridBuffer
+      ?? null;
+    if (
+      gridUpdate.activeSourceDenseCompatibilityEnabled !== true
+      || sourceProjection?.activeSourceDenseCompatibilityEnabled !== true
+      || sourceProjection?.schroederSpatialDirectory?.directorySchema
+        !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
+      || sourceProjection?.schroederSpatialDirectory?.generationId
+        !== schroederSpatialAuthority.generationId
+      || sourceProjection?.schroederLevelFilter?.selectedLevel
+        !== schroederSelectedLevel
+      || !validateLocallySubmittedMlsMpmActiveSourceDenseGridUpdate(
+        device,
+        gridUpdate,
+        {
+          sourceProjection,
+          schroederSpatialEpochGeneration,
+          selectedLevel: schroederSelectedLevel,
+          updatedGridBuffer: sourceUpdatedGridBuffer,
+          revalidateSourceProjection: true
+        }
+      )
+    ) {
+      throw canonicalSpatialExecutionError(
+        'active-source-v2-dense-grid-update-provenance-rejected',
+        'Canonical spatial v2 dense G2P requires the exact locally submitted ActiveSource P2G/grid-update chain'
+      );
+    }
+  }
+  if (mechanicsFieldRequired) {
     mechanicsFieldViewBuffer = gridUpdate.mechanicsFieldViewBuffer ?? null;
-    const fieldExecution = gridUpdate.mechanicsFieldViewExecution ?? null;
-    const fieldRuntime = fieldExecution?.ownerRuntime ?? null;
+    fieldExecution = gridUpdate.mechanicsFieldViewExecution ?? null;
+    fieldRuntime = fieldExecution?.ownerRuntime ?? null;
     const mutationOrdinal = gridUpdate.mechanicsFieldMutationOutputOrdinal;
     const sourceProjection = gridUpdate.sourceProjection ?? null;
     const previousGridUpdate = gridUpdate.previousGridUpdate ?? null;
@@ -3229,7 +3444,26 @@ export async function runMlsMpmG2pWebGpu({
   const gridBuffer = borrowedGridBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes));
   const outStateBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const paramsBuffer = !canonicalSpatialAuthority
+  const g2pWorkspace = mechanicsFieldRequired
+    ? fieldRuntime?.g2pWorkspaceForExecution?.(fieldExecution) ?? null
+    : null;
+  const requiredParamsBytes = !canonicalSpatialAuthority
+    ? G2P_PARAMS_BYTES
+    : (activeSourceV2G2pEnabled || activeSourceV2DenseG2pEnabled
+        ? G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES
+        : G2P_CANONICAL_PARAMS_BYTES);
+  if (
+    g2pWorkspace != null
+    && (
+      !webGpuBufferMatchesDevice(g2pWorkspace?.paramsBuffer, device)
+      || Number(g2pWorkspace.paramsBuffer?.size ?? 0) < requiredParamsBytes
+    )
+  ) {
+    throw new TypeError(
+      'Required mechanics-field G2P needs its exact arena-owned workspace'
+    );
+  }
+  const paramsBuffer = g2pWorkspace?.paramsBuffer ?? (!canonicalSpatialAuthority
     ? ownAllocation(device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
         size: G2P_PARAMS_BYTES,
@@ -3237,11 +3471,11 @@ export async function runMlsMpmG2pWebGpu({
       }))
     : ownAllocation(device.createBuffer({
         label: 'ulg-mls-mpm-g2p-params',
-        size: activeSourceV2G2pEnabled
+        size: activeSourceV2G2pEnabled || activeSourceV2DenseG2pEnabled
           ? G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES
           : G2P_CANONICAL_PARAMS_BYTES,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      }));
+      })));
   const borrowedAssignmentBuffer = canonicalSpatialAuthority
     ? null
     : (schroederLevelAssignment?.assignmentBuffer
@@ -3301,6 +3535,7 @@ export async function runMlsMpmG2pWebGpu({
   const mechanicsReadBuffer = noFullReadback
     ? null
     : ownAllocation(device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST }));
+  let encoder = null;
   try {
     if (fusedG2p) {
       if (!fusedInputsRemainAdmitted()) {
@@ -3330,7 +3565,8 @@ export async function runMlsMpmG2pWebGpu({
         ? Math.round(Number(schroederSelectedLevel))
         : -1,
       schroederSpatialDirectory: schroederSpatialAuthority,
-      activeSourceBinding: activeSourceV2G2pEnabled
+      activeSourceBinding:
+        activeSourceV2G2pEnabled || activeSourceV2DenseG2pEnabled
         ? mechanicsFieldBinding
         : null,
       spatialEvidenceEnabled: canonicalSpatialAuthority
@@ -3355,20 +3591,26 @@ export async function runMlsMpmG2pWebGpu({
                     .mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl
                   : mechanicsFieldKernelBundle
                     .mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl)
-              : mlsMpmG2pReconstructCanonicalSpatialWgsl)
+              : (activeSourceV2DenseG2pEnabled
+                  ? mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2DenseSingleLevelWgsl
+                  : mlsMpmG2pReconstructCanonicalSpatialWgsl))
           : (mechanicsFieldRequired
               ? (activeSourceV2G2pEnabled
                   ? mechanicsFieldKernelBundle
                     .mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl
                   : mechanicsFieldKernelBundle
                     .mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl)
-              : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl))
+              : (activeSourceV2DenseG2pEnabled
+                  ? mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl
+                  : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl)))
       : mlsMpmG2pReconstructWgsl;
     const g2pVariant = canonicalSpatialAuthority
       ? `canonical-spatial-epoch.${mechanicsFieldRequired ? 'field.v3-reflux' : 'v7'}.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}${activeSourceV2G2pEnabled
           ? '.active-source-v2'
+          : ''}${activeSourceV2DenseG2pEnabled
+          ? '.active-source-v2-dense-single-level'
           : ''}`
       : 'precanonical-level-assignment.v5';
     const g2pBindings = [
@@ -3391,37 +3633,25 @@ export async function runMlsMpmG2pWebGpu({
       ),
       ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : [])
     ];
-    const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-mls-mpm-g2p-reconstruct.${g2pVariant}`,
-      label: 'ulg-mls-mpm-g2p-reconstruct',
-      code: g2pShader,
-      entryPoint: 'main',
-      bindings: g2pBindings
+    const refluxReceiptStage = parentFieldWorkspace?.refluxLedger == null
+      ? null
+      : parentFieldWorkspace.terminalKind === 'fine-correction'
+        ? ['consume-fine-reflux', 'consume_g2p_fine_reflux_receipt']
+        : parentFieldWorkspace.terminalKind === 'coarse-terminal'
+          ? ['consume-coarse-reflux', 'consume_g2p_coarse_reflux_receipt']
+          : null;
+    const {
+      reconstruct: { pipeline, bindGroupLayout },
+      canonicalFinalize,
+      energyReceiptPipelines
+    } = cachedG2pPipelineBundle(device, {
+      variant: g2pVariant,
+      shader: g2pShader,
+      bindings: g2pBindings,
+      canonicalSpatialAuthority,
+      mechanicsFieldRequired,
+      refluxReceiptStage
     });
-    const canonicalFinalize = canonicalSpatialAuthority
-      ? createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-mls-mpm-g2p-reconstruct.finalize-authority.${g2pVariant}`,
-        label: 'ulg-mls-mpm-g2p-finalize-spatial-authority',
-        code: g2pShader,
-        entryPoint: 'finalize_canonical_spatial_authority',
-        bindings: g2pBindings
-      })
-      : null;
-    const energyReceiptPipelines = mechanicsFieldRequired
-      ? [
-          ['claim', 'claim_g2p_energy_receipt'],
-          ['measure', 'measure_g2p_energy_receipt'],
-          ['consume-field', 'consume_g2p_energy_receipt'],
-          ['consume-fine-reflux', 'consume_g2p_fine_reflux_receipt'],
-          ['consume-coarse-reflux', 'consume_g2p_coarse_reflux_receipt']
-        ].map(([stage, entryPoint]) => createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-mls-mpm-g2p-reconstruct.field-energy-${stage}.v3.${g2pVariant}`,
-          label: `ulg-mls-mpm-g2p-field-energy-${stage}`,
-          code: g2pShader,
-          entryPoint,
-          bindings: g2pBindings
-        }))
-      : [];
     const g2pEntries = [
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: mechanicsFieldRequired
@@ -3434,7 +3664,9 @@ export async function runMlsMpmG2pWebGpu({
       { binding: 6, resource: { buffer: paramsBuffer } },
       { binding: 7, resource: { buffer: schroederAuthorityBuffer } },
       ...(canonicalSpatialAuthority
-        ? [{ binding: 8, resource: { buffer: activeSourceV2G2pEnabled
+        ? [{ binding: 8, resource: { buffer: (
+          activeSourceV2G2pEnabled || activeSourceV2DenseG2pEnabled
+        )
           ? mechanicsFieldBinding.activeSourceBuffer
           : schroederSpatialAuthority.directoryBuffer } }]
         : [])
@@ -3444,30 +3676,60 @@ export async function runMlsMpmG2pWebGpu({
       entries: g2pEntries
     });
     const canonicalFinalizeBindGroup = canonicalFinalize
-      ? device.createBindGroup({
-        layout: canonicalFinalize.bindGroupLayout,
-        entries: g2pEntries
-      })
+      ? (canonicalFinalize.bindGroupLayout === bindGroupLayout
+          ? bindGroup
+          : device.createBindGroup({
+              layout: canonicalFinalize.bindGroupLayout,
+              entries: g2pEntries
+            }))
       : null;
     const energyReceiptBindGroups = energyReceiptPipelines.map(
-      (pipelineInfo) => device.createBindGroup({
-        layout: pipelineInfo.bindGroupLayout,
-        entries: g2pEntries
-      })
+      (pipelineInfo) => pipelineInfo.bindGroupLayout === bindGroupLayout
+        ? bindGroup
+        : device.createBindGroup({
+            layout: pipelineInfo.bindGroupLayout,
+            entries: g2pEntries
+          })
     );
-    const encoder = device.createCommandEncoder();
+    encoder = device.createCommandEncoder();
+    const groupedMechanicsPass = mechanicsFieldRequired
+      && fusedG2p
+      && gpuTimestampRecorder?.active !== true
+      ? encoder.beginComputePass()
+      : null;
+    const encodeComputeDispatch = (pipelineInfo, stageBindGroup, workgroups) => {
+      const stagePass = groupedMechanicsPass ?? encoder.beginComputePass();
+      stagePass.setPipeline(pipelineInfo);
+      stagePass.setBindGroup(0, stageBindGroup);
+      stagePass.dispatchWorkgroups(workgroups);
+      if (groupedMechanicsPass == null) stagePass.end();
+    };
     if (mechanicsFieldRequired) {
-      const claimReceiptPass = encoder.beginComputePass();
-      claimReceiptPass.setPipeline(energyReceiptPipelines[0].pipeline);
-      claimReceiptPass.setBindGroup(0, energyReceiptBindGroups[0]);
-      claimReceiptPass.dispatchWorkgroups(1);
-      claimReceiptPass.end();
+      encodeComputeDispatch(
+        energyReceiptPipelines[0].pipeline,
+        energyReceiptBindGroups[0],
+        1
+      );
     }
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
-    pass.end();
+    const reconstructionTimestamp = gpuTimestampRecorder?.active === true
+      && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+      && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
+      ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+          producerId: 'mls-mpm-g2p:particle-reconstruction',
+          stage: 'particle-reconstruction',
+          spanClass: 'same-production-command-encoder-coarse',
+          measurementKind: 'same-command-encoder-gpu-elapsed-interval',
+          coarseStage: true
+        })
+      : null;
+    encodeComputeDispatch(
+      pipeline,
+      bindGroup,
+      Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
+    );
+    if (reconstructionTimestamp) {
+      gpuTimestampRecorder.endEncoderSpan(encoder, reconstructionTimestamp);
+    }
     let separation;
     if (canonicalSpatialAuthority) {
       if (fusedG2p) {
@@ -3497,11 +3759,28 @@ export async function runMlsMpmG2pWebGpu({
             'Canonical G2P requires an authenticated deferred post-G2P contact/separation residual solver'
           );
         }
+        const mechanicalApplyTimestamp = gpuTimestampRecorder?.active === true
+          && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
+          && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
+          ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
+              producerId: 'mls-mpm-g2p:spatial-mechanical-apply',
+              stage: 'spatial-mechanical-apply',
+              spanClass: 'same-production-command-encoder-coarse',
+              measurementKind: 'same-command-encoder-gpu-elapsed-interval',
+              coarseStage: true
+            })
+          : null;
         schroederSpatialMechanicalProposal.encodeApply(encoder, {
           stateBuffer: outStateBuffer,
           mechanicsBuffer,
           selectedLevel: schroederSelectedLevel
         });
+        if (mechanicalApplyTimestamp) {
+          gpuTimestampRecorder.endEncoderSpan(
+            encoder,
+            mechanicalApplyTimestamp
+          );
+        }
         separation = {
           enabled: true,
           transientBuffers: [],
@@ -3542,40 +3821,32 @@ export async function runMlsMpmG2pWebGpu({
       ownAllocation(transientBuffer);
     }
     if (mechanicsFieldRequired) {
-      const measureReceiptPass = encoder.beginComputePass();
-      measureReceiptPass.setPipeline(energyReceiptPipelines[1].pipeline);
-      measureReceiptPass.setBindGroup(0, energyReceiptBindGroups[1]);
-      measureReceiptPass.dispatchWorkgroups(
+      encodeComputeDispatch(
+        energyReceiptPipelines[1].pipeline,
+        energyReceiptBindGroups[1],
         Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
       );
-      measureReceiptPass.end();
       for (let receiptStage = 2;
         receiptStage < energyReceiptPipelines.length;
         receiptStage += 1) {
-        const consumeReceiptPass = encoder.beginComputePass();
-        consumeReceiptPass.setPipeline(
-          energyReceiptPipelines[receiptStage].pipeline
+        encodeComputeDispatch(
+          energyReceiptPipelines[receiptStage].pipeline,
+          energyReceiptBindGroups[receiptStage],
+          1
         );
-        consumeReceiptPass.setBindGroup(
-          0,
-          energyReceiptBindGroups[receiptStage]
-        );
-        consumeReceiptPass.dispatchWorkgroups(1);
-        consumeReceiptPass.end();
       }
     }
     // Receipt consumption can reject a candidate after the particle pass.
     // Restore from the canonical input only after every receipt stage so the
     // caller can never observe a failed transaction's output buffers.
     if (canonicalFinalize && separation.canonicalAuthorityRestoreFolded !== true) {
-      const finalizePass = encoder.beginComputePass();
-      finalizePass.setPipeline(canonicalFinalize.pipeline);
-      finalizePass.setBindGroup(0, canonicalFinalizeBindGroup);
-      finalizePass.dispatchWorkgroups(
+      encodeComputeDispatch(
+        canonicalFinalize.pipeline,
+        canonicalFinalizeBindGroup,
         Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
       );
-      finalizePass.end();
     }
+    groupedMechanicsPass?.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
@@ -3587,8 +3858,34 @@ export async function runMlsMpmG2pWebGpu({
         'Fused G2P lost its frozen input family or exact producer claim after command encoding'
       );
     }
-    device.queue.submit([commandBuffer]);
+    if (
+      noFullReadback
+      && (fusedG2p || singleLevelQueueOrderedCleanup)
+    ) {
+      assertQueueOrderedCleanupClaimsRegistered(
+        device,
+        queueOrderedProducerClaims
+      );
+      queueOrderedSubmissionReceipt = submitQueueOrderedWork(
+        device,
+        [commandBuffer]
+      );
+    } else {
+      device.queue.submit([commandBuffer]);
+    }
     fusedG2pQueueSubmitted = true;
+    if (
+      canonicalSpatialAuthority
+      && !fusedG2p
+      && typeof schroederSpatialMechanicalProposal?.markSubmittedWork
+        === 'function'
+      && schroederSpatialMechanicalProposal.markSubmittedWork() !== true
+    ) {
+      throw canonicalSpatialExecutionError(
+        'mechanical-proposal-submission-acknowledgment-failed',
+        'Canonical G2P could not authenticate its submitted mechanical proposal'
+      );
+    }
     if (
       retainOutputParticleBuffers
       && separation.postSeparationThermalBinCandidate
@@ -3642,7 +3939,7 @@ export async function runMlsMpmG2pWebGpu({
       stateReadBuffer.unmap();
       mechanicsReadBuffer.unmap();
     }
-    const reconstruction = outputEnvelope({
+    reconstruction = outputEnvelope({
       backend: 'webgpu',
       sphParticleState,
       mlsMpmParticleState,
@@ -3658,9 +3955,27 @@ export async function runMlsMpmG2pWebGpu({
       ),
       schroederLevelFilter,
       separationCanonicalSpatialAuthorityGate:
-        separation.canonicalSpatialAuthorityGate === true
+        separation.canonicalSpatialAuthorityGate === true,
+      readbackTelemetry: createGpuReadbackTelemetry({
+        scope: 'mls-mpm-g2p-webgpu',
+        mapAsyncCount: noFullReadback ? 0 : 2,
+        readbackBytes: noFullReadback
+          ? 0
+          : Math.max(4, stateByteLength) + Math.max(4, mechanicsByteLength)
+      })
     });
     reconstruction.mechanicsFieldMode = mechanicsFieldMode;
+    reconstruction.activeSourceDenseCompatibilityEnabled =
+      activeSourceV2DenseG2pEnabled;
+    reconstruction.activeSourceDenseCompatibilityScope =
+      activeSourceV2DenseG2pEnabled
+        ? 'single-level-exact-query'
+        : null;
+    reconstruction.activeSourceDenseCompatibilityProvenance =
+      activeSourceV2DenseG2pEnabled
+        ? 'locally-submitted-p2g-grid-update-g2p-chain'
+        : null;
+    reconstruction.sourceGridUpdate = gridUpdate;
     reconstruction.postSeparationThermalBinAuthority =
       postSeparationThermalBinAuthority;
     if (retainOutputParticleBuffers) {
@@ -3796,6 +4111,16 @@ export async function runMlsMpmG2pWebGpu({
           configurable: false,
           writable: false
         },
+        // Install the publication slot before any cleanup claim can be
+        // sealed. The capability itself is assigned immediately after seal,
+        // before invoking fallible producer cleanup, so a cleanup failure
+        // cannot strand externally supplied claims behind an unpublished
+        // capability.
+        queueOrderedFinalConsumerCapability: {
+          get: () => queueOrderedFinalConsumerCapability,
+          enumerable: false,
+          configurable: false
+        },
         proposalMode: {
           value: 'proposal-deferred-to-post-mechanics',
           enumerable: true,
@@ -3913,6 +4238,17 @@ export async function runMlsMpmG2pWebGpu({
       postSeparationThermalBinAuthority != null;
     return reconstruction;
   } finally {
+    if (
+      fusedG2pQueueSubmitted !== true
+      && encoder
+      && typeof gpuTimestampRecorder?.discardEncoderSpans === 'function'
+    ) {
+      try {
+        gpuTimestampRecorder.discardEncoderSpans(encoder);
+      } catch {
+        // Timestamp diagnostics cannot replace the originating encode error.
+      }
+    }
     if (fusedG2p && fusedG2pClaim && !fusedG2pCommitted) {
       if (fusedG2pArtifact && !fusedG2pArtifactLifecycleDelegated) {
         fusedG2pOrigins.delete(fusedG2pArtifact);
@@ -3996,13 +4332,248 @@ export async function runMlsMpmG2pWebGpu({
       destroyOwnedAllocation(mechanicsReadBuffer);
       destroyAllocationLedger();
     };
-    if (noFullReadback && fusedG2pQueueSubmitted) {
+    let singleLevelQueueOrderedCleanupStillExact = false;
+    if (
+      singleLevelQueueOrderedCleanup
+      && fusedG2pQueueSubmitted
+      && returnedRetainedOutputBuffers
+      && reconstruction
+    ) {
       try {
-        allocationCleanupDelegated =
-          deferSubmittedWorkCleanup(device, cleanup) === true;
+        singleLevelQueueOrderedCleanupStillExact =
+          validateSchroederSingleLevelQueueOrderedCleanupCapability(
+            schroederSingleLevelQueueOrderedCleanupCapability,
+            {
+              transaction: schroederSpatialEpochTransaction,
+              device,
+              generation: schroederSpatialEpochGeneration,
+              sphParticleUpload,
+              mlsMpmParticleUpload,
+              readbackMode
+            }
+          );
       } catch {
-        allocationCleanupDelegated = false;
-        cleanup();
+        singleLevelQueueOrderedCleanupStillExact = false;
+      }
+    }
+    if (
+      noFullReadback
+      && singleLevelQueueOrderedCleanup
+      && singleLevelQueueOrderedCleanupStillExact
+      && fusedG2pQueueSubmitted
+      && returnedRetainedOutputBuffers
+      && reconstruction
+    ) {
+      const producerFamily = 'mls-mpm-g2p-submitted-temporaries';
+      let producerClaim = null;
+      let queueOrderedFinalConsumer = null;
+      try {
+        producerClaim = registerQueueOrderedCleanupClaim(
+          g2pSubmittedTemporaryCleanupClaimIssuer,
+          device,
+          {
+            producerOutput: reconstruction,
+            cleanup
+          }
+        );
+        queueOrderedFinalConsumer =
+          sealQueueOrderedFinalConsumerCapability(
+            queueOrderedSubmissionReceipt,
+            device,
+            {
+              finalConsumerOwner: reconstruction,
+              producerClaims: [producerClaim]
+            }
+          );
+        // Consume the private claim before cleanup. WebGPU retains resources
+        // referenced by the already-submitted command buffer, so the exact
+        // same-queue receipt replaces a host-observed device-idle fence.
+        allocationCleanupDelegated = true;
+        const receipt = releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          cleanup,
+          {
+            queueOrderedFinalConsumer,
+            producerClaim,
+            producerOutput: reconstruction,
+            producerFamily
+          }
+        );
+        reconstruction.queueOrderedCleanupReceipt = receipt;
+        reconstruction.queueCompletionStatus =
+          receipt.queueCompletionStatus;
+        reconstruction.queueCompletionMethod =
+          receipt.queueCompletionMethod;
+      } catch {
+        if (queueOrderedFinalConsumer == null && producerClaim != null) {
+          try {
+            cancelQueueOrderedCleanupClaim(
+              producerClaim,
+              device,
+              {
+                producerOutput: reconstruction,
+                cleanup
+              }
+            );
+          } catch {
+            // A claim that raced to sealed state is retained rather than
+            // replayed with replacement cleanup code.
+          }
+        }
+        try {
+          allocationCleanupDelegated =
+            deferSubmittedWorkCleanup(device, cleanup) === true;
+        } catch {
+          allocationCleanupDelegated = false;
+        }
+        if (allocationCleanupDelegated) {
+          appendGpuReadbackTelemetryObservation(reconstruction, {
+            hostQueueFenceCount: 1,
+            deferredCleanupHostQueueFenceCount: 1
+          }, {
+            source: 'g2p-submitted-temporary-cleanup-fallback'
+          });
+        } else {
+          cleanup();
+        }
+      }
+    } else if (noFullReadback && fusedG2pQueueSubmitted) {
+      if (
+        fusedG2pCommitted === true
+        && fusedG2pArtifact
+      ) {
+        const fusedOrigin = fusedG2pOrigins.get(fusedG2pArtifact);
+        if (
+          fusedOrigin?.device !== device
+          || fusedOrigin?.transaction !== fusedTransaction
+          || fusedOrigin?.reconstruction !== fusedG2pArtifact
+        ) {
+          throw new Error(
+            'Fused G2P queue-ordered cleanup lost exact published origin authority'
+          );
+        }
+        const producerFamily = 'mls-mpm-g2p-submitted-temporaries';
+        let producerClaim = null;
+        try {
+          producerClaim = registerQueueOrderedCleanupClaim(
+            g2pSubmittedTemporaryCleanupClaimIssuer,
+            device,
+            {
+              producerOutput: fusedG2pArtifact,
+              cleanup
+            }
+          );
+          const queueOrderedFinalConsumer =
+            sealQueueOrderedFinalConsumerCapability(
+              queueOrderedSubmissionReceipt,
+              device,
+              {
+                finalConsumerOwner: fusedG2pArtifact,
+                producerClaims: [
+                  producerClaim,
+                  ...queueOrderedProducerClaims
+                ]
+              }
+            );
+          queueOrderedFinalConsumerCapability =
+            queueOrderedFinalConsumer;
+          // From this assignment onward the exact returned artifact publishes
+          // the capability through its preinstalled non-enumerable getter.
+          // Treat cleanup as delegated before calling producer code: the
+          // central release consumes the local claim before invoking cleanup,
+          // and any remaining external claims must stay reachable even if
+          // that cleanup throws.
+          allocationCleanupDelegated = true;
+          try {
+            const receipt = releaseSubmittedWorkCleanupQueueOrdered(
+              device,
+              cleanup,
+              {
+                queueOrderedFinalConsumer,
+                producerClaim,
+                producerOutput: fusedG2pArtifact,
+                producerFamily
+              }
+            );
+            fusedG2pArtifact.queueOrderedCleanupReceipt = receipt;
+            fusedG2pArtifact.queueCompletionStatus =
+              receipt.queueCompletionStatus;
+            fusedG2pArtifact.queueCompletionMethod =
+              receipt.queueCompletionMethod;
+          } catch {
+            // The local claim was consumed before cleanup was invoked. A
+            // best-effort fenced retry may finish partially failed resource
+            // destruction, but neither fence construction nor retry failure
+            // may replace the already-published artifact or strand the
+            // capability's remaining external claims.
+            try {
+              const cleanupRetryScheduled =
+                deferSubmittedWorkCleanup(device, cleanup) === true;
+              if (cleanupRetryScheduled && fusedG2pArtifact) {
+                appendGpuReadbackTelemetryObservation(fusedG2pArtifact, {
+                  hostQueueFenceCount: 1,
+                  deferredCleanupHostQueueFenceCount: 1
+                }, {
+                  source: 'fused-g2p-cleanup-retry'
+                });
+              }
+            } catch {
+              // Retain rather than replay or hide the capability. The exact
+              // external owners can still consume their published claims.
+            }
+          }
+        } catch {
+          if (queueOrderedFinalConsumerCapability != null) {
+            // Seal succeeded and the preinstalled getter already exposes the
+            // capability. Never let later bookkeeping make it unreachable.
+            allocationCleanupDelegated = true;
+          } else if (producerClaim != null) {
+            try {
+              cancelQueueOrderedCleanupClaim(
+                producerClaim,
+                device,
+                {
+                  producerOutput: fusedG2pArtifact,
+                  cleanup
+                }
+              );
+            } catch {
+              // A claim that raced to sealed state is retained rather than
+              // replayed with replacement cleanup code.
+            }
+          }
+          if (queueOrderedFinalConsumerCapability == null) {
+            allocationCleanupDelegated =
+              deferSubmittedWorkCleanup(device, cleanup) === true;
+            if (allocationCleanupDelegated && fusedG2pArtifact) {
+              appendGpuReadbackTelemetryObservation(fusedG2pArtifact, {
+                hostQueueFenceCount: 1,
+                deferredCleanupHostQueueFenceCount: 1
+              }, {
+                source: 'fused-g2p-submitted-temporary-cleanup-fallback'
+              });
+            }
+          }
+        }
+      } else {
+        const cleanupResultAuthority = fusedG2pArtifact ?? reconstruction;
+        try {
+          allocationCleanupDelegated =
+            deferSubmittedWorkCleanup(device, cleanup) === true;
+          if (allocationCleanupDelegated && cleanupResultAuthority) {
+            appendGpuReadbackTelemetryObservation(
+              cleanupResultAuthority,
+              {
+                hostQueueFenceCount: 1,
+                deferredCleanupHostQueueFenceCount: 1
+              },
+              { source: 'fused-g2p-submitted-temporary-cleanup' }
+            );
+          }
+        } catch {
+          allocationCleanupDelegated = false;
+          cleanup();
+        }
       }
     } else {
       cleanup();
@@ -4139,9 +4710,33 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
       reconstruction?.destroyOutputParticleBufferComponents ?? null,
     postSeparationThermalBinAuthority:
       reconstruction?.postSeparationThermalBinAuthority ?? null,
+    queueOrderedCleanupReceipt:
+      reconstruction?.queueOrderedCleanupReceipt ?? null,
+    queueCompletionStatus:
+      reconstruction?.queueCompletionStatus ?? null,
+    queueCompletionMethod:
+      reconstruction?.queueCompletionMethod ?? null,
     readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
-    fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
+    fullReadbackPerformed:
+      reconstruction?.fullReadbackPerformed
+      ?? reconstruction?.readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,
+    fullParticleReadbackPerformed:
+      reconstruction?.fullParticleReadbackPerformed
+      ?? reconstruction?.fullReadbackPerformed
+      ?? reconstruction?.readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackFree:
+      typeof reconstruction?.fullParticleReadbackFree === 'boolean'
+        ? reconstruction.fullParticleReadbackFree
+        : (
+            reconstruction?.readbackMode === NO_FULL_READBACK_MODE
+            || reconstruction?.fullParticleReadbackPerformed === false
+          ),
+    ...mergeGpuReadbackTelemetry([
+      { source: 'reconstruction', telemetry: reconstruction }
+    ], {
+      scope: 'mls-mpm-g2p-execution'
+    }),
     particleScaleStability: reconstruction?.particleScaleStability ?? null,
     particleScaleStabilitySchema: reconstruction?.particleScaleStabilitySchema ?? null,
     particleScaleStabilityStatus: reconstruction?.particleScaleStabilityStatus ?? null,
@@ -4175,6 +4770,14 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
       reconstruction?.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
     denseGridAuthoritative:
       reconstruction?.denseGridAuthoritative !== false,
+    activeSourceDenseCompatibilityEnabled:
+      reconstruction?.activeSourceDenseCompatibilityEnabled === true,
+    activeSourceDenseCompatibilityScope:
+      reconstruction?.activeSourceDenseCompatibilityScope ?? null,
+    activeSourceDenseCompatibilityProvenance:
+      reconstruction?.activeSourceDenseCompatibilityProvenance ?? null,
+    sourceGridUpdate:
+      reconstruction?.sourceGridUpdate ?? null,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -4219,7 +4822,10 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
   schroederSpatialEpochGeneration = null,
+  schroederSpatialEpochTransaction = null,
+  schroederSingleLevelQueueOrderedCleanupCapability = null,
   schroederSpatialMechanicalProposal = null,
+  gpuTimestampRecorder = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
   canonicalSpatialRequired = false,
@@ -4332,7 +4938,10 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       schroederLevelAssignment,
       schroederSelectedLevel,
       schroederSpatialEpochGeneration,
+      schroederSpatialEpochTransaction,
+      schroederSingleLevelQueueOrderedCleanupCapability,
       schroederSpatialMechanicalProposal,
+      ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
       fusedFineSubstepTransaction,
       fusedCoarseTerminalTransaction,
       canonicalSpatialRequired,

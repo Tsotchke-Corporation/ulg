@@ -279,7 +279,7 @@ function canonicalMechanicalProposalFixture(device, generation, applyCalls = nul
     generationId: generation.execution.generationId,
     supportEpoch: generation.execution.supportEpoch,
     traversalCount: 1,
-    solverIterationCount: 4,
+    solverIterationCount: 16,
     privateBuildCount: 0,
     fixedCandidateBuildCount: 0,
     exhaustiveTraversalCount: 0,
@@ -306,7 +306,7 @@ function canonicalMechanicalProposalFixture(device, generation, applyCalls = nul
     energyLedgerRowStrideFloats: 8,
     directedPairCapacity: 4,
     contactGraph: Object.freeze({
-      schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v3',
+      schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v6',
       status: 'schroeder-spatial-mechanical-pair-graph-prepared',
       selectedLevel: 0,
       directedPairCapacity: 4,
@@ -638,6 +638,89 @@ test('WebGPU MLS-MPM G2P params buffer fits the full uniform payload', async () 
   assert.equal(paramsBuffer.size, 80);
   assert.equal(paramsWrite.byteLength, 80);
   assert.equal(device.submissions.length, 1);
+  assert.equal(result.observedHostQueueFenceCount, 1);
+  assert.equal(result.deferredCleanupHostQueueFenceCount, 1);
+  assert.equal(result.unclassifiedHostQueueFenceCount, 0);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.productionHotLoopHostDependencyFree, true);
+});
+
+test('WebGPU MLS-MPM G2P brackets coarse reconstruction without adding a readback', async () => {
+  const device = fakeG2pDevice();
+  const begun = [];
+  const ended = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      const token = { encoder, descriptor };
+      begun.push(token);
+      return token;
+    },
+    endEncoderSpan(encoder, token) {
+      ended.push({ encoder, token });
+    }
+  };
+  const result = await runMlsMpmG2pWebGpu({
+    ...fixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    gpuTimestampRecorder
+  });
+
+  assert.deepEqual(
+    begun.map(({ descriptor }) => descriptor.producerId),
+    ['mls-mpm-g2p:particle-reconstruction']
+  );
+  assert.equal(begun[0].descriptor.coarseStage, true);
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].encoder, begun[0].encoder);
+  assert.equal(ended[0].token, begun[0]);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(
+    device.createdBuffers.some((buffer) => (buffer.usage & 1) !== 0),
+    false
+  );
+  assert.equal(device.submissions.length, 1);
+});
+
+test('WebGPU MLS-MPM G2P discards timestamp spans after a pre-submit encode failure', async () => {
+  const device = fakeG2pDevice();
+  const createCommandEncoder = device.createCommandEncoder.bind(device);
+  let abandonedEncoder = null;
+  device.createCommandEncoder = () => {
+    const encoder = createCommandEncoder();
+    encoder.finish = () => {
+      throw new Error('injected G2P finish failure');
+    };
+    abandonedEncoder = encoder;
+    return encoder;
+  };
+  const discarded = [];
+  const gpuTimestampRecorder = {
+    active: true,
+    beginEncoderSpan(encoder, descriptor) {
+      return { encoder, descriptor };
+    },
+    endEncoderSpan() {},
+    discardEncoderSpans(encoder) {
+      discarded.push(encoder);
+    }
+  };
+
+  await assert.rejects(
+    runMlsMpmG2pWebGpu({
+      ...fixture(),
+      device,
+      boxDimsM: [3, 3, 3],
+      readbackMode: 'no-full-readback',
+      gpuTimestampRecorder
+    }),
+    /injected G2P finish failure/
+  );
+  assert.deepEqual(discarded, [abandonedEncoder]);
+  assert.equal(device.submissions.length, 0);
 });
 
 test('excluded-volume separation refills one retained bin directory after position apply', () => {

@@ -349,6 +349,17 @@ function productReuseMatchesClosureTier(record, {
   // tier so an old strict product cannot leak into a reduced interactive run
   // (or vice versa).
   if (!closureMatchesProductTier(record?.closure, requestedClosureTier)) return false;
+  // A reduced compound is derived from representative reactant properties.
+  // Its density, modulus, and conductivity therefore belong to one exact
+  // reaction-input digest; same-tier reuse across keys can silently carry a
+  // stale closure after any of those inputs changes.
+  if (closureUsesReducedProductModel(record?.closure)) {
+    return Boolean(
+      sourceReactionCacheKey
+      && record?.sourceReactionCacheKey === sourceReactionCacheKey
+      && (!record?.closureTier || record.closureTier === requestedClosureTier)
+    );
+  }
   if (sourceReactionCacheKey && record?.sourceReactionCacheKey === sourceReactionCacheKey) {
     return !record?.closureTier || record.closureTier === requestedClosureTier;
   }

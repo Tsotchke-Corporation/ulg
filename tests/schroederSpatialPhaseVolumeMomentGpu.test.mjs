@@ -484,6 +484,35 @@ test('phase-volume moment runtime preserves exact field provenance and caller-ow
   assert.equal(runtime.destroy(), true);
 });
 
+test('phase-volume moment arenas reuse exact immutable bind groups', () => {
+  const tracker = createFakeDevice();
+  const authority = createMechanicsFieldAuthority(tracker.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const runtime = createSchroederSpatialPhaseVolumeMomentGpu(tracker.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1,
+    label: 'test-phase-volume-moment-bind-cache'
+  });
+  const encode = () => runtime.encode(createFakeEncoder(), {
+    sourceBuffer: authority.sourceBuffer,
+    sourceMechanicsBuffer: authority.sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    mechanicsFieldView: authority.field
+  });
+  const first = encode();
+  const explicitBindGroupCount = tracker.bindGroups.length;
+  assert.equal(explicitBindGroupCount, 4);
+  assert.equal(runtime.releaseExecution(first, { discardedEncoder: true }), true);
+  const second = encode();
+  assert.equal(tracker.bindGroups.length, explicitBindGroupCount);
+  assert.equal(runtime.releaseExecution(second, { discardedEncoder: true }), true);
+  assert.equal(runtime.destroy(), true);
+});
+
 test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves physical identities', () => {
   const tracker = createFakeDevice();
   const authority = createMechanicsFieldAuthority(tracker.device, {

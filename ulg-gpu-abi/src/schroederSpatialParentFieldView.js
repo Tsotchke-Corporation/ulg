@@ -6,6 +6,10 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_VERSION = 1;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS = 80;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS = 4;
+// Private candidate/radix rows pack mechanicalFamilyId into the high byte of
+// the already-bounded 24-bit materialId. Published parent keys remain the
+// stable public u32x4 ABI above.
+export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_RADIX_KEY_WORDS = 3;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD = 8;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_DISPATCH_OFFSET_WORDS = 60;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_FINE_DISPATCH_OFFSET_WORDS = 64;
@@ -250,7 +254,7 @@ export function createSchroederSpatialParentFieldViewLayout({
     byteLength: cursor * Uint32Array.BYTES_PER_ELEMENT,
     candidateKeyByteLength:
       candidateCapacity
-      * SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS
+      * SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_RADIX_KEY_WORDS
       * Uint32Array.BYTES_PER_ELEMENT,
     candidateMapByteLength: candidateCapacity * Uint32Array.BYTES_PER_ELEMENT,
     fineCountByteLength: fineCapacity * Uint32Array.BYTES_PER_ELEMENT

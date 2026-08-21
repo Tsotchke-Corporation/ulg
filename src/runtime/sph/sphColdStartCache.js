@@ -291,7 +291,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       table: thermalPhaseResponseTable,
       arrays: {
         records: thermalPhaseResponseTable.records,
-        responses: thermalPhaseResponseTable.responses
+        responses: thermalPhaseResponseTable.responses,
+        responseThermalConductivities:
+          thermalPhaseResponseTable.responseThermalConductivities
       },
       metadata: {
         sourceSchema: thermalPhaseResponseTable.sourceSchema || null,
@@ -740,6 +742,8 @@ function restoreThermalClosureGraphSet(record) {
     graphs,
     metadata: Array.isArray(graphMetadata) ? graphMetadata : [],
     skippedSegments: metadata.skippedSegments || [],
+    sourceThermalMaterialTableRowHash:
+      metadata.sourceThermalMaterialTableRowHash ?? null,
     cache: cacheMetadata(record),
     scientificValidation: false,
     materialValidation: false,
@@ -750,7 +754,11 @@ function restoreThermalClosureGraphSet(record) {
 }
 
 function restoreThermalPhaseResponseTable(record) {
-  if (!record?.arrays?.records || !record?.arrays?.responses) return null;
+  if (
+    !record?.arrays?.records
+    || !record?.arrays?.responses
+    || !record?.arrays?.responseThermalConductivities
+  ) return null;
   const metadata = record.metadata || {};
   return {
     schema: record.sourceSchema,
@@ -766,7 +774,11 @@ function restoreThermalPhaseResponseTable(record) {
     responseStrideFloats: metadata.responseStrideFloats || 16,
     records: record.arrays.records,
     responses: record.arrays.responses,
+    responseThermalConductivities:
+      record.arrays.responseThermalConductivities,
     metadata: metadata.tableMetadata || [],
+    sourceThermalMaterialTableRowHash:
+      metadata.sourceThermalMaterialTableRowHash ?? null,
     cache: cacheMetadata(record),
     scientificValidation: false,
     materialValidation: false,
@@ -907,7 +919,16 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
   };
   const thermalMaterialTable = restoreThermalMaterialTable(thermalMaterialTableRecord);
   const thermalClosureGraphSet = restoreThermalClosureGraphSet(derivedThermalRecord('sph-thermal-closure-graph-bank'));
-  const thermalPhaseResponseTable = restoreThermalPhaseResponseTable(derivedThermalRecord('sph-thermal-phase-response-table'));
+  const thermalPhaseResponseTableRecord =
+    derivedThermalRecord('sph-thermal-phase-response-table');
+  const thermalPhaseResponseTable =
+    restoreThermalPhaseResponseTable(thermalPhaseResponseTableRecord);
+  if (thermalPhaseResponseTableRecord && !thermalPhaseResponseTable) {
+    staleDerivedFamilies.push({
+      family: 'sph-thermal-phase-response-table',
+      reason: 'missing-response-thermal-conductivity-sidecar'
+    });
+  }
   const opticalGpuTable = restoreOpticalGpuTable(byFamily.get('optical-pbr-table'));
   const reactionTableRecord = byFamily.get('sph-reaction-table');
   const reactionTable = restoreReactionTable(reactionTableRecord);

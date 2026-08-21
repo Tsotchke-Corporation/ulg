@@ -87,12 +87,54 @@ export function buildOpticalGpuTableForSurfaceDescriptors(descriptors = [], {
   });
 }
 
-export function sphStaticTableInputsFromViewState(viewState = {}) {
+function typedArrayBytesExactlyEqual(left, right) {
+  if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right)) return false;
+  if (left.constructor !== right.constructor || left.byteLength !== right.byteLength) return false;
+  const leftBytes = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+  const rightBytes = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return false;
+  }
+  return true;
+}
+
+export function thermalMaterialTablesExactlyEqual(cachedTable, liveTable) {
+  if (!cachedTable?.schema || !liveTable?.schema) return false;
+  for (const field of [
+    'schema',
+    'materialCount',
+    'segmentCount',
+    'recordStrideFloats',
+    'segmentStrideFloats'
+  ]) {
+    if (cachedTable[field] !== liveTable[field]) return false;
+  }
+  if (
+    JSON.stringify(cachedTable.recordLayout) !== JSON.stringify(liveTable.recordLayout)
+    || JSON.stringify(cachedTable.segmentLayout) !== JSON.stringify(liveTable.segmentLayout)
+  ) {
+    return false;
+  }
+  return (
+    typedArrayBytesExactlyEqual(cachedTable.records, liveTable.records)
+    && typedArrayBytesExactlyEqual(cachedTable.segments, liveTable.segments)
+  );
+}
+
+export function buildSphThermalMaterialTableFromViewState(viewState = {}) {
   const materialProperties = viewState.materialProperties || {};
-  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties, {
+  return buildSphThermalMaterialTable(materialProperties, {
     materialPropertyBankGpuWarmInputTable:
       viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
   });
+}
+
+export function sphStaticTableInputsFromViewState(viewState = {}, {
+  thermalMaterialTable: providedThermalMaterialTable = null
+} = {}) {
+  const materialProperties = viewState.materialProperties || {};
+  const thermalMaterialTable = providedThermalMaterialTable
+    ?? buildSphThermalMaterialTableFromViewState(viewState);
   const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
   const opticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(

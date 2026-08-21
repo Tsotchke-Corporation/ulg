@@ -5,6 +5,7 @@ import {
   ULG_SCHROEDER_HIERARCHY_ARTIFACT_LEDGER_SCHEMA,
   bindSchroederHierarchyArtifactLedgerSpatialEpoch,
   createSchroederHierarchyArtifactLedger,
+  prepareSchroederHierarchyArtifactTransferCleanupClaims,
   reclaimSchroederHierarchyArtifactTransfers,
   registerSchroederHierarchyArtifact,
   registerSchroederHierarchyArtifactFamily,
@@ -15,6 +16,14 @@ import {
   transferSchroederHierarchyArtifact,
   transferSchroederHierarchyArtifactFamily
 } from '../src/runtime/sph/schroederHierarchyArtifactLedger.js';
+import {
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedCleanupClaim,
+  releaseSubmittedWorkCleanupQueueOrdered,
+  sealQueueOrderedFinalConsumerCapability,
+  submitQueueOrderedWork
+} from '../src/runtime/webgpuComputeLayout.js';
 
 function deferred() {
   let resolve;
@@ -308,6 +317,234 @@ test('generation retirement skips borrowed and transferred resources until their
   assert.equal(continuation.destroyCount, 0);
   assert.equal(summary.resources.continuation.externallyOwned, true);
   assert.equal(summary.pendingTransferCount, 0);
+});
+
+test('two transfer classes coalesce exact queue-ordered release while default release stays fenced', async () => {
+  let deferredCleanup = null;
+  let deferredCleanupCount = 0;
+  const fencedLedger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'submitted-transfer-default-fence',
+    deferCleanup(cleanup) {
+      deferredCleanupCount += 1;
+      deferredCleanup = cleanup;
+      return true;
+    }
+  });
+  const fencedBuffer = fakeBuffer('submitted-transfer-default-fence');
+  registerSchroederHierarchyArtifact(fencedLedger, {
+    resourceKey: 'render',
+    family: 'active-node-list',
+    buffer: fencedBuffer,
+    destroy: () => fencedBuffer.destroy()
+  });
+  transferSchroederHierarchyArtifact(
+    fencedLedger,
+    'render',
+    { transferClass: 'render' }
+  );
+  const fencedCompletion = releaseSchroederHierarchyArtifactTransfers(
+    fencedLedger,
+    {
+      transferClass: 'render',
+      submitted: true
+    }
+  );
+  assert.equal(deferredCleanupCount, 1);
+  assert.equal(fencedBuffer.destroyCount, 0);
+  deferredCleanup();
+  await fencedCompletion;
+  assert.equal(fencedBuffer.destroyCount, 1);
+
+  const device = {
+    submitCount: 0,
+    fenceCount: 0,
+    queue: {
+      submit(commandBuffers) {
+        assert.ok(Array.isArray(commandBuffers));
+        assert.ok(commandBuffers.length > 0);
+        device.submitCount += 1;
+      },
+      onSubmittedWorkDone() {
+        device.fenceCount += 1;
+        return Promise.resolve();
+      }
+    }
+  };
+  const issuerByFamily = new Map(
+    ['render', 'next-tick'].map((transferClass) => {
+      const family =
+        `schroeder-hierarchy-artifact-transfer:${transferClass}`;
+      return [
+        family,
+        createQueueOrderedCleanupClaimIssuer({ producerFamily: family })
+      ];
+    })
+  );
+  let fallbackFenceCount = 0;
+  const queueOrderedLedger = createSchroederHierarchyArtifactLedger({
+    ledgerId: 'submitted-transfer-queue-ordered',
+    deferCleanup() {
+      fallbackFenceCount += 1;
+      return true;
+    },
+    registerQueueOrderedTransferCleanup(
+      cleanup,
+      { producerOutput, producerFamily }
+    ) {
+      return registerQueueOrderedCleanupClaim(
+        issuerByFamily.get(producerFamily),
+        device,
+        {
+          producerOutput,
+          cleanup
+        }
+      );
+    },
+    cancelQueueOrderedTransferCleanup(
+      producerClaim,
+      cleanup,
+      { producerOutput }
+    ) {
+      return cancelQueueOrderedCleanupClaim(
+        producerClaim,
+        device,
+        {
+          producerOutput,
+          cleanup
+        }
+      );
+    },
+    releaseQueueOrderedCleanup(
+      cleanup,
+      finalConsumer,
+      {
+        producerClaim,
+        producerOutput,
+        producerFamily
+      }
+    ) {
+      return releaseSubmittedWorkCleanupQueueOrdered(
+        device,
+        cleanup,
+        {
+          queueOrderedFinalConsumer: finalConsumer,
+          producerClaim,
+          producerOutput,
+          producerFamily
+        }
+      );
+    }
+  });
+  const buffers = {
+    renderA: fakeBuffer('submitted-transfer-render-a'),
+    renderB: fakeBuffer('submitted-transfer-render-b'),
+    nextTickA: fakeBuffer('submitted-transfer-next-tick-a'),
+    nextTickB: fakeBuffer('submitted-transfer-next-tick-b')
+  };
+  for (const [resourceKey, buffer] of Object.entries(buffers)) {
+    registerSchroederHierarchyArtifact(queueOrderedLedger, {
+      resourceKey,
+      family: resourceKey.startsWith('render')
+        ? 'active-node-list'
+        : 'phase-volume-level-update',
+      buffer,
+      destroy: () => buffer.destroy()
+    });
+    transferSchroederHierarchyArtifact(
+      queueOrderedLedger,
+      resourceKey,
+      {
+        transferClass: resourceKey.startsWith('render')
+          ? 'render'
+          : 'next-tick'
+      }
+    );
+  }
+  const claims =
+    prepareSchroederHierarchyArtifactTransferCleanupClaims(
+      queueOrderedLedger
+    );
+  assert.equal(claims.length, 2);
+  assert.notEqual(claims[0], claims[1]);
+  const submissionReceipt = submitQueueOrderedWork(device, [
+    { label: 'existing-next-hierarchy-final-consumer' }
+  ]);
+  const exactFinalConsumer = sealQueueOrderedFinalConsumerCapability(
+    submissionReceipt,
+    device,
+    {
+      finalConsumerOwner: {},
+      producerClaims: claims
+    }
+  );
+
+  assert.throws(
+    () => releaseSchroederHierarchyArtifactTransfers(
+      queueOrderedLedger,
+      {
+        transferClass: 'render',
+        submitted: true,
+        queueOrderedFinalConsumer: { id: 'forged-final-consumer' }
+      }
+    ),
+    (error) => (
+      error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED'
+    )
+  );
+  assert.equal(
+    Object.values(buffers).reduce(
+      (count, buffer) => count + buffer.destroyCount,
+      0
+    ),
+    0
+  );
+  await releaseSchroederHierarchyArtifactTransfers(queueOrderedLedger, {
+    transferClass: 'render',
+    families: 'active-node-list',
+    submitted: true,
+    queueOrderedFinalConsumer: exactFinalConsumer
+  });
+  // One class claim deliberately coalesces both scoped render releases.
+  await releaseSchroederHierarchyArtifactTransfers(queueOrderedLedger, {
+    transferClass: 'render',
+    families: 'active-node-list',
+    submitted: true,
+    queueOrderedFinalConsumer: exactFinalConsumer
+  });
+  await releaseSchroederHierarchyArtifactTransfers(queueOrderedLedger, {
+    transferClass: 'next-tick',
+    families: 'phase-volume-level-update',
+    submitted: true,
+    queueOrderedFinalConsumer: exactFinalConsumer
+  });
+  await releaseSchroederHierarchyArtifactTransfers(queueOrderedLedger, {
+    transferClass: 'next-tick',
+    families: 'phase-volume-level-update',
+    submitted: true,
+    queueOrderedFinalConsumer: exactFinalConsumer
+  });
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(buffers).map(([key, buffer]) => [
+        key,
+        buffer.destroyCount
+      ])
+    ),
+    {
+      renderA: 1,
+      renderB: 1,
+      nextTickA: 1,
+      nextTickB: 1
+    }
+  );
+  assert.equal(device.submitCount, 1);
+  assert.equal(device.fenceCount, 0);
+  assert.equal(fallbackFenceCount, 0);
+  assert.equal(
+    summarizeSchroederHierarchyArtifactLedger(queueOrderedLedger)
+      .pendingTransferCount,
+    0
+  );
 });
 
 test('retirement waits for its fence and duplicate scheduling remains one-shot', async () => {

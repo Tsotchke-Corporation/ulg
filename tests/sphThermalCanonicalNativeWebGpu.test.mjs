@@ -1,13 +1,29 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import {
+  sphThermalStepWgsl as canonicalThermalStepWgsl
+} from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 const RUN_NATIVE_TREE = process.env.ULG_RUN_NATIVE_THERMAL_TREE === '1';
+const RUN_NATIVE_PAIR = process.env.ULG_RUN_NATIVE_THERMAL_PAIR === '1';
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_THERMAL === '1'
-  || RUN_NATIVE_TREE;
+  || RUN_NATIVE_TREE
+  || RUN_NATIVE_PAIR;
 const BASE_URL = process.env.ULG_THERMAL_BASE_URL
   || 'https://127.0.0.1:5174/';
 const CHROME = process.env.ULG_THERMAL_CHROME
   || '/usr/bin/google-chrome';
+
+test('canonical thermal WGSL retains explicit ambient-radiation exchange authority', () => {
+  assert.match(
+    canonicalThermalStepWgsl,
+    /ambient_radiation_exchange_enabled:\s*u32/
+  );
+  assert.match(
+    canonicalThermalStepWgsl,
+    /params\.ambient_radiation_exchange_enabled\s*==\s*1u[\s\S]*self_emissivity\s*>\s*0\.0/
+  );
+});
 
 test('native Vulkan thermal v2 producer and canonical apply keep latent carriers bounded and reciprocal', {
   skip: RUN_NATIVE
@@ -34,7 +50,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async ({ runNativeTreeShadow }) => {
+    native = await page.evaluate(async ({
+      runNativeTreeShadow,
+      runNativePairOnly
+    }) => {
       const fail = (message) => {
         throw new Error(message);
       };
@@ -88,11 +107,34 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         };
       }
       const deviceLimits = await import('/src/runtime/webgpuDeviceLimits.js');
-      const device = await adapter.requestDevice(
+      const residentDeviceDescriptor =
         deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter, {
           timestampProfilingRequested: runNativeTreeShadow
-        })
-      );
+        }) || {};
+      const thermalTreeStorageBufferLimit = 13;
+      if (
+        runNativeTreeShadow
+        && Number(adapter.limits?.maxStorageBuffersPerShaderStage)
+          < thermalTreeStorageBufferLimit
+      ) {
+        return {
+          status: 'unsupported',
+          reason:
+            'thermal tree comparison requires 13 storage buffers per shader stage'
+        };
+      }
+      const device = await adapter.requestDevice({
+        ...residentDeviceDescriptor,
+        requiredLimits: {
+          ...(residentDeviceDescriptor.requiredLimits || {}),
+          ...(runNativeTreeShadow
+            ? {
+                maxStorageBuffersPerShaderStage:
+                  thermalTreeStorageBufferLimit
+              }
+            : {})
+        }
+      });
       const uncapturedErrors = [];
       device.addEventListener('uncapturederror', (event) => {
         uncapturedErrors.push(event.error?.message || String(event.error));
@@ -205,6 +247,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         transactionModule,
         binAuthorityModule,
         closuresModule,
+        materialDerivationModule,
+        reactionDiscoveryModule,
         thermoState,
         sphStateModule
       ] = await Promise.all([
@@ -216,9 +260,45 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         import(transactionUrl),
         import(binAuthorityUrl),
         import('/src/runtime/material/materialClosures.js'),
+        import('/src/runtime/material/materialDerivation.js'),
+        import('/src/runtime/sph/reactionDiscovery.js'),
         import('/src/runtime/material/thermoState.js'),
         import('/src/runtime/sph/sphState.js')
       ]);
+
+      const thermalShaderDiagnostics = [];
+      for (const [name, code] of [
+        ['derived', proposalModule.schroederSpatialThermalDerivedPrepassWgsl],
+        ['proposal-v1', proposalModule.schroederSpatialThermalProposalWgsl],
+        ['proposal-v2', proposalModule.schroederSpatialThermalProposalV2Wgsl],
+        [
+          'native-tree-shadow',
+          proposalModule
+            .createSchroederSpatialThermalTreeShadowWgslForNativeTest()
+        ],
+        ['classic', proposalModule.classicThermalProposalWgsl],
+        ['classic-binned', proposalModule.classicThermalBinnedProposalWgsl]
+      ]) {
+        const module = device.createShaderModule({
+          label: `ulg-native-thermal-${name}-compile-proof`,
+          code
+        });
+        if (typeof module.getCompilationInfo !== 'function') continue;
+        const info = await module.getCompilationInfo();
+        for (const message of info.messages || []) {
+          thermalShaderDiagnostics.push({
+            name,
+            type: message.type,
+            lineNum: message.lineNum,
+            linePos: message.linePos,
+            message: message.message
+          });
+        }
+      }
+      requireTrue(
+        thermalShaderDiagnostics.every(({ type }) => type !== 'error'),
+        `thermal proposal WGSL did not compile: ${JSON.stringify(thermalShaderDiagnostics)}`
+      );
 
       const createTaggedBuffer = (
         label,
@@ -418,9 +498,57 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       };
 
       const closures = closuresModule.createReferenceMaterialClosures();
+      const anchoredClosures = Object.fromEntries(
+        ['h2o', 'fe'].map((material) => [
+          material,
+          materialDerivationModule.createReferenceAnchoredMaterialClosure(
+            material,
+            {
+              elementOptions: {
+                allowReducedEstimates: true,
+                gridPointsN: 80
+              }
+            }
+          )
+        ])
+      );
+      const withAnchoredConductivity = (material) => {
+        const base = closures[material].properties;
+        const anchored = anchoredClosures[material].properties;
+        return {
+          ...base,
+          phases: base.phases.map((phase) => {
+            const source = anchored.phases.find(
+              (candidate) => candidate.name === phase.name
+            );
+            return {
+              ...phase,
+              thermalConductivityWPerMK:
+                source?.thermalConductivityWPerMK,
+              thermalConductivityProvenance:
+                source?.thermalConductivityProvenance
+            };
+          })
+        };
+      };
       const materialProperties = {
-        h2o: closures.h2o.properties,
-        fe: closures.fe.properties
+        h2o: withAnchoredConductivity('h2o'),
+        fe: withAnchoredConductivity('fe'),
+        naoh: reactionDiscoveryModule.discoverReactions('Na', 'h2o', {
+          materialProperties: {
+            Na: materialDerivationModule.createReferenceAnchoredMaterialClosure(
+              'Na',
+              {
+                elementOptions: {
+                  allowReducedEstimates: true,
+                  gridPointsN: 80
+                }
+              }
+            ).properties,
+            h2o: anchoredClosures.h2o.properties
+          },
+          allowReducedProductProperties: true
+        }).productClosures.naoh.properties
       };
       const thermalMaterialTable = thermal.buildSphThermalMaterialTable(
         materialProperties
@@ -497,6 +625,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         materialProperties.fe,
         240
       );
+      const ironPairU = thermoState.specificInternalEnergyJPerKg(
+        materialProperties.fe,
+        400
+      );
       const productionIronHotU = thermoState.specificInternalEnergyJPerKg(
         materialProperties.fe,
         1850
@@ -505,11 +637,20 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         materialProperties.h2o,
         233.15
       );
+      const sodiumWaterNaohHotU = thermoState.specificInternalEnergyJPerKg(
+        materialProperties.naoh,
+        2193.2
+      );
+      const sodiumWaterAmbientU = thermoState.specificInternalEnergyJPerKg(
+        materialProperties.h2o,
+        293.15
+      );
       const productionPitchM = 0.2;
       const productionSmoothingLengthM = 0.24814;
       const productionIronMassKg = 55.84;
       const productionIceMassKg = 7.336;
       let epochOrdinal = 0;
+      let pairOnlyReceipt = null;
 
       const runFixture = async ({
         name,
@@ -541,23 +682,43 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         requireConductionExchange = requireThermalExchange,
         radiationEnabled = false,
         requireRadiationExchange = radiationEnabled,
-        useAggregate = true,
-        useActiveRank = false,
-        useDirectoryV2 = false,
+        useAggregate: requestedAggregate,
+        useActiveRank =
+          requestedAggregate === undefined && runNativeTreeShadow,
+        useDirectoryV2 =
+          requestedAggregate === undefined && !runNativeTreeShadow,
         producerTraversal = 'direct',
         observeTreeTraversalCounters = true,
         includeAppliedRowsInResult = false,
         particleLevels = null,
         sameGenerationTreeShadow = false,
         sameGenerationSourceCellTreeShadow = false,
-        sameGenerationExhaustiveShadow = false
+        sameGenerationExhaustiveShadow = false,
+        phaseResponseTableOverride = null,
+        responseUploadOverride = null
       }) => {
-        const fixturePhaseResponseTable = radiationEnabled
-          ? radiationPhaseResponseTable
-          : phaseResponseTable;
-        const fixtureResponseUpload = radiationEnabled
-          ? radiationResponseUpload
-          : responseUpload;
+        // Aggregate views are FAR-owned.  Unqualified thermal fixtures exercise
+        // the canonical directory-v2 ActiveSource route, except that the
+        // directory-v1-only native tree comparator uses its authenticated
+        // ActiveRank route.  An explicit `useAggregate: false` continues to
+        // select the local control arm.
+        const useAggregate = requestedAggregate === true;
+        requireTrue(
+          useAggregate === false,
+          `${name}: thermal-only fixtures must not request a FAR aggregate view`
+        );
+        const fixturePhaseResponseTable = phaseResponseTableOverride
+          || (
+            radiationEnabled
+              ? radiationPhaseResponseTable
+              : phaseResponseTable
+          );
+        const fixtureResponseUpload = responseUploadOverride
+          || (
+            radiationEnabled
+              ? radiationResponseUpload
+              : responseUpload
+          );
         requireTrue(
           Number(useAggregate) + Number(useActiveRank)
               + Number(useDirectoryV2) <= 1,
@@ -863,7 +1024,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             particleCount: packed.particleCount,
             particleIdentityBuffer: particleUpload.identityBuffer,
             particleIdentityStrideWords: 1,
-            particleBufferSet: useAggregate ? particleUpload : null,
+            particleBufferSet: null,
             laneId: `native-thermal-${name}`,
             sourceFamily: `native-thermal-${name}`,
             mechanicsLevels: [],
@@ -1225,6 +1386,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const [
             derivedBytes,
             proposalBytes,
+            conductivitySidecarBytes,
             conductionEvidenceBytes,
             radiationEvidenceBytes,
             activeDispatchBytes,
@@ -1240,6 +1402,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               proposal.proposalBuffer,
               proposal.activeProposalByteLength,
               `ulg-native-thermal-${name}-proposal-readback`
+            ),
+            readBuffer(
+              proposal.thermalConductivitySidecarBuffer,
+              proposal.activeThermalConductivitySidecarByteLength,
+              `ulg-native-thermal-${name}-conductivity-sidecar-readback`
             ),
             readBuffer(
               proposal.conductionEvidenceBuffer,
@@ -1276,6 +1443,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const derivedFloats = new Float32Array(derivedBytes);
           const proposalWords = new Uint32Array(proposalBytes);
           const proposalFloats = new Float32Array(proposalBytes);
+          const conductivitySidecarWords =
+            new Uint32Array(conductivitySidecarBytes);
+          const conductivitySidecarFloats =
+            new Float32Array(conductivitySidecarBytes);
           const conductionEvidence = Array.from(
             new Uint32Array(conductionEvidenceBytes)
           );
@@ -1853,6 +2024,24 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               && proposalWords[15] === packed.particleCount,
             `${name}: proposal invalid counts/rows ${proposalWords[6]}/${proposalWords[7]}/${proposalWords[15]}; aggregate=${JSON.stringify(aggregateHeader)}`
           );
+          requireTrue(
+            conductivitySidecarWords[0]
+              === proposalModule.SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC
+              && conductivitySidecarWords[1]
+                === proposalModule.SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION
+              && conductivitySidecarWords[2] === proposal.generationId
+              && conductivitySidecarWords[3] === packed.particleCount
+              && conductivitySidecarWords[4]
+                === fixtureResponseUpload.materialCount
+              && conductivitySidecarWords[5]
+                === fixtureResponseUpload.responseCount
+              && conductivitySidecarWords[6]
+                === proposal.thermalConductivitySidecarProvenanceToken
+              && conductivitySidecarWords[10] === activeSourceCount,
+            `${name}: conductivity sidecar header is invalid: ${
+              JSON.stringify(Array.from(conductivitySidecarWords.slice(0, 12)))
+            }`
+          );
           for (const [consumer, evidence] of [
             ['conduction', conductionEvidence],
             ['radiation', radiationEvidence]
@@ -1881,7 +2070,30 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             requireConductionExchange
               ? conductionEvidence[4] > 0
               : conductionEvidence[4] === 0,
-            `${name}: conduction support-mask hits were ${conductionEvidence[4]}`
+            `${name}: conduction support-mask hits were ${conductionEvidence[4]}: ${
+              JSON.stringify({
+                activeSourceProjectionMode:
+                  proposal.activeSourceProjectionMode,
+                radiiM: Array.from(
+                  { length: packed.particleCount },
+                  (_, index) => derivedFloats[
+                    proposal.derivedHeaderWords
+                      + index * proposal.derivedRowWords
+                      + 2
+                  ]
+                ),
+                thermalConductivitiesWPerMK: Array.from(
+                  { length: packed.particleCount },
+                  (_, index) => conductivitySidecarFloats[
+                    proposal.thermalConductivitySidecarHeaderWords
+                      + index
+                        * proposal.thermalConductivitySidecarRowWords
+                  ]
+                ),
+                conductionEvidence,
+                radiationEvidence
+              })
+            }`
           );
           requireTrue(
             !requireRadiationExchange || radiationEvidence[4] > 0,
@@ -1890,6 +2102,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
 
           const derivedRows = [];
           const proposalRows = [];
+          const conductivityRows = [];
           let reciprocalProposalEnergyJ = 0;
           let absoluteProposalEnergyJ = 0;
           let absoluteConductionEnergyJ = 0;
@@ -1916,6 +2129,15 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               proposalFloats.slice(proposalOffset, proposalOffset + proposal.proposalRowWords)
             );
             proposalRows.push(proposalRow);
+            const conductivityOffset =
+              proposal.thermalConductivitySidecarHeaderWords
+                + index * proposal.thermalConductivitySidecarRowWords;
+            const conductivityRow = {
+              thermalConductivityWPerMK:
+                conductivitySidecarFloats[conductivityOffset],
+              status: conductivitySidecarWords[conductivityOffset + 1]
+            };
+            conductivityRows.push(conductivityRow);
             requireTrue(
               proposalRow.every(finite),
               `${name}: non-finite proposal row ${index}: ${proposalRow}`
@@ -1937,8 +2159,30 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 proposalRow.every((value) => value === 0),
                 `${name}: inactive proposal row ${index} was not zero: ${proposalRow}`
               );
+              requireTrue(
+                conductivityRow.status === 0
+                  && conductivityRow.thermalConductivityWPerMK === 0,
+                `${name}: inactive conductivity row ${index} was not inert: ${
+                  JSON.stringify(conductivityRow)
+                }`
+              );
               continue;
             }
+            requireTrue(
+              (
+                conductivityRow.status
+                  === proposalModule.SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_READY
+                && conductivityRow.thermalConductivityWPerMK > 0
+              )
+              || (
+                conductivityRow.status
+                  === proposalModule.SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING
+                && conductivityRow.thermalConductivityWPerMK === 0
+              ),
+              `${name}: active conductivity row ${index} is invalid: ${
+                JSON.stringify(conductivityRow)
+              }`
+            );
             requireTrue(
               derivedRow[0] >= 0 && derivedRow[1] >= 0 && derivedRow[2] > 0,
               `${name}: invalid derived thermal state at row ${index}: ${derivedRow}`
@@ -2037,6 +2281,46 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               equalizingEnergyJ * 0.25
             );
           };
+          const conductiveContactGeometry = (
+            radiusM,
+            otherRadiusM,
+            distanceM
+          ) => {
+            if (
+              !(radiusM > 0)
+              || !(otherRadiusM > 0)
+              || distanceM >= radiusM + otherRadiusM
+            ) {
+              return { areaM2: 0, pathLengthM: distanceM };
+            }
+            const minimumRadiusM = Math.min(radiusM, otherRadiusM);
+            let contactRadiusSquaredM2;
+            if (
+              distanceM === 0
+              || distanceM <= Math.abs(radiusM - otherRadiusM)
+            ) {
+              contactRadiusSquaredM2 = minimumRadiusM * minimumRadiusM;
+            } else {
+              const planeFromSelfM = (
+                distanceM * distanceM
+                + radiusM * radiusM
+                - otherRadiusM * otherRadiusM
+              ) / (2 * distanceM);
+              contactRadiusSquaredM2 = Math.max(
+                0,
+                radiusM * radiusM - planeFromSelfM * planeFromSelfM
+              );
+            }
+            return {
+              areaM2: Math.PI * contactRadiusSquaredM2,
+              pathLengthM: distanceM > 0 ? distanceM : minimumRadiusM
+            };
+          };
+          const harmonicMeanPositive = (left, right) => (
+            left > 0 && right > 0
+              ? (2 * left * right) / (left + right)
+              : 0
+          );
           for (let i = 0; i < packed.particleCount; i += 1) {
             const stateOffsetI = i * 8;
             const massI = packed.state[stateOffsetI + 3];
@@ -2050,14 +2334,23 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 currentState[stateOffsetI + 1] - currentState[stateOffsetJ + 1],
                 currentState[stateOffsetI + 2] - currentState[stateOffsetJ + 2]
               );
-              const supportM = Math.max(
-                2 * packed.smoothingLengthM,
-                derivedRows[i][2] + derivedRows[j][2]
+              const contact = conductiveContactGeometry(
+                derivedRows[i][2],
+                derivedRows[j][2],
+                distanceM
               );
-              if (!(distanceM < supportM)) continue;
-              const rawEnergyIntoIJ = conductionRate
+              const pairConductivityWPerMK = harmonicMeanPositive(
+                conductivityRows[i].thermalConductivityWPerMK,
+                conductivityRows[j].thermalConductivityWPerMK
+              );
+              if (
+                !(contact.areaM2 > 0)
+                || !(contact.pathLengthM > 0)
+                || !(pairConductivityWPerMK > 0)
+              ) continue;
+              const rawEnergyIntoIJ = pairConductivityWPerMK
+                * contact.areaM2 / contact.pathLengthM
                 * (derivedRows[j][0] - derivedRows[i][0])
-                * (1 - distanceM / supportM)
                 * dtS;
               const requestedEnergyIntoIJ = clampPairEnergy({
                 rawEnergyJ: rawEnergyIntoIJ,
@@ -2089,7 +2382,9 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   idI: particles[i].id,
                   idJ: particles[j].id,
                   distanceM,
-                  supportM,
+                  contactAreaM2: contact.areaM2,
+                  conductionPathLengthM: contact.pathLengthM,
+                  pairConductivityWPerMK,
                   rawEnergyIntoIJ,
                   requestedEnergyIntoIJ,
                   directionalScale,
@@ -2219,12 +2514,22 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   smoothingLengthM: packed.smoothingLengthM,
                   conductionRate
                 });
+              device.pushErrorScope('validation');
               sameGenerationTreeReceipt = proposalModule
                 .armSchroederSpatialThermalTreeShadowForNativeTest({
                   device,
                   schroederSpatialThermalProposal: treeProposal,
                   observeTraversalCounters: true
                 });
+              const treePipelineValidationError =
+                await device.popErrorScope();
+              requireTrue(
+                !treePipelineValidationError,
+                `${name}: same-generation tree pipeline validation failed: ${
+                  treePipelineValidationError?.message
+                    || String(treePipelineValidationError)
+                }`
+              );
               requireTrue(
                 treeProposal.generationId === proposal.generationId
                   && treeProposal.supportEpoch === proposal.supportEpoch
@@ -2277,6 +2582,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const [
                 treeDerivedBytes,
                 treeProposalBytes,
+                treeConductivitySidecarBytes,
                 treeConductionEvidenceBytes,
                 treeRadiationEvidenceBytes,
                 treeFinalStateBytes,
@@ -2295,6 +2601,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   treeProposal.proposalBuffer,
                   treeProposal.activeProposalByteLength,
                   `ulg-native-thermal-${name}-same-generation-tree-proposal`
+                ),
+                readBuffer(
+                  treeProposal.thermalConductivitySidecarBuffer,
+                  treeProposal.activeThermalConductivitySidecarByteLength,
+                  `ulg-native-thermal-${name}-same-generation-tree-conductivity-sidecar`
                 ),
                 readBuffer(
                   treeProposal.conductionEvidenceBuffer,
@@ -2363,6 +2674,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const byteReceipts = {
                 derived: exactBytes(derivedBytes, treeDerivedBytes),
                 proposal: exactBytes(proposalBytes, treeProposalBytes),
+                conductivitySidecar: exactBytes(
+                  conductivitySidecarBytes,
+                  treeConductivitySidecarBytes
+                ),
                 conductionEvidence: exactBytes(
                   conductionEvidenceBytes,
                   treeConductionEvidenceBytes
@@ -2548,6 +2863,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const [
                 sourceCellDerivedBytes,
                 sourceCellProposalBytes,
+                sourceCellConductivitySidecarBytes,
                 sourceCellConductionEvidenceBytes,
                 sourceCellRadiationEvidenceBytes,
                 sourceCellFinalStateBytes,
@@ -2566,6 +2882,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   sourceCellProposal.proposalBuffer,
                   sourceCellProposal.activeProposalByteLength,
                   `ulg-native-thermal-${name}-same-generation-source-cell-proposal`
+                ),
+                readBuffer(
+                  sourceCellProposal.thermalConductivitySidecarBuffer,
+                  sourceCellProposal.activeThermalConductivitySidecarByteLength,
+                  `ulg-native-thermal-${name}-same-generation-source-cell-conductivity-sidecar`
                 ),
                 readBuffer(
                   sourceCellProposal.conductionEvidenceBuffer,
@@ -2640,6 +2961,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 proposal: exactBytes(
                   proposalBytes,
                   sourceCellProposalBytes
+                ),
+                conductivitySidecar: exactBytes(
+                  conductivitySidecarBytes,
+                  sourceCellConductivitySidecarBytes
                 ),
                 conductionEvidence: exactBytes(
                   conductionEvidenceBytes,
@@ -2914,6 +3239,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               const [
                 exhaustiveDerivedBytes,
                 exhaustiveProposalBytes,
+                exhaustiveConductivitySidecarBytes,
                 exhaustiveConductionEvidenceBytes,
                 exhaustiveRadiationEvidenceBytes,
                 exhaustiveFinalStateBytes,
@@ -2931,6 +3257,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   exhaustiveProposal.proposalBuffer,
                   exhaustiveProposal.activeProposalByteLength,
                   `ulg-native-thermal-${name}-same-generation-exhaustive-proposal`
+                ),
+                readBuffer(
+                  exhaustiveProposal.thermalConductivitySidecarBuffer,
+                  exhaustiveProposal.activeThermalConductivitySidecarByteLength,
+                  `ulg-native-thermal-${name}-same-generation-exhaustive-conductivity-sidecar`
                 ),
                 readBuffer(
                   exhaustiveProposal.conductionEvidenceBuffer,
@@ -3000,6 +3331,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 proposal: exactBytes(
                   proposalBytes,
                   exhaustiveProposalBytes
+                ),
+                conductivitySidecar: exactBytes(
+                  conductivitySidecarBytes,
+                  exhaustiveConductivitySidecarBytes
                 ),
                 conductionEvidence: exactBytes(
                   conductionEvidenceBytes,
@@ -3072,6 +3407,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               };
               const semanticReceipts = {
                 derived: byteReceipts.derived,
+                conductivitySidecar: byteReceipts.conductivitySidecar,
                 proposalHeader: proposalHeaderExact,
                 proposalRowsNear,
                 conductionEvidenceExceptCandidateVisits:
@@ -3261,6 +3597,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
 
           const finalDomains = [];
           let appliedEnergyDeltaJ = 0;
+          let appliedEnergyQuantizationBudgetJ = 0;
           for (let index = 0; index < packed.particleCount; index += 1) {
             const stateOffset = index * 8;
             const thermoOffset = index * 12;
@@ -3301,15 +3638,25 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               `${name}: canonical apply row ${index} produced ${finalU}; expected ${expectedFinalU}`
             );
             appliedEnergyDeltaJ += massKg * (finalU - initialU);
+            appliedEnergyQuantizationBudgetJ += massKg * Math.abs(
+              (expectedFinalU - initialU)
+                - (
+                  proposalRows[index][0]
+                    + proposalRows[index][1]
+                )
+            );
           }
           const finalEnergyJ = totalEnergyJ(result.state);
           const applyConservationToleranceJ = Math.max(
             5.0e-2,
-            absoluteProposalEnergyJ * 1.0e-5
+            absoluteProposalEnergyJ * 1.0e-5,
+            proposalConservationToleranceJ
+              + appliedEnergyQuantizationBudgetJ
+              + 1.0e-6
           );
           requireTrue(
             Math.abs(appliedEnergyDeltaJ) <= applyConservationToleranceJ,
-            `${name}: applied reciprocal energy residual ${appliedEnergyDeltaJ} J exceeds ${applyConservationToleranceJ} J`
+            `${name}: applied reciprocal energy residual ${appliedEnergyDeltaJ} J exceeds ${applyConservationToleranceJ} J (f32 budget ${appliedEnergyQuantizationBudgetJ} J)`
           );
           requireTrue(
             Math.abs(finalEnergyJ - initialEnergyJ) <= applyConservationToleranceJ,
@@ -3502,6 +3849,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             absoluteRadiationEnergyJ,
             proposalConservationToleranceJ,
             appliedEnergyDeltaJ,
+            appliedEnergyQuantizationBudgetJ,
             applyConservationToleranceJ,
             centralInitialU: proposalSourceState[7],
             centralFinalU: result.state[7],
@@ -3524,6 +3872,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             materializedActiveSources,
             derivedRows,
             proposalRows,
+            conductivityRows,
             conductionEvidence,
             radiationEvidence,
             pairLedger: includePairLedgerInResult ? pairLedger : null,
@@ -3627,6 +3976,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         for (const field of [
           'derivedRows',
           'proposalRows',
+          'conductivityRows',
           'conductionEvidence',
           'radiationEvidence',
           'appliedState',
@@ -4094,6 +4444,11 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   `ulg-native-thermal-timing-${name}-${ordinal}-${route}-proposal`
                 ),
                 readBuffer(
+                  proposal.thermalConductivitySidecarBuffer,
+                  proposal.activeThermalConductivitySidecarByteLength,
+                  `ulg-native-thermal-timing-${name}-${ordinal}-${route}-conductivity-sidecar`
+                ),
+                readBuffer(
                   proposal.conductionEvidenceBuffer,
                   proposal.evidenceWordCount
                     * Uint32Array.BYTES_PER_ELEMENT,
@@ -4185,6 +4540,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           const parityFields = [
             'derived',
             'proposal',
+            'conductivitySidecar',
             'conductionEvidence',
             'radiationEvidence',
             'activeDispatch',
@@ -4267,12 +4623,25 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           lifecycleAdapter != null,
           'source-cell lifecycle adapter unavailable'
         );
-        const lifecycleDevice = await lifecycleAdapter.requestDevice(
+        requireTrue(
+          Number(
+            lifecycleAdapter.limits?.maxStorageBuffersPerShaderStage
+          ) >= thermalTreeStorageBufferLimit,
+          'source-cell lifecycle adapter cannot bind the thermal tree comparator'
+        );
+        const lifecycleResidentDescriptor =
           deviceLimits.webGpuDeviceDescriptorForResidentSph(
             lifecycleAdapter,
             { timestampProfilingRequested: false }
-          )
-        );
+          ) || {};
+        const lifecycleDevice = await lifecycleAdapter.requestDevice({
+          ...lifecycleResidentDescriptor,
+          requiredLimits: {
+            ...(lifecycleResidentDescriptor.requiredLimits || {}),
+            maxStorageBuffersPerShaderStage:
+              thermalTreeStorageBufferLimit
+          }
+        });
         requireTrue(
           lifecycleDevice !== device,
           'source-cell lifecycle campaign reused the timed GPUDevice'
@@ -4469,14 +4838,16 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               particleCount: packed.particleCount,
               particleIdentityBuffer: particleUpload.identityBuffer,
               particleIdentityStrideWords: 1,
-              particleBufferSet: particleUpload,
+              particleBufferSet: null,
               laneId: `native-s9d5-lifecycle-${name}`,
               sourceFamily: `native-s9d5-lifecycle-${name}`,
               mechanicsLevels: [],
               directArenaCount: 1
             });
           requireTrue(
-            generation.ready === true && generation.selected === true,
+            generation.ready === true
+              && generation.selected === true
+              && generation.aggregateView == null,
             `${name}: lifecycle spatial generation rejected: ${
               generation.status
             }`
@@ -4843,7 +5214,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               particleIdentityBuffer:
                 lossFixture.particleUpload.identityBuffer,
               particleIdentityStrideWords: 1,
-              particleBufferSet: lossFixture.particleUpload,
+              particleBufferSet: null,
               laneId: 'native-s9d5-lifecycle-device-loss-reentry',
               sourceFamily:
                 'native-s9d5-lifecycle-device-loss-reentry',
@@ -4954,6 +5325,159 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           thermalClosureGraphBank: graphSet.graphBank,
           thermalPhaseResponseTable: phaseResponseTable
         });
+        if (runNativePairOnly) {
+          const pairParticles = [
+            {
+              id: 'native-pair-ice',
+              material: 'h2o',
+              x: [5, 5, 5],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: productionIceColdU
+            },
+            {
+              id: 'native-pair-iron',
+              material: 'fe',
+              x: [5.008, 5, 5],
+              v: [0, 0, 0],
+              massKg: 1.0e-3,
+              specificInternalEnergyJPerKg: ironPairU
+            }
+          ];
+          const fixture = {
+            particles: pairParticles,
+            smoothingLengthM: 0.01,
+            spatialCellSizeM: 0.02,
+            nativeGridSpacingM: 0.02,
+            dtS: 0.01,
+            requireCentralHeating: false,
+            useAggregate: false
+          };
+          const base = await runFixture({
+            name: 'native-material-k-contact-rate-zero',
+            ...fixture,
+            conductionRate: 0
+          });
+          const legacyRate = await runFixture({
+            name: 'native-material-k-contact-rate-1500',
+            ...fixture,
+            conductionRate: 1500
+          });
+          const scaledPhaseResponseTable = {
+            ...phaseResponseTable,
+            responseThermalConductivities: Float32Array.from(
+              phaseResponseTable.responseThermalConductivities,
+              (value) => value > 0 ? value * 2 : 0
+            )
+          };
+          let scaledResponseUpload = null;
+          let scaled;
+          try {
+            scaledResponseUpload =
+              thermal.uploadSphThermalResponseGraphBuffers(device, {
+                thermalMaterialTable,
+                thermalClosureGraphSet: graphSet,
+                thermalClosureGraphBank: graphSet.graphBank,
+                thermalPhaseResponseTable: scaledPhaseResponseTable
+              });
+            scaled = await runFixture({
+              name: 'native-material-k-contact-scaled-two-x',
+              ...fixture,
+              conductionRate: 1500,
+              phaseResponseTableOverride: scaledPhaseResponseTable,
+              responseUploadOverride: scaledResponseUpload
+            });
+          } finally {
+            if (scaledResponseUpload) {
+              thermal.destroySphThermalResponseGraphBuffers(
+                scaledResponseUpload
+              );
+            }
+          }
+          const positiveGap = await runFixture({
+            name: 'native-material-k-positive-gap-zero',
+            ...fixture,
+            particles: [
+              pairParticles[0],
+              {
+                ...pairParticles[1],
+                x: [5.02, 5, 5]
+              }
+            ],
+            conductionRate: 1500,
+            requireCentralHeating: false,
+            requireThermalExchange: false
+          });
+          const sodiumWaterProductPair = await runFixture({
+            name: 'native-sodium-water-naoh-product-conduction',
+            particles: [
+              {
+                id: 'native-sodium-water-ambient-water',
+                material: 'h2o',
+                x: [5, 5, 5],
+                v: [0, 0, 0],
+                massKg: 8,
+                specificInternalEnergyJPerKg: sodiumWaterAmbientU
+              },
+              {
+                id: 'native-sodium-water-hot-naoh',
+                material: 'naoh',
+                x: [5.07, 5, 5],
+                v: [0, 0, 0],
+                massKg: 0.76016,
+                specificInternalEnergyJPerKg: sodiumWaterNaohHotU
+              }
+            ],
+            smoothingLengthM: 0.1,
+            spatialCellSizeM: 0.1,
+            nativeGridSpacingM: 0.1,
+            dtS: 0.01,
+            conductionRate: 0,
+            requireCentralHeating: false,
+            useAggregate: false
+          });
+          const baseEnergyJ = base.absoluteConductionEnergyJ * 0.5;
+          const legacyRateEnergyJ =
+            legacyRate.absoluteConductionEnergyJ * 0.5;
+          const scaledEnergyJ = scaled.absoluteConductionEnergyJ * 0.5;
+          requireTrue(
+            baseEnergyJ > 0
+              && near(legacyRateEnergyJ, baseEnergyJ, 1e-7, 2e-5)
+              && near(scaledEnergyJ, 2 * baseEnergyJ, 1e-7, 2e-5)
+              && positiveGap.absoluteConductionEnergyJ <= 1e-7,
+            `native material-k pair parity failed: ${
+              JSON.stringify({
+                baseEnergyJ,
+                legacyRateEnergyJ,
+                scaledEnergyJ,
+                positiveGapEnergyJ:
+                  positiveGap.absoluteConductionEnergyJ
+              })
+            }`
+          );
+          pairOnlyReceipt = {
+            baseEnergyJ,
+            legacyRateEnergyJ,
+            scaledEnergyJ,
+            positiveGapEnergyJ: positiveGap.absoluteConductionEnergyJ,
+            baseConductivityRows: base.conductivityRows,
+            scaledConductivityRows: scaled.conductivityRows,
+            basePairLedger: base.pairLedger,
+            conservationResidualJ: base.reciprocalProposalEnergyJ,
+            sodiumWaterProduct: {
+              centralInitialU: sodiumWaterProductPair.centralInitialU,
+              centralFinalU: sodiumWaterProductPair.centralFinalU,
+              absoluteConductionEnergyJ:
+                sodiumWaterProductPair.absoluteConductionEnergyJ,
+              reciprocalProposalEnergyJ:
+                sodiumWaterProductPair.reciprocalProposalEnergyJ,
+              conductivityRows: sodiumWaterProductPair.conductivityRows,
+              pairLedger: sodiumWaterProductPair.pairLedger
+            },
+            legacyRateIndependent: true,
+            scaledConductivityRatio: scaledEnergyJ / baseEnergyJ
+          };
+        } else {
         const mixedBoilingParticles = [
           {
             id: 'h2o-mixed-boiling-carrier',
@@ -4966,7 +5490,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           {
             id: 'fe-hot-x-min',
             material: 'fe',
-            x: [4.96, 5, 5],
+            x: [4.992, 5, 5],
             v: [0, 0, 0],
             massKg: 1.0e-2,
             specificInternalEnergyJPerKg: ironHotU
@@ -4974,7 +5498,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           {
             id: 'fe-hot-x-max',
             material: 'fe',
-            x: [5.04, 5, 5],
+            x: [5.008, 5, 5],
             v: [0, 0, 0],
             massKg: 1.0e-2,
             specificInternalEnergyJPerKg: ironHotU
@@ -4982,7 +5506,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           {
             id: 'fe-cold-y-min',
             material: 'fe',
-            x: [5, 4.96, 5],
+            x: [5, 4.992, 5],
             v: [0, 0, 0],
             massKg: 1.0e-2,
             specificInternalEnergyJPerKg: ironColdU
@@ -4990,7 +5514,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           {
             id: 'fe-cold-y-max',
             material: 'fe',
-            x: [5, 5.04, 5],
+            x: [5, 5.008, 5],
             v: [0, 0, 0],
             massKg: 1.0e-2,
             specificInternalEnergyJPerKg: ironColdU
@@ -5062,7 +5586,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
 
         cases.push(await runFixture({
           name: 'pure-gas-shared-boil-knot',
-          requireCentralHeating: true,
+          requireThermalExchange: false,
           particles: [
             {
               id: 'h2o-pure-gas-boil-knot',
@@ -5075,7 +5599,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'fe-hot-neighbor',
               material: 'fe',
-              x: [5.04, 5, 5],
+              x: [5.008, 5, 5],
               v: [0, 0, 0],
               massKg: 1.0e-2,
               specificInternalEnergyJPerKg: ironHotU
@@ -5083,8 +5607,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           ]
         }));
         requireTrue(
-          cases[1].centralFinalU > cases[1].centralInitialU,
-          'shared-knot gas carrier did not receive bounded heat'
+          cases[1].centralFinalU === cases[1].centralInitialU
+            && cases[1].conductivityRows[0].status
+              === proposalModule
+                .SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING
+            && cases[1].conductivityRows[0].thermalConductivityWPerMK === 0,
+          'shared-knot gas carrier did not fail closed on missing vapor conductivity'
         );
 
         cases.push(await runFixture({
@@ -5221,12 +5749,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           ],
           currentPositions: [
             [5, 5, 5],
-            [5.05, 5, 5]
+            [5.01, 5, 5]
           ]
         }));
         requireTrue(
           cases[4].centralFinalU > cases[4].centralInitialU
-            && near(cases[4].maxPositionDisplacementM, 0.45, 2.0e-5, 2.0e-5),
+            && near(cases[4].maxPositionDisplacementM, 0.49, 2.0e-5, 2.0e-5),
           `current-contact/frozen-separated fixture did not exchange heat with Dmax ${
             cases[4].maxPositionDisplacementM
           }`
@@ -5249,7 +5777,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'fe-hot-frozen-near',
               material: 'fe',
-              x: [5.05, 5, 5],
+              x: [5.01, 5, 5],
               v: [0, 0, 0],
               massKg: 1.0e-2,
               specificInternalEnergyJPerKg: ironHotU
@@ -5262,7 +5790,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         }));
         requireTrue(
           cases[5].centralFinalU === cases[5].centralInitialU
-            && near(cases[5].maxPositionDisplacementM, 0.45, 2.0e-5, 2.0e-5),
+            && near(cases[5].maxPositionDisplacementM, 0.49, 2.0e-5, 2.0e-5),
           `current-separated/frozen-contact fixture exchanged heat or reported Dmax ${
             cases[5].maxPositionDisplacementM
           }`
@@ -5288,7 +5816,13 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           cases[6].currentActiveCount === 0
             && cases[6].expectedActiveCount === 0
             && cases[6].materializedRankCount === 0
-            && cases[6].activeDispatch[0] === 1
+            && cases[6].activeDispatch[0]
+              === (cases[6].useDirectoryV2 ? 0 : 1)
+            && (
+              !cases[6].useDirectoryV2
+              || JSON.stringify(cases[6].physicalTopologyDispatch)
+                === JSON.stringify([1, 1, 1])
+            )
             && cases[6].inactiveProposalRowCount === 4,
           `all-dormant dispatch contract failed: ${JSON.stringify(cases[6])}`
         );
@@ -5972,7 +6506,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         // heuristic that could silently discard a real interaction.
         const activeNearFarCurrentPositions = [
           [5, 5, 5],
-          [5.05, 5, 5]
+          [5.003, 5, 5]
         ];
         for (
           let z = 0;
@@ -6225,7 +6759,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             id: `stale-cpu-mirror-h2o-${index}`,
             material: 'h2o',
             x: [
-              4 + (index % 4) * 0.04,
+              4 + (index % 4) * 0.01,
               4 + Math.floor(index / 4) * 0.04,
               4
             ],
@@ -6319,7 +6853,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'negative-boundary-hot-iron',
               material: 'fe',
-              x: [-0.05, -0.1, -0.1],
+              x: [-0.09, -0.1, -0.1],
               v: [0, 0, 0],
               massKg: 1.0e-2,
               specificInternalEnergyJPerKg: ironHotU
@@ -6337,7 +6871,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'multilevel-fine-cold-water',
               material: 'h2o',
-              x: [-0.025, 0, 0],
+              x: [-0.005, 0, 0],
               v: [0, 0, 0],
               massKg: 1.0e-3,
               specificInternalEnergyJPerKg: productionIceColdU
@@ -6345,7 +6879,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'multilevel-base-hot-iron',
               material: 'fe',
-              x: [0.025, 0, 0],
+              x: [0.005, 0, 0],
               v: [0, 0, 0],
               massKg: 1.0e-2,
               specificInternalEnergyJPerKg: ironHotU
@@ -6361,7 +6895,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             {
               id: 'multilevel-coarse-hot-iron',
               material: 'fe',
-              x: [0.38, 0, 0],
+              x: [0.21, 0, 0],
               v: [0, 0, 0],
               massKg: 1.0e-2,
               specificInternalEnergyJPerKg: ironHotU
@@ -6441,7 +6975,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 ],
                 currentPositions: [
                   [5, 5, 5],
-                  [5.05, 5, 5]
+                  [5.01, 5, 5]
                 ],
                 smoothingLengthM: 0.1,
                 spatialCellSizeM: 0.1
@@ -6462,7 +6996,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                   {
                     id: 'tree-parity-fe-frozen-contact',
                     material: 'fe',
-                    x: [5.05, 5, 5],
+                    x: [5.01, 5, 5],
                     v: [0, 0, 0],
                     massKg: 1.0e-2,
                     specificInternalEnergyJPerKg: ironHotU
@@ -7184,6 +7718,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             productionDecision: 'retain-direct'
           };
         }
+        }
       } finally {
         if (responseUpload) {
           thermal.destroySphThermalResponseGraphBuffers(responseUpload);
@@ -7221,6 +7756,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         adapterInfo,
         uncapturedErrors,
         scopeErrors,
+        pairOnlyReceipt,
         cases,
         treeShadowComparisons,
         treeShadowFailureCases,
@@ -7228,7 +7764,10 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         sourceCellLifecycle,
         thermalTreeTiming
       };
-    }, { runNativeTreeShadow: RUN_NATIVE_TREE });
+    }, {
+      runNativeTreeShadow: RUN_NATIVE_TREE,
+      runNativePairOnly: RUN_NATIVE_PAIR
+    });
   } finally {
     await browser.close();
   }
@@ -7236,6 +7775,49 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
   assert.equal(native.status, 'passed', native.reason || JSON.stringify(native));
   assert.deepEqual(native.uncapturedErrors, []);
   assert.deepEqual(native.scopeErrors, []);
+  if (RUN_NATIVE_PAIR) {
+    assert.ok(native.pairOnlyReceipt?.baseEnergyJ > 0);
+    assert.ok(
+      Math.abs(
+        native.pairOnlyReceipt.legacyRateEnergyJ
+          - native.pairOnlyReceipt.baseEnergyJ
+      ) <= Math.max(1e-7, native.pairOnlyReceipt.baseEnergyJ * 2e-5)
+    );
+    assert.ok(
+      Math.abs(native.pairOnlyReceipt.scaledConductivityRatio - 2) <= 2e-5
+    );
+    assert.ok(native.pairOnlyReceipt.positiveGapEnergyJ <= 1e-7);
+    assert.ok(
+      Math.abs(native.pairOnlyReceipt.conservationResidualJ) <= 2e-3
+    );
+    assert.ok(
+      native.pairOnlyReceipt.baseConductivityRows.every(
+        ({ thermalConductivityWPerMK, status }) => (
+          thermalConductivityWPerMK > 0 && status === 1
+        )
+      )
+    );
+    assert.ok(
+      native.pairOnlyReceipt.sodiumWaterProduct.centralFinalU
+        > native.pairOnlyReceipt.sodiumWaterProduct.centralInitialU
+    );
+    assert.ok(
+      native.pairOnlyReceipt.sodiumWaterProduct.absoluteConductionEnergyJ > 0
+    );
+    assert.ok(
+      Math.abs(
+        native.pairOnlyReceipt.sodiumWaterProduct.reciprocalProposalEnergyJ
+      ) <= 2e-3
+    );
+    assert.ok(
+      native.pairOnlyReceipt.sodiumWaterProduct.conductivityRows.every(
+        ({ thermalConductivityWPerMK, status }) => (
+          thermalConductivityWPerMK > 0 && status === 1
+        )
+      )
+    );
+    return;
+  }
   if (RUN_NATIVE_TREE) {
     const adapterDescription = Object.values(native.adapterInfo || {})
       .filter(Boolean)
@@ -7307,6 +7889,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       {
         derived: true,
         proposal: true,
+        conductivitySidecar: true,
         conductionEvidence: true,
         radiationEvidence: true,
         activeDispatch: true,
@@ -7327,6 +7910,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       {
         derived: true,
         proposal: true,
+        conductivitySidecar: true,
         conductionEvidence: true,
         radiationEvidence: true,
         activeDispatch: true,
@@ -7363,6 +7947,12 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
     assert.equal(
       native.cases[0].sameGenerationExhaustiveParity
         ?.enumerationIndependent,
+      true,
+      JSON.stringify(native.cases[0].sameGenerationExhaustiveParity)
+    );
+    assert.equal(
+      native.cases[0].sameGenerationExhaustiveParity
+        ?.semanticReceipts?.conductivitySidecar,
       true,
       JSON.stringify(native.cases[0].sameGenerationExhaustiveParity)
     );

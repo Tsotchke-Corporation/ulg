@@ -58,12 +58,15 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       wzmax: '300'
     },
     validation: {
-      batches: 12,
+      // The first frozen steam lineage reaches the cold ceiling near 3.33 s.
+      // Retain five post-contact checkpoints so the standard gate observes
+      // same-lineage gas loss and return instead of stopping at plume rise.
+      batches: 18,
       batchSteps: 512,
-      timeoutMs: 420000,
+      timeoutMs: 1200000,
       expectedMechanics: 'mlsmpm',
       expectedH2oVisibleSurfaceCount: 1,
-      minVisualFrameTimeSpanS: 3,
+      minVisualFrameTimeSpanS: 4.5,
       checkpoints: [
         { id: 'initial', expectation: 'two liquid water cohorts begin near 300 K' },
         { id: 'flow', expectation: 'the falling cohort merges and the liquid free surface moves' },
@@ -82,12 +85,43 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       baset: '233.15',
       wymin: '293.15',
       wymax: '293.15',
-      ironh: '2.5'
+      // Resolve the same physical 28 mm ice / 16.8 mm iron experiment at
+      // twice the legacy linear sampling density.  The reference controls are
+      // doubled while sceneLengthScale is halved, so every physical body,
+      // wall, initial contact position, density, mass, and temperature is
+      // unchanged.  Only the carrier pitch changes (5.6 mm -> 2.8 mm).
+      dropn: '6',
+      basen: '10',
+      boxx: '10',
+      boxy: '10',
+      boxz: '10',
+      ironh: '2',
+      // This standard gate is the first production visual route admitted to
+      // the exact single-level Schroeder surface-stress lifecycle.
+      lawst: '1'
+    },
+    runtime: {
+      // See the controls above: this is an exact spatial refinement, not a
+      // miniature substitute for the requested physical experiment.
+      sceneLengthScale: '0.014',
+      wallModel: 'adiabatic',
+      // Surface stress is mechanics-field authoritative. Keep the direct
+      // ?scenario=iron-ice-quench route on the canonical spatial authority
+      // instead of admitting lawst and then rejecting its first P2G batch.
+      ss: '1'
     },
     validation: {
-      batches: 10,
+      // The refined initial-rate screen crosses one-carrier vapor demand near
+      // 2.19 s, while the resolved front is still melting new carriers at
+      // 2.56 s. Retain enough post-onset checkpoints to observe both vapor
+      // birth and sustained rise instead of treating the minimum frame span
+      // as a phase-transition deadline.
+      batches: 16,
       batchSteps: 512,
-      timeoutMs: 360000,
+      // The exact 2x spatial refinement carries 8x as many live carriers.
+      // Keep the production proof fail-closed, but allow the memory-capped
+      // browser run to finish on the reference Vulkan/WebGPU workstation.
+      timeoutMs: 1200000,
       expectedMechanics: 'mlsmpm',
       minVisualFrameTimeSpanS: 2,
       checkpoints: [
@@ -124,7 +158,13 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       avAlpha: '0',
       residentStepsPerSchedule: '128',
       residentComputeManagerMode: 'direct',
-      residentInterfaceRefreshMode: 'pipelined'
+      residentInterfaceRefreshMode: 'pipelined',
+      // Look across the contact band instead of down through the remaining
+      // opaque sodium. These values are normalized by the box dimensions, so
+      // the real NaOH and H2 product layers stay exposed on desktop and Pixel
+      // without moving particles or inflating their rendered surfaces.
+      cameraPositionNormalized: '0.78,0.31,1.55',
+      cameraTargetNormalized: '0.50,0.31,0.50'
     },
     validation: {
       batches: 10,

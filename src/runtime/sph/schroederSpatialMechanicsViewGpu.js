@@ -360,6 +360,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       arenaIndex,
       inUse: false,
       token: null,
+      bindGroupCache: new Map(),
       paramsBuffer: createOwnedBuffer(
         device,
         `${arenaLabel}-params`,
@@ -443,6 +444,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
 
   function bindGroup(
     devicePipeline,
+    cacheKey,
     arena,
     sourceBuffer,
     directoryBuffer,
@@ -466,14 +468,39 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       }],
       [7, { buffer: arena.paramsBuffer }]
     ]);
-    return device.createBindGroup({
+    const resolvedResources = bindings.map((binding) => resources.get(binding));
+    const cached = arena.bindGroupCache.get(cacheKey);
+    const resourcesMatch = cached?.resources.length === resolvedResources.length
+      && cached.resources.every((left, index) => {
+        const right = resolvedResources[index];
+        if (left === right) return true;
+        return left?.buffer === right?.buffer
+          && (left?.offset ?? 0) === (right?.offset ?? 0)
+          && (left?.size ?? null) === (right?.size ?? null);
+      });
+    if (
+      cached?.pipeline === devicePipeline
+      && resourcesMatch
+      && cached.bindings.length === bindings.length
+      && cached.bindings.every((binding, index) => binding === bindings[index])
+    ) {
+      return cached.bindGroup;
+    }
+    const created = device.createBindGroup({
       label: `${label}-arena-${arena.arenaIndex}-bindings`,
       layout: devicePipeline.getBindGroupLayout(0),
-      entries: bindings.map((binding) => ({
+      entries: bindings.map((binding, index) => ({
         binding,
-        resource: resources.get(binding)
+        resource: resolvedResources[index]
       }))
     });
+    arena.bindGroupCache.set(cacheKey, {
+      pipeline: devicePipeline,
+      bindings: [...bindings],
+      resources: resolvedResources,
+      bindGroup: created
+    });
+    return created;
   }
 
   function encode(encoder, {
@@ -760,6 +787,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       );
       const markBindGroup = bindGroup(
         markPipeline,
+        'mark',
         arena,
         sourceBuffer,
         spatialExecution.directoryBuffer,
@@ -771,6 +799,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       );
       const countBindGroup = bindGroup(
         pipelines.count,
+        'count',
         arena,
         sourceBuffer,
         spatialExecution.directoryBuffer,
@@ -782,6 +811,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       );
       const scatterBindGroup = bindGroup(
         pipelines.scatter,
+        'scatter',
         arena,
         sourceBuffer,
         spatialExecution.directoryBuffer,
@@ -793,6 +823,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
       );
       const finalizeBindGroup = bindGroup(
         finalizePipeline,
+        'finalize',
         arena,
         sourceBuffer,
         spatialExecution.directoryBuffer,
@@ -1026,6 +1057,26 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
     return finalizeRelease(execution, ownershipFor(execution));
   }
 
+  function canReleaseExecutionQueueOrdered(execution) {
+    try {
+      ownershipFor(execution);
+      return submittedExecutions.has(execution)
+        && !releaseInFlight.has(execution);
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseExecutionQueueOrdered(execution) {
+    if (!canReleaseExecutionQueueOrdered(execution)) {
+      throw new Error(
+        'queue-ordered compact mechanics view release requires an exact submitted idle execution'
+      );
+    }
+    const ownership = ownershipFor(execution);
+    return finalizeRelease(execution, ownership);
+  }
+
   async function releaseExecutionAfter(execution, submissionFence) {
     if (!submissionFence?.then) {
       throw new TypeError('releaseExecutionAfter requires a submission-fence thenable');
@@ -1058,6 +1109,7 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
         arena.mechanicsViewBuffer
       ]) buffer.destroy?.();
       arena.scan.destroy();
+      arena.bindGroupCache.clear();
     }
     return true;
   }
@@ -1087,6 +1139,8 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
     markExecutionSubmitted,
     isExecutionSubmitted,
     releaseExecution,
+    canReleaseExecutionQueueOrdered,
+    releaseExecutionQueueOrdered,
     releaseExecutionAfter,
     allocationEntries: () => arenas.flatMap(allocationEntriesForArena),
     activeExecutionCount: () => arenas.filter((arena) => arena.inUse).length,

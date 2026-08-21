@@ -4,7 +4,16 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  cancelQueueOrderedCleanupClaim,
+  createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedCleanupClaim,
+  submitQueueOrderedFinalConsumerWork,
+  releaseSubmittedWorkCleanupQueueOrdered
+} from '../webgpuComputeLayout.js';
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -22,8 +31,16 @@ import {
   typedArrayContentFingerprint,
   webGpuBufferDevice
 } from './sphGpuDeviceIdentity.js';
+import {
+  appendGpuReadbackTelemetryObservation,
+  createGpuReadbackTelemetry
+} from './sphGpuReadbackTelemetry.js';
 
 export const ULG_MLS_MPM_MECHANICS_REFRESH_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-refresh.v0';
+const mechanicsRefreshCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'mls-mpm-mechanics-refresh-submitted-work'
+  });
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-phase-upload.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
@@ -391,7 +408,12 @@ function outputEnvelope({
   mechanicsMaterialBankWarmInputShaderBinding = null,
   authorityValidationStatus = 'not-observed',
   authorityValidationFailureCount = null,
-  authorityValidationBuffer = null
+  authorityValidationBuffer = null,
+  readbackTelemetry = createGpuReadbackTelemetry({
+    scope: 'mls-mpm-mechanics-refresh',
+    complete: false,
+    unknownSources: ['unclassified-mechanics-refresh-backend']
+  })
 }) {
   const mechanicsMaterialBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
     mechanicsMaterialTable,
@@ -429,7 +451,12 @@ function outputEnvelope({
     authorityValidationStatus,
     authorityValidationFailureCount,
     authorityValidationBuffer,
-    normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
+    fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackPerformed:
+      readbackMode !== NO_FULL_READBACK_MODE,
+    fullParticleReadbackFree:
+      readbackMode === NO_FULL_READBACK_MODE,
+    ...readbackTelemetry,
     destroyOutputParticleBuffers,
     scientificValidation: false,
     materialValidation: false,
@@ -704,15 +731,55 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     entries: bindGroupEntries
   });
   const mechanics = new Float32Array();
+  const destroyedBuffers = new Set();
+  let localMaterialPhaseUploadDestroyed = false;
+  let materialBankWarmInputDestroyed = false;
+  let cleanupComplete = false;
+  const destroyBufferOnce = (buffer) => {
+    if (!buffer || destroyedBuffers.has(buffer)) return;
+    buffer.destroy?.();
+    destroyedBuffers.add(buffer);
+  };
   const cleanup = () => {
-    if (!borrowedStateBuffer) stateBuffer.destroy?.();
-    if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-    if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-    if (localMaterialPhaseUpload) destroyMlsMpmMechanicsMaterialPhaseUpload(localMaterialPhaseUpload);
-    materialBankWarmInputBinding.destroy?.();
-    paramsBuffer.destroy?.();
-    authorityValidationBuffer.destroy?.();
-    if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
+    if (cleanupComplete) return;
+    let firstError = null;
+    for (const buffer of [
+      !borrowedStateBuffer ? stateBuffer : null,
+      !borrowedThermoBuffer ? thermoBuffer : null,
+      !borrowedMechanicsBuffer ? mechanicsBuffer : null,
+      paramsBuffer,
+      authorityValidationBuffer,
+      !retainOutputParticleBuffers ? outMechanicsBuffer : null
+    ]) {
+      try {
+        destroyBufferOnce(buffer);
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (
+      localMaterialPhaseUpload
+      && !localMaterialPhaseUploadDestroyed
+    ) {
+      try {
+        destroyMlsMpmMechanicsMaterialPhaseUpload(
+          localMaterialPhaseUpload
+        );
+        localMaterialPhaseUploadDestroyed = true;
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (!materialBankWarmInputDestroyed) {
+      try {
+        materialBankWarmInputBinding.destroy?.();
+        materialBankWarmInputDestroyed = true;
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError) throw firstError;
+    cleanupComplete = true;
   };
   const result = outputEnvelope({
     backend: 'webgpu',
@@ -736,6 +803,17 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     authorityValidationStatus:
       'mechanics-refresh-authority-validation-gpu-resident',
     authorityValidationBuffer,
+    readbackTelemetry: readbackMode === NO_FULL_READBACK_MODE
+      ? createGpuReadbackTelemetry({
+          scope: 'mls-mpm-mechanics-refresh-webgpu',
+          mapAsyncCount: 0,
+          readbackBytes: 0
+        })
+      : createGpuReadbackTelemetry({
+          scope: 'mls-mpm-mechanics-refresh-webgpu',
+          complete: false,
+          unknownSources: ['full-readback-pending']
+        }),
     destroyOutputParticleBuffers() {
       outMechanicsBuffer.destroy?.();
     }
@@ -768,11 +846,60 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
 
 export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage(args);
-  const { device, mlsMpmParticleState, retainOutputParticleBuffers = false } = args;
+  const {
+    device,
+    mlsMpmParticleState,
+    retainOutputParticleBuffers = false,
+    queueOrderedProducerClaims = []
+  } = args;
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
+  const exactConsumerClaims =
+    Array.isArray(queueOrderedProducerClaims)
+      ? queueOrderedProducerClaims
+      : [];
+  const authenticatedQueueOrderedRoute =
+    noFullReadback && exactConsumerClaims.length > 0;
   const encoder = device.createCommandEncoder();
   stage.encode(encoder);
-  device.queue.submit([encoder.finish()]);
+  const commandBuffer = encoder.finish();
+  let submittedWorkCleanupClaim = null;
+  let submittedWorkFinalConsumer = null;
+  if (authenticatedQueueOrderedRoute) {
+    submittedWorkCleanupClaim = registerQueueOrderedCleanupClaim(
+      mechanicsRefreshCleanupClaimIssuer,
+      device,
+      {
+        producerOutput: stage,
+        cleanup: stage.cleanupSubmittedWork
+      }
+    );
+    try {
+      submittedWorkFinalConsumer =
+        submitQueueOrderedFinalConsumerWork(
+          device,
+          [commandBuffer],
+          {
+            finalConsumerOwner: stage,
+            producerClaims: [
+              ...exactConsumerClaims,
+              submittedWorkCleanupClaim
+            ]
+          }
+        );
+    } catch (error) {
+      cancelQueueOrderedCleanupClaim(
+        submittedWorkCleanupClaim,
+        device,
+        {
+          producerOutput: stage,
+          cleanup: stage.cleanupSubmittedWork
+        }
+      );
+      throw error;
+    }
+  } else {
+    device.queue.submit([commandBuffer]);
+  }
   if (!noFullReadback) {
     const [mechanicsBytes, validationBytes] = await Promise.all([
       readBuffer(
@@ -792,9 +919,80 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
     stage.result.authorityValidationStatus = failureCount === 0
       ? 'mechanics-refresh-authority-accepted'
       : 'mechanics-refresh-authority-rejected';
+    Object.assign(stage.result, createGpuReadbackTelemetry({
+      scope: 'mls-mpm-mechanics-refresh-webgpu',
+      mapAsyncCount: 2,
+      readbackBytes:
+        Math.max(4, mlsMpmParticleState.mechanics.byteLength)
+        + Uint32Array.BYTES_PER_ELEMENT
+    }));
   }
   if (noFullReadback) {
-    deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+    if (authenticatedQueueOrderedRoute) {
+      Object.defineProperty(
+        stage.result,
+        'queueOrderedFinalConsumerCapability',
+        {
+          value: submittedWorkFinalConsumer,
+          enumerable: false
+        }
+      );
+      try {
+        const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+          device,
+          stage.cleanupSubmittedWork,
+          {
+            queueOrderedFinalConsumer: submittedWorkFinalConsumer,
+            producerClaim: submittedWorkCleanupClaim,
+            producerOutput: stage,
+            producerFamily:
+              'mls-mpm-mechanics-refresh-submitted-work'
+          }
+        );
+        Object.assign(stage.result, {
+          submittedWorkCleanupReceipt: cleanupReceipt,
+          submittedWorkCleanupStatus: cleanupReceipt.status,
+          submittedWorkCleanupHostQueueFenceCount:
+            cleanupReceipt.hostQueueFenceCount,
+          submittedWorkCleanupMethod: cleanupReceipt.queueCompletionMethod
+        });
+      } catch (error) {
+        deferSubmittedWorkCleanup(
+          device,
+          stage.cleanupSubmittedWork
+        );
+        appendGpuReadbackTelemetryObservation(stage.result, {
+          hostQueueFenceCount: 1,
+          deferredCleanupHostQueueFenceCount: 1
+        }, {
+          source: 'mechanics-refresh-submitted-work-cleanup-retry'
+        });
+        Object.assign(stage.result, {
+          submittedWorkCleanupStatus:
+            'queue-ordered-local-cleanup-retry-deferred-after-host-queue-fence',
+          submittedWorkCleanupError:
+            error instanceof Error ? error.message : String(error),
+          submittedWorkCleanupHostQueueFenceCount: 1,
+          submittedWorkCleanupMethod:
+            'gpu-queue-on-submitted-work-done'
+        });
+      }
+    } else {
+      deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+      appendGpuReadbackTelemetryObservation(stage.result, {
+        hostQueueFenceCount: 1,
+        deferredCleanupHostQueueFenceCount: 1
+      }, {
+        source: 'mechanics-refresh-submitted-work-cleanup'
+      });
+      Object.assign(stage.result, {
+        submittedWorkCleanupStatus:
+          'submitted-work-cleanup-deferred-after-host-queue-fence',
+        submittedWorkCleanupHostQueueFenceCount: 1,
+        submittedWorkCleanupMethod:
+          'gpu-queue-on-submitted-work-done'
+      });
+    }
   } else {
     stage.cleanupSubmittedWork();
   }

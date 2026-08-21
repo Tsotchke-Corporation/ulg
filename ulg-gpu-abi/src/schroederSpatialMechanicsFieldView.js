@@ -430,17 +430,31 @@ function checkedAdd(left, right, label) {
 
 export function createSchroederSpatialMechanicsFieldViewLayout({
   sourceCapacity,
+  candidateCapacity = null,
   fieldCapacity = null
 } = {}) {
   const resolvedSourceCapacity = integer(sourceCapacity, 'sourceCapacity', 1);
-  const candidateCapacity = checkedProduct(
+  const maxCandidateCapacity = checkedProduct(
     resolvedSourceCapacity,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE,
     'field candidate capacity'
   );
+  const resolvedCandidateCapacity = candidateCapacity == null
+    ? maxCandidateCapacity
+    : integer(
+        candidateCapacity,
+        'candidateCapacity',
+        1,
+        maxCandidateCapacity
+      );
   const resolvedFieldCapacity = fieldCapacity == null
-    ? candidateCapacity
-    : integer(fieldCapacity, 'fieldCapacity', 1, candidateCapacity);
+    ? resolvedCandidateCapacity
+    : integer(
+        fieldCapacity,
+        'fieldCapacity',
+        1,
+        resolvedCandidateCapacity
+      );
   const descriptorOffsetWords = SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS;
   const descriptorCapacityWords = checkedProduct(
     resolvedSourceCapacity,
@@ -500,7 +514,7 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
     sourceCapacity: resolvedSourceCapacity,
-    candidateCapacity,
+    candidateCapacity: resolvedCandidateCapacity,
     fieldCapacity: resolvedFieldCapacity,
     headerWords: SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
     descriptorOffsetWords,
@@ -530,6 +544,7 @@ export function createSchroederSpatialMechanicsFieldViewLayout({
 export function createSchroederSpatialMechanicsFieldViewPlan({
   sourceCount,
   sourceCapacity = sourceCount,
+  activeSourceCapacity = sourceCapacity,
   sourceAuthorityVersion =
     SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
   sourceRowLayoutId = 1,
@@ -566,6 +581,21 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
   );
+  const resolvedActiveSourceCapacity = integer(
+    activeSourceCapacity,
+    'activeSourceCapacity',
+    1,
+    resolvedSourceCapacity
+  );
+  if (
+    resolvedSourceAuthorityVersion
+      === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1
+    && resolvedActiveSourceCapacity !== resolvedSourceCapacity
+  ) {
+    throw new RangeError(
+      'directory-v1 field authority requires activeSourceCapacity === sourceCapacity'
+    );
+  }
   if ((!Array.isArray(gridDims) && !ArrayBuffer.isView(gridDims)) || gridDims.length !== 3) {
     throw new TypeError('gridDims must be an array-like [x, y, z] value');
   }
@@ -577,8 +607,14 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
   if (!Number.isSafeInteger(gridProduct) || gridProduct !== resolvedGridNodeCount) {
     throw new RangeError('gridNodeCount must equal gridDims[0] * gridDims[1] * gridDims[2]');
   }
+  const candidateCapacity = checkedProduct(
+    resolvedActiveSourceCapacity,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE,
+    'field candidate capacity'
+  );
   const layout = createSchroederSpatialMechanicsFieldViewLayout({
-    sourceCapacity: resolvedSourceCapacity
+    sourceCapacity: resolvedSourceCapacity,
+    candidateCapacity
   });
   const identity = Object.fromEntries([
     ['generationId', generationId, true],
@@ -599,7 +635,7 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     label,
     integer(value, label, positive ? 1 : 0)
   ]));
-  const candidateCount = checkedProduct(
+  const physicalCandidateCount = checkedProduct(
     resolvedSourceCount,
     SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE,
     'field candidate count'
@@ -611,6 +647,7 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     sourceCount: resolvedSourceCount,
     physicalSourceCount: resolvedSourceCount,
     sourceCapacity: resolvedSourceCapacity,
+    activeSourceCapacity: resolvedActiveSourceCapacity,
     sourceAuthorityVersion: resolvedSourceAuthorityVersion,
     sourceWorkIdentity: resolvedSourceAuthorityVersion
       === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
@@ -635,8 +672,8 @@ export function createSchroederSpatialMechanicsFieldViewPlan({
     candidateCount: resolvedSourceAuthorityVersion
       === SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2
       ? null
-      : candidateCount,
-    candidateCapacity: candidateCount,
+      : physicalCandidateCount,
+    candidateCapacity,
     fieldCapacity: layout.fieldCapacity,
     layout,
     deterministicOrdering: 'stable-lexicographic-u32x4',
@@ -674,6 +711,7 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     'completionOrdinal',
     'sourceCount',
     'physicalSourceCount',
+    'activeSourceCapacity',
     'sourceAuthorityVersion',
     'sourceRowLayoutId',
     'identityStrideWords',
@@ -731,7 +769,8 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
   let expectedLayout;
   try {
     expectedLayout = createSchroederSpatialMechanicsFieldViewLayout({
-      sourceCapacity: view.sourceCapacity
+      sourceCapacity: view.sourceCapacity,
+      candidateCapacity: view.candidateCapacity
     });
   } catch {
     return {
@@ -754,10 +793,17 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     || view.sourceCount < 1
     || view.sourceCount > view.sourceCapacity
     || view.physicalSourceCount !== view.sourceCount
+    || !Number.isInteger(view.activeSourceCapacity)
+    || view.activeSourceCapacity < 1
+    || view.activeSourceCapacity > view.sourceCapacity
+    || (
+      !v2Authority
+      && view.activeSourceCapacity !== view.sourceCapacity
+    )
     || (
       v2Authority
         ? view.candidateCount !== null
-          || view.candidateCapacity !== view.sourceCount
+          || view.candidateCapacity !== view.activeSourceCapacity
             * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE
         : view.candidateCount !== view.sourceCount
             * SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STENCIL_SIZE
@@ -812,6 +858,13 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
     const spatialExecution = view.spatialExecution;
     const activeSourceView = view.activeSourceView;
     const parent = view.parentMechanicsView;
+    const topologySuccessor =
+      view.topologyConstructionMode === 'conservative-successor-copy'
+      && view.constructionDispatchEvidence?.topologySuccessorCopy === true
+      && Number.isInteger(view.topologyPredecessorGenerationId)
+      && view.topologyPredecessorGenerationId > 0
+      && view.computeDispatchScaling
+        === 'gpu-authenticated-coarse-topology-copy-and-occupied-field-count';
     let activeSourceAdmission = { admitted: false };
     try {
       activeSourceAdmission = validateSchroederSpatialActiveSourceViewDescriptor(
@@ -873,12 +926,17 @@ export function validateSchroederSpatialMechanicsFieldViewDescriptor(
         !== 18 * Uint32Array.BYTES_PER_ELEMENT
       || view.activeSourceCountAuthority?.capacity
         !== activeSourceView.activeSourceCapacity
+      || activeSourceView.activeSourceCapacity !== view.activeSourceCapacity
+      || spatialExecution.activeSourceCapacity !== view.activeSourceCapacity
       || view.directorySchema !== ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA
       || view.directoryAbiVersion !== SCHROEDER_SPATIAL_EPOCH_V2_VERSION
       || view.sourceWorkIdentity !== 'gpu-active-ordinal'
       || view.retainedMemoryScaling !== 'physical-source-capacity'
-      || view.computeDispatchScaling
-        !== 'gpu-active-source-count-and-occupied-field-count'
+      || (
+        view.computeDispatchScaling
+          !== 'gpu-active-source-count-and-occupied-field-count'
+        && !topologySuccessor
+      )
     ) {
       return {
         admitted: false,

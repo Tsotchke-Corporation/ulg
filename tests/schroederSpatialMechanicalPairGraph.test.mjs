@@ -21,6 +21,7 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCALE_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_LAYOUT,
@@ -35,12 +36,12 @@ import {
 
 const UINT32_MAX = 0xffff_ffff;
 
-function limits(maxBufferSize = 4096, maxStorageBufferBindingSize = 4096) {
+function limits(maxBufferSize = 65_536, maxStorageBufferBindingSize = 65_536) {
   return { maxBufferSize, maxStorageBufferBindingSize };
 }
 
 test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR semantics', () => {
-  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_LAYOUT.length, 44);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_LAYOUT.length, 130);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_LAYOUT.length, 48);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.magic, 0);
   assert.equal(
@@ -74,6 +75,59 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.zeroEdgeDispatchZ,
     43
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount4,
+    44
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount7,
+    51
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.energyMeasureCount7,
+    55
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.measureCount8,
+    56
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.solveCount15,
+    71
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD.energyMeasureCount15,
+    79
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .preSolveMaxPositionResidualOrderedF32_0,
+    80
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .preSolveMaxPositionViolationRatioOrderedF32_0,
+    96
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .preSolveMaxVelocityResidualOrderedF32_15,
+    127
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .matchingCleanupPassCount,
+    128
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
+      .matchingCleanupTrustRestoreCount,
+    129
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
+    3_596
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORD.publishedDirectedPairCount,
@@ -146,7 +200,20 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
     ENERGY_ITERATION_1: 16384,
     ENERGY_ITERATION_2: 32768,
     ENERGY_ITERATION_3: 65536,
-    ENERGY_VERIFIED: 131072
+    ENERGY_VERIFIED: 131072,
+    ITERATION_4: 262144,
+    ITERATION_5: 524288,
+    ITERATION_6: 1048576,
+    ITERATION_7: 2097152,
+    ENERGY_ITERATION_4: 4194304,
+    ENERGY_ITERATION_5: 8388608,
+    ENERGY_ITERATION_6: 16777216,
+    ENERGY_ITERATION_7: 33554432,
+    ITERATIONS_8_15: 67108864,
+    ENERGY_ITERATIONS_8_15: 134217728,
+    MATCHING_CLEANUP: 268435456,
+    MATCHING_TRUST_RESTORED: 536870912,
+    CONTACT_INTERFACE_RECEIPT_PUBLISHED: 1073741824
   });
   assert.deepEqual(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE, {
     DIRECTORY_REJECT: 1,
@@ -167,7 +234,8 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
     STAGE_ORDER: 32768,
     ENERGY_GAIN: 65536,
     ENERGY_CLOSURE: 131072,
-    NEGATIVE_INTERNAL_ENERGY: 262144
+    NEGATIVE_INTERNAL_ENERGY: 262144,
+    CONTACT_INTERFACE_RECEIPT: 524288
   });
   assert.deepEqual(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCALE_ROW_LAYOUT, [
     'barrierDxScale:f32-bits',
@@ -195,10 +263,10 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
     RUNTIME_MECHANICAL_GRAPH_FAILURE
   );
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.exactNearTraversalCount, 1);
-  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.version, 3);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.version, 8);
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.schema,
-    'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v3'
+    'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v8'
   );
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.radixSortRequired, false);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.sentinelPaddingRequired, false);
@@ -220,7 +288,7 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
   );
   assert.match(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.conditionalDispatchBufferPolicy,
-    /zero-edge-triplet.*without-host-readback/
+    /zero-edge-triplet.*phase-reuses.*matching-cleanup.*without host readback/
   );
   assert.match(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ABI.reciprocityValidation,
@@ -246,15 +314,15 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
 test('mechanical pair-graph layout accounts every retained buffer and CSR terminator', () => {
   const layout = createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 5,
-    directedPairCapacity: 12,
-    maxRetainedBytes: 4096,
+    directedPairCapacity: 21,
+    maxRetainedBytes: 16_124,
     deviceLimits: { limits: limits() }
   });
   assert.equal(layout.schema, ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA);
   assert.equal(layout.sourceCountWordLength, 5);
   assert.equal(layout.sourceOffsetWordLength, 6);
-  assert.equal(layout.stagingWordLength, 36);
-  assert.equal(layout.directedPeerWordLength, 12);
+  assert.equal(layout.stagingWordLength, 63);
+  assert.equal(layout.directedPeerWordLength, 21);
   assert.equal(layout.scratchStateWordLength, 40);
   assert.equal(layout.scaleWordLength, 20);
   assert.equal(layout.energyRowWords, 8);
@@ -267,9 +335,9 @@ test('mechanical pair-graph layout accounts every retained buffer and CSR termin
     'solver-scratch-until-proposal-publication'
   );
   assert.equal(layout.proposalWordLength, 56);
-  assert.equal(layout.fixedRetainedByteLength, 1060);
-  assert.equal(layout.retainedWordLength, 313);
-  assert.equal(layout.retainedByteLength, 1252);
+  assert.equal(layout.fixedRetainedByteLength, 15_788);
+  assert.equal(layout.retainedWordLength, 4_031);
+  assert.equal(layout.retainedByteLength, 16_124);
   assert.equal(
     layout.indirectDispatchBufferRole,
     'mechanical-pair-graph-indirect-dispatch'
@@ -285,10 +353,12 @@ test('mechanical pair-graph layout accounts every retained buffer and CSR termin
   assert.equal(layout.conditionalDispatchSourceOffsetBytes, 164);
   assert.equal(layout.controlDispatchEvidenceOffsetWords, 29);
   assert.equal(layout.controlDispatchEvidenceOffsetBytes, 116);
-  assert.equal(layout.bufferLayouts.control.wordLength, 44);
-  assert.equal(layout.bufferLayouts.control.byteLength, 176);
+  assert.equal(layout.bufferLayouts.control.wordLength, 130);
+  assert.equal(layout.bufferLayouts.control.byteLength, 520);
   assert.equal(layout.bufferLayouts.evidence.wordLength, 48);
   assert.equal(layout.bufferLayouts.evidence.byteLength, 192);
+  assert.equal(layout.bufferLayouts.matchingCleanupControl.wordLength, 3_596);
+  assert.equal(layout.bufferLayouts.matchingCleanupControl.byteLength, 14_384);
   assert.equal(layout.bufferLayouts.control.indirect, false);
   assert.equal(layout.bufferLayouts.indirectDispatch.wordLength, 3);
   assert.equal(layout.bufferLayouts.indirectDispatch.byteLength, 12);
@@ -298,8 +368,8 @@ test('mechanical pair-graph layout accounts every retained buffer and CSR termin
   assert.equal(layout.bufferLayouts.conditionalDispatch.indirect, true);
   assert.equal(layout.bufferLayouts.sourceCounts.wordLength, 5);
   assert.equal(layout.bufferLayouts.sourceOffsets.wordLength, 6);
-  assert.equal(layout.bufferLayouts.appendStaging.byteLength, 144);
-  assert.equal(layout.bufferLayouts.directedPeers.byteLength, 48);
+  assert.equal(layout.bufferLayouts.appendStaging.byteLength, 252);
+  assert.equal(layout.bufferLayouts.directedPeers.byteLength, 84);
   assert.equal(layout.bufferLayouts.scratchStateA.byteLength, 160);
   assert.equal(layout.bufferLayouts.scratchStateB.byteLength, 160);
   assert.equal(layout.bufferLayouts.scales.byteLength, 80);
@@ -312,10 +382,21 @@ test('mechanical pair-graph layout accounts every retained buffer and CSR termin
   );
   assert.equal(layout.bufferLayouts.energyLedger.aliasWordOffset, 16);
   assert.equal(layout.bufferLayouts.energyLedger.aliasByteOffset, 64);
+  assert.equal(layout.interfaceReceiptMaximumPublishedRows, 20);
+  assert.equal(layout.interfaceReceiptWordLength, 62);
+  assert.equal(layout.interfaceReceiptAliasedToAppendStaging, true);
+  assert.equal(layout.bufferLayouts.interfaceReceipt.wordLength, 62);
+  assert.equal(layout.bufferLayouts.interfaceReceipt.byteLength, 248);
+  assert.equal(layout.bufferLayouts.interfaceReceipt.aliased, true);
+  assert.equal(
+    layout.bufferLayouts.interfaceReceipt.aliasOf,
+    'mechanical-pair-graph-append-staging'
+  );
   assert.equal(layout.bufferLayouts.proposals.byteLength, 224);
-  assert.equal(layout.buffers.length, 12);
-  assert.equal(layout.bufferAliases.length, 1);
+  assert.equal(layout.buffers.length, 13);
+  assert.equal(layout.bufferAliases.length, 2);
   assert.equal(layout.bufferAliases[0], layout.bufferLayouts.energyLedger);
+  assert.equal(layout.bufferAliases[1], layout.bufferLayouts.interfaceReceipt);
   assert.equal(
     layout.buffers.some((buffer) => (
       buffer.role === 'mechanical-pair-graph-energy-ledger'
@@ -339,30 +420,30 @@ test('mechanical pair-graph layout accounts every retained buffer and CSR termin
 test('mechanical pair-graph capacity plan obeys retained-byte, binding, and caller ceilings', () => {
   const budgetBound = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: 5,
-    maxRetainedBytes: 1160,
+    maxRetainedBytes: 16_124,
     deviceLimits: limits()
   });
-  assert.equal(budgetBound.fixedRetainedByteLength, 1060);
-  assert.equal(budgetBound.directedPairCapacity, 6);
-  assert.equal(budgetBound.layout.retainedByteLength, 1156);
+  assert.equal(budgetBound.fixedRetainedByteLength, 15_788);
+  assert.equal(budgetBound.directedPairCapacity, 21);
+  assert.equal(budgetBound.layout.retainedByteLength, 16_124);
   assert.deepEqual(budgetBound.limitingFactors, ['retainedByteBudget']);
 
   const bindingBound = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: 2,
-    maxRetainedBytes: 4096,
-    deviceLimits: limits(4096, 208)
+    maxRetainedBytes: 110_000,
+    deviceLimits: limits(110_000, 43_056)
   });
-  assert.equal(bindingBound.directedPairCapacity, 17);
-  assert.equal(bindingBound.capacityLimits.stagingMaxStorageBufferBindingSize, 17);
+  assert.equal(bindingBound.directedPairCapacity, 3588);
+  assert.equal(bindingBound.capacityLimits.stagingMaxStorageBufferBindingSize, 3588);
   assert.ok(bindingBound.limitingFactors.includes('stagingMaxStorageBufferBindingSize'));
 
   const callerBound = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: 2,
-    maximumDirectedPairCapacity: 7,
-    maxRetainedBytes: 4096,
+    maximumDirectedPairCapacity: 8,
+    maxRetainedBytes: 50_000,
     deviceLimits: limits()
   });
-  assert.equal(callerBound.directedPairCapacity, 7);
+  assert.equal(callerBound.directedPairCapacity, 8);
   assert.deepEqual(callerBound.limitingFactors, ['requestedMaximum']);
   assert.ok(Object.isFrozen(callerBound.capacityLimits));
   assert.ok(Object.isFrozen(callerBound.limitingFactors));
@@ -378,10 +459,10 @@ test('mechanical pair-graph exact particle capacity removes the rounding cliff a
     particleCapacity: 32_769,
     maxRetainedBytes
   });
-  assert.equal(below.fixedRetainedByteLength, 3_932_620);
+  assert.equal(below.fixedRetainedByteLength, 3_947_348);
   assert.equal(above.fixedRetainedByteLength, below.fixedRetainedByteLength + 120);
-  assert.equal(below.directedPairCapacity, 278_499);
-  assert.equal(above.directedPairCapacity, 278_491);
+  assert.equal(below.directedPairCapacity, 277_578);
+  assert.equal(above.directedPairCapacity, 277_571);
   assert.ok(below.directedPairCapacity - above.directedPairCapacity <= 8);
 
   const minimumDirectedPairCapacity = 32_769 * 16;
@@ -408,27 +489,33 @@ test('mechanical pair-graph layout rejects device buffer, binding, and retained-
   assert.doesNotThrow(() => createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 2,
     directedPairCapacity: 16,
-    maxRetainedBytes: 4096,
-    deviceLimits: limits(256, 256)
+    maxRetainedBytes: 15_684,
+    deviceLimits: limits(43_056, 43_056)
   }));
   assert.throws(() => createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 2,
-    directedPairCapacity: 18,
-    maxRetainedBytes: 4096,
-    deviceLimits: limits(208, 4096)
+    directedPairCapacity: 3589,
+    maxRetainedBytes: 101_524,
+    deviceLimits: limits(43_056, 100_000)
   }), /append-staging.*maxBufferSize/);
   assert.throws(() => createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 2,
-    directedPairCapacity: 18,
-    maxRetainedBytes: 4096,
-    deviceLimits: limits(4096, 208)
+    directedPairCapacity: 3589,
+    maxRetainedBytes: 101_524,
+    deviceLimits: limits(100_000, 43_056)
   }), /append-staging.*maxStorageBufferBindingSize/);
   assert.throws(() => createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 5,
-    directedPairCapacity: 12,
-    maxRetainedBytes: 1251,
+    directedPairCapacity: 21,
+    maxRetainedBytes: 16_123,
     deviceLimits: limits()
-  }), /retained byte length 1252 exceeds maxRetainedBytes 1251/);
+  }), /retained byte length 16124 exceeds maxRetainedBytes 16123/);
+  assert.throws(() => createSchroederSpatialMechanicalPairGraphLayout({
+    particleCapacity: 5,
+    directedPairCapacity: 20,
+    maxRetainedBytes: 50_000,
+    deviceLimits: limits()
+  }), /interface receipt word length 62 exceeds aliased append-staging word length 60/);
   assert.throws(() => createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: 2,
     directedPairCapacity: 1,
@@ -438,9 +525,9 @@ test('mechanical pair-graph layout rejects device buffer, binding, and retained-
   }), /must match/);
   assert.throws(() => createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: 5,
-    maxRetainedBytes: 1060,
+    maxRetainedBytes: 16_108,
     deviceLimits: limits()
-  }), /cannot admit the required 1 directed pairs/);
+  }), /cannot admit the required 21 directed pairs/);
 });
 
 test('mechanical pair-graph capacity arithmetic rejects u32 and unsafe-number inputs', () => {

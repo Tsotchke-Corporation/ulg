@@ -22,7 +22,8 @@
       273.15
      ],
      "densityKgPerM3": 917,
-     "heatCapacityJPerKgK": 2090
+     "heatCapacityJPerKgK": 2090,
+     "thermalConductivityWPerMK": 2.16
     },
     {
      "name": "liquid",
@@ -31,7 +32,8 @@
       373.15
      ],
      "densityKgPerM3": 1000,
-     "heatCapacityJPerKgK": 4186
+     "heatCapacityJPerKgK": 4186,
+     "thermalConductivityWPerMK": 0.598011575
     },
     {
      "name": "gas",
@@ -64,6 +66,21 @@
      "units": "K, J/kg, kg/m^3, J/(kg K)",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-04"
+    },
+    {
+     "family": "thermal-conductivity",
+     "source": "iapws-r15-11+nist-crc-ice-2019",
+     "method": "reference-state values held constant within each runtime phase segment; vapor intentionally omitted until temperature-density transport interpolation is implemented",
+     "status": "reference-fallback",
+     "units": "W/(m K)",
+     "referenceState": "ice Ih: 273.15 K, 101325 Pa; liquid: 293.15 K, 100000 Pa",
+     "quality": "ice table value 2.16 W/(m K); IAPWS pure-water numerical check value 0.598011575 W/(m K)",
+     "applicationPolicy": "reference-state-value-held-constant-within-runtime-phase; missing phases fail closed",
+     "references": [
+      "https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=926353",
+      "https://iapws.org/documents/release/ThCond",
+      "https://iapws.org/documents/release/Seawater-ThCond"
+     ]
     }
    ]
   },

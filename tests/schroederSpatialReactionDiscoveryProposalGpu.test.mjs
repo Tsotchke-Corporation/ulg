@@ -18,6 +18,7 @@ import {
   maxReactionContactRadiusM,
   resolveSchroederSpatialReactionDiscoveryProposalForConsumer,
   runSchroederSpatialReactionDiscoveryProposalWebGpu,
+  schroederSpatialReactionDiscoveryProposalV2Wgsl,
   schroederSpatialReactionDiscoveryProposalWgsl
 } from '../src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
 import {
@@ -225,6 +226,43 @@ function createActiveNodeList(device, particleCount = 2) {
   };
 }
 
+function createLevelAssignment(device, particleCount = 2) {
+  const assignmentBuffer = device.createBuffer({
+    label: 'reaction-discovery-level-assignment-source',
+    size: particleCount * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceStateBuffer = device.createBuffer({
+    label: 'reaction-discovery-level-assignment-state-source',
+    size: particleCount * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  return {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: 16,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer,
+    sourceStateBufferBorrowed: true,
+    storageGeneration: 11,
+    physicsTick: 13,
+    physicsSubstep: 0,
+    positionEpoch: 17,
+    topologyEpoch: 19,
+    chartEpoch: 23,
+    levelEpoch: 29,
+    supportEpoch: 31,
+    minLevel: -1,
+    maxLevel: 1,
+    chartId: 0,
+    baseGridSpacingM: 0.25
+  };
+}
+
 function createReactionTable() {
   const records = new Float32Array([
     1, 2, 3, 900,
@@ -343,7 +381,27 @@ test('reaction discovery exposes the existing one-proposal ABI and one uncapped 
   );
   assert.equal(
     SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION,
-    'v4-s9d-hot-counter-aggregation'
+    'v5-version-matched-exact-near-traversal'
+  );
+  assert.match(
+    schroederSpatialReactionDiscoveryProposalWgsl,
+    /SchroederSpatialExactNearExpectationV1/
+  );
+  assert.doesNotMatch(
+    schroederSpatialReactionDiscoveryProposalWgsl,
+    /SchroederSpatialExactNearExpectationV2/
+  );
+  assert.match(
+    schroederSpatialReactionDiscoveryProposalV2Wgsl,
+    /SchroederSpatialExactNearExpectationV2/
+  );
+  assert.match(
+    schroederSpatialReactionDiscoveryProposalV2Wgsl,
+    /SS_EXACT_NEAR_ABI_VERSION_V2/
+  );
+  assert.match(
+    schroederSpatialReactionDiscoveryProposalV2Wgsl,
+    /SS_EXACT_CELL_TREE_VERSION: u32 = 2u/
   );
   assert.match(
     schroederSpatialReactionDiscoveryProposalWgsl,
@@ -424,6 +482,90 @@ test('reaction discovery exposes the existing one-proposal ABI and one uncapped 
   assert.doesNotMatch(
     schroederSpatialReactionDiscoveryProposalWgsl,
     /for\s*\([^)]*other[^)]*params\.particle_count/
+  );
+});
+
+test('reaction discovery matches V2 generation traversal and keeps V1/V2 arenas distinct', async () => {
+  const device = createFakeDevice();
+  const reactionTable = createReactionTable();
+
+  const activeNodeList = createActiveNodeList(device);
+  const generationV1 = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    activeNodeList,
+    particleCount: 2,
+    directArenaCount: 1
+  });
+  const thermoV1 = device.createBuffer({
+    label: 'reaction-discovery-versioned-v1-thermo',
+    size: 96,
+    usage: 128
+  });
+  const proposalV1 = await runSchroederSpatialReactionDiscoveryProposalWebGpu({
+    device,
+    generation: generationV1,
+    sourceStateBuffer: activeNodeList.sourceStateBuffer,
+    sourceThermoBuffer: thermoV1,
+    reactionTable
+  });
+  assert.equal(proposalV1.directoryAbiVersion, 1);
+  assert.equal(
+    proposalV1.exactNearCellTreeTraversal,
+    'canonical-complete-binary-cell-aabb-leaf-streaming-v1'
+  );
+  assert.match(proposalV1.expectationBuffer.label, /expectation-v1-arena-0/);
+  proposalV1.destroy();
+  releaseSchroederSpatialEpochGenerationAfterQueue(generationV1, device);
+  await generationV1.releasePromise;
+
+  const levelAssignment = createLevelAssignment(device);
+  const identityBuffer = device.createBuffer({
+    label: 'reaction-discovery-versioned-v2-identity',
+    size: 2 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const generationV2 = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: 2,
+    particleIdentityBuffer: identityBuffer,
+    particleIdentityStrideWords: 1,
+    mechanicsLevels: [],
+    directArenaCount: 1
+  });
+  const thermoV2 = device.createBuffer({
+    label: 'reaction-discovery-versioned-v2-thermo',
+    size: 96,
+    usage: 128
+  });
+  const proposalV2 = await runSchroederSpatialReactionDiscoveryProposalWebGpu({
+    device,
+    generation: generationV2,
+    sourceStateBuffer: levelAssignment.sourceStateBuffer,
+    sourceThermoBuffer: thermoV2,
+    reactionTable
+  });
+  assert.equal(generationV2.execution.abiVersion, 2);
+  assert.equal(proposalV2.directoryAbiVersion, 2);
+  assert.equal(
+    proposalV2.exactNearCellTreeTraversal,
+    'canonical-complete-binary-cell-aabb-leaf-streaming-v2'
+  );
+  assert.match(proposalV2.expectationBuffer.label, /expectation-v2-arena-0/);
+  assert.notEqual(
+    proposalV2.expectationBuffer,
+    proposalV1.expectationBuffer
+  );
+  assert.ok(device.shaderModules.some(({ code }) => (
+    code === schroederSpatialReactionDiscoveryProposalV2Wgsl
+  )));
+
+  proposalV2.destroy();
+  releaseSchroederSpatialEpochGenerationAfterQueue(generationV2, device);
+  await generationV2.releasePromise;
+  assert.equal(
+    destroySchroederSpatialReactionDiscoveryProposalCache(device),
+    true
   );
 });
 
@@ -594,6 +736,14 @@ test('reaction discovery binds the exact generation and optionally observes a co
   assert.equal(proposal.exhaustiveTraversalCount, 0);
   assert.equal(proposal.candidateBudget, null);
   assert.equal(proposal.fullReadbackPerformed, false);
+  assert.equal(proposal.fullParticleReadbackPerformed, false);
+  assert.equal(proposal.fullParticleReadbackFree, true);
+  assert.equal(proposal.readbackTelemetryComplete, true);
+  assert.deepEqual(proposal.readbackTelemetryUnknownSources, []);
+  assert.equal(proposal.mapAsyncCount, 1);
+  assert.equal(proposal.readbackBytes, 108);
+  assert.equal(proposal.hostQueueFenceCount, 0);
+  assert.equal(proposal.normalHotLoopReadbackFree, false);
   assert.equal(proposal.readbackMode, 'no-full-readback');
   assert.equal(proposal.positionAuthorityIdentityExact, true);
   assert.equal(
@@ -717,7 +867,9 @@ test('reaction discovery binds the exact generation and optionally observes a co
   ).admitted, false);
 
   const expectationWrite = device.writes.find(({ buffer }) => (
-    buffer.label.startsWith('ulg-schroeder-spatial-reaction-discovery-expectation-arena-')
+    buffer.label.startsWith(
+      'ulg-schroeder-spatial-reaction-discovery-expectation-v1-arena-'
+    )
   ));
   assert.ok(expectationWrite);
   assert.equal(
@@ -783,7 +935,8 @@ test('reaction discovery binds the exact generation and optionally observes a co
     true
   );
   const proposalLayout = device.bindGroupLayouts.find(({ label }) => (
-    label === 'ulg-schroeder-spatial-reaction-discovery-proposal-bind-group-layout'
+    label
+      === 'ulg-schroeder-spatial-reaction-discovery-proposal-v1-bind-group-layout'
   ));
   assert.ok(proposalLayout);
   assert.equal(
@@ -833,7 +986,8 @@ test('reaction discovery hot path keeps the submitted seal GPU-resident with zer
     generation,
     sourceStateBuffer,
     sourceThermoBuffer,
-    reactionTable
+    reactionTable,
+    collectGpuResidentDiagnosticEvidence: true
   });
 
   assert.equal(proposal.ready, true);
@@ -842,6 +996,14 @@ test('reaction discovery hot path keeps the submitted seal GPU-resident with zer
   assert.equal(proposal.evidenceObservationReadbackByteLength, 0);
   assert.equal(proposal.gpuEvidence.residentCountersObserved, false);
   assert.equal(proposal.gpuEvidence.compactReadbackByteLength, 0);
+  assert.equal(proposal.fullParticleReadbackPerformed, false);
+  assert.equal(proposal.fullParticleReadbackFree, true);
+  assert.equal(proposal.readbackTelemetryComplete, true);
+  assert.deepEqual(proposal.readbackTelemetryUnknownSources, []);
+  assert.equal(proposal.mapAsyncCount, 0);
+  assert.equal(proposal.readbackBytes, 0);
+  assert.equal(proposal.hostQueueFenceCount, 0);
+  assert.equal(proposal.normalHotLoopReadbackFree, true);
   assert.equal(proposal.bufferCreationCount, 5);
   assert.equal(device.mapCalls.length, 0);
   assert.equal(device.unmapCalls.length, 0);
@@ -877,7 +1039,7 @@ test('reaction discovery hot path keeps the submitted seal GPU-resident with zer
     buffer.label.startsWith('ulg-schroeder-spatial-reaction-discovery-params-arena-')
   ));
   assert.ok(paramsWrite);
-  assert.equal(new DataView(paramsWrite.data).getUint32(56, true), 0);
+  assert.equal(new DataView(paramsWrite.data).getUint32(56, true), 1);
 
   proposal.destroy();
   releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);

@@ -11,6 +11,10 @@ import {
   buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
+import {
+  resolveSphThermalEnvironmentAuthority,
+  resolveSphWallReservoirAuthority
+} from './thermalEnvironmentAuthority.js';
 
 export const ULG_SPH_PHASE_VIEW_STATE_SCHEMA = 'peercompute.ulg.sph-phase-view-state.v0';
 
@@ -19,6 +23,22 @@ export function createSphPhaseViewState(driver) {
     throw new TypeError('createSphPhaseViewState requires an SPH phase demo driver');
   }
   const demo = driver.demo;
+  const thermalEnvironmentAuthority = resolveSphThermalEnvironmentAuthority({
+    ambientTemperatureK: demo.scenario?.ambientTemperatureK,
+    thermalEnvironmentAuthority: demo.scenario?.thermalEnvironment ?? null,
+    source: 'sph-phase-view-state-scenario',
+    sourceScenarioId: demo.scenario?.scenarioId ?? null
+  });
+  const wallReservoirAuthority = resolveSphWallReservoirAuthority({
+    wallTemperaturesK: demo.scenario?.walls?.faces,
+    wallReservoirAuthority:
+      demo.scenario?.wallReservoirAuthority
+      ?? demo.scenario?.walls?.authority
+      ?? null,
+    wallModel: demo.scenario?.walls?.model,
+    source: 'sph-phase-view-state-scenario',
+    sourceScenarioId: demo.scenario?.scenarioId ?? null
+  });
   const colors = particleColors(demo);
   const pressureSummary = gasPressureSummary(demo);
   const renderDescriptors = particleRenderDescriptors(demo, { gasPressure: pressureSummary });
@@ -155,12 +175,19 @@ export function createSphPhaseViewState(driver) {
         }
       : null,
     scenario: {
+      scenarioId: demo.scenario?.scenarioId ?? null,
+      ambientTemperatureK: thermalEnvironmentAuthority.ambientTemperatureK,
+      thermalEnvironment: thermalEnvironmentAuthority,
       walls: {
-        model: demo.scenario?.walls?.model ?? null,
-        faces: { ...(demo.scenario?.walls?.faces || {}) }
+        model: wallReservoirAuthority.model,
+        faces: { ...wallReservoirAuthority.faces },
+        authority: wallReservoirAuthority
       }
     },
-    wallTemperaturesK: { ...(demo.scenario?.walls?.faces || {}) },
+    ambientTemperatureK: thermalEnvironmentAuthority.ambientTemperatureK,
+    thermalEnvironmentAuthority,
+    wallTemperaturesK: { ...wallReservoirAuthority.faces },
+    wallReservoirAuthority,
     box: {
       edgeM: demo.box.edgeM,
       dimensionsM: [...demo.box.dimensionsM]
@@ -168,6 +195,8 @@ export function createSphPhaseViewState(driver) {
     physicalLawGroups: { ...(demo.physicalLawGroups || demo.state?.physicalLawGroups || {}) },
     pendingPhysicalLawGroups: (demo.pendingPhysicalLawGroups || demo.state?.pendingPhysicalLawGroups || [])
       .map((group) => ({ ...group })),
+    surfaceTensionLawAdmission:
+      demo.surfaceTensionLawAdmission || demo.state?.surfaceTensionLawAdmission || null,
     gpuMechanics: { ...demo.gpuMechanics },
     initialHydrostaticState: demo.initialHydrostaticState ? { ...demo.initialHydrostaticState } : null,
     initialBodies: demo.initialBodies

@@ -18,6 +18,7 @@ export const ULG_SCHROEDER_HIERARCHY_ARTIFACT_LEDGER_SUMMARY_SCHEMA =
   'peercompute.ulg.schroeder-hierarchy-artifact-ledger-summary.v0';
 
 const TRANSFER_CLASSES = new Set(['render', 'next-tick', 'continuation']);
+const QUEUE_ORDERED_TRANSFER_CLASSES = new Set(['render', 'next-tick']);
 const RETIREMENT_AUTHORITIES = new Set(['ledger-consumer', 'external-owner']);
 const runtimeByLedger = new WeakMap();
 
@@ -533,6 +534,10 @@ function scheduleAfter(ledger, {
   after = null,
   submitted = true,
   requireConfirmedTrue = false,
+  queueOrderedFinalConsumer = null,
+  queueOrderedProducerClaim = null,
+  queueOrderedProducerOutput = null,
+  queueOrderedProducerFamily = null,
   scheduleKey,
   reason,
   cleanup
@@ -591,7 +596,41 @@ function scheduleAfter(ledger, {
     return invoke();
   };
   let completion;
-  if (after && typeof after.then === 'function') {
+  if (queueOrderedFinalConsumer != null) {
+    if (
+      after != null
+      || submitted !== true
+      || queueOrderedProducerClaim == null
+      || queueOrderedProducerOutput == null
+      || typeof queueOrderedProducerFamily !== 'string'
+      || !queueOrderedProducerFamily.trim()
+      || typeof runtime.releaseQueueOrderedCleanup !== 'function'
+    ) {
+      const error = new Error(
+        'Queue-ordered hierarchy artifact retirement requires one submitted final-consumer authority and no host fence'
+      );
+      error.code =
+        'ERR_SCHROEDER_HIERARCHY_ARTIFACT_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED';
+      throw error;
+    }
+    clearResolvedFenceBlockers();
+    runtime.releaseQueueOrderedCleanup(
+      cleanup,
+      queueOrderedFinalConsumer,
+      {
+        producerClaim: queueOrderedProducerClaim,
+        producerOutput: queueOrderedProducerOutput,
+        producerFamily: queueOrderedProducerFamily.trim()
+      }
+    );
+    ledger.events.push({
+      status: 'artifact-retirement-queue-ordered-final-consumer-confirmed',
+      reason: cleanString(reason, 'hierarchy-artifact-cleanup')
+    });
+    completion = Promise.resolve(
+      summarizeSchroederHierarchyArtifactLedger(ledger)
+    );
+  } else if (after && typeof after.then === 'function') {
     completion = Promise.resolve(after).then(
       confirmAndInvoke,
       (error) => {
@@ -647,7 +686,10 @@ export function createSchroederHierarchyArtifactLedger({
   generationId = null,
   step = null,
   time = null,
-  deferCleanup = null
+  deferCleanup = null,
+  registerQueueOrderedTransferCleanup = null,
+  cancelQueueOrderedTransferCleanup = null,
+  releaseQueueOrderedCleanup = null
 } = {}) {
   const resolvedLedgerId = cleanString(
     ledgerId,
@@ -695,7 +737,20 @@ export function createSchroederHierarchyArtifactLedger({
     resources: [],
     groupDestroyers: new WeakMap(),
     schedules: new Map(),
-    deferCleanup: typeof deferCleanup === 'function' ? deferCleanup : null
+    queueOrderedTransferClaims: new Map(),
+    deferCleanup: typeof deferCleanup === 'function' ? deferCleanup : null,
+    registerQueueOrderedTransferCleanup:
+      typeof registerQueueOrderedTransferCleanup === 'function'
+        ? registerQueueOrderedTransferCleanup
+        : null,
+    cancelQueueOrderedTransferCleanup:
+      typeof cancelQueueOrderedTransferCleanup === 'function'
+        ? cancelQueueOrderedTransferCleanup
+        : null,
+    releaseQueueOrderedCleanup:
+      typeof releaseQueueOrderedCleanup === 'function'
+        ? releaseQueueOrderedCleanup
+        : null
   });
   return refreshLedger(ledger);
 }
@@ -1060,11 +1115,159 @@ export function scheduleSchroederHierarchyArtifactRetirement(ledger, {
   });
 }
 
+function releaseSchroederHierarchyTransferResources(
+  ledger,
+  runtime,
+  resources,
+  {
+    transferClass,
+    reason
+  }
+) {
+  for (const resource of resources) {
+    const transfer = resource.transfer;
+    if (
+      transfer?.transferClass !== transferClass
+      || transfer.status !== 'active'
+    ) {
+      continue;
+    }
+    releaseResidentBufferLease(runtime.baseLedger, transfer.leaseId, {
+      status: transfer.retirementAuthority === 'external-owner'
+        ? 'ownership-transferred'
+        : 'released'
+    });
+    transfer.status = transfer.retirementAuthority === 'external-owner'
+      ? 'ownership-transferred'
+      : 'released';
+    ledger.events.push({
+      resourceKey: resource.canonicalKey,
+      status: `artifact-transfer-${transfer.status}`,
+      transferClass,
+      reason
+    });
+    if (transfer.retirementAuthority === 'external-owner') {
+      resource.externallyOwned = true;
+      resource.retirementStatus = 'retirement-delegated-to-external-owner';
+    } else {
+      retireRecord(ledger, resource, {
+        reason,
+        allowTransferred: true
+      });
+    }
+  }
+  refreshLedger(ledger);
+  return summarizeSchroederHierarchyArtifactLedger(ledger);
+}
+
+/**
+ * Register one producer-private cleanup claim per transfer class. Each claim
+ * owns a distinct private output identity and one stable cleanup function that
+ * retires every still-active transfer in that class. This deliberate
+ * coalescing lets multiple scoped public release calls share one true final
+ * consumer without attempting to register the public ledger object twice.
+ */
+export function prepareSchroederHierarchyArtifactTransferCleanupClaims(
+  ledger,
+  {
+    transferClasses = ['render', 'next-tick']
+  } = {}
+) {
+  const runtime = assertLedger(ledger);
+  if (
+    typeof runtime.registerQueueOrderedTransferCleanup !== 'function'
+    || typeof runtime.cancelQueueOrderedTransferCleanup !== 'function'
+    || typeof runtime.releaseQueueOrderedCleanup !== 'function'
+  ) {
+    throw new Error(
+      'Queue-ordered hierarchy transfer claims require exact register, cancel, and release owners'
+    );
+  }
+  const normalizedClasses = uniqueStrings(transferClasses);
+  const claims = [];
+  for (const transferClass of normalizedClasses) {
+    if (!QUEUE_ORDERED_TRANSFER_CLASSES.has(transferClass)) {
+      throw new Error(
+        `Unsupported queue-ordered hierarchy transfer class: ${transferClass}`
+      );
+    }
+    const activeResources = runtime.resources.filter(
+      (resource) => (
+        resource.transfer?.transferClass === transferClass
+        && resource.transfer.status === 'active'
+        && resource.transfer.retirementAuthority === 'ledger-consumer'
+      )
+    );
+    if (activeResources.length === 0) continue;
+    const existing = runtime.queueOrderedTransferClaims.get(transferClass);
+    if (existing) {
+      if (existing.status !== 'registered') {
+        throw new Error(
+          `Queue-ordered hierarchy transfer claim is no longer live: ${transferClass}`
+        );
+      }
+      claims.push(existing.producerClaim);
+      continue;
+    }
+    const producerFamily =
+      `schroeder-hierarchy-artifact-transfer:${transferClass}`;
+    const producerOutput = Object.freeze({
+      schema:
+        'peercompute.ulg.schroeder-hierarchy-artifact-transfer-output.v0',
+      status: 'schroeder-hierarchy-artifact-transfer-output-private',
+      transferClass
+    });
+    const state = {
+      transferClass,
+      producerFamily,
+      producerOutput,
+      producerClaim: null,
+      releaseReason: `${transferClass}-consumer-released`,
+      cleanup: null,
+      status: 'registering'
+    };
+    state.cleanup = () => {
+      const resources = runtime.resources.filter(
+        (resource) => (
+          resource.transfer?.transferClass === transferClass
+          && resource.transfer.status === 'active'
+        )
+      );
+      return releaseSchroederHierarchyTransferResources(
+        ledger,
+        runtime,
+        resources,
+        {
+          transferClass,
+          reason: state.releaseReason
+        }
+      );
+    };
+    state.producerClaim = runtime.registerQueueOrderedTransferCleanup(
+      state.cleanup,
+      {
+        producerOutput,
+        producerFamily
+      }
+    );
+    if (state.producerClaim == null) {
+      throw new Error(
+        `Queue-ordered hierarchy transfer claim registration failed: ${transferClass}`
+      );
+    }
+    state.status = 'registered';
+    runtime.queueOrderedTransferClaims.set(transferClass, state);
+    claims.push(state.producerClaim);
+  }
+  return Object.freeze(claims);
+}
+
 export function releaseSchroederHierarchyArtifactTransfers(ledger, {
   transferClass,
   after = null,
   submitted = true,
   requireConfirmedTrue = false,
+  queueOrderedFinalConsumer = null,
   reason = null,
   keys = null,
   families = null,
@@ -1083,41 +1286,98 @@ export function releaseSchroederHierarchyArtifactTransfers(ledger, {
     return Promise.resolve(summarizeSchroederHierarchyArtifactLedger(ledger));
   }
   const releaseReason = cleanString(reason, `${normalizedClass}-consumer-released`);
-  const releaseScope = resources.map((resource) => resource.canonicalKey).sort().join(',');
-  return scheduleAfter(ledger, {
-    after,
-    submitted,
-    requireConfirmedTrue,
-    scheduleKey: `transfer-release:${normalizedClass}:${releaseScope}`,
-    reason: releaseReason,
-    cleanup: () => {
-      for (const resource of resources) {
-        const transfer = resource.transfer;
-        releaseResidentBufferLease(runtime.baseLedger, transfer.leaseId, {
-          status: transfer.retirementAuthority === 'external-owner'
-            ? 'ownership-transferred'
-            : 'released'
-        });
-        transfer.status = transfer.retirementAuthority === 'external-owner'
-          ? 'ownership-transferred'
-          : 'released';
-        ledger.events.push({
-          resourceKey: resource.canonicalKey,
-          status: `artifact-transfer-${transfer.status}`,
-          transferClass: normalizedClass,
-          reason: releaseReason
-        });
-        if (transfer.retirementAuthority === 'external-owner') {
-          resource.externallyOwned = true;
-          resource.retirementStatus = 'retirement-delegated-to-external-owner';
-        } else {
-          retireRecord(ledger, resource, { reason: releaseReason, allowTransferred: true });
-        }
-      }
-      refreshLedger(ledger);
-      return summarizeSchroederHierarchyArtifactLedger(ledger);
+  const preparedClaim =
+    runtime.queueOrderedTransferClaims.get(normalizedClass) ?? null;
+  if (queueOrderedFinalConsumer == null && preparedClaim?.status === 'registered') {
+    if (typeof runtime.cancelQueueOrderedTransferCleanup !== 'function') {
+      throw new Error(
+        'Queue-ordered hierarchy transfer claim cannot fall back without its exact cancellation owner'
+      );
     }
-  });
+    runtime.cancelQueueOrderedTransferCleanup(
+      preparedClaim.producerClaim,
+      preparedClaim.cleanup,
+      {
+        producerOutput: preparedClaim.producerOutput,
+        producerFamily: preparedClaim.producerFamily
+      }
+    );
+    preparedClaim.status = 'cancelled';
+  }
+  let selectedResources = resources;
+  let releaseScope =
+    resources.map((resource) => resource.canonicalKey).sort().join(',');
+  let scheduleKey =
+    `transfer-release:${normalizedClass}:${releaseScope}`;
+  let queueOrderedProducerClaim = null;
+  let queueOrderedProducerOutput = null;
+  let queueOrderedProducerFamily = null;
+  let cleanup = () => releaseSchroederHierarchyTransferResources(
+    ledger,
+    runtime,
+    selectedResources,
+    {
+      transferClass: normalizedClass,
+      reason: releaseReason
+    }
+  );
+  if (queueOrderedFinalConsumer != null) {
+    if (
+      !preparedClaim
+      || preparedClaim.status !== 'registered'
+      || !QUEUE_ORDERED_TRANSFER_CLASSES.has(normalizedClass)
+    ) {
+      const error = new Error(
+        'Queue-ordered hierarchy transfer release requires its exact live class claim'
+      );
+      error.code =
+        'ERR_SCHROEDER_HIERARCHY_ARTIFACT_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED';
+      throw error;
+    }
+    selectedResources = runtime.resources.filter(
+      (resource) => (
+        resource.transfer?.transferClass === normalizedClass
+        && resource.transfer.status === 'active'
+      )
+    );
+    releaseScope = 'all-active';
+    scheduleKey = `transfer-release:${normalizedClass}:${releaseScope}`;
+    preparedClaim.releaseReason = releaseReason;
+    cleanup = preparedClaim.cleanup;
+    queueOrderedProducerClaim = preparedClaim.producerClaim;
+    queueOrderedProducerOutput = preparedClaim.producerOutput;
+    queueOrderedProducerFamily = preparedClaim.producerFamily;
+    preparedClaim.status = 'release-attempted';
+  }
+  let completion;
+  try {
+    completion = scheduleAfter(ledger, {
+      after,
+      submitted,
+      requireConfirmedTrue,
+      queueOrderedFinalConsumer,
+      queueOrderedProducerClaim,
+      queueOrderedProducerOutput,
+      queueOrderedProducerFamily,
+      scheduleKey,
+      reason: releaseReason,
+      cleanup
+    });
+  } catch (error) {
+    if (
+      preparedClaim?.status === 'release-attempted'
+      && error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED'
+    ) {
+      // Central validation rejected the capability before consuming the
+      // exact claim, so a correct final-consumer capability may retry.
+      preparedClaim.status = 'registered';
+    }
+    throw error;
+  }
+  if (preparedClaim?.status === 'release-attempted') {
+    preparedClaim.status = 'consumed';
+  }
+  return completion;
 }
 
 export function reclaimSchroederHierarchyArtifactTransfers(ledger, {
@@ -1132,6 +1392,18 @@ export function reclaimSchroederHierarchyArtifactTransfers(ledger, {
   );
   if (resources.length === 0) {
     return Promise.resolve(summarizeSchroederHierarchyArtifactLedger(ledger));
+  }
+  for (const state of runtime.queueOrderedTransferClaims.values()) {
+    if (state.status !== 'registered') continue;
+    runtime.cancelQueueOrderedTransferCleanup(
+      state.producerClaim,
+      state.cleanup,
+      {
+        producerOutput: state.producerOutput,
+        producerFamily: state.producerFamily
+      }
+    );
+    state.status = 'cancelled';
   }
   return scheduleAfter(ledger, {
     after,

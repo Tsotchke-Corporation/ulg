@@ -102,8 +102,8 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_ROW_FLOATS = 8;
 export const SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS =
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS;
 export const SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS = 16;
-export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES = 512;
-export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES = 512;
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES = 1024;
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES = 1024;
 // The owner admits a bounded contact/wall frontier. This is an incident-CSR
 // admission cap, not a claim that every owner stage visits each cursor once.
 export const
@@ -15991,7 +15991,7 @@ fn run_matching_cleanup_global_owner(
   let dispatch_active = workgroupUniformLoad(
     &mechanical_matching_persistent_dispatch_active
   );
-  // The host retains the exact 512-dispatch logical horizon. Once the prior
+  // The host retains the exact 1024-dispatch logical horizon. Once the prior
   // owner quantum has synthesized the terminal receipt tail (or failed
   // closed), make every remaining directly encoded quantum a uniform early
   // return instead of executing its otherwise-unavoidable barrier skeleton.
@@ -19236,7 +19236,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       ? null
       : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS,
     solverPolicy:
-      'retained-csr-sixteen-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-512-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit',
+      'retained-csr-sixteen-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-1024-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit',
     aggregateHierarchyEnabled,
     aggregateAdmissionStatus,
     activeRankViewEnabled,

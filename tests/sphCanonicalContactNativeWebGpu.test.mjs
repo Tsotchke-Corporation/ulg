@@ -1001,12 +1001,12 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
               JSON.stringify(interfaceReceiptHeader)
             }; control=${Array.from(graphControl)}; cleanupPass0=${[
               matchingCleanupControl[12],
-              matchingCleanupControl[12 + 512],
-              matchingCleanupControl[12 + 2 * 512],
-              matchingCleanupControl[12 + 3 * 512],
-              matchingCleanupControl[12 + 4 * 512],
-              matchingCleanupControl[12 + 5 * 512],
-              matchingCleanupControl[12 + 6 * 512]
+              matchingCleanupControl[12 + matchingCleanupPasses],
+              matchingCleanupControl[12 + 2 * matchingCleanupPasses],
+              matchingCleanupControl[12 + 3 * matchingCleanupPasses],
+              matchingCleanupControl[12 + 4 * matchingCleanupPasses],
+              matchingCleanupControl[12 + 5 * matchingCleanupPasses],
+              matchingCleanupControl[12 + 6 * matchingCleanupPasses]
             ]}; cleanupHeader=${Array.from(
               matchingCleanupControl.slice(0, 12)
             )}; selections=${JSON.stringify(matchingSelections)}`
@@ -1032,12 +1032,12 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
                 Array.from(graphControl)
               }; cleanupPass0=${[
                 matchingCleanupControl[12],
-                matchingCleanupControl[12 + 512],
-                matchingCleanupControl[12 + 2 * 512],
-                matchingCleanupControl[12 + 3 * 512],
-                matchingCleanupControl[12 + 4 * 512],
-                matchingCleanupControl[12 + 5 * 512],
-                matchingCleanupControl[12 + 6 * 512]
+                matchingCleanupControl[12 + matchingCleanupPasses],
+                matchingCleanupControl[12 + 2 * matchingCleanupPasses],
+                matchingCleanupControl[12 + 3 * matchingCleanupPasses],
+                matchingCleanupControl[12 + 4 * matchingCleanupPasses],
+                matchingCleanupControl[12 + 5 * matchingCleanupPasses],
+                matchingCleanupControl[12 + 6 * matchingCleanupPasses]
               ]}; cleanupHeader=${Array.from(
                 matchingCleanupControl.slice(0, 12)
               )}; selections=${JSON.stringify(
@@ -3627,7 +3627,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
         )),
         'dense measured contact samples did not all reuse the warmed arena'
       );
-      // The 512-sweep proof bound keeps 512 one-workgroup finalizer dispatches
+      // The 1024-sweep proof bound keeps 1024 one-workgroup finalizer dispatches
       // encoded even when the GPU latch has suppressed the converged particle
       // tail. WebGPU forbids a finalizer from writing the buffer that supplies
       // its own indirect arguments, so removing those launches requires a

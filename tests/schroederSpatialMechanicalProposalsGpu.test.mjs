@@ -2940,10 +2940,10 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.equal(SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS, 48);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT, 1);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS, 16);
-  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES, 512);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES, 1024);
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
-    512
+    1024
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
@@ -2961,7 +2961,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
-    512
+    1024
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
@@ -3345,7 +3345,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.match(matchingFinalizeSource,
     /mechanical_matching_wall_count_word\(completed_pass\)/);
   assert.match(matchingFinalizeSource,
-    /&graph_control\[128u\],[\s\S]*512u/);
+    /&graph_control\[128u\],[\s\S]*1024u/);
   assert.match(matchingFinalizeSource,
     /bitcast<f32>\(terminal_position_ratio\) <= 1\.0/);
   assert.match(matchingFinalizeSource,
@@ -3360,7 +3360,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   const residualVerifySource = wgslFunctionSource('verify_contact_residual');
   assert.match(
     matchingTrustRestoreSource,
-    /mechanical_matching_current_pass\(\)\s*!= 512u/
+    /mechanical_matching_current_pass\(\)\s*!= 1024u/
   );
   assert.match(
     matchingTrustRestoreSource,
@@ -3368,7 +3368,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.match(
     residualVerifySource,
-    /&graph_control\[128u\][\s\S]*?\)\s*!= 512u/
+    /&graph_control\[128u\][\s\S]*?\)\s*!= 1024u/
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
@@ -3491,7 +3491,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
       'fn apply_matching_cleanup_edge_for_index('
     )
   );
-  assert.match(matchingCopySource, />= 512u/);
+  assert.match(matchingCopySource, />= 1024u/);
   assert.match(matchingCopySource,
     /output_state\[self_index \* 2u\] = input_state\[self_index \* 2u\]/);
   const matchingApplySource =
@@ -3647,7 +3647,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
       start,
       start + 1200
     );
-    assert.match(source, /pass_index[\s\S]*>= 512u[\s\S]*\) \{ return; \}/);
+    assert.match(source, /pass_index[\s\S]*>= 1024u[\s\S]*\) \{ return; \}/);
   }
   assert.match(schroederSpatialMechanicalProposalWgsl,
     /ss_exact_near_directory_admitted\(spatial_expectation\)/);
@@ -5112,7 +5112,7 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
   );
   assert.equal(
     first.contactGraph.layout.bufferLayouts.matchingCleanupControl.wordLength,
-    3_596
+    7_180
   );
   assert.equal(first.contactGraph.energyLedgerAliasedToProposalRows, true);
   assert.equal(
@@ -5404,7 +5404,10 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
     /let dispatch_active = workgroupUniformLoad\([\s\S]*&mechanical_matching_persistent_dispatch_active[\s\S]*\);[\s\S]*if \(dispatch_active == 0u\) \{[\s\S]*atomicStore\(&matching_cleanup_dispatch\[0u\], 0u\);[\s\S]*return;[\s\S]*\}[\s\S]*storageBarrier\(\);/
   );
   assert.doesNotMatch(matchingOwnerWgsl, /component_mode|atomic spin/i);
-  assert.ok(first.encodedDispatchCount <= 640);
+  assert.ok(
+    first.encodedDispatchCount
+      <= 128 + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+  );
   const energyVerifyDispatch = fixture.device.dispatches.find(
     ({ pipeline }) => pipeline?.label
       === 'ulg-schroeder-spatial-mechanical-contact-energy-verify'
@@ -5549,13 +5552,13 @@ test('a tighter pair-graph byte budget cannot reuse an oversized warm arena', as
 
   const constrained = runSchroederSpatialMechanicalProposalWebGpu({
     ...fixture,
-    pairGraphByteBudget: 20 * 1024
+    pairGraphByteBudget: 34 * 1024
   });
   assert.equal(constrained.proposalPoolCacheHit, false);
-  assert.ok(constrained.candidateByteBudget <= 20 * 1024);
-  assert.equal(constrained.configuredRetainedByteBudget, 20 * 1024);
-  assert.ok(constrained.totalRetainedGraphByteLength <= 20 * 1024);
-  assert.ok(20 * 1024 - constrained.totalRetainedGraphByteLength < 32);
+  assert.ok(constrained.candidateByteBudget <= 34 * 1024);
+  assert.equal(constrained.configuredRetainedByteBudget, 34 * 1024);
+  assert.ok(constrained.totalRetainedGraphByteLength <= 34 * 1024);
+  assert.ok(34 * 1024 - constrained.totalRetainedGraphByteLength < 32);
   assert.equal(
     fixture.device.buffers.filter(
       ({ label }) => label.startsWith(
@@ -5582,7 +5585,7 @@ test('explicit mechanical graph budgets below the sixteen-row floor fail before 
   const beforeBuffers = fixture.device.buffers.length;
   assert.throws(() => runSchroederSpatialMechanicalProposalWebGpu({
     ...fixture,
-    pairGraphByteBudget: 15_428 + 31 * 32
+    pairGraphByteBudget: 29_764 + 31 * 32
   }), /cannot admit the required 32 directed pairs/);
   assert.equal(fixture.device.buffers.length, beforeBuffers);
   destroySchroederSpatialMechanicalProposalRuntime(fixture.device);

@@ -105,16 +105,33 @@ export const SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS =
 export const SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS = 16;
 export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES = 1024;
 export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES = 1024;
-// The owner admits a bounded contact/wall frontier. This is an incident-CSR
-// admission cap, not a claim that every owner stage visits each cursor once.
+// Chunked owner encoding: every single-workgroup owner dispatch runs this
+// many LOGICAL cleanup passes in an in-shader loop with workgroup/storage
+// barriers between passes, instead of one host-encoded dispatch per logical
+// pass. 32 is chosen because (a) it divides both production presets exactly
+// (batch 1024 -> 32 dispatches, interactive 512 -> 16), (b) it removes the
+// measured interactive-presentation starvation caused by >~640 serially
+// encoded single-workgroup dispatches per step, and (c) it keeps one
+// dispatch TDR-safe: each logical pass is a fixed number of particle-strided
+// scans plus frontier work bounded by the admission caps below, so 32
+// chunked passes remain orders of magnitude below watchdog horizons. The
+// pass clock stays fully logical: evidence rows, the terminal
+// ITERATION_INCOMPLETE window, and convergence acceptance are all keyed by
+// the logical pass number; the in-loop latch re-check breaks out of the
+// chunk (workgroup-uniformly) exactly where the per-dispatch early return
+// used to fire.
 export const
-  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH = 1;
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH = 32;
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES =
-    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
-      / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH;
+    Math.ceil(
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+        / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+    );
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS = 5;
+// The owner admits a bounded contact/wall frontier. This is an incident-CSR
+// admission cap, not a claim that every owner stage visits each cursor once.
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES =
     1024;
@@ -343,8 +360,14 @@ export function resolveSchroederSpatialMechanicalSolverBudget({
     encodedPassBudget: cleanupPassBudget,
     ownerPassesPerDispatch:
       SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
-    ownerDispatches: cleanupPassBudget
-      / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    // Chunked owner encoding: ceil(logical passes / passes-per-dispatch)
+    // host-encoded single-workgroup dispatches cover the whole declared
+    // budget; a final partial chunk is truncated on-GPU by the uniform
+    // in-loop pass-clock latch, never by the host.
+    ownerDispatches: Math.ceil(
+      cleanupPassBudget
+        / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+    ),
     selectionCountWord,
     copyCountWord,
     applyCountWord,
@@ -16132,12 +16155,14 @@ fn run_matching_cleanup_global_owner(
   let dispatch_active = workgroupUniformLoad(
     &mechanical_matching_persistent_dispatch_active
   );
-  // The host retains the exact 1024-dispatch logical horizon. Once the prior
-  // owner quantum has synthesized the terminal receipt tail (or failed
-  // closed), make every remaining directly encoded quantum a uniform early
-  // return instead of executing its otherwise-unavoidable barrier skeleton.
-  // This is entirely GPU-resident and does not add an indirect usage, host
-  // observation, or queue fence.
+  // The host encodes ceil(cleanupPassBudget / ownerPassesPerDispatch)
+  // chunked owner quanta for the full logical horizon. Once a prior quantum
+  // has synthesized the terminal receipt tail (or failed closed), make every
+  // remaining directly encoded quantum a uniform early return instead of
+  // executing its otherwise-unavoidable barrier skeleton; the matching
+  // in-loop latch below performs the same uniform exit between the logical
+  // passes of one quantum. This is entirely GPU-resident and does not add an
+  // indirect usage, host observation, or queue fence.
   if (dispatch_active == 0u) {
     if (lane == 0u && arrayLength(&matching_cleanup_dispatch) >= 3u) {
       atomicStore(&matching_cleanup_dispatch[0u], 0u);
@@ -16159,6 +16184,30 @@ fn run_matching_cleanup_global_owner(
         mechanical_matching_current_pass();
       mechanical_matching_persistent_active_count = 0u;
       mechanical_matching_persistent_contact_count = 0u;
+      mechanical_matching_persistent_dispatch_active = 0u;
+      if (
+        mechanical_solver_full_path_enabled()
+        && mechanical_matching_persistent_pass
+          < ${solverBudget.cleanupPassBudget}u
+        && atomicLoad(&graph_control[14u]) == 0u
+      ) {
+        mechanical_matching_persistent_dispatch_active = 1u;
+      }
+    }
+    // Chunked-pass latch: finalize_matching_cleanup_pass_body advanced the
+    // logical pass clock (or synthesized the converged terminal tail, or a
+    // stage failed closed) at the end of the previous loop iteration, and
+    // this re-check observes it before committing to another logical pass.
+    // workgroupUniformLoad both publishes lane 0's writes (it is a control
+    // barrier) and returns a workgroup-uniform value, so the break below is
+    // uniform across the workgroup and the unconditional barriers of later
+    // iterations stay in uniform control flow -- the same pattern as the
+    // fresh-dispatch early return above, applied inside the loop.
+    let pass_latch_active = workgroupUniformLoad(
+      &mechanical_matching_persistent_dispatch_active
+    );
+    if (pass_latch_active == 0u) {
+      break;
     }
     let published_total_before_expansion = atomicLoad(&graph_control[12u]);
     let frontier_counts_before_expansion =
@@ -19458,9 +19507,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'declared-budget-compiled-into-pipeline-variants-and-verified-against-control-header-words-10-11-fail-closed',
     // Fixed (scan-independent) deferred dispatch count for the declared
     // budget: 18 bundle commands + 3 dispatches per Jacobi round + the
-    // cleanup path (one owner dispatch per pass in production; the legacy
-    // diagnostic ping-pong encodes 5 stage dispatches plus 2 trace
-    // dispatches per pass and 3 terminal trace dispatches).
+    // cleanup path (ceil(passes / ownerPassesPerDispatch) chunked owner
+    // dispatches in production, each looping its logical passes in-shader;
+    // the legacy diagnostic ping-pong encodes 5 stage dispatches plus 2
+    // trace dispatches per pass and 3 terminal trace dispatches).
     encodedDeferredDispatchFloor:
       18
       + 3 * solverBudget.jacobiIterations
@@ -19488,7 +19538,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       ? null
       : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS,
     solverPolicy:
-      `retained-csr-${solverBudget.jacobiIterations}-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-${solverBudget.cleanupPassBudget}-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit`,
+      `retained-csr-${solverBudget.jacobiIterations}-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-${solverBudget.cleanupPassBudget}-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-${solverBudget.ownerPassesPerDispatch}-passes-per-dispatch-chunked-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit`,
     aggregateHierarchyEnabled,
     aggregateAdmissionStatus,
     activeRankViewEnabled,

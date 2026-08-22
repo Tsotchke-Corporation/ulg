@@ -1933,6 +1933,7 @@ fn main() {
             mechanicalProposal =
               mechanicalProposalModule
                 .runSchroederSpatialMechanicalProposalWebGpu({
+                  cleanupPassBudget: 1024,
                   device,
                   generation,
                   sphParticleState,

@@ -38,6 +38,14 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION,
   SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_BYTES,
   SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET,
+  SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET,
+  SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX,
+  SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_SOLVER_BUDGET,
+  SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX,
+  SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN,
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS,
@@ -67,8 +75,10 @@ import {
   evaluateSchroederSpatialMechanicalPairProposal,
   isLiveSchroederSpatialMechanicalProposal,
   runSchroederSpatialMechanicalProposalWebGpu,
+  resolveSchroederSpatialMechanicalSolverBudget,
   schroederSpatialMechanicalPairRequiresUnilateralContact,
   schroederSpatialMechanicalPairSharesPhaseLineage,
+  schroederSpatialMechanicalSolverBudgetWgsl,
   schroederSpatialMechanicalGraphControlWgsl,
   schroederSpatialMechanicalGraphSolverWgsl,
   schroederSpatialMechanicalInterfaceReceiptWgsl,
@@ -359,6 +369,9 @@ function liveFixture(
     device,
     generation,
     spatialSource: levelAssignment || activeNodeList,
+    // Batch/native/diagnostic preset: the module has no cleanupPassBudget
+    // default, so the fixture selects the batch horizon explicitly.
+    cleanupPassBudget: SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET,
     sphParticleState: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
       particleCount,
@@ -2948,7 +2961,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
-    'production must encode the proven worst-case cleanup horizon while GPU early-tail certification suppresses converged work'
+    'the batch preset must keep the measured worst-case horizon as its declared budget'
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES & 1,
@@ -4179,6 +4192,177 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.doesNotMatch(schroederSpatialMechanicalProposalApplyWgsl,
     /level_assignments/);
 });
+
+test('the encoded cleanup horizon is a declared, sealed per-invocation solver parameter', async () => {
+  // 1. No silent default at the module boundary: callers must select a
+  // cleanup pass budget explicitly.
+  assert.throws(
+    () => resolveSchroederSpatialMechanicalSolverBudget({}),
+    /explicit cleanupPassBudget/
+  );
+  assert.throws(
+    () => resolveSchroederSpatialMechanicalSolverBudget({
+      jacobiIterations: 16
+    }),
+    /explicit cleanupPassBudget/
+  );
+  assert.throws(
+    () => runSchroederSpatialMechanicalProposalWebGpu(liveFixtureWithoutBudget()),
+    /explicit cleanupPassBudget/
+  );
+  // 2. Declared budgets are validated and clamped nowhere inside the module:
+  // out-of-range declarations fail closed instead of being silently adjusted.
+  assert.throws(
+    () => resolveSchroederSpatialMechanicalSolverBudget({
+      jacobiIterations: SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX + 1,
+      cleanupPassBudget: 512
+    }),
+    /jacobiIterations/
+  );
+  assert.throws(
+    () => resolveSchroederSpatialMechanicalSolverBudget({
+      cleanupPassBudget:
+        SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN - 1
+    }),
+    /cleanupPassBudget/
+  );
+  assert.throws(
+    () => resolveSchroederSpatialMechanicalSolverBudget({
+      cleanupPassBudget:
+        SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX + 1
+    }),
+    /cleanupPassBudget/
+  );
+  // 3. The two production presets. The batch preset keeps the measured
+  // worst-case horizon; the interactive preset keeps the demo cadence below
+  // the measured serial-pass starvation threshold.
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET, 1024);
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET,
+    512
+  );
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN, 1);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX, 16);
+  for (const preset of [
+    SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET,
+    SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_SOLVER_BUDGET
+  ]) {
+    assert.ok(Object.isFrozen(preset));
+    assert.equal(preset.jacobiIterations, 16);
+    // The seal invariant that replaced "encoded == proven worst-case": the
+    // encoded horizon IS the declared budget, exactly.
+    assert.equal(preset.encodedPassBudget, preset.cleanupPassBudget);
+    assert.equal(preset.ownerDispatches, preset.cleanupPassBudget);
+    assert.equal(
+      preset.matchingCleanupControlWords,
+      12 + 7 * preset.cleanupPassBudget
+    );
+  }
+  // 4. The declared budget is compiled into the shader variant: the terminal
+  // window, the pass-clock certificate, and the control-buffer floor all
+  // carry the declared value, and distinct declarations compile distinct
+  // variants while equal declarations share one cached variant.
+  const interactiveWgsl = schroederSpatialMechanicalSolverBudgetWgsl(
+    SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_SOLVER_BUDGET
+  );
+  const batchWgsl = schroederSpatialMechanicalSolverBudgetWgsl(
+    SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET
+  );
+  assert.equal(batchWgsl.solver, schroederSpatialMechanicalGraphSolverWgsl);
+  assert.equal(
+    batchWgsl.apply,
+    schroederSpatialMechanicalProposalApplyWgsl
+  );
+  assert.equal(
+    schroederSpatialMechanicalSolverBudgetWgsl(
+      resolveSchroederSpatialMechanicalSolverBudget({
+        cleanupPassBudget: 1024
+      })
+    ).solver,
+    batchWgsl.solver
+  );
+  assert.notEqual(interactiveWgsl.solver, batchWgsl.solver);
+  assert.match(interactiveWgsl.solver, /\+ 16u\s*>= 512u/);
+  assert.match(
+    interactiveWgsl.apply,
+    new RegExp(`>= ${12 + 7 * 512}u`)
+  );
+  // Every pass-clock comparison in the 512 variant carries 512, never the
+  // batch horizon. (`== 1024u` still legitimately appears as the targeted
+  // diagnostic capture-completion count 512 passes x 2 targets.)
+  assert.doesNotMatch(interactiveWgsl.solver, />= 1024u/);
+  // 5. A live run seals the declared values into the artifact telemetry and
+  // the GPU-visible control header (words 10/11), and the admission contract
+  // accepts only a self-consistent seal.
+  const fixture = liveFixture(2, { identityEnabled: false });
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu({
+    ...fixture,
+    jacobiIterations: 16,
+    cleanupPassBudget:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET
+  });
+  assert.equal(proposal.solverIterationCount, 16);
+  assert.equal(proposal.matchingCleanupLogicalPassCount, 512);
+  assert.equal(proposal.matchingCleanupEncodedPassCount, 512);
+  assert.equal(proposal.matchingCleanupOwnerDispatchCount, 512);
+  assert.ok(Object.isFrozen(proposal.solverBudgetDeclared));
+  assert.equal(proposal.solverBudgetDeclared.jacobiIterations, 16);
+  assert.equal(proposal.solverBudgetDeclared.cleanupPassBudget, 512);
+  assert.equal(proposal.solverBudgetDeclared.encodedPassBudget, 512);
+  assert.match(proposal.solverPolicy, /-512-pass-logical-receipt-/);
+  assert.match(
+    proposal.solverBudgetSealPolicy,
+    /control-header-words-10-11/
+  );
+  assert.equal(
+    proposal.contactGraph.layout.bufferLayouts.matchingCleanupControl
+      .wordLength,
+    12 + 7 * 512
+  );
+  assert.equal(
+    isLiveSchroederSpatialMechanicalProposal(proposal, {
+      device: fixture.device,
+      generation: fixture.generation
+    }),
+    true
+  );
+  const cleanupHeaderWrite = fixture.device.writes.find(
+    (write) => write.buffer === proposal.matchingCleanupControlBuffer
+  );
+  assert.ok(
+    cleanupHeaderWrite,
+    'the run must write the matching-cleanup control header'
+  );
+  assert.equal(
+    cleanupHeaderWrite.bytes.byteLength,
+    (12 + 7 * 512) * 4,
+    'the control write covers the budget-sized lane arena'
+  );
+  const headerWords = new Uint32Array(
+    cleanupHeaderWrite.bytes.buffer,
+    cleanupHeaderWrite.bytes.byteOffset,
+    12
+  );
+  assert.equal(
+    headerWords[10],
+    16,
+    'control header word 10 seals jacobiIterations'
+  );
+  assert.equal(
+    headerWords[11],
+    512,
+    'control header word 11 seals cleanupPassBudget'
+  );
+  proposal.destroy();
+  await settleDeferredCleanup(fixture.device);
+});
+
+function liveFixtureWithoutBudget() {
+  const { cleanupPassBudget: _omitted, ...rest } = liveFixture(2, {
+    identityEnabled: false
+  });
+  return rest;
+}
 
 test('level-assignment spatial sources use SS-authenticated identity and level selection', async () => {
   const graphSelectionSource = schroederSpatialMechanicalProposalWgsl.slice(

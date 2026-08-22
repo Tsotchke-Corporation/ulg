@@ -1216,6 +1216,22 @@ function canonicalMechanicalProposalFixture({
     particleCount,
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
     solverIterationCount: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    matchingCleanupLogicalPassCount:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+    matchingCleanupEncodedPassCount:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+    matchingCleanupOwnerDispatchCount:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
+    solverBudgetDeclared: Object.freeze({
+      schema: 'peercompute.ulg.schroeder-spatial-mechanical-solver-budget.v1',
+      cacheKey: `j${SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS}.p${
+        SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}`,
+      jacobiIterations: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+      cleanupPassBudget: SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+      encodedPassBudget: SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+      ownerDispatches:
+        SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+    }),
     encodedDispatchCount: SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT,
     encodedComputePassCount: 1,
     privateBuildCount: 0,

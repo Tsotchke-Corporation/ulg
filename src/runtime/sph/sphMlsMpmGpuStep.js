@@ -3626,9 +3626,17 @@ function recordSpatialMechanicalProposalEncoding(topology, proposal) {
   if (!stage?.enabled) return topology;
   const encodedDispatchCount = Number(proposal?.encodedDispatchCount);
   const encodedComputePassCount = Number(proposal?.encodedComputePassCount);
+  // The deferred bundle's fixed dispatch count follows the proposal's
+  // declared, sealed solver budget; the batch-preset constant remains the
+  // fallback for proposals predating the sealed-budget contract.
+  const deferredDispatchFloor = Number.isInteger(
+    proposal?.encodedDeferredDispatchFloor
+  )
+    ? proposal.encodedDeferredDispatchFloor
+    : SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT;
   if (
     !Number.isInteger(encodedDispatchCount)
-    || encodedDispatchCount < SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT
+    || encodedDispatchCount < deferredDispatchFloor
     || !Number.isInteger(encodedComputePassCount)
     || encodedComputePassCount < 1
   ) {
@@ -3637,13 +3645,35 @@ function recordSpatialMechanicalProposalEncoding(topology, proposal) {
     );
   }
   const exclusiveScanDispatchCount = encodedDispatchCount
-    - SCHROEDER_MECHANICAL_DEFERRED_DISPATCH_COUNT;
+    - deferredDispatchFloor;
   stage.exclusiveScanDispatchCount = exclusiveScanDispatchCount;
   stage.exclusiveScanDispatchCountPerSubstep = exclusiveScanDispatchCount;
   stage.dispatchCountPerSubstep = encodedDispatchCount;
   stage.dispatchCountPerSubstepExact = true;
   stage.encodedComputePassCountPerSubstep = encodedComputePassCount;
   stage.dispatchCountEvidence = 'post-encode-proposal-artifact';
+  // Reconcile the declared-plan stage summary with the proposal's sealed
+  // per-invocation solver budget.
+  if (Number.isInteger(proposal?.solverIterationCount)) {
+    stage.solverIterationCount = proposal.solverIterationCount;
+    stage.scaleMeasurementDispatchCount = proposal.solverIterationCount;
+    stage.solverApplyDispatchCount = proposal.solverIterationCount;
+    stage.energyAllocationDispatchCount = proposal.solverIterationCount;
+    stage.particleParallelDispatchCountPerSubstep =
+      12 + 3 * proposal.solverIterationCount;
+  }
+  if (Number.isInteger(proposal?.matchingCleanupLogicalPassCount)) {
+    stage.matchingCleanupPassCount = proposal.matchingCleanupEncodedPassCount;
+    stage.matchingCleanupLogicalPassCount =
+      proposal.matchingCleanupLogicalPassCount;
+    stage.matchingCleanupEncodedPassCount =
+      proposal.matchingCleanupEncodedPassCount;
+    stage.matchingCleanupDispatchCount =
+      proposal.matchingCleanupOwnerDispatchCount;
+  }
+  if (proposal?.solverBudgetDeclared) {
+    stage.solverBudgetDeclared = proposal.solverBudgetDeclared;
+  }
 
   topology.dispatchesPerSubstep =
     topology.dispatchesPerSubstepExcludingSpatialMechanicalProposal
@@ -12706,7 +12736,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         canonicalProposalTraversalCount:
           SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
         canonicalProposalSolverIterationCount:
-          SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+          schroederSpatialMechanicalProposal.solverIterationCount,
+        canonicalProposalCleanupPassBudget:
+          schroederSpatialMechanicalProposal.matchingCleanupLogicalPassCount,
         privateBinBuildCount: 0,
         fixedCandidateBuildCount: 0,
         exhaustiveParticleScanCount: 0
@@ -31480,6 +31512,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederSingleLevelQueueOrderedCleanupCapability = null,
   spatialMechanicalProposalRunner = runSchroederSpatialMechanicalProposalWebGpu,
   spatialMechanicalProposalCapture = null,
+  // Per-invocation contact-solver knobs. This orchestrator is the
+  // batch/native/diagnostic call context, so it declares the batch preset
+  // explicitly (the proposals module itself has no cleanup budget default);
+  // the interactive demo route overrides these with its own preset.
+  contactJacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+  contactCleanupPassBudget =
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
   spatialReactionDiscoveryProposalRunner =
     runSchroederSpatialReactionDiscoveryProposalWebGpu,
   spatialThermalProposalRunner = runSchroederSpatialThermalProposalWebGpu,
@@ -31906,7 +31945,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           gpuTimestampRecorder,
           capture: spatialMechanicalProposalCapture,
           sequenceIndex,
-          sequenceStepCount
+          sequenceStepCount,
+          jacobiIterations: contactJacobiIterations,
+          cleanupPassBudget: contactCleanupPassBudget
         })
       );
       const mechanicalProposalAdmitted =
@@ -33106,6 +33147,38 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       resultAuthenticated !== false && residentDeferred !== true
     ))
     .map(({ consumerId }) => consumerId);
+  // Sealed contact-solver budget for this run: the values the mechanical
+  // proposal artifact declared and compiled, or the explicit skipped record
+  // when the canonical pair-contact solve did not run.
+  step.spatialMechanicalSolverBudget = Object.freeze(
+    spatialMechanicalProposal
+      ? {
+          schema:
+            'peercompute.ulg.mls-mpm-resident-contact-solver-budget-seal.v1',
+          skipped: false,
+          jacobiIterations: spatialMechanicalProposal.solverIterationCount,
+          cleanupPassBudget:
+            spatialMechanicalProposal.matchingCleanupLogicalPassCount,
+          encodedPassBudget:
+            spatialMechanicalProposal.matchingCleanupEncodedPassCount,
+          ownerDispatchCount:
+            spatialMechanicalProposal.matchingCleanupOwnerDispatchCount,
+          declared: spatialMechanicalProposal.solverBudgetDeclared ?? null,
+          sealPolicy: spatialMechanicalProposal.solverBudgetSealPolicy ?? null
+        }
+      : {
+          schema:
+            'peercompute.ulg.mls-mpm-resident-contact-solver-budget-seal.v1',
+          skipped: true,
+          reason: 'canonical-spatial-proposal-mode-not-requested',
+          jacobiIterations: null,
+          cleanupPassBudget: null,
+          encodedPassBudget: null,
+          ownerDispatchCount: null,
+          declared: null,
+          sealPolicy: null
+        }
+  );
   step.schroederSpatialExactNearProposalSummary = Object.freeze({
     status: canonicalSpatialProposalMode
       ? 'canonical-exact-near-consumer-proposals-submitted'

@@ -329,6 +329,7 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
 
         mechanicalProposal =
           proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+            cleanupPassBudget: 1024,
             device,
             generation,
             sphParticleState,

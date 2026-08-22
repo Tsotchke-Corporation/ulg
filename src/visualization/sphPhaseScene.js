@@ -50,6 +50,13 @@ import {
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../runtime/sph/sphGpuBuffers.js';
+import {
+  SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX,
+  SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET,
+  SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX,
+  SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN
+} from '../runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
 import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphMechanicsGpuKernel.js';
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
 import {
@@ -21510,6 +21517,8 @@ export function createSphPhaseScene(container, {
     compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
     schroederSimulation = false,
+    contactJacobiIterations = null,
+    contactCleanupPassBudget = null,
     schroederSelectedLevel = 0,
     schroederMinLevel = null,
     schroederMaxLevel = null,
@@ -21553,6 +21562,8 @@ export function createSphPhaseScene(container, {
       normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
       residentSourceMode,
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
+      `contactJacobi=${contactJacobiIterations ?? 'preset'}`,
+      `contactCleanup=${contactCleanupPassBudget ?? 'preset'}`,
       `ssLevel=${Math.round(Number(schroederSelectedLevel) || 0)}`,
       `ssMin=${schroederMinLevel ?? 'default'}`,
       `ssMax=${schroederMaxLevel ?? 'default'}`,
@@ -36405,6 +36416,14 @@ fn main(
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined,
     schroederSimulation = false,
+    // Interactive contact-solver knobs (demo URL: contactSolver,
+    // contactJacobiIterations, contactCleanupPasses). The interactive route
+    // presets 512 cleanup passes; contactSolver=0 reuses the existing
+    // schroeder-simulation enable seam and skips the canonical pair-contact
+    // solve entirely (pre-canonical separation runs instead).
+    schroederContactSolverEnabled = true,
+    schroederContactJacobiIterations = null,
+    schroederContactCleanupPassBudget = null,
     schroederSelectedLevel = 0,
     schroederBaseGridSpacingM = null,
     schroederMinLevel = null,
@@ -36529,7 +36548,30 @@ fn main(
       fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
     );
     const requestedMeasureFusedSequenceQueueFence = Boolean(measureFusedSequenceQueueFence);
-    const requestedSchroederSimulation = Boolean(schroederSimulation);
+    const requestedSchroederContactSolverEnabled =
+      schroederContactSolverEnabled !== false;
+    // contactSolver=0 reuses the schroeder-simulation enable gate: with the
+    // canonical spatial route off, no mechanical pair-contact proposal runs
+    // and the pre-canonical separation path takes over.
+    const requestedSchroederSimulation = Boolean(schroederSimulation)
+      && requestedSchroederContactSolverEnabled;
+    const clampContactKnob = (value, min, max, fallback) => {
+      const numeric = Number(value);
+      if (value == null || !Number.isFinite(numeric)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(numeric)));
+    };
+    const requestedContactJacobiIterations = clampContactKnob(
+      schroederContactJacobiIterations,
+      SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN,
+      SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX,
+      SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX
+    );
+    const requestedContactCleanupPassBudget = clampContactKnob(
+      schroederContactCleanupPassBudget,
+      SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN,
+      SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX,
+      SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET
+    );
     const requestedCollectSchroederHierarchyHostTiming = Boolean(
       collectSchroederHierarchyHostTiming
     );
@@ -37314,6 +37356,8 @@ fn main(
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells,
       schroederSimulation: requestedSchroederSimulation,
+      contactJacobiIterations: requestedContactJacobiIterations,
+      contactCleanupPassBudget: requestedContactCleanupPassBudget,
       schroederSelectedLevel: requestedSchroederSelectedLevel,
       schroederMinLevel: requestedSchroederMinLevel,
       schroederMaxLevel: requestedSchroederMaxLevel,
@@ -37838,6 +37882,11 @@ fn main(
           pressureInterfaceGasCellFieldAdmission,
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
+          // Interactive contact-solver preset (clamped): the demo route
+          // declares its own sealed budget instead of inheriting the
+          // batch/native default.
+          contactJacobiIterations: requestedContactJacobiIterations,
+          contactCleanupPassBudget: requestedContactCleanupPassBudget,
           reactionParticleBinMetadataReadback:
             requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
@@ -39847,6 +39896,48 @@ fn main(
           summary.ambientPressureSource = resolvedAmbientPressureEvidence.source;
         }
         execution.signature = signature;
+        // Seal the contact-solver knobs for this resident execution: the
+        // requested URL values, the clamped values actually declared, and the
+        // per-run seal reported back by the step (or the explicit skipped
+        // record when the pair-contact solve did not run).
+        {
+          const finalStep = execution.finalStep || null;
+          const runSealCandidates = [
+            finalStep?.spatialMechanicalSolverBudget,
+            finalStep?.residentStep?.spatialMechanicalSolverBudget,
+            finalStep?.schroederSameLevelMechanics
+              ?.spatialMechanicalSolverBudget,
+            finalStep?.schroederSameLevelMechanics?.residentStep
+              ?.spatialMechanicalSolverBudget
+          ];
+          execution.contactSolverBudgetSeal = Object.freeze({
+            schema: 'peercompute.ulg.sph-demo-contact-solver-budget-seal.v1',
+            contactSolver: requestedSchroederContactSolverEnabled ? 1 : 0,
+            requested: Object.freeze({
+              jacobiIterations: schroederContactJacobiIterations ?? null,
+              cleanupPassBudget: schroederContactCleanupPassBudget ?? null
+            }),
+            clamped: Object.freeze({
+              jacobiIterations: requestedContactJacobiIterations,
+              cleanupPassBudget: requestedContactCleanupPassBudget
+            }),
+            run: runSealCandidates.find((candidate) => candidate != null)
+              ?? Object.freeze({
+                schema:
+                  'peercompute.ulg.mls-mpm-resident-contact-solver-budget-seal.v1',
+                skipped: true,
+                reason: requestedSchroederContactSolverEnabled
+                  ? 'canonical-spatial-route-not-active'
+                  : 'contact-solver-disabled-by-request'
+              })
+          });
+          try {
+            globalThis.__ulgContactSolverSeal =
+              execution.contactSolverBudgetSeal;
+          } catch {
+            // Diagnostic seal exposure must never affect the physics step.
+          }
+        }
         const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
         const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
           'released-after-mls-mpm-resident-steps-complete',
@@ -39894,6 +39985,8 @@ fn main(
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
             activeGridSafetyCells: normalizedActiveGridSafetyCells,
             schroederSimulation: requestedSchroederSimulation,
+            contactJacobiIterations: requestedContactJacobiIterations,
+            contactCleanupPassBudget: requestedContactCleanupPassBudget,
             schroederSelectedLevel: requestedSchroederSelectedLevel,
             schroederMinLevel: requestedSchroederMinLevel,
             schroederMaxLevel: requestedSchroederMaxLevel,

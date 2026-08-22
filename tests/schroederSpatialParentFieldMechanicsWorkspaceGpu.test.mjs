@@ -2243,6 +2243,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         );
         const proposalFor = (gridSpacingM, selectedLevel) =>
           proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+            cleanupPassBudget: 1024,
             device,
             generation,
             sphParticleState,
@@ -3044,6 +3045,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         );
         const proposal = m1Fused == null
           ? proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+              cleanupPassBudget: 1024,
               device,
               generation,
               sphParticleState,
@@ -3174,6 +3176,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         }
         const replayProposal = m1Fused == null
           ? proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+              cleanupPassBudget: 1024,
               device,
               generation,
               sphParticleState,
@@ -3310,6 +3313,7 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
 
       const fineProposal =
         proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+          cleanupPassBudget: 1024,
           device,
           generation,
           sphParticleState,

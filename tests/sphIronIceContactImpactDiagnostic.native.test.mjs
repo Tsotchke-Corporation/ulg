@@ -227,6 +227,12 @@ test('native mounted iron/ice impact contact diagnostic', {
         + '&renderOwnership=main-thread-renderer'
         + '&surfaceDraw=native-webgpu-surface-consumer'
         + '&ss=1'
+        // Diagnostic context: declare the batch cleanup horizon explicitly.
+        // The demo route otherwise presets the interactive 512-pass budget,
+        // which cannot cover the measured ~890-pass contact-chain worst case
+        // this diagnostic exists to exercise.
+        + '&contactCleanupPasses=1024'
+        + '&contactJacobiIterations=16'
         + '&schroederLevel=0'
         + '&schroederMinLevel=0'
         + '&schroederMaxLevel=0'
@@ -941,6 +947,12 @@ test('native mounted iron/ice impact contact diagnostic', {
           compactSummaryScope: 'particle-visual',
           continueFromResidentState: false,
           schroederSimulation: true,
+          // Diagnostic context: declare the batch cleanup horizon. The scene
+          // otherwise presets the interactive 512-pass budget, which cannot
+          // cover this diagnostic's measured ~890-pass contact-chain worst
+          // case.
+          schroederContactJacobiIterations: 16,
+          schroederContactCleanupPassBudget: 1024,
           schroederSelectedLevel: 0,
           schroederMinLevel: 0,
           schroederMaxLevel: 0,

@@ -1633,6 +1633,7 @@ test('canonical spatial v2 dense P2G authenticates one exact level and preserves
 
   const mechanicalProposal =
     runSchroederSpatialMechanicalProposalWebGpu({
+      cleanupPassBudget: 1024,
       device: fixture.device,
       generation: fixture.generation,
       sphParticleState: fixture.sphParticleState,

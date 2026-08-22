@@ -21,13 +21,17 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT,
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCALE_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_LAYOUT,
   ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
   createSchroederSpatialMechanicalPairGraphCapacityPlan,
-  createSchroederSpatialMechanicalPairGraphLayout
+  createSchroederSpatialMechanicalPairGraphLayout,
+  schroederSpatialMechanicalMatchingCleanupControlWordsForPasses
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicalPairGraph.js';
 import {
   SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE as RUNTIME_MECHANICAL_GRAPH_FAILURE,
@@ -128,6 +132,56 @@ test('mechanical pair-graph ABI fixes one-traversal deterministic directed CSR s
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
     7_180
+  );
+  // CONTROL_WORDS sizing follows the declared pass budget: one fixed
+  // 12-word header plus seven per-pass evidence lanes.
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_HEADER_WORDS,
+    12
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT,
+    7
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES,
+    1024
+  );
+  assert.equal(
+    schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(1024),
+    7_180
+  );
+  assert.equal(
+    schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(512),
+    12 + 7 * 512
+  );
+  assert.throws(
+    () => schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(0),
+    RangeError
+  );
+  const budgetedLayout = createSchroederSpatialMechanicalPairGraphLayout({
+    particleCapacity: 4,
+    directedPairCapacity: 64,
+    matchingCleanupPasses: 512
+  });
+  assert.equal(budgetedLayout.matchingCleanupPasses, 512);
+  assert.equal(
+    budgetedLayout.matchingCleanupControlWords,
+    12 + 7 * 512
+  );
+  assert.equal(
+    budgetedLayout.bufferLayouts.matchingCleanupControl.wordLength,
+    12 + 7 * 512
+  );
+  const budgetedPlan = createSchroederSpatialMechanicalPairGraphCapacityPlan({
+    particleCapacity: 4,
+    matchingCleanupPasses: 512,
+    maxRetainedBytes: 1024 * 1024
+  });
+  assert.equal(budgetedPlan.matchingCleanupPasses, 512);
+  assert.equal(
+    budgetedPlan.layout.matchingCleanupControlWords,
+    12 + 7 * 512
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORD.publishedDirectedPairCount,

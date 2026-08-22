@@ -2281,8 +2281,19 @@ function canonicalMechanicalProposalAdmitted({
     && proposal.supportEpoch === spatialAuthority?.supportEpoch
     && proposal.traversalCount
       === SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT
+    // The Jacobi round count is a declared, sealed per-invocation solver
+    // parameter; admission requires a self-consistent seal rather than the
+    // fixed reference round count.
+    && Number.isInteger(proposal.solverIterationCount)
+    && proposal.solverIterationCount >= 1
     && proposal.solverIterationCount
-      === SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS
+      <= SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS
+    && proposal.solverBudgetDeclared?.jacobiIterations
+      === proposal.solverIterationCount
+    && proposal.solverBudgetDeclared?.cleanupPassBudget
+      === proposal.matchingCleanupLogicalPassCount
+    && proposal.matchingCleanupEncodedPassCount
+      === proposal.matchingCleanupLogicalPassCount
     && proposal.privateBuildCount === 0
     && proposal.fixedCandidateBuildCount === 0
     && proposal.exhaustiveTraversalCount === 0
@@ -3795,7 +3806,9 @@ export async function runMlsMpmG2pWebGpu({
           canonicalProposalTraversalCount:
             SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT,
           canonicalProposalSolverIterationCount:
-            SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS,
+            schroederSpatialMechanicalProposal.solverIterationCount,
+          canonicalProposalCleanupPassBudget:
+            schroederSpatialMechanicalProposal.matchingCleanupLogicalPassCount,
           privateBinBuildCount: 0,
           fixedCandidateBuildCount: 0,
           exhaustiveParticleScanCount: 0

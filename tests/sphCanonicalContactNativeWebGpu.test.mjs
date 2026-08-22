@@ -763,6 +763,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
             };
           }
           proposal = proposalModule.runSchroederSpatialMechanicalProposalWebGpu({
+            cleanupPassBudget: 1024,
             device,
             generation,
             sphParticleState: packed,

@@ -41,7 +41,8 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION,
   ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
-  createSchroederSpatialMechanicalPairGraphCapacityPlan
+  createSchroederSpatialMechanicalPairGraphCapacityPlan,
+  schroederSpatialMechanicalMatchingCleanupControlWordsForPasses
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicalPairGraph.js';
 import {
   computeBufferBinding,
@@ -248,6 +249,129 @@ if (
     'mechanical matching-cleanup encoded pass budget must preserve terminal buffer parity within the logical receipt capacity'
   );
 }
+
+// --- Per-invocation solver budget ("knobs") ------------------------------
+// The Jacobi round count and the matching-cleanup pass budget are declared,
+// sealed solver parameters. The module keeps NO default cleanup budget:
+// every invocation must select one. The two production presets are the
+// batch/native/diagnostic horizon (1024, covering the measured ~890-pass
+// iron-ice worst case) and the interactive demo cadence budget (512, below
+// the ~640-serial-pass starvation threshold of the interactive path).
+export const SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN = 1;
+export const SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX =
+  SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+export const SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX = 65536;
+export const SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET =
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET =
+  512;
+
+const mechanicalSolverBudgetCache = new Map();
+
+export function resolveSchroederSpatialMechanicalSolverBudget({
+  jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+  cleanupPassBudget
+} = {}) {
+  if (cleanupPassBudget == null) {
+    throw new RangeError(
+      'canonical mechanical solver requires an explicit cleanupPassBudget; '
+      + 'there is no module default. Select the batch preset '
+      + `(${SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET}) or the `
+      + 'interactive preset '
+      + `(${SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET}).`
+    );
+  }
+  if (
+    typeof jacobiIterations !== 'number'
+    || !Number.isInteger(jacobiIterations)
+    || jacobiIterations < SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN
+    || jacobiIterations > SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX
+  ) {
+    throw new RangeError(
+      'canonical mechanical jacobiIterations must be an integer within '
+      + `${SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN}..`
+      + `${SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX}`
+    );
+  }
+  if (
+    typeof cleanupPassBudget !== 'number'
+    || !Number.isInteger(cleanupPassBudget)
+    || cleanupPassBudget < SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN
+    || cleanupPassBudget > SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX
+  ) {
+    throw new RangeError(
+      'canonical mechanical cleanupPassBudget must be an integer within '
+      + `${SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN}..`
+      + `${SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX}`
+    );
+  }
+  const cacheKey = `j${jacobiIterations}.p${cleanupPassBudget}`;
+  let budget = mechanicalSolverBudgetCache.get(cacheKey);
+  if (budget) return budget;
+  const selectionCountWord = MATCHING_CLEANUP_CONTROL_HEADER_WORDS;
+  const copyCountWord = selectionCountWord + cleanupPassBudget;
+  const applyCountWord = copyCountWord + cleanupPassBudget;
+  const wallCountWord = applyCountWord + cleanupPassBudget;
+  const appliedPairCountWord = wallCountWord + cleanupPassBudget;
+  const maxPositionRatioWord = appliedPairCountWord + cleanupPassBudget;
+  const maxVelocityResidualWord = maxPositionRatioWord + cleanupPassBudget;
+  const matchingCleanupControlWords =
+    schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(
+      cleanupPassBudget
+    );
+  if (
+    matchingCleanupControlWords !== maxVelocityResidualWord + cleanupPassBudget
+  ) {
+    throw new Error(
+      'mechanical matching-cleanup control ABI word count drifted for the declared budget'
+    );
+  }
+  const diagnosticTargetTraceWords =
+    SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORD
+    + cleanupPassBudget
+      * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
+      * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_ROW_WORDS;
+  budget = Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-solver-budget.v1',
+    cacheKey,
+    jacobiIterations,
+    cleanupPassBudget,
+    // The encoded horizon IS the declared budget: the shader variant, the
+    // control-buffer sizing, and the receipt lanes are all compiled/sized
+    // from this one sealed value.
+    encodedPassBudget: cleanupPassBudget,
+    ownerPassesPerDispatch:
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    ownerDispatches: cleanupPassBudget
+      / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    selectionCountWord,
+    copyCountWord,
+    applyCountWord,
+    wallCountWord,
+    appliedPairCountWord,
+    maxPositionRatioWord,
+    maxVelocityResidualWord,
+    matchingCleanupControlWords,
+    diagnosticTargetTraceWords,
+    diagnosticTargetTraceBytes:
+      diagnosticTargetTraceWords * Uint32Array.BYTES_PER_ELEMENT
+  });
+  mechanicalSolverBudgetCache.set(cacheKey, budget);
+  return budget;
+}
+
+export const SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET =
+  resolveSchroederSpatialMechanicalSolverBudget({
+    jacobiIterations: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    cleanupPassBudget: SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET
+  });
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_SOLVER_BUDGET =
+  resolveSchroederSpatialMechanicalSolverBudget({
+    jacobiIterations: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    cleanupPassBudget:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET
+  });
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_HEADER_LAYOUT = Object.freeze([
   'magic:u32',
@@ -556,7 +680,10 @@ function resolveMechanicalProposalCaptureRequest({
   });
 }
 
-function mechanicalSolverIterationUniformPlan(device) {
+function mechanicalSolverIterationUniformPlan(
+  device,
+  solverIterationCount = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+) {
   const requestedAlignment = Math.trunc(finiteNumber(
     device?.limits?.minUniformBufferOffsetAlignment,
     MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
@@ -569,12 +696,11 @@ function mechanicalSolverIterationUniformPlan(device) {
   const strideBytes = Math.ceil(
     MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES / alignment
   ) * alignment;
-  const byteLength = strideBytes
-    * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+  const byteLength = strideBytes * solverIterationCount;
   const values = new Uint32Array(byteLength / Uint32Array.BYTES_PER_ELEMENT);
   for (
     let iteration = 0;
-    iteration < SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+    iteration < solverIterationCount;
     iteration += 1
   ) {
     values[iteration * strideBytes / Uint32Array.BYTES_PER_ELEMENT] = iteration;
@@ -1675,7 +1801,8 @@ function resolveMechanicalDiagnosticTrace({
   device,
   diagnosticTrace,
   execution,
-  particleCount
+  particleCount,
+  solverBudget
 }) {
   if (diagnosticTrace == null) return null;
   const buffer = requireBuffer(
@@ -1733,10 +1860,10 @@ function resolveMechanicalDiagnosticTrace({
     }
   }
   const traceWordCount = targetIndices
-    ? SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_WORDS
+    ? solverBudget.diagnosticTargetTraceWords
     : SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_WORDS;
   const traceByteLength = targetIndices
-    ? SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TRACE_BYTES
+    ? solverBudget.diagnosticTargetTraceBytes
     : SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_BYTES;
   if (
     !Number.isSafeInteger(buffer.size)
@@ -1818,7 +1945,7 @@ function resolveMechanicalDiagnosticTrace({
     'diagnosticTrace particleCount',
     { positive: true }
   );
-  words[11] = SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+  words[11] = solverBudget.cleanupPassBudget;
   floats[12] = materialAId;
   floats[13] = materialBId;
   for (const word of [18, 19, 30, 31, 33, 34, 35, 36, 37, 38]) {
@@ -1833,8 +1960,7 @@ function resolveMechanicalDiagnosticTrace({
       SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_VERSION;
     words[header + 2] =
       SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_STATUS.HEADER_VALID;
-    words[header + 3] =
-      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+    words[header + 3] = solverBudget.cleanupPassBudget;
     words[header + 4] =
       SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS;
     words[header + 5] =
@@ -1843,7 +1969,7 @@ function resolveMechanicalDiagnosticTrace({
     words[header + 7] = targetIndices[1];
     for (
       let passIndex = 0;
-      passIndex < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+      passIndex < solverBudget.cleanupPassBudget;
       passIndex += 1
     ) {
       for (
@@ -2024,6 +2150,7 @@ function createMechanicalParamsArray({
   activeRankViewEnabled,
   aggregateSourceRowLayoutId,
   aggregateCapacityWords,
+  solverIterationCount,
   execution
 }) {
   const dims = Array.isArray(boxDimsM) ? boxDimsM : [5, 5, 5];
@@ -2076,7 +2203,9 @@ function createMechanicalParamsArray({
   ), true);
   view.setUint32(
     108,
-    SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    exactU32(solverIterationCount, 'solverIterationCount', {
+      positive: true
+    }),
     true
   );
   view.setUint32(112, retainCompleteAuthenticatedCellCliques ? 1 : 0, true);
@@ -2123,10 +2252,12 @@ function createMechanicalProposalHeader(execution, particleCount) {
   return words;
 }
 
-function createMechanicalMatchingCleanupControlHeader(execution, particleCount) {
-  const words = new Uint32Array(
-    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
-  );
+function createMechanicalMatchingCleanupControlHeader(
+  execution,
+  particleCount,
+  solverBudget
+) {
+  const words = new Uint32Array(solverBudget.matchingCleanupControlWords);
   words[0] = MATCHING_CLEANUP_CONTROL_MAGIC;
   words[1] = MATCHING_CLEANUP_CONTROL_VERSION;
   words[2] = exactU32(execution?.generationId, 'execution.generationId', {
@@ -2148,8 +2279,11 @@ function createMechanicalMatchingCleanupControlHeader(execution, particleCount) 
   words[9] = exactU32(particleCount, 'particleCount', {
     positive: true
   });
-  words[10] = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
-  words[11] = SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+  // Words 10 and 11 seal the declared per-invocation solver budget into the
+  // GPU-visible control header; every budget-compiled shader verifies them
+  // (fail-closed) before trusting the cleanup receipt lanes.
+  words[10] = solverBudget.jacobiIterations;
+  words[11] = solverBudget.cleanupPassBudget;
   return words;
 }
 
@@ -5445,7 +5579,10 @@ fn validate_contact_graph_csr(
 const mechanicalSolverInputStateReadWriteDeclarationWgsl =
   '@group(0) @binding(0) var<storage, read_write> input_state: array<vec4<f32>>;';
 
-const schroederSpatialMechanicalGraphSolverCoreWgsl = /* wgsl */ `
+function createSchroederSpatialMechanicalGraphSolverCoreWgsl(
+  solverBudget
+) {
+  return /* wgsl */ `
 ${mechanicalContactGraphParamsWgsl}
 
 struct MechanicalSolverIterationParams {
@@ -5776,7 +5913,7 @@ fn mechanical_diagnostic_trace_header_valid() -> bool {
       && atomicLoad(&mechanical_diagnostic_trace[10u])
         == mechanical_params.particle_count
       && atomicLoad(&mechanical_diagnostic_trace[11u])
-        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+        == ${solverBudget.cleanupPassBudget}u;
   if (!valid) {
     atomicOr(
       &mechanical_diagnostic_trace[2u],
@@ -5816,7 +5953,7 @@ fn mechanical_diagnostic_target_tail_header_valid() -> bool {
           & MECHANICAL_DIAGNOSTIC_TARGET_TAIL_INVALID
       ) == 0u
       && atomicLoad(&mechanical_diagnostic_trace[header + 3u])
-        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+        == ${solverBudget.cleanupPassBudget}u
       && atomicLoad(&mechanical_diagnostic_trace[header + 4u])
         == MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
       && atomicLoad(&mechanical_diagnostic_trace[header + 5u])
@@ -7529,7 +7666,7 @@ fn verify_contact_energy(
     && atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupPassCount}u]
-    ) == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    ) == ${solverBudget.cleanupPassBudget}u
     && atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupTrustRestoreCount}u]
@@ -7685,7 +7822,7 @@ fn verify_contact_energy(
 
 fn mechanical_runtime_iteration_valid(iteration: u32) -> bool {
   return iteration < mechanical_params.solver_iteration_count
-    && iteration < ${SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS}u;
+    && iteration < ${solverBudget.jacobiIterations}u;
 }
 
 @compute @workgroup_size(64)
@@ -7745,7 +7882,7 @@ fn allocate_energy_runtime_iteration(
 
 fn mechanical_matching_cleanup_header_valid() -> bool {
   return arrayLength(&traversal_evidence)
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS}u
+      >= ${solverBudget.matchingCleanupControlWords}u
     && atomicLoad(&traversal_evidence[0u])
       == ${MATCHING_CLEANUP_CONTROL_MAGIC}u
     && atomicLoad(&traversal_evidence[1u])
@@ -7769,35 +7906,35 @@ fn mechanical_matching_cleanup_header_valid() -> bool {
     && atomicLoad(&traversal_evidence[10u])
       == mechanical_params.solver_iteration_count
     && atomicLoad(&traversal_evidence[11u])
-      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+      == ${solverBudget.cleanupPassBudget}u;
 }
 
 fn mechanical_matching_selection_count_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_SELECTION_COUNT_WORD}u + pass_index;
+  return ${solverBudget.selectionCountWord}u + pass_index;
 }
 
 fn mechanical_matching_copy_count_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_COPY_COUNT_WORD}u + pass_index;
+  return ${solverBudget.copyCountWord}u + pass_index;
 }
 
 fn mechanical_matching_apply_count_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_APPLY_COUNT_WORD}u + pass_index;
+  return ${solverBudget.applyCountWord}u + pass_index;
 }
 
 fn mechanical_matching_wall_count_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_WALL_COUNT_WORD}u + pass_index;
+  return ${solverBudget.wallCountWord}u + pass_index;
 }
 
 fn mechanical_matching_applied_pair_count_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD}u + pass_index;
+  return ${solverBudget.appliedPairCountWord}u + pass_index;
 }
 
 fn mechanical_matching_max_position_ratio_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD}u + pass_index;
+  return ${solverBudget.maxPositionRatioWord}u + pass_index;
 }
 
 fn mechanical_matching_max_velocity_residual_word(pass_index: u32) -> u32 {
-  return ${MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD}u + pass_index;
+  return ${solverBudget.maxVelocityResidualWord}u + pass_index;
 }
 
 fn mechanical_matching_jacobi_ready() -> bool {
@@ -12250,7 +12387,7 @@ fn mechanical_matching_three_block(
   result.secondary_center_cursor = secondary_center_cursor;
   result.member_count = 3u;
   let terminal_star_window = mechanical_matching_current_pass() + 16u
-    >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+    >= ${solverBudget.cleanupPassBudget}u;
   if (eligible_inbound_count == 2u && terminal_star_window) {
     result.tertiary_index = tertiary_index;
     result.center_tertiary_cursor = center_tertiary_cursor;
@@ -12893,7 +13030,7 @@ fn mechanical_matching_preflight(pass_index: u32) -> bool {
     || arrayLength(&matching_constraints)
       < mechanical_params.directed_pair_capacity
     || pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) {
     atomicOr(
       &graph_control[14u],
@@ -12927,7 +13064,7 @@ fn select_matching_cleanup_edge_for_index(
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (!mechanical_matching_preflight(pass_index)) { return; }
   let begin = source_offsets[self_index];
@@ -13209,7 +13346,7 @@ fn copy_matching_cleanup_state_for_index(self_index: u32) {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) {
     // The host keeps a deterministic ping-pong schedule. Once the GPU has
     // certified convergence, propagate only the terminal state so that the
@@ -13254,7 +13391,7 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (
     !mechanical_matching_preflight(pass_index)
@@ -13332,7 +13469,7 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
       }
       let published_total = atomicLoad(&graph_control[12u]);
       let terminal_path_window = pass_index + 16u
-        >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+        >= ${solverBudget.cleanupPassBudget}u;
       var three_block = mechanical_matching_zero_three_block();
       if (terminal_path_window) {
         three_block = mechanical_matching_four_path_block(
@@ -14242,7 +14379,7 @@ fn replay_matching_cleanup_refinement_trace() {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (
     atomicLoad(
@@ -14278,7 +14415,7 @@ fn replay_matching_cleanup_refinement_trace() {
     if (
       prior_local_capture_count
           + MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
-        == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+        == ${solverBudget.cleanupPassBudget
           * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS}u
     ) {
       atomicOr(
@@ -14345,7 +14482,7 @@ fn replay_matching_cleanup_refinement_trace() {
       return;
     }
     let terminal_path_window = pass_index + 16u
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+      >= ${solverBudget.cleanupPassBudget}u;
     var three_block = mechanical_matching_zero_three_block();
     if (terminal_path_window) {
       three_block = mechanical_matching_four_path_block(
@@ -14802,7 +14939,7 @@ fn mechanical_diagnostic_capture_target_post_wall(pass_index: u32) {
   if (
     prior_post_wall_capture_count
         + MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS
-      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+      == ${solverBudget.cleanupPassBudget
         * SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TARGET_TAIL_TARGETS}u
   ) {
     atomicOr(
@@ -14830,7 +14967,7 @@ fn trace_matching_cleanup_apply() {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (
     atomicLoad(
@@ -14998,7 +15135,7 @@ fn project_matching_cleanup_walls_for_index(self_index: u32) {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (
     !mechanical_matching_preflight(pass_index)
@@ -15175,7 +15312,7 @@ fn finalize_matching_cleanup_pass_body() {
   let pass_index = mechanical_matching_current_pass();
   if (
     pass_index
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      >= ${solverBudget.cleanupPassBudget}u
   ) { return; }
   if (
     !mechanical_matching_preflight(pass_index)
@@ -15213,7 +15350,7 @@ fn finalize_matching_cleanup_pass_body() {
           .toExponential(1)
       }
       && (pass_index & 1u)
-        == ${((SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES - 1) & 1)}u
+        == ${((solverBudget.cleanupPassBudget - 1) & 1)}u
     ) {
       // No unprocessed violated edge remains and the all-edge residual is
       // certified. Convergence is accepted only on the fixed terminal-buffer
@@ -15224,7 +15361,7 @@ fn finalize_matching_cleanup_pass_body() {
       for (
         var completed_pass = pass_index + 1u;
         completed_pass
-          < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+          < ${solverBudget.cleanupPassBudget}u;
         completed_pass = completed_pass + 1u
       ) {
         atomicStore(
@@ -15273,7 +15410,7 @@ fn finalize_matching_cleanup_pass_body() {
       atomicStore(
         &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
           .matchingCleanupPassCount}u],
-        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+        ${solverBudget.cleanupPassBudget}u
       );
       atomicOr(
         &graph_control[15u],
@@ -15295,7 +15432,7 @@ fn finalize_matching_cleanup_pass_body() {
   );
   if (
     prior_pass + 1u
-      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      == ${solverBudget.cleanupPassBudget}u
   ) {
     atomicOr(
       &graph_control[15u],
@@ -15317,13 +15454,13 @@ fn restore_matching_cleanup_trust(
   if (self_index >= mechanical_params.particle_count) { return; }
   if (!mechanical_solver_full_path_enabled()) { return; }
   let final_pass =
-    ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES - 1}u;
+    ${solverBudget.cleanupPassBudget - 1}u;
   if (
     atomicLoad(&graph_control[14u]) != 0u
     || arrayLength(&matching_constraints)
       < mechanical_params.directed_pair_capacity
     || mechanical_matching_current_pass()
-      != ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      != ${solverBudget.cleanupPassBudget}u
     || atomicLoad(
       &traversal_evidence[mechanical_matching_wall_count_word(final_pass)]
     ) != mechanical_params.particle_count
@@ -15400,7 +15537,7 @@ fn verify_contact_residual(
     || atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupPassCount}u]
-    ) != ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    ) != ${solverBudget.cleanupPassBudget}u
     || atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupTrustRestoreCount}u]
@@ -15842,9 +15979,13 @@ fn materialize_terminal_residual_trace() {
 }
 
 `;
+}
 
-export const schroederSpatialMechanicalGraphSolverWgsl = /* wgsl */ `
-${schroederSpatialMechanicalGraphSolverCoreWgsl}
+function createSchroederSpatialMechanicalGraphSolverWgslForBudget(
+  solverBudget
+) {
+  return /* wgsl */ `
+${createSchroederSpatialMechanicalGraphSolverCoreWgsl(solverBudget)}
 
 struct MechanicalMatchingOwnerFrontierCounts {
   active_count: u32,
@@ -15982,7 +16123,7 @@ fn run_matching_cleanup_global_owner(
     } else if (
       mechanical_solver_full_path_enabled()
       && mechanical_matching_persistent_pass
-        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+        < ${solverBudget.cleanupPassBudget}u
       && atomicLoad(&graph_control[14u]) == 0u
     ) {
       mechanical_matching_persistent_dispatch_active = 1u;
@@ -16067,7 +16208,7 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
     let expand_frontier = mechanical_solver_full_path_enabled()
       && mechanical_matching_persistent_pass
-        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+        < ${solverBudget.cleanupPassBudget}u
       && arrayLength(&matching_cleanup_dispatch) >= owner_word_count
       && atomicLoad(&graph_control[14u]) == 0u;
 
@@ -16210,7 +16351,7 @@ fn run_matching_cleanup_global_owner(
             > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS}u
           || (
             mechanical_matching_persistent_pass + 16u
-              >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+              >= ${solverBudget.cleanupPassBudget}u
             && frontier_counts_after_expansion.active_cursor_count
               > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS}u
           )
@@ -16227,7 +16368,7 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
     let execute_pass = mechanical_solver_full_path_enabled()
       && mechanical_matching_persistent_pass
-        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+        < ${solverBudget.cleanupPassBudget}u
       && atomicLoad(&graph_control[14u]) == 0u;
 
     if (lane == 0u && execute_pass) {
@@ -16415,15 +16556,19 @@ fn run_matching_cleanup_global_owner(
         1u,
         mechanical_solver_full_path_enabled()
           && mechanical_matching_current_pass()
-            < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+            < ${solverBudget.cleanupPassBudget}u
           && atomicLoad(&graph_control[14u]) == 0u
       )
     );
   }
 }
 `;
+}
 
-export const schroederSpatialMechanicalInterfaceReceiptWgsl = /* wgsl */ `
+function createSchroederSpatialMechanicalInterfaceReceiptWgslForBudget(
+  solverBudget
+) {
+  return /* wgsl */ `
 ${mechanicalContactGraphParamsWgsl}
 
 @group(0) @binding(0) var<storage, read> final_state: array<vec4<f32>>;
@@ -16954,7 +17099,7 @@ fn seal_contact_interface_receipt(
     && atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupPassCount}u]
-    ) == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+    ) == ${solverBudget.cleanupPassBudget}u
     && atomicLoad(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupTrustRestoreCount}u]
@@ -16980,8 +17125,12 @@ fn seal_contact_interface_receipt(
   );
 }
 `;
+}
 
-export const schroederSpatialMechanicalProposalApplyWgsl = /* wgsl */ `
+function createSchroederSpatialMechanicalProposalApplyWgslForBudget(
+  solverBudget
+) {
+  return /* wgsl */ `
 ${mechanicalContactGraphParamsWgsl}
 
 @group(0) @binding(0) var<storage, read> original_state: array<vec4<f32>>;
@@ -17098,7 +17247,7 @@ fn mechanical_publish_graph_header_valid() -> bool {
 
 fn mechanical_publish_matching_cleanup_header_valid() -> bool {
   return arrayLength(&matching_cleanup_control)
-      >= ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS}u
+      >= ${solverBudget.matchingCleanupControlWords}u
     && atomicLoad(&matching_cleanup_control[0u])
       == ${MATCHING_CLEANUP_CONTROL_MAGIC}u
     && atomicLoad(&matching_cleanup_control[1u])
@@ -17122,7 +17271,7 @@ fn mechanical_publish_matching_cleanup_header_valid() -> bool {
     && atomicLoad(&matching_cleanup_control[10u])
       == mechanical_params.solver_iteration_count
     && atomicLoad(&matching_cleanup_control[11u])
-      == ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+      == ${solverBudget.cleanupPassBudget}u;
 }
 
 @compute @workgroup_size(64)
@@ -17205,7 +17354,7 @@ fn complete_zero_contact_proposal(
     && mechanical_publish_graph_header_valid()
     && mechanical_publish_matching_cleanup_header_valid()
     && mechanical_params.solver_iteration_count
-      == ${SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS}u
+      == ${solverBudget.jacobiIterations}u
     && atomicLoad(&graph_control[11u]) == 0u
     && atomicLoad(&graph_control[12u]) == 0u
     && atomicLoad(&graph_control[13u]) == 0u
@@ -17294,7 +17443,7 @@ fn complete_zero_contact_proposal(
     atomicStore(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
         .matchingCleanupPassCount}u],
-      ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u
+      ${solverBudget.cleanupPassBudget}u
     );
     atomicStore(
       &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
@@ -17304,48 +17453,48 @@ fn complete_zero_contact_proposal(
     for (
       var cleanup_pass = 0u;
       cleanup_pass
-        < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES}u;
+        < ${solverBudget.cleanupPassBudget}u;
       cleanup_pass = cleanup_pass + 1u
     ) {
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_SELECTION_COUNT_WORD}u + cleanup_pass
+          ${solverBudget.selectionCountWord}u + cleanup_pass
         ],
         mechanical_params.particle_count
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_COPY_COUNT_WORD}u + cleanup_pass
+          ${solverBudget.copyCountWord}u + cleanup_pass
         ],
         mechanical_params.particle_count
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_APPLY_COUNT_WORD}u + cleanup_pass
+          ${solverBudget.applyCountWord}u + cleanup_pass
         ],
         mechanical_params.particle_count
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_WALL_COUNT_WORD}u + cleanup_pass
+          ${solverBudget.wallCountWord}u + cleanup_pass
         ],
         mechanical_params.particle_count
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_APPLIED_PAIR_COUNT_WORD}u + cleanup_pass
+          ${solverBudget.appliedPairCountWord}u + cleanup_pass
         ],
         0u
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD}u + cleanup_pass
+          ${solverBudget.maxPositionRatioWord}u + cleanup_pass
         ],
         0u
       );
       atomicStore(
         &matching_cleanup_control[
-          ${MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD}u + cleanup_pass
+          ${solverBudget.maxVelocityResidualWord}u + cleanup_pass
         ],
         0u
       );
@@ -17479,6 +17628,48 @@ fn commit_contact_proposal(
   }
 }
 `;
+}
+
+// Per-budget compiled WGSL variants. The declared solver budget appears in
+// shader source as interpolated constants, so each (jacobiIterations,
+// cleanupPassBudget) pair compiles its own variant; the cache below plus the
+// budget-suffixed pipeline cache keys make the variants cheap and exact.
+const mechanicalSolverBudgetWgslCache = new Map();
+export function schroederSpatialMechanicalSolverBudgetWgsl(solverBudget) {
+  const cacheKey = solverBudget?.cacheKey;
+  if (typeof cacheKey !== 'string' || !cacheKey) {
+    throw new TypeError(
+      'mechanical solver budget WGSL requires a resolved solver budget'
+    );
+  }
+  let entry = mechanicalSolverBudgetWgslCache.get(cacheKey);
+  if (!entry) {
+    entry = Object.freeze({
+      solver: createSchroederSpatialMechanicalGraphSolverWgslForBudget(
+        solverBudget
+      ),
+      interfaceReceipt:
+        createSchroederSpatialMechanicalInterfaceReceiptWgslForBudget(
+          solverBudget
+        ),
+      apply: createSchroederSpatialMechanicalProposalApplyWgslForBudget(
+        solverBudget
+      )
+    });
+    mechanicalSolverBudgetWgslCache.set(cacheKey, entry);
+  }
+  return entry;
+}
+const schroederSpatialMechanicalBatchSolverBudgetWgsl =
+  schroederSpatialMechanicalSolverBudgetWgsl(
+    SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET
+  );
+export const schroederSpatialMechanicalGraphSolverWgsl =
+  schroederSpatialMechanicalBatchSolverBudgetWgsl.solver;
+export const schroederSpatialMechanicalInterfaceReceiptWgsl =
+  schroederSpatialMechanicalBatchSolverBudgetWgsl.interfaceReceipt;
+export const schroederSpatialMechanicalProposalApplyWgsl =
+  schroederSpatialMechanicalBatchSolverBudgetWgsl.apply;
 
 function createBuffer(device, label, size, usage) {
   return tagWebGpuBufferDevice(device.createBuffer({
@@ -17587,8 +17778,14 @@ function mechanicalProposalPoolSlot(
   particleCount,
   arenaIndex = 0,
   generation = null,
-  pairGraphByteBudget = null
+  pairGraphByteBudget = null,
+  solverBudget = null
 ) {
+  if (typeof solverBudget?.cacheKey !== 'string') {
+    throw new TypeError(
+      'mechanical proposal pool requires a resolved solver budget'
+    );
+  }
   let devicePools = mechanicalProposalPools.get(device);
   if (!devicePools) {
     devicePools = new Map();
@@ -17638,6 +17835,7 @@ function mechanicalProposalPoolSlot(
   const deviceCapacityPlan = createSchroederSpatialMechanicalPairGraphCapacityPlan({
     particleCapacity: capacity,
     maximumDirectedPairCapacity,
+    matchingCleanupPasses: solverBudget.cleanupPassBudget,
     maxRetainedBytes: Number.MAX_SAFE_INTEGER,
     deviceLimits
   });
@@ -17714,6 +17912,7 @@ function mechanicalProposalPoolSlot(
       budgetDirectedPairCapacity
     ),
     minimumDirectedPairCapacity,
+    matchingCleanupPasses: solverBudget.cleanupPassBudget,
     maxRetainedBytes: resolvedPairGraphByteBudget,
     deviceLimits
   });
@@ -17737,8 +17936,10 @@ function mechanicalProposalPoolSlot(
     'generation.execution.arenaIndex'
   );
   const key = String(exactArenaIndex);
-  const solverIterationUniformPlan =
-    mechanicalSolverIterationUniformPlan(device);
+  const solverIterationUniformPlan = mechanicalSolverIterationUniformPlan(
+    device,
+    solverBudget.jacobiIterations
+  );
   let slot = devicePools.get(key);
   if (slot?.inUseGenerationId != null) {
     throw new Error(
@@ -17757,12 +17958,15 @@ function mechanicalProposalPoolSlot(
     && slot.solverIterationParamsBuffer
     && slot.solverIterationParamsStrideBytes
       === solverIterationUniformPlan.strideBytes
+    && slot.solverIterationParamsByteLength
+      === solverIterationUniformPlan.byteLength
+    && slot.solverBudgetKey === solverBudget.cacheKey
     && slot.graphLayout?.schema
       === ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA
     && slot.graphLayout?.controlWords
       === SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS
     && slot.graphLayout?.matchingCleanupControlWords
-      === SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+      === solverBudget.matchingCleanupControlWords
     && slot.totalRetainedByteLength <= resolvedPairGraphByteBudget
   );
   const priorAllocationCount = slot?.totalBufferCreationCount ?? 0;
@@ -17920,6 +18124,9 @@ function mechanicalProposalPoolSlot(
       ),
       solverIterationParamsStrideBytes:
         solverIterationUniformPlan.strideBytes,
+      solverIterationParamsByteLength:
+        solverIterationUniformPlan.byteLength,
+      solverBudgetKey: solverBudget.cacheKey,
       identityDisabledBuffer: createTrackedBuffer(
         device,
         `ulg-schroeder-spatial-mechanical-identity-disabled-${key}`,
@@ -17979,8 +18186,19 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   diagnosticTrace = null,
   capture = null,
   sequenceIndex = null,
-  sequenceStepCount = null
+  sequenceStepCount = null,
+  // Per-invocation solver knobs. jacobiIterations defaults to the proven 16
+  // rounds; cleanupPassBudget has NO default and every caller must select
+  // one (batch preset 1024, interactive preset 512). Both are validated by
+  // resolveSchroederSpatialMechanicalSolverBudget and sealed into the run's
+  // control header, pipelines, and telemetry.
+  jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+  cleanupPassBudget
 } = {}) {
+  const solverBudget = resolveSchroederSpatialMechanicalSolverBudget({
+    jacobiIterations,
+    cleanupPassBudget
+  });
   const particleCount = Math.max(0, Math.trunc(finiteNumber(
     sphParticleState?.particleCount ?? mlsMpmParticleState?.particleCount,
     0
@@ -18026,7 +18244,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     device,
     diagnosticTrace,
     execution: authority.execution,
-    particleCount
+    particleCount,
+    solverBudget
   });
   const aggregateView = generation?.aggregateView || null;
   const activeRankView = generation?.activeRankView
@@ -18201,7 +18420,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     particleCount,
     authority.execution.arenaIndex,
     generation,
-    pairGraphByteBudget
+    pairGraphByteBudget,
+    solverBudget
   );
   const pool = poolAcquisition.slot;
   const identityBuffer = authority.identityBuffer || pool.identityDisabledBuffer;
@@ -18245,6 +18465,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     activeRankViewEnabled,
     aggregateSourceRowLayoutId,
     aggregateCapacityWords,
+    solverIterationCount: solverBudget.jacobiIterations,
     execution: authority.execution
   }));
   device.queue.writeBuffer(evidenceBuffer, 0, evidenceInitial);
@@ -18253,7 +18474,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     0,
     createMechanicalMatchingCleanupControlHeader(
       authority.execution,
-      particleCount
+      particleCount,
+      solverBudget
     )
   );
   device.queue.writeBuffer(
@@ -18420,9 +18642,20 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     computeBufferBinding(6, 'uniform'),
     computeBufferBinding(7, 'storage')
   ];
+  // Budget-compiled shader variants: the declared solver budget is
+  // interpolated into the solver/receipt/apply WGSL, so pipelines built from
+  // those sources are cached per (jacobiIterations, cleanupPassBudget) by
+  // suffixing their cache keys with the sealed budget key.
+  const solverBudgetWgsl = schroederSpatialMechanicalSolverBudgetWgsl(
+    solverBudget
+  );
   const createPipeline = ({ cacheKey, label, code, entryPoint, bindings }) => (
     createCachedExplicitComputePipeline(device, {
-      cacheKey,
+      cacheKey: code === solverBudgetWgsl.solver
+        || code === solverBudgetWgsl.interfaceReceipt
+        || code === solverBudgetWgsl.apply
+        ? `${cacheKey}.${solverBudget.cacheKey}`
+        : cacheKey,
       label,
       code,
       entryPoint,
@@ -18515,7 +18748,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
         'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v2',
       label:
         'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'measure_runtime_iteration',
       bindings: solverIterationBindings
     }),
@@ -18524,7 +18757,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
         'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v2',
       label:
         'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'solve_runtime_iteration',
       bindings: solverIterationBindings
     }),
@@ -18533,7 +18766,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
         'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v2',
       label:
         'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'allocate_energy_runtime_iteration',
       bindings: solverIterationBindings
     })
@@ -18543,7 +18776,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'ulg-schroeder-spatial-mechanical-matching-constraints-initialize.v22',
     label:
       'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
-    code: schroederSpatialMechanicalGraphSolverWgsl,
+    code: solverBudgetWgsl.solver,
     entryPoint: 'initialize_matching_cleanup_constraints',
     bindings: matchingConstraintInitializerBindings
   });
@@ -18553,7 +18786,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       cacheKey:
         'ulg-schroeder-spatial-mechanical-matching-cleanup-select.v27',
       label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-select',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'select_matching_cleanup_edge',
       bindings: matchingCleanupBindings
     }),
@@ -18561,7 +18794,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       cacheKey:
         'ulg-schroeder-spatial-mechanical-matching-cleanup-copy.v24',
       label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-copy',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'copy_matching_cleanup_state',
       bindings: matchingCleanupBindings
     }),
@@ -18569,7 +18802,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       cacheKey:
         'ulg-schroeder-spatial-mechanical-matching-cleanup-apply.v29',
       label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-apply',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'apply_matching_cleanup_edge',
       bindings: matchingCleanupBindings
     }),
@@ -18577,7 +18810,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       cacheKey:
         'ulg-schroeder-spatial-mechanical-matching-cleanup-walls.v25',
       label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-walls',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'project_matching_cleanup_walls',
       bindings: matchingCleanupBindings
     }),
@@ -18585,7 +18818,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       cacheKey:
         'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize.v24',
       label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize',
-      code: schroederSpatialMechanicalGraphSolverWgsl,
+      code: solverBudgetWgsl.solver,
       entryPoint: 'finalize_matching_cleanup_pass',
       bindings: matchingCleanupBindings
     })
@@ -18598,7 +18831,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner.v12',
         label:
           'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
-        code: schroederSpatialMechanicalGraphSolverWgsl,
+        code: solverBudgetWgsl.solver,
         entryPoint: 'run_matching_cleanup_global_owner',
         bindings: matchingCleanupBindings
       });
@@ -18607,14 +18840,14 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust.v24',
     label:
       'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust',
-    code: schroederSpatialMechanicalGraphSolverWgsl,
+    code: solverBudgetWgsl.solver,
     entryPoint: 'restore_matching_cleanup_trust',
     bindings: matchingCleanupBindings
   });
   const verifyPipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-contact-residual-verify.v35',
     label: 'ulg-schroeder-spatial-mechanical-contact-residual-verify',
-    code: schroederSpatialMechanicalGraphSolverWgsl,
+    code: solverBudgetWgsl.solver,
     entryPoint: 'verify_contact_residual',
     bindings: residualVerifyBindings
   });
@@ -18625,7 +18858,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay.v6',
           label:
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay',
-          code: schroederSpatialMechanicalGraphSolverWgsl,
+          code: solverBudgetWgsl.solver,
           entryPoint: 'replay_matching_cleanup_refinement_trace',
           bindings: diagnosticRefinementReplayBindings
         }),
@@ -18634,7 +18867,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply.v7',
           label:
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply',
-          code: schroederSpatialMechanicalGraphSolverWgsl,
+          code: solverBudgetWgsl.solver,
           entryPoint: 'trace_matching_cleanup_apply',
           bindings: diagnosticApplyTraceBindings
         }),
@@ -18643,7 +18876,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure.v3',
           label:
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure',
-          code: schroederSpatialMechanicalGraphSolverWgsl,
+          code: solverBudgetWgsl.solver,
           entryPoint: 'measure_terminal_residual_trace',
           bindings: diagnosticTerminalTraceBindings
         }),
@@ -18652,7 +18885,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-select.v3',
           label:
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-select',
-          code: schroederSpatialMechanicalGraphSolverWgsl,
+          code: solverBudgetWgsl.solver,
           entryPoint: 'select_terminal_residual_trace',
           bindings: diagnosticTerminalTraceBindings
         }),
@@ -18661,7 +18894,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize.v4',
           label:
             'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize',
-          code: schroederSpatialMechanicalGraphSolverWgsl,
+          code: solverBudgetWgsl.solver,
           entryPoint: 'materialize_terminal_residual_trace',
           bindings: diagnosticMaterializeTraceBindings
         })
@@ -18670,7 +18903,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   const verifyEnergyPipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-contact-energy-verify.v27',
     label: 'ulg-schroeder-spatial-mechanical-contact-energy-verify',
-    code: schroederSpatialMechanicalGraphSolverWgsl,
+    code: solverBudgetWgsl.solver,
     entryPoint: 'verify_contact_energy',
     bindings: solverBindings
   });
@@ -18679,7 +18912,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v5',
     label:
       'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
-    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    code: solverBudgetWgsl.interfaceReceipt,
     entryPoint: 'initialize_contact_interface_receipt',
     bindings: interfaceReceiptBindings
   });
@@ -18688,7 +18921,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v5',
     label:
       'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
-    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    code: solverBudgetWgsl.interfaceReceipt,
     entryPoint: 'materialize_contact_interface_receipt',
     bindings: interfaceReceiptBindings
   });
@@ -18696,35 +18929,35 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     cacheKey:
       'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v5',
     label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal',
-    code: schroederSpatialMechanicalInterfaceReceiptWgsl,
+    code: solverBudgetWgsl.interfaceReceipt,
     entryPoint: 'seal_contact_interface_receipt',
     bindings: interfaceReceiptBindings
   });
   const publishPipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-publish.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-publish',
-    code: schroederSpatialMechanicalProposalApplyWgsl,
+    code: solverBudgetWgsl.apply,
     entryPoint: 'publish_contact_proposal',
     bindings: applyBindings
   });
   const zeroContactCompletePipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v8',
     label: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete',
-    code: schroederSpatialMechanicalProposalApplyWgsl,
+    code: solverBudgetWgsl.apply,
     entryPoint: 'complete_zero_contact_proposal',
     bindings: applyBindings
   });
   const sealPipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-seal.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-seal',
-    code: schroederSpatialMechanicalProposalApplyWgsl,
+    code: solverBudgetWgsl.apply,
     entryPoint: 'seal_contact_proposal',
     bindings: applyBindings
   });
   const commitPipeline = createPipeline({
     cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-commit.v11',
     label: 'ulg-schroeder-spatial-mechanical-proposal-commit',
-    code: schroederSpatialMechanicalProposalApplyWgsl,
+    code: solverBudgetWgsl.apply,
     entryPoint: 'commit_contact_proposal',
     bindings: applyBindings
   });
@@ -19214,18 +19447,37 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     supportProfiles: SCHROEDER_SPATIAL_MECHANICAL_CONSUMERS,
     multiConsumerTraversal: true,
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT,
-    solverIterationCount: SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
+    solverIterationCount: solverBudget.jacobiIterations,
+    // The declared solver budget, sealed. The encoded horizon is exactly the
+    // declared cleanupPassBudget: the compiled shader variant, the control
+    // header words 10/11, and the receipt lanes are all derived from this
+    // one declaration, and the budget-compiled pipelines verify the header
+    // words on-GPU (fail-closed on mismatch).
+    solverBudgetDeclared: solverBudget,
+    solverBudgetSealPolicy:
+      'declared-budget-compiled-into-pipeline-variants-and-verified-against-control-header-words-10-11-fail-closed',
+    // Fixed (scan-independent) deferred dispatch count for the declared
+    // budget: 18 bundle commands + 3 dispatches per Jacobi round + the
+    // cleanup path (one owner dispatch per pass in production; the legacy
+    // diagnostic ping-pong encodes 5 stage dispatches plus 2 trace
+    // dispatches per pass and 3 terminal trace dispatches).
+    encodedDeferredDispatchFloor:
+      18
+      + 3 * solverBudget.jacobiIterations
+      + (resolvedDiagnosticTrace
+        ? 7 * solverBudget.cleanupPassBudget + 3
+        : solverBudget.ownerDispatches),
     matchingCleanupLogicalPassCount:
-      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+      solverBudget.cleanupPassBudget,
     matchingCleanupEncodedPassCount: resolvedDiagnosticTrace
-      ? SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
-      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
+      ? solverBudget.cleanupPassBudget
+      : solverBudget.encodedPassBudget,
     matchingCleanupOwnerPassesPerDispatch: resolvedDiagnosticTrace
       ? null
-      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+      : solverBudget.ownerPassesPerDispatch,
     matchingCleanupOwnerDispatchCount: resolvedDiagnosticTrace
       ? 0
-      : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
+      : solverBudget.ownerDispatches,
     matchingCleanupOwnerMaxActiveParticles: resolvedDiagnosticTrace
       ? null
       : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES,
@@ -19236,7 +19488,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       ? null
       : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS,
     solverPolicy:
-      'retained-csr-sixteen-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-1024-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit',
+      `retained-csr-${solverBudget.jacobiIterations}-round-reciprocal-mass-tensor-bounded-velocity-jacobi-aggregate-position-trust-${solverBudget.cleanupPassBudget}-pass-logical-receipt-pre-and-post-certified-monotone-contact-wall-frontier-owner-terminal-path-contained-one-pass-per-dispatch-gpu-uniform-early-tail-fail-closed-if-budget-exhausted-fused-energy-measure-nonnegative-edge-heat-final-residual-seal-then-commit`,
     aggregateHierarchyEnabled,
     aggregateAdmissionStatus,
     activeRankViewEnabled,
@@ -19765,7 +20017,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           for (
             let ownerDispatch = 0;
             ownerDispatch
-              < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES;
+              < solverBudget.ownerDispatches;
             ownerDispatch += 1
           ) {
             pass.dispatchWorkgroups(1);
@@ -19894,7 +20146,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           endContactTimestamp(encoder, validationTimestamp);
           for (
             let iteration = 0;
-            iteration < SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+            iteration < solverBudget.jacobiIterations;
             iteration += 1
           ) {
             const iterationTimestamp = beginContactTimestamp(
@@ -19918,7 +20170,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           if (legacyMatchingCleanupActive) {
             for (
               let cleanupPass = 0;
-              cleanupPass < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+              cleanupPass < solverBudget.cleanupPassBudget;
               cleanupPass += 1
             ) {
               const cleanupTimestamp = beginContactTimestamp(
@@ -19937,7 +20189,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
               advanceMatchingCleanupState();
               if (
                 cleanupPass + 1
-                  === SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+                  === solverBudget.cleanupPassBudget
               ) {
                 encodeMatchingTrustRestore(
                   cleanupPassEncoder,
@@ -19988,7 +20240,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           encodeScatterAndValidation(secondPass);
           for (
             let iteration = 0;
-            iteration < SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
+            iteration < solverBudget.jacobiIterations;
             iteration += 1
           ) {
             encodeSolverIteration(
@@ -20010,7 +20262,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             });
             for (
               let cleanupPass = 0;
-              cleanupPass < SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+              cleanupPass < solverBudget.cleanupPassBudget;
               cleanupPass += 1
             ) {
               encodeMatchingCleanupPass(
@@ -20168,24 +20420,24 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
         }
         encodedDispatchCount =
           18
-          + 3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+          + 3 * solverBudget.jacobiIterations
           + (
             legacyMatchingCleanupActive
-              ? 5 * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
-              : SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+              ? 5 * solverBudget.cleanupPassBudget
+              : solverBudget.ownerDispatches
           )
           + (
             diagnosticTracePipelines
-              ? 2 * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES + 3
+              ? 2 * solverBudget.cleanupPassBudget + 3
               : 0
           )
           + preparedScan.encodedDispatchCount;
         encodedComputePassCount = contactTimestampActive
           ? 9
-            + SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+            + solverBudget.jacobiIterations
             + (
               legacyMatchingCleanupActive
-                ? SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+                ? solverBudget.cleanupPassBudget
                 : 1
             )
           : 7;
@@ -20273,8 +20525,29 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && contactInterfaceReceipt.failClosed === true
     && proposal.traversalCount
       === SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
+    // The solver budget is a declared, sealed per-invocation parameter. The
+    // contract requires the seal to be present and internally consistent:
+    // the encoded horizon must equal the declared cleanup budget, and the
+    // reported counts must match the sealed declaration exactly.
+    && Number.isInteger(proposal.solverIterationCount)
     && proposal.solverIterationCount
-      === SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
+      >= SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MIN
+    && proposal.solverIterationCount
+      <= SCHROEDER_SPATIAL_MECHANICAL_JACOBI_ITERATIONS_MAX
+    && Number.isInteger(proposal.matchingCleanupLogicalPassCount)
+    && proposal.matchingCleanupLogicalPassCount
+      >= SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN
+    && proposal.matchingCleanupLogicalPassCount
+      <= SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX
+    && proposal.matchingCleanupEncodedPassCount
+      === proposal.matchingCleanupLogicalPassCount
+    && proposal.solverBudgetDeclared?.jacobiIterations
+      === proposal.solverIterationCount
+    && proposal.solverBudgetDeclared?.cleanupPassBudget
+      === proposal.matchingCleanupLogicalPassCount
+    && proposal.solverBudgetDeclared?.encodedPassBudget
+      === proposal.matchingCleanupLogicalPassCount
+    && Object.isFrozen(proposal.solverBudgetDeclared)
     && proposal.evidence?.traversalCount
       === SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
     && Array.isArray(traversalBuffers)

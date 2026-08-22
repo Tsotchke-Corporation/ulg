@@ -826,6 +826,9 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'avAlpha',
   'sep',
   'sepVel',
+  'contactSolver',
+  'contactJacobiIterations',
+  'contactCleanupPasses',
   'bg',
   'bgimg',
   'lighting',
@@ -5914,6 +5917,23 @@ export async function mountSphPhaseDemoOverlay({
   const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
   const initialParticleSeparationRelaxation = numericUrlOption('sep');
   const initialParticleSeparationVelocityDamping = numericUrlOption('sepVel', { max: 1 });
+  // Contact-solver knobs. Absent params stay null so the scene's interactive
+  // preset (16 Jacobi rounds, 512 cleanup passes) applies; out-of-range
+  // values clamp, and the clamped value is what gets sealed into telemetry.
+  const clampedContactUrlOption = (key, min, max) => {
+    const raw = initialHash.get(key) ?? initialQuery.get(key) ?? initialScenarioRuntime[key];
+    if (raw == null || raw === '') return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    return Math.min(max, Math.max(min, Math.round(value)));
+  };
+  const initialContactSolverEnabled = (() => {
+    const raw = initialHash.get('contactSolver') ?? initialQuery.get('contactSolver') ?? initialScenarioRuntime.contactSolver;
+    if (raw == null || raw === '') return true;
+    return String(raw) !== '0' && String(raw) !== 'false';
+  })();
+  const initialContactJacobiIterations = clampedContactUrlOption('contactJacobiIterations', 1, 16);
+  const initialContactCleanupPasses = clampedContactUrlOption('contactCleanupPasses', 16, 65536);
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -6162,6 +6182,9 @@ export async function mountSphPhaseDemoOverlay({
   const initialSchroederSimulationConfig = Object.freeze({
     schema: 'peercompute.ulg.sph-demo-schroeder-simulation-config.v0',
     enabled: initialSchroederSimulationEnabled,
+    contactSolverEnabled: initialContactSolverEnabled,
+    contactJacobiIterations: initialContactJacobiIterations,
+    contactCleanupPassBudget: initialContactCleanupPasses,
     selectedLevel: initialSchroederSelectedLevel,
     baseGridSpacingM: initialSchroederBaseGridSpacingM,
     minLevel: initialSchroederMinLevel,
@@ -6216,9 +6239,27 @@ export async function mountSphPhaseDemoOverlay({
   function schroederResidentExecutionOptionsFromConfig(
     config = initialSchroederSimulationConfig
   ) {
-    if (!config?.enabled) return { schroederSimulation: false };
+    if (!config?.enabled) {
+      return {
+        schroederSimulation: false,
+        schroederContactSolverEnabled: config?.contactSolverEnabled !== false
+      };
+    }
+    // contactSolver=0 reuses the existing schroeder-simulation enable seam:
+    // the canonical spatial proposals route (which owns the pair-contact
+    // solve) is turned off entirely and the pre-canonical separation path
+    // runs instead. The scene seals the skip into telemetry.
+    if (config.contactSolverEnabled === false) {
+      return {
+        schroederSimulation: false,
+        schroederContactSolverEnabled: false
+      };
+    }
     return {
       schroederSimulation: true,
+      schroederContactSolverEnabled: true,
+      schroederContactJacobiIterations: config.contactJacobiIterations,
+      schroederContactCleanupPassBudget: config.contactCleanupPassBudget,
       schroederSelectedLevel: config.selectedLevel,
       schroederBaseGridSpacingM: config.baseGridSpacingM,
       schroederMinLevel: config.minLevel,
@@ -10183,6 +10224,9 @@ export async function mountSphPhaseDemoOverlay({
     activeGridSafetyCells = null,
     measureFusedSequenceQueueFence = false,
     schroederSimulation = false,
+    schroederContactSolverEnabled = true,
+    schroederContactJacobiIterations = null,
+    schroederContactCleanupPassBudget = null,
     schroederSelectedLevel = 0,
     schroederBaseGridSpacingM = null,
     schroederMinLevel = null,
@@ -10228,6 +10272,9 @@ export async function mountSphPhaseDemoOverlay({
       `activeGridSafety=${activeGridSafetyCells ?? 'default'}`,
       `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`,
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
+      `ssContactSolver=${schroederContactSolverEnabled === false ? 0 : 1}`,
+      `ssContactJacobi=${schroederContactJacobiIterations ?? 'preset'}`,
+      `ssContactCleanup=${schroederContactCleanupPassBudget ?? 'preset'}`,
       `ssLevel=${schroederSelectedLevel ?? 0}`,
       `ssBaseDx=${schroederBaseGridSpacingM ?? 'auto'}`,
       `ssMin=${schroederMinLevel ?? 'auto'}`,

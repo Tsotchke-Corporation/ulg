@@ -5,7 +5,40 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_MAGIC = 0x4d50_4731;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 8;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS = 130;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS = 48;
-export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS = 7_180;
+// The matching-cleanup control buffer holds one fixed 12-word header plus
+// seven per-pass evidence lanes (selection/copy/apply/wall counts, applied
+// pair count, max position ratio, max velocity residual). The pass budget is
+// a declared per-invocation solver parameter; the words scale with it.
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_HEADER_WORDS = 12;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT = 7;
+// Reference pass budget mirrored by the batch/native/diagnostic preset of the
+// mechanical proposals solver. Callers with a different declared budget must
+// size their control buffer through the function below.
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES = 1024;
+export function schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(
+  matchingCleanupPasses
+) {
+  if (
+    typeof matchingCleanupPasses !== 'number'
+    || !Number.isInteger(matchingCleanupPasses)
+    || matchingCleanupPasses < 1
+    || matchingCleanupPasses > 0xffff_ffff
+  ) {
+    throw new RangeError(
+      'matchingCleanupPasses must be a positive u32 integer'
+    );
+  }
+  return SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_HEADER_WORDS
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT
+      * matchingCleanupPasses;
+}
+export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS =
+  schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES
+  );
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS = 3;
 // The exact traversal decides on-GPU whether a certified zero-edge completion
 // can replace the CSR solver. One dispatch triplet launches that path without
@@ -538,7 +571,11 @@ function frozenBufferLayout(role, wordLength, { indirect = false } = {}) {
   });
 }
 
-function computePairGraphBuffers(particleCapacity, directedPairCapacity) {
+function computePairGraphBuffers(
+  particleCapacity,
+  directedPairCapacity,
+  matchingCleanupControlWords
+) {
   const sourceOffsetWordLength = checkedAdd(
     particleCapacity,
     1,
@@ -585,7 +622,7 @@ function computePairGraphBuffers(particleCapacity, directedPairCapacity) {
     ),
     frozenBufferLayout(
       'mechanical-pair-graph-matching-cleanup-control',
-      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS
+      matchingCleanupControlWords
     ),
     frozenBufferLayout(
       'mechanical-pair-graph-indirect-dispatch',
@@ -670,6 +707,11 @@ function minimumInterfaceReceiptDirectedCapacity(particleCapacity) {
 export function createSchroederSpatialMechanicalPairGraphLayout({
   particleCapacity,
   directedPairCapacity,
+  // Declared matching-cleanup pass budget. The reference (batch) preset keeps
+  // existing callers byte-identical; per-invocation budgets must be threaded
+  // explicitly so CONTROL_WORDS sizing follows the passed budget.
+  matchingCleanupPasses =
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES,
   maxRetainedBytes = null,
   arenaByteLimit = null,
   deviceLimits = null
@@ -682,6 +724,14 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     directedPairCapacity,
     'directedPairCapacity'
   );
+  const resolvedMatchingCleanupPasses = positiveU32(
+    matchingCleanupPasses,
+    'matchingCleanupPasses'
+  );
+  const matchingCleanupControlWords =
+    schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(
+      resolvedMatchingCleanupPasses
+    );
   const resolvedDeviceLimits = resolveDeviceLimits(deviceLimits);
   const resolvedMaxRetainedBytes = resolveRetainedByteLimit({
     maxRetainedBytes,
@@ -689,7 +739,8 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
   });
   const buffers = computePairGraphBuffers(
     resolvedParticleCapacity,
-    resolvedDirectedPairCapacity
+    resolvedDirectedPairCapacity,
+    matchingCleanupControlWords
   );
   validateBufferLimits(buffers, resolvedDeviceLimits);
   const retainedWordLength = buffers.reduce((sum, buffer) => checkedAdd(
@@ -797,8 +848,8 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     directedPairCapacity: resolvedDirectedPairCapacity,
     controlWords: SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS,
     evidenceWords: SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS,
-    matchingCleanupControlWords:
-      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_WORDS,
+    matchingCleanupPasses: resolvedMatchingCleanupPasses,
+    matchingCleanupControlWords,
     indirectDispatchWords:
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_INDIRECT_DISPATCH_WORDS,
     conditionalDispatchWords:
@@ -887,6 +938,8 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
   particleCapacity,
   maximumDirectedPairCapacity = UINT32_MAX,
   minimumDirectedPairCapacity = 1,
+  matchingCleanupPasses =
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_REFERENCE_PASSES,
   maxRetainedBytes = null,
   arenaByteLimit = null,
   deviceLimits = null
@@ -894,6 +947,10 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
   const resolvedParticleCapacity = positiveU32(
     particleCapacity,
     'particleCapacity'
+  );
+  const resolvedMatchingCleanupPasses = positiveU32(
+    matchingCleanupPasses,
+    'matchingCleanupPasses'
   );
   const resolvedMaximumDirectedPairCapacity = positiveU32(
     maximumDirectedPairCapacity,
@@ -935,6 +992,7 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
   const provisional = createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: resolvedParticleCapacity,
     directedPairCapacity: interfaceReceiptMinimumDirectedCapacity,
+    matchingCleanupPasses: resolvedMatchingCleanupPasses,
     maxRetainedBytes: DEFAULT_BYTE_LIMIT,
     deviceLimits: resolvedDeviceLimits
   });
@@ -999,6 +1057,7 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
   const layout = createSchroederSpatialMechanicalPairGraphLayout({
     particleCapacity: resolvedParticleCapacity,
     directedPairCapacity,
+    matchingCleanupPasses: resolvedMatchingCleanupPasses,
     maxRetainedBytes: resolvedMaxRetainedBytes,
     deviceLimits: resolvedDeviceLimits
   });
@@ -1007,6 +1066,7 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
     status: 'schroeder-spatial-mechanical-pair-graph-capacity-plan-ready',
     particleCapacity: resolvedParticleCapacity,
     directedPairCapacity,
+    matchingCleanupPasses: resolvedMatchingCleanupPasses,
     minimumDirectedPairCapacity: resolvedMinimumDirectedPairCapacity,
     effectiveMinimumDirectedPairCapacity,
     interfaceReceiptMinimumDirectedCapacity,

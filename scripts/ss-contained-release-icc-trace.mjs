@@ -277,6 +277,23 @@ function receiptArtifactGraphStable(before, after) {
   return canonicalJson(before) === canonicalJson(after);
 }
 
+/**
+ * The hashed artifact graph and the per-receipt evidence readers may
+ * legitimately attest the same file — a repeated attestation is not an
+ * identity conflict. Collapse repeats within the attested-evidence set so
+ * the pairwise-distinct assertion below guards the separations that
+ * matter: receipt-vs-receipt, evidence-vs-receipt, and anything-vs-output.
+ */
+export function dedupeAttestedEvidencePaths(entries) {
+  const seen = new Set();
+  return Object.freeze(entries.filter((entry) => {
+    const identity = path.resolve(entry.path);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  }));
+}
+
 async function assertCompleteTraceArtifactSeparation({
   receiptPaths,
   graph,
@@ -289,11 +306,13 @@ async function assertCompleteTraceArtifactSeparation({
     label: 'contained release receipts, nested evidence, and ICC trace',
     paths: [
       ...Object.values(receiptPaths),
-      ...graph.evidence.map(({ path: artifactPath }, index) => ({
-        path: artifactPath,
-        label: `hashed nested evidence ${index}`
-      })),
-      ...receiptArtifactPaths(evidence, { label: 'reader evidence' }),
+      ...dedupeAttestedEvidencePaths([
+        ...graph.evidence.map(({ path: artifactPath }, index) => ({
+          path: artifactPath,
+          label: `hashed nested evidence ${index}`
+        })),
+        ...receiptArtifactPaths(evidence, { label: 'reader evidence' })
+      ]),
       { path: outputPath, label: 'contained release ICC trace' }
     ]
   });

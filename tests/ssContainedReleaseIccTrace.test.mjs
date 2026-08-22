@@ -404,3 +404,20 @@ test('a waiver marker without waiver identity fields is not authentic', () => {
     false
   );
 });
+
+test('attested evidence dedupe collapses repeated attestations of one artifact and keeps distinct files', async () => {
+  const { dedupeAttestedEvidencePaths } = await import(
+    '../scripts/ss-contained-release-icc-trace.mjs'
+  );
+  const deduped = dedupeAttestedEvidencePaths([
+    { path: '/tmp/a/artifact.log', label: 'hashed nested evidence 0' },
+    { path: '/tmp/a/../a/artifact.log', label: 'reader evidence' },
+    { path: '/tmp/a/artifact.log', label: 'reader evidence again' },
+    { path: '/tmp/b/other.log', label: 'hashed nested evidence 1' }
+  ]);
+  assert.deepEqual(
+    deduped.map((entry) => entry.path),
+    ['/tmp/a/artifact.log', '/tmp/b/other.log']
+  );
+  assert.equal(deduped[0].label, 'hashed nested evidence 0');
+});

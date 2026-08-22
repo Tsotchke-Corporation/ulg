@@ -14,6 +14,8 @@ import {
   ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
   ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA,
+  ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS,
+  ULG_WORKER_SCHROEDER_LANE_SEED_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON,
@@ -4431,4 +4433,794 @@ test('ULG resident stage worker refuses schedules with invalid or over-cap step 
   );
   assert.equal(result.status, 'worker-resident-schedule-completed');
   assert.equal(result.completedStepCount, 1);
+});
+
+// --- SS worker-lane seed stage (refactor increment W4a) ---
+// A fresh worker lane starts an SS schedule from a structured-cloneable seed
+// descriptor: the W1 adopted-storage rematerialization rebuilds the four
+// particle-storage buffers on the worker device, the caller-supplied lineage
+// words are stamped onto those uploads, the REAL
+// resolveSchroederParticleBufferFamilyGeneration verdict gates the seed, and
+// the REAL runSchroederLevelAssignmentWebGpu runs on the fake device (the
+// injectable stageOptions.schroederLaneSeed.levelAssignmentRunner seam is
+// exercised only by the device-mismatch refusal below).
+
+const WORKER_LANE_SEED_DEFAULT_LINEAGE = Object.freeze({
+  storageGeneration: 11,
+  physicsTick: 13,
+  physicsSubstep: 0,
+  positionEpoch: 17,
+  topologyEpoch: 19,
+  chartEpoch: 23,
+  levelEpoch: 29,
+  supportEpoch: 31
+});
+
+function workerLaneSeedStage() {
+  return stage(
+    'schroederLaneSeed',
+    ['sph-particle-state', 'mls-mpm-mechanics'],
+    ['schroeder-level-assignment']
+  );
+}
+
+function workerLaneSeedStageOptions({
+  hotBufferKey = 'ulg:sph-resident-schroeder-adopted-storage:lane-seed',
+  particleCount = 1,
+  lineage = WORKER_LANE_SEED_DEFAULT_LINEAGE,
+  seedOptionOverrides = {}
+} = {}) {
+  return {
+    useSchroederAdoptedParticleStorageWorkerRematerialization: true,
+    schroederAdoptedParticleStorageWorkerRematerializationSeed: {
+      schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
+      status: 'schroeder-adopted-particle-storage-portable-materialization-seed-ready',
+      ready: true,
+      hotBufferKey,
+      authoritativeParticleCount: particleCount,
+      materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed'
+    },
+    schroederLaneSeed: {
+      ...(lineage ? { lineage: { ...lineage } } : {}),
+      minLevel: 0,
+      maxLevel: 0,
+      chartId: 0,
+      baseGridSpacingM: 1,
+      ...seedOptionOverrides
+    }
+  };
+}
+
+function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount = 1 }) {
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const runnerCalls = [];
+  const runner = async (args) => {
+    runnerCalls.push(args);
+    const ordinal = runnerCalls.length;
+    return {
+      status: 'schroeder-same-level-mechanics-completed',
+      selectedLevel: 0,
+      residentStep: {
+        backend: 'webgpu',
+        status: 'resident-step-completed',
+        readbackMode: 'no-full-readback',
+        stageStatus: { p2g: 'completed', g2p: 'completed' },
+        stageBackends: { p2g: 'webgpu', g2p: 'webgpu' },
+        nextParticleUploads: {
+          sphParticleUpload: {
+            particleCount,
+            stateBuffer: taggedBuffer(
+              `${labelPrefix}-next-state-${ordinal}`,
+              particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+            ),
+            thermoBuffer: taggedBuffer(
+              `${labelPrefix}-next-thermo-${ordinal}`,
+              particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+            ),
+            identityBuffer: taggedBuffer(
+              `${labelPrefix}-next-identity-${ordinal}`,
+              particleCount * Uint32Array.BYTES_PER_ELEMENT
+            )
+          },
+          mlsMpmParticleUpload: {
+            particleCount,
+            mechanicsBuffer: taggedBuffer(
+              `${labelPrefix}-next-mechanics-${ordinal}`,
+              particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+            )
+          }
+        }
+      },
+      schroederSpatialEpochReleasePromise: Promise.resolve(true),
+      currentSchroederSpatialEpochGenerationSummary: () => ({
+        status: 'synthetic-generation-summary'
+      })
+    };
+  };
+  return { runner, runnerCalls };
+}
+
+const WORKER_SEED_MECHANICS_GRID = Object.freeze({
+  selectedLevel: 0,
+  gridDims: [2, 2, 2],
+  gridNodeCount: 8,
+  gridShift: 1,
+  gridSpacingM: 1
+});
+
+test('ULG resident stage worker seeds a fresh SS lane from a cloneable descriptor and a 2-step schedule advances beyond the seeded lineage', async () => {
+  // The W4b scene hand-off contract: exactly these words, every one REQUIRED.
+  assert.deepEqual([...ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS], [
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ]);
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const particleCount = 1;
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-seed-schedule-lane',
+    stateKey: 'ulg:test:schroeder-seed-schedule-state'
+  };
+  const seedLineage = WORKER_LANE_SEED_DEFAULT_LINEAGE;
+
+  const seeded = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-schedule',
+        particleCount
+      })
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(seeded.value.schema, ULG_WORKER_SCHROEDER_LANE_SEED_STAGE_SCHEMA);
+  assert.equal(seeded.value.status, 'worker-schroeder-lane-seeded');
+  assert.equal(seeded.value.laneSeeded, true);
+  assert.equal(seeded.value.seedRetainedInLane, true);
+  // The REAL family resolver's verdict, published truthfully.
+  assert.equal(
+    seeded.value.bufferFamilyGenerationStatus,
+    'schroeder-particle-buffer-family-generation-ready'
+  );
+  assert.equal(seeded.value.bufferFamilyGeneration.ready, true);
+  assert.equal(
+    seeded.value.bufferFamilyGeneration.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  // The REAL level-assignment runner executed on the fake device (no seam).
+  assert.equal(
+    seeded.value.levelAssignmentRunnerSource,
+    'real-runSchroederLevelAssignmentWebGpu'
+  );
+  assert.equal(
+    seeded.value.levelAssignmentSummary.status,
+    'schroeder-level-assignment-submitted'
+  );
+  assert.equal(
+    seeded.value.levelAssignmentSummary.bufferFamilyGenerationStatus,
+    'schroeder-particle-buffer-family-generation-ready'
+  );
+  assert.equal(seeded.value.levelAssignmentSummary.assignmentStrideFloats, 16);
+  for (const field of ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS) {
+    assert.equal(
+      seeded.value.levelAssignmentSummary[field],
+      seedLineage[field],
+      `seeded assignment lineage word ${field}`
+    );
+  }
+  assert.deepEqual(seeded.value.seedLineage, { ...seedLineage });
+  assert.equal(
+    seeded.value.workerResidentStage.workerAdoptedStorageRematerializationApplied,
+    true
+  );
+  assert.match(seeded.value.seedLevelAssignmentBufferRef.ref, /^ulg-worker:/);
+  assert.ok(seeded.retainedBufferRefs.includes(
+    seeded.value.seedLevelAssignmentBufferRef.ref
+  ));
+  assert.equal(seeded.value.gpuFence.fenceSatisfied, true);
+  assertNoWorkerGpuBuffers(seeded, 'seeded');
+  structuredClone(seeded.value);
+
+  // 2-step schedule: step 1 consumes the seeded assignment; step 2 continues
+  // from the kernel-committed stand-in with advanced identity words.
+  const continuationAssignment = workerSchroederLevelAssignmentFixture(device, {
+    particleCount,
+    storageGeneration: seedLineage.storageGeneration + 1,
+    physicsTick: seedLineage.physicsTick + 1,
+    positionEpoch: seedLineage.positionEpoch + 1,
+    sourceStateBuffer: null,
+    label: 'worker-ss-seeded-step2'
+  });
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-ss-seeded-schedule',
+    particleCount
+  });
+  const progressEnvelopes = [];
+  const scheduleResult = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false,
+          scheduleStepOptionsProvider: () => ({
+            levelAssignment: continuationAssignment
+          })
+        },
+        schroederSameLevelMechanics: {
+          schroederSameLevelMechanicsRunner: mechanicsFixture.runner
+        }
+      }),
+      { stepCount: 2, scheduleId: 'ulg:test:seeded-schedule' },
+      laneOptions
+    ),
+    { postProgress: (progress) => progressEnvelopes.push(progress) }
+  );
+  assert.equal(scheduleResult.status, 'worker-resident-schedule-completed');
+  assert.equal(scheduleResult.completedStepCount, 2);
+  assert.equal(mechanicsFixture.runnerCalls.length, 2);
+  // Step 1 consumed the retained seeded assignment and carries EXACTLY the
+  // seeded identity words.
+  assert.equal(
+    progressEnvelopes[0].stepSummary.levelAssignmentSource,
+    'worker-lane-seeded-level-assignment'
+  );
+  assert.equal(
+    progressEnvelopes[0].epochIdentity.physicsTick,
+    seedLineage.physicsTick
+  );
+  assert.equal(
+    progressEnvelopes[0].epochIdentity.positionEpoch,
+    seedLineage.positionEpoch
+  );
+  assert.equal(
+    progressEnvelopes[0].epochIdentity.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  // Step 2 (and the schedule's final identity) advanced beyond the seeded
+  // lineage baseline.
+  assert.equal(
+    progressEnvelopes[1].stepSummary.levelAssignmentSource,
+    'stage-option-level-assignment-with-worker-retained-particle-buffers'
+  );
+  assert.ok(
+    scheduleResult.finalEpochIdentity.physicsTick > seedLineage.physicsTick
+  );
+  assert.ok(
+    scheduleResult.finalEpochIdentity.positionEpoch > seedLineage.positionEpoch
+  );
+  assert.equal(
+    scheduleResult.finalEpochIdentity.storageGeneration,
+    seedLineage.storageGeneration + 1
+  );
+  const ring = scheduleResult.perStepSummaries.ring;
+  assert.equal(ring.length, 2);
+  assert.equal(ring[0].physicsTick, seedLineage.physicsTick);
+  assert.equal(ring[0].positionEpoch, seedLineage.positionEpoch);
+  assert.equal(ring[1].physicsTick, seedLineage.physicsTick + 1);
+  assert.equal(ring[1].positionEpoch, seedLineage.positionEpoch + 1);
+  // Step 1's mechanics consumed the seed-stamped rematerialized uploads and
+  // the seeded execution itself; step 2 consumed step 1's post-step buffers.
+  const stepOneArgs = mechanicsFixture.runnerCalls[0];
+  assert.equal(
+    stepOneArgs.sphParticleUpload.stateBuffer.label,
+    'ulg-worker-adopted-storage-state'
+  );
+  assert.equal(
+    stepOneArgs.sphParticleUpload.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  assert.equal(
+    stepOneArgs.levelAssignment.bufferFamilyGenerationStatus,
+    'schroeder-particle-buffer-family-generation-ready'
+  );
+  assert.equal(
+    stepOneArgs.levelAssignment.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  assert.equal(
+    stepOneArgs.spatialEpochGeneration.execution.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  const stepTwoArgs = mechanicsFixture.runnerCalls[1];
+  assert.equal(
+    stepTwoArgs.sphParticleUpload.stateBuffer.label,
+    'worker-ss-seeded-schedule-next-state-1'
+  );
+  assert.equal(
+    stepTwoArgs.spatialEpochGeneration.execution.positionEpoch,
+    seedLineage.positionEpoch + 1
+  );
+  for (const ref of scheduleResult.retainedBufferRefs) {
+    assert.match(ref, /^ulg-worker:/);
+  }
+  assertNoWorkerGpuBuffers(scheduleResult, 'seededScheduleResult');
+  structuredClone(scheduleResult);
+  progressEnvelopes.forEach((progress, index) => {
+    assertNoWorkerGpuBuffers(progress, `seededProgress[${index}]`);
+    structuredClone(progress);
+  });
+});
+
+test('ULG resident stage worker lane seed fails closed on missing lineage words and never invents them', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-seed-lineage-lane',
+    stateKey: 'ulg:test:schroeder-seed-lineage-state'
+  };
+  const seedPayload = (lineage) => payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-lineage',
+        lineage
+      })
+    }),
+    null,
+    laneOptions
+  );
+
+  // A missing word is refused by name.
+  const { positionEpoch: omitted, ...missingPositionEpoch } =
+    WORKER_LANE_SEED_DEFAULT_LINEAGE;
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(seedPayload(missingPositionEpoch)),
+    (error) => {
+      assert.equal(error.reason, 'seed-lineage-missing');
+      assert.equal(error.code, 'ERR_ULG_WORKER_SCHROEDER_SEED_LINEAGE_MISSING');
+      assert.match(error.message, /positionEpoch/);
+      return true;
+    }
+  );
+  // A non-finite word is refused the same way.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(seedPayload({
+      ...WORKER_LANE_SEED_DEFAULT_LINEAGE,
+      physicsTick: Number.NaN
+    })),
+    (error) => {
+      assert.equal(error.reason, 'seed-lineage-missing');
+      assert.match(error.message, /physicsTick/);
+      return true;
+    }
+  );
+  // A lineage object missing entirely is refused with the full word list.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(seedPayload(null)),
+    (error) => {
+      assert.equal(error.reason, 'seed-lineage-missing');
+      assert.match(error.message, /storageGeneration.*supportEpoch/);
+      return true;
+    }
+  );
+  // A malformed particle-storage descriptor is refused with the exact W1
+  // machinery verdict (the seed reuses that machinery, never duplicates it).
+  const notReadyOptions = workerLaneSeedStageOptions({
+    hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-lineage'
+  });
+  notReadyOptions.schroederAdoptedParticleStorageWorkerRematerializationSeed = {
+    ...notReadyOptions.schroederAdoptedParticleStorageWorkerRematerializationSeed,
+    ready: false
+  };
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: notReadyOptions
+      }),
+      null,
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(error.reason, 'seed-particle-storage-rematerialization-blocked');
+      assert.match(
+        error.message,
+        /blocked-worker-adopted-storage-rematerialization-seed-not-ready/
+      );
+      return true;
+    }
+  );
+  // A seed that never requested the W1 rematerialization is refused too.
+  const noRematOptions = workerLaneSeedStageOptions({
+    hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-lineage'
+  });
+  delete noRematOptions.useSchroederAdoptedParticleStorageWorkerRematerialization;
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: noRematOptions
+      }),
+      null,
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(error.reason, 'seed-particle-storage-rematerialization-blocked');
+      return true;
+    }
+  );
+
+  // The refusals did not poison the lane: a complete lineage still seeds it.
+  const seeded = await runUlgMechanicsResidentStageWorkerPayload(
+    seedPayload(WORKER_LANE_SEED_DEFAULT_LINEAGE)
+  );
+  assert.equal(seeded.value.status, 'worker-schroeder-lane-seeded');
+  assertNoWorkerGpuBuffers(seeded, 'seededAfterRefusals');
+  structuredClone(seeded.value);
+});
+
+test('ULG resident stage worker lane seed surfaces the real family-resolver rejection truthfully', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-seed-family-lane',
+    stateKey: 'ulg:test:schroeder-seed-family-state'
+  };
+  // storageGeneration 0 is a finite lineage word, but the REAL
+  // resolveSchroederParticleBufferFamilyGeneration requires one matching
+  // POSITIVE generation on both uploads — its verdict is surfaced verbatim.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-family',
+          lineage: { ...WORKER_LANE_SEED_DEFAULT_LINEAGE, storageGeneration: 0 }
+        })
+      }),
+      null,
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(error.reason, 'seed-family-generation-rejected');
+      assert.equal(
+        error.code,
+        'ERR_ULG_WORKER_SCHROEDER_SEED_FAMILY_GENERATION_REJECTED'
+      );
+      assert.equal(
+        error.bufferFamilyGeneration.schema,
+        'peercompute.ulg.schroeder-particle-buffer-family-generation.v1'
+      );
+      assert.equal(
+        error.bufferFamilyGeneration.status,
+        'schroeder-particle-buffer-family-generation-rejected'
+      );
+      assert.equal(error.bufferFamilyGeneration.ready, false);
+      assert.equal(error.bufferFamilyGeneration.sphStorageGeneration, null);
+      assert.match(error.message, /one matching positive generation/);
+      return true;
+    }
+  );
+});
+
+test('ULG resident stage worker lane seed refuses double-seeding, stepped lanes, and cross-device seam executions', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-seed-double-lane',
+    stateKey: 'ulg:test:schroeder-seed-double-state'
+  };
+  const seedPayload = () => payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-double'
+      })
+    }),
+    null,
+    laneOptions
+  );
+  const seeded = await runUlgMechanicsResidentStageWorkerPayload(seedPayload());
+  assert.equal(seeded.value.status, 'worker-schroeder-lane-seeded');
+
+  // No reseed flag in this increment: an already-seeded lane refuses.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(seedPayload()),
+    (error) => {
+      assert.equal(error.reason, 'lane-already-seeded');
+      assert.equal(error.code, 'ERR_ULG_WORKER_SCHROEDER_LANE_ALREADY_SEEDED');
+      return true;
+    }
+  );
+
+  // Consume the seed with a step-1 epoch; the lane is now stepped and still
+  // refuses a new seed, with the stepped reason.
+  const epoch = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: {
+        selectedLevel: 0,
+        mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(
+    epoch.value.levelAssignmentSource,
+    'worker-lane-seeded-level-assignment'
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(seedPayload()),
+    (error) => {
+      assert.equal(error.reason, 'lane-already-stepped');
+      assert.equal(error.code, 'ERR_ULG_WORKER_SCHROEDER_LANE_ALREADY_STEPPED');
+      return true;
+    }
+  );
+
+  // The injectable seam exists for environments where the real runner cannot
+  // execute — but a seam execution from another device fails closed.
+  const foreignDevice = createFakeGpuDevice();
+  const foreignAssignmentBuffer = tagWebGpuBufferDevice(
+    foreignDevice.createBuffer({
+      label: 'worker-ss-seed-foreign-assignment',
+      size: 64,
+      usage: 128 | 4
+    }),
+    foreignDevice
+  );
+  const seamObserved = {};
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-foreign',
+          seedOptionOverrides: {
+            async levelAssignmentRunner(args) {
+              seamObserved.args = args;
+              return {
+                schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+                status: 'schroeder-level-assignment-submitted',
+                bufferFamilyGenerationStatus:
+                  'schroeder-particle-buffer-family-generation-ready',
+                particleCount: 1,
+                assignmentStrideFloats: 16,
+                assignmentBuffer: foreignAssignmentBuffer
+              };
+            }
+          }
+        })
+      }),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-seed-foreign-lane',
+        stateKey: 'ulg:test:schroeder-seed-foreign-state'
+      }
+    )),
+    (error) => {
+      assert.equal(error.reason, 'seed-device-mismatch');
+      assert.equal(error.code, 'ERR_ULG_WORKER_SCHROEDER_SEED_DEVICE_MISMATCH');
+      return true;
+    }
+  );
+  // The seam received the lineage-stamped worker-device uploads.
+  assert.equal(seamObserved.args.device, device);
+  assert.equal(
+    seamObserved.args.sphParticleUpload.storageGeneration,
+    WORKER_LANE_SEED_DEFAULT_LINEAGE.storageGeneration
+  );
+  assert.equal(
+    seamObserved.args.sphParticleUpload.stateBuffer.label,
+    'ulg-worker-adopted-storage-state'
+  );
+  assert.equal(
+    seamObserved.args.mlsMpmParticleUpload.storageGeneration,
+    WORKER_LANE_SEED_DEFAULT_LINEAGE.storageGeneration
+  );
+});
+
+test('ULG resident stage worker seeded lane works through single-stage messages and pins the seed lineage as the schedule baseline', async () => {
+  const device = createFakeGpuDevice();
+  const deviceId = webGpuDeviceId(device);
+  const buffers = manualBuffers();
+  const particleCount = 1;
+  const seedLineage = WORKER_LANE_SEED_DEFAULT_LINEAGE;
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-seed-single-lane',
+    stateKey: 'ulg:test:schroeder-seed-single-state'
+  };
+  const seeded = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:seed-single',
+        particleCount
+      })
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(seeded.value.status, 'worker-schroeder-lane-seeded');
+
+  // While the seed is unconsumed the lane admits no competing payload source.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'schroederSpatialEpoch',
+        ['schroeder-level-assignment'],
+        ['schroeder-spatial-epoch']
+      ),
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          levelAssignment: workerSchroederLevelAssignmentFixture(device, {
+            particleCount,
+            label: 'worker-ss-seed-single-conflict'
+          }),
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false
+        }
+      }),
+      null,
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(
+        error.reason,
+        'seeded-lane-conflicting-level-assignment-source'
+      );
+      return true;
+    }
+  );
+
+  // A plain single-stage epoch message consumes the seeded assignment; the
+  // sealed identity IS the seed lineage.
+  const epoch = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: {
+        selectedLevel: 0,
+        mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(epoch.value.schema, ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA);
+  assert.equal(
+    epoch.value.levelAssignmentSource,
+    'worker-lane-seeded-level-assignment'
+  );
+  assert.equal(epoch.value.epochStepOrdinal, 0);
+  const epochSeal = epoch.value.epochSeal;
+  assert.equal(epochSeal.deviceId, deviceId);
+  for (const field of ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS) {
+    assert.equal(epochSeal[field], seedLineage[field], `epoch seal word ${field}`);
+  }
+  assertNoWorkerGpuBuffers(epoch, 'seededSingleEpoch');
+  structuredClone(epoch.value);
+
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-ss-seed-single',
+    particleCount
+  });
+  const mechanics = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSameLevelMechanics',
+      ['schroeder-spatial-epoch', 'sph-particle-state', 'mls-mpm-mechanics'],
+      ['sph-particle-state', 'mls-mpm-mechanics']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSameLevelMechanics: {
+        expectedSpatialEpochSeal: epochSeal,
+        schroederSameLevelMechanicsRunner: mechanicsFixture.runner
+      }
+    }),
+    epoch.value,
+    laneOptions
+  ));
+  assert.equal(mechanics.value.epochConsumed, true);
+  assert.equal(
+    mechanicsFixture.runnerCalls[0].sphParticleUpload.stateBuffer.label,
+    'ulg-worker-adopted-storage-state'
+  );
+  assert.equal(
+    mechanicsFixture.runnerCalls[0].levelAssignment.storageGeneration,
+    seedLineage.storageGeneration
+  );
+  assertNoWorkerGpuBuffers(mechanics, 'seededSingleMechanics');
+  structuredClone(mechanics.value);
+
+  // The seed lineage stays the lane's monotonicity baseline: a schedule step
+  // that does NOT advance beyond the seeded words fails closed.
+  const staleScheduleContext = workerSchroederStageContext(device, buffers, {
+    schroederSpatialEpoch: {
+      levelAssignment: workerSchroederLevelAssignmentFixture(device, {
+        particleCount,
+        sourceStateBuffer: null,
+        label: 'worker-ss-seed-single-stale'
+      }),
+      useWorkerRetainedParticleBuffers: true,
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false
+    },
+    schroederSameLevelMechanics: {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner
+    }
+  });
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+      staleScheduleContext,
+      { stepCount: 1, scheduleId: 'ulg:test:seed-single-stale-schedule' },
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(error.reason, 'epoch-identity-regressed');
+      assert.match(error.message, /seeded lineage baseline/);
+      assert.equal(error.residentScheduleError.stepOrdinal, 1);
+      assert.equal(
+        error.residentScheduleError.laneState.laneSeedRetained,
+        true
+      );
+      assert.equal(
+        error.residentScheduleError.laneState.laneSeedConsumed,
+        true
+      );
+      return true;
+    }
+  );
+
+  // A step that advances beyond the seeded words completes.
+  const advancedScheduleContext = workerSchroederStageContext(device, buffers, {
+    schroederSpatialEpoch: {
+      levelAssignment: workerSchroederLevelAssignmentFixture(device, {
+        particleCount,
+        storageGeneration: seedLineage.storageGeneration + 1,
+        physicsTick: seedLineage.physicsTick + 1,
+        positionEpoch: seedLineage.positionEpoch + 1,
+        sourceStateBuffer: null,
+        label: 'worker-ss-seed-single-advanced'
+      }),
+      useWorkerRetainedParticleBuffers: true,
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false
+    },
+    schroederSameLevelMechanics: {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner
+    }
+  });
+  const advanced = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      advancedScheduleContext,
+      { stepCount: 1, scheduleId: 'ulg:test:seed-single-advanced-schedule' },
+      laneOptions
+    )
+  );
+  assert.equal(advanced.status, 'worker-resident-schedule-completed');
+  assert.equal(advanced.completedStepCount, 1);
+  assert.equal(
+    advanced.finalEpochIdentity.physicsTick,
+    seedLineage.physicsTick + 1
+  );
+  assert.equal(
+    advanced.finalEpochIdentity.positionEpoch,
+    seedLineage.positionEpoch + 1
+  );
+  assertNoWorkerGpuBuffers(advanced, 'seededAdvancedSchedule');
+  structuredClone(advanced);
 });

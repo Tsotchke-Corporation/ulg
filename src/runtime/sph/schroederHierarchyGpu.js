@@ -1089,7 +1089,11 @@ function gpuBufferHasBytes(buffer, requiredBytes) {
   return !Number.isFinite(size) || size >= requiredBytes;
 }
 
-function resolveSchroederParticleBufferFamilyGeneration({
+// Exported for the worker-lane seed stage (refactor increment W4a): the seed
+// must publish bufferFamilyGenerationStatus from this resolver's ACTUAL
+// verdict before running the level-assignment kernel, never from its own
+// assumption about the caller-supplied lineage words.
+export function resolveSchroederParticleBufferFamilyGeneration({
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
   particleCount = 0

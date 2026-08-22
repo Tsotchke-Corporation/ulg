@@ -71,6 +71,21 @@ export const ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA =
   'peercompute.ulg.worker-schroeder-spatial-epoch-seal.v0';
 export const ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON =
   'w1-single-level-only';
+export const ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-result.v0';
+export const ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-progress.v0';
+export const ULG_WORKER_RESIDENT_SCHEDULE_ERROR_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-error.v0';
+export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-step-summary.v0';
+// The worker-side batched schedule cap matches the sodium preset's historical
+// 128-step resident batching (src/runtime/sphPhaseScenarioPresets.js;
+// plan/todo/ss-regression.md correction 1).
+export const ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT = 128;
+// Terminal schedule results keep the LAST step's full summary plus a compact
+// fixed-capacity per-step ring so envelopes stay bounded for any stepCount.
+export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY = 32;
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -3004,7 +3019,9 @@ function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDev
 
 // --- Schroeder Simulation (SS) worker-lane stages (refactor increment W1) ---
 //
-// One message still runs one stage (scheduling loops arrive in increment W2).
+// One 'run-resident-stage' message runs one stage; the increment-W2
+// 'run-resident-schedule' driver further below loops these same stage
+// functions for batched steps without any postMessage-to-self round trips.
 // A schroederSpatialEpoch stage consumes a level-assignment source (the
 // committed successor source family retained from the previous same-level
 // step, or a payload-supplied level-assignment / active-node execution) and
@@ -3740,6 +3757,518 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       ...postStepRefs
     }
   };
+}
+
+// --- SS worker-side batched schedule driver (refactor increment W2) ---
+//
+// One 'run-resident-schedule' message loops the W1 stage pair — a fresh
+// schroederSpatialEpoch, then the schroederSameLevelMechanics step that
+// consumes it — stepCount times on ONE lane, through direct internal calls to
+// runUlgMechanicsResidentStageWorkerPayload (never postMessage-to-self). This
+// realizes plan/todo/ss-regression.md correction 1 worker-side: amortization
+// returns as a batch while every step still builds and seals its own
+// generation, so an immutable generation is never reused across an invalid
+// position epoch. The driver asserts per step that the new seal's
+// positionEpoch/physicsTick words strictly advance versus the prior step and
+// fails closed with 'epoch-identity-regressed' otherwise.
+//
+// Concurrency choice: schedules are exclusive PER LANE ('lane-schedule-
+// already-active' fail-closed); schedules on DIFFERENT lanes may interleave.
+// That interleaving is trivially safe with the current structure because all
+// SS lane state lives on the per-laneKey record (retainedLanes) and single
+// 'run-resident-stage' messages from different lanes already interleave the
+// same way through the message listener; the only shared module state the
+// stage path touches is the memoized worker device promise, which is already
+// shared by the single-stage path.
+// TODO(W4): global schedule admission (queueing/fairness across lanes and
+// against single-stage messages) arrives with increment W4; until then the
+// per-lane exclusivity above is the only admission control.
+//
+// Cancellation ('cancel-resident-schedule') sets a flag the loop checks only
+// BETWEEN steps: the in-flight step always completes and releases per W1
+// semantics, then the driver posts a terminal result with cancelled: true and
+// the truthful completedStepCount. The loop awaits a plain microtask yield
+// between steps; the per-stage device fences are what actually yield the
+// worker's macrotask queue so cancel messages can be delivered mid-batch.
+
+const SCHROEDER_EPOCH_ADVANCING_IDENTITY_WORD_FIELDS = Object.freeze([
+  'physicsTick',
+  'positionEpoch'
+]);
+const activeWorkerResidentScheduleByLaneKey = new Map();
+const activeWorkerResidentScheduleByCancelKey = new Map();
+let workerResidentScheduleOrdinal = 1;
+
+function workerResidentScheduleError(reason, detail = null, {
+  scheduleId = null,
+  stepOrdinal = null,
+  stageId = null,
+  laneState = null
+} = {}) {
+  const message = `Worker resident schedule failed closed: ${reason}${
+    detail ? ` (${detail})` : ''
+  }`;
+  const error = new Error(message);
+  error.code = `ERR_ULG_WORKER_RESIDENT_SCHEDULE_${
+    reason.replace(/-/g, '_').toUpperCase()
+  }`;
+  error.reason = reason;
+  error.residentScheduleError = {
+    schema: ULG_WORKER_RESIDENT_SCHEDULE_ERROR_SCHEMA,
+    scheduleId,
+    stepOrdinal,
+    stageId,
+    reason,
+    message,
+    laneState
+  };
+  return error;
+}
+
+function workerResidentScheduleEpochIdentity(seal = null) {
+  if (!seal || typeof seal !== 'object') return null;
+  return Object.fromEntries(SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.map(
+    (field) => [field, seal[field] ?? null]
+  ));
+}
+
+function workerResidentScheduleRegressedIdentityWords(previousSeal, currentSeal) {
+  return SCHROEDER_EPOCH_ADVANCING_IDENTITY_WORD_FIELDS.filter((field) => {
+    const previous = Number(previousSeal?.[field]);
+    const current = Number(currentSeal?.[field]);
+    return !(Number.isFinite(previous)
+      && Number.isFinite(current)
+      && current > previous);
+  });
+}
+
+function workerResidentScheduleLaneStateSnapshot(record, {
+  laneId = null,
+  stateKey = null
+} = {}) {
+  const lane = record?.schroederLane || null;
+  return {
+    schema: 'peercompute.ulg.worker-resident-schedule-lane-state.v0',
+    laneId,
+    stateKey,
+    laneRetained: Boolean(lane),
+    epochRetained: Boolean(lane?.epochGeneration),
+    epochConsumed: lane?.epochConsumed === true,
+    epochReleaseScheduled: lane?.epochReleaseScheduled === true,
+    epochReleasedWithoutMechanicsStep:
+      lane?.epochReleasedWithoutMechanicsStep === true,
+    epochGenerationId: lane?.epochSeal?.generationId ?? null,
+    epochIdentity: workerResidentScheduleEpochIdentity(lane?.epochSeal),
+    epochStepOrdinal: lane?.stepOrdinal ?? null,
+    particleCount: lane?.particleCount ?? null,
+    postStepUploadsRetained: Boolean(lane?.sphParticleUpload?.stateBuffer),
+    successorSourceFamilyRetained: Boolean(lane?.successorSourceFamily)
+  };
+}
+
+// A schedule step that aborted after its epoch stage retained a fresh sealed
+// generation (identity regression, or a mechanics-stage error) must not leave
+// that generation pinned unconsumed: a follow-up single 'run-resident-stage'
+// epoch message on the same lane has to keep working. Release it queue-ordered
+// exactly like consumption would have, but only when the retained generation
+// is provably the one THIS step built.
+function releaseWorkerResidentScheduleUnconsumedStepEpoch(record, stepSeal, {
+  releaseSuccessorLease = false
+} = {}) {
+  const lane = record?.schroederLane || null;
+  if (!stepSeal || !lane?.epochGeneration || lane.epochConsumed === true) {
+    return false;
+  }
+  if (lane.epochSeal?.generationId !== stepSeal.generationId) return false;
+  const generation = lane.epochGeneration;
+  if (releaseSuccessorLease) {
+    // Only when the mechanics stage never started for this step; its own
+    // finally-block owns the lease release otherwise.
+    releaseWorkerSchroederSuccessorLeaseQuietly(
+      lane.successorConsumption,
+      lane.device
+    );
+    lane.successorConsumption = null;
+  }
+  const released =
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, lane.device)
+      === true;
+  lane.epochConsumed = true;
+  lane.epochReleasedWithoutMechanicsStep = true;
+  lane.epochReleaseScheduled = released;
+  lane.epochReleasePromise = generation.releasePromise ?? null;
+  return released;
+}
+
+export function cancelUlgMechanicsResidentStageWorkerSchedule(id) {
+  const key = normalizeString(id, null);
+  const state = key ? activeWorkerResidentScheduleByCancelKey.get(key) : null;
+  if (!state) {
+    return {
+      status: 'resident-schedule-not-active',
+      scheduleId: key,
+      cancelRequested: false
+    };
+  }
+  state.cancelRequested = true;
+  return {
+    status: 'resident-schedule-cancel-requested',
+    scheduleId: state.scheduleId,
+    cancelRequested: true
+  };
+}
+
+export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
+  payload = {},
+  { id = null, postProgress = null } = {}
+) {
+  const schedule = payload.schedule && typeof payload.schedule === 'object'
+    ? payload.schedule
+    : {};
+  const laneId = normalizeString(
+    payload.lease?.laneId ?? payload.lane?.laneId,
+    null
+  );
+  const stateKey = normalizeString(
+    payload.lease?.stateKey ?? payload.lane?.stateKey,
+    null
+  );
+  const laneKey = laneKeyFor(payload);
+  const scheduleId = normalizeString(schedule.scheduleId, null)
+    || normalizeString(id, null)
+    || `ulg-worker-resident-schedule:${workerResidentScheduleOrdinal++}`;
+  const stepCount = Number(schedule.stepCount);
+  if (!Number.isInteger(stepCount) || stepCount < 1) {
+    throw workerResidentScheduleError(
+      'schedule-step-count-invalid',
+      `stepCount must be an integer in 1..${
+        ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT
+      }, got ${schedule.stepCount}`,
+      { scheduleId }
+    );
+  }
+  if (stepCount > ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT) {
+    throw workerResidentScheduleError(
+      'schedule-step-count-over-cap',
+      `stepCount ${stepCount} exceeds the resident schedule cap ${
+        ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT
+      }`,
+      { scheduleId }
+    );
+  }
+  const progressEverySteps = firstPositiveInteger(
+    [schedule.progressEverySteps],
+    1
+  );
+  const activeOnLane = activeWorkerResidentScheduleByLaneKey.get(laneKey);
+  if (activeOnLane) {
+    throw workerResidentScheduleError(
+      'lane-schedule-already-active',
+      `lane ${laneKey} is already running schedule ${activeOnLane.scheduleId}`,
+      { scheduleId }
+    );
+  }
+  const state = {
+    scheduleId,
+    id: normalizeString(id, null),
+    laneKey,
+    cancelRequested: false
+  };
+  const cancelKeys = [...new Set([state.scheduleId, state.id].filter(Boolean))];
+  for (const cancelKey of cancelKeys) {
+    if (activeWorkerResidentScheduleByCancelKey.has(cancelKey)) {
+      throw workerResidentScheduleError(
+        'schedule-id-already-active',
+        `schedule id ${cancelKey} is already registered by an active schedule`,
+        { scheduleId }
+      );
+    }
+  }
+  activeWorkerResidentScheduleByLaneKey.set(laneKey, state);
+  for (const cancelKey of cancelKeys) {
+    activeWorkerResidentScheduleByCancelKey.set(cancelKey, state);
+  }
+  try {
+    const baseContext = workerContext(payload);
+    const baseStageOptions =
+      baseContext.stageOptions && typeof baseContext.stageOptions === 'object'
+        ? baseContext.stageOptions
+        : {};
+    const baseEpochOptions =
+      baseStageOptions[SCHROEDER_SPATIAL_EPOCH_STAGE_ID] || {};
+    const baseMechanicsOptions =
+      baseStageOptions[SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID] || {};
+    const scheduleStepOptionsProvider =
+      typeof baseEpochOptions.scheduleStepOptionsProvider === 'function'
+        ? baseEpochOptions.scheduleStepOptionsProvider
+        : null;
+    const scheduleStagePayload = (stageId, reads, writes, stageOptions) => ({
+      stage: {
+        id: stageId,
+        lawNodeId: `ulg-mls-mpm-mechanics-${stageId}-stage`,
+        runtimeTarget: 'gpu-hub-resident-stage-worker',
+        reads: [...reads],
+        writes: [...writes]
+      },
+      input: null,
+      lease: {
+        ...(payload.lease && typeof payload.lease === 'object'
+          ? payload.lease
+          : {}),
+        laneId,
+        stateKey
+      },
+      context: {
+        ulgMechanicsResidentStageWorker: {
+          ...baseContext,
+          stageOptions: { ...baseStageOptions, [stageId]: stageOptions }
+        }
+      }
+    });
+    const epochOptionsForStep = async (stepOrdinal, previousEpochSeal) => {
+      const {
+        scheduleStepOptionsProvider: ignoredProvider,
+        ...stepZeroOptions
+      } = baseEpochOptions;
+      if (stepOrdinal === 1) return stepZeroOptions;
+      // Continuation steps rebuild from the lane's retained post-step
+      // buffers (or the retained successor source family when the kernel
+      // committed one). Step-0-only sources are stripped so a stale
+      // level assignment cannot silently feed a later step: a step without
+      // an advanced assignment fails the epoch-identity seal below.
+      const {
+        sphParticleUpload: ignoredSphUpload,
+        mlsMpmParticleUpload: ignoredMlsUpload,
+        levelAssignment: ignoredLevelAssignment,
+        activeNodeList: ignoredActiveNodeList,
+        schroederSpatialSuccessorSourceFamily: ignoredSourceFamily,
+        particleIdentityBuffer: ignoredIdentityBuffer,
+        ...continuationOptions
+      } = stepZeroOptions;
+      const providerOverrides = scheduleStepOptionsProvider
+        ? await scheduleStepOptionsProvider({
+            scheduleId,
+            stepOrdinal,
+            previousEpochSeal
+          })
+        : null;
+      return {
+        ...continuationOptions,
+        useWorkerRetainedParticleBuffers: true,
+        ...(providerOverrides && typeof providerOverrides === 'object'
+          ? providerOverrides
+          : {})
+      };
+    };
+    const mechanicsOptionsForStep = (epochSeal) => {
+      const {
+        expectedSpatialEpochSeal: ignoredExpectedSeal,
+        ...continuationOptions
+      } = baseMechanicsOptions;
+      // The driver pins each step's mechanics stage to the seal of the
+      // generation IT just built; a caller-supplied seal is only valid for
+      // one generation and would go stale on step 2.
+      return { ...continuationOptions, expectedSpatialEpochSeal: epochSeal };
+    };
+    const record = getLaneRecord(payload);
+    let completedStepCount = 0;
+    let cancelled = false;
+    let previousEpochSeal = null;
+    let lastMechanicsStageResult = null;
+    let lastStepSummary = null;
+    const stepSummaryRing = [];
+    let droppedStepSummaryCount = 0;
+    for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
+      // Microtask yield between steps; cancellation is observed here and
+      // never mid-stage.
+      await Promise.resolve();
+      if (state.cancelRequested) {
+        cancelled = true;
+        break;
+      }
+      let currentStepSeal = null;
+      let epochStageResult = null;
+      let mechanicsStageResult = null;
+      let mechanicsStageStarted = false;
+      try {
+        epochStageResult = await runUlgMechanicsResidentStageWorkerPayload(
+          scheduleStagePayload(
+            SCHROEDER_SPATIAL_EPOCH_STAGE_ID,
+            ['schroeder-level-assignment'],
+            ['schroeder-spatial-epoch'],
+            await epochOptionsForStep(stepOrdinal, previousEpochSeal)
+          )
+        );
+        currentStepSeal = epochStageResult.value?.epochSeal ?? null;
+        if (!currentStepSeal) {
+          throw workerResidentScheduleError(
+            'schedule-epoch-seal-missing',
+            'the epoch stage completed without a sealed generation identity',
+            { scheduleId, stepOrdinal }
+          );
+        }
+        if (previousEpochSeal) {
+          const regressedWords = workerResidentScheduleRegressedIdentityWords(
+            previousEpochSeal,
+            currentStepSeal
+          );
+          if (regressedWords.length > 0) {
+            // The contract seal of correction 1: batching must never reuse
+            // (or rebuild against) a stale position epoch.
+            throw workerResidentScheduleError(
+              'epoch-identity-regressed',
+              `step ${stepOrdinal} rebuilt the spatial epoch without advancing: ${
+                regressedWords.join(', ')
+              }`,
+              { scheduleId, stepOrdinal }
+            );
+          }
+        }
+        mechanicsStageStarted = true;
+        mechanicsStageResult = await runUlgMechanicsResidentStageWorkerPayload(
+          scheduleStagePayload(
+            SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID,
+            ['schroeder-spatial-epoch', 'sph-particle-state', 'mls-mpm-mechanics'],
+            ['sph-particle-state', 'mls-mpm-mechanics'],
+            mechanicsOptionsForStep(currentStepSeal)
+          )
+        );
+      } catch (error) {
+        // The W1 stage finally-blocks already released the successor-family
+        // lease when the mechanics stage ran; drop the epoch this step built
+        // (if it is still retained unconsumed) so the lane stays consistent
+        // and restartable by a plain 'run-resident-stage' epoch message.
+        releaseWorkerResidentScheduleUnconsumedStepEpoch(
+          record,
+          currentStepSeal,
+          { releaseSuccessorLease: !mechanicsStageStarted }
+        );
+        const laneState = workerResidentScheduleLaneStateSnapshot(record, {
+          laneId,
+          stateKey
+        });
+        if (error?.residentScheduleError) {
+          if (error.residentScheduleError.laneState == null) {
+            error.residentScheduleError.laneState = laneState;
+          }
+          if (error.residentScheduleError.stepOrdinal == null) {
+            error.residentScheduleError.stepOrdinal = stepOrdinal;
+          }
+          throw error;
+        }
+        throw workerResidentScheduleError(
+          normalizeString(error?.reason, null) || 'schedule-step-stage-error',
+          error?.message != null ? String(error.message) : String(error),
+          {
+            scheduleId,
+            stepOrdinal,
+            stageId: normalizeString(error?.stageId, null),
+            laneState
+          }
+        );
+      }
+      completedStepCount = stepOrdinal;
+      previousEpochSeal = currentStepSeal;
+      lastMechanicsStageResult = mechanicsStageResult;
+      const epochIdentity =
+        workerResidentScheduleEpochIdentity(currentStepSeal);
+      lastStepSummary = {
+        schema: ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
+        scheduleId,
+        stepOrdinal,
+        epochStepOrdinal: epochStageResult.value?.epochStepOrdinal ?? null,
+        epochStatus: epochStageResult.value?.status ?? null,
+        levelAssignmentSource:
+          epochStageResult.value?.levelAssignmentSource ?? null,
+        epochSeal: currentStepSeal,
+        epochIdentity,
+        epochRetainedBufferRefs: [...(epochStageResult.retainedBufferRefs || [])],
+        mechanicsStatus: mechanicsStageResult.value?.status ?? null,
+        residentStepStatus:
+          mechanicsStageResult.value?.residentStepSummary?.status ?? null,
+        epochConsumed: mechanicsStageResult.value?.epochConsumed === true,
+        epochReleaseScheduled:
+          mechanicsStageResult.value?.epochReleaseScheduled === true,
+        particleCount:
+          mechanicsStageResult.value?.postStep?.particleCount ?? null,
+        successorSourceFamilyRetained:
+          mechanicsStageResult.value?.postStep?.successorSourceFamilyRetained
+            === true,
+        retainedBufferRefs: [...(mechanicsStageResult.retainedBufferRefs || [])],
+        gpuFenceSatisfied:
+          mechanicsStageResult.gpuFence?.fenceSatisfied === true
+      };
+      stepSummaryRing.push({
+        stepOrdinal,
+        generationId: currentStepSeal.generationId ?? null,
+        storageGeneration: currentStepSeal.storageGeneration ?? null,
+        physicsTick: currentStepSeal.physicsTick ?? null,
+        positionEpoch: currentStepSeal.positionEpoch ?? null,
+        mechanicsStatus: mechanicsStageResult.value?.status ?? null
+      });
+      if (
+        stepSummaryRing.length
+          > ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY
+      ) {
+        stepSummaryRing.shift();
+        droppedStepSummaryCount += 1;
+      }
+      if (
+        typeof postProgress === 'function'
+        && stepOrdinal % progressEverySteps === 0
+      ) {
+        try {
+          // Fire-and-forget; progress never blocks or fails the step loop.
+          postProgress({
+            schema: ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
+            scheduleId,
+            completedStepCount,
+            stepOrdinal,
+            epochIdentity,
+            stepSummary: lastStepSummary
+          });
+        } catch {
+          // Progress delivery failures must not abort the batch.
+        }
+      }
+    }
+    return {
+      schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
+      status: cancelled
+        ? 'worker-resident-schedule-cancelled'
+        : 'worker-resident-schedule-completed',
+      scheduleId,
+      laneId,
+      stateKey,
+      requestedStepCount: stepCount,
+      completedStepCount,
+      cancelled,
+      progressEverySteps,
+      retainedBufferRefs: [
+        ...(lastMechanicsStageResult?.retainedBufferRefs || [])
+      ],
+      finalEpochIdentity: workerResidentScheduleEpochIdentity(previousEpochSeal),
+      finalEpochSeal: previousEpochSeal,
+      perStepSummaries: {
+        schema: 'peercompute.ulg.worker-resident-schedule-step-summaries.v0',
+        ringCapacity: ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY,
+        totalStepCount: completedStepCount,
+        droppedStepCount: droppedStepSummaryCount,
+        lastStep: lastStepSummary,
+        ring: stepSummaryRing
+      },
+      gpuFence: lastMechanicsStageResult?.gpuFence ?? null
+    };
+  } finally {
+    if (activeWorkerResidentScheduleByLaneKey.get(laneKey) === state) {
+      activeWorkerResidentScheduleByLaneKey.delete(laneKey);
+    }
+    for (const cancelKey of cancelKeys) {
+      if (activeWorkerResidentScheduleByCancelKey.get(cancelKey) === state) {
+        activeWorkerResidentScheduleByCancelKey.delete(cancelKey);
+      }
+    }
+  }
 }
 
 function workerPressureHasFollowingGridUpdate(data = null) {
@@ -5212,9 +5741,50 @@ function postWorkerError(id, error) {
 if (typeof globalThis.self?.addEventListener === 'function') {
   globalThis.self.addEventListener('message', (event) => {
     const message = event.data || {};
-    if (message.type !== 'run-resident-stage') return;
-    runUlgMechanicsResidentStageWorkerPayload(message.payload || {})
-      .then((result) => postWorkerResult(message.id, result))
-      .catch((error) => postWorkerError(message.id, error));
+    if (message.type === 'run-resident-stage') {
+      runUlgMechanicsResidentStageWorkerPayload(message.payload || {})
+        .then((result) => postWorkerResult(message.id, result))
+        .catch((error) => postWorkerError(message.id, error));
+      return;
+    }
+    if (message.type === 'run-resident-schedule') {
+      runUlgMechanicsResidentStageWorkerSchedulePayload(message.payload || {}, {
+        id: message.id,
+        postProgress: (progress) => {
+          // Fire-and-forget progress envelope; cloneable-only by
+          // construction (seals, identity words, worker-retained refs).
+          globalThis.self.postMessage({
+            type: 'resident-schedule-progress',
+            id: message.id,
+            progress
+          });
+        }
+      })
+        .then((result) => globalThis.self.postMessage({
+          type: 'resident-schedule-result',
+          id: message.id,
+          result
+        }))
+        .catch((error) => globalThis.self.postMessage({
+          type: 'resident-schedule-error',
+          id: message.id,
+          error: error?.residentScheduleError || {
+            schema: ULG_WORKER_RESIDENT_SCHEDULE_ERROR_SCHEMA,
+            scheduleId: null,
+            stepOrdinal: null,
+            stageId: null,
+            reason: 'schedule-error',
+            message: error instanceof Error ? error.message : String(error),
+            laneState: null
+          }
+        }));
+      return;
+    }
+    if (message.type === 'cancel-resident-schedule') {
+      // The flag is observed by the running schedule BETWEEN steps; the
+      // terminal 'resident-schedule-result' with cancelled: true (under the
+      // schedule's own id) is the acknowledgement.
+      cancelUlgMechanicsResidentStageWorkerSchedule(message.id);
+    }
   });
 }

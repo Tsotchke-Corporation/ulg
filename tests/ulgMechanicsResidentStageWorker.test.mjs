@@ -9,13 +9,19 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
+  ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT,
+  ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
+  ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
+  ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
   ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA,
   ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON,
+  cancelUlgMechanicsResidentStageWorkerSchedule,
   exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot,
   resolveUlgMechanicsResidentStageWorkerDeviceResult,
-  runUlgMechanicsResidentStageWorkerPayload
+  runUlgMechanicsResidentStageWorkerPayload,
+  runUlgMechanicsResidentStageWorkerSchedulePayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
@@ -3878,4 +3884,551 @@ test('ULG resident stage worker SS stages fail closed on missing epoch, identity
     )),
     /lane-epoch-already-consumed/
   );
+});
+
+// --- SS worker-side batched schedule driver (refactor increment W2) ---
+// The schedule driver loops the W1 stage pair internally; these tests drive
+// the REAL spatial epoch generation builder on the synthetic fake-device
+// fixture with per-step level assignments whose identity words advance, and
+// pin the mechanics side through the injectable
+// stageOptions.schroederSameLevelMechanics.schroederSameLevelMechanicsRunner
+// seam exactly like the W1 tests above.
+// TODO(native-arm): real-GPU schedule coverage runs in the native WebGPU test
+// arm; do not add GPU-flagged coverage here.
+
+function workerScheduleFixture({ laneSuffix = 'a', failAtStep = null } = {}) {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const particleCount = 2;
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const mechanicsGrid = {
+    selectedLevel: 0,
+    gridDims: [2, 2, 2],
+    gridNodeCount: 8,
+    gridShift: 1,
+    gridSpacingM: 1
+  };
+  // Identity words advance per step: the schedule contract requires every
+  // step to build a fresh sealed generation against an advanced epoch.
+  const levelAssignmentForStep = (stepOrdinal) =>
+    workerSchroederLevelAssignmentFixture(device, {
+      particleCount,
+      storageGeneration: 11 + (stepOrdinal - 1),
+      physicsTick: 13 + (stepOrdinal - 1),
+      positionEpoch: 17 + (stepOrdinal - 1),
+      topologyEpoch: 19,
+      sourceStateBuffer: stepOrdinal === 1 ? undefined : null,
+      label: `worker-ss-schedule-${laneSuffix}-step${stepOrdinal}`
+    });
+  const stepOneAssignment = levelAssignmentForStep(1);
+  const identityBuffer = taggedBuffer(
+    `worker-ss-schedule-${laneSuffix}-identity`,
+    particleCount * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const thermoBuffer = taggedBuffer(
+    `worker-ss-schedule-${laneSuffix}-thermo`,
+    particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const mechanicsBuffer = taggedBuffer(
+    `worker-ss-schedule-${laneSuffix}-mechanics`,
+    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const runnerCalls = [];
+  const mechanicsRunner = async (args) => {
+    runnerCalls.push(args);
+    const ordinal = runnerCalls.length;
+    if (failAtStep != null && ordinal === failAtStep) {
+      throw new Error(`injected mechanics failure at schedule step ${failAtStep}`);
+    }
+    return {
+      status: 'schroeder-same-level-mechanics-completed',
+      selectedLevel: 0,
+      residentStep: {
+        backend: 'webgpu',
+        status: 'resident-step-completed',
+        readbackMode: 'no-full-readback',
+        stageStatus: { p2g: 'completed', g2p: 'completed' },
+        stageBackends: { p2g: 'webgpu', g2p: 'webgpu' },
+        nextParticleUploads: {
+          sphParticleUpload: {
+            particleCount,
+            stateBuffer: taggedBuffer(
+              `worker-ss-schedule-${laneSuffix}-next-state-${ordinal}`,
+              particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+            ),
+            thermoBuffer: taggedBuffer(
+              `worker-ss-schedule-${laneSuffix}-next-thermo-${ordinal}`,
+              particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+            ),
+            identityBuffer: taggedBuffer(
+              `worker-ss-schedule-${laneSuffix}-next-identity-${ordinal}`,
+              particleCount * Uint32Array.BYTES_PER_ELEMENT
+            )
+          },
+          mlsMpmParticleUpload: {
+            particleCount,
+            mechanicsBuffer: taggedBuffer(
+              `worker-ss-schedule-${laneSuffix}-next-mechanics-${ordinal}`,
+              particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+            )
+          }
+        }
+      },
+      schroederSpatialEpochReleasePromise: Promise.resolve(true),
+      currentSchroederSpatialEpochGenerationSummary: () => ({
+        status: 'synthetic-generation-summary'
+      })
+    };
+  };
+  const stageOptions = {
+    schroederSpatialEpoch: {
+      levelAssignment: stepOneAssignment,
+      particleIdentityBuffer: identityBuffer,
+      particleIdentityStrideWords: 1,
+      selectedLevel: 0,
+      mechanicsGrid,
+      exactNearCellTreeEnabled: false,
+      sphParticleUpload: {
+        particleCount,
+        stateBuffer: stepOneAssignment.sourceStateBuffer,
+        thermoBuffer,
+        identityBuffer
+      },
+      mlsMpmParticleUpload: { particleCount, mechanicsBuffer },
+      // Continuation steps get an advanced assignment; the fake mechanics
+      // runner never commits a successor source family, so this is the
+      // synthetic stand-in for the kernel-committed continuation.
+      scheduleStepOptionsProvider: ({ stepOrdinal }) => ({
+        levelAssignment: levelAssignmentForStep(stepOrdinal),
+        particleIdentityStrideWords: 1
+      })
+    },
+    schroederSameLevelMechanics: {
+      schroederSameLevelMechanicsRunner: mechanicsRunner
+    }
+  };
+  return {
+    device,
+    buffers,
+    particleCount,
+    mechanicsGrid,
+    stageOptions,
+    runnerCalls,
+    levelAssignmentForStep,
+    taggedBuffer
+  };
+}
+
+function schedulePayload(context, schedule, {
+  laneId = 'ulg:test:schroeder-schedule-lane',
+  stateKey = 'ulg:test:schroeder-schedule-state'
+} = {}) {
+  return {
+    schedule,
+    lease: {
+      laneId,
+      stateKey,
+      queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission'
+    },
+    context: {
+      ulgMechanicsResidentStageWorker: context
+    }
+  };
+}
+
+test('ULG resident stage worker runs a batched resident schedule with a fresh sealed epoch per step', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'batch' });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-batch-lane',
+    stateKey: 'ulg:test:schroeder-schedule-batch-state'
+  };
+  const progressEnvelopes = [];
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
+      { stepCount: 3, scheduleId: 'ulg:test:schedule-batch' },
+      laneOptions
+    ),
+    { postProgress: (progress) => progressEnvelopes.push(progress) }
+  );
+  assert.equal(result.schema, ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA);
+  assert.equal(result.status, 'worker-resident-schedule-completed');
+  assert.equal(result.scheduleId, 'ulg:test:schedule-batch');
+  assert.equal(result.cancelled, false);
+  assert.equal(result.requestedStepCount, 3);
+  assert.equal(result.completedStepCount, 3);
+  assert.equal(fixture.runnerCalls.length, 3);
+
+  // One progress envelope per step (progressEverySteps defaults to 1), with
+  // monotonically advancing epoch identity words and no GPU buffers.
+  assert.equal(progressEnvelopes.length, 3);
+  progressEnvelopes.forEach((progress, index) => {
+    assert.equal(progress.schema, ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA);
+    assert.equal(progress.scheduleId, 'ulg:test:schedule-batch');
+    assert.equal(progress.stepOrdinal, index + 1);
+    assert.equal(progress.completedStepCount, index + 1);
+    assert.equal(progress.epochIdentity.positionEpoch, 17 + index);
+    assert.equal(progress.epochIdentity.physicsTick, 13 + index);
+    assert.equal(progress.epochIdentity.storageGeneration, 11 + index);
+    if (index > 0) {
+      assert.ok(
+        progress.epochIdentity.positionEpoch
+          > progressEnvelopes[index - 1].epochIdentity.positionEpoch
+      );
+      assert.ok(
+        progress.epochIdentity.physicsTick
+          > progressEnvelopes[index - 1].epochIdentity.physicsTick
+      );
+    }
+    assert.equal(
+      progress.stepSummary.schema,
+      ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA
+    );
+    assert.equal(progress.stepSummary.stepOrdinal, index + 1);
+    assert.equal(progress.stepSummary.epochConsumed, true);
+    assert.equal(progress.stepSummary.gpuFenceSatisfied, true);
+    for (const ref of progress.stepSummary.retainedBufferRefs) {
+      assert.match(ref, /^ulg-worker:/);
+    }
+    assertNoWorkerGpuBuffers(progress, `progress[${index}]`);
+    structuredClone(progress);
+  });
+
+  // Every step consumed its own fresh sealed generation.
+  assert.equal(result.perStepSummaries.ring.length, 3);
+  assert.equal(result.perStepSummaries.droppedStepCount, 0);
+  assert.equal(result.perStepSummaries.totalStepCount, 3);
+  const generationIds = result.perStepSummaries.ring.map((entry) => entry.generationId);
+  assert.equal(new Set(generationIds).size, 3);
+  result.perStepSummaries.ring.forEach((entry, index) => {
+    assert.equal(entry.stepOrdinal, index + 1);
+    assert.equal(entry.positionEpoch, 17 + index);
+    assert.equal(entry.physicsTick, 13 + index);
+    assert.equal(entry.mechanicsStatus, 'worker-schroeder-same-level-mechanics-completed');
+  });
+  assert.equal(result.perStepSummaries.lastStep.stepOrdinal, 3);
+  assert.equal(
+    result.perStepSummaries.lastStep.epochSeal.schema,
+    ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA
+  );
+  assert.equal(result.finalEpochIdentity.positionEpoch, 19);
+  assert.equal(result.finalEpochIdentity.physicsTick, 15);
+  assert.equal(result.finalEpochIdentity.storageGeneration, 13);
+  assert.ok(result.retainedBufferRefs.length > 0);
+  for (const ref of result.retainedBufferRefs) {
+    assert.match(ref, /^ulg-worker:/);
+  }
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assertNoWorkerGpuBuffers(result, 'scheduleResult');
+  structuredClone(result);
+
+  // The steps chained: step N's mechanics consumed step N-1's post-step
+  // buffers, and each mechanics stage consumed that step's own generation.
+  assert.equal(
+    fixture.runnerCalls[1].sphParticleUpload.stateBuffer.label,
+    'worker-ss-schedule-batch-next-state-1'
+  );
+  assert.equal(
+    fixture.runnerCalls[2].sphParticleUpload.stateBuffer.label,
+    'worker-ss-schedule-batch-next-state-2'
+  );
+  assert.equal(
+    fixture.runnerCalls[1].spatialEpochGeneration.execution.positionEpoch,
+    18
+  );
+  assert.equal(
+    fixture.runnerCalls[2].spatialEpochGeneration.execution.positionEpoch,
+    19
+  );
+});
+
+test('ULG resident stage worker schedule cancellation finishes the in-flight step and leaves the lane usable', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'cancel' });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-cancel-lane',
+    stateKey: 'ulg:test:schroeder-schedule-cancel-state'
+  };
+  const scheduleId = 'ulg:test:schedule-cancel';
+  // Cancelling an id with no active schedule is a truthful no-op.
+  assert.equal(
+    cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId).cancelRequested,
+    false
+  );
+  const progressEnvelopes = [];
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
+      { stepCount: 3, scheduleId },
+      laneOptions
+    ),
+    {
+      postProgress: (progress) => {
+        progressEnvelopes.push(progress);
+        if (progress.stepOrdinal === 1) {
+          const ack = cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
+          assert.equal(ack.cancelRequested, true);
+          assert.equal(ack.scheduleId, scheduleId);
+        }
+      }
+    }
+  );
+  assert.equal(result.status, 'worker-resident-schedule-cancelled');
+  assert.equal(result.cancelled, true);
+  // The in-flight step completes; the flag is only observed between steps,
+  // so the truthful count is 1 or 2, and it must match what actually ran.
+  assert.ok(
+    result.completedStepCount === 1 || result.completedStepCount === 2,
+    `completedStepCount ${result.completedStepCount} is not 1 or 2`
+  );
+  assert.equal(result.completedStepCount, fixture.runnerCalls.length);
+  assert.equal(result.completedStepCount, progressEnvelopes.length);
+  assert.equal(result.perStepSummaries.ring.length, result.completedStepCount);
+  assert.equal(
+    result.finalEpochIdentity.positionEpoch,
+    17 + (result.completedStepCount - 1)
+  );
+  assertNoWorkerGpuBuffers(result, 'cancelledScheduleResult');
+  structuredClone(result);
+
+  // The lane is still usable by a follow-up single-stage message: the last
+  // completed step consumed its epoch and retained its post-step buffers.
+  const followUp = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(fixture.device, fixture.buffers, {
+      schroederSpatialEpoch: {
+        levelAssignment: fixture.levelAssignmentForStep(result.completedStepCount + 1),
+        useWorkerRetainedParticleBuffers: true,
+        particleIdentityStrideWords: 1,
+        selectedLevel: 0,
+        mechanicsGrid: fixture.mechanicsGrid,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(followUp.value.status, 'worker-schroeder-spatial-epoch-retained');
+  assert.equal(
+    followUp.value.levelAssignmentSource,
+    'stage-option-level-assignment-with-worker-retained-particle-buffers'
+  );
+});
+
+test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage error and stays consistent', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'fail', failAtStep: 2 });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-fail-lane',
+    stateKey: 'ulg:test:schroeder-schedule-fail-state'
+  };
+  const progressEnvelopes = [];
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
+        { stepCount: 3, scheduleId: 'ulg:test:schedule-fail' },
+        laneOptions
+      ),
+      { postProgress: (progress) => progressEnvelopes.push(progress) }
+    ),
+    (error) => {
+      const detail = error.residentScheduleError;
+      assert.ok(detail, 'schedule errors carry a cloneable residentScheduleError');
+      assert.equal(detail.scheduleId, 'ulg:test:schedule-fail');
+      assert.equal(detail.stepOrdinal, 2);
+      assert.match(detail.message, /injected mechanics failure at schedule step 2/);
+      // The W1 finally-block released leases and the driver released the
+      // step's unconsumed epoch: the lane snapshot is consistent.
+      assert.equal(detail.laneState.epochConsumed, true);
+      assert.equal(detail.laneState.epochReleasedWithoutMechanicsStep, true);
+      assert.equal(detail.laneState.postStepUploadsRetained, true);
+      assertNoWorkerGpuBuffers(detail, 'residentScheduleError');
+      structuredClone(detail);
+      return true;
+    }
+  );
+  assert.equal(progressEnvelopes.length, 1);
+  assert.equal(fixture.runnerCalls.length, 2);
+
+  // A follow-up single 'run-resident-stage' epoch message on the same lane
+  // still works: the aborted schedule left no pinned unconsumed epoch.
+  const followUp = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(fixture.device, fixture.buffers, {
+      schroederSpatialEpoch: {
+        levelAssignment: fixture.levelAssignmentForStep(2),
+        useWorkerRetainedParticleBuffers: true,
+        particleIdentityStrideWords: 1,
+        selectedLevel: 0,
+        mechanicsGrid: fixture.mechanicsGrid,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(followUp.value.status, 'worker-schroeder-spatial-epoch-retained');
+  assert.equal(
+    followUp.value.levelAssignmentSource,
+    'stage-option-level-assignment-with-worker-retained-particle-buffers'
+  );
+});
+
+test('ULG resident stage worker schedule fails closed when a step does not advance the epoch identity', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'stale' });
+  // A provider that hands step 2 the SAME identity words as step 1 models a
+  // scheduler trying to amortize by reusing a stale position epoch.
+  fixture.stageOptions.schroederSpatialEpoch.scheduleStepOptionsProvider = () => ({
+    levelAssignment: fixture.levelAssignmentForStep(1),
+    particleIdentityStrideWords: 1
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-stale-lane',
+    stateKey: 'ulg:test:schroeder-schedule-stale-state'
+  };
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
+        { stepCount: 2, scheduleId: 'ulg:test:schedule-stale' },
+        laneOptions
+      )
+    ),
+    (error) => {
+      assert.match(error.message, /epoch-identity-regressed/);
+      assert.equal(error.residentScheduleError.stepOrdinal, 2);
+      assert.equal(error.residentScheduleError.reason, 'epoch-identity-regressed');
+      assert.equal(error.residentScheduleError.laneState.epochConsumed, true);
+      return true;
+    }
+  );
+  // Only step 1's mechanics ran; the stale step-2 generation was released
+  // before it could feed a mechanics step, and the lane stays usable.
+  assert.equal(fixture.runnerCalls.length, 1);
+  const followUp = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(fixture.device, fixture.buffers, {
+      schroederSpatialEpoch: {
+        levelAssignment: fixture.levelAssignmentForStep(2),
+        useWorkerRetainedParticleBuffers: true,
+        particleIdentityStrideWords: 1,
+        selectedLevel: 0,
+        mechanicsGrid: fixture.mechanicsGrid,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(followUp.value.status, 'worker-schroeder-spatial-epoch-retained');
+});
+
+test('ULG resident stage worker refuses a concurrent schedule on one lane fail-closed', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'concurrent' });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-concurrent-lane',
+    stateKey: 'ulg:test:schroeder-schedule-concurrent-state'
+  };
+  const context = workerSchroederStageContext(
+    fixture.device,
+    fixture.buffers,
+    fixture.stageOptions
+  );
+  const first = runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      context,
+      { stepCount: 2, scheduleId: 'ulg:test:schedule-concurrent-a' },
+      laneOptions
+    )
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        context,
+        { stepCount: 1, scheduleId: 'ulg:test:schedule-concurrent-b' },
+        laneOptions
+      )
+    ),
+    /lane-schedule-already-active/
+  );
+  const firstResult = await first;
+  assert.equal(firstResult.status, 'worker-resident-schedule-completed');
+  assert.equal(firstResult.completedStepCount, 2);
+  // The refusal was per-active-schedule, not permanent: the lane admits a
+  // new schedule once the first completes.
+  const second = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      context,
+      { stepCount: 1, scheduleId: 'ulg:test:schedule-concurrent-c' },
+      laneOptions
+    )
+  );
+  assert.equal(second.status, 'worker-resident-schedule-completed');
+  assert.equal(second.completedStepCount, 1);
+});
+
+test('ULG resident stage worker refuses schedules with invalid or over-cap step counts', async () => {
+  assert.equal(ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT, 128);
+  const fixture = workerScheduleFixture({ laneSuffix: 'cap' });
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-schedule-cap-lane',
+    stateKey: 'ulg:test:schroeder-schedule-cap-state'
+  };
+  const context = workerSchroederStageContext(
+    fixture.device,
+    fixture.buffers,
+    fixture.stageOptions
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+      context,
+      {
+        stepCount: ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT + 1,
+        scheduleId: 'ulg:test:schedule-over-cap'
+      },
+      laneOptions
+    )),
+    /schedule-step-count-over-cap/
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+      context,
+      { stepCount: 0, scheduleId: 'ulg:test:schedule-zero' },
+      laneOptions
+    )),
+    /schedule-step-count-invalid/
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+      context,
+      { scheduleId: 'ulg:test:schedule-missing-count' },
+      laneOptions
+    )),
+    /schedule-step-count-invalid/
+  );
+  // The refusals left no active-schedule registration behind: a valid
+  // schedule on the same lane runs to completion.
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      context,
+      { stepCount: 1, scheduleId: 'ulg:test:schedule-cap-valid' },
+      laneOptions
+    )
+  );
+  assert.equal(result.status, 'worker-resident-schedule-completed');
+  assert.equal(result.completedStepCount, 1);
 });

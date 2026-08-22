@@ -308,6 +308,30 @@ const RESIDENT_VISIBLE_MOTION_THRESHOLD_MIN_M = 1e-6;
 const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
 const DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE = 'same-device-interactive';
 
+// Bounded status telemetry (plan/todo/ss-regression.md correction 4): the
+// full status traversal is expensive scene-wide work, so it may never run
+// per resident step. Hidden panel: zero traversals, one deferred flush on
+// expand. Visible panel: leading-edge render, then trailing coalescence at
+// this cadence.
+export const SPH_STATUS_REFRESH_MIN_INTERVAL_MS = 250;
+
+export function resolveSphStatusRefreshDecision({
+  panelHidden = false,
+  lastRenderMs = 0,
+  nowMs = 0,
+  minIntervalMs = SPH_STATUS_REFRESH_MIN_INTERVAL_MS
+} = {}) {
+  if (panelHidden) return Object.freeze({ action: 'skip-hidden', delayMs: 0 });
+  const elapsed = Math.max(0, Number(nowMs) - Number(lastRenderMs));
+  if (!Number.isFinite(elapsed) || elapsed >= minIntervalMs) {
+    return Object.freeze({ action: 'render-now', delayMs: 0 });
+  }
+  return Object.freeze({
+    action: 'defer',
+    delayMs: Math.max(1, minIntervalMs - elapsed)
+  });
+}
+
 export function resolveSphResidentScheduleStepCount({
   requestedStepCount = 1,
   schroederSimulationEnabled = false
@@ -14407,7 +14431,47 @@ export async function mountSphPhaseDemoOverlay({
     return `requested=${requestedMode} particle=${particleRenderMode} sizing=${sphereSizingMode} pbr=${pbrSource}`;
   }
 
+  let statusRenderLastMs = 0;
+  let statusRenderTimer = null;
+  let statusRenderDirty = false;
+  function statusPanelHidden() {
+    return overlay.querySelector('#sph-panel')?.classList?.contains('collapsed') === true;
+  }
+  function flushStatusRender() {
+    if (statusRenderTimer) {
+      clearTimeout(statusRenderTimer);
+      statusRenderTimer = null;
+    }
+    statusRenderDirty = false;
+    renderStatusNow();
+  }
   function renderStatus() {
+    const decision = resolveSphStatusRefreshDecision({
+      panelHidden: statusPanelHidden(),
+      lastRenderMs: statusRenderLastMs,
+      nowMs: Date.now()
+    });
+    if (decision.action === 'skip-hidden') {
+      statusRenderDirty = true;
+      return;
+    }
+    if (decision.action === 'render-now') {
+      statusRenderDirty = false;
+      renderStatusNow();
+      return;
+    }
+    statusRenderDirty = true;
+    if (statusRenderTimer) return;
+    statusRenderTimer = setTimeout(() => {
+      statusRenderTimer = null;
+      if (statusRenderDirty && !statusPanelHidden()) {
+        statusRenderDirty = false;
+        renderStatusNow();
+      }
+    }, decision.delayMs);
+  }
+  function renderStatusNow() {
+    statusRenderLastMs = Date.now();
     if (simulationRuntimeBlocked()) {
       statusEl.textContent = `simulation blocked — ${simulationRuntimeAdmission.reason}`;
       return;
@@ -15759,6 +15823,9 @@ export async function mountSphPhaseDemoOverlay({
     panel.classList.toggle('collapsed', collapsed);
     toggle.textContent = collapsed ? '☰ menu' : '✕ hide';
     toggle.setAttribute('aria-expanded', String(!collapsed));
+    // Deferred status work accumulated while hidden lands exactly once on
+    // expand, so an opened panel is never stale and a hidden one costs zero.
+    if (!collapsed && statusRenderDirty) flushStatusRender();
   }
   toggle.addEventListener('click', () => { collapsed = !collapsed; applyCollapsed(); });
   applyCollapsed();
@@ -15780,6 +15847,10 @@ export async function mountSphPhaseDemoOverlay({
     fpsLoopRunning = false;
     staticTableCacheReadGeneration += 1;
     staticTableCacheGeneration += 1;
+    if (statusRenderTimer != null) {
+      clearTimeout(statusRenderTimer);
+      statusRenderTimer = null;
+    }
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     disposeMountedMechanicsStageWorkerRunner('demo-close');
     cancelPendingLocalBackgroundImage('sph-demo-close-pending-background-image');

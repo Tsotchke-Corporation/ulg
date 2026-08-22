@@ -1,3 +1,9 @@
+import {
+  createResidentRenderCandidateMailbox,
+  ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+  ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS
+} from '../visualization/residentRenderCandidateMailbox.js';
+
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
 const DISPLAY_HANDOFF = 'transferControlToOffscreen';
@@ -9,6 +15,8 @@ const RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0';
 const PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
+const PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA =
+  'peercompute.ulg.presentation-worker-resident-schedule-cancel.v0';
 const PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 const REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
@@ -655,6 +663,293 @@ async function runResidentStageOnPresentationDevice(data = {}) {
       error
     });
   }
+}
+
+// --- W3: batched resident schedule on the presentation device ---
+//
+// Worker-local single-slot mailbox for the render candidates this worker's
+// schedule runs produce. The bridge keeps its own mirror (fed by the
+// 'resident-schedule-candidate' messages below); this instance is the
+// worker-side arbitration point for future worker-local draw consumers.
+// Exported for direct-invocation tests (this module is otherwise a plain
+// worker script).
+export const presentationResidentScheduleCandidateMailbox =
+  createResidentRenderCandidateMailbox();
+
+// Version mapping (documented decision for W3):
+//
+// The de-facto version token for render candidates is the scene's
+// resident-render-source metadata (peercompute.ulg.sph-resident-render-source
+// .v0, src/visualization/sphPhaseScene.js), ordered by
+// (residentExecutionGeneration, nextStep). The presentation worker has no
+// access to the scene's counters, so it derives the same ordering from the
+// lane's own sealed epoch identity words carried by every W2 schedule
+// progress envelope and terminal result:
+//
+//   version.residentExecutionGeneration := epochIdentity.storageGeneration
+//     The lane's generationId lineage word: it only changes when the lane's
+//     storage generation re-materializes, which strictly supersedes every
+//     candidate of the prior generation (the scene-side analogue is the
+//     per-execution residentExecutionGeneration counter).
+//
+//   version.nextStep := epochIdentity.physicsTick
+//     The W2 schedule driver's 'epoch-identity-regressed' seal guarantees
+//     physicsTick (and positionEpoch) strictly advance per step, and a
+//     continuation schedule on the retained lane keeps advancing from the
+//     retained words — so within one storage generation versions strictly
+//     increase across steps AND across schedules.
+//
+//   version.scheduleId / version.stepOrdinal are carried verbatim for
+//     observability only; they do not participate in ordering.
+//
+// Together (storageGeneration, physicsTick) is strictly increasing over every
+// candidate one lane emits, which is exactly the mailbox's ordering contract.
+// The terminal-result candidate of a schedule whose last step already emitted
+// a progress candidate carries the SAME version; the mailbox truthfully drops
+// it as a duplicate (droppedStaleCount) rather than reordering.
+//
+// Fail-closed: when the epoch identity or either version word is missing or
+// non-finite (e.g. a schedule cancelled before step 1 has a null
+// finalEpochIdentity) the builder returns null — a candidate is skipped, never
+// fabricated.
+export function buildPresentationResidentScheduleRenderCandidate({
+  scheduleId = null,
+  stepOrdinal = null,
+  epochIdentity = null,
+  retainedBufferRefs = null,
+  summary = null
+} = {}) {
+  if (!epochIdentity || typeof epochIdentity !== 'object') return null;
+  for (const field of ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS) {
+    if (!Number.isFinite(Number(epochIdentity[field]))) return null;
+  }
+  const residentExecutionGeneration = Number(epochIdentity.storageGeneration);
+  const nextStep = Number(epochIdentity.physicsTick);
+  return {
+    schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    version: {
+      residentExecutionGeneration,
+      nextStep,
+      scheduleId: typeof scheduleId === 'string' ? scheduleId : null,
+      stepOrdinal: Number.isFinite(Number(stepOrdinal))
+        ? Number(stepOrdinal)
+        : null
+    },
+    epochIdentity: Object.fromEntries(
+      ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS.map(
+        (field) => [field, Number(epochIdentity[field])]
+      )
+    ),
+    ...(Array.isArray(retainedBufferRefs)
+      ? { retainedBufferRefs: [...retainedBufferRefs] }
+      : {}),
+    ...(summary && typeof summary === 'object' ? { summary } : {})
+  };
+}
+
+// (a) publish into the worker-local mailbox, (b) post the bridge message.
+// Stale/duplicate versions are dropped by the mailbox but the bridge message
+// is still posted — the bridge-side mailbox applies the identical ordering
+// gate and counts its own drops. Returns the candidate or null when the
+// source had no publishable identity.
+function postResidentScheduleCandidate(source) {
+  const candidate = buildPresentationResidentScheduleRenderCandidate(source);
+  if (!candidate) return null;
+  presentationResidentScheduleCandidateMailbox.publish(candidate);
+  self.postMessage({ type: 'resident-schedule-candidate', candidate });
+  return candidate;
+}
+
+// Mirrors runResidentStageOnPresentationDevice exactly (same device-injection
+// pattern through context.ulgMechanicsResidentStageWorker.common.deviceResult
+// with sameWorkerQueueFenceFallback, same dynamic module import) but drives
+// the W2 batched schedule entry runUlgMechanicsResidentStageWorkerSchedule-
+// Payload. `runnerModuleOverride` is a test-only seam so node tests can inject
+// a fake mechanics module; the message path never sets it. Exported for
+// direct-invocation tests.
+export async function runResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  const payload = data.payload && typeof data.payload === 'object' ? data.payload : {};
+  if (!device || !context) {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-webgpu-unavailable',
+      reason: 'presentation worker WebGPU device/context is unavailable',
+      stagePayload: payload,
+      workerDeviceSource: null,
+      workerDeviceProvided: false,
+      workerReady: false
+    });
+    return;
+  }
+  const startedAtMs = nowMs();
+  const timeoutMs = residentStageTimeoutMs(data);
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publishResidentStageStatus({
+        status: 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+        reason: 'mechanics resident stage runner import failed',
+        stagePayload: payload,
+        workerReady: true,
+        startedAtMs,
+        timeoutMs,
+        error
+      });
+      return;
+    }
+  }
+  if (typeof runner.runUlgMechanicsResidentStageWorkerSchedulePayload !== 'function') {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule runner is unavailable in presentation worker',
+      stagePayload: payload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs
+    });
+    return;
+  }
+  const previousContext = payload.context && typeof payload.context === 'object'
+    ? payload.context
+    : {};
+  const previousWorkerContext = previousContext.ulgMechanicsResidentStageWorker
+    || previousContext.mechanicsResidentStageWorker
+    || {};
+  const previousCommon = previousWorkerContext.common && typeof previousWorkerContext.common === 'object'
+    ? previousWorkerContext.common
+    : {};
+  const schedulePayload = {
+    ...payload,
+    context: {
+      ...previousContext,
+      ulgMechanicsResidentStageWorker: {
+        ...previousWorkerContext,
+        preferWebGpu: true,
+        common: {
+          ...previousCommon,
+          sameWorkerQueueFenceFallback: true,
+          deviceResult: {
+            status: 'webgpu-ready-presentation-worker-device',
+            reason: 'resident schedule is executing inside the offscreen presentation worker',
+            device,
+            workerDeviceSource: 'offscreen-presentation-worker-device',
+            workerDeviceProvided: true
+          },
+          navigatorRef: self.navigator
+        }
+      }
+    }
+  };
+  publishResidentStageStatus({
+    status: 'worker-offscreen-resident-schedule-on-presentation-device-started',
+    reason: data.reason || 'run-resident-schedule-on-presentation-device',
+    stagePayload: schedulePayload,
+    workerReady: true,
+    startedAtMs,
+    timeoutMs
+  });
+  try {
+    const result = await timeoutResidentStage(
+      runner.runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload, {
+        id: data.id ?? null,
+        postProgress: (progress) => {
+          try {
+            postResidentScheduleCandidate({
+              scheduleId: progress?.scheduleId ?? null,
+              stepOrdinal: progress?.stepOrdinal ?? null,
+              epochIdentity: progress?.epochIdentity ?? null,
+              retainedBufferRefs:
+                progress?.stepSummary?.retainedBufferRefs ?? null,
+              summary: progress?.stepSummary ?? null
+            });
+          } catch {
+            // Candidate delivery must never abort the batch (mirrors the W2
+            // driver's own fire-and-forget progress contract).
+          }
+        }
+      }),
+      timeoutMs
+    );
+    try {
+      postResidentScheduleCandidate({
+        scheduleId: result?.scheduleId ?? null,
+        stepOrdinal: result?.completedStepCount ?? null,
+        epochIdentity: result?.finalEpochIdentity ?? null,
+        retainedBufferRefs: result?.retainedBufferRefs ?? null,
+        summary: result?.perStepSummaries?.lastStep ?? null
+      });
+    } catch {
+      // Terminal candidate failures must not mask the completed result.
+    }
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-completed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      result
+    });
+  } catch (error) {
+    publishResidentStageStatus({
+      status: error?.message?.includes('timed out')
+        ? 'worker-offscreen-resident-schedule-on-presentation-device-timeout'
+        : 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      error
+    });
+  }
+}
+
+// Forwards to the W2 cancel entry (a pure between-steps flag; no device is
+// required, so cancellation works even while init is still pending). The
+// terminal 'resident-schedule-...-completed' status with result.cancelled:
+// true remains the acknowledgement, exactly as on the mechanics worker's own
+// message loop. Exported for direct-invocation tests.
+export async function cancelResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publish({
+        status: 'worker-offscreen-resident-schedule-cancel-failed',
+        reason: 'mechanics resident stage runner import failed',
+        workerReady: Boolean(device && context),
+        ...compactError(error)
+      });
+      return null;
+    }
+  }
+  if (typeof runner.cancelUlgMechanicsResidentStageWorkerSchedule !== 'function') {
+    publish({
+      status: 'worker-offscreen-resident-schedule-cancel-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule cancel entry is unavailable in presentation worker',
+      workerReady: Boolean(device && context)
+    });
+    return null;
+  }
+  const outcome = runner.cancelUlgMechanicsResidentStageWorkerSchedule(data.id);
+  publish({
+    status: 'worker-offscreen-resident-schedule-cancel-forwarded',
+    reason: data.reason || 'cancel-resident-schedule-on-presentation-device',
+    workerReady: Boolean(device && context),
+    workerOffscreenResidentScheduleCancel: {
+      schema: PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA,
+      id: data.id ?? null,
+      ...(outcome && typeof outcome === 'object' ? outcome : {})
+    }
+  });
+  return outcome;
 }
 
 async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
@@ -1921,6 +2216,14 @@ self.onmessage = (event) => {
     }
     if (data.type === 'run-resident-stage-on-presentation-device') {
       await runResidentStageOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'run-resident-schedule-on-presentation-device') {
+      await runResidentScheduleOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'cancel-resident-schedule-on-presentation-device') {
+      await cancelResidentScheduleOnPresentationDevice(data);
       return;
     }
     if (data.type === 'export-retained-compact-snapshot') {

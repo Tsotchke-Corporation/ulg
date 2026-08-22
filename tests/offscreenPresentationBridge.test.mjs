@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   createUlgWorkerOffscreenPresentationBridge,
+  ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
   ULG_WORKER_OFFSCREEN_PRESENTATION_HANDOFF,
   ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
   ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
@@ -883,4 +884,141 @@ test('worker offscreen retained GPUBuffer handoff fails closed before plan chang
     'worker-offscreen-retained-gpubuffer-handoff-blocked-device-owner-split'
   );
   assert.equal(deviceSplit.sameDeviceOwner, false);
+});
+
+test('worker offscreen bridge arbitrates resident-schedule-candidate messages through a versioned mailbox', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      this.listeners = [];
+      worker = this;
+    }
+
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (type === 'message') {
+        this.listeners = this.listeners.filter((entry) => entry !== listener);
+      }
+    }
+
+    emit(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+
+    terminate() {}
+  }
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() {
+      return { offscreen: true };
+    }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) {
+      child.parentNode = this;
+    },
+    removeChild(child) {
+      if (child.parentNode === this) child.parentNode = null;
+    },
+    ownerDocument: {
+      createElement() {
+        return canvas;
+      }
+    }
+  };
+  const acceptedCandidates = [];
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    container,
+    width: 64,
+    height: 64,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument },
+    onResidentRenderCandidate: (candidate) => acceptedCandidates.push(candidate)
+  });
+  assert.equal(typeof bridge.residentRenderCandidateMailbox?.publish, 'function');
+  assert.equal(bridge.residentRenderCandidateRejectedCount, 0);
+
+  const identity = (step) => ({
+    storageGeneration: 7,
+    physicsTick: 100 + step,
+    physicsSubstep: 0,
+    positionEpoch: 200 + step,
+    topologyEpoch: 2,
+    chartEpoch: 3,
+    levelEpoch: 1,
+    supportEpoch: 1
+  });
+  const candidate = (step, stepOrdinal = step) => ({
+    schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    version: {
+      residentExecutionGeneration: 7,
+      nextStep: 100 + step,
+      scheduleId: 'ulg:test:bridge-sched',
+      stepOrdinal
+    },
+    epochIdentity: identity(step),
+    retainedBufferRefs: [`ulg-worker:test:state:${step}`]
+  });
+
+  worker.emit({ type: 'resident-schedule-candidate', candidate: candidate(1) });
+  worker.emit({ type: 'resident-schedule-candidate', candidate: candidate(2) });
+  // Stale republish: dropped by the bridge mailbox, never reordered forward.
+  worker.emit({ type: 'resident-schedule-candidate', candidate: candidate(1) });
+
+  assert.equal(acceptedCandidates.length, 2);
+  assert.equal(acceptedCandidates[1].version.nextStep, 102);
+  const latest = bridge.residentRenderCandidateMailbox.peekLatest();
+  assert.equal(latest.version.nextStep, 102);
+  assert.ok(Object.isFrozen(latest));
+  const stats = bridge.residentRenderCandidateMailbox.stats();
+  assert.equal(stats.publishedCount, 2);
+  assert.equal(stats.droppedStaleCount, 1);
+  assert.equal(bridge.residentRenderCandidateRejectedCount, 0);
+
+  // Malformed candidates fail closed: counted, never accepted, and the
+  // handler survives to process later messages.
+  worker.emit({ type: 'resident-schedule-candidate', candidate: { schema: 'wrong' } });
+  worker.emit({ type: 'resident-schedule-candidate', candidate: null });
+  assert.equal(bridge.residentRenderCandidateRejectedCount, 2);
+  assert.equal(bridge.residentRenderCandidateMailbox.stats().publishedCount, 2);
+
+  // Existing handlers stay untouched: a presentation status envelope emitted
+  // after candidate traffic still flows through the status path.
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    status: 'worker-offscreen-presentation-ready',
+    workerOffscreenResidentStage: {
+      schema: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA,
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+    }
+  });
+  assert.equal(
+    bridge.residentStageStatus.status,
+    'worker-offscreen-resident-schedule-on-presentation-device-completed'
+  );
+  assert.equal(bridge.status.status, 'worker-offscreen-presentation-ready');
+
+  // takeLatest clears the slot but the version gate persists on the bridge
+  // mailbox exactly as on the worker-local one.
+  const taken = bridge.residentRenderCandidateMailbox.takeLatest();
+  assert.equal(taken, latest);
+  assert.equal(bridge.residentRenderCandidateMailbox.peekLatest(), null);
+  worker.emit({ type: 'resident-schedule-candidate', candidate: candidate(2) });
+  assert.equal(bridge.residentRenderCandidateMailbox.peekLatest(), null);
+  assert.equal(bridge.residentRenderCandidateMailbox.stats().droppedStaleCount, 2);
 });

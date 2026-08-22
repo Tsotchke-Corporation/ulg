@@ -1,3 +1,11 @@
+import {
+  createResidentRenderCandidateMailbox
+} from './residentRenderCandidateMailbox.js';
+
+export {
+  ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA
+} from './residentRenderCandidateMailbox.js';
+
 export const ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA =
   'peercompute.ulg.worker-offscreen-presentation.v0';
 export const ULG_WORKER_OFFSCREEN_PRESENTATION_TRANSPORT =
@@ -553,7 +561,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
   onRenderRowsStatus = null,
   onRetainedGpuBufferHandoffStatus = null,
   onResidentStageStatus = null,
-  onRetainedCompactSnapshotStatus = null
+  onRetainedCompactSnapshotStatus = null,
+  onResidentRenderCandidate = null
 } = {}) {
   const documentRef = container?.ownerDocument || windowRef?.document || globalThis.document || null;
   let currentBackgroundColor = backgroundColor;
@@ -615,6 +624,17 @@ export function createUlgWorkerOffscreenPresentationBridge({
     retainedGpuBufferHandoffStatus: null,
     residentStageStatus: null,
     retainedCompactSnapshotStatus: null,
+    // W3: bridge-owned mirror of the presentation worker's resident-schedule
+    // render-candidate lane. Fed by 'resident-schedule-candidate' worker
+    // messages; the mailbox drops stale/duplicate versions with counters and
+    // fails closed (TypeError) on malformed candidates — rejections are
+    // counted below instead of crashing the worker message handler. The
+    // optional onResidentRenderCandidate factory callback fires only for
+    // accepted (newest-version) candidates.
+    residentRenderCandidateMailbox: createResidentRenderCandidateMailbox({
+      onCandidate: onResidentRenderCandidate
+    }),
+    residentRenderCandidateRejectedCount: 0,
     displayOwner: requested ? 'worker' : 'none',
     displayOwnerEpoch: 0,
     displayOwnerReason: 'bridge-initialization',
@@ -1565,6 +1585,20 @@ export function createUlgWorkerOffscreenPresentationBridge({
         || bridge.lifecycleGeneration !== workerLifecycleGeneration
       ) return;
       const data = event?.data || {};
+      // W3: resident-schedule render candidates arrive as their own message
+      // type (not a presentation status envelope) and are arbitrated by the
+      // bridge-owned versioned mailbox. Handled before the schema guard so
+      // every existing status handler below stays untouched.
+      if (data?.type === 'resident-schedule-candidate') {
+        try {
+          bridge.residentRenderCandidateMailbox.publish(data.candidate);
+        } catch {
+          // Fail-closed mailbox rejection (malformed candidate): counted,
+          // never silently accepted, never allowed to crash the handler.
+          bridge.residentRenderCandidateRejectedCount += 1;
+        }
+        return;
+      }
       if (data?.schema !== ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA) return;
       const contentReceipt = data.workerOffscreenRenderRows || null;
       const contentReceiptReady = Boolean(

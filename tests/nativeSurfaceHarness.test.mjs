@@ -3196,8 +3196,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     mountSource,
-    /resolveSphNativeSurfacePostStepPresentationGateSettlement\(\{[\s\S]*?boundedAttemptComplete:\s*true,[\s\S]*?if \(residentPostStepPresentationGate\?\.active\) \{[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
-    'only a still-pending post-step proof may hold continuations; a terminal fail-open receipt must preserve playback'
+    /resolveSphNativeSurfacePostStepPresentationGateSettlement\(\{[\s\S]*?boundedAttemptComplete:\s*true,[\s\S]*?residentPostStepPresentationGate\?\.active[\s\S]*?&& !workerLaneScheduleCompletionContinuation[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
+    'only a still-pending post-step proof may hold continuations; a terminal fail-open receipt must preserve playback, and W4b worker-lane schedule issuance is never suppressed by the native presentation gate'
   );
   assert.match(
     mountSource,

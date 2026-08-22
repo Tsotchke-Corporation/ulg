@@ -51,8 +51,13 @@ import {
   summarizePeerComputeResidentAuthorityHost
 } from '../runtime/peercomputeBrowserResidentHost.js';
 import {
+  ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES,
+  normalizePeerComputeRenderOwnershipMode,
   resolvePeerComputeRenderOwnershipPolicy
 } from '../runtime/peercomputeRenderOwnershipPolicy.js';
+import {
+  resolveUlgWorkerOffscreenPresentationCapability
+} from './offscreenPresentationBridge.js';
 import {
   SPH_COLD_START_CACHE_SCHEMA,
   SPH_COLD_START_CACHE_STORAGE_KEY,
@@ -334,7 +339,8 @@ export function resolveSphStatusRefreshDecision({
 
 export function resolveSphResidentScheduleStepCount({
   requestedStepCount = 1,
-  schroederSimulationEnabled = false
+  schroederSimulationEnabled = false,
+  workerLaneActive = false
 } = {}) {
   const normalized = Math.max(
     1,
@@ -344,11 +350,18 @@ export function resolveSphResidentScheduleStepCount({
     )
   );
   // One canonical SS generation is immutable for exactly one position epoch.
-  // Asking the resident sequence executor to reuse it across a multi-step
-  // mounted batch is rejected before step 1. Keep playback live by publishing
-  // one completed epoch per schedule; the RAF continuation builds the next
-  // hierarchy generation for the next physics step.
-  return schroederSimulationEnabled ? 1 : normalized;
+  // Asking the DIRECT scene-resident sequence executor to reuse it across a
+  // multi-step mounted batch is rejected before step 1, so the direct route
+  // publishes one completed epoch per schedule and the RAF continuation
+  // builds the next hierarchy generation for the next physics step.
+  //
+  // W4b: the worker-owned resident lane batches legally. Each worker schedule
+  // step builds and seals ITS OWN spatial epoch generation (the W2 driver
+  // fails closed with 'epoch-identity-regressed' if a step does not advance),
+  // so a multi-step batch never reuses a generation across a position epoch
+  // and the whole batch runs off the page thread.
+  if (schroederSimulationEnabled) return workerLaneActive ? normalized : 1;
+  return normalized;
 }
 
 export function resolveSphResidentInterfaceRefreshContinuationPolicy({
@@ -2975,6 +2988,29 @@ export function residentGpuContinuationEvidenceReady(execution = null) {
   } catch (_) {
     return false;
   }
+}
+
+// W4b: continuation readiness for the worker-owned resident lane. The lane
+// retains its post-step particle buffers INSIDE the presentation worker, so
+// the page-device continuation evidence (nextParticleUploads with live
+// GPUBuffers) truthfully does not exist on a worker-lane execution. The lane
+// itself is the continuation: a completed, uncancelled schedule whose
+// terminal envelope proves retained worker refs and a sealed final epoch
+// identity is ready for the next batched schedule on the SAME lane.
+export function residentWorkerLaneContinuationReady(execution = null) {
+  const lane = execution?.workerOwnedResidentLane;
+  return Boolean(
+    execution?.residentComputeManagerMode === 'worker-owned-resident-lane'
+    && execution?.workerLaneFallback == null
+    && lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+    && lane?.cancelled !== true
+    && Number.isSafeInteger(Number(lane?.completedStepCount))
+    && Number(lane.completedStepCount) > 0
+    && lane?.finalEpochIdentity
+    && typeof lane.finalEpochIdentity === 'object'
+    && Array.isArray(lane?.retainedBufferRefs)
+    && lane.retainedBufferRefs.length > 0
+  );
 }
 
 function compactResidentStageOrderFamilyOwners(familyOwners = {}) {
@@ -6556,6 +6592,51 @@ export async function mountSphPhaseDemoOverlay({
         ?? null
     }
     : null;
+  // W4b policy readiness: the worker-owned resident lane is ready ONLY when
+  // all three hold — (1) the render-ownership REQUEST explicitly normalizes
+  // to the worker-owned resident producer (or its presentation-worker
+  // retained presentation-only variant); an auto/implicit selection never
+  // upgrades, (2) the SS route is requested (the lane runs SS schedules and
+  // nothing else), and (3) the worker-offscreen presentation capability probe
+  // passes on this page (module Worker + transferControlToOffscreen).
+  const explicitRenderOwnershipRequest = normalizePeerComputeRenderOwnershipMode(
+    rawRenderOwnershipMode,
+    null
+  );
+  const workerOwnedResidentLaneModeExplicitlyRequested = Boolean(
+    explicitRenderOwnershipRequest
+      === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+    || explicitRenderOwnershipRequest
+      === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES
+        .PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
+  );
+  const workerOwnedResidentLaneCapabilityProbe =
+    workerOwnedResidentLaneModeExplicitlyRequested && initialSchroederSimulationEnabled
+      ? resolveUlgWorkerOffscreenPresentationCapability({
+          requested: true,
+          canvas: typeof document?.createElement === 'function'
+            ? document.createElement('canvas')
+            : null,
+          windowRef: window,
+          navigatorRef: globalThis.navigator
+        })
+      : null;
+  const initialWorkerOwnedResidentLaneReady = Boolean(
+    workerOwnedResidentLaneModeExplicitlyRequested
+    && initialSchroederSimulationEnabled
+    && workerOwnedResidentLaneCapabilityProbe?.status
+      === 'worker-offscreen-presentation-transfer-ready'
+  );
+  overlay.__sphWorkerOwnedResidentLaneAdmission = {
+    schema: 'peercompute.ulg.sph-demo-worker-owned-resident-lane-admission.v0',
+    ready: initialWorkerOwnedResidentLaneReady,
+    explicitRenderOwnershipRequest,
+    workerOwnedResidentLaneModeExplicitlyRequested,
+    schroederSimulationRequested: initialSchroederSimulationEnabled,
+    capabilityProbeStatus: workerOwnedResidentLaneCapabilityProbe?.status ?? null,
+    capabilityProbeReason: workerOwnedResidentLaneCapabilityProbe?.reason ?? null,
+    updatedAtMs: performance.now()
+  };
   const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy:
       currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
@@ -6563,6 +6644,7 @@ export async function mountSphPhaseDemoOverlay({
       || runtime?.renderOwnershipPolicy
       || null,
     requestedMode: rawRenderOwnershipMode,
+    workerOwnedResidentProducerReady: initialWorkerOwnedResidentLaneReady,
     workerOffscreenPresentationRequested: directWorkerOffscreenPresentationEnabled,
     workerOffscreenPresentationExplicitlyDisabled,
     presentationWorkerResidentStagesRequested,
@@ -9315,6 +9397,12 @@ export async function mountSphPhaseDemoOverlay({
         ?? overlay.__mlsMpmResidentStep?.particlePingPong?.nextTime
         ?? scene.getMlsMpmResidentSteps?.()?.nextSphParticleState?.time
         ?? overlay.__mlsMpmResidentSteps?.nextSphParticleState?.time
+        // W4b: the worker-owned resident lane retains its post-step state
+        // worker-side (no page-device nextSphParticleState exists); the
+        // truthful adopted clock is baseTime + completedStepCount * dt from
+        // the terminal schedule envelope.
+        ?? scene.getMlsMpmResidentSteps?.()?.workerLaneSimTime?.timeS
+        ?? overlay.__mlsMpmResidentSteps?.workerLaneSimTime?.timeS
         ?? driver?.demo?.state?.time
         ?? activeViewState?.time
     );
@@ -10386,9 +10474,18 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentResidentStepsPerSchedule() {
     if (initialSchroederSimulationConfig.enabled) {
+      // Worker-lane batches honor an explicit residentStepsPerSchedule
+      // override; otherwise the mounted worker-lane default batch applies.
+      // The direct SS route stays pinned at one epoch per schedule.
+      const workerLaneRequestedStepCount = positiveIntegerUrlParam(
+        currentPeerComputeRenderOwnershipPolicy()?.residentStepsPerScheduleOverride
+      ) ?? RESIDENT_STEPS_PER_SCHEDULE_MAX;
       return resolveSphResidentScheduleStepCount({
-        requestedStepCount: 1,
-        schroederSimulationEnabled: true
+        requestedStepCount: initialWorkerOwnedResidentLaneReady
+          ? workerLaneRequestedStepCount
+          : 1,
+        schroederSimulationEnabled: true,
+        workerLaneActive: initialWorkerOwnedResidentLaneReady
       });
     }
     let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
@@ -11531,7 +11628,8 @@ export async function mountSphPhaseDemoOverlay({
     const requestedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
     const normalizedStepCount = resolveSphResidentScheduleStepCount({
       requestedStepCount,
-      schroederSimulationEnabled: initialSchroederSimulationConfig.enabled
+      schroederSimulationEnabled: initialSchroederSimulationConfig.enabled,
+      workerLaneActive: initialWorkerOwnedResidentLaneReady
     });
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     const schroederExecutionOptions = schroederResidentExecutionOptionsFromConfig();
@@ -11600,6 +11698,10 @@ export async function mountSphPhaseDemoOverlay({
     let scheduleContinuation = false;
     let scheduleLatestGeneration = false;
     let restartPlaybackContinuation = false;
+    // W4b: set when the settled execution is a worker-owned resident-lane
+    // batch. Its continuation issues directly from schedule completion (the
+    // batch itself is the pacing) instead of the per-step rAF chain.
+    let workerLaneScheduleCompletionContinuation = false;
     // Any continuation that crosses an await must retain the exact mounted
     // scene and schedule identity it began with.  In particular, reset can
     // replace the scene and advance its generation while a native candidate
@@ -12114,8 +12216,14 @@ export async function mountSphPhaseDemoOverlay({
           }
         }
       }
+      // W4b: worker-lane continuation readiness is lane-resident evidence
+      // (the presentation worker retains the post-step buffers); the direct
+      // page-device continuation evidence stays byte-identical.
+      const workerLaneContinuationReady =
+        residentWorkerLaneContinuationReady(execution);
+      workerLaneScheduleCompletionContinuation = workerLaneContinuationReady;
       scheduleContinuation = Boolean(
-        residentGpuContinuationReady(execution)
+        (residentGpuContinuationReady(execution) || workerLaneContinuationReady)
         && continuationBudget > 0
         && generation === particleSyncGeneration
         && requiredInterfaceRefreshReady
@@ -12144,7 +12252,8 @@ export async function mountSphPhaseDemoOverlay({
       restartPlaybackContinuation = sphResidentPlaybackRestartAllowed({
         scheduleContinuation,
         playing,
-        continuationReady: residentGpuContinuationReady(execution),
+        continuationReady:
+          residentGpuContinuationReady(execution) || workerLaneContinuationReady,
         generationCurrent: generation === particleSyncGeneration,
         requiredInterfaceRefreshReady
       });
@@ -12905,7 +13014,16 @@ export async function mountSphPhaseDemoOverlay({
                       ?.proofWaitStatus ?? null
                 }
               );
-              if (residentPostStepPresentationGate?.active) {
+              if (
+                residentPostStepPresentationGate?.active
+                // W4b: worker-lane schedule issuance is never suppressed by
+                // the native-surface presentation gate — the worker lane's
+                // presentation flows through the resident render candidate
+                // mailbox, so holding physics for a page-side presentation
+                // proof would deadlock playback against a proof that this
+                // route never produces.
+                && !workerLaneScheduleCompletionContinuation
+              ) {
                 // A non-terminal exact-generation proof still owns the
                 // continuation. Terminal unadmitted/error/timeout outcomes are
                 // inactive fail-open receipts and preserve playback.
@@ -13093,6 +13211,28 @@ export async function mountSphPhaseDemoOverlay({
             generation: particleSyncGeneration
           });
         });
+      } else if (
+        workerLaneScheduleCompletionContinuation
+        && scheduleContinuation
+        && residentScheduleIsCurrent()
+      ) {
+        // W4b: the worker lane issues its next batched schedule directly
+        // from THIS schedule's completion. The per-step rAF chain below
+        // paces one-epoch direct schedules against page presentation; a
+        // worker batch is its own pacing and never waits on a page frame.
+        if (sphResidentChainedContinuationAllowed({
+          scheduleContinuation,
+          playing,
+          scheduleCurrent: residentScheduleIsCurrent()
+        })) {
+          scheduleMlsMpmResidentSteps({
+            stepCount: normalizedStepCount,
+            readbackMode,
+            continueFromResidentState: true,
+            continuationBudget: continuationBudget - 1,
+            generation
+          });
+        }
       } else if (scheduleContinuation && residentScheduleIsCurrent()) {
         window.requestAnimationFrame(() => {
           if (!sphResidentChainedContinuationAllowed({
@@ -13108,6 +13248,22 @@ export async function mountSphPhaseDemoOverlay({
             generation
           });
         });
+      } else if (
+        workerLaneScheduleCompletionContinuation
+        && restartPlaybackContinuation
+        && residentScheduleIsCurrent()
+      ) {
+        // W4b: worker-lane playback restart also issues from schedule
+        // completion rather than a page frame.
+        if (overlay.isConnected && playing && generation === particleSyncGeneration) {
+          scheduleMlsMpmResidentSteps({
+            stepCount: normalizedStepCount,
+            readbackMode,
+            continueFromResidentState: true,
+            continuationBudget: RESIDENT_CONTINUATION_CHAIN_BUDGET,
+            generation
+          });
+        }
       } else if (restartPlaybackContinuation && residentScheduleIsCurrent()) {
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;

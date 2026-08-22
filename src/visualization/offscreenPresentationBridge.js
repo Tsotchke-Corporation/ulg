@@ -1427,6 +1427,77 @@ export function createUlgWorkerOffscreenPresentationBridge({
         workerDeviceProvided: true
       });
     },
+    // W4b: batched SS schedule on the presentation-worker device. Mirrors
+    // runResidentStageOnPresentationDevice exactly but drives the worker's
+    // 'run-resident-schedule-on-presentation-device' verb (W2 driver behind
+    // the W3 message). Terminal truth arrives on the resident-stage status
+    // channel as residentScheduleResult / residentScheduleError.
+    runResidentScheduleOnPresentationDevice({
+      payload = null,
+      id = null,
+      reason = 'run-resident-schedule-on-presentation-device'
+    } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('runResidentScheduleOnPresentationDevice');
+      }
+      if (!requested) {
+        return this.publishResidentStageStatus({
+          status: 'worker-offscreen-resident-schedule-on-presentation-device-not-requested',
+          reason,
+          inputTransport: null
+        });
+      }
+      if (!this.worker) {
+        return this.publishResidentStageStatus({
+          status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-worker-unavailable',
+          reason,
+          workerReady: false
+        });
+      }
+      const schedulePayload = payload && typeof payload === 'object' ? payload : {};
+      this.worker.postMessage?.({
+        type: 'run-resident-schedule-on-presentation-device',
+        schema: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA,
+        id: id ?? schedulePayload.schedule?.scheduleId ?? null,
+        payload: schedulePayload,
+        reason
+      });
+      return this.publishResidentStageStatus({
+        status: 'worker-offscreen-resident-schedule-on-presentation-device-submit-posted',
+        reason,
+        scheduleId: schedulePayload.schedule?.scheduleId ?? id ?? null,
+        stepCount: schedulePayload.schedule?.stepCount ?? null,
+        laneId: schedulePayload.lease?.laneId || schedulePayload.lane?.laneId || null,
+        stateKey: schedulePayload.lease?.stateKey || schedulePayload.lane?.stateKey || null,
+        workerDeviceSource: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT,
+        workerDeviceProvided: true
+      });
+    },
+    cancelResidentScheduleOnPresentationDevice({
+      id = null,
+      reason = 'cancel-resident-schedule-on-presentation-device'
+    } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus('cancelResidentScheduleOnPresentationDevice');
+      }
+      if (!this.worker) {
+        return this.publishResidentStageStatus({
+          status: 'worker-offscreen-resident-schedule-cancel-blocked-worker-unavailable',
+          reason,
+          workerReady: false
+        });
+      }
+      this.worker.postMessage?.({
+        type: 'cancel-resident-schedule-on-presentation-device',
+        id,
+        reason
+      });
+      return this.publishResidentStageStatus({
+        status: 'worker-offscreen-resident-schedule-cancel-posted',
+        reason,
+        scheduleId: id ?? null
+      });
+    },
     exportRetainedCompactSnapshot({
       laneId = null,
       stateKey = null,
@@ -1605,7 +1676,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
         contentReceipt
         && /-rendered$/.test(String(contentReceipt.status || ''))
         && Math.max(0, Math.floor(Number(contentReceipt.particleCount) || 0)) > 0
-        && Number(contentReceipt.displayOwnerEpoch) === bridge.displayOwnerEpoch
+        && (
+          Number(contentReceipt.displayOwnerEpoch) === bridge.displayOwnerEpoch
+          // W4b: candidate-driven presentations are ordered by the worker's
+          // own strictly advancing candidate version, not the page epoch (a
+          // per-refresh epoch bump would otherwise permanently hide a live
+          // worker-lane canvas).
+          || contentReceipt.residentScheduleCandidatePresentation === true
+        )
         && bridge.displayOwner === 'worker'
       );
       if (contentReceiptReady) {

@@ -59,6 +59,7 @@ import {
 import { SPH_INITIAL_BODIES_SCHEMA } from '../src/runtime/sphInitialBodies.js';
 
 test('mounted canonical SS playback advances one immutable position epoch per schedule', () => {
+  // Direct SS route: one sealed epoch per schedule, always.
   assert.equal(resolveSphResidentScheduleStepCount({
     requestedStepCount: 128,
     schroederSimulationEnabled: true
@@ -70,6 +71,35 @@ test('mounted canonical SS playback advances one immutable position epoch per sc
   assert.equal(resolveSphResidentScheduleStepCount({
     requestedStepCount: 0,
     schroederSimulationEnabled: false
+  }), 1);
+});
+
+test('mounted worker-owned resident lane lifts the SS one-epoch throttle to legal batches', () => {
+  // W4b: each worker schedule step builds and seals its own epoch (the W2
+  // driver fails closed with 'epoch-identity-regressed' otherwise), so the
+  // normalized batch count passes through when the worker lane is active.
+  assert.equal(resolveSphResidentScheduleStepCount({
+    requestedStepCount: 16,
+    schroederSimulationEnabled: true,
+    workerLaneActive: true
+  }), 16);
+  // The resident-schedule cap still binds worker-lane batches.
+  assert.equal(resolveSphResidentScheduleStepCount({
+    requestedStepCount: 500,
+    schroederSimulationEnabled: true,
+    workerLaneActive: true
+  }), 128);
+  // The lane flag alone never affects the non-SS path.
+  assert.equal(resolveSphResidentScheduleStepCount({
+    requestedStepCount: 8,
+    schroederSimulationEnabled: false,
+    workerLaneActive: true
+  }), 8);
+  // And an inactive lane keeps the direct SS pin.
+  assert.equal(resolveSphResidentScheduleStepCount({
+    requestedStepCount: 16,
+    schroederSimulationEnabled: true,
+    workerLaneActive: false
   }), 1);
 });
 

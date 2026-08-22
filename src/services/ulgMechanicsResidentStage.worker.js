@@ -1,4 +1,6 @@
 import {
+  cloneMlsMpmParticleStateForNext,
+  cloneSphParticleStateForNext,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
@@ -53,6 +55,9 @@ import {
   webGpuBufferDevice,
   webGpuDeviceId
 } from '../runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  prewarmCachedExplicitComputePipeline
+} from '../runtime/webgpuComputeLayout.js';
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
@@ -1617,7 +1622,31 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     };
   }
   const g2p = retainedG2pOutput(record);
-  const source = sourceStageId === 'g2p' ? g2p : null;
+  // W4b: the SS worker lane retains its post-step (or freshly seeded)
+  // particle uploads on record.schroederLane; presentation consumers resolve
+  // them through the same contract the g2p output uses. The buffers stay
+  // worker-retained — this resolver only ever hands them to same-worker
+  // consumers (the presentation draw path), never across postMessage.
+  const schroederLaneUpload = record.schroederLane?.sphParticleUpload || null;
+  const schroederLaneSource =
+    sourceStageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+    && schroederLaneUpload?.stateBuffer
+      ? {
+          stateBuffer: schroederLaneUpload.stateBuffer,
+          thermoBuffer: schroederLaneUpload.thermoBuffer || null,
+          mechanicsBuffer:
+            record.schroederLane?.mlsMpmParticleUpload?.mechanicsBuffer || null,
+          particleCount:
+            record.schroederLane?.particleCount
+            ?? schroederLaneUpload.particleCount
+            ?? null,
+          stateStrideFloats: schroederLaneUpload.stateStrideFloats ?? null,
+          thermoStrideFloats: schroederLaneUpload.thermoStrideFloats ?? null,
+          stateBufferByteLength: schroederLaneUpload.stateBufferByteLength ?? null,
+          thermoBufferByteLength: schroederLaneUpload.thermoBufferByteLength ?? null
+        }
+      : null;
+  const source = sourceStageId === 'g2p' ? g2p : schroederLaneSource;
   const exportSources = sourceStageId === 'g2p'
     && record.compactSnapshotExportSources?.status === 'worker-retained-compact-snapshot-export-sources-ready'
     && record.compactSnapshotExportSources?.exportOwnedSourceReady === true
@@ -3306,6 +3335,113 @@ function releaseWorkerSchroederSuccessorLeaseQuietly(consumption, device) {
 // step-1-admissible level-assignment source. The worker NEVER invents
 // lineage: a missing or non-finite word is a fail-closed error, never a
 // default.
+// W4b lane-admission prewarm hook. prewarmCachedExplicitComputePipeline
+// requires an exact per-pipeline descriptor ({ cacheKey, label, code,
+// entryPoint, bindings }); the SS kernel WGSL lives inline in the kernel
+// modules (schroederSpatialEpochGpu / schroederHierarchyGpu) and no module
+// currently exports a clean enumeration of those descriptors. Fabricating
+// one here would duplicate (and drift from) the kernels' own cache keys, so
+// the hook fires with an EMPTY enumeration and reports that truthfully.
+// TODO(W5): export a prewarmable-pipeline enumeration from the SS kernel
+// modules (cacheKey + label + code + entryPoint + bindings per pipeline) and
+// feed it through `enumeratePipelines` below so lane admission hides the
+// first-step pipeline compile latency.
+function prewarmWorkerSchroederLaneComputePipelines(device, {
+  enumeratePipelines = null
+} = {}) {
+  const descriptors = typeof enumeratePipelines === 'function'
+    ? (enumeratePipelines() || [])
+    : [];
+  if (!Array.isArray(descriptors) || descriptors.length === 0) {
+    return {
+      schema: 'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0',
+      status: 'worker-lane-pipeline-prewarm-skipped-no-enumeration',
+      reason: 'no clean enumeration of SS compute pipelines is exported yet; see TODO(W5)',
+      requestedCount: 0,
+      firedCount: 0
+    };
+  }
+  let firedCount = 0;
+  for (const descriptor of descriptors) {
+    try {
+      // Fire-and-forget: prewarm failures never gate lane admission.
+      prewarmCachedExplicitComputePipeline(device, descriptor).catch(() => {});
+      firedCount += 1;
+    } catch {
+      // A malformed descriptor is an enumeration bug, not a lane blocker.
+    }
+  }
+  return {
+    schema: 'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0',
+    status: 'worker-lane-pipeline-prewarm-fired',
+    reason: null,
+    requestedCount: descriptors.length,
+    firedCount
+  };
+}
+
+// W4b: worker-local continuation classifier for batched schedules. A lane
+// whose mechanics kernel retains post-step uploads but commits no successor
+// source family (the offscreen presentation-device flow) rebuilds its next
+// step's level assignment by running the REAL classifier against the lane's
+// OWN retained buffers and advanced metadata. This factory is worker-local
+// by construction (it closes over the retained lane map); the offscreen
+// presentation worker injects it as the W2 driver's
+// scheduleStepOptionsProvider because a function can never cross
+// postMessage.
+export function createWorkerSchroederLaneLevelAssignmentProvider({
+  laneId = null,
+  stateKey = null,
+  classifierOptions = null,
+  levelAssignmentRunner = runSchroederLevelAssignmentWebGpu
+} = {}) {
+  const laneKey = laneKeyForParts({ laneId, stateKey });
+  const filteredClassifierOptions = {};
+  for (const field of SCHROEDER_LANE_SEED_CLASSIFIER_OPTION_FIELDS) {
+    if (classifierOptions?.[field] != null) {
+      filteredClassifierOptions[field] = classifierOptions[field];
+    }
+  }
+  return async function workerSchroederLaneLevelAssignmentProvider() {
+    const record = retainedLanes.get(laneKey);
+    const lane = record?.schroederLane || null;
+    if (!lane) {
+      throw new Error(
+        `Worker schroeder lane continuation failed closed: lane-continuation-state-missing (no retained lane for ${laneKey})`
+      );
+    }
+    // A committed successor source family is the lane's native step source;
+    // the epoch stage consumes it directly.
+    if (lane.successorSourceFamily) return {};
+    const sphUpload = lane.sphParticleUpload || null;
+    const mlsUpload = lane.mlsMpmParticleUpload || null;
+    if (!sphUpload?.stateBuffer || !mlsUpload?.mechanicsBuffer) {
+      throw new Error(
+        'Worker schroeder lane continuation failed closed: lane-post-step-uploads-missing (the previous step retained no continuation buffers)'
+      );
+    }
+    const execution = await levelAssignmentRunner({
+      device: lane.device,
+      sphParticleState: lane.sphParticleState || null,
+      mlsMpmParticleState: lane.mlsMpmParticleState || null,
+      sphParticleUpload: sphUpload,
+      mlsMpmParticleUpload: mlsUpload,
+      ...filteredClassifierOptions,
+      retainAssignmentBuffer: true,
+      readbackMode: NO_FULL_READBACK_MODE
+    });
+    if (
+      execution?.status !== 'schroeder-level-assignment-submitted'
+      || !execution.assignmentBuffer
+    ) {
+      throw new Error(
+        `Worker schroeder lane continuation failed closed: lane-continuation-level-assignment-invalid (${execution?.status ?? 'missing-execution'})`
+      );
+    }
+    return { levelAssignment: execution };
+  };
+}
+
 async function runWorkerSchroederLaneSeedStage(data = {}) {
   const stageId = SCHROEDER_LANE_SEED_STAGE_ID;
   const record = workerSchroederLaneRecord(stageId, data);
@@ -3538,9 +3674,13 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     'laneSeed.levelAssignment.assignmentBuffer',
     execution.assignmentBuffer
   );
+  // W4b: lane admission fires the pipeline prewarm hook (fire-and-forget;
+  // currently reports skipped-no-enumeration — see the hook's TODO).
+  const pipelinePrewarm = prewarmWorkerSchroederLaneComputePipelines(device);
   return {
     schema: ULG_WORKER_SCHROEDER_LANE_SEED_STAGE_SCHEMA,
     status: 'worker-schroeder-lane-seeded',
+    pipelinePrewarm,
     backend: 'webgpu',
     readbackMode: data.readbackMode || null,
     laneSeeded: true,
@@ -3805,6 +3945,11 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       : null,
     sphParticleUpload: laneSphUpload || data.sphParticleUpload || null,
     mlsMpmParticleUpload: laneMlsUpload || data.mlsMpmParticleUpload || null,
+    // W4b: the lane's advanced CPU-metadata clones (step/time/epoch words)
+    // survive the per-step lane-record rebuild; the next mechanics step's
+    // particlePingPong advances from them.
+    sphParticleState: previousLane?.sphParticleState ?? null,
+    mlsMpmParticleState: previousLane?.mlsMpmParticleState ?? null,
     particleCount
   };
   const retainedRefDescriptors = {};
@@ -3944,14 +4089,22 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   const sphParticleUpload = lane.sphParticleUpload || data.sphParticleUpload || null;
   const mlsMpmParticleUpload =
     lane.mlsMpmParticleUpload || data.mlsMpmParticleUpload || null;
+  // W4b: chained steps consume the lane's own advanced CPU-metadata clone
+  // (step/time/epoch words) exactly as the direct scene loop consumes
+  // nextSphParticleState per step; the payload's packed rows only seed the
+  // first step of a fresh lane.
+  const sphParticleStateForKernel =
+    lane.sphParticleState || data.sphParticleState;
+  const mlsMpmParticleStateForKernel =
+    lane.mlsMpmParticleState || data.mlsMpmParticleState;
   const successorConsumption = lane.successorConsumption || null;
   let kernelResult = null;
   let successorLeaseReleasePromise = null;
   try {
     kernelResult = await kernelRunner({
       device,
-      sphParticleState: data.sphParticleState,
-      mlsMpmParticleState: data.mlsMpmParticleState,
+      sphParticleState: sphParticleStateForKernel,
+      mlsMpmParticleState: mlsMpmParticleStateForKernel,
       sphParticleUpload,
       mlsMpmParticleUpload,
       spatialEpochGeneration: generation,
@@ -4057,6 +4210,31 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   lane.mlsMpmParticleUpload = nextMlsUpload;
   lane.successorSourceFamily = nextSuccessorSourceFamily;
   lane.particleCount = nextSphUpload?.particleCount ?? lane.particleCount ?? null;
+  // W4b: retain the kernel's advanced CPU-metadata clones so the NEXT step's
+  // particlePingPong (physicsTick, time) advances truthfully — worker-local
+  // only, never returned across the message boundary.
+  let nextParticleStateCloneError = null;
+  try {
+    lane.sphParticleState = residentStep.nextSphParticleState
+      ?? (sphParticleStateForKernel
+        ? cloneSphParticleStateForNext(sphParticleStateForKernel, residentStep)
+        : null);
+    lane.mlsMpmParticleState = residentStep.nextMlsMpmParticleState
+      ?? (mlsMpmParticleStateForKernel
+        ? cloneMlsMpmParticleStateForNext(
+            mlsMpmParticleStateForKernel,
+            residentStep
+          )
+        : null);
+  } catch (cloneError) {
+    // A metadata clone failure must not fail the completed step; the next
+    // step fails closed truthfully if its inputs are incomplete — and the
+    // failure is REPORTED, never swallowed.
+    nextParticleStateCloneError =
+      cloneError instanceof Error ? cloneError.message : String(cloneError);
+    lane.sphParticleState = lane.sphParticleState ?? null;
+    lane.mlsMpmParticleState = lane.mlsMpmParticleState ?? null;
+  }
   const postStepRefs = {};
   if (nextSphUpload?.stateBuffer) {
     postStepRefs.stateBufferRef = retainGpuBuffer(
@@ -4116,7 +4294,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       readbackMode: residentStep.readbackMode ?? null,
       particleCount: nextSphUpload?.particleCount
         ?? data?.sphParticleState?.particleCount
-        ?? null
+        ?? null,
+      nextParticleStateRetained: Boolean(lane.sphParticleState),
+      nextParticleStateStep: lane.sphParticleState?.step ?? null,
+      nextParticleStateCloneError
     },
     schroederSummary: {
       status: kernelResult.status ?? null,
@@ -4418,7 +4599,37 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scheduleStepOptionsProvider: ignoredProvider,
         ...stepZeroOptions
       } = baseEpochOptions;
-      if (stepOrdinal === 1) return stepZeroOptions;
+      if (stepOrdinal === 1) {
+        // W4b: a RETAINED lane starting a new schedule with no step-1 source
+        // at all — seed already consumed, no committed successor family, no
+        // payload-supplied levelAssignment/activeNodeList — consults the
+        // schedule provider exactly as steps 2+ do. Every existing step-1
+        // source keeps absolute precedence; this branch only replaces the
+        // 'level-assignment-source-missing' dead end on lane continuation.
+        const stepOneLane = record.schroederLane || null;
+        const stepOneLaneNeedsProvider = Boolean(
+          scheduleStepOptionsProvider
+          && stepOneLane
+          && !stepOneLane.successorSourceFamily
+          && !(stepOneLane.laneSeed && stepOneLane.laneSeed.consumed !== true)
+          && stepZeroOptions.levelAssignment == null
+          && stepZeroOptions.activeNodeList == null
+          && stepOneLane.sphParticleUpload?.stateBuffer
+        );
+        if (!stepOneLaneNeedsProvider) return stepZeroOptions;
+        const providerOverrides = await scheduleStepOptionsProvider({
+          scheduleId,
+          stepOrdinal,
+          previousEpochSeal
+        });
+        return {
+          ...stepZeroOptions,
+          useWorkerRetainedParticleBuffers: true,
+          ...(providerOverrides && typeof providerOverrides === 'object'
+            ? providerOverrides
+            : {})
+        };
+      }
       // Continuation steps rebuild from the lane's retained post-step
       // buffers (or the retained successor source family when the kernel
       // committed one). Step-0-only sources are stripped so a stale
@@ -4637,6 +4848,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         mechanicsStatus: mechanicsStageResult.value?.status ?? null,
         residentStepStatus:
           mechanicsStageResult.value?.residentStepSummary?.status ?? null,
+        nextParticleStateRetained:
+          mechanicsStageResult.value?.residentStepSummary
+            ?.nextParticleStateRetained ?? null,
+        nextParticleStateStep:
+          mechanicsStageResult.value?.residentStepSummary
+            ?.nextParticleStateStep ?? null,
+        nextParticleStateCloneError:
+          mechanicsStageResult.value?.residentStepSummary
+            ?.nextParticleStateCloneError ?? null,
         epochConsumed: mechanicsStageResult.value?.epochConsumed === true,
         epochReleaseScheduled:
           mechanicsStageResult.value?.epochReleaseScheduled === true,

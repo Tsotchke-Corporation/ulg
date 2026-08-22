@@ -56,6 +56,9 @@ import {
   webGpuDeviceId
 } from '../runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors
+} from '../runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
+import {
   prewarmCachedExplicitComputePipeline
 } from '../runtime/webgpuComputeLayout.js';
 
@@ -3335,28 +3338,43 @@ function releaseWorkerSchroederSuccessorLeaseQuietly(consumption, device) {
 // step-1-admissible level-assignment source. The worker NEVER invents
 // lineage: a missing or non-finite word is a fail-closed error, never a
 // default.
-// W4b lane-admission prewarm hook. prewarmCachedExplicitComputePipeline
+// W4b/W5 lane-admission prewarm hook. prewarmCachedExplicitComputePipeline
 // requires an exact per-pipeline descriptor ({ cacheKey, label, code,
-// entryPoint, bindings }); the SS kernel WGSL lives inline in the kernel
-// modules (schroederSpatialEpochGpu / schroederHierarchyGpu) and no module
-// currently exports a clean enumeration of those descriptors. Fabricating
-// one here would duplicate (and drift from) the kernels' own cache keys, so
-// the hook fires with an EMPTY enumeration and reports that truthfully.
-// TODO(W5): export a prewarmable-pipeline enumeration from the SS kernel
-// modules (cacheKey + label + code + entryPoint + bindings per pipeline) and
-// feed it through `enumeratePipelines` below so lane admission hides the
-// first-step pipeline compile latency.
-function prewarmWorkerSchroederLaneComputePipelines(device, {
-  enumeratePipelines = null
+// entryPoint, bindings }); as of W5 the mechanical-proposals kernel module
+// EXPORTS that enumeration (enumerateSchroederSpatialMechanicalPrewarm-
+// PipelineDescriptors) from the same descriptor factory its encode path
+// consumes, so the prewarmed cache keys can never drift from the keys the
+// first SS step asks for. The default enumeration covers both canonical
+// solver budgets (j16.p1024 batch, j16.p512 interactive), the aggregate and
+// flat projection variants, and directory ABI v1.
+//
+// Fire-and-forget and fail-open per the primitive's semantics: every
+// descriptor is fired without awaiting, compile failures resolve inside the
+// primitive (never reject the lane), and a throwing enumeration is reported
+// truthfully instead of blocking admission.
+export function prewarmWorkerSchroederLaneComputePipelines(device, {
+  enumeratePipelines =
+    enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors
 } = {}) {
-  const descriptors = typeof enumeratePipelines === 'function'
-    ? (enumeratePipelines() || [])
-    : [];
+  let descriptors;
+  try {
+    descriptors = typeof enumeratePipelines === 'function'
+      ? (enumeratePipelines() || [])
+      : [];
+  } catch (error) {
+    return {
+      schema: 'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0',
+      status: 'worker-lane-pipeline-prewarm-skipped-enumeration-failed',
+      reason: error instanceof Error ? error.message : String(error),
+      requestedCount: 0,
+      firedCount: 0
+    };
+  }
   if (!Array.isArray(descriptors) || descriptors.length === 0) {
     return {
       schema: 'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0',
       status: 'worker-lane-pipeline-prewarm-skipped-no-enumeration',
-      reason: 'no clean enumeration of SS compute pipelines is exported yet; see TODO(W5)',
+      reason: 'the pipeline enumeration produced no descriptors',
       requestedCount: 0,
       firedCount: 0
     };
@@ -3373,7 +3391,7 @@ function prewarmWorkerSchroederLaneComputePipelines(device, {
   }
   return {
     schema: 'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0',
-    status: 'worker-lane-pipeline-prewarm-fired',
+    status: 'worker-lane-pipeline-prewarm-completed',
     reason: null,
     requestedCount: descriptors.length,
     firedCount
@@ -3674,8 +3692,8 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     'laneSeed.levelAssignment.assignmentBuffer',
     execution.assignmentBuffer
   );
-  // W4b: lane admission fires the pipeline prewarm hook (fire-and-forget;
-  // currently reports skipped-no-enumeration — see the hook's TODO).
+  // W4b/W5: lane admission fires the pipeline prewarm hook (fire-and-forget;
+  // reports a truthful summary of the SS descriptors it fired).
   const pipelinePrewarm = prewarmWorkerSchroederLaneComputePipelines(device);
   return {
     schema: ULG_WORKER_SCHROEDER_LANE_SEED_STAGE_SCHEMA,

@@ -18854,10 +18854,16 @@ export function createSphPhaseScene(container, {
     );
   }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
-  // Timestamp of the previous render-field build: the interval between
-  // builds is the physical smear window for the splash-shard dispersion
-  // correction (mass disperses for sigma_v * dt between visual refreshes).
-  let sphResidentLastRenderFieldBuildMs = 0;
+  // Simulated time of the state the last visible render field was built from.
+  // The splash-shard smear interval is measured against THIS clock, never the
+  // wall clock: the field must represent the simulation, and between two
+  // builds the simulation only moved by its own dt. Wall time asserted motion
+  // that never happened -- measured on iron-ice: a stepped schedule advances
+  // sim t by ~15 ms while the wall waits seconds, so every post-first build
+  // smeared the molten iron by the 250 ms clamp times its internal velocity
+  // dispersion (~19x the whole metaball support at 0.05 m/s) and the block
+  // collapsed to a nub with physics calm. null = no field built yet.
+  let sphResidentLastRenderFieldSimTimeS = null;
   const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
   const sphNativeMarchingCubesAdapterCaches = new Set();
   let pressureInterfaceForceRowsUpload = null;
@@ -46702,13 +46708,28 @@ fn main(
             destroyResidentRenderFieldRowsBufferPool('render-field-rows-buffer-pool-route-disabled');
           }
           const buildRenderFieldForRows = () => {
-            // Measured interval since the previous field build, clamped to a
-            // quarter second so a paused tab does not smear everything away.
-            const nowBuildMs = nowMs();
-            const renderSmearDtS = sphResidentLastRenderFieldBuildMs > 0
-              ? Math.min(Math.max((nowBuildMs - sphResidentLastRenderFieldBuildMs) / 1000, 0), 0.25)
+            // Splash-shard smear interval: the SIMULATED time advanced since
+            // the previous field build, clamped to a quarter second so a
+            // large seek cannot smear everything away. The wall clock is the
+            // wrong basis -- a paused or stepped simulation has not moved, so
+            // its field must not smear (W5 first-schedule truthfulness fix;
+            // see sphResidentLastRenderFieldSimTimeS). An unknown sim time
+            // contributes zero smear rather than a fabricated interval.
+            const nowBuildSimTimeS = finiteNumberOrNull(
+              nextSphParticleState?.time ?? nextMlsMpmParticleState?.time
+            );
+            const renderSmearDtS = (
+              nowBuildSimTimeS != null
+              && sphResidentLastRenderFieldSimTimeS != null
+            )
+              ? Math.min(
+                Math.max(nowBuildSimTimeS - sphResidentLastRenderFieldSimTimeS, 0),
+                0.25
+              )
               : 0;
-            sphResidentLastRenderFieldBuildMs = nowBuildMs;
+            if (nowBuildSimTimeS != null) {
+              sphResidentLastRenderFieldSimTimeS = nowBuildSimTimeS;
+            }
             const successorFieldLineageEligible = Boolean(
               schroederSpatialSourceFamily
               && !productEventBuffer

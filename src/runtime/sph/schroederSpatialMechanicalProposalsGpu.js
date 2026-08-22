@@ -17720,6 +17720,587 @@ export const schroederSpatialMechanicalInterfaceReceiptWgsl =
 export const schroederSpatialMechanicalProposalApplyWgsl =
   schroederSpatialMechanicalBatchSolverBudgetWgsl.apply;
 
+// --- W5: exported pipeline-descriptor factory -------------------------------
+//
+// Single source of truth for every compute-pipeline descriptor the canonical
+// mechanical proposal encodes. The runtime encode path below consumes THIS
+// factory, and the admission-time prewarm enumeration
+// (enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors) re-exports
+// the same descriptors, so a prewarmed cache key can never drift from the key
+// the encode later asks for.
+//
+// Every descriptor is a complete createCachedExplicitComputePipeline argument
+// ({ cacheKey, label, code, entryPoint, bindings }). Descriptors whose code is
+// budget-compiled (solver / interface-receipt / apply WGSL) carry the sealed
+// solver-budget key (j{n}.p{n}) as a cacheKey suffix, exactly as the encode
+// always keyed them.
+
+export const SCHROEDER_SPATIAL_MECHANICAL_PROJECTION_VARIANTS =
+  Object.freeze(['aggregate', 'active-rank', 'flat']);
+
+function mechanicalBuildWgslForVariant(
+  mechanicalProjectionVariant,
+  directoryAbiVersion
+) {
+  if (mechanicalProjectionVariant === 'aggregate') {
+    return directoryAbiVersion === 2
+      ? schroederSpatialMechanicalProposalV2Wgsl
+      : schroederSpatialMechanicalProposalWgsl;
+  }
+  if (mechanicalProjectionVariant === 'active-rank') {
+    return directoryAbiVersion === 2
+      ? schroederSpatialMechanicalProposalV2ActiveRankWgsl
+      : schroederSpatialMechanicalProposalActiveRankWgsl;
+  }
+  return directoryAbiVersion === 2
+    ? schroederSpatialMechanicalProposalV2FlatWgsl
+    : schroederSpatialMechanicalProposalFlatWgsl;
+}
+
+export function schroederSpatialMechanicalPipelineDescriptors({
+  solverBudget,
+  mechanicalProjectionVariant = 'aggregate',
+  directoryAbiVersion = 1,
+  diagnosticTrace = false
+} = {}) {
+  if (typeof solverBudget?.cacheKey !== 'string' || !solverBudget.cacheKey) {
+    throw new TypeError(
+      'mechanical pipeline descriptors require a resolved solver budget'
+    );
+  }
+  if (
+    !SCHROEDER_SPATIAL_MECHANICAL_PROJECTION_VARIANTS
+      .includes(mechanicalProjectionVariant)
+  ) {
+    throw new RangeError(
+      `mechanical pipeline descriptors do not support projection variant ${
+        String(mechanicalProjectionVariant)
+      }`
+    );
+  }
+  if (directoryAbiVersion !== 1 && directoryAbiVersion !== 2) {
+    throw new RangeError(
+      `canonical mechanical proposal does not support directory ABI v${directoryAbiVersion}`
+    );
+  }
+  const solverBudgetWgsl = schroederSpatialMechanicalSolverBudgetWgsl(
+    solverBudget
+  );
+  const budgetKey = (cacheKey) => `${cacheKey}.${solverBudget.cacheKey}`;
+  const mechanicalBuildWgsl = mechanicalBuildWgslForVariant(
+    mechanicalProjectionVariant,
+    directoryAbiVersion
+  );
+  const buildBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'uniform'),
+    computeBufferBinding(13, 'read-only-storage')
+  ];
+  const controlBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'storage')
+  ];
+  const solverBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage')
+  ];
+  const solverIterationBindings = [
+    ...solverBindings,
+    computeBufferBinding(16, 'uniform', {
+      minBindingSize: MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
+    })
+  ];
+  const residualVerifyBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage')
+  ];
+  const matchingConstraintInitializerBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(14, 'storage')
+  ];
+  const matchingCleanupBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(14, 'storage')
+  ];
+  const diagnosticRefinementReplayBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticApplyTraceBindings = [
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticTerminalTraceBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const diagnosticMaterializeTraceBindings = [
+    computeBufferBinding(0, 'storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(13, 'storage'),
+    computeBufferBinding(15, 'storage')
+  ];
+  const interfaceReceiptBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'read-only-storage')
+  ];
+  const applyBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'uniform'),
+    computeBufferBinding(7, 'storage')
+  ];
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pipeline-descriptors.v1',
+    solverBudgetCacheKey: solverBudget.cacheKey,
+    mechanicalProjectionVariant,
+    directoryAbiVersion,
+    diagnosticTrace: Boolean(diagnosticTrace),
+    initialize: {
+      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v11',
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize',
+      code: schroederSpatialMechanicalGraphControlWgsl,
+      entryPoint: 'initialize_contact_graph',
+      bindings: controlBindings
+    },
+    reduction: {
+      cacheKey:
+        `ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.${
+          mechanicalProjectionVariant
+        }.directory-v${directoryAbiVersion}.v12`,
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction',
+      code: mechanicalBuildWgsl,
+      entryPoint: 'reduce_support',
+      bindings: buildBindings
+    },
+    materialize: {
+      cacheKey: `ulg-schroeder-spatial-mechanical-contact-graph-traversal.${
+        mechanicalProjectionVariant
+      }.directory-v${directoryAbiVersion}.v16`,
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-traversal',
+      code: mechanicalBuildWgsl,
+      entryPoint: 'materialize_contact_graph',
+      bindings: buildBindings
+    },
+    finalizeCounts: {
+      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v11',
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts',
+      code: schroederSpatialMechanicalGraphControlWgsl,
+      entryPoint: 'finalize_contact_graph_counts',
+      bindings: controlBindings
+    },
+    scatter: {
+      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v11',
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr',
+      code: schroederSpatialMechanicalGraphControlWgsl,
+      entryPoint: 'scatter_contact_graph_csr',
+      bindings: controlBindings
+    },
+    validate: {
+      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v12',
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr',
+      code: schroederSpatialMechanicalGraphControlWgsl,
+      entryPoint: 'validate_contact_graph_csr',
+      bindings: controlBindings
+    },
+    index: {
+      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v7',
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr',
+      code: schroederSpatialMechanicalGraphControlWgsl,
+      entryPoint: 'index_contact_graph_csr',
+      bindings: controlBindings
+    },
+    solverMeasure: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v2'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'measure_runtime_iteration',
+      bindings: solverIterationBindings
+    },
+    solverSolve: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v2'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'solve_runtime_iteration',
+      bindings: solverIterationBindings
+    },
+    solverAllocateEnergy: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v2'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'allocate_energy_runtime_iteration',
+      bindings: solverIterationBindings
+    },
+    initializeMatchingConstraints: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-matching-constraints-initialize.v22'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'initialize_matching_cleanup_constraints',
+      bindings: matchingConstraintInitializerBindings
+    },
+    matchingCleanup: diagnosticTrace
+      ? {
+        select: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-matching-cleanup-select.v27'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-select',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'select_matching_cleanup_edge',
+          bindings: matchingCleanupBindings
+        },
+        copy: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-matching-cleanup-copy.v24'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-copy',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'copy_matching_cleanup_state',
+          bindings: matchingCleanupBindings
+        },
+        apply: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-matching-cleanup-apply.v29'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-apply',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'apply_matching_cleanup_edge',
+          bindings: matchingCleanupBindings
+        },
+        walls: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-matching-cleanup-walls.v25'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-walls',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'project_matching_cleanup_walls',
+          bindings: matchingCleanupBindings
+        },
+        finalize: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize.v24'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'finalize_matching_cleanup_pass',
+          bindings: matchingCleanupBindings
+        }
+      }
+      : null,
+    matchingCleanupOwner: diagnosticTrace
+      ? null
+      : {
+        cacheKey: budgetKey(
+          'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner.v12'
+        ),
+        label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
+        code: solverBudgetWgsl.solver,
+        entryPoint: 'run_matching_cleanup_global_owner',
+        bindings: matchingCleanupBindings
+      },
+    restoreMatchingTrust: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust.v24'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'restore_matching_cleanup_trust',
+      bindings: matchingCleanupBindings
+    },
+    verify: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-residual-verify.v35'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-residual-verify',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'verify_contact_residual',
+      bindings: residualVerifyBindings
+    },
+    diagnosticTracePipelines: diagnosticTrace
+      ? {
+        replay: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay.v6'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'replay_matching_cleanup_refinement_trace',
+          bindings: diagnosticRefinementReplayBindings
+        },
+        apply: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply.v7'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'trace_matching_cleanup_apply',
+          bindings: diagnosticApplyTraceBindings
+        },
+        measure: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure.v3'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'measure_terminal_residual_trace',
+          bindings: diagnosticTerminalTraceBindings
+        },
+        select: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-select.v3'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-diagnostic-trace-select',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'select_terminal_residual_trace',
+          bindings: diagnosticTerminalTraceBindings
+        },
+        materialize: {
+          cacheKey: budgetKey(
+            'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize.v4'
+          ),
+          label: 'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize',
+          code: solverBudgetWgsl.solver,
+          entryPoint: 'materialize_terminal_residual_trace',
+          bindings: diagnosticMaterializeTraceBindings
+        }
+      }
+      : null,
+    verifyEnergy: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-energy-verify.v27'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-energy-verify',
+      code: solverBudgetWgsl.solver,
+      entryPoint: 'verify_contact_energy',
+      bindings: solverBindings
+    },
+    initializeInterfaceReceipt: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v5'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
+      code: solverBudgetWgsl.interfaceReceipt,
+      entryPoint: 'initialize_contact_interface_receipt',
+      bindings: interfaceReceiptBindings
+    },
+    materializeInterfaceReceipt: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v5'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
+      code: solverBudgetWgsl.interfaceReceipt,
+      entryPoint: 'materialize_contact_interface_receipt',
+      bindings: interfaceReceiptBindings
+    },
+    sealInterfaceReceipt: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v5'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal',
+      code: solverBudgetWgsl.interfaceReceipt,
+      entryPoint: 'seal_contact_interface_receipt',
+      bindings: interfaceReceiptBindings
+    },
+    publish: {
+      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-publish.v11'),
+      label: 'ulg-schroeder-spatial-mechanical-proposal-publish',
+      code: solverBudgetWgsl.apply,
+      entryPoint: 'publish_contact_proposal',
+      bindings: applyBindings
+    },
+    zeroContactComplete: {
+      cacheKey: budgetKey(
+        'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v8'
+      ),
+      label: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete',
+      code: solverBudgetWgsl.apply,
+      entryPoint: 'complete_zero_contact_proposal',
+      bindings: applyBindings
+    },
+    seal: {
+      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-seal.v11'),
+      label: 'ulg-schroeder-spatial-mechanical-proposal-seal',
+      code: solverBudgetWgsl.apply,
+      entryPoint: 'seal_contact_proposal',
+      bindings: applyBindings
+    },
+    commit: {
+      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-commit.v11'),
+      label: 'ulg-schroeder-spatial-mechanical-proposal-commit',
+      code: solverBudgetWgsl.apply,
+      entryPoint: 'commit_contact_proposal',
+      bindings: applyBindings
+    }
+  });
+}
+
+// W5 admission-time prewarm enumeration (consumed by the mechanics resident
+// stage worker's lane-admission hook). Flattens the descriptor factory across
+// the canonical solver budgets and the live projection/ABI variants into a
+// deduplicated list of exact prewarmCachedExplicitComputePipeline arguments.
+//
+// Defaults are deliberately the LANE-HOT configuration: both canonical solver
+// budgets (batch j16.p1024 and interactive j16.p512 -- the only budgets any
+// production caller selects), the aggregate and flat projection variants (a
+// lane runs 'aggregate' when its epoch commits an aggregate view and 'flat'
+// otherwise; 'active-rank' stays opt-in), directory ABI v1 (the only version
+// the epoch stage admits today), and no diagnostic-trace variants.
+export function enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors({
+  solverBudgets = [
+    SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET,
+    SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_SOLVER_BUDGET
+  ],
+  mechanicalProjectionVariants = ['aggregate', 'flat'],
+  directoryAbiVersions = [1],
+  diagnosticTrace = false
+} = {}) {
+  const descriptorsByCacheKey = new Map();
+  const collect = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.cacheKey === 'string' && typeof value.entryPoint === 'string') {
+      if (!descriptorsByCacheKey.has(value.cacheKey)) {
+        descriptorsByCacheKey.set(value.cacheKey, value);
+      }
+      return;
+    }
+    for (const nested of Object.values(value)) {
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        collect(nested);
+      }
+    }
+  };
+  for (const solverBudget of solverBudgets) {
+    for (const mechanicalProjectionVariant of mechanicalProjectionVariants) {
+      for (const directoryAbiVersion of directoryAbiVersions) {
+        const table = schroederSpatialMechanicalPipelineDescriptors({
+          solverBudget,
+          mechanicalProjectionVariant,
+          directoryAbiVersion,
+          diagnosticTrace
+        });
+        for (const [field, value] of Object.entries(table)) {
+          if (
+            field === 'schema'
+            || field === 'solverBudgetCacheKey'
+            || field === 'mechanicalProjectionVariant'
+            || field === 'directoryAbiVersion'
+            || field === 'diagnosticTrace'
+          ) continue;
+          collect(value);
+        }
+      }
+    }
+  }
+  return [...descriptorsByCacheKey.values()];
+}
+
 function createBuffer(device, label, size, usage) {
   return tagWebGpuBufferDevice(device.createBuffer({
     label,
@@ -18533,191 +19114,6 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     createMechanicalProposalHeader(authority.execution, particleCount)
   );
 
-  const buildBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'read-only-storage'),
-    computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'uniform'),
-    computeBufferBinding(13, 'read-only-storage')
-  ];
-  const controlBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'storage'),
-    computeBufferBinding(3, 'storage'),
-    computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'uniform'),
-    computeBufferBinding(9, 'storage')
-  ];
-  const solverBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'storage')
-  ];
-  const solverIterationBindings = [
-    ...solverBindings,
-    computeBufferBinding(16, 'uniform', {
-      minBindingSize: MECHANICAL_SOLVER_ITERATION_PARAMS_BYTES
-    })
-  ];
-  const residualVerifyBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(13, 'storage')
-  ];
-  const matchingConstraintInitializerBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(13, 'storage'),
-    computeBufferBinding(14, 'storage')
-  ];
-  const matchingCleanupBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(13, 'storage'),
-    computeBufferBinding(14, 'storage')
-  ];
-  const diagnosticRefinementReplayBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(13, 'storage'),
-    computeBufferBinding(15, 'storage')
-  ];
-  const diagnosticApplyTraceBindings = [
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'storage'),
-    computeBufferBinding(15, 'storage')
-  ];
-  const diagnosticTerminalTraceBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(13, 'storage'),
-    computeBufferBinding(15, 'storage')
-  ];
-  const diagnosticMaterializeTraceBindings = [
-    computeBufferBinding(0, 'storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(9, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(13, 'storage'),
-    computeBufferBinding(15, 'storage')
-  ];
-  const interfaceReceiptBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'read-only-storage'),
-    computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'uniform'),
-    computeBufferBinding(9, 'read-only-storage')
-  ];
-  const applyBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(2, 'storage'),
-    computeBufferBinding(3, 'storage'),
-    computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'uniform'),
-    computeBufferBinding(7, 'storage')
-  ];
-  // Budget-compiled shader variants: the declared solver budget is
-  // interpolated into the solver/receipt/apply WGSL, so pipelines built from
-  // those sources are cached per (jacobiIterations, cleanupPassBudget) by
-  // suffixing their cache keys with the sealed budget key.
-  const solverBudgetWgsl = schroederSpatialMechanicalSolverBudgetWgsl(
-    solverBudget
-  );
-  const createPipeline = ({ cacheKey, label, code, entryPoint, bindings }) => (
-    createCachedExplicitComputePipeline(device, {
-      cacheKey: code === solverBudgetWgsl.solver
-        || code === solverBudgetWgsl.interfaceReceipt
-        || code === solverBudgetWgsl.apply
-        ? `${cacheKey}.${solverBudget.cacheKey}`
-        : cacheKey,
-      label,
-      code,
-      entryPoint,
-      bindings
-    })
-  );
-  const initializePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v11',
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize',
-    code: schroederSpatialMechanicalGraphControlWgsl,
-    entryPoint: 'initialize_contact_graph',
-    bindings: controlBindings
-  });
   const mechanicalProjectionVariant = aggregateHierarchyEnabled
     ? 'aggregate'
     : (activeRankViewEnabled ? 'active-rank' : 'flat');
@@ -18728,288 +19124,89 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     'execution.directoryAbiVersion',
     { positive: true }
   );
-  if (directoryAbiVersion !== 1 && directoryAbiVersion !== 2) {
-    throw new RangeError(
-      `canonical mechanical proposal does not support directory ABI v${directoryAbiVersion}`
-    );
-  }
-  const mechanicalBuildWgsl = aggregateHierarchyEnabled
-    ? (directoryAbiVersion === 2
-      ? schroederSpatialMechanicalProposalV2Wgsl
-      : schroederSpatialMechanicalProposalWgsl)
-    : (activeRankViewEnabled
-      ? (directoryAbiVersion === 2
-        ? schroederSpatialMechanicalProposalV2ActiveRankWgsl
-        : schroederSpatialMechanicalProposalActiveRankWgsl)
-      : (directoryAbiVersion === 2
-        ? schroederSpatialMechanicalProposalV2FlatWgsl
-        : schroederSpatialMechanicalProposalFlatWgsl));
-  const reductionPipeline = createPipeline({
-    cacheKey:
-      `ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.${
-        mechanicalProjectionVariant
-      }.directory-v${directoryAbiVersion}.v12`,
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction',
-    code: mechanicalBuildWgsl,
-    entryPoint: 'reduce_support',
-    bindings: buildBindings
+  // W5: every pipeline descriptor (cache key, WGSL, entry point, bindings)
+  // comes from the exported factory the admission-time prewarm enumeration
+  // also consumes, so a prewarmed cache key can never drift from the key
+  // this encode asks for. Budget-compiled shader variants keep their sealed
+  // (jacobiIterations, cleanupPassBudget) cacheKey suffix inside the
+  // factory; the factory also owns the directory-ABI validation.
+  const pipelineDescriptors = schroederSpatialMechanicalPipelineDescriptors({
+    solverBudget,
+    mechanicalProjectionVariant,
+    directoryAbiVersion,
+    diagnosticTrace: Boolean(resolvedDiagnosticTrace)
   });
-  const materializePipeline = createPipeline({
-    cacheKey: `ulg-schroeder-spatial-mechanical-contact-graph-traversal.${
-      mechanicalProjectionVariant
-    }.directory-v${directoryAbiVersion}.v16`,
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-traversal',
-    code: mechanicalBuildWgsl,
-    entryPoint: 'materialize_contact_graph',
-    bindings: buildBindings
-  });
-  const finalizeCountsPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v11',
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts',
-    code: schroederSpatialMechanicalGraphControlWgsl,
-    entryPoint: 'finalize_contact_graph_counts',
-    bindings: controlBindings
-  });
-  const scatterPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v11',
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr',
-    code: schroederSpatialMechanicalGraphControlWgsl,
-    entryPoint: 'scatter_contact_graph_csr',
-    bindings: controlBindings
-  });
-  const validatePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v12',
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr',
-    code: schroederSpatialMechanicalGraphControlWgsl,
-    entryPoint: 'validate_contact_graph_csr',
-    bindings: controlBindings
-  });
-  const indexPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v7',
-    label: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr',
-    code: schroederSpatialMechanicalGraphControlWgsl,
-    entryPoint: 'index_contact_graph_csr',
-    bindings: controlBindings
-  });
+  const createPipeline = (descriptor) => (
+    createCachedExplicitComputePipeline(device, descriptor)
+  );
+  const initializePipeline = createPipeline(pipelineDescriptors.initialize);
+  const reductionPipeline = createPipeline(pipelineDescriptors.reduction);
+  const materializePipeline = createPipeline(pipelineDescriptors.materialize);
+  const finalizeCountsPipeline = createPipeline(
+    pipelineDescriptors.finalizeCounts
+  );
+  const scatterPipeline = createPipeline(pipelineDescriptors.scatter);
+  const validatePipeline = createPipeline(pipelineDescriptors.validate);
+  const indexPipeline = createPipeline(pipelineDescriptors.index);
   const solverPipelines = Object.freeze({
-    measure: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v2',
-      label:
-        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'measure_runtime_iteration',
-      bindings: solverIterationBindings
-    }),
-    solve: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v2',
-      label:
-        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'solve_runtime_iteration',
-      bindings: solverIterationBindings
-    }),
-    allocateEnergy: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v2',
-      label:
-        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'allocate_energy_runtime_iteration',
-      bindings: solverIterationBindings
-    })
+    measure: createPipeline(pipelineDescriptors.solverMeasure),
+    solve: createPipeline(pipelineDescriptors.solverSolve),
+    allocateEnergy: createPipeline(pipelineDescriptors.solverAllocateEnergy)
   });
-  const initializeMatchingConstraintsPipeline = createPipeline({
-    cacheKey:
-      'ulg-schroeder-spatial-mechanical-matching-constraints-initialize.v22',
-    label:
-      'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
-    code: solverBudgetWgsl.solver,
-    entryPoint: 'initialize_matching_cleanup_constraints',
-    bindings: matchingConstraintInitializerBindings
-  });
+  const initializeMatchingConstraintsPipeline = createPipeline(
+    pipelineDescriptors.initializeMatchingConstraints
+  );
   const matchingCleanupPipelines = resolvedDiagnosticTrace
     ? Object.freeze({
-    select: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-matching-cleanup-select.v27',
-      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-select',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'select_matching_cleanup_edge',
-      bindings: matchingCleanupBindings
-    }),
-    copy: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-matching-cleanup-copy.v24',
-      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-copy',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'copy_matching_cleanup_state',
-      bindings: matchingCleanupBindings
-    }),
-    apply: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-matching-cleanup-apply.v29',
-      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-apply',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'apply_matching_cleanup_edge',
-      bindings: matchingCleanupBindings
-    }),
-    walls: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-matching-cleanup-walls.v25',
-      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-walls',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'project_matching_cleanup_walls',
-      bindings: matchingCleanupBindings
-    }),
-    finalize: createPipeline({
-      cacheKey:
-        'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize.v24',
-      label: 'ulg-schroeder-spatial-mechanical-matching-cleanup-finalize',
-      code: solverBudgetWgsl.solver,
-      entryPoint: 'finalize_matching_cleanup_pass',
-      bindings: matchingCleanupBindings
+      select: createPipeline(pipelineDescriptors.matchingCleanup.select),
+      copy: createPipeline(pipelineDescriptors.matchingCleanup.copy),
+      apply: createPipeline(pipelineDescriptors.matchingCleanup.apply),
+      walls: createPipeline(pipelineDescriptors.matchingCleanup.walls),
+      finalize: createPipeline(pipelineDescriptors.matchingCleanup.finalize)
     })
-  })
     : null;
   const matchingCleanupOwnerPipeline = resolvedDiagnosticTrace
-      ? null
-      : createPipeline({
-        cacheKey:
-          'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner.v12',
-        label:
-          'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
-        code: solverBudgetWgsl.solver,
-        entryPoint: 'run_matching_cleanup_global_owner',
-        bindings: matchingCleanupBindings
-      });
-  const restoreMatchingTrustPipeline = createPipeline({
-    cacheKey:
-      'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust.v24',
-    label:
-      'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust',
-    code: solverBudgetWgsl.solver,
-    entryPoint: 'restore_matching_cleanup_trust',
-    bindings: matchingCleanupBindings
-  });
-  const verifyPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-residual-verify.v35',
-    label: 'ulg-schroeder-spatial-mechanical-contact-residual-verify',
-    code: solverBudgetWgsl.solver,
-    entryPoint: 'verify_contact_residual',
-    bindings: residualVerifyBindings
-  });
+    ? null
+    : createPipeline(pipelineDescriptors.matchingCleanupOwner);
+  const restoreMatchingTrustPipeline = createPipeline(
+    pipelineDescriptors.restoreMatchingTrust
+  );
+  const verifyPipeline = createPipeline(pipelineDescriptors.verify);
   const diagnosticTracePipelines = resolvedDiagnosticTrace
     ? Object.freeze({
-        replay: createPipeline({
-          cacheKey:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay.v6',
-          label:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-refinement-replay',
-          code: solverBudgetWgsl.solver,
-          entryPoint: 'replay_matching_cleanup_refinement_trace',
-          bindings: diagnosticRefinementReplayBindings
-        }),
-        apply: createPipeline({
-          cacheKey:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply.v7',
-          label:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-apply',
-          code: solverBudgetWgsl.solver,
-          entryPoint: 'trace_matching_cleanup_apply',
-          bindings: diagnosticApplyTraceBindings
-        }),
-        measure: createPipeline({
-          cacheKey:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure.v3',
-          label:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-measure',
-          code: solverBudgetWgsl.solver,
-          entryPoint: 'measure_terminal_residual_trace',
-          bindings: diagnosticTerminalTraceBindings
-        }),
-        select: createPipeline({
-          cacheKey:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-select.v3',
-          label:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-select',
-          code: solverBudgetWgsl.solver,
-          entryPoint: 'select_terminal_residual_trace',
-          bindings: diagnosticTerminalTraceBindings
-        }),
-        materialize: createPipeline({
-          cacheKey:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize.v4',
-          label:
-            'ulg-schroeder-spatial-mechanical-diagnostic-trace-materialize',
-          code: solverBudgetWgsl.solver,
-          entryPoint: 'materialize_terminal_residual_trace',
-          bindings: diagnosticMaterializeTraceBindings
-        })
-      })
+      replay: createPipeline(
+        pipelineDescriptors.diagnosticTracePipelines.replay
+      ),
+      apply: createPipeline(
+        pipelineDescriptors.diagnosticTracePipelines.apply
+      ),
+      measure: createPipeline(
+        pipelineDescriptors.diagnosticTracePipelines.measure
+      ),
+      select: createPipeline(
+        pipelineDescriptors.diagnosticTracePipelines.select
+      ),
+      materialize: createPipeline(
+        pipelineDescriptors.diagnosticTracePipelines.materialize
+      )
+    })
     : null;
-  const verifyEnergyPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-contact-energy-verify.v27',
-    label: 'ulg-schroeder-spatial-mechanical-contact-energy-verify',
-    code: solverBudgetWgsl.solver,
-    entryPoint: 'verify_contact_energy',
-    bindings: solverBindings
-  });
-  const initializeInterfaceReceiptPipeline = createPipeline({
-    cacheKey:
-      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v5',
-    label:
-      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
-    code: solverBudgetWgsl.interfaceReceipt,
-    entryPoint: 'initialize_contact_interface_receipt',
-    bindings: interfaceReceiptBindings
-  });
-  const materializeInterfaceReceiptPipeline = createPipeline({
-    cacheKey:
-      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v5',
-    label:
-      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
-    code: solverBudgetWgsl.interfaceReceipt,
-    entryPoint: 'materialize_contact_interface_receipt',
-    bindings: interfaceReceiptBindings
-  });
-  const sealInterfaceReceiptPipeline = createPipeline({
-    cacheKey:
-      'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v5',
-    label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal',
-    code: solverBudgetWgsl.interfaceReceipt,
-    entryPoint: 'seal_contact_interface_receipt',
-    bindings: interfaceReceiptBindings
-  });
-  const publishPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-publish.v11',
-    label: 'ulg-schroeder-spatial-mechanical-proposal-publish',
-    code: solverBudgetWgsl.apply,
-    entryPoint: 'publish_contact_proposal',
-    bindings: applyBindings
-  });
-  const zeroContactCompletePipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v8',
-    label: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete',
-    code: solverBudgetWgsl.apply,
-    entryPoint: 'complete_zero_contact_proposal',
-    bindings: applyBindings
-  });
-  const sealPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-seal.v11',
-    label: 'ulg-schroeder-spatial-mechanical-proposal-seal',
-    code: solverBudgetWgsl.apply,
-    entryPoint: 'seal_contact_proposal',
-    bindings: applyBindings
-  });
-  const commitPipeline = createPipeline({
-    cacheKey: 'ulg-schroeder-spatial-mechanical-proposal-commit.v11',
-    label: 'ulg-schroeder-spatial-mechanical-proposal-commit',
-    code: solverBudgetWgsl.apply,
-    entryPoint: 'commit_contact_proposal',
-    bindings: applyBindings
-  });
+  const verifyEnergyPipeline = createPipeline(pipelineDescriptors.verifyEnergy);
+  const initializeInterfaceReceiptPipeline = createPipeline(
+    pipelineDescriptors.initializeInterfaceReceipt
+  );
+  const materializeInterfaceReceiptPipeline = createPipeline(
+    pipelineDescriptors.materializeInterfaceReceipt
+  );
+  const sealInterfaceReceiptPipeline = createPipeline(
+    pipelineDescriptors.sealInterfaceReceipt
+  );
+  const publishPipeline = createPipeline(pipelineDescriptors.publish);
+  const zeroContactCompletePipeline = createPipeline(
+    pipelineDescriptors.zeroContactComplete
+  );
+  const sealPipeline = createPipeline(pipelineDescriptors.seal);
+  const commitPipeline = createPipeline(pipelineDescriptors.commit);
   const workgroups = Math.max(1, Math.ceil(particleCount / WORKGROUP_SIZE));
   const buildEntries = (
     stateBuffer,

@@ -32,6 +32,21 @@ import {
 import {
   isExactSphPressureInterfaceCompletionReceipt
 } from '../runtime/sph/sphPressureInterfaceGpuKernel.js';
+import {
+  releaseSchroederSpatialEpochGenerationAfterQueue,
+  runSchroederSpatialEpochGenerationWebGpu
+} from '../runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  runSchroederSameLevelMechanicsWebGpu
+} from '../runtime/sph/schroederHierarchyGpu.js';
+import {
+  acquireSchroederSpatialSuccessorSourceFamilyLease,
+  releaseSchroederSpatialSuccessorSourceFamilyLease,
+  releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter,
+  resolveSchroederSpatialSuccessorSourceFamily,
+  retireSchroederSpatialSuccessorSourceFamilyAfterLeases
+} from '../runtime/sph/schroederSpatialSuccessorSourceFamily.js';
+import { webGpuDeviceId } from '../runtime/sph/sphGpuDeviceIdentity.js';
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
@@ -46,6 +61,16 @@ const ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA = 'peercompute.ulg.sph-phase-carrier-
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GAS_CELL_EOS_FINALIZER_STAGE_ID = 'gasCellEosFinalizer';
+const SCHROEDER_SPATIAL_EPOCH_STAGE_ID = 'schroederSpatialEpoch';
+const SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID = 'schroederSameLevelMechanics';
+export const ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA =
+  'peercompute.ulg.worker-schroeder-spatial-epoch-stage.v0';
+export const ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA =
+  'peercompute.ulg.worker-schroeder-same-level-mechanics-stage.v0';
+export const ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA =
+  'peercompute.ulg.worker-schroeder-spatial-epoch-seal.v0';
+export const ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON =
+  'w1-single-level-only';
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -130,7 +155,12 @@ const STAGE_RUNNERS = {
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
   g2p: runMlsMpmMechanicsG2pStageComputeTask,
   thermalPhase: runSphThermalPhaseStageComputeTask,
-  reactionProduct: runSphReactionProductStageComputeTask
+  reactionProduct: runSphReactionProductStageComputeTask,
+  // Schroeder Simulation (SS) worker-lane stages (refactor increment W1).
+  // Function declarations hoist; the runners live near the other SS helpers.
+  [SCHROEDER_SPATIAL_EPOCH_STAGE_ID]: runWorkerSchroederSpatialEpochStage,
+  [SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID]:
+    runWorkerSchroederSameLevelMechanicsStage
 };
 
 const retainedLanes = new Map();
@@ -351,6 +381,7 @@ function getLaneRecord(payload = {}) {
       phaseCarrierPlan: null,
       compactSnapshotExportSources: null,
       pressureInterfaceGridForceHandoff: null,
+      schroederLane: null,
       workerDevice: null,
       nextBufferOrdinal: 1
     };
@@ -2971,6 +3002,746 @@ function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDev
   };
 }
 
+// --- Schroeder Simulation (SS) worker-lane stages (refactor increment W1) ---
+//
+// One message still runs one stage (scheduling loops arrive in increment W2).
+// A schroederSpatialEpoch stage consumes a level-assignment source (the
+// committed successor source family retained from the previous same-level
+// step, or a payload-supplied level-assignment / active-node execution) and
+// builds the spatial epoch generation on the worker's device with the REAL
+// generation builder. The generation and every GPU buffer it references stay
+// retained on the worker lane record; only seals, cloneable summaries, and
+// worker-retained buffer refs cross the message boundary. A
+// schroederSameLevelMechanics stage then consumes that retained generation
+// for exactly one same-level mechanics step, handles successor-source-family
+// consumption/retirement the way runSchroederSceneResidentSteps does, and
+// retains the post-step particle buffers (plus any newly committed successor
+// source family) for the next schroederSpatialEpoch. The two stages
+// alternating in one lane are one SS step chain.
+//
+// W1 is physics-only. Deliberately left on the scene path: render-proxy
+// publication (portable summary, render LOD, local retained render buffers),
+// phase-volume assignment-overlay feedback caching, the pre-integration
+// owner-scope pressure diagnostic, product-placement accumulation, host
+// timing/progress marks, and prior-execution cleanup claim records.
+//
+// TODO(native-arm): real-GPU coverage for these two stages belongs to the
+// native WebGPU test arm (see tests/*.native.test.mjs). The node tests drive
+// the real epoch builder on the synthetic fake-device fixture and pin the
+// mechanics-stage contract through the injectable
+// stageOptions.schroederSameLevelMechanics.schroederSameLevelMechanicsRunner
+// seam, which defaults to the real runSchroederSameLevelMechanicsWebGpu.
+
+const SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS = Object.freeze([
+  'storageGeneration',
+  'physicsTick',
+  'physicsSubstep',
+  'positionEpoch',
+  'topologyEpoch',
+  'chartEpoch',
+  'levelEpoch',
+  'supportEpoch'
+]);
+const SCHROEDER_EPOCH_SEAL_COMPARABLE_FIELDS = Object.freeze([
+  'generationId',
+  'deviceId',
+  ...SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS
+]);
+const workerSchroederLaneRecordByStageData = new WeakMap();
+
+function workerSchroederStageError(stageId, reason, detail = null) {
+  const error = new Error(
+    `Worker ${stageId} stage failed closed: ${reason}${detail ? ` (${detail})` : ''}`
+  );
+  error.code = `ERR_ULG_WORKER_SCHROEDER_${reason.replace(/-/g, '_').toUpperCase()}`;
+  error.stageId = stageId;
+  error.reason = reason;
+  return error;
+}
+
+function workerSchroederTwoLevelRequested(data = {}) {
+  return data?.enableTwoLevelMechanics === true
+    || data?.twoLevelMechanicsAuthority === 'authoritative'
+    || (Array.isArray(data?.mechanicsLevels) && data.mechanicsLevels.length > 1);
+}
+
+function refuseWorkerSchroederTwoLevel(stageId, data = {}) {
+  if (!workerSchroederTwoLevelRequested(data)) return;
+  throw workerSchroederStageError(
+    stageId,
+    ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON,
+    'two-level Schroeder mechanics stays on the scene path in refactor increment W1'
+  );
+}
+
+function workerSchroederStageDevice(stageId, data = {}) {
+  const device = data?.deviceResult?.device || data?.device || null;
+  if (!device?.createBuffer || !device?.queue) {
+    throw workerSchroederStageError(
+      stageId,
+      'worker-device-missing',
+      'SS worker stages require the lane-resident WebGPU device'
+    );
+  }
+  return device;
+}
+
+function workerSchroederLaneRecord(stageId, data = {}) {
+  const record = workerSchroederLaneRecordByStageData.get(data);
+  if (!record) {
+    throw workerSchroederStageError(
+      stageId,
+      'lane-record-missing',
+      'stage data was not prepared by stageDataForPayload'
+    );
+  }
+  return record;
+}
+
+// The epoch's own seal: the generation carries its deviceId, generationId,
+// and the eight epoch identity words on execution. This descriptor is the
+// only epoch identity that crosses the message boundary; a scheduler echoes
+// it back as stageOptions.schroederSameLevelMechanics.expectedSpatialEpochSeal
+// to pin the retained generation across messages.
+function workerSchroederEpochSealFromGeneration(generation, device) {
+  const execution = generation?.execution || null;
+  if (generation?.ready !== true || !execution) return null;
+  return {
+    schema: ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA,
+    generationId: execution.generationId ?? null,
+    deviceId: execution.deviceId ?? null,
+    consumerDeviceId: webGpuDeviceId(device),
+    directoryAbiVersion: generation.directoryAbiVersion ?? null,
+    mechanicsLevelCount: generation.mechanicsLevelCount
+      ?? (generation.mechanicsLevelViews?.length ?? 0),
+    mechanicsLevels: Array.isArray(generation.mechanicsLevels)
+      ? [...generation.mechanicsLevels]
+      : [],
+    ...Object.fromEntries(SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.map(
+      (field) => [field, execution[field] ?? null]
+    ))
+  };
+}
+
+function workerSchroederEpochSealMismatchFields(currentSeal, expectedSeal) {
+  if (!currentSeal || !expectedSeal || typeof expectedSeal !== 'object') {
+    return [];
+  }
+  return SCHROEDER_EPOCH_SEAL_COMPARABLE_FIELDS.filter((field) => (
+    expectedSeal[field] !== undefined
+    && expectedSeal[field] !== null
+    && expectedSeal[field] !== currentSeal[field]
+  ));
+}
+
+// Worker mirror of the scene's beginSchroederSpatialSuccessorSourceFamilyConsumption
+// (src/visualization/sphPhaseScene.js). Reimplemented here from the runtime
+// primitives so the worker never imports the scene module: acquire the exact
+// read-only consumer lease while the family is still active, resolve the
+// private successor level assignment, then request retirement that settles
+// only after the owner fence and every issued lease fence complete.
+function beginWorkerSchroederSuccessorSourceFamilyConsumption({
+  sourceFamily = null,
+  device = null,
+  particleCount = sourceFamily?.particleCount,
+  stateBuffer = null,
+  thermoBuffer = null,
+  identityBuffer = null,
+  mechanicsBuffer = null,
+  consumerStage = 'ulg-mechanics-resident-stage-worker-schroeder-spatial-epoch',
+  retirementReason = 'ulg worker schroeder lane continuation superseded',
+  ownerFence = Promise.resolve()
+} = {}) {
+  if (!sourceFamily) return null;
+  const lease = acquireSchroederSpatialSuccessorSourceFamilyLease(
+    sourceFamily,
+    { device, consumerStage }
+  );
+  let resolution;
+  let retirementPromise;
+  try {
+    resolution = resolveSchroederSpatialSuccessorSourceFamily(sourceFamily, {
+      device,
+      particleCount,
+      stateBuffer,
+      thermoBuffer,
+      identityBuffer,
+      mechanicsBuffer
+    });
+    retirementPromise = retireSchroederSpatialSuccessorSourceFamilyAfterLeases(
+      sourceFamily,
+      {
+        device,
+        reason: retirementReason,
+        after: ownerFence
+      }
+    );
+  } catch (error) {
+    releaseSchroederSpatialSuccessorSourceFamilyLease(
+      sourceFamily,
+      lease,
+      { device }
+    );
+    throw error;
+  }
+  let releasePromise = null;
+  return Object.freeze({
+    sourceFamily,
+    sourceFamilyLease: lease,
+    levelAssignment: resolution.levelAssignment,
+    levelAssignmentSeal: resolution.levelAssignmentSeal,
+    retirementPromise,
+    releaseAfter(after = null) {
+      if (!releasePromise) {
+        const attempt = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+          sourceFamily,
+          lease,
+          { device, after }
+        );
+        releasePromise = attempt;
+        attempt.catch(() => {
+          if (releasePromise === attempt) releasePromise = null;
+        });
+      }
+      return releasePromise;
+    }
+  });
+}
+
+function releaseWorkerSchroederSuccessorLeaseQuietly(consumption, device) {
+  if (!consumption?.sourceFamily || !consumption.sourceFamilyLease) return;
+  try {
+    releaseSchroederSpatialSuccessorSourceFamilyLease(
+      consumption.sourceFamily,
+      consumption.sourceFamilyLease,
+      { device }
+    );
+  } catch {
+    // The lease may already carry a queue-fenced release; keep the original
+    // stage failure as the reported error.
+  }
+}
+
+async function runWorkerSchroederSpatialEpochStage(data = {}) {
+  const stageId = SCHROEDER_SPATIAL_EPOCH_STAGE_ID;
+  const record = workerSchroederLaneRecord(stageId, data);
+  refuseWorkerSchroederTwoLevel(stageId, data);
+  const device = workerSchroederStageDevice(stageId, data);
+  const previousLane = record.schroederLane || null;
+  if (previousLane?.epochGeneration && previousLane.epochConsumed !== true) {
+    throw workerSchroederStageError(
+      stageId,
+      'unconsumed-epoch-retained',
+      `lane still retains unconsumed spatial epoch generation ${
+        previousLane.epochSeal?.generationId ?? 'unknown'
+      }; run schroederSameLevelMechanics first`
+    );
+  }
+  const laneSphUpload = previousLane?.sphParticleUpload || null;
+  const laneMlsUpload = previousLane?.mlsMpmParticleUpload || null;
+  const retainedSourceFamily = previousLane?.successorSourceFamily
+    || data.schroederSpatialSuccessorSourceFamily
+    || null;
+  let successorConsumption = null;
+  let levelAssignment = null;
+  let activeNodeList = null;
+  let levelAssignmentSource = null;
+  if (retainedSourceFamily) {
+    // Mirror the scene's per-step consumption exactly; a family that does not
+    // identify the exact committed same-device continuation throws here and
+    // the stage fails closed instead of falling back to stale inputs.
+    successorConsumption = beginWorkerSchroederSuccessorSourceFamilyConsumption({
+      sourceFamily: retainedSourceFamily,
+      device,
+      particleCount: laneSphUpload?.particleCount
+        ?? data?.sphParticleUpload?.particleCount,
+      stateBuffer: laneSphUpload?.stateBuffer
+        ?? data?.sphParticleUpload?.stateBuffer
+        ?? null,
+      thermoBuffer: laneSphUpload?.thermoBuffer
+        ?? data?.sphParticleUpload?.thermoBuffer
+        ?? null,
+      identityBuffer: laneSphUpload?.identityBuffer
+        ?? data?.sphParticleUpload?.identityBuffer
+        ?? null,
+      mechanicsBuffer: laneMlsUpload?.mechanicsBuffer
+        ?? data?.mlsMpmParticleUpload?.mechanicsBuffer
+        ?? null,
+      retirementReason:
+        'ulg worker schroeder lane continuation superseded by next spatial epoch',
+      // The lane's previous mechanics submissions are already queue-ordered;
+      // retirement still waits for every issued lease fence, so the resolved
+      // owner fence mirrors the scene's Promise.resolve() contract.
+      ownerFence: Promise.resolve()
+    });
+    levelAssignment = successorConsumption?.levelAssignment || null;
+    levelAssignmentSource = 'worker-retained-successor-source-family';
+    if (!levelAssignment) {
+      releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
+      throw workerSchroederStageError(
+        stageId,
+        'successor-family-level-assignment-missing',
+        'committed successor source family resolved without a canonical level assignment'
+      );
+    }
+  } else if (data.levelAssignment && typeof data.levelAssignment === 'object') {
+    levelAssignment = data.levelAssignment;
+    levelAssignmentSource = 'stage-option-level-assignment';
+    if (data.useWorkerRetainedParticleBuffers === true) {
+      if (!laneSphUpload?.stateBuffer) {
+        throw workerSchroederStageError(
+          stageId,
+          'worker-retained-particle-buffers-missing',
+          'useWorkerRetainedParticleBuffers requires post-step uploads retained by a prior schroederSameLevelMechanics stage in this lane'
+        );
+      }
+      if (!levelAssignment.sourceStateBuffer) {
+        levelAssignment = {
+          ...levelAssignment,
+          sourceStateBuffer: laneSphUpload.stateBuffer,
+          sourceStateBufferBorrowed: true
+        };
+      }
+      levelAssignmentSource =
+        'stage-option-level-assignment-with-worker-retained-particle-buffers';
+    }
+  } else if (data.activeNodeList && typeof data.activeNodeList === 'object') {
+    activeNodeList = data.activeNodeList;
+    levelAssignmentSource = 'stage-option-active-node-list';
+  } else {
+    throw workerSchroederStageError(
+      stageId,
+      'level-assignment-source-missing',
+      'no retained successor source family and no payload-supplied levelAssignment/activeNodeList'
+    );
+  }
+  const particleCount = firstPositiveInteger([
+    levelAssignment?.particleCount,
+    data?.sphParticleState?.particleCount,
+    activeNodeList?.activeCandidateCount
+  ], 0) || null;
+  const particleIdentityBuffer = data.particleIdentityBuffer
+    ?? (data.useWorkerRetainedParticleBuffers === true || successorConsumption
+      ? laneSphUpload?.identityBuffer ?? null
+      : null)
+    ?? data?.sphParticleUpload?.identityBuffer
+    ?? null;
+  const generationRunner =
+    typeof data.schroederSpatialEpochGenerationRunner === 'function'
+      ? data.schroederSpatialEpochGenerationRunner
+      : runSchroederSpatialEpochGenerationWebGpu;
+  let generation;
+  try {
+    generation = await generationRunner({
+      device,
+      ...(levelAssignment ? { levelAssignment } : { activeNodeList }),
+      particleCount,
+      ...(particleIdentityBuffer
+        ? {
+            particleIdentityBuffer,
+            particleIdentityStrideWords: firstPositiveInteger(
+              [data.particleIdentityStrideWords],
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+            )
+          }
+        : {}),
+      laneId: 'ulg-mechanics-resident-stage-worker',
+      sourceFamily: levelAssignment
+        ? 'schroeder-level-assignment-particles'
+        : 'schroeder-active-node-particles',
+      selectedLevel: data.selectedLevel ?? 0,
+      ...(data.mechanicsGrid ? { mechanicsGrid: data.mechanicsGrid } : {}),
+      ...(Number.isInteger(data.spatialEpochArenaCount)
+        ? { directArenaCount: data.spatialEpochArenaCount }
+        : {}),
+      mechanicsFieldPairV2Enabled: data.enableMechanicsFieldPairV2 === true,
+      exactNearCellTreeEnabled: data.exactNearCellTreeEnabled !== false,
+      gpuTimestampRecorder: null
+    });
+  } catch (error) {
+    releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
+    throw error;
+  }
+  if (generation?.ready !== true) {
+    releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
+    throw workerSchroederStageError(
+      stageId,
+      'generation-not-ready',
+      `${generation?.status ?? 'missing-generation'}: ${generation?.reason ?? 'no reason'}`
+    );
+  }
+  const epochSeal = workerSchroederEpochSealFromGeneration(generation, device);
+  if (!epochSeal
+    || (epochSeal.deviceId != null
+      && epochSeal.deviceId !== epochSeal.consumerDeviceId)) {
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+    releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
+    throw workerSchroederStageError(
+      stageId,
+      'generation-device-mismatch',
+      `generation deviceId ${epochSeal?.deviceId ?? 'missing'} is not the worker lane device ${epochSeal?.consumerDeviceId ?? webGpuDeviceId(device)}`
+    );
+  }
+  record.schroederLane = {
+    schema: 'peercompute.ulg.worker-schroeder-lane-state.v0',
+    device,
+    deviceId: epochSeal.consumerDeviceId,
+    stepOrdinal: (previousLane?.stepOrdinal ?? -1) + 1,
+    epochGeneration: generation,
+    epochSeal,
+    epochConsumed: false,
+    epochReleaseScheduled: false,
+    epochReleasePromise: null,
+    levelAssignment,
+    activeNodeList,
+    levelAssignmentSource,
+    successorConsumption,
+    successorLeaseReleasePromise: null,
+    // The retained family (if any) was just consumed into this epoch; the
+    // next family arrives from the following mechanics step.
+    successorSourceFamily: null,
+    sphParticleUpload: laneSphUpload || data.sphParticleUpload || null,
+    mlsMpmParticleUpload: laneMlsUpload || data.mlsMpmParticleUpload || null,
+    particleCount
+  };
+  const retainedRefDescriptors = {};
+  if (generation.execution?.directoryBuffer) {
+    retainedRefDescriptors.directoryBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'epochGeneration.execution.directoryBuffer',
+      generation.execution.directoryBuffer
+    );
+  }
+  if (generation.execution?.sourceBuffer) {
+    retainedRefDescriptors.sourceBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'epochGeneration.execution.sourceBuffer',
+      generation.execution.sourceBuffer
+    );
+  }
+  if (levelAssignment?.assignmentBuffer) {
+    retainedRefDescriptors.levelAssignmentBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'levelAssignment.assignmentBuffer',
+      levelAssignment.assignmentBuffer
+    );
+  }
+  return {
+    schema: ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA,
+    status: 'worker-schroeder-spatial-epoch-retained',
+    backend: 'webgpu',
+    readbackMode: data.readbackMode || null,
+    epochSeal,
+    epochRetainedInLane: true,
+    epochStepOrdinal: record.schroederLane.stepOrdinal,
+    levelAssignmentSource,
+    successorSourceFamilyConsumption: successorConsumption
+      ? {
+          began: true,
+          consumerStage:
+            'ulg-mechanics-resident-stage-worker-schroeder-spatial-epoch',
+          sourceGenerationId:
+            successorConsumption.sourceFamily?.sourceGenerationId ?? null,
+          deviceId: successorConsumption.sourceFamily?.deviceId ?? null,
+          levelAssignmentSealPresent:
+            Boolean(successorConsumption.levelAssignmentSeal)
+        }
+      : null,
+    generationSummary: {
+      status: generation.status ?? null,
+      directoryAbiVersion: generation.directoryAbiVersion ?? null,
+      directoryBuildCount: generation.directoryBuildCount ?? null,
+      mechanicsLevelCount: epochSeal.mechanicsLevelCount,
+      mechanicsLevels: [...epochSeal.mechanicsLevels],
+      arenaCapacity: generation.arenaCapacity ?? null,
+      runtimeCacheHit: generation.runtimeCacheHit === true,
+      particleCount
+    },
+    ...retainedRefDescriptors
+  };
+}
+
+async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
+  const stageId = SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID;
+  const record = workerSchroederLaneRecord(stageId, data);
+  refuseWorkerSchroederTwoLevel(stageId, data);
+  const device = workerSchroederStageDevice(stageId, data);
+  const lane = record.schroederLane || null;
+  if (!lane?.epochGeneration) {
+    throw workerSchroederStageError(
+      stageId,
+      'lane-epoch-missing',
+      'run a schroederSpatialEpoch stage in this lane before same-level mechanics'
+    );
+  }
+  if (lane.epochConsumed === true) {
+    throw workerSchroederStageError(
+      stageId,
+      'lane-epoch-already-consumed',
+      'each retained spatial epoch generation feeds exactly one same-level mechanics step'
+    );
+  }
+  const generation = lane.epochGeneration;
+  const currentSeal = workerSchroederEpochSealFromGeneration(generation, device);
+  if (!currentSeal) {
+    throw workerSchroederStageError(
+      stageId,
+      'lane-epoch-not-ready',
+      'the retained generation no longer reports a ready execution'
+    );
+  }
+  if (
+    currentSeal.deviceId !== currentSeal.consumerDeviceId
+    || lane.deviceId !== currentSeal.consumerDeviceId
+  ) {
+    throw workerSchroederStageError(
+      stageId,
+      'epoch-device-mismatch',
+      `retained epoch generation belongs to device ${
+        currentSeal.deviceId ?? lane.deviceId ?? 'unknown'
+      }, not the current worker lane device ${currentSeal.consumerDeviceId}`
+    );
+  }
+  const retainedSealDrift = workerSchroederEpochSealMismatchFields(
+    currentSeal,
+    lane.epochSeal
+  );
+  if (retainedSealDrift.length > 0) {
+    throw workerSchroederStageError(
+      stageId,
+      'epoch-seal-mismatch',
+      `retained generation identity drifted on: ${retainedSealDrift.join(', ')}`
+    );
+  }
+  const expectedSealMismatch = workerSchroederEpochSealMismatchFields(
+    currentSeal,
+    data.expectedSpatialEpochSeal || null
+  );
+  if (expectedSealMismatch.length > 0) {
+    throw workerSchroederStageError(
+      stageId,
+      'epoch-seal-mismatch',
+      `expectedSpatialEpochSeal does not match the retained generation on: ${expectedSealMismatch.join(', ')}`
+    );
+  }
+  if (currentSeal.mechanicsLevelCount > 1) {
+    throw workerSchroederStageError(
+      stageId,
+      ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON,
+      'the retained generation carries more than one mechanics level view'
+    );
+  }
+  const kernelRunner =
+    typeof data.schroederSameLevelMechanicsRunner === 'function'
+      ? data.schroederSameLevelMechanicsRunner
+      : runSchroederSameLevelMechanicsWebGpu;
+  const sphParticleUpload = lane.sphParticleUpload || data.sphParticleUpload || null;
+  const mlsMpmParticleUpload =
+    lane.mlsMpmParticleUpload || data.mlsMpmParticleUpload || null;
+  const successorConsumption = lane.successorConsumption || null;
+  let kernelResult = null;
+  let successorLeaseReleasePromise = null;
+  try {
+    kernelResult = await kernelRunner({
+      device,
+      sphParticleState: data.sphParticleState,
+      mlsMpmParticleState: data.mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      spatialEpochGeneration: generation,
+      enableSpatialEpochGeneration: false,
+      ...(successorConsumption?.levelAssignment
+        ? {
+            levelAssignment: successorConsumption.levelAssignment,
+            levelAssignmentSourceFamily: successorConsumption.sourceFamily,
+            levelAssignmentSourceFamilyLease:
+              successorConsumption.sourceFamilyLease
+          }
+        : (lane.levelAssignment
+            ? { levelAssignment: lane.levelAssignment }
+            : {})),
+      selectedLevel: data.selectedLevel ?? 0,
+      ...(data.baseGridSpacingM != null
+        ? { baseGridSpacingM: data.baseGridSpacingM }
+        : {}),
+      ...(data.minLevel != null ? { minLevel: data.minLevel } : {}),
+      ...(data.maxLevel != null ? { maxLevel: data.maxLevel } : {}),
+      ...(data.tileCellCount != null
+        ? { tileCellCount: data.tileCellCount }
+        : {}),
+      enableTwoLevelMechanics: false,
+      twoLevelMechanicsAuthority: 'observation',
+      enableMechanicsFieldPairV2: data.enableMechanicsFieldPairV2 === true,
+      boxDimsM: data.boxDimsM ?? [5, 5, 5],
+      ...(data.dt != null ? { dt: data.dt } : {}),
+      ...(data.gravityMPerS2 != null
+        ? { gravityMPerS2: data.gravityMPerS2 }
+        : {}),
+      ...(data.cflFactor != null ? { cflFactor: data.cflFactor } : {}),
+      ...(data.readbackMode ? { readbackMode: data.readbackMode } : {}),
+      ...(data.residentStepOptions
+        && typeof data.residentStepOptions === 'object'
+        ? { residentStepOptions: data.residentStepOptions }
+        : {})
+    });
+  } finally {
+    if (successorConsumption) {
+      // Mirror the scene loop: the successor-source lease releases only after
+      // the exact consumer fence — the hierarchy owner completion when it is
+      // offered, else this device queue's completion.
+      let exactConsumerFence;
+      const hierarchyOwnerCompletion =
+        kernelResult?.schroederSpatialEpochReleasePromise;
+      if (
+        hierarchyOwnerCompletion
+        && typeof hierarchyOwnerCompletion.then === 'function'
+      ) {
+        exactConsumerFence = Promise.resolve(hierarchyOwnerCompletion).then(
+          (confirmed) => {
+            if (confirmed !== true) {
+              throw new Error(
+                'Worker Schroeder hierarchy owner completion did not confirm successor-source consumption'
+              );
+            }
+            return true;
+          }
+        );
+      } else {
+        try {
+          exactConsumerFence = device.queue.onSubmittedWorkDone();
+        } catch (error) {
+          exactConsumerFence = Promise.reject(error);
+        }
+      }
+      successorLeaseReleasePromise =
+        successorConsumption.releaseAfter(exactConsumerFence);
+      successorLeaseReleasePromise.catch(() => {});
+      lane.successorLeaseReleasePromise = successorLeaseReleasePromise;
+    }
+  }
+  const residentStep = kernelResult?.residentStep || null;
+  if (!residentStep) {
+    throw workerSchroederStageError(
+      stageId,
+      'resident-step-missing',
+      'the same-level mechanics runner did not return a resident step'
+    );
+  }
+  const nextUploads = residentStep.nextParticleUploads || null;
+  const nextSphUpload = nextUploads?.sphParticleUpload ?? null;
+  const nextMlsUpload = nextUploads?.mlsMpmParticleUpload ?? null;
+  const nextSuccessorSourceFamily =
+    residentStep.schroederSpatialSuccessorSourceFamily
+    ?? nextUploads?.schroederSpatialSuccessorSourceFamily
+    ?? kernelResult.schroederSpatialSuccessorSourceFamily
+    ?? null;
+  // The retained generation fed exactly this step; release it queue-ordered
+  // behind the step's submissions and keep the post-step buffers as the
+  // lane's continuation state for the next schroederSpatialEpoch.
+  lane.epochConsumed = true;
+  const epochReleaseScheduled =
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device)
+      === true;
+  lane.epochReleaseScheduled = epochReleaseScheduled;
+  lane.epochReleasePromise = generation.releasePromise ?? null;
+  lane.successorConsumption = null;
+  lane.levelAssignment = null;
+  lane.activeNodeList = null;
+  lane.sphParticleUpload = nextSphUpload;
+  lane.mlsMpmParticleUpload = nextMlsUpload;
+  lane.successorSourceFamily = nextSuccessorSourceFamily;
+  lane.particleCount = nextSphUpload?.particleCount ?? lane.particleCount ?? null;
+  const postStepRefs = {};
+  if (nextSphUpload?.stateBuffer) {
+    postStepRefs.stateBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'nextParticleUploads.sphParticleUpload.stateBuffer',
+      nextSphUpload.stateBuffer
+    );
+  }
+  if (nextSphUpload?.thermoBuffer) {
+    postStepRefs.thermoBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'nextParticleUploads.sphParticleUpload.thermoBuffer',
+      nextSphUpload.thermoBuffer
+    );
+  }
+  if (nextSphUpload?.identityBuffer) {
+    postStepRefs.identityBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'nextParticleUploads.sphParticleUpload.identityBuffer',
+      nextSphUpload.identityBuffer
+    );
+  }
+  if (nextMlsUpload?.mechanicsBuffer) {
+    postStepRefs.mechanicsBufferRef = retainGpuBuffer(
+      record,
+      stageId,
+      'nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer',
+      nextMlsUpload.mechanicsBuffer
+    );
+  }
+  const summaryOf = (candidate) => {
+    if (typeof candidate === 'function') {
+      try {
+        return candidate() ?? null;
+      } catch {
+        return null;
+      }
+    }
+    return candidate ?? null;
+  };
+  return {
+    schema: ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA,
+    status: 'worker-schroeder-same-level-mechanics-completed',
+    backend: residentStep.backend || 'webgpu',
+    readbackMode: residentStep.readbackMode ?? data.readbackMode ?? null,
+    epochSeal: currentSeal,
+    epochConsumed: true,
+    epochReleaseScheduled,
+    residentStepSummary: {
+      backend: residentStep.backend ?? null,
+      status: residentStep.status ?? null,
+      stageStatus: { ...(residentStep.stageStatus || {}) },
+      stageBackends: { ...(residentStep.stageBackends || {}) },
+      readbackMode: residentStep.readbackMode ?? null,
+      particleCount: nextSphUpload?.particleCount
+        ?? data?.sphParticleState?.particleCount
+        ?? null
+    },
+    schroederSummary: {
+      status: kernelResult.status ?? null,
+      selectedLevel: kernelResult.selectedLevel ?? data.selectedLevel ?? 0,
+      spatialEpochGenerationSummary: summaryOf(
+        kernelResult.currentSchroederSpatialEpochGenerationSummary
+      ),
+      spatialEpochTransactionSummary: summaryOf(
+        kernelResult.currentSchroederSpatialEpochTransactionSummary
+      )
+    },
+    successorSourceFamilyRetirement: successorConsumption
+      ? {
+          leaseReleaseScheduled: successorLeaseReleasePromise != null,
+          sourceGenerationId:
+            successorConsumption.sourceFamily?.sourceGenerationId ?? null
+        }
+      : null,
+    postStep: {
+      particleCount: nextSphUpload?.particleCount ?? null,
+      successorSourceFamilyRetained: Boolean(nextSuccessorSourceFamily),
+      successorSourceGenerationId:
+        nextSuccessorSourceFamily?.sourceGenerationId ?? null,
+      ...postStepRefs
+    }
+  };
+}
+
 function workerPressureHasFollowingGridUpdate(data = null) {
   const stageOrder = data?.residentStagePlanStageOrder;
   if (!Array.isArray(stageOrder)) return false;
@@ -3681,7 +4452,11 @@ function baseStageData(payload = {}) {
     && (context.readbackMode || common.readbackMode)
       === NO_FULL_READBACK_MODE
   );
-  const retainedBufferRefs = stageId === 'p2g'
+  const retainedBufferRefs = stageId === SCHROEDER_SPATIAL_EPOCH_STAGE_ID
+    ? ['schroeder-spatial-epoch-directory-buffer']
+    : stageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+    ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer']
+    : stageId === 'p2g'
     ? ['mls-mpm-p2g-grid-buffer']
     : (stageId === 'gridUpdate'
       ? ['mls-mpm-grid-update-buffer']
@@ -3771,6 +4546,15 @@ function baseStageData(payload = {}) {
 function stageDataForPayload(payload = {}, record) {
   const stageId = normalizeString(payload.stage?.id, null);
   const data = baseStageData(payload);
+  if (
+    stageId === SCHROEDER_SPATIAL_EPOCH_STAGE_ID
+    || stageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+  ) {
+    // The SS worker-lane stage runners retain their epoch generation and
+    // post-step buffers on the lane record; hand it to them the same way the
+    // exact gas transport graph rides its stage data.
+    workerSchroederLaneRecordByStageData.set(data, record);
+  }
   if (stageId === 'spatialGasLedgerProducer') {
     const previousResidentProductMass = previousWorkerResidentProductMass(record);
     if (previousResidentProductMass) {

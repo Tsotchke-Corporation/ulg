@@ -9,6 +9,10 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
+  ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA,
+  ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA,
+  ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA,
+  ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON,
   exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot,
   resolveUlgMechanicsResidentStageWorkerDeviceResult,
   runUlgMechanicsResidentStageWorkerPayload
@@ -3211,4 +3215,667 @@ test('ULG resident stage worker fails closed until arbitrary-domain rematerializ
   assert.equal(rematerialization.identityRequired, true);
   assert.equal(rematerialization.identityRevision, seed.identityRevision);
   assert.equal(rematerialization.identityBufferByteLength, Uint32Array.BYTES_PER_ELEMENT);
+});
+
+// --- Schroeder Simulation (SS) worker-lane stages (refactor increment W1) ---
+// These tests drive the REAL spatial epoch generation builder on the
+// synthetic fake-device fixture (same pattern as
+// tests/schroederSpatialEpochGpu.test.mjs) and pin the mechanics-stage
+// plumbing through the injectable
+// stageOptions.schroederSameLevelMechanics.schroederSameLevelMechanicsRunner
+// seam, which defaults to the real runSchroederSameLevelMechanicsWebGpu.
+// TODO(native-arm): real-GPU coverage for the full kernel path runs in the
+// native WebGPU test arm; do not add GPU-flagged coverage here.
+
+function workerSchroederLevelAssignmentFixture(device, {
+  particleCount = 2,
+  storageGeneration = 11,
+  physicsTick = 13,
+  physicsSubstep = 0,
+  positionEpoch = 17,
+  topologyEpoch = 19,
+  chartEpoch = 23,
+  levelEpoch = 29,
+  supportEpoch = 31,
+  sourceStateBuffer = undefined,
+  label = 'worker-ss-lane'
+} = {}) {
+  const taggedBuffer = (bufferLabel, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label: bufferLabel, size, usage: 128 | 8 }),
+    device
+  );
+  const assignmentBuffer = taggedBuffer(
+    `${label}-assignment`,
+    particleCount * SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const resolvedSourceStateBuffer = sourceStateBuffer === undefined
+    ? taggedBuffer(
+        `${label}-state`,
+        particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+      )
+    : sourceStateBuffer;
+  return {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    ...(resolvedSourceStateBuffer
+      ? {
+          sourceStateBuffer: resolvedSourceStateBuffer,
+          sourceStateBufferBorrowed: true
+        }
+      : {}),
+    storageGeneration,
+    physicsTick,
+    physicsSubstep,
+    positionEpoch,
+    topologyEpoch,
+    chartEpoch,
+    levelEpoch,
+    supportEpoch,
+    minLevel: 0,
+    maxLevel: 0,
+    chartId: 0,
+    baseGridSpacingM: 1
+  };
+}
+
+function workerSchroederStageContext(device, buffers, stageOptions = {}) {
+  return {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:schroeder-worker',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    common: {
+      ...buffers,
+      deviceResult: { device },
+      boxDimsM: [5, 5, 5],
+      dt: buffers.mlsMpmParticleState.mechanicsDtS,
+      gravityMPerS2: [0, 0, 0],
+      cflFactor: 10
+    },
+    stageOptions
+  };
+}
+
+function assertNoWorkerGpuBuffers(value, path = 'result', seen = new Set()) {
+  if (value == null || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  const bufferLike = typeof value.mapAsync === 'function'
+    || typeof value.getMappedRange === 'function'
+    || value.constructor?.name === 'GPUBuffer'
+    || value.constructor?.name === 'FakeGpuBuffer';
+  assert.equal(bufferLike, false, `GPU buffer leaked into worker result at ${path}`);
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return;
+  for (const [key, entry] of Object.entries(value)) {
+    assertNoWorkerGpuBuffers(entry, `${path}.${key}`, seen);
+  }
+}
+
+test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLevelMechanics through one retained SS lane', async () => {
+  const device = createFakeGpuDevice();
+  const deviceId = webGpuDeviceId(device);
+  const buffers = manualBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:schroeder-worker-lane',
+    stateKey: 'ulg:test:schroeder-worker-state'
+  };
+  const particleCount = 2;
+  const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 128 | 8 }),
+    device
+  );
+  const levelAssignment = workerSchroederLevelAssignmentFixture(device, {
+    particleCount,
+    label: 'worker-ss-chain-step0'
+  });
+  const particleIdentityBuffer = taggedBuffer(
+    'worker-ss-chain-identity',
+    particleCount * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const initialThermoBuffer = taggedBuffer(
+    'worker-ss-chain-thermo',
+    particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const initialMechanicsBuffer = taggedBuffer(
+    'worker-ss-chain-mechanics',
+    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const mechanicsGrid = {
+    selectedLevel: 0,
+    gridDims: [2, 2, 2],
+    gridNodeCount: 8,
+    gridShift: 1,
+    gridSpacingM: 1
+  };
+  const epochStageOptions = {
+    levelAssignment,
+    particleIdentityBuffer,
+    particleIdentityStrideWords: 1,
+    selectedLevel: 0,
+    mechanicsGrid,
+    exactNearCellTreeEnabled: false,
+    sphParticleUpload: {
+      particleCount,
+      stateBuffer: levelAssignment.sourceStateBuffer,
+      thermoBuffer: initialThermoBuffer,
+      identityBuffer: particleIdentityBuffer
+    },
+    mlsMpmParticleUpload: {
+      particleCount,
+      mechanicsBuffer: initialMechanicsBuffer
+    }
+  };
+
+  // Step 0 epoch: the REAL generation builder runs in the worker stage.
+  const epoch = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: epochStageOptions
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(epoch.value.schema, ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA);
+  assert.equal(epoch.value.status, 'worker-schroeder-spatial-epoch-retained');
+  assert.equal(epoch.value.epochRetainedInLane, true);
+  assert.equal(epoch.value.epochStepOrdinal, 0);
+  assert.equal(epoch.value.levelAssignmentSource, 'stage-option-level-assignment');
+  const epochSeal = epoch.value.epochSeal;
+  assert.equal(epochSeal.schema, ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA);
+  assert.equal(epochSeal.deviceId, deviceId);
+  assert.equal(epochSeal.consumerDeviceId, deviceId);
+  assert.ok(Number.isInteger(epochSeal.generationId) && epochSeal.generationId > 0);
+  assert.equal(epochSeal.storageGeneration, levelAssignment.storageGeneration);
+  assert.equal(epochSeal.physicsTick, levelAssignment.physicsTick);
+  assert.equal(epochSeal.positionEpoch, levelAssignment.positionEpoch);
+  assert.equal(epochSeal.topologyEpoch, levelAssignment.topologyEpoch);
+  assert.equal(epochSeal.mechanicsLevelCount, 1);
+  assert.match(epoch.value.directoryBufferRef.ref, /^ulg-worker:/);
+  assert.match(epoch.value.levelAssignmentBufferRef.ref, /^ulg-worker:/);
+  assert.ok(epoch.retainedBufferRefs.includes(epoch.value.directoryBufferRef.ref));
+  assert.ok(epoch.retainedBufferRefs.includes(epoch.value.levelAssignmentBufferRef.ref));
+  assert.equal(epoch.value.workerResidentStage.stageId, 'schroederSpatialEpoch');
+  assert.equal(epoch.value.gpuFence.fenceSatisfied, true);
+  assertNoWorkerGpuBuffers(epoch, 'epoch');
+  structuredClone(epoch.value);
+
+  // Step 0 mechanics: consumes the lane-retained epoch generation across
+  // messages through the injectable kernel-runner seam.
+  const nextStateBuffer = taggedBuffer(
+    'worker-ss-chain-next-state',
+    particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const nextThermoBuffer = taggedBuffer(
+    'worker-ss-chain-next-thermo',
+    particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const nextIdentityBuffer = taggedBuffer(
+    'worker-ss-chain-next-identity',
+    particleCount * Uint32Array.BYTES_PER_ELEMENT
+  );
+  const nextMechanicsBuffer = taggedBuffer(
+    'worker-ss-chain-next-mechanics',
+    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  const observedStepZero = {};
+  const mechanics = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSameLevelMechanics',
+      ['schroeder-spatial-epoch', 'sph-particle-state', 'mls-mpm-mechanics'],
+      ['sph-particle-state', 'mls-mpm-mechanics']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSameLevelMechanics: {
+        expectedSpatialEpochSeal: epochSeal,
+        async schroederSameLevelMechanicsRunner(args) {
+          observedStepZero.args = args;
+          return {
+            status: 'schroeder-same-level-mechanics-completed',
+            selectedLevel: 0,
+            residentStep: {
+              backend: 'webgpu',
+              status: 'resident-step-completed',
+              readbackMode: 'no-full-readback',
+              stageStatus: { p2g: 'completed', g2p: 'completed' },
+              stageBackends: { p2g: 'webgpu', g2p: 'webgpu' },
+              nextParticleUploads: {
+                sphParticleUpload: {
+                  particleCount,
+                  stateBuffer: nextStateBuffer,
+                  thermoBuffer: nextThermoBuffer,
+                  identityBuffer: nextIdentityBuffer
+                },
+                mlsMpmParticleUpload: {
+                  particleCount,
+                  mechanicsBuffer: nextMechanicsBuffer
+                }
+              }
+            },
+            schroederSpatialEpochReleasePromise: Promise.resolve(true),
+            currentSchroederSpatialEpochGenerationSummary: () => ({
+              status: 'synthetic-generation-summary'
+            })
+          };
+        }
+      }
+    }),
+    epoch.value,
+    laneOptions
+  ));
+  const stepZeroArgs = observedStepZero.args;
+  assert.equal(stepZeroArgs.device, device);
+  assert.equal(stepZeroArgs.spatialEpochGeneration.ready, true);
+  assert.equal(
+    stepZeroArgs.spatialEpochGeneration.execution.generationId,
+    epochSeal.generationId
+  );
+  assert.equal(stepZeroArgs.enableSpatialEpochGeneration, false);
+  assert.equal(stepZeroArgs.enableTwoLevelMechanics, false);
+  assert.equal(stepZeroArgs.twoLevelMechanicsAuthority, 'observation');
+  assert.equal(stepZeroArgs.levelAssignment, levelAssignment);
+  assert.equal(
+    stepZeroArgs.sphParticleUpload.stateBuffer,
+    levelAssignment.sourceStateBuffer
+  );
+  assert.equal(
+    stepZeroArgs.mlsMpmParticleUpload.mechanicsBuffer,
+    initialMechanicsBuffer
+  );
+  assert.equal(
+    mechanics.value.schema,
+    ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA
+  );
+  assert.equal(
+    mechanics.value.status,
+    'worker-schroeder-same-level-mechanics-completed'
+  );
+  assert.equal(mechanics.value.epochConsumed, true);
+  assert.equal(mechanics.value.epochReleaseScheduled, true);
+  assert.equal(mechanics.value.epochSeal.generationId, epochSeal.generationId);
+  assert.equal(
+    mechanics.value.schroederSummary.spatialEpochGenerationSummary.status,
+    'synthetic-generation-summary'
+  );
+  assert.match(mechanics.value.postStep.stateBufferRef.ref, /^ulg-worker:/);
+  assert.match(mechanics.value.postStep.thermoBufferRef.ref, /^ulg-worker:/);
+  assert.match(mechanics.value.postStep.identityBufferRef.ref, /^ulg-worker:/);
+  assert.match(mechanics.value.postStep.mechanicsBufferRef.ref, /^ulg-worker:/);
+  assert.ok(mechanics.retainedBufferRefs.includes(
+    mechanics.value.postStep.stateBufferRef.ref
+  ));
+  assert.equal(mechanics.value.gpuFence.fenceSatisfied, true);
+  assertNoWorkerGpuBuffers(mechanics, 'mechanics');
+  structuredClone(mechanics.value);
+  // The worker owns the injected generation's release; it settles after the
+  // step's queue submissions.
+  assert.equal(
+    await stepZeroArgs.spatialEpochGeneration.releasePromise,
+    true
+  );
+
+  // Step 1 epoch: the next spatial epoch consumes the post-step particle
+  // buffers retained by the mechanics stage in the same lane.
+  const levelAssignmentStepOne = workerSchroederLevelAssignmentFixture(device, {
+    particleCount,
+    storageGeneration: 12,
+    physicsTick: 14,
+    positionEpoch: 18,
+    topologyEpoch: 19,
+    sourceStateBuffer: null,
+    label: 'worker-ss-chain-step1'
+  });
+  const epochStepOne = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSpatialEpoch',
+      ['schroeder-level-assignment'],
+      ['schroeder-spatial-epoch']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: {
+        levelAssignment: levelAssignmentStepOne,
+        useWorkerRetainedParticleBuffers: true,
+        particleIdentityStrideWords: 1,
+        selectedLevel: 0,
+        mechanicsGrid,
+        exactNearCellTreeEnabled: false
+      }
+    }),
+    mechanics.value,
+    laneOptions
+  ));
+  assert.equal(
+    epochStepOne.value.levelAssignmentSource,
+    'stage-option-level-assignment-with-worker-retained-particle-buffers'
+  );
+  assert.equal(epochStepOne.value.epochStepOrdinal, 1);
+  assert.equal(epochStepOne.value.epochSeal.storageGeneration, 12);
+  assert.equal(epochStepOne.value.epochSeal.physicsTick, 14);
+  assert.notEqual(
+    epochStepOne.value.epochSeal.generationId,
+    epochSeal.generationId
+  );
+  assertNoWorkerGpuBuffers(epochStepOne, 'epochStepOne');
+
+  // Step 1 mechanics: proves the alternating pair is one SS step chain —
+  // the second epoch was built against the first step's post-step state
+  // buffer, and the second mechanics step consumes those same retained
+  // buffers.
+  const observedStepOne = {};
+  const mechanicsStepOne = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage(
+      'schroederSameLevelMechanics',
+      ['schroeder-spatial-epoch', 'sph-particle-state', 'mls-mpm-mechanics'],
+      ['sph-particle-state', 'mls-mpm-mechanics']
+    ),
+    workerSchroederStageContext(device, buffers, {
+      schroederSameLevelMechanics: {
+        expectedSpatialEpochSeal: epochStepOne.value.epochSeal,
+        async schroederSameLevelMechanicsRunner(args) {
+          observedStepOne.args = args;
+          return {
+            status: 'schroeder-same-level-mechanics-completed',
+            selectedLevel: 0,
+            residentStep: {
+              backend: 'webgpu',
+              status: 'resident-step-completed',
+              readbackMode: 'no-full-readback',
+              stageStatus: {},
+              stageBackends: {},
+              nextParticleUploads: {
+                sphParticleUpload: {
+                  particleCount,
+                  stateBuffer: taggedBuffer('worker-ss-chain-step1-state', 64),
+                  thermoBuffer: taggedBuffer('worker-ss-chain-step1-thermo', 96),
+                  identityBuffer: taggedBuffer('worker-ss-chain-step1-identity', 8)
+                },
+                mlsMpmParticleUpload: {
+                  particleCount,
+                  mechanicsBuffer:
+                    taggedBuffer('worker-ss-chain-step1-mechanics', 256)
+                }
+              }
+            },
+            schroederSpatialEpochReleasePromise: Promise.resolve(true)
+          };
+        }
+      }
+    }),
+    epochStepOne.value,
+    laneOptions
+  ));
+  const stepOneArgs = observedStepOne.args;
+  assert.equal(stepOneArgs.sphParticleUpload.stateBuffer, nextStateBuffer);
+  assert.equal(stepOneArgs.sphParticleUpload.thermoBuffer, nextThermoBuffer);
+  assert.equal(stepOneArgs.sphParticleUpload.identityBuffer, nextIdentityBuffer);
+  assert.equal(
+    stepOneArgs.mlsMpmParticleUpload.mechanicsBuffer,
+    nextMechanicsBuffer
+  );
+  assert.equal(
+    stepOneArgs.spatialEpochGeneration.source.sourceStateBuffer,
+    nextStateBuffer
+  );
+  assert.equal(
+    stepOneArgs.spatialEpochGeneration.execution.storageGeneration,
+    12
+  );
+  assert.equal(mechanicsStepOne.value.epochConsumed, true);
+  assert.equal(mechanicsStepOne.value.epochReleaseScheduled, true);
+  assertNoWorkerGpuBuffers(mechanicsStepOne, 'mechanicsStepOne');
+});
+
+test('ULG resident stage worker SS stages fail closed on missing epoch, identity mismatch, and two-level requests', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers();
+  const particleCount = 2;
+  const mechanicsGrid = {
+    selectedLevel: 0,
+    gridDims: [2, 2, 2],
+    gridNodeCount: 8,
+    gridShift: 1,
+    gridSpacingM: 1
+  };
+  const mechanicsStage = stage(
+    'schroederSameLevelMechanics',
+    ['schroeder-spatial-epoch'],
+    ['sph-particle-state']
+  );
+  const epochStage = stage(
+    'schroederSpatialEpoch',
+    ['schroeder-level-assignment'],
+    ['schroeder-spatial-epoch']
+  );
+
+  // A mechanics stage with no retained epoch in the lane fails closed.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      mechanicsStage,
+      workerSchroederStageContext(device, buffers, {}),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-guard-empty-lane',
+        stateKey: 'ulg:test:schroeder-guard-empty-state'
+      }
+    )),
+    /lane-epoch-missing/
+  );
+
+  // Two-level requests are out of W1 scope on both stages.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      epochStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          enableTwoLevelMechanics: true,
+          levelAssignment: workerSchroederLevelAssignmentFixture(device, {
+            particleCount,
+            label: 'worker-ss-guard-two-level'
+          })
+        }
+      }),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-guard-two-level-lane',
+        stateKey: 'ulg:test:schroeder-guard-two-level-state'
+      }
+    )),
+    new RegExp(ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON)
+  );
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      mechanicsStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSameLevelMechanics: {
+          twoLevelMechanicsAuthority: 'authoritative'
+        }
+      }),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-guard-two-level-lane',
+        stateKey: 'ulg:test:schroeder-guard-two-level-state'
+      }
+    )),
+    new RegExp(ULG_WORKER_SCHROEDER_W1_TWO_LEVEL_REFUSAL_REASON)
+  );
+
+  // An epoch stage without any level-assignment source fails closed.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      epochStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {}
+      }),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-guard-no-source-lane',
+        stateKey: 'ulg:test:schroeder-guard-no-source-state'
+      }
+    )),
+    /level-assignment-source-missing/
+  );
+
+  // A generation the real builder refuses is a structured stage error, not a
+  // silent fallback.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      epochStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          levelAssignment: {
+            ...workerSchroederLevelAssignmentFixture(device, {
+              particleCount,
+              label: 'worker-ss-guard-not-ready'
+            }),
+            bufferFamilyGenerationStatus: 'schroeder-particle-buffer-family-generation-blocked'
+          },
+          mechanicsGrid,
+          exactNearCellTreeEnabled: false
+        }
+      }),
+      null,
+      {
+        laneId: 'ulg:test:schroeder-guard-not-ready-lane',
+        stateKey: 'ulg:test:schroeder-guard-not-ready-state'
+      }
+    )),
+    /generation-not-ready/
+  );
+
+  // Retain a real epoch, then pin the guard set that protects it.
+  const guardLane = {
+    laneId: 'ulg:test:schroeder-guard-retained-lane',
+    stateKey: 'ulg:test:schroeder-guard-retained-state'
+  };
+  const levelAssignment = workerSchroederLevelAssignmentFixture(device, {
+    particleCount,
+    label: 'worker-ss-guard-retained'
+  });
+  const epoch = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    epochStage,
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: {
+        levelAssignment,
+        selectedLevel: 0,
+        mechanicsGrid,
+        exactNearCellTreeEnabled: false,
+        sphParticleUpload: {
+          particleCount,
+          stateBuffer: levelAssignment.sourceStateBuffer
+        }
+      }
+    }),
+    null,
+    guardLane
+  ));
+  assert.equal(epoch.value.epochRetainedInLane, true);
+
+  // A second epoch stage must not silently supersede an unconsumed epoch.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      epochStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          levelAssignment: workerSchroederLevelAssignmentFixture(device, {
+            particleCount,
+            label: 'worker-ss-guard-second-epoch'
+          }),
+          mechanicsGrid,
+          exactNearCellTreeEnabled: false
+        }
+      }),
+      null,
+      guardLane
+    )),
+    /unconsumed-epoch-retained/
+  );
+
+  // Generation identity mismatch: the caller-pinned seal must match the
+  // retained generation's own identity words.
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      mechanicsStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSameLevelMechanics: {
+          expectedSpatialEpochSeal: {
+            ...epoch.value.epochSeal,
+            generationId: epoch.value.epochSeal.generationId + 999
+          },
+          async schroederSameLevelMechanicsRunner() {
+            throw new Error('kernel must not run on identity mismatch');
+          }
+        }
+      }),
+      null,
+      guardLane
+    )),
+    /epoch-seal-mismatch/
+  );
+
+  // Cross-device consumption of a retained epoch fails closed.
+  const foreignDevice = createFakeGpuDevice();
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      mechanicsStage,
+      workerSchroederStageContext(foreignDevice, buffers, {
+        schroederSameLevelMechanics: {
+          async schroederSameLevelMechanicsRunner() {
+            throw new Error('kernel must not run on device mismatch');
+          }
+        }
+      }),
+      null,
+      guardLane
+    )),
+    /epoch-device-mismatch/
+  );
+
+  // The lane epoch is still intact after the rejections; a valid mechanics
+  // stage still consumes it, and a consumed epoch cannot be consumed twice.
+  const mechanics = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    mechanicsStage,
+    workerSchroederStageContext(device, buffers, {
+      schroederSameLevelMechanics: {
+        expectedSpatialEpochSeal: epoch.value.epochSeal,
+        async schroederSameLevelMechanicsRunner() {
+          return {
+            status: 'schroeder-same-level-mechanics-completed',
+            residentStep: {
+              backend: 'webgpu',
+              status: 'resident-step-completed',
+              nextParticleUploads: null
+            }
+          };
+        }
+      }
+    }),
+    null,
+    guardLane
+  ));
+  assert.equal(mechanics.value.epochConsumed, true);
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      mechanicsStage,
+      workerSchroederStageContext(device, buffers, {
+        schroederSameLevelMechanics: {
+          async schroederSameLevelMechanicsRunner() {
+            throw new Error('kernel must not run on a consumed epoch');
+          }
+        }
+      }),
+      null,
+      guardLane
+    )),
+    /lane-epoch-already-consumed/
+  );
 });

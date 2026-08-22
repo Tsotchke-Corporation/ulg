@@ -1,0 +1,98 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  body { margin:0; background:#131c24; font-family:"DejaVu Sans",system-ui,sans-serif; }
+  #fig { width:1400px; }
+  svg { display:block; }
+</style>
+<div id="fig">
+<svg viewBox="0 0 1400 860" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="860" fill="#131c24"/>
+  <text x="40" y="52" fill="#52d8c4" font-size="15" letter-spacing="4" font-family="monospace">ULG SS &middot; MIGRATION MAP &mdash; what moves, what appears, what dies</text>
+  <text x="40" y="84" fill="#d9e5eb" font-size="28" font-weight="bold">The refactor as a set of moves</text>
+
+  <!-- column headers -->
+  <rect x="40" y="120" width="480" height="46" rx="8" fill="#1b2733" stroke="#e6a44e" stroke-width="2"/>
+  <text x="280" y="150" fill="#e6a44e" font-size="15" font-family="monospace" text-anchor="middle">MAIN THREAD (today)</text>
+  <rect x="880" y="120" width="480" height="46" rx="8" fill="#1b2733" stroke="#52d8c4" stroke-width="2"/>
+  <text x="1120" y="150" fill="#52d8c4" font-size="15" font-family="monospace" text-anchor="middle">RESIDENT WORKER LANE (target)</text>
+
+  <defs>
+    <marker id="mv" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52d8c4"/></marker>
+  </defs>
+
+  <!-- MOVES: rows of boxes with crossing arrows -->
+  <g font-size="15" fill="#d9e5eb">
+    <!-- row 1 -->
+    <rect x="40" y="190" width="480" height="50" rx="6" fill="#1b2733" stroke="#2c3d4c"/>
+    <text x="56" y="212">SS epoch construction + hierarchy build</text>
+    <text x="56" y="231" fill="#8298a6" font-size="12">today: authored between input events and paint</text>
+    <rect x="880" y="190" width="480" height="50" rx="6" fill="#1b2733" stroke="#52d8c4"/>
+    <text x="896" y="212">&#8230;runs in the worker, admitted via StateManager</text>
+    <text x="896" y="231" fill="#8298a6" font-size="12">page thread never sees an epoch lifecycle again</text>
+    <line x1="520" y1="215" x2="880" y2="215" stroke="#52d8c4" stroke-width="2.5" marker-end="url(#mv)"/>
+    <text x="700" y="207" fill="#52d8c4" font-size="12" font-family="monospace" text-anchor="middle">MOVE</text>
+
+    <!-- row 2 -->
+    <rect x="40" y="256" width="480" height="50" rx="6" fill="#1b2733" stroke="#2c3d4c"/>
+    <text x="56" y="278">Command encoding + queue submission</text>
+    <text x="56" y="297" fill="#8298a6" font-size="12">incl. the contact solver&rsquo;s serial dispatch tail</text>
+    <rect x="880" y="256" width="480" height="50" rx="6" fill="#1b2733" stroke="#52d8c4"/>
+    <text x="896" y="278">&#8230;encoded worker-side in batched schedules</text>
+    <text x="896" y="297" fill="#8298a6" font-size="12">128-step amortization restored, epoch contract kept</text>
+    <line x1="520" y1="281" x2="880" y2="281" stroke="#52d8c4" stroke-width="2.5" marker-end="url(#mv)"/>
+    <text x="700" y="273" fill="#52d8c4" font-size="12" font-family="monospace" text-anchor="middle">MOVE</text>
+
+    <!-- row 3 -->
+    <rect x="40" y="322" width="480" height="50" rx="6" fill="#1b2733" stroke="#2c3d4c"/>
+    <text x="56" y="344">Cold pipeline compilation</text>
+    <text x="56" y="363" fill="#8298a6" font-size="12">today: synchronous, freezes first interaction</text>
+    <rect x="880" y="322" width="480" height="50" rx="6" fill="#1b2733" stroke="#52d8c4"/>
+    <text x="896" y="344">&#8230;async prewarm before first submission</text>
+    <text x="896" y="363" fill="#8298a6" font-size="12">variants compiled off-path; cache hit optional bonus</text>
+    <line x1="520" y1="347" x2="880" y2="347" stroke="#52d8c4" stroke-width="2.5" marker-end="url(#mv)"/>
+    <text x="700" y="339" fill="#52d8c4" font-size="12" font-family="monospace" text-anchor="middle">MOVE + ASYNC</text>
+
+    <!-- row 4 -->
+    <rect x="40" y="388" width="480" height="50" rx="6" fill="#1b2733" stroke="#2c3d4c"/>
+    <text x="56" y="410">Execution publication + status generation</text>
+    <text x="56" y="429" fill="#8298a6" font-size="12">today: renderStatus() traverses scene every step</text>
+    <rect x="880" y="388" width="480" height="50" rx="6" fill="#1b2733" stroke="#52d8c4"/>
+    <text x="896" y="410">&#8230;compact telemetry sampled at bounded cadence</text>
+    <text x="896" y="429" fill="#8298a6" font-size="12">UI reads snapshots; hidden panels cost zero</text>
+    <line x1="520" y1="413" x2="880" y2="413" stroke="#52d8c4" stroke-width="2.5" marker-end="url(#mv)"/>
+    <text x="700" y="405" fill="#52d8c4" font-size="12" font-family="monospace" text-anchor="middle">MOVE + BOUND</text>
+  </g>
+
+  <!-- DELETIONS -->
+  <rect x="40" y="478" width="640" height="170" rx="10" fill="#1b2733" stroke="#e07a6a" stroke-width="2"/>
+  <text x="60" y="508" fill="#e07a6a" font-size="14" font-family="monospace" letter-spacing="2">COUPLINGS DELETED</text>
+  <g font-size="14.5" fill="#d9e5eb">
+    <text x="60" y="536">&#10007; physics continuation waiting on rAF + presentation proof</text>
+    <text x="60" y="562">&#10007; one-step-per-schedule normalization of every preset</text>
+    <text x="60" y="588">&#10007; per-step schedule/epoch lifecycle on the page thread</text>
+    <text x="60" y="614">&#10007; <tspan font-family="monospace">direct-schroeder-scene</tspan> fallback as the ordinary route</text>
+  </g>
+  <text x="60" y="638" fill="#8298a6" font-size="12">each deletion is an acceptance criterion, not a hope &mdash; ss-regression.md pins all four</text>
+
+  <!-- ADDITIONS -->
+  <rect x="720" y="478" width="640" height="170" rx="10" fill="#1b2733" stroke="#b48ce8" stroke-width="2"/>
+  <text x="740" y="508" fill="#b48ce8" font-size="14" font-family="monospace" letter-spacing="2">NEW PIECES</text>
+  <g font-size="14.5" fill="#d9e5eb">
+    <text x="740" y="536">+ versioned render-candidate mailbox (publish/consume, no waits)</text>
+    <text x="740" y="562">+ selective law admission predicates (interface/kinematic/scale/settled)</text>
+    <text x="740" y="588">+ matching sweep-rate fix (chain drain &gt; 1 pair per 3 passes)</text>
+    <text x="740" y="614">+ render-truth fixes: first-schedule lane handoff, iso-flicker</text>
+  </g>
+  <text x="740" y="638" fill="#8298a6" font-size="12">then: dynamic law-graph viewer + reference-bank validation layer (roadmap)</text>
+
+  <!-- footer sequencing -->
+  <rect x="40" y="688" width="1320" height="130" rx="10" fill="#1b2733" stroke="#2c3d4c"/>
+  <text x="60" y="718" fill="#52d8c4" font-size="14" font-family="monospace">SEQUENCE</text>
+  <g font-size="14.5" fill="#d9e5eb">
+    <text x="60" y="746">1. Worker lane + admission + mailbox (moves rows above) &nbsp;&rarr;&nbsp; 2. prewarm + bounded telemetry &nbsp;&rarr;&nbsp; 3. batching restored &nbsp;&rarr;&nbsp;</text>
+    <text x="60" y="772">4. render-truth fixes (truth before beauty) &nbsp;&rarr;&nbsp; 5. sweep-rate + admission predicates &nbsp;&rarr;&nbsp; 6. rerun the full receipt campaign;</text>
+    <text x="60" y="798">default-enable only when the P0 contract passes on the same evidence machinery that gated the contained merge.</text>
+  </g>
+</svg>
+</div>

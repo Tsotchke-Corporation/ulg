@@ -1,0 +1,122 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  body { margin:0; background:#131c24; font-family:"DejaVu Sans",system-ui,sans-serif; }
+  #fig { width:1400px; }
+  svg { display:block; }
+</style>
+<div id="fig">
+<svg viewBox="0 0 1400 920" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="920" fill="#131c24"/>
+  <text x="40" y="52" fill="#52d8c4" font-size="15" letter-spacing="4" font-family="monospace">ULG SS &middot; PLANNED REFACTOR TARGET (branch ss-worker-lane-refactor)</text>
+  <text x="40" y="84" fill="#d9e5eb" font-size="28" font-weight="bold">Worker-owned resident lane, decoupled presentation, selective laws</text>
+
+  <!-- main thread (thin) -->
+  <rect x="40" y="120" width="330" height="560" rx="12" fill="#1b2733" stroke="#6fce8f" stroke-width="2"/>
+  <text x="60" y="152" fill="#6fce8f" font-size="14" font-family="monospace" letter-spacing="2">MAIN THREAD &mdash; UI only</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="60" y="172" width="290" height="56" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="195">UI input &middot; menus &middot; knobs</text>
+    <text x="74" y="216" fill="#8298a6" font-size="12.5">always responsive; taps never dropped</text>
+    <rect x="60" y="244" width="290" height="56" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="267">Presentation consume</text>
+    <text x="74" y="288" fill="#8298a6" font-size="12.5">draws latest committed candidate at rAF</text>
+    <rect x="60" y="316" width="290" height="56" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="339">Bounded telemetry UI</text>
+    <text x="74" y="360" fill="#8298a6" font-size="12.5">sampled cadence; no per-step traversal;</text>
+    <text x="74" y="376" fill="#8298a6" font-size="12.5">zero DOM work while panel hidden</text>
+    <rect x="60" y="404" width="290" height="56" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="427">Law-graph viewer</text>
+    <text x="74" y="448" fill="#8298a6" font-size="12.5">live view over seals (roadmap)</text>
+  </g>
+  <text x="60" y="510" fill="#6fce8f" font-size="12.5">GC breathes: idle time exists again,</text>
+  <text x="60" y="528" fill="#6fce8f" font-size="12.5">dev-reload garbage collected between waves</text>
+
+  <!-- worker lane (the new owner) -->
+  <rect x="430" y="120" width="560" height="560" rx="12" fill="#1b2733" stroke="#52d8c4" stroke-width="2.5"/>
+  <text x="450" y="152" fill="#52d8c4" font-size="14" font-family="monospace" letter-spacing="2">RESIDENT WORKER LANE &mdash; owns SS execution</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="450" y="172" width="255" height="60" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="464" y="195">StateManager admission</text>
+    <text x="464" y="216" fill="#8298a6" font-size="12.5">ComputeManager route restored;</text>
+    <text x="464" y="230" fill="#8298a6" font-size="11.5" font-family="monospace">no more direct-schroeder-scene</text>
+
+    <rect x="720" y="172" width="250" height="60" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="734" y="195">Async pipeline prewarm</text>
+    <text x="734" y="216" fill="#8298a6" font-size="12.5">cold compile off the interactive path;</text>
+    <text x="734" y="230" fill="#8298a6" font-size="11.5">first Play never freezes a page</text>
+
+    <rect x="450" y="248" width="520" height="64" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="464" y="271">Epoch construction &middot; encode &middot; submit &mdash; batched schedules</text>
+    <text x="464" y="292" fill="#8298a6" font-size="12.5">restore 128-step amortization while preserving the one-position-epoch</text>
+    <text x="464" y="306" fill="#8298a6" font-size="12.5">correctness contract; no page-thread lifecycle per step</text>
+
+    <rect x="450" y="328" width="520" height="72" rx="6" fill="#223140" stroke="#b48ce8"/>
+    <text x="464" y="351">Selective law admission predicates</text>
+    <text x="464" y="372" fill="#8298a6" font-size="12.5">interface &middot; kinematic &middot; scale &middot; settledness routing per region;</text>
+    <text x="464" y="388" fill="#8298a6" font-size="12.5">contact runs where it matters, budgets sized from measured chain depth</text>
+
+    <rect x="450" y="416" width="255" height="60" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="464" y="439">Matching sweep-rate fix</text>
+    <text x="464" y="460" fill="#8298a6" font-size="12.5">&gt;1 pair/pass on serial chains;</text>
+    <text x="464" y="474" fill="#8298a6" font-size="11.5">in-shader pass loop candidate</text>
+
+    <rect x="720" y="416" width="250" height="60" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="734" y="439">Truthful render field</text>
+    <text x="734" y="460" fill="#8298a6" font-size="12.5">first-schedule lane handoff fixed;</text>
+    <text x="734" y="474" fill="#8298a6" font-size="11.5">iso-flicker gone; truth before beauty</text>
+
+    <rect x="450" y="492" width="520" height="56" rx="6" fill="#223140" stroke="#52d8c4"/>
+    <text x="464" y="515">Versioned render-candidate mailbox</text>
+    <text x="464" y="536" fill="#8298a6" font-size="12.5">physics publishes; presentation consumes; neither ever waits for the other</text>
+  </g>
+  <text x="450" y="590" fill="#8298a6" font-size="12.5">strict TS control plane adopted incrementally at these module boundaries</text>
+  <text x="450" y="608" fill="#8298a6" font-size="12.5">(discriminated unions for scheduling/generation/submission terminal states)</text>
+
+  <!-- GPU column -->
+  <rect x="1050" y="120" width="310" height="560" rx="12" fill="#1b2733" stroke="#6fce8f" stroke-width="2"/>
+  <text x="1070" y="152" fill="#6fce8f" font-size="14" font-family="monospace" letter-spacing="2">GPU &mdash; laws unchanged</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="1070" y="172" width="270" height="56" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="195">Resident MLS-MPM step</text>
+    <text x="1084" y="216" fill="#8298a6" font-size="12.5">same physics, batched submits</text>
+    <rect x="1070" y="244" width="270" height="56" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="267">SS spatial kernels</text>
+    <text x="1084" y="288" fill="#8298a6" font-size="12.5">level routing serves admission</text>
+    <rect x="1070" y="316" width="270" height="56" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="339">Contact where admitted</text>
+    <text x="1084" y="360" fill="#8298a6" font-size="12.5">resting chains demoted to monitor</text>
+    <rect x="1070" y="388" width="270" height="56" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="411">Render field + surfaces</text>
+    <text x="1084" y="432" fill="#8298a6" font-size="12.5">still zero hot-loop readbacks</text>
+  </g>
+  <text x="1070" y="480" fill="#8298a6" font-size="12.5">tolerances never move: fail-closed</text>
+  <text x="1070" y="498" fill="#8298a6" font-size="12.5">semantics and residual gates identical</text>
+
+  <!-- arrows -->
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d9e5eb"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6fce8f"/></marker>
+  </defs>
+  <line x1="370" y1="200" x2="430" y2="200" stroke="#d9e5eb" stroke-width="2" marker-end="url(#a)"/>
+  <text x="352" y="188" fill="#8298a6" font-size="12" font-family="monospace">intents</text>
+  <path d="M 430,520 C 410,420 400,330 374,282" stroke="#6fce8f" stroke-width="2.5" fill="none" marker-end="url(#ag)"/>
+  <text x="272" y="595" fill="#6fce8f" font-size="13" font-family="monospace">candidates,</text>
+  <text x="272" y="612" fill="#6fce8f" font-size="13" font-family="monospace">no waiting</text>
+  <line x1="990" y1="280" x2="1050" y2="280" stroke="#d9e5eb" stroke-width="2" marker-end="url(#a)"/>
+  <text x="998" y="268" fill="#8298a6" font-size="12" font-family="monospace">batched</text>
+  <line x1="1050" y1="430" x2="990" y2="430" stroke="#d9e5eb" stroke-width="2" marker-end="url(#a)"/>
+  <text x="994" y="418" fill="#8298a6" font-size="12" font-family="monospace">done</text>
+
+  <!-- footer -->
+  <rect x="40" y="720" width="1320" height="160" rx="10" fill="#1b2733" stroke="#2c3d4c"/>
+  <text x="60" y="752" fill="#52d8c4" font-size="14" font-family="monospace">P0 ACCEPTANCE (plan/todo/ss-regression.md &mdash; the contract this branch must satisfy before default-enable):</text>
+  <g fill="#d9e5eb" font-size="14">
+    <text x="60" y="780">&#10003; canonical SS route no longer identifies as a scene-owned fallback &nbsp;&nbsp; &#10003; UI responsive through startup and sustained autoplay</text>
+    <text x="60" y="804">&#10003; physics cadence not gated by rAF or visible-frame completion &nbsp;&nbsp; &#10003; hidden status UI does no per-step traversal</text>
+    <text x="60" y="828">&#10003; cold pipeline prep cannot stall the page &nbsp;&nbsp; &#10003; accepted/presented step rate within a documented factor of GPU rate</text>
+    <text x="60" y="852">&#10003; each standard demo reaches its milestone &lt; 10 min with compositor motion &mdash; and no timeout may be raised to fake any of this</text>
+  </g>
+</svg>
+</div>

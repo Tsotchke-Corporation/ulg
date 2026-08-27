@@ -31649,6 +31649,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   contactJacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   contactCleanupPassBudget =
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+  // Diagnostic-only fixed-size readback of the matching-cleanup control
+  // buffer (per-pass applied-pair and selection counters). Explicit opt-in;
+  // ordinary runs perform no cleanup-profile readback.
+  contactCleanupProfileReadback = false,
   spatialReactionDiscoveryProposalRunner =
     runSchroederSpatialReactionDiscoveryProposalWebGpu,
   spatialThermalProposalRunner = runSchroederSpatialThermalProposalWebGpu,
@@ -33309,6 +33313,158 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           sealPolicy: null
         }
   );
+  // Opt-in bounded diagnostic: read the matching-cleanup control buffer once
+  // after all step submissions and publish a compact per-pass activity
+  // profile (applied pairs + contact frontier size per pass bucket). This is
+  // the reactionBinMetadataReadback pattern: an explicit CPU fence the caller
+  // requested, never part of the default no-full hot loop, reported with its
+  // own readback evidence rather than laundered into hot-loop claims.
+  step.matchingCleanupProfile = null;
+  if (
+    contactCleanupProfileReadback === true
+    && spatialMechanicalProposal?.matchingCleanupControlBuffer
+    && spatialMechanicalProposal?.solverBudgetDeclared
+    && typeof resolvedDevice?.createBuffer === 'function'
+    && typeof resolvedDevice?.createCommandEncoder === 'function'
+  ) {
+    const profileBudget = spatialMechanicalProposal.solverBudgetDeclared;
+    const profileWordCount = Number(profileBudget.matchingCleanupControlWords);
+    const profilePassCount = Number(profileBudget.cleanupPassBudget);
+    const profileParticleCount = Number(
+      mlsMpmParticleState?.particleCount
+        ?? sphParticleState?.particleCount
+        ?? 0
+    );
+    try {
+      if (
+        !Number.isInteger(profileWordCount)
+        || profileWordCount <= 0
+        || !Number.isInteger(profilePassCount)
+        || profilePassCount <= 0
+      ) {
+        throw new Error('matching cleanup profile layout unavailable');
+      }
+      const profileByteLength = profileWordCount * 4;
+      const profileReadbackBuffer = resolvedDevice.createBuffer({
+        label: 'ulg-matching-cleanup-profile-readback',
+        size: profileByteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      try {
+        const profileEncoder = resolvedDevice.createCommandEncoder({
+          label: 'ulg-matching-cleanup-profile-copy'
+        });
+        profileEncoder.copyBufferToBuffer(
+          spatialMechanicalProposal.matchingCleanupControlBuffer,
+          0,
+          profileReadbackBuffer,
+          0,
+          profileByteLength
+        );
+        resolvedDevice.queue.submit([profileEncoder.finish()]);
+        await profileReadbackBuffer.mapAsync(GPUMapMode.READ);
+        const profileWords = new Uint32Array(
+          profileReadbackBuffer.getMappedRange().slice(0)
+        );
+        profileReadbackBuffer.unmap();
+        const appliedBase = Number(profileBudget.appliedPairCountWord);
+        const selectionBase = Number(profileBudget.selectionCountWord);
+        const positionRatioBase = Number(profileBudget.maxPositionRatioWord);
+        const velocityResidualBase = Number(
+          profileBudget.maxVelocityResidualWord
+        );
+        const bitcastF32 = (word) => {
+          const view = new DataView(new ArrayBuffer(4));
+          view.setUint32(0, word >>> 0, true);
+          return view.getFloat32(0, true);
+        };
+        const bucketCount = 16;
+        const appliedPairPerBucket = new Array(bucketCount).fill(0);
+        const contactCountPerBucketMax = new Array(bucketCount).fill(0);
+        const maxPositionRatioPerBucket = new Array(bucketCount).fill(0);
+        const maxVelocityResidualPerBucket = new Array(bucketCount).fill(0);
+        let appliedPairTotal = 0;
+        let firstZeroAppliedPass = -1;
+        let lastNonzeroAppliedPass = -1;
+        let maxContactCount = 0;
+        for (let pass = 0; pass < profilePassCount; pass += 1) {
+          const bucket = Math.min(
+            bucketCount - 1,
+            Math.floor((pass * bucketCount) / profilePassCount)
+          );
+          const appliedAtPass = profileWords[appliedBase + pass] ?? 0;
+          appliedPairTotal += appliedAtPass;
+          if (appliedAtPass > 0) lastNonzeroAppliedPass = pass;
+          else if (firstZeroAppliedPass < 0) firstZeroAppliedPass = pass;
+          appliedPairPerBucket[bucket] += appliedAtPass;
+          const selectionAtPass = profileWords[selectionBase + pass] ?? 0;
+          const contactAtPass = Math.max(
+            0,
+            profileParticleCount - selectionAtPass
+          );
+          if (contactAtPass > contactCountPerBucketMax[bucket]) {
+            contactCountPerBucketMax[bucket] = contactAtPass;
+          }
+          if (contactAtPass > maxContactCount) maxContactCount = contactAtPass;
+          const positionRatioAtPass = bitcastF32(
+            profileWords[positionRatioBase + pass] ?? 0
+          );
+          if (
+            Number.isFinite(positionRatioAtPass)
+            && positionRatioAtPass > maxPositionRatioPerBucket[bucket]
+          ) {
+            maxPositionRatioPerBucket[bucket] = positionRatioAtPass;
+          }
+          const velocityResidualAtPass = bitcastF32(
+            profileWords[velocityResidualBase + pass] ?? 0
+          );
+          if (
+            Number.isFinite(velocityResidualAtPass)
+            && velocityResidualAtPass > maxVelocityResidualPerBucket[bucket]
+          ) {
+            maxVelocityResidualPerBucket[bucket] = velocityResidualAtPass;
+          }
+        }
+        step.matchingCleanupProfile = Object.freeze({
+          schema: 'peercompute.ulg.mls-mpm-matching-cleanup-profile.v0',
+          status: 'matching-cleanup-profile-readback-completed',
+          diagnosticOnly: true,
+          physicsHotLoopParticipation: false,
+          passBudget: profilePassCount,
+          particleCount: profileParticleCount,
+          readbackBytes: profileByteLength,
+          appliedPairTotal,
+          firstZeroAppliedPass,
+          lastNonzeroAppliedPass,
+          maxContactCount,
+          appliedPairPerBucket: Object.freeze(appliedPairPerBucket),
+          contactCountPerBucketMax: Object.freeze(contactCountPerBucketMax),
+          maxPositionRatioPerBucket: Object.freeze(maxPositionRatioPerBucket),
+          maxVelocityResidualPerBucket: Object.freeze(
+            maxVelocityResidualPerBucket
+          ),
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        });
+      } finally {
+        profileReadbackBuffer.destroy();
+      }
+    } catch (error) {
+      step.matchingCleanupProfile = Object.freeze({
+        schema: 'peercompute.ulg.mls-mpm-matching-cleanup-profile.v0',
+        status: 'matching-cleanup-profile-readback-failed',
+        diagnosticOnly: true,
+        physicsHotLoopParticipation: false,
+        reason: error instanceof Error ? error.message : String(error),
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+  }
   step.schroederSpatialExactNearProposalSummary = Object.freeze({
     status: canonicalSpatialProposalMode
       ? 'canonical-exact-near-consumer-proposals-submitted'

@@ -5416,6 +5416,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       data.twoLevelMechanicsAuthority
       || (enableTwoLevelMechanics ? 'authoritative' : 'observation'),
     residentStepStatus: residentStep.status ?? null,
+    // Opt-in cleanup-profile diagnostic (contactCleanupProfileReadback=1):
+    // named here explicitly because the summary is a whitelist — an unnamed
+    // step field never crosses the worker boundary.
+    matchingCleanupProfile: residentStep.matchingCleanupProfile
+      ? { ...residentStep.matchingCleanupProfile }
+      : null,
     twoLevelFineSubstepCount:
       residentStep.twoLevelFineSubstepCount ?? null,
     twoLevelCflFactor,

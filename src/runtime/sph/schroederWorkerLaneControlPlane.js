@@ -52,6 +52,7 @@ const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'contactKinematicsParticleBinMetadataReadback',
   'contactJacobiIterations',
   'contactCleanupPassBudget',
+  'contactCleanupProfileReadback',
   'reactionParticleBinMetadataReadback',
   // Diagnostic-only fixed-size GPU authority receipts. Keep this explicit:
   // ordinary worker schedules remain readback-free unless the caller opts in.

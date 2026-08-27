@@ -36387,6 +36387,7 @@ fn main(
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
     pressureInterfaceGasCellFieldAdmission = null,
     contactKinematicsParticleBinMetadataReadback = false,
+    contactCleanupProfileReadback = false,
     reactionParticleBinMetadataReadback = false,
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
@@ -36444,6 +36445,9 @@ fn main(
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
+    const requestedContactCleanupProfileReadback = Boolean(
+      contactCleanupProfileReadback
+    );
     const requestedReactionParticleBinMetadataReadback = Boolean(
       reactionParticleBinMetadataReadback
     );
@@ -36470,6 +36474,8 @@ fn main(
       physicalLawGroups: lawGroups,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
+      contactCleanupProfileReadback:
+        requestedContactCleanupProfileReadback,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback
     });
@@ -36675,6 +36681,8 @@ fn main(
           pressureInterfaceGasCellFieldAdmission,
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
+          contactCleanupProfileReadback:
+            requestedContactCleanupProfileReadback,
           reactionParticleBinMetadataReadback:
             requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
@@ -36752,6 +36760,8 @@ fn main(
             physicalLawGroups: lawGroups,
             contactKinematicsParticleBinMetadataReadback:
               requestedContactKinematicsParticleBinMetadataReadback,
+            contactCleanupProfileReadback:
+              requestedContactCleanupProfileReadback,
             reactionParticleBinMetadataReadback:
               requestedReactionParticleBinMetadataReadback
           }) !== signature
@@ -36911,6 +36921,7 @@ fn main(
     schroederParticleStorageMaterializationAdmission = null,
     thermalStepOptions: thermalStepOptionOverrides = null,
     contactKinematicsParticleBinMetadataReadback = false,
+    contactCleanupProfileReadback = false,
     reactionParticleBinMetadataReadback = false,
     emitResidentProgressConsole = true,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
@@ -37617,6 +37628,9 @@ fn main(
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
+    const requestedContactCleanupProfileReadback = Boolean(
+      contactCleanupProfileReadback
+    );
     const requestedReactionParticleBinMetadataReadback = Boolean(
       reactionParticleBinMetadataReadback
     );
@@ -37674,6 +37688,8 @@ fn main(
       ),
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
+      contactCleanupProfileReadback:
+        requestedContactCleanupProfileReadback,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback,
       schroederSimulation: requestedSchroederSimulation,
@@ -37843,6 +37859,8 @@ fn main(
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
+      contactCleanupProfileReadback:
+        requestedContactCleanupProfileReadback,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
@@ -38421,6 +38439,8 @@ fn main(
           // batch/native default.
           contactJacobiIterations: requestedContactJacobiIterations,
           contactCleanupPassBudget: requestedContactCleanupPassBudget,
+          contactCleanupProfileReadback:
+            requestedContactCleanupProfileReadback,
           reactionParticleBinMetadataReadback:
             requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
@@ -40630,6 +40650,8 @@ fn main(
             measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
             contactKinematicsParticleBinMetadataReadback:
               requestedContactKinematicsParticleBinMetadataReadback,
+            contactCleanupProfileReadback:
+              requestedContactCleanupProfileReadback,
             reactionParticleBinMetadataReadback:
               requestedReactionParticleBinMetadataReadback,
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,

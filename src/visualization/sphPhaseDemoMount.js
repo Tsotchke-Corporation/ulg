@@ -7101,6 +7101,11 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('contactKinematicsParticleBinMetadataReadback'),
     false
   );
+  const initialContactCleanupProfileReadbackEnabled = booleanUrlParam(
+    initialHash.get('contactCleanupProfileReadback')
+      ?? initialQuery.get('contactCleanupProfileReadback'),
+    false
+  );
   const initialReactionBinMetadataReadbackEnabled = booleanUrlParam(
     initialHash.get('reactionBinMetadataReadback')
       ?? initialQuery.get('reactionBinMetadataReadback')
@@ -7480,6 +7485,8 @@ export async function mountSphPhaseDemoOverlay({
       measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled,
       contactKinematicsParticleBinMetadataReadback:
         initialContactBinMetadataReadbackEnabled,
+      contactCleanupProfileReadback:
+        initialContactCleanupProfileReadbackEnabled,
       reactionParticleBinMetadataReadback:
         initialReactionBinMetadataReadbackEnabled
     };

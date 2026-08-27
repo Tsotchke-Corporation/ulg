@@ -1161,6 +1161,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'contactSolver',
   'contactJacobiIterations',
   'contactCleanupPasses',
+  'contactInnerRounds',
   'bg',
   'bgimg',
   'lighting',
@@ -6682,6 +6683,7 @@ export async function mountSphPhaseDemoOverlay({
     'contactSolver',
     'contactJacobiIterations',
     'contactCleanupPasses',
+    'contactInnerRounds',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);

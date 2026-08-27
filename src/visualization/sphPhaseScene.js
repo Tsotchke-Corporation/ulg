@@ -21893,6 +21893,7 @@ export function createSphPhaseScene(container, {
     schroederSimulation = false,
     contactJacobiIterations = null,
     contactCleanupPassBudget = null,
+    contactInnerRounds = null,
     schroederSelectedLevel = 0,
     schroederMinLevel = null,
     schroederMaxLevel = null,
@@ -21939,6 +21940,7 @@ export function createSphPhaseScene(container, {
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
       `contactJacobi=${contactJacobiIterations ?? 'preset'}`,
       `contactCleanup=${contactCleanupPassBudget ?? 'preset'}`,
+      `contactInnerRounds=${contactInnerRounds ?? 'preset'}`,
       `ssLevel=${Math.round(Number(schroederSelectedLevel) || 0)}`,
       `ssMin=${schroederMinLevel ?? 'default'}`,
       `ssMax=${schroederMaxLevel ?? 'default'}`,
@@ -38458,7 +38460,6 @@ fn main(
           contactJacobiIterations: requestedContactJacobiIterations,
           contactCleanupPassBudget: requestedContactCleanupPassBudget,
           contactInnerRounds: requestedContactInnerRounds,
-      contactInnerRounds: requestedContactInnerRounds,
           contactCleanupProfileReadback:
             requestedContactCleanupProfileReadback,
           residentGpuTimestampProfilingRequested:
@@ -40607,11 +40608,13 @@ fn main(
             contactSolver: requestedSchroederContactSolverEnabled ? 1 : 0,
             requested: Object.freeze({
               jacobiIterations: schroederContactJacobiIterations ?? null,
-              cleanupPassBudget: schroederContactCleanupPassBudget ?? null
+              cleanupPassBudget: schroederContactCleanupPassBudget ?? null,
+              innerRounds: schroederContactInnerRounds ?? null
             }),
             clamped: Object.freeze({
               jacobiIterations: requestedContactJacobiIterations,
-              cleanupPassBudget: requestedContactCleanupPassBudget
+              cleanupPassBudget: requestedContactCleanupPassBudget,
+              innerRounds: requestedContactInnerRounds
             }),
             run: runSealCandidates.find((candidate) => candidate != null)
               ?? Object.freeze({
@@ -40684,8 +40687,6 @@ fn main(
             contactJacobiIterations: requestedContactJacobiIterations,
             contactCleanupPassBudget: requestedContactCleanupPassBudget,
             contactInnerRounds: requestedContactInnerRounds,
-          contactInnerRounds: requestedContactInnerRounds,
-      contactInnerRounds: requestedContactInnerRounds,
             schroederSelectedLevel: requestedSchroederSelectedLevel,
             schroederMinLevel: requestedSchroederMinLevel,
             schroederMaxLevel: requestedSchroederMaxLevel,

@@ -304,3 +304,29 @@ Reaching a sustained 30 needs either a lower interactive budget
 silently) or another ~3.5x on per-pass cost (0.151 -> 0.043), beyond
 what lane-grouping has left. iron-ice-quench runs 6.5 steps/s at
 default on the same commits.
+
+## Final attribution & pipeline fixes (2026-08-27, f05c5c4)
+
+Tooling now decomposes everything (residentGpuTimestampProfile=1):
+contact pass timestamps + a per-stage queue timeline across the step
+(queue:* keys) + an internal epoch-generation timeline. Hard-won
+lesson: queue-interval BRACKETS on a busy queue measure occupancy, not
+the stage — the epoch generation "22.4 ms" was backlog draining inside
+the bracket; its internal timeline shows 0.93 ms of real device work.
+
+At budget 128, N=1216, step ~192: step queue 32.6 ms = cleanup owner
+18.4 + Jacobi 4.2 + gas-EOS producer 7.0 + ~3 everything else; epoch
+~1; the queue runs ~96% busy after the lagged drain (the 16-step Dawn
+pressure checkpoint now awaits the PREVIOUS boundary's fence; stalls
+halved, physics bit-identical). Schedule length is NOT the limiter and
+the presentation was ruled out (per-commit field build ~12 ms, raster
+viewport-independent).
+
+Scoreboard (sodium-water, default 512 preset): 1.7 origin -> 4.9 ->
+11.6 (lane grouping) -> 14.7 steps/s (lagged drain). Budget-128
+deadline config: ~20-21 steps/s. Road to a sustained 30:
+1. owner 18.4 -> ~12 (further lane micro or admission redesign)
+2. gas-EOS producer 7.0 -> ~2 (unexplored; N=1216!)
+3. per-64-step commit/verify/turnaround ~14 ms/step -> ~8
+plus the budget decision if the owner wants the deadline guaranteed at
+impact steps.

@@ -323,8 +323,13 @@ the presentation was ruled out (per-commit field build ~12 ms, raster
 viewport-independent).
 
 Scoreboard (sodium-water, default 512 preset): 1.7 origin -> 4.9 ->
-11.6 (lane grouping) -> 14.7 steps/s (lagged drain). Budget-128
-deadline config: ~20-21 steps/s. Road to a sustained 30:
+11.6 (lane grouping) -> 15.3 steps/s (lagged drain, await-then-start
+ordering: a failed checkpoint aborts without touching the queue again;
+fence counts per schedule = 1 seed + 1 per satisfied checkpoint +
+terminal). Budget-128 deadline config: ~20-21 steps/s. The gas-EOS
+producer's mapAsync is fallback-only (the lane takes the
+queue-submitted-cleanup-deferred zero-readback path), so its ~7 ms is
+real kernel work. Road to a sustained 30:
 1. owner 18.4 -> ~12 (further lane micro or admission redesign)
 2. gas-EOS producer 7.0 -> ~2 (unexplored; N=1216!)
 3. per-64-step commit/verify/turnaround ~14 ms/step -> ~8

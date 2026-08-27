@@ -7236,16 +7236,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // encode pipeline keeps running ahead of device completion instead
         // of stalling for the newest submissions every interval.
         const laggedFencePromise = pendingQueueDrainFencePromise;
-        pendingQueueDrainFencePromise = (() => {
-          try {
-            return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
-          } catch {
-            return null;
-          }
-        })();
-        if (pendingQueueDrainFencePromise?.catch) {
-          pendingQueueDrainFencePromise.catch(() => {});
-        }
+        pendingQueueDrainFencePromise = null;
         const checkpoint =
           await completeWorkerResidentScheduleQueueDrainCheckpoint({
             workerDevice: state.workerDevice,
@@ -7255,6 +7246,22 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             completedStepCount,
             fencePromise: laggedFencePromise
           });
+        if (checkpoint.fenceSatisfied === true) {
+          // Start the next window's fence only after this one succeeded, so
+          // a failed checkpoint aborts without touching the queue again. The
+          // fence starts after the current window's submissions, so awaiting
+          // it at the NEXT checkpoint still bounds unfenced work by roughly
+          // two intervals while the encode pipeline keeps running.
+          try {
+            pendingQueueDrainFencePromise =
+              state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
+          } catch {
+            pendingQueueDrainFencePromise = null;
+          }
+          if (pendingQueueDrainFencePromise?.catch) {
+            pendingQueueDrainFencePromise.catch(() => {});
+          }
+        }
         queueDrainCheckpoints.push(checkpoint);
         if (checkpoint.fenceSatisfied !== true) {
           failedQueueDrainCheckpoint = checkpoint;

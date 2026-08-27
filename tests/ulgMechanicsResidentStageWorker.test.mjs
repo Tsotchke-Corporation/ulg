@@ -5716,8 +5716,10 @@ test('ULG resident schedule bounds queued work with non-authoritative 16-step dr
   assert.equal(result.gpuFence.authorityAdmissionReady, true);
   assert.equal(
     fixture.device.queue.submittedWorkDoneCount,
-    2,
-    'one pressure drain plus the terminal authority fence'
+    3,
+    'the lagged drain starts a fence at the loop seed and after each '
+      + 'satisfied checkpoint (awaited at the NEXT boundary), plus the '
+      + 'terminal authority fence'
   );
   assertNoWorkerGpuBuffers(result, 'boundedQueueDrainScheduleResult');
   structuredClone(result);
@@ -6039,8 +6041,10 @@ test('ULG resident schedule keeps SS transport refs bounded across 256 persisten
   );
   assert.equal(
     fixture.device.queue.submittedWorkDoneCount,
-    16,
-    'each 128-step schedule drains seven bounded windows plus its terminal fence'
+    18,
+    'each 128-step schedule seeds one lagged-drain fence, starts one after '
+      + 'each of its seven satisfied checkpoints, and closes with its '
+      + 'terminal fence'
   );
 });
 

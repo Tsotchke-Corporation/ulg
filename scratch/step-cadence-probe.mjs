@@ -32,6 +32,7 @@ while (Date.now() - t0 < horizonMs) {
             epoch: r.epochStageElapsedMs,
             mech: r.mechanicsStageElapsedMs,
             epochGpu: r.epochQueueIntervalMs ?? null,
+            epochTimeline: r.epochQueueTimeline ?? null,
           }))
         : [],
     };

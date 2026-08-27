@@ -31874,8 +31874,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     stageMs[name] = Math.max(0, nowMs() - startMs);
     return stageMs[name];
   };
+  let submitStepTimelineMarker = null;
   const timedStage = async (name, runStage) => {
     const startMs = nowMs();
+    if (submitStepTimelineMarker) {
+      try { submitStepTimelineMarker(name); } catch {}
+    }
     markStageProgress('resident-stage-started', { stage: name });
     try {
       const result = gpuTimestampRecorder?.active === true
@@ -31935,7 +31939,54 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     // command buffers.
     let stepQueueIntervalProfiler = null;
     let stepQueueIntervalBracket = null;
+    // Stage-boundary timeline: one timestamp marker submitted at the start
+    // of every timed stage plus a final end marker decodes into per-stage
+    // queue intervals (sequential stages on one queue; only presentation
+    // frames interleave).
+    let stepTimelineQuerySet = null;
+    let stepTimelineResolveBuffer = null;
+    let stepTimelineReadBuffer = null;
+    const stepTimelineStages = [];
+    const stepTimelineCapacity = 24;
+    submitStepTimelineMarker = (stage) => {
+      if (
+        !stepTimelineQuerySet
+        || stepTimelineStages.length >= stepTimelineCapacity
+      ) return;
+      try {
+        const markerEncoder = resolvedDevice.createCommandEncoder();
+        encodeSphGpuTimestampMarkerPass(markerEncoder, {
+          querySet: stepTimelineQuerySet,
+          queryIndex: stepTimelineStages.length,
+          boundary: 'end',
+          label: `ulg-mls-mpm-step-timeline-${stage}`
+        });
+        resolvedDevice.queue.submit([markerEncoder.finish()]);
+        stepTimelineStages.push(String(stage));
+      } catch {
+        // diagnostic only
+      }
+    };
     if (residentGpuTimestampProfilingRequested === true && resolvedDevice) {
+      try {
+        stepTimelineQuerySet = resolvedDevice.createQuerySet({
+          label: 'ulg-mls-mpm-step-timeline',
+          type: 'timestamp',
+          count: stepTimelineCapacity
+        });
+        stepTimelineResolveBuffer = resolvedDevice.createBuffer({
+          label: 'ulg-mls-mpm-step-timeline-resolve',
+          size: stepTimelineCapacity * 8,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+        });
+        stepTimelineReadBuffer = resolvedDevice.createBuffer({
+          label: 'ulg-mls-mpm-step-timeline-read',
+          size: stepTimelineCapacity * 8,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+      } catch {
+        stepTimelineQuerySet = null;
+      }
       try {
         stepQueueIntervalProfiler = createSphGpuTimestampProfiler({
           device: resolvedDevice,
@@ -33112,6 +33163,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   );
   if (stepQueueIntervalBracket && stepQueueIntervalProfiler) {
     try {
+      if (submitStepTimelineMarker) submitStepTimelineMarker('stepEnd');
       const markerEncoder = resolvedDevice.createCommandEncoder();
       encodeSphGpuTimestampMarkerPass(markerEncoder, {
         querySet: stepQueueIntervalBracket.timestampWrites.querySet,
@@ -33120,6 +33172,22 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         boundary: 'end',
         label: 'ulg-mls-mpm-step-queue-interval-end'
       });
+      if (stepTimelineQuerySet && stepTimelineStages.length > 0) {
+        markerEncoder.resolveQuerySet(
+          stepTimelineQuerySet,
+          0,
+          stepTimelineStages.length,
+          stepTimelineResolveBuffer,
+          0
+        );
+        markerEncoder.copyBufferToBuffer(
+          stepTimelineResolveBuffer,
+          0,
+          stepTimelineReadBuffer,
+          0,
+          stepTimelineStages.length * 8
+        );
+      }
       stepQueueIntervalProfiler.resolve(markerEncoder);
       resolvedDevice.queue.submit([markerEncoder.finish()]);
     } catch {
@@ -33158,6 +33226,34 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       }
     } catch {
       // Fused bracket read is diagnostic-only; ignore failures.
+    }
+  }
+  if (stepTimelineQuerySet && stepTimelineStages.length > 0) {
+    try {
+      await stepTimelineReadBuffer.mapAsync(GPUMapMode.READ);
+      const raw = new BigUint64Array(
+        stepTimelineReadBuffer.getMappedRange().slice(0)
+      );
+      stepTimelineReadBuffer.unmap();
+      const timelineMs = {};
+      for (let index = 0; index + 1 < stepTimelineStages.length; index += 1) {
+        const delta = Number(raw[index + 1] - raw[index]) / 1e6;
+        const key = `queue:${stepTimelineStages[index]}`;
+        timelineMs[key] = (timelineMs[key] ?? 0) + delta;
+      }
+      contactGpuPassProfile = {
+        ...(contactGpuPassProfile ?? { status: 'step-timeline' }),
+        stageGpuMs: {
+          ...(contactGpuPassProfile?.stageGpuMs ?? {}),
+          ...timelineMs
+        }
+      };
+    } catch {
+      // diagnostic only
+    } finally {
+      try { stepTimelineQuerySet.destroy?.(); } catch {}
+      try { stepTimelineResolveBuffer?.destroy?.(); } catch {}
+      try { stepTimelineReadBuffer?.destroy?.(); } catch {}
     }
   }
   if (stepQueueIntervalProfiler) {

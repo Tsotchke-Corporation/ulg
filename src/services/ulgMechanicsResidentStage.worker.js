@@ -4493,11 +4493,23 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       // artifact the hierarchy-owned path requests for its transaction.
       phaseVolumeInterfaceProposalEnabled: authoritativeTwoLevel,
       exactNearCellTreeEnabled: data.exactNearCellTreeEnabled !== false,
+      gpuQueueTimelineRequested: epochProfilingRequested,
       gpuTimestampRecorder: null
     });
   } catch (error) {
     releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
     throw error;
+  }
+  let epochQueueTimeline = null;
+  if (
+    epochProfilingRequested
+    && typeof generation?.readGenerationQueueTimeline === 'function'
+  ) {
+    try {
+      epochQueueTimeline = await generation.readGenerationQueueTimeline();
+    } catch {
+      epochQueueTimeline = null;
+    }
   }
   let epochQueueIntervalMs = null;
   if (epochIntervalBracket && epochIntervalProfiler) {
@@ -4619,6 +4631,7 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     // Diagnostic-only bracketed device interval of the epoch generation
     // (null unless residentGpuTimestampProfile=1).
     epochQueueIntervalMs,
+    epochQueueTimeline,
     epochSeal,
     epochRetainedInLane: true,
     epochStepOrdinal: record.schroederLane.stepOrdinal,
@@ -5904,7 +5917,11 @@ async function completeWorkerResidentScheduleQueueDrainCheckpoint({
   scheduleId,
   laneId,
   stateKey,
-  completedStepCount
+  completedStepCount,
+  // Lagged-drain support: a fence the CALLER already started (covering work
+  // through an earlier checkpoint). Awaiting it bounds unfenced work without
+  // stalling the encode pipeline behind the newest submissions.
+  fencePromise = null
 } = {}) {
   const normalizedCompletedStepCount = Math.max(
     0,
@@ -5938,7 +5955,7 @@ async function completeWorkerResidentScheduleQueueDrainCheckpoint({
   }
   const startedAtMs = workerResidentScheduleNowMs();
   try {
-    await queue.onSubmittedWorkDone();
+    await (fencePromise ?? queue.onSubmittedWorkDone());
   } catch (error) {
     return {
       ...base,
@@ -6622,6 +6639,20 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let lastMechanicsStageResult = null;
     let lastStepSummary = null;
     const stepSummaryRing = [];
+    // Lagged-drain state: the queue fence started at the previous drain
+    // checkpoint (see the checkpoint block below). Seeded immediately so the
+    // first checkpoint awaits a real fence (covering lane seed uploads)
+    // rather than fully draining the newest submissions.
+    let pendingQueueDrainFencePromise = (() => {
+      try {
+        return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    if (pendingQueueDrainFencePromise?.catch) {
+      pendingQueueDrainFencePromise.catch(() => {});
+    }
     let droppedStepSummaryCount = 0;
     let phaseVolumeSurfaceStressRequired = false;
     let phaseVolumeSurfaceStressObservedStepCount = 0;
@@ -7159,7 +7190,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         epochStageElapsedMs,
         mechanicsStageElapsedMs,
         epochQueueIntervalMs:
-          epochStageResult.value?.epochQueueIntervalMs ?? null
+          epochStageResult.value?.epochQueueIntervalMs ?? null,
+        epochQueueTimeline:
+          epochStageResult.value?.epochQueueTimeline ?? null
       });
       if (
         stepSummaryRing.length
@@ -7195,13 +7228,32 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // after posting the boundary candidate. This bounds both canonical
         // compute and worker-local render work without publishing an
         // authority fence before the schedule terminal.
+        //
+        // Lagged drain: the fence awaited here was STARTED at the previous
+        // checkpoint, so it covers all work submitted through that earlier
+        // boundary. Unfenced work stays bounded by two checkpoint intervals
+        // (the Dawn pressure bound this checkpoint exists for) while the
+        // encode pipeline keeps running ahead of device completion instead
+        // of stalling for the newest submissions every interval.
+        const laggedFencePromise = pendingQueueDrainFencePromise;
+        pendingQueueDrainFencePromise = (() => {
+          try {
+            return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
+          } catch {
+            return null;
+          }
+        })();
+        if (pendingQueueDrainFencePromise?.catch) {
+          pendingQueueDrainFencePromise.catch(() => {});
+        }
         const checkpoint =
           await completeWorkerResidentScheduleQueueDrainCheckpoint({
             workerDevice: state.workerDevice,
             scheduleId,
             laneId,
             stateKey,
-            completedStepCount
+            completedStepCount,
+            fencePromise: laggedFencePromise
           });
         queueDrainCheckpoints.push(checkpoint);
         if (checkpoint.fenceSatisfied !== true) {

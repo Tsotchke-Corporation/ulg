@@ -4046,6 +4046,10 @@ function consumeNativeTestLegacyLevelAssignmentDirectoryV1Arm(
  */
 export function runSchroederSpatialEpochGenerationWebGpu({
   device,
+  // Diagnostic-only: capture a device-timestamp timeline at each internal
+  // generation boundary (markGenerationQueueBoundary sites) so the epoch
+  // build's ~22 ms/step decomposes. Requires 'timestamp-query'.
+  gpuQueueTimelineRequested = false,
   levelAssignment = null,
   activeNodeList,
   particleCount = null,
@@ -4413,8 +4417,59 @@ export function runSchroederSpatialEpochGenerationWebGpu({
           physicsSubstep: source.physicsSubstep
       })
       : null;
-    const markGenerationQueueBoundary = (stage, extra = {}) => (
-      gpuTimestampRecorder?.markQueueBoundary?.({
+    const queueTimelineCapacity = 24;
+    let queueTimelineQuerySet = null;
+    let queueTimelineResolveBuffer = null;
+    let queueTimelineReadBuffer = null;
+    let queueTimelineStages = [];
+    let queueTimelineSealed = false;
+    if (
+      gpuQueueTimelineRequested === true
+      && typeof device?.features?.has === 'function'
+      && device.features.has('timestamp-query')
+      && typeof device.createQuerySet === 'function'
+    ) {
+      try {
+        queueTimelineQuerySet = device.createQuerySet({
+          label: 'ulg-schroeder-generation-queue-timeline',
+          type: 'timestamp',
+          count: queueTimelineCapacity
+        });
+        queueTimelineResolveBuffer = device.createBuffer({
+          label: 'ulg-schroeder-generation-queue-timeline-resolve',
+          size: queueTimelineCapacity * 8,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+        });
+        queueTimelineReadBuffer = device.createBuffer({
+          label: 'ulg-schroeder-generation-queue-timeline-read',
+          size: queueTimelineCapacity * 8,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+      } catch {
+        queueTimelineQuerySet = null;
+        queueTimelineResolveBuffer = null;
+        queueTimelineReadBuffer = null;
+      }
+    }
+    const markGenerationQueueBoundary = (stage, extra = {}) => {
+      if (
+        queueTimelineQuerySet
+        && !queueTimelineSealed
+        && queueTimelineStages.length < queueTimelineCapacity
+      ) {
+        // A boundary timestamp is the beginning of an empty marker pass, so
+        // it lands after every previously encoded command retires.
+        const markerPass = encoder.beginComputePass({
+          label: `ulg-schroeder-generation-timeline-${stage}`,
+          timestampWrites: {
+            querySet: queueTimelineQuerySet,
+            beginningOfPassWriteIndex: queueTimelineStages.length
+          }
+        });
+        markerPass.end();
+        queueTimelineStages.push(String(stage));
+      }
+      return gpuTimestampRecorder?.markQueueBoundary?.({
         producerId: `schroeder-spatial-generation-${stage}`,
         stage,
         generationId,
@@ -4423,8 +4478,8 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         physicsTick: source.physicsTick,
         physicsSubstep: source.physicsSubstep,
         ...extra
-      })
-    );
+      });
+    };
     markGenerationQueueBoundary('generation-start');
     if (
       directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
@@ -5028,6 +5083,23 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       physicsTick: source.physicsTick,
       physicsSubstep: source.physicsSubstep
     });
+    if (queueTimelineQuerySet && queueTimelineStages.length > 0) {
+      encoder.resolveQuerySet(
+        queueTimelineQuerySet,
+        0,
+        queueTimelineStages.length,
+        queueTimelineResolveBuffer,
+        0
+      );
+      encoder.copyBufferToBuffer(
+        queueTimelineResolveBuffer,
+        0,
+        queueTimelineReadBuffer,
+        0,
+        queueTimelineStages.length * 8
+      );
+      queueTimelineSealed = true;
+    }
     device.queue.submit([encoder.finish()]);
     submissionPerformed = true;
     markGenerationQueueBoundary('after-generation-submit');
@@ -5097,6 +5169,34 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-epoch-generation-submitted',
       reason: null,
+      // Diagnostic-only: resolve the boundary-timestamp timeline captured
+      // this generation (null when not requested). One-shot; destroys the
+      // query resources with the read. Values are ms since the first
+      // boundary, one entry per markGenerationQueueBoundary site reached
+      // before submit.
+      async readGenerationQueueTimeline() {
+        if (!queueTimelineQuerySet || queueTimelineStages.length === 0) {
+          return null;
+        }
+        try {
+          await queueTimelineReadBuffer.mapAsync(GPUMapMode.READ);
+          const raw = new BigUint64Array(
+            queueTimelineReadBuffer.getMappedRange().slice(0)
+          );
+          queueTimelineReadBuffer.unmap();
+          const base = raw[0];
+          return queueTimelineStages.map((stage, index) => ({
+            stage,
+            atMs: Number(raw[index] - base) / 1e6
+          }));
+        } catch {
+          return null;
+        } finally {
+          try { queueTimelineQuerySet.destroy?.(); } catch {}
+          try { queueTimelineResolveBuffer?.destroy?.(); } catch {}
+          try { queueTimelineReadBuffer?.destroy?.(); } catch {}
+        }
+      },
       ready: true,
       selected: true,
       source,

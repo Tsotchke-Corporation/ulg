@@ -55,6 +55,9 @@ import {
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
 import {
+  createSphGpuTimestampProfiler
+} from './sphGpuTimestampProfiler.js';
+import {
   SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS,
   bindSchroederSpatialExactNearResidentConsumerEvidence,
   resolveSchroederSpatialExactNearConsumerGeneration
@@ -19371,6 +19374,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   pairGraphByteBudget = null,
   retainCompleteAuthenticatedCellCliques = false,
   gpuTimestampRecorder = null,
+  // Diagnostic pass-level GPU timestamps for this proposal's compute
+  // passes (build, Jacobi iterations, cleanup owner, verify, publish).
+  // Requires a device created with 'timestamp-query'; inert otherwise.
+  gpuPassTimestampProfilingRequested = false,
   diagnosticTrace = null,
   capture = null,
   sequenceIndex = null,
@@ -19993,6 +20000,16 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
       && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
   );
+  const contactPassProfiler = createSphGpuTimestampProfiler({
+    device,
+    enabled: gpuPassTimestampProfilingRequested === true,
+    capacity: 48,
+    label: 'ulg-schroeder-spatial-mechanical-contact-passes'
+  });
+  // The split-pass encode below exists for timing; enter it when either
+  // instrument is live.
+  const contactPassSplitActive = contactTimestampActive
+    || contactPassProfiler.enabled === true;
   const beginContactTimestamp = (encoder, stage) => (
     contactTimestampActive
       ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
@@ -20938,13 +20955,14 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
         const legacyMatchingCleanupActive = Boolean(
           diagnosticTracePipelines
         );
-        if (contactTimestampActive) {
+        if (contactPassSplitActive) {
           const validationTimestamp = beginContactTimestamp(
             encoder,
             'scatter-validate'
           );
           const validationPass = encoder.beginComputePass({
-            label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-validate'
+            label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-validate',
+            ...contactPassProfiler.passDescriptorExtras('scatter-validate')
           });
           encodeScatterAndValidation(validationPass);
           validationPass.end();
@@ -20960,7 +20978,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             );
             const iterationPass = encoder.beginComputePass({
               label:
-                `ulg-schroeder-spatial-mechanical-contact-graph-iteration-${iteration}`
+                `ulg-schroeder-spatial-mechanical-contact-graph-iteration-${iteration}`,
+              ...contactPassProfiler.passDescriptorExtras('jacobi-iterations')
             });
             encodeSolverIteration(
               iterationPass,
@@ -21011,7 +21030,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             );
             const cleanupPassEncoder = encoder.beginComputePass({
               label:
-                'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner'
+                'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
+              ...contactPassProfiler.passDescriptorExtras(
+                'matching-cleanup-owner'
+              )
             });
             encodeMatchingCleanupOwner(
               cleanupPassEncoder,
@@ -21029,7 +21051,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             'energy-residual-verify'
           );
           const verificationPass = encoder.beginComputePass({
-            label: 'ulg-schroeder-spatial-mechanical-contact-graph-verify'
+            label: 'ulg-schroeder-spatial-mechanical-contact-graph-verify',
+            ...contactPassProfiler.passDescriptorExtras('energy-residual-verify')
           });
           encodeVerification(
             verificationPass,
@@ -21110,7 +21133,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
 
         const publishTimestamp = beginContactTimestamp(encoder, 'publish');
         const publishPass = encoder.beginComputePass({
-          label: 'ulg-schroeder-spatial-mechanical-contact-graph-publish'
+          label: 'ulg-schroeder-spatial-mechanical-contact-graph-publish',
+          ...contactPassProfiler.passDescriptorExtras('publish')
         });
         const publishEntries = applyEntries(
           canonicalStateBuffer,
@@ -21129,7 +21153,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
 
         const commitTimestamp = beginContactTimestamp(encoder, 'seal-commit');
         const commitPass = encoder.beginComputePass({
-          label: 'ulg-schroeder-spatial-mechanical-contact-graph-commit'
+          label: 'ulg-schroeder-spatial-mechanical-contact-graph-commit',
+          ...contactPassProfiler.passDescriptorExtras('seal-commit')
         });
         const commitEntries = applyEntries(
           outputStateBuffer,
@@ -21237,7 +21262,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
               : 0
           )
           + preparedScan.encodedDispatchCount;
-        encodedComputePassCount = contactTimestampActive
+        encodedComputePassCount = contactPassSplitActive
           ? 9
             + solverBudget.jacobiIterations
             + (
@@ -21250,6 +21275,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           capturePlan.record.lastProposal = artifact;
           capturePlan.record.nextSequenceIndex += 1;
         }
+        contactPassProfiler.resolve(encoder);
         lifecycleStatus = 'encoded';
         return true;
       } catch (error) {
@@ -21265,6 +21291,17 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     },
     cleanupTemporaryBuffersAfterSubmittedWork() {
       return false;
+    },
+    // Diagnostic pass-level GPU times for this proposal's compute passes.
+    // Resolves after the caller's submit completes (mapAsync waits on the
+    // queue); one-shot -- the profiler's query resources are destroyed
+    // with the read.
+    async readContactGpuPassProfile() {
+      try {
+        return await contactPassProfiler.read();
+      } finally {
+        contactPassProfiler.destroy?.();
+      }
     },
     markSubmittedWork,
     canReleaseQueueOrdered,

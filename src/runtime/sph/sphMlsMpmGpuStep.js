@@ -31653,6 +31653,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   // buffer (per-pass applied-pair and selection counters). Explicit opt-in;
   // ordinary runs perform no cleanup-profile readback.
   contactCleanupProfileReadback = false,
+  // Diagnostic pass-level GPU timestamps for the contact proposal's compute
+  // passes (build, Jacobi, cleanup owner, verify, publish). Requires a
+  // device created with 'timestamp-query'; inert otherwise.
+  residentGpuTimestampProfilingRequested = false,
   spatialReactionDiscoveryProposalRunner =
     runSchroederSpatialReactionDiscoveryProposalWebGpu,
   spatialThermalProposalRunner = runSchroederSpatialThermalProposalWebGpu,
@@ -32081,7 +32085,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           sequenceIndex,
           sequenceStepCount,
           jacobiIterations: contactJacobiIterations,
-          cleanupPassBudget: contactCleanupPassBudget
+          cleanupPassBudget: contactCleanupPassBudget,
+          gpuPassTimestampProfilingRequested:
+            residentGpuTimestampProfilingRequested === true
         })
       );
       const mechanicalProposalAdmitted =
@@ -33025,10 +33031,30 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const queueStageGpuSummary = summarizeGpuTimestampRecorderQueueStages(
     gpuTimestampRecorder
   );
+  let contactGpuPassProfile = null;
+  if (
+    residentGpuTimestampProfilingRequested === true
+    && typeof spatialMechanicalProposal?.readContactGpuPassProfile
+      === 'function'
+  ) {
+    // Diagnostic-only: mapping the timestamp resolve buffer waits on the
+    // submitted queue, so this read serializes the step against the GPU.
+    try {
+      contactGpuPassProfile =
+        await spatialMechanicalProposal.readContactGpuPassProfile();
+    } catch {
+      contactGpuPassProfile = null;
+    }
+  }
   const stageTiming = {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
+    // Device-side pass durations for the contact proposal's compute passes
+    // (null when pass profiling is inert). Distinct from queueStageGpuMs:
+    // these are timestamp-query pass spans, not fence brackets.
+    stageGpuMs: contactGpuPassProfile?.stageGpuMs ?? null,
+    gpuTimestampProfile: contactGpuPassProfile ?? null,
     // PROF-0. Device-side cost per stage from the queue-stage recorder. This is
     // deliberately not merged into stageGpuMs: that comes from pass-level
     // timestamp queries and measures pass execution, while this brackets a

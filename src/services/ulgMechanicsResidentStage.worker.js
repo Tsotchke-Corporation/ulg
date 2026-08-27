@@ -1749,7 +1749,14 @@ async function getWorkerDeviceResult(preferWebGpu, data = {}) {
     workerDeviceResultPromise = requestOpticalGpuDevice(globalThis.navigator, {
       onDeviceLost() {
         workerDeviceResultPromise = null;
-      }
+      },
+      // Diagnostic pass-level GPU timestamps need the 'timestamp-query'
+      // device feature, which must be negotiated at acquisition -- and the
+      // worker device is a session singleton usually acquired on a stage
+      // message that predates any schedule options. Enabling the feature is
+      // free (cost exists only when a query set is created), so always
+      // negotiate it when the adapter offers it.
+      timestampProfilingRequested: true
     }).then((result) => result
       ? {
           ...result,
@@ -5344,6 +5351,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           Object.entries(residentStep.stageTiming.stageMs || {})
             .filter(([, elapsedMs]) => Number.isFinite(elapsedMs))
         ),
+        // Device-side pass timestamps (null when profiling is inert). The
+        // stageMs host-enqueue entries above are literal zeros for work
+        // encoded inside the fused sequence; these are the real durations.
+        stageGpuMs: residentStep.stageTiming.stageGpuMs ?? null,
+        gpuTimestampProfile:
+          residentStep.stageTiming.gpuTimestampProfile ?? null,
         compactSummaryRequested:
           residentStep.stageTiming.compactSummaryRequested === true,
         compactSummaryMapAsyncWaitMs: Number.isFinite(

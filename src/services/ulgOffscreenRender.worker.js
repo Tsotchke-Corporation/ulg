@@ -2879,7 +2879,13 @@ async function initPresentation(data) {
     return;
   }
   device = await adapter.requestDevice(
-    webGpuDeviceDescriptorForResidentSph(adapter)
+    // timestamp-query is negotiated whenever the adapter offers it: the
+    // feature itself is free, and the resident stages that share this
+    // device can only place diagnostic pass timestamps when it was granted
+    // at acquisition (the device is a session singleton).
+    webGpuDeviceDescriptorForResidentSph(adapter, {
+      timestampProfilingRequested: true
+    })
   );
   format = gpu.getPreferredCanvasFormat();
   configureCanvas({

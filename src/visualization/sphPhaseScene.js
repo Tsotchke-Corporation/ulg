@@ -36476,6 +36476,8 @@ fn main(
         requestedContactKinematicsParticleBinMetadataReadback,
       contactCleanupProfileReadback:
         requestedContactCleanupProfileReadback,
+      residentGpuTimestampProfilingRequested:
+        enableResidentGpuTimestampProfiling,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback
     });
@@ -36683,6 +36685,8 @@ fn main(
             requestedContactKinematicsParticleBinMetadataReadback,
           contactCleanupProfileReadback:
             requestedContactCleanupProfileReadback,
+          residentGpuTimestampProfilingRequested:
+            enableResidentGpuTimestampProfiling,
           reactionParticleBinMetadataReadback:
             requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
@@ -36762,6 +36766,8 @@ fn main(
               requestedContactKinematicsParticleBinMetadataReadback,
             contactCleanupProfileReadback:
               requestedContactCleanupProfileReadback,
+            residentGpuTimestampProfilingRequested:
+              enableResidentGpuTimestampProfiling,
             reactionParticleBinMetadataReadback:
               requestedReactionParticleBinMetadataReadback
           }) !== signature
@@ -37690,6 +37696,8 @@ fn main(
         requestedContactKinematicsParticleBinMetadataReadback,
       contactCleanupProfileReadback:
         requestedContactCleanupProfileReadback,
+      residentGpuTimestampProfilingRequested:
+        enableResidentGpuTimestampProfiling,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback,
       schroederSimulation: requestedSchroederSimulation,
@@ -37861,6 +37869,8 @@ fn main(
         requestedContactKinematicsParticleBinMetadataReadback,
       contactCleanupProfileReadback:
         requestedContactCleanupProfileReadback,
+      residentGpuTimestampProfilingRequested:
+        enableResidentGpuTimestampProfiling,
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
@@ -38441,6 +38451,8 @@ fn main(
           contactCleanupPassBudget: requestedContactCleanupPassBudget,
           contactCleanupProfileReadback:
             requestedContactCleanupProfileReadback,
+          residentGpuTimestampProfilingRequested:
+            enableResidentGpuTimestampProfiling,
           reactionParticleBinMetadataReadback:
             requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
@@ -40652,6 +40664,8 @@ fn main(
               requestedContactKinematicsParticleBinMetadataReadback,
             contactCleanupProfileReadback:
               requestedContactCleanupProfileReadback,
+            residentGpuTimestampProfilingRequested:
+              enableResidentGpuTimestampProfiling,
             reactionParticleBinMetadataReadback:
               requestedReactionParticleBinMetadataReadback,
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,

@@ -431,7 +431,8 @@ test('sealed GPU-authored count encodes one fixed maximum indirect topology with
   assert.equal(result.readbackPerformed, false);
   assert.equal(result.fixedMaximumTopology, true);
   assert.equal(result.radixPassCount, 16);
-  assert.equal(result.encodedIndirectDispatchCount, 53);
+  assert.equal(result.encodedIndirectDispatchCount, 0);
+  assert.equal(result.encodedDirectDispatchCount, 55);
   assert.equal(result.encodedDispatchCount, 55);
   assert.equal(result.encodedComputePassCount, 2);
   assert.equal(result.histogramScanFusedTopAddEnabled, false);
@@ -485,12 +486,21 @@ test('sealed GPU-authored count encodes one fixed maximum indirect topology with
   assert.equal(commands.at(-1).pipeline,
     'sealed-radix-gpu-count-finalize-unique');
   assert.deepEqual(commands.at(-1).dispatch, [1, 1, 1]);
+  // Direct-ceiling dispatch: every stage except parent-offset adds now
+  // launches its host-computable worst-case 1D shape; the kernels'
+  // GPU-count element guards keep the live prefix identical and the
+  // fail-closed no-op intact (live count zero when not admitted).
   assert.equal(
     commands.slice(1, -1).every(({ dispatchIndirect }) => (
-      dispatchIndirect?.label === 'sealed-radix-gpu-count-control'
-      && dispatchIndirect.byteOffset % 12 === 8
+      dispatchIndirect == null
     )),
     true
+  );
+  assert.deepEqual(
+    commands.filter(({ pipeline }) => (
+      pipeline === 'sealed-radix-gpu-count-histogram'
+    )).map(({ dispatch }) => dispatch),
+    Array.from({ length: 16 }, () => [3, 1, 1])
   );
   assert.equal(
     commands.filter(({ pipeline }) => (
@@ -513,8 +523,8 @@ test('sealed GPU-authored count encodes one fixed maximum indirect topology with
   assert.deepEqual(
     commands.filter(({ pipeline }) => (
       pipeline === 'sealed-radix-gpu-count-scan-fused-top-add'
-    )).map(({ dispatchIndirect }) => dispatchIndirect.byteOffset),
-    [200]
+    )).map(({ dispatch }) => dispatch),
+    [[1, 1, 1]]
   );
   assert.equal(
     encoder.events.filter(({ kind }) => kind === 'clear').length,
@@ -584,7 +594,7 @@ test('GPU-count radix skips producer-proven uniform digits in stable LSD order',
   const result = encode([0, 1, 8]);
   assert.equal(result.radixPassCount, 3);
   assert.deepEqual(result.significantDigitRows, [0, 1, 8]);
-  assert.equal(result.encodedIndirectDispatchCount, 14);
+  assert.equal(result.encodedIndirectDispatchCount, 0);
   assert.equal(result.encodedDispatchCount, 16);
   runtime.releaseExecution(result, { discardedEncoder: true });
   assert.throws(() => encode([]), /retain at least one digit/);
@@ -633,7 +643,8 @@ test('GPU-count mechanics-field radix fuses each bounded parallel histogram top'
   assert.equal(result.headScanFusedTopAddEnabled, false);
   assert.equal(result.histogramScanEncodedDispatchCount, 2);
   assert.equal(result.headScanEncodedDispatchCount, 3);
-  assert.equal(result.encodedIndirectDispatchCount, 102);
+  assert.equal(result.encodedIndirectDispatchCount, 1);
+  assert.equal(result.encodedDirectDispatchCount, 103);
   assert.equal(result.encodedDispatchCount, 104);
 
   const commands = computeCommands(encoder);
@@ -647,8 +658,8 @@ test('GPU-count mechanics-field radix fuses each bounded parallel histogram top'
   assert.deepEqual(
     commands.filter(({ pipeline }) => (
       pipeline === 'mechanics-field-radix-gpu-count-scan-fused-top-add'
-    )).map(({ dispatchIndirect }) => dispatchIndirect.byteOffset),
-    Array.from({ length: 24 }, () => 180)
+    )).map(({ dispatch }) => dispatch),
+    Array.from({ length: 24 }, () => [1, 1, 1])
   );
   assert.equal(
     commands.filter(({ pipeline }) => (
@@ -656,12 +667,22 @@ test('GPU-count mechanics-field radix fuses each bounded parallel histogram top'
     )).length,
     1
   );
+  // Only the head-scan parent-offset add keeps the indirect path: its
+  // live dispatch is legitimately zero when a live level needs no parent
+  // add, so a ceiling launch would apply stale offsets.
   assert.equal(
-    commands.slice(1, -1).every(({ dispatchIndirect }) => (
-      dispatchIndirect?.label
-        === 'mechanics-field-radix-gpu-count-control'
-    )),
+    commands.filter(({ dispatchIndirect }) => dispatchIndirect != null)
+      .every(({ pipeline, dispatchIndirect }) => (
+        pipeline === 'mechanics-field-radix-gpu-count-scan-add'
+        && dispatchIndirect.label === 'mechanics-field-radix-gpu-count-control'
+      )),
     true
+  );
+  assert.deepEqual(
+    commands.filter(({ pipeline }) => (
+      pipeline === 'mechanics-field-radix-gpu-count-histogram'
+    )).map(({ dispatch }) => dispatch),
+    Array.from({ length: 24 }, () => [486, 1, 1])
   );
 
   runtime.releaseExecution(result, { discardedEncoder: true });
@@ -775,7 +796,8 @@ test('GPU-count config lease keeps zero-count encodes allocation-free and reject
   assert.equal(zero.elementCount, null);
   assert.equal(zero.elementCountSource, 'authenticated-gpu-authority');
   assert.equal(zero.encodedDispatchCount, 54);
-  assert.equal(zero.encodedIndirectDispatchCount, 52);
+  assert.equal(zero.encodedIndirectDispatchCount, 0);
+  assert.equal(zero.encodedDirectDispatchCount, 54);
   assert.equal(zero.gpuBufferCreationCountDuringEncode, 0);
   assert.equal(zero.bindGroupCreationCount, 37);
   assert.equal(zero.bindGroupReuseCount, 0);

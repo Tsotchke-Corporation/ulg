@@ -1,3 +1,4 @@
+import { cachedWebGpuBindGroup } from '../webgpuBindGroupCache.js';
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
@@ -1266,7 +1267,7 @@ function encodePlacementPass({
 }
 
 function placementBindGroup(device, pipelineInfo, label, entries) {
-  return device.createBindGroup({
+  return cachedWebGpuBindGroup(device, {
     label,
     layout: pipelineInfo.bindGroupLayout,
     entries

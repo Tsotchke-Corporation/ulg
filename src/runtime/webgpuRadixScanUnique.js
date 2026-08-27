@@ -4124,9 +4124,40 @@ export function createWebGpuStableRadixScanUnique(device, {
       const productionPass = encoder.beginComputePass({
         label: `${label}GroupedGpuCountRadixUnique`
       });
-      const encodeIndirect = (pipeline, bindGroup, byteOffset) => {
+      // Direct-ceiling dispatch: dispatchWorkgroupsIndirect costs ~0.25 ms
+      // of GPU-process CPU per call on Chromium (per-call indirect
+      // validation), which dwarfs these tiny sorts. Every kernel here
+      // element-guards against the control buffer's GPU-authored live
+      // counts (zero when the seal/topology admission fails), so launching
+      // the host-computable worst-case group count is observationally
+      // identical for the live prefix and preserves fail-closed no-ops.
+      // Only the parent-offset add keeps the indirect path: its live
+      // dispatch is legitimately zero whenever a live level needs no
+      // parent add, and running it anyway would apply stale offsets.
+      // Folded (2D) ceilings also stay indirect: kernels decode
+      // linear_group with the live dispatch_x, which only matches the
+      // launched grid when the shape is one-dimensional.
+      const directCeilingGroups = (groupCount) => (
+        Number.isSafeInteger(groupCount)
+        && groupCount > 0
+        && groupCount <= maxComputeWorkgroupsPerDimension
+          ? groupCount
+          : null
+      );
+      const radixCeilingGroups = directCeilingGroups(
+        Math.ceil(maximum / 256)
+      );
+      let encodedDirectCeilingCount = 0;
+      let encodedIndirectCount = 0;
+      const encodeIndirect = (pipeline, bindGroup, byteOffset, ceiling = null) => {
         productionPass.setPipeline(pipeline);
         productionPass.setBindGroup(0, bindGroup);
+        if (ceiling != null) {
+          productionPass.dispatchWorkgroups(ceiling, 1, 1);
+          encodedDirectCeilingCount += 1;
+          return;
+        }
+        encodedIndirectCount += 1;
         if (typeof productionPass.dispatchWorkgroupsIndirect !== 'function') {
           throw new TypeError(
             'GPU-authored count radix encoding requires dispatchWorkgroupsIndirect'
@@ -4136,18 +4167,23 @@ export function createWebGpuStableRadixScanUnique(device, {
       };
       const encodeScan = (population) => {
         for (const level of population.levels) {
+          const levelCeiling = directCeilingGroups(
+            Math.ceil(level.maximumElementCount / 512)
+          );
           if (level.level === population.fusedTopLevelIndex) {
             encodeIndirect(
               gpuCountPipelines.scanFusedTopAdd,
               level.fusedTopAddBindGroup,
-              level.blockDispatchOffsetBytes
+              level.blockDispatchOffsetBytes,
+              levelCeiling
             );
             continue;
           }
           encodeIndirect(
             gpuCountPipelines.scanBlocks,
             level.blockBindGroup,
-            level.blockDispatchOffsetBytes
+            level.blockDispatchOffsetBytes,
+            levelCeiling
           );
         }
         // The top scanned level has no parent offset to add. Lower levels are
@@ -4167,31 +4203,36 @@ export function createWebGpuStableRadixScanUnique(device, {
       encodeIndirect(
         gpuCountPipelines.initialize,
         initializeBindGroup,
-        gpuCountControlLayout.radixDispatchOffsetBytes
+        gpuCountControlLayout.radixDispatchOffsetBytes,
+        radixCeilingGroups
       );
       for (const command of digitCommands) {
         encodeIndirect(
           gpuCountPipelines.histogram,
           command.histogramBindGroup,
-          gpuCountControlLayout.radixDispatchOffsetBytes
+          gpuCountControlLayout.radixDispatchOffsetBytes,
+          radixCeilingGroups
         );
         encodeScan(histogramScanPopulation);
         encodeIndirect(
           gpuCountPipelines.scatter,
           command.scatterBindGroup,
-          gpuCountControlLayout.radixDispatchOffsetBytes
+          gpuCountControlLayout.radixDispatchOffsetBytes,
+          radixCeilingGroups
         );
       }
       encodeIndirect(
         gpuCountPipelines.markHeads,
         markBindGroup,
-        gpuCountControlLayout.radixDispatchOffsetBytes
+        gpuCountControlLayout.radixDispatchOffsetBytes,
+        radixCeilingGroups
       );
       encodeScan(headScanPopulation);
       encodeIndirect(
         gpuCountPipelines.scatterUnique,
         scatterUniqueBindGroup,
-        gpuCountControlLayout.radixDispatchOffsetBytes
+        gpuCountControlLayout.radixDispatchOffsetBytes,
+        radixCeilingGroups
       );
       productionPass.setPipeline(gpuCountPipelines.finalizeUnique);
       productionPass.setBindGroup(0, finalizeBindGroup);
@@ -4202,14 +4243,8 @@ export function createWebGpuStableRadixScanUnique(device, {
       }
 
       const radixPassCount = digitCommands.length;
-      const indirectDispatchCount =
-        1
-        + radixPassCount * (
-          2 + histogramScanPopulation.encodedDispatchCount
-        )
-        + 1
-        + headScanPopulation.encodedDispatchCount
-        + 1;
+      const productionDispatchCount =
+        encodedDirectCeilingCount + encodedIndirectCount;
       return attachRetainedParamsLease({
         schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
         countAuthoritySchema: ULG_WEBGPU_RADIX_GPU_COUNT_SCHEMA,
@@ -4250,14 +4285,15 @@ export function createWebGpuStableRadixScanUnique(device, {
           histogramScanPopulation.encodedDispatchCount,
         headScanEncodedDispatchCount:
           headScanPopulation.encodedDispatchCount,
-        encodedDispatchCount: indirectDispatchCount + 2,
-        encodedIndirectDispatchCount: indirectDispatchCount,
-        encodedDirectDispatchCount: 2,
+        encodedDispatchCount: productionDispatchCount + 2,
+        encodedIndirectDispatchCount: encodedIndirectCount,
+        encodedDirectDispatchCount: encodedDirectCeilingCount + 2,
         encodedComputePassCount: 2,
         fixedMaximumTopology: true,
         timestampProducerId,
         executionConcurrency: 'single-flight-per-runtime',
-        inactiveDispatchPolicy: 'zero-workgroup-indirect-row',
+        inactiveDispatchPolicy:
+          'gpu-count-element-guarded-ceiling-with-indirect-parent-adds',
         paramsBufferCreationCount: 0,
         gpuBufferCreationCountDuringEncode: 0,
         bindGroupCreationCount: bindGroupTelemetry.created,

@@ -1,3 +1,4 @@
+import { cachedWebGpuBindGroup } from '../webgpuBindGroupCache.js';
 import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
@@ -20499,7 +20500,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 6, resource: { buffer: paramsBuffer } },
     { binding: 7, resource: { buffer: pool.matchingCleanupControlBuffer } }
   ];
-  const bindGroup = (pipelineInfo, entries, label) => device.createBindGroup({
+  const bindGroup = (pipelineInfo, entries, label) => cachedWebGpuBindGroup(device, {
     label,
     layout: pipelineInfo.bindGroupLayout,
     entries

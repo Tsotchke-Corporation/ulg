@@ -177,6 +177,7 @@ const PRODUCT_EVENT_SOURCE_FAMILY =
   'sph-reaction-product-event-capacity-gas-ledger';
 const DEFAULT_GAS_CONSTANT_J_PER_MOL_K = 8.31446261815324;
 const DEFAULT_GAS_TEMPERATURE_K = 293.15;
+const SPH_SPATIAL_GAS_COMPACT_CAPACITY_FLOOR_ROWS = 4096;
 const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS =
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
@@ -1178,13 +1179,23 @@ function normalizeSource({
       )
     };
   }
+  const declaredLiveRowCountUpperBound = Number(
+    source.productEventLiveRowCountUpperBound
+  );
+  const liveRowCountUpperBound =
+    liveCountDescriptor
+    && Number.isInteger(declaredLiveRowCountUpperBound)
+    && declaredLiveRowCountUpperBound >= 1
+      ? Math.min(rowCount, declaredLiveRowCountUpperBound)
+      : rowCount;
   return {
     source,
     buffer,
     rowCount,
     strideFloats,
     requiredBytes,
-    liveCountDescriptor
+    liveCountDescriptor,
+    liveRowCountUpperBound
   };
 }
 
@@ -1500,6 +1511,13 @@ fn finalize_compaction() {
     || atomicLoad(&authority[7u]) != params.source_capacity
   ) {
     atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
+  }
+  if (params.source_row_count > params.source_capacity) {
+    atomicOr(&authority[3u], ERROR_COMPACTION_OVERFLOW);
+    atomicStore(
+      &authority[13u],
+      params.source_row_count - params.source_capacity
+    );
   }
   var live_count = 0u;
   if (params.source_capacity > 0u) {
@@ -3810,6 +3828,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       ...retainedReadbackTelemetrySnapshot()
     };
   }
+  const compactCapacityRowBound = Math.min(
+    normalizedSource.rowCount,
+    Math.max(
+      SPH_SPATIAL_GAS_COMPACT_CAPACITY_FLOOR_ROWS,
+      normalizedSource.liveRowCountUpperBound
+    )
+  );
   const normalizedEpoch = normalizeEpochIdentity(epochIdentity);
   if (normalizedEpoch.error) {
     return rejectedExecutionWithTelemetry(
@@ -3902,7 +3927,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     }
     capacityDispatchCount = sphSpatialGasLedgerEosDispatchWorkgroups(
       device,
-      nextPowerOfTwo(normalizedSource.rowCount)
+      nextPowerOfTwo(compactCapacityRowBound)
     );
   } catch (error) {
     return rejectedExecutionWithTelemetry(
@@ -3945,7 +3970,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   }
   let arena;
   try {
-    arena = await acquireArenaSlot(device, normalizedSource.rowCount, {
+    arena = await acquireArenaSlot(device, compactCapacityRowBound, {
       onBeforeBackpressureAwait: () => {
         retainedReadbackTelemetry.recordAwaitedBackpressureHostQueueFence(
           1,

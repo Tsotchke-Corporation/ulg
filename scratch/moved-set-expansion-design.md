@@ -373,3 +373,20 @@ particle-storage materialization submits, per-step writeBuffer traffic,
 or another non-stage submitter on the shared queue. Instrument by
 enumerating queue.submit call sites hit per step (host-side counter in
 the worker device wrapper) before guessing further.
+
+EXECUTED — submit census results (sodium-water, budget 16, per step):
+~30 production submits from ~20 named sites. Ruled out: per-submit
+overhead itself (~38 us each, microbenched: 1000 split submits 43.7 ms
+vs fused 6.2 ms => ~1 ms/step total), the active-node/law-queue/
+phase-volume family (all five flags off: +1 step/s = ~2.5 ms), the
+epoch cluster (0.93 ms true). REMAINING census-guided suspects for the
+~19 ms/step of unattributed device time:
+- submitQueueOrderedFinalConsumerWork (webgpuComputeLayout.js:732) —
+  4 submits/step of deferred final-consumer/cleanup work
+- submitFrozenFamilyCopy (schroederSpatialReactionPlacementEpochGpu)
+- submitResidentProductHistoryFilteredAppend (sphMlsMpmGpuStep)
+- runSphSpatialGasLedgerEosRetained + gas free-volume EOS authority
+Next: wrap these four with marker pairs (all infra exists) for direct
+per-site device time. The census wrapper lives in the schedule payload
+(diagnostic-only, armed by residentGpuTimestampProfile=1) and surfaces
+as scheduleResult.submitCensus.

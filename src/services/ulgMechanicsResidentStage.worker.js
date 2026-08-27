@@ -6639,6 +6639,39 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let lastMechanicsStageResult = null;
     let lastStepSummary = null;
     const stepSummaryRing = [];
+    // Diagnostic-only submit census: under residentGpuTimestampProfile=1,
+    // wrap the worker queue's submit once per device and count call sites
+    // (top non-wrapper stack frame) so every producer of device work is
+    // named per step. Removed concern: the wrapper adds one Error() per
+    // submit in diagnostic runs only.
+    const submitCensus = new Map();
+    const scheduleProfilingRequested =
+      record.schroederLane?.residentStepOptions
+        ?.residentGpuTimestampProfilingRequested === true;
+    const armSubmitCensus = () => {
+      const queue = state.workerDevice?.queue;
+      if (!scheduleProfilingRequested || !queue) return;
+      if (!queue.__ulgSubmitCensusWrapped) {
+        const originalSubmit = queue.submit.bind(queue);
+        queue.__ulgSubmitCensusWrapped = true;
+        queue.__ulgSubmitCensusSink = null;
+        queue.submit = (buffers) => {
+          const sink = queue.__ulgSubmitCensusSink;
+          if (sink) {
+            const stack = String(new Error().stack || '');
+            const line = stack.split('\n').find(
+              (l, index) => index > 1
+                && !l.includes('__ulgSubmitCensus')
+                && !l.includes('submitQueueOrderedWork')
+            ) || 'unknown';
+            const site = line.trim().slice(0, 120);
+            sink.set(site, (sink.get(site) || 0) + 1);
+          }
+          return originalSubmit(buffers);
+        };
+      }
+      queue.__ulgSubmitCensusSink = submitCensus;
+    };
     // Worker-clock schedule phase stamps for inter-cycle diagnosis: the gap
     // between one schedule's result assembly and the next schedule's first
     // step start is main-thread turnaround (commit, verify, re-request).
@@ -7208,6 +7241,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           hierarchyStageSummary?.residentStageTiming?.stageGpuMs ?? null
       });
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
+      armSubmitCensus();
       if (
         stepSummaryRing.length
           > ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY
@@ -7568,6 +7602,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleFirstStepStartedAtMs,
       scheduleLastStepEndedAtMs,
       tailTerminalFenceDoneAtMs,
+      submitCensus: submitCensus.size > 0
+        ? Object.fromEntries(submitCensus)
+        : null,
       resultAssembledAtMs: workerResidentScheduleNowMs(),
       progressEverySteps,
       queueDrainIntervalSteps:

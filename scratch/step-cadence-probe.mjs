@@ -29,6 +29,7 @@ while (Date.now() - t0 < horizonMs) {
         first: lane?.scheduleFirstStepStartedAtMs ?? null,
         lastEnd: lane?.scheduleLastStepEndedAtMs ?? null,
         fenceDone: lane?.tailTerminalFenceDoneAtMs ?? null,
+        census: lane?.submitCensus ?? null,
         assembled: lane?.resultAssembledAtMs ?? null,
       },
       ring: Array.isArray(ps?.ring)

@@ -7176,6 +7176,16 @@ export async function mountSphPhaseDemoOverlay({
   })();
   const initialContactJacobiIterations = clampedContactUrlOption('contactJacobiIterations', 1, 16);
   const initialContactCleanupPasses = clampedContactUrlOption('contactCleanupPasses', 16, 65536);
+  // Opt-in inner solver rounds per cleanup pass (worker lane only):
+  // each logical pass runs this many selection+apply+propagate rounds,
+  // advancing several violation layers while paying the expansion, wall,
+  // and evidence phases once. Compiled into the sealed solver-budget
+  // shader variant; 1 preserves the historical pass bit-for-bit.
+  const initialContactInnerRounds = clampedContactUrlOption(
+    'contactInnerRounds',
+    1,
+    16
+  );
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -7438,6 +7448,7 @@ export async function mountSphPhaseDemoOverlay({
     contactSolverEnabled: initialContactSolverEnabled,
     contactJacobiIterations: initialContactJacobiIterations,
     contactCleanupPassBudget: initialContactCleanupPasses,
+    contactInnerRounds: initialContactInnerRounds,
     selectedLevel: initialSchroederSelectedLevel,
     baseGridSpacingM: initialSchroederBaseGridSpacingM,
     minLevel: initialSchroederMinLevel,
@@ -7507,6 +7518,7 @@ export async function mountSphPhaseDemoOverlay({
       schroederContactSolverEnabled: config.contactSolverEnabled !== false,
       schroederContactJacobiIterations: config.contactJacobiIterations,
       schroederContactCleanupPassBudget: config.contactCleanupPassBudget,
+      schroederContactInnerRounds: config.contactInnerRounds,
       schroederSelectedLevel: config.selectedLevel,
       schroederBaseGridSpacingM: config.baseGridSpacingM,
       schroederMinLevel: config.minLevel,

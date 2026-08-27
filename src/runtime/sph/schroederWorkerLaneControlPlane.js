@@ -52,6 +52,7 @@ const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'contactKinematicsParticleBinMetadataReadback',
   'contactJacobiIterations',
   'contactCleanupPassBudget',
+  'contactInnerRounds',
   'contactCleanupProfileReadback',
   'residentGpuTimestampProfilingRequested',
   'reactionParticleBinMetadataReadback',

@@ -308,7 +308,14 @@ const mechanicalSolverBudgetCache = new Map();
 
 export function resolveSchroederSpatialMechanicalSolverBudget({
   jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
-  cleanupPassBudget
+  cleanupPassBudget,
+  // Opt-in inner solver rounds per logical cleanup pass: each pass runs
+  // this many selection+apply+propagate rounds, advancing several
+  // violation layers while paying the expansion, wall, and evidence
+  // phases once. Compiled into the shader variant (part of this sealed
+  // budget and its cache key); 1 preserves the historical single-round
+  // pass bit-for-bit.
+  contactInnerRounds = 1
 } = {}) {
   if (cleanupPassBudget == null) {
     throw new RangeError(
@@ -343,7 +350,19 @@ export function resolveSchroederSpatialMechanicalSolverBudget({
       + `${SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX}`
     );
   }
-  const cacheKey = `j${jacobiIterations}.p${cleanupPassBudget}`;
+  const innerRounds = Number(contactInnerRounds ?? 1);
+  if (
+    !Number.isInteger(innerRounds)
+    || innerRounds < 1
+    || innerRounds > 16
+  ) {
+    throw new RangeError(
+      'canonical mechanical contactInnerRounds must be an integer within 1..16'
+    );
+  }
+  const cacheKey = `j${jacobiIterations}.p${cleanupPassBudget}${
+    innerRounds > 1 ? `.i${innerRounds}` : ''
+  }`;
   let budget = mechanicalSolverBudgetCache.get(cacheKey);
   if (budget) return budget;
   const selectionCountWord = MATCHING_CLEANUP_CONTROL_HEADER_WORDS;
@@ -375,6 +394,7 @@ export function resolveSchroederSpatialMechanicalSolverBudget({
     cacheKey,
     jacobiIterations,
     cleanupPassBudget,
+    contactInnerRounds: innerRounds,
     // The encoded horizon IS the declared budget: the shader variant, the
     // control-buffer sizing, and the receipt lanes are all compiled/sized
     // from this one sealed value.
@@ -13500,6 +13520,11 @@ fn mechanical_matching_selection_epilogue(
   self_index: u32,
   pass_index: u32,
   full_selection: bool,
+  // The per-member selection-completeness contribution must be counted
+  // exactly once per logical pass; inner solver rounds after the first
+  // republish ledger rows with counting disabled. The row-maximum
+  // contributions stay unconditional (re-maxing is idempotent).
+  count_evidence: bool,
   scan: MechanicalMatchingSelectionScan
 ) {
   var best_peer = scan.best_peer;
@@ -13545,10 +13570,14 @@ fn mechanical_matching_selection_epilogue(
     ],
     bitcast<u32>(row_max_velocity_residual_m_per_s)
   );
-  atomicAdd(
-    &traversal_evidence[mechanical_matching_selection_count_word(pass_index)],
-    1u
-  );
+  if (count_evidence) {
+    atomicAdd(
+      &traversal_evidence[
+        mechanical_matching_selection_count_word(pass_index)
+      ],
+      1u
+    );
+  }
 }
 
 fn select_matching_cleanup_edge_for_index(
@@ -13610,6 +13639,7 @@ fn select_matching_cleanup_edge_for_index(
     self_index,
     pass_index,
     full_selection,
+    true,
     scan
   );
 }
@@ -13666,7 +13696,14 @@ fn copy_matching_cleanup_state(
   copy_matching_cleanup_state_for_index(global_id.x);
 }
 
-fn apply_matching_cleanup_edge_for_index(self_index: u32) {
+fn apply_matching_cleanup_edge_for_index(
+  self_index: u32,
+  // The per-member apply-completeness contribution must be counted exactly
+  // once per logical pass; inner solver rounds after the first re-run this
+  // function with counting disabled. Applied-pair evidence always
+  // accumulates (the sweep delimiter reads the pass total).
+  count_completeness: bool
+) {
   if (self_index >= mechanical_params.particle_count) { return; }
   if (!mechanical_solver_full_path_enabled()) { return; }
   let pass_index = mechanical_matching_current_pass();
@@ -13775,12 +13812,14 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
         && three_block.topology == 1u
         && three_block.path_owner == 0u
       ) {
-        atomicAdd(
-          &traversal_evidence[
-            mechanical_matching_apply_count_word(pass_index)
-          ],
-          1u
-        );
+        if (count_completeness) {
+          atomicAdd(
+            &traversal_evidence[
+              mechanical_matching_apply_count_word(pass_index)
+            ],
+            1u
+          );
+        }
         return;
       }
       if (three_block.applied == 0u) {
@@ -13957,12 +13996,14 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
           ],
           3u
         );
-        atomicAdd(
-          &traversal_evidence[
-            mechanical_matching_apply_count_word(pass_index)
-          ],
-          1u
-        );
+        if (count_completeness) {
+          atomicAdd(
+            &traversal_evidence[
+              mechanical_matching_apply_count_word(pass_index)
+            ],
+            1u
+          );
+        }
         return;
       }
       if (three_block.applied != 0u) {
@@ -14087,12 +14128,14 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
           ],
           2u
         );
-        atomicAdd(
-          &traversal_evidence[
-            mechanical_matching_apply_count_word(pass_index)
-          ],
-          1u
-        );
+        if (count_completeness) {
+          atomicAdd(
+            &traversal_evidence[
+              mechanical_matching_apply_count_word(pass_index)
+            ],
+            1u
+          );
+        }
         return;
       }
       let high_mass_ratio = low_pos_mass.w / high_pos_mass.w;
@@ -14243,17 +14286,19 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
       );
     }
   }
-  atomicAdd(
-    &traversal_evidence[mechanical_matching_apply_count_word(pass_index)],
-    1u
-  );
+  if (count_completeness) {
+    atomicAdd(
+      &traversal_evidence[mechanical_matching_apply_count_word(pass_index)],
+      1u
+    );
+  }
 }
 
 @compute @workgroup_size(64)
 fn apply_matching_cleanup_edge(
   @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-  apply_matching_cleanup_edge_for_index(global_id.x);
+  apply_matching_cleanup_edge_for_index(global_id.x, true);
 }
 
 fn mechanical_diagnostic_capture_target_local_base(
@@ -17143,7 +17188,26 @@ fn run_matching_cleanup_global_owner(
     let selection_converged =
       mechanical_matching_persistent_pass == 0u
       && mechanical_matching_jacobi_residual_converged();
-    let selection_waves = (selection_member_total + 15u) / 16u;
+    let selection_waves = (selection_member_total + 15u) / 16u;${
+      solverBudget.contactInnerRounds > 1
+        ? `
+    // Inner solver rounds: each logical pass advances ${
+            solverBudget.contactInnerRounds
+          } violation layers by repeating selection+apply+propagate against
+    // the round-updated state, paying the expansion, wall, and evidence
+    // phases once per pass. Only the first round counts the per-member
+    // completeness words; applied-pair evidence accumulates across
+    // rounds so the sweep delimiter reads the pass total. The trip count
+    // is a compile-time constant, so the interior barriers stay in
+    // uniform control flow.
+    for (
+      var solver_round = 0u;
+      solver_round < ${solverBudget.contactInnerRounds}u;
+      solver_round = solver_round + 1u
+    ) {
+    let round_counts = solver_round == 0u;`
+        : ''
+    }
     for (
       var selection_wave = 0u;
       selection_wave < selection_waves;
@@ -17155,7 +17219,11 @@ fn run_matching_cleanup_global_owner(
       var selection_scan = mechanical_matching_selection_empty_scan();
       if (
         selection_preflight_ok
-        && selection_slot < selection_member_total
+        && selection_slot < selection_member_total${
+          solverBudget.contactInnerRounds > 1
+            ? '\n        && (!selection_converged || solver_round == 0u)'
+            : ''
+        }
       ) {
         let candidate = mechanical_matching_owner_list[selection_slot];
         if (candidate < mechanical_params.particle_count) {
@@ -17175,7 +17243,11 @@ fn run_matching_cleanup_global_owner(
                 selection_member,
                 mechanical_matching_persistent_pass,
                 selection_full,
-                selection_begin_new_sweep,
+                selection_begin_new_sweep${
+                  solverBudget.contactInnerRounds > 1
+                    ? ' && solver_round == 0u'
+                    : ''
+                },
                 lane & 7u,
                 8u
               );
@@ -17215,6 +17287,11 @@ fn run_matching_cleanup_global_owner(
               selection_member,
               mechanical_matching_persistent_pass,
               selection_full,
+              ${
+                solverBudget.contactInnerRounds > 1
+                  ? 'round_counts'
+                  : 'true'
+              },
               merged
             );
           }
@@ -17224,7 +17301,9 @@ fn run_matching_cleanup_global_owner(
     }
     storageBarrier();
 
-    if (lane == 0u && execute_pass) {
+    if (lane == 0u && execute_pass${
+      solverBudget.contactInnerRounds > 1 ? ' && round_counts' : ''
+    }) {
       // Pass 0 must re-baseline output from the Jacobi-final input (the
       // solver iterations ping-pong the buffers before cleanup). From pass 1
       // on, the propagate phase leaves input_state == output_state for every
@@ -17247,7 +17326,14 @@ fn run_matching_cleanup_global_owner(
     }
     storageBarrier();
 
-    if (execute_pass && mechanical_matching_persistent_pass == 0u) {
+    if (
+      execute_pass
+      && mechanical_matching_persistent_pass == 0u${
+        solverBudget.contactInnerRounds > 1
+          ? '\n      && round_counts'
+          : ''
+      }
+    ) {
       let owner_list_total = min(
         atomicLoad(&mechanical_matching_owner_list_count),
         ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
@@ -17272,7 +17358,9 @@ fn run_matching_cleanup_global_owner(
 
     storageBarrier();
 
-    if (lane == 0u && execute_pass) {
+    if (lane == 0u && execute_pass${
+      solverBudget.contactInnerRounds > 1 ? ' && round_counts' : ''
+    }) {
       atomicStore(
         &traversal_evidence[
           mechanical_matching_apply_count_word(
@@ -17302,11 +17390,59 @@ fn run_matching_cleanup_global_owner(
           ]
         );
         if ((flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u) {
-          apply_matching_cleanup_edge_for_index(self_index);
+          apply_matching_cleanup_edge_for_index(
+            self_index,
+            ${
+              solverBudget.contactInnerRounds > 1
+                ? 'round_counts'
+                : 'true'
+            }
+          );
         }
       }
     }
+    storageBarrier();${
+      solverBudget.contactInnerRounds > 1
+        ? `
+    // Inner propagate: publish this round's outputs as the next round's
+    // inputs for every member recorded as a mover this pass (idempotent
+    // for earlier rounds' movers), then start the next round.
+    if (execute_pass) {
+      var inner_propagate_total = 0u;
+      if (mechanical_matching_owner_moved_phase == 0u) {
+        inner_propagate_total =
+          atomicLoad(&mechanical_matching_owner_moved_count_a);
+      } else {
+        inner_propagate_total =
+          atomicLoad(&mechanical_matching_owner_moved_count_b);
+      }
+      inner_propagate_total = min(
+        inner_propagate_total,
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u
+      );
+      for (
+        var inner_slot = lane;
+        inner_slot < inner_propagate_total;
+        inner_slot = inner_slot + 128u
+      ) {
+        var inner_index = 0u;
+        if (mechanical_matching_owner_moved_phase == 0u) {
+          inner_index = mechanical_matching_owner_moved_a[inner_slot];
+        } else {
+          inner_index = mechanical_matching_owner_moved_b[inner_slot];
+        }
+        if (inner_index >= mechanical_params.particle_count) {
+          continue;
+        }
+        input_state[inner_index * 2u] = output_state[inner_index * 2u];
+        input_state[inner_index * 2u + 1u] =
+          output_state[inner_index * 2u + 1u];
+      }
+    }
     storageBarrier();
+    }`
+        : ''
+    }
 
     // Snapshot for the full-sweep pending-counter rebase below. The
     // workgroup counter zero-initializes each chunked dispatch while
@@ -19759,11 +19895,13 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   // resolveSchroederSpatialMechanicalSolverBudget and sealed into the run's
   // control header, pipelines, and telemetry.
   jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
-  cleanupPassBudget
+  cleanupPassBudget,
+  contactInnerRounds = 1
 } = {}) {
   const solverBudget = resolveSchroederSpatialMechanicalSolverBudget({
     jacobiIterations,
-    cleanupPassBudget
+    cleanupPassBudget,
+    contactInnerRounds
   });
   const particleCount = Math.max(0, Math.trunc(finiteNumber(
     sphParticleState?.particleCount ?? mlsMpmParticleState?.particleCount,

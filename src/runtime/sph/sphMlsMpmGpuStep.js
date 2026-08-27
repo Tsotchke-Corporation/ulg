@@ -31649,6 +31649,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   contactJacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   contactCleanupPassBudget =
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
+  // Opt-in inner solver rounds per cleanup pass; part of the sealed
+  // solver budget (see resolveSchroederSpatialMechanicalSolverBudget).
+  contactInnerRounds = 1,
   // Diagnostic-only fixed-size readback of the matching-cleanup control
   // buffer (per-pass applied-pair and selection counters). Explicit opt-in;
   // ordinary runs perform no cleanup-profile readback.
@@ -32086,6 +32089,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           sequenceStepCount,
           jacobiIterations: contactJacobiIterations,
           cleanupPassBudget: contactCleanupPassBudget,
+          contactInnerRounds,
           gpuPassTimestampProfilingRequested:
             residentGpuTimestampProfilingRequested === true
         })

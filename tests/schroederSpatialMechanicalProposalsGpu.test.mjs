@@ -4074,7 +4074,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.match(
     ownerSource,
-    /execute_pass && mechanical_matching_persistent_pass == 0u[\s\S]{0,900}copy_matching_cleanup_state_for_index\(/,
+    /execute_pass\s*&&\s*mechanical_matching_persistent_pass == 0u[\s\S]{0,900}copy_matching_cleanup_state_for_index\(/,
     'the owner re-baselines output from the Jacobi-final input on pass 0 only'
   );
   assert.equal(

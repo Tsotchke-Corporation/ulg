@@ -36884,6 +36884,7 @@ fn main(
     schroederContactSolverEnabled = true,
     schroederContactJacobiIterations = null,
     schroederContactCleanupPassBudget = null,
+    schroederContactInnerRounds = null,
     schroederSelectedLevel = 0,
     schroederBaseGridSpacingM = null,
     schroederMinLevel = null,
@@ -37045,6 +37046,12 @@ fn main(
       SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN,
       SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX,
       SCHROEDER_SPATIAL_MECHANICAL_INTERACTIVE_CLEANUP_PASS_BUDGET
+    );
+    const requestedContactInnerRounds = clampContactKnob(
+      schroederContactInnerRounds,
+      1,
+      16,
+      1
     );
     const requestedCollectSchroederHierarchyHostTiming = Boolean(
       collectSchroederHierarchyHostTiming
@@ -37878,6 +37885,7 @@ fn main(
       schroederSimulation: requestedSchroederSimulation,
       contactJacobiIterations: requestedContactJacobiIterations,
       contactCleanupPassBudget: requestedContactCleanupPassBudget,
+      contactInnerRounds: requestedContactInnerRounds,
       schroederSelectedLevel: requestedSchroederSelectedLevel,
       schroederMinLevel: requestedSchroederMinLevel,
       schroederMaxLevel: requestedSchroederMaxLevel,
@@ -38449,6 +38457,8 @@ fn main(
           // batch/native default.
           contactJacobiIterations: requestedContactJacobiIterations,
           contactCleanupPassBudget: requestedContactCleanupPassBudget,
+          contactInnerRounds: requestedContactInnerRounds,
+      contactInnerRounds: requestedContactInnerRounds,
           contactCleanupProfileReadback:
             requestedContactCleanupProfileReadback,
           residentGpuTimestampProfilingRequested:
@@ -40673,6 +40683,9 @@ fn main(
             schroederSimulation: requestedSchroederSimulation,
             contactJacobiIterations: requestedContactJacobiIterations,
             contactCleanupPassBudget: requestedContactCleanupPassBudget,
+            contactInnerRounds: requestedContactInnerRounds,
+          contactInnerRounds: requestedContactInnerRounds,
+      contactInnerRounds: requestedContactInnerRounds,
             schroederSelectedLevel: requestedSchroederSelectedLevel,
             schroederMinLevel: requestedSchroederMinLevel,
             schroederMaxLevel: requestedSchroederMaxLevel,

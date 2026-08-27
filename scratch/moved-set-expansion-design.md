@@ -335,3 +335,23 @@ real kernel work. Road to a sustained 30:
 3. per-64-step commit/verify/turnaround ~14 ms/step -> ~8
 plus the budget decision if the owner wants the deadline guaranteed at
 impact steps.
+
+## Commit-boundary mystery (2856b0a) — NEXT SESSION'S FIRST TARGET
+
+Schedule-phase stamps + a 64-entry ring decompose the whole lifecycle:
+steps encode uniformly (~18 ms at budget 16), turnaround ~90 ms,
+post-fence assembly ~0 — and the terminal fence waits 1.1-1.3 s for
+REAL pending device work (raw fence latency is ~0-3 ms) that none of
+the instrumented stages account for. Eliminated: presentation worker
+(disabled: no change), interface refresh + surface draw (disabled,
+field build verifiably absent: no change), render refresh, epoch
+(0.93 ms true), progress candidates (~2-3 ms/step total). The work is
+submitted around the commit boundary and drains under the next cycle's
+fences (also visible as the ~500 ms checkpoint stall at step 16).
+~1.2 s per 64-step cycle ≈ 19 ms/step — the TOP line item at every
+budget. Suspects: the gasCellEos finalizer chain, reflux receipt
+encode, StateManager commit-side device work, lane continuation
+handling. Next experiment: worker-side queue markers bracketing the
+commit boundary (schedule-end marker already exists via the phase
+stamps; add one at next-schedule start and read the early steps'
+queue:* timeline instead of the last step's).

@@ -74,6 +74,7 @@ import {
   createUlgMechanicsPromotionEvidenceTask,
   createUlgResidentLawGraphManifest,
   createUlgResidentSolverDescriptors,
+  refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot,
   summarizePeerComputeResidentAuthorityHost,
   ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA,
   ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_AUTHORITY_REPORT_SCHEMA,
@@ -342,6 +343,128 @@ function createFakeWebGpuUploadDevice() {
     }
   };
 }
+
+test('compact snapshot materialization preserves explicit Uint32 particle identity and rejects malformed identity ABI', () => {
+  const device = createFakeWebGpuUploadDevice();
+  const particleCount = 2;
+  const identity = Uint32Array.from([17, 29]);
+  const compactBufferSnapshot = {
+    schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    cacheKey: 'ulg:test:compact-identity-cache',
+    stateKey: 'ulg:test:compact-identity-state',
+    particleCount,
+    step: 7,
+    time: 0.125,
+    identityRequired: true,
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
+    identityStrideBytes:
+      SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    sphIdentityByteLength: identity.byteLength,
+    identityRevision: 'ulg:test:compact-identity-revision:7',
+    renderDomainKeys: {
+      17: 'body-seventeen',
+      29: 'body-twenty-nine'
+    },
+    sphState: new Float32Array(
+      particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
+    ),
+    sphThermo: new Float32Array(
+      particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
+    ),
+    sphIdentity: identity,
+    mlsMpmMechanics: new Float32Array(
+      particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+    )
+  };
+  const stored = new Map();
+  const stateManager = {
+    setHotBuffer(key, value) {
+      stored.set(key, value);
+    }
+  };
+
+  const refresh = refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
+    device,
+    compactBufferSnapshot,
+    stateManager,
+    hotBufferKey: 'ulg:test:compact-identity-hot-buffer'
+  });
+
+  assert.equal(
+    refresh.status,
+    'ulg-sph-mls-mpm-compact-snapshot-hot-buffer-refresh-executed'
+  );
+  assert.equal(refresh.bytes.sphIdentityBytes, identity.byteLength);
+  const hotBuffer = stored.get(refresh.hotBufferKey);
+  assert.ok(hotBuffer);
+  assert.equal(hotBuffer.sphPacked.identityRequired, true);
+  assert.equal(
+    hotBuffer.sphPacked.identitySchema,
+    ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+  );
+  assert.equal(
+    hotBuffer.sphPacked.identityStrideUints,
+    SPH_GPU_PARTICLE_IDENTITY_UINTS
+  );
+  assert.equal(
+    hotBuffer.sphPacked.identityStrideBytes,
+    SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    hotBuffer.sphPacked.identityRevision,
+    compactBufferSnapshot.identityRevision
+  );
+  assert.deepEqual(
+    hotBuffer.sphPacked.renderDomainKeys,
+    compactBufferSnapshot.renderDomainKeys
+  );
+  assert.ok(hotBuffer.sphPacked.identity instanceof Uint32Array);
+  assert.notStrictEqual(hotBuffer.sphPacked.identity, identity);
+  assert.deepEqual([...hotBuffer.sphPacked.identity], [...identity]);
+
+  const createdBufferCount = device.createdBuffers.length;
+  const invalidSnapshots = [
+    {
+      label: 'Float32 identity rows',
+      patch: { sphIdentity: new Float32Array(identity) },
+      error: /must use Uint32Array identity rows/
+    },
+    {
+      label: 'noncanonical identity schema',
+      patch: { identitySchema: 'peercompute.ulg.invalid-particle-identity.v0' },
+      error: /require the particle identity schema/
+    },
+    {
+      label: 'identity stride',
+      patch: { identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS + 1 },
+      error: /particle identity ABI metadata is incomplete/
+    },
+    {
+      label: 'identity byte length',
+      patch: {
+        sphIdentityByteLength:
+          identity.byteLength - Uint32Array.BYTES_PER_ELEMENT
+      },
+      error: /particle identity ABI metadata is incomplete/
+    }
+  ];
+  for (const { label, patch, error } of invalidSnapshots) {
+    assert.throws(
+      () => refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
+        device,
+        compactBufferSnapshot: {
+          ...compactBufferSnapshot,
+          ...patch
+        },
+        hotBufferKey: `ulg:test:compact-identity-rejected:${label}`
+      }),
+      error,
+      label
+    );
+  }
+  assert.equal(device.createdBuffers.length, createdBufferCount);
+});
 
 function connectInMemoryKernelMesh({
   requester,
@@ -1797,7 +1920,12 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           backend: 'webgpu',
           status: 'webgpu-accepted-no-full-readback',
           readbackMode: 'no-full-readback',
-          normalHotLoopReadbackFree: true,
+          fullReadbackPerformed: false,
+          copyBudgetReadbackBytes: 0,
+          // These stage tasks cross explicit ComputeManager queue fences.
+          // They are zero-readback without claiming one uninterrupted local
+          // hot loop.
+          normalHotLoopReadbackFree: false,
           gpuResidentLaneRequirement,
           gpuFence,
           gpuFenceReport: gpuFence,
@@ -2126,9 +2254,9 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.pressureInterface, 'no-full-readback');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.thermalPhase, 'no-full-readback');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.reactionProduct, 'no-full-readback');
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.pressureInterface, true);
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.thermalPhase, true);
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.reactionProduct, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.pressureInterface, false);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.thermalPhase, false);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.reactionProduct, false);
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate?.schema,
     ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA
@@ -2207,6 +2335,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     pressureInterfaceStagePublicationPayloads[0].candidate.retainedGasPressureBufferRefs,
     ['resident-gas-pressure-cells-buffer']
   );
+  assert.deepEqual(
+    pressureInterfaceStagePublicationPayloads[0].candidate.stageFullReadbackPerformed,
+    { pressureInterface: false }
+  );
+  assert.deepEqual(
+    pressureInterfaceStagePublicationPayloads[0].candidate.stageCopyBudgetReadbackBytes,
+    { pressureInterface: 0 }
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCandidateStatus, 'worker-retained-thermal-phase-publication-candidate-ready');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationStatus, 'worker-retained-thermal-phase-output-published');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCommitted, true);
@@ -2216,6 +2352,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(thermalStagePublicationPayloads[0].sourceStage, 'thermalPhase');
   assert.deepEqual(thermalStagePublicationPayloads[0].candidate.outputFamilies, ['sph-thermo-phase']);
   assert.equal(thermalStagePublicationPayloads[0].candidate.workerRetainedThermoBufferRefCount, 1);
+  assert.deepEqual(
+    thermalStagePublicationPayloads[0].candidate.stageFullReadbackPerformed,
+    { thermalPhase: false }
+  );
+  assert.deepEqual(
+    thermalStagePublicationPayloads[0].candidate.stageCopyBudgetReadbackBytes,
+    { thermalPhase: 0 }
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationCandidateStatus, 'worker-retained-reaction-product-publication-candidate-ready');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationStatus, 'worker-retained-reaction-product-output-published');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationCommitted, true);
@@ -2233,6 +2377,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     'resident-product-mass'
   ]);
   assert.equal(reactionProductStagePublicationPayloads[0].candidate.workerRetainedProductBufferRefCount, 1);
+  assert.deepEqual(
+    reactionProductStagePublicationPayloads[0].candidate.stageFullReadbackPerformed,
+    { reactionProduct: false }
+  );
+  assert.deepEqual(
+    reactionProductStagePublicationPayloads[0].candidate.stageCopyBudgetReadbackBytes,
+    { reactionProduct: 0 }
+  );
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.pressureInterface.pressureInterfaceAuthoritativeMutation,
     false
@@ -6151,8 +6303,17 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
     step: compactSnapshotStep,
     time: compactSnapshotTime,
     phaseCarrierPlan,
+    identityRequired: true,
+    identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+    identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
+    identityStrideBytes:
+      SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+    sphIdentityByteLength: snapshotSphPacked.identity.byteLength,
+    identityRevision: 'ulg:test:remote-compact-snapshot-identity',
+    renderDomainKeys: { 0: 'remote-seed-domain' },
     sphState: snapshotSphPacked.state,
     sphThermo: snapshotSphPacked.thermo,
+    sphIdentity: snapshotSphPacked.identity,
     mlsMpmMechanics: snapshotMlsMpmPacked.mechanics
   };
   const compactMechanicsSeedWithSnapshot = runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode({
@@ -6187,6 +6348,7 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   const compactSnapshotCandidate = compactMechanicsSeedWithSnapshot.compactMechanicsStageSeed;
   const compactSnapshotByteLength = snapshotSphPacked.state.byteLength
     + snapshotSphPacked.thermo.byteLength
+    + snapshotSphPacked.identity.byteLength
     + snapshotMlsMpmPacked.mechanics.byteLength;
   assert.equal(
     compactSnapshotCandidate.compactBufferSnapshot.schema,

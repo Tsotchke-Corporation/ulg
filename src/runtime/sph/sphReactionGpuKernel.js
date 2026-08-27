@@ -44,6 +44,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { phaseSoundSpeedScaleFor } from './sphMechanicsMaterialTable.js';
 import { describeChemicalFormula } from '../chemistry/formula.js';
 import {
   buildSphThermalClosureGraphBank,
@@ -693,7 +694,10 @@ function phaseMechanicsRecord(material, properties, phase, options) {
   const restDensity = finiteNumber(phase?.densityKgPerM3, 0);
   const bulkRaw = finiteNumber(phase?.bulkModulusPa, 0);
   const shearRaw = phase?.name === 'solid' ? finiteNumber(phase?.shearModulusPa, 0) : 0;
-  const soundSpeedScale = finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE);
+  const soundSpeedScale = phaseSoundSpeedScaleFor(properties, phase, {
+    soundSpeedScale: finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE),
+    cflMaxSoundSpeedMPerS: finiteNumber(options.cflMaxSoundSpeedMPerS, 0)
+  });
   const modulusScale = soundSpeedScale * soundSpeedScale;
   const bulk = bulkRaw * modulusScale;
   const shear = shearRaw * modulusScale;
@@ -766,6 +770,7 @@ export function buildSphReactionTable(reactions = [], {
   materialProperties = {},
   contactRadiusM = 0,
   soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
+  cflMaxSoundSpeedMPerS = 0,
   minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
 } = {}) {
   const records = [];
@@ -782,7 +787,11 @@ export function buildSphReactionTable(reactions = [], {
   const productPhaseRecords = [];
   const productPhaseMetadata = [];
   const productPhaseKeys = new Set();
-  const options = { soundSpeedScale, minGasSoundSpeedMPerS };
+  const options = {
+    soundSpeedScale,
+    cflMaxSoundSpeedMPerS,
+    minGasSoundSpeedMPerS
+  };
 
   for (let reactionIndex = 0; reactionIndex < (reactions || []).length; reactionIndex += 1) {
     const reaction = reactions[reactionIndex];
@@ -4033,6 +4042,10 @@ export async function runSphReactionStepWebGpu({
             ancestorGeneration: schroederSpatialEpochGeneration,
             reactionInputStateBuffer: summarySourceStateBuffer,
             reactionInputThermoBuffer: summarySourceThermoBuffer,
+            reactionInputMechanicsBuffer: summarySourceMechanicsBuffer,
+            transactionRollbackThermoBuffer: summarySourceThermoBuffer,
+            transactionRollbackMechanicsBuffer:
+              summarySourceMechanicsBuffer,
             frozenResolvedStateBuffer: outStateBuffer,
             particleCount: sphParticleState.particleCount,
             reactionDiscoveryProposal:
@@ -4079,7 +4092,8 @@ export async function runSphReactionStepWebGpu({
               productEventCapacity:
                 sphParticleState.particleCount * reactionTable.productTermCount,
               sourceStateBuffer: summarySourceStateBuffer,
-              sourceThermoBuffer: summarySourceThermoBuffer
+              sourceThermoBuffer: summarySourceThermoBuffer,
+              sourceMechanicsBuffer: summarySourceMechanicsBuffer
             })
           : null;
       reactionSummary = await runSphReactionSummaryWebGpu({
@@ -4091,7 +4105,15 @@ export async function runSphReactionStepWebGpu({
         sourceMechanicsBuffer: summarySourceMechanicsBuffer,
         nextStateBuffer: continuationStateBuffer,
         nextThermoBuffer: continuationThermoBuffer,
-        nextMechanicsBuffer: continuationMechanicsBuffer,
+        // Product-event publication is also the non-canonical resident
+        // sidecar path. Supplying a destination mechanics buffer opts into
+        // physical carrier placement, which intentionally requires the
+        // canonical Schroeder authority. Keep direct/non-SS execution on the
+        // retained sidecar path instead of turning that authority refusal into
+        // an unavailable summary with no renderable products.
+        nextMechanicsBuffer: canonicalReactionProductPlacementAuthority
+          ? continuationMechanicsBuffer
+          : null,
         reactionRecordBuffer,
         proposalBuffer,
         // Only forward the simulation-domain dimensions. Particle-bin bounds

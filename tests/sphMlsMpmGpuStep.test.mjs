@@ -134,8 +134,10 @@ import {
   createSphReactionProductStageComputeTask,
   runSphReactionProductStageComputeTask,
   runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks,
+  runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu,
   runMlsMpmMechanicsP2gStageComputeTask,
   runMlsMpmMechanicsG2pStageComputeTask,
+  buildMechanicsWorkerCompactPublicationCandidate,
   submitMlsMpmResidentStepComputeTask,
   submitMlsMpmResidentStepsComputeTask,
   summarizeGpuTimestampRecorderQueueStages,
@@ -463,6 +465,75 @@ test('inactive or invalid recorder summaries return null instead of fabricated z
   );
   assert.equal(invalid.stageGpuMs, null);
   assert.equal(invalid.stageGpuStats, null);
+});
+
+test('worker compact publication admits zero-readback stages without claiming an uninterrupted hot loop', () => {
+  const stageIds = ['p2g', 'gridUpdate', 'g2p'];
+  const stageExecution = {
+    status: 'completed',
+    stageResults: stageIds.map((stageId) => ({
+      stageId,
+      status: 'completed',
+      retainedBufferRefs: [`ulg-worker:test-${stageId}`]
+    }))
+  };
+  const baseSummaries = Object.fromEntries(stageIds.map((stageId) => [stageId, {
+    backend: 'webgpu',
+    readbackMode: 'no-full-readback',
+    fullReadbackPerformed: false,
+    copyBudgetReadbackBytes: 0,
+    normalHotLoopReadbackFree: false,
+    workerWebGpuStatus: 'webgpu-executed-no-full-readback',
+    workerRetainedBufferRefs: [`ulg-worker:test-${stageId}`]
+  }]));
+  const createCandidate = (stagePatch = {}) => {
+    const stageLaneSummaries = Object.fromEntries(stageIds.map((stageId) => [
+      stageId,
+      { ...baseSummaries[stageId], ...(stagePatch[stageId] || {}) }
+    ]));
+    return buildMechanicsWorkerCompactPublicationCandidate({
+      stageExecution,
+      stageLaneSummaries,
+      stageWorkerResidencyStatuses: Object.fromEntries(
+        stageIds.map((stageId) => [stageId, 'worker-ready'])
+      ),
+      workerRunnerSupplied: true,
+      workerModuleUrl: '/src/services/ulgMechanicsResidentStage.worker.js',
+      laneId: 'ulg:test:compact-publication-lane',
+      stateKey: 'ulg:test:compact-publication-state'
+    });
+  };
+
+  const admitted = createCandidate();
+  assert.equal(
+    admitted.candidateStatus,
+    'worker-retained-compact-publication-candidate-ready'
+  );
+  assert.equal(admitted.blocker, null);
+  assert.equal(admitted.compactSummaryStatus, 'worker-compact-summary-required');
+  assert.deepEqual(admitted.stageFullReadbackPerformed, {
+    p2g: false,
+    gridUpdate: false,
+    g2p: false
+  });
+  assert.deepEqual(admitted.stageCopyBudgetReadbackBytes, {
+    p2g: 0,
+    gridUpdate: 0,
+    g2p: 0
+  });
+
+  for (const stagePatch of [
+    { p2g: { readbackMode: 'full-parity-readback' } },
+    { gridUpdate: { fullReadbackPerformed: true } },
+    { g2p: { copyBudgetReadbackBytes: 4 } }
+  ]) {
+    const rejected = createCandidate(stagePatch);
+    assert.equal(
+      rejected.candidateStatus,
+      'worker-retained-compact-publication-candidate-blocked'
+    );
+    assert.equal(rejected.blocker, 'compact-summary-no-full-readback-required');
+  }
 });
 
 test('mechanics-field contact requires interface authority for mixed noncondensed pairs and defers all-noncondensed pairs to EOS', () => {
@@ -1711,7 +1782,10 @@ function residentProductMassHandle({
   generationCount = 1,
   sourceRowCounts = null,
   sourceByteLengths = null,
-  gasSpeciesRows = []
+  gasSpeciesRows = [],
+  strictReactionGate = null,
+  reactionPlacementRolledBack = false,
+  reactionPlacementTransactionOutcome = null
 } = {}) {
   const productEventBuffer = {
     label,
@@ -1772,6 +1846,13 @@ function residentProductMassHandle({
     gasSpeciesLedger,
     gasSpeciesLedgerCount: gasSpeciesLedger?.recordCount ?? 0,
     gasSpeciesReadbackByteLength: gasSpeciesLedger ? gasSpeciesLedger.recordCount * 32 : 0,
+    strictReactionGate,
+    strictReactionGateSchema: strictReactionGate?.schema ?? null,
+    strictReactionGateStatus: strictReactionGate?.status ?? null,
+    strictForceCouplingAllowed:
+      strictReactionGate?.strictForceCouplingAllowed === true,
+    reactionPlacementRolledBack,
+    reactionPlacementTransactionOutcome,
     sealedBoxGasProductMoles: gasSpeciesRows.reduce((sum, row) => sum + (Number(row.moles) || 0), 0),
     visibleProductMassKg: 0,
     unplacedProductMassKg,
@@ -1800,6 +1881,117 @@ function residentProductMassHandle({
   });
   return handle;
 }
+
+test('resident product-history preserves the prior strict gas proof when the current atomic placement transaction rolls back', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const priorStrictGate = {
+    schema: 'peercompute.ulg.sph-reaction-strict-gate.v0',
+    status: 'strict-reaction-gate-pass',
+    blockers: [],
+    warnings: [],
+    provisionalEnergetics: [],
+    strictForceCouplingAllowed: true
+  };
+  const input = residentProductMassHandle({
+    label: 'atomic-rollback-input-events',
+    rowCount: 1,
+    byteLength: 128,
+    strictReactionGate: priorStrictGate,
+    gasSpeciesRows: [{
+      material: 'h2',
+      materialId: 7,
+      massKg: 0.01,
+      moles: 5
+    }]
+  });
+  const emitted = residentProductMassHandle({
+    label: 'atomic-rollback-cleared-current-events',
+    rowCount: 1,
+    byteLength: 128,
+    unplacedProductMassKg: 0,
+    strictReactionGate: {
+      schema: 'peercompute.ulg.sph-reaction-strict-gate.v0',
+      status: 'strict-reaction-gate-blocked',
+      blockers: [
+        'reaction-product-placement-atomic-rollback-no-new-products'
+      ],
+      warnings: [],
+      provisionalEnergetics: [],
+      strictForceCouplingAllowed: false
+    },
+    reactionPlacementRolledBack: true,
+    reactionPlacementTransactionOutcome:
+      'atomic-reaction-placement-pre-reaction-fallback'
+  });
+  const merged = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: input,
+    emittedResidentProductMass: emitted
+  });
+  assert.equal(merged, input);
+  assert.equal(merged.strictReactionGateStatus, 'strict-reaction-gate-pass');
+  assert.equal(merged.strictForceCouplingAllowed, true);
+  assert.deepEqual(merged.strictReactionGate, priorStrictGate);
+  assert.equal(merged.gasSpeciesLedger.bySpecies.h2.moles, 5);
+  assert.equal(merged.productEventRowCount, 1);
+  assert.equal(merged.productEventBufferByteLength, 128);
+  assert.equal(device.copies.length, 0);
+  assert.equal(device.submissions.length, 0);
+  await releaseResidentProductHistoryTestHandles(merged, input, emitted);
+});
+
+test('resident product-history publishes no generation when the first atomic placement rolls back', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const emitted = residentProductMassHandle({
+    label: 'atomic-rollback-first-generation-events',
+    rowCount: 1,
+    byteLength: 128,
+    reactionPlacementRolledBack: true,
+    reactionPlacementTransactionOutcome:
+      'atomic-reaction-placement-pre-reaction-fallback'
+  });
+
+  const merged = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    emittedResidentProductMass: emitted,
+    allowHostCompactionObservation: false
+  });
+
+  assert.equal(merged, null);
+  assert.equal(device.createdBuffers.length, 0);
+  assert.equal(device.copies.length, 0);
+  assert.equal(device.submissions.length, 0);
+  await releaseResidentProductHistoryTestHandles(emitted);
+});
+
+test('resident product-history rejects a rollback marker without the exact atomic outcome', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const emitted = residentProductMassHandle({
+    label: 'atomic-rollback-invalid-outcome-events',
+    rowCount: 1,
+    byteLength: 128,
+    reactionPlacementRolledBack: true,
+    reactionPlacementTransactionOutcome: 'unproven-fallback'
+  });
+
+  await assert.rejects(
+    mergeResidentProductMassBuffersWebGpu({
+      device,
+      emittedResidentProductMass: emitted,
+      allowHostCompactionObservation: false
+    }),
+    (error) => error?.code === 'ERR_SPH_PRODUCT_HISTORY_ROLLBACK_OUTCOME_INVALID'
+  );
+  assert.equal(device.createdBuffers.length, 0);
+  assert.equal(device.submissions.length, 0);
+  await releaseResidentProductHistoryTestHandles(emitted);
+});
 
 function compactSpatialGasRowsFixture(rows = [
   {
@@ -9073,6 +9265,7 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
 
   let laneContract = null;
   let gridTask = null;
+  let p2gResult = null;
   let spatialResult = null;
   let eosResult = null;
   const submittedTasks = [];
@@ -9082,7 +9275,7 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
       submittedTasks.push(task);
       observedStages.push(task.exportName);
       if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
-        return {
+        p2gResult = {
           computeTaskResultSchema:
             'peercompute.ulg.mls-mpm-mechanics-p2g-stage-compute-task-result.v0',
           mechanicsP2gStageTask: true,
@@ -9105,6 +9298,7 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
           readbackMode: 'no-full-readback',
           normalHotLoopReadbackFree: true
         };
+        return p2gResult;
       }
       if (
         task.exportName
@@ -9177,6 +9371,21 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
       return { status: 'rejected' };
     }
   };
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2: {
+      molarMassKgPerMol: 0.002016,
+      phases: [{
+        name: 'gas',
+        densityKgPerM3: 0.0838,
+        bulkModulusPa: 101325,
+        shearModulusPa: 0,
+        cpJPerKgK: 14300,
+        temperatureRange: [20, 1200]
+      }]
+    }
+  }, {
+    surfaceTensionEnabled: false
+  });
 
   await assert.rejects(
     runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
@@ -9197,6 +9406,8 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
       sphParticleUpload,
       mlsMpmParticleUpload,
       boxDimsM: [2, 2, 2],
+      mechanicsMaterialTable,
+      gravityMPerS2: [0, -9.80665, 0],
       internalPressureScale: 0.75,
       ambientPressurePa: 101325,
       includePressureInterfaceStage: false,
@@ -9269,6 +9480,16 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
   assert.equal(p2gTask.data.externalGaugePressurePa, 0);
   assert.equal(p2gTask.data.externalGaugePressureEnabled, false);
   assert.equal(p2gTask.data.mechanicsFieldMode, 'required');
+  assert.equal(
+    p2gResult.residentProductMassProductEventDispatchMode,
+    'gpu-authenticated-gas-only-no-mechanics-scatter'
+  );
+  assert.equal(
+    p2gResult.residentProductMassGridCouplingStatus,
+    'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
+  );
+  assert.equal(p2gResult.residentProductMassCoupledEventCount, 0);
+  assert.equal(p2gResult.residentProductMassCoupledUnplacedMassKg, 0);
   assert.equal(p2gTask.data.retainGridBuffer, false);
   assert.deepEqual(p2gTask.webgpu.retainedBufferRefs, []);
   const spatialTask = submittedTasks.find(
@@ -9305,6 +9526,8 @@ test('exact v4 gas-pressure mechanics builds one readback-free five-stage DAG an
   );
   assert.equal(gridTask.data.gasPressureMechanicsChartId, 0);
   assert.equal(gridTask.data.gasPressureMechanicsBoundaryRequired, true);
+  assert.equal(gridTask.data.phaseVolumeAmbientBuoyancyRequired, true);
+  assert.equal(gridTask.data.ambientPressurePa, 101325);
   assert.equal(gridTask.data.workerExactPressureGridHandoffRequired, true);
   assert.equal(gridTask.data.retainUpdatedGridBuffer, false);
   assert.equal(
@@ -14331,7 +14554,7 @@ test('MLS-MPM resident sequence contract makes surface stress a hard pass-DAG bl
   );
 });
 
-test('resident product history selects dense P2G compatibility for canonical ambient buoyancy', () => {
+test('resident product history selects product-aware P2G without suppressing canonical ambient buoyancy', () => {
   const { options } = noFullReadbackResidentStepFixture();
   const residentProductMass = residentProductMassHandle({
     label: 'already-materialized-product-history',
@@ -14388,23 +14611,20 @@ test('resident product history selects dense P2G compatibility for canonical amb
   );
   assert.equal(selection.requested, true);
   assert.equal(selection.authorityRequired, true);
-  assert.equal(selection.required, false);
+  assert.equal(selection.required, true);
   assert.equal(selection.productAwareP2gRequired, true);
-  assert.equal(
-    selection.skipReason,
-    'resident-product-mass-requires-dense-p2g-compatibility'
-  );
+  assert.equal(selection.skipReason, null);
   assert.equal(
     task.gpuResidentLane.residentSequenceLaneContract.ambientBuoyancyRequired,
-    false
+    true
   );
   assert.equal(
     task.gpuResidentLane.residentSequenceLaneContract.ambientBuoyancySkipReason,
-    'resident-product-mass-requires-dense-p2g-compatibility'
+    null
   );
 });
 
-test('canonical ambient-only resident step keeps product history on dense P2G', async () => {
+test('canonical ambient-only resident step keeps product history on authenticated field P2G', async () => {
   const { tracker, options } = noFullReadbackResidentStepFixture();
   const device = { queue: {}, lost: new Promise(() => {}) };
   const { generation, transaction } = residentSpatialEpochTransactionFixture({
@@ -14464,14 +14684,11 @@ test('canonical ambient-only resident step keeps product history on dense P2G', 
     }
   });
 
-  assert.notEqual(observedP2gArgs?.mechanicsFieldMode, 'required');
+  assert.equal(observedP2gArgs?.mechanicsFieldMode, 'required');
   assert.equal(observedP2gArgs?.residentProductMass, residentProductMass);
   assert.equal(step.phaseVolumeAmbientBuoyancyRequested, true);
-  assert.equal(step.phaseVolumeAmbientBuoyancyRequired, false);
-  assert.equal(
-    step.phaseVolumeAmbientBuoyancySkipReason,
-    'resident-product-mass-requires-dense-p2g-compatibility'
-  );
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequired, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancySkipReason, null);
   assert.equal(step.residentProductMass, residentProductMass);
   assert.equal(
     step.nextParticleUploads.residentProductMass,
@@ -14479,6 +14696,64 @@ test('canonical ambient-only resident step keeps product history on dense P2G', 
   );
   assert.equal(step.fullParticleReadbackPerformed, false);
   assert.equal(step.normalHotLoopReadbackFree, true);
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
+test('canonical mechanics-only resident step derives ambient buoyancy without a caller flag', async () => {
+  const { tracker, options } = noFullReadbackResidentStepFixture();
+  const device = { queue: {}, lost: new Promise(() => {}) };
+  const { generation, transaction } = residentSpatialEpochTransactionFixture({
+    device,
+    tracker,
+    sphParticleUpload: options.sphParticleUpload,
+    mlsMpmParticleUpload: options.mlsMpmParticleUpload
+  });
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2: {
+      molarMassKgPerMol: 0.002016,
+      phases: [{
+        name: 'gas',
+        densityKgPerM3: 0.0838,
+        bulkModulusPa: 101325,
+        shearModulusPa: 0,
+        cpJPerKgK: 14300,
+        temperatureRange: [20, 1200]
+      }]
+    }
+  }, {
+    surfaceTensionEnabled: false
+  });
+  const baseP2gRunner = options.p2gRunner;
+  const baseGridUpdateRunner = options.gridUpdateRunner;
+  let observedP2gArgs = null;
+  let observedGridUpdateArgs = null;
+
+  const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
+    ...options,
+    device,
+    schroederSpatialEpochGeneration: generation,
+    schroederSpatialEpochTransaction: transaction,
+    canonicalSpatialRequired: true,
+    mechanicsMaterialTable,
+    ambientPressurePa: 101325,
+    gravityMPerS2: [0, -9.80665, 0],
+    p2gRunner(args) {
+      observedP2gArgs = args;
+      return baseP2gRunner(args);
+    },
+    gridUpdateRunner(args) {
+      observedGridUpdateArgs = args;
+      return baseGridUpdateRunner(args);
+    }
+  });
+
+  assert.equal(observedP2gArgs?.mechanicsFieldMode, 'required');
+  assert.equal(observedGridUpdateArgs?.phaseVolumeAmbientBuoyancyRequired, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequested, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancyRequired, true);
+  assert.equal(step.phaseVolumeAmbientBuoyancySkipReason, null);
+  assert.equal(step.diagnostics.phaseVolumeAmbientBuoyancyRequested, true);
+  assert.equal(step.diagnostics.phaseVolumeAmbientBuoyancyRequired, true);
   destroyMlsMpmResidentStepBuffers(step);
 });
 
@@ -19460,7 +19735,7 @@ test('MLS-MPM resident steps compactSummaryMode none skips no-full summary readb
   assert.ok(tracker.destroyed > 0);
 });
 
-test('MLS-MPM resident reaction sequence reuses one owned placement accumulator and reads only the final step', async () => {
+test('MLS-MPM resident reaction sequence reuses one accumulator but leaves no-readback source count unproven', async () => {
   const fixture = placementAccumulatorSequenceFixture({ productTermCount: 3 });
   const execution = await runMlsMpmResidentStepsWithOptionalWebGpu(fixture.sequenceOptions);
   await new Promise((resolve) => setImmediate(resolve));
@@ -19497,7 +19772,7 @@ test('MLS-MPM resident reaction sequence reuses one owned placement accumulator 
   );
   assert.deepEqual(
     fixture.reactionCalls.map((call) => call.reactionProductPlacementSourceSummaryCount),
-    [1, 2, 3]
+    [1, null, null]
   );
   assert.equal(accumulator.size, fixture.expectedAccumulatorByteLength);
   assert.equal(
@@ -19507,19 +19782,14 @@ test('MLS-MPM resident reaction sequence reuses one owned placement accumulator 
   assert.equal(execution.reactionProductPlacementAccumulatorByteLength, fixture.expectedAccumulatorByteLength);
   assert.equal(execution.reactionProductPlacementAccumulatorOwned, true);
   assert.equal(execution.reactionProductPlacementReadbackCadence, 'resident-sequence-final-only');
-  assert.equal(execution.reactionProductPlacementAccumulatorStatus, 'product-placement-provenance-ready');
-  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 3);
-  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, true);
-  assert.equal(execution.reactionProductPlacementSourceCountVerified, true);
-  assert.equal(execution.reactionProductPlacementProvenance.sourceSummaryCount, 3);
   assert.equal(
-    execution.reactionProductPlacementProvenance.readbackCadence,
-    'resident-sequence-final-only'
+    execution.reactionProductPlacementAccumulatorStatus,
+    'resident-sequence-product-placement-dispatch-evidence-incomplete'
   );
-  assert.equal(
-    execution.reactionProductPlacementProvenance.readbackByteLength,
-    fixture.expectedAccumulatorByteLength
-  );
+  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 1);
+  assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, false);
+  assert.equal(execution.reactionProductPlacementSourceCountVerified, false);
+  assert.equal(execution.reactionProductPlacementProvenance, null);
   const accumulatorWrites = fixture.device.writes.filter((write) => (
     write.label === 'ulg-sph-reaction-product-placement-resident-sequence-accumulator'
   ));
@@ -19638,9 +19908,9 @@ test('MLS-MPM resident reaction sequence fails closed when any placement dispatc
 
   assert.deepEqual(
     fixture.reactionCalls.map((call) => call.reactionProductPlacementSourceSummaryCount),
-    [1, 2, 2]
+    [1, null, null]
   );
-  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 2);
+  assert.equal(execution.reactionProductPlacementSuccessfulDispatchCount, 1);
   assert.equal(execution.reactionProductPlacementDispatchEvidenceComplete, false);
   assert.equal(execution.reactionProductPlacementSourceCountVerified, false);
   assert.equal(execution.reactionProductPlacementProvenance, null);

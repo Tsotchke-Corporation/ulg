@@ -48,7 +48,7 @@ export const STANDARD_VISUAL_REVIEW_SCHEMA =
 export const STANDARD_VISUAL_RECEIPT_SCHEMA =
   'peercompute.ulg.ss-standard-visual-matrix-receipt.v1';
 export const STANDARD_VISUAL_POLICY_ID =
-  'ss-contained-standard-seven-scenario-human-reviewed-v2';
+  'ss-contained-standard-seven-scenario-human-reviewed-v3';
 export const STANDARD_VISUAL_EVENT_KIND = 'ulg_sph_probe';
 export const STANDARD_VISUAL_EVENT_NAME = 'standard_visual_matrix_passed';
 export const STANDARD_VISUAL_REVIEW_ATTESTATION =
@@ -205,6 +205,9 @@ export function standardVisualScenarioManifest() {
     Object.freeze({
       label: scenario.label,
       presetId: scenario.presetId ?? null,
+      acceptanceTrack: scenario.acceptanceTrack ?? null,
+      totalStepCount:
+        scenario.workerSchedulePlan?.totalStepCount ?? null,
       randomPair: scenario.randomPair == null
         ? null
         : Object.freeze({ ...scenario.randomPair }),
@@ -272,12 +275,10 @@ function commandPolicyCore({ artifactDir, runId }) {
         ULG_VISUAL_MATRIX_VIEWPORT_HEIGHT: '800',
         ULG_VISUAL_MATRIX_FRAME_EVERY: '1',
         ULG_VISUAL_MATRIX_FRAME_MAX: '16',
-        // This is only a wall-clock allowance. The exact seven-scenario
-        // horizons, checkpoint counts, and scientific acceptance criteria
-        // remain unchanged. The resident SS route currently pays substantial
-        // low-N constant overhead, so the former per-scenario 5/20-minute
-        // limits could reject a healthy GPU-resident run before its required
-        // horizon completed.
+        // This is only a wall-clock allowance. Every scenario's explicit
+        // acceptance track and step horizon are sealed into the policy
+        // manifest above; the separately runnable scientific-calibration arm
+        // is not part of this seven-scenario release receipt.
         ULG_VISUAL_MATRIX_TIMEOUT_MS:
           String(STANDARD_VISUAL_SCENARIO_TIMEOUT_MS),
         ULG_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION: '1',
@@ -1158,6 +1159,9 @@ export function evaluateStandardVisualCapture(
     if (
       result?.label !== expected.label
       || result?.presetId !== expected.presetId
+      || (result?.acceptanceTrack ?? null) !== expected.acceptanceTrack
+      || (result?.workerSchedulePlan?.totalStepCount ?? null)
+        !== expected.totalStepCount
       || canonicalJson(result?.randomPair ?? null)
         !== canonicalJson(expected.randomPair)
       || result?.url !== expected.url

@@ -13,7 +13,9 @@ import {
   summarizeSphStaticTableCacheSnapshot
 } from '../runtime/sph/sphColdStartCache.js';
 import {
+  buildSphReactionTableFromViewState,
   buildSphThermalMaterialTableFromViewState,
+  reactionTablesExactlyEqual,
   sphStaticTableInputsFromViewState,
   surfaceDescriptorsFromMaterials,
   thermalMaterialTablesExactlyEqual
@@ -126,6 +128,12 @@ export function staticTableBundleCoversViewState(
     || !sameStringSet(expectedProducts, reactionProducts)
     || !reactionTableContactRadiiCoverViewState(bundle.reactionTable, viewState)
   ) {
+    return false;
+  }
+  if (!reactionTablesExactlyEqual(
+    bundle.reactionTable,
+    buildSphReactionTableFromViewState(viewState)
+  )) {
     return false;
   }
 

@@ -126,7 +126,7 @@ const BROWSER_CONSOLE_ISSUE_PATTERNS = [
   },
   {
     issue: 'webgpu-device-lost',
-    pattern: /\[ulg-gpu-device-lost\]|(?:WebGPU|GPU)\s*Device[^\n]{0,80}\blost\b|\bdevice loss\b/i
+    pattern: /\[ulg-gpu-device-lost\]|(?:WebGPU|GPU)\s*Device[^\n]{0,80}\blost\b|\bdevice loss\b|A valid external Instance reference no longer exists/i
   },
   {
     issue: 'webgpu-uncaptured-error',
@@ -156,7 +156,7 @@ const BROWSER_CRITICAL_GPU_MESSAGE_PATTERNS = [
   },
   {
     category: 'device-lost',
-    pattern: /\[ulg-gpu-device-lost\]|(?:WebGPU|GPU)\s*Device[^\n]{0,80}\blost\b|\bdevice loss\b/i
+    pattern: /\[ulg-gpu-device-lost\]|(?:WebGPU|GPU)\s*Device[^\n]{0,80}\blost\b|\bdevice loss\b|A valid external Instance reference no longer exists/i
   },
   {
     category: 'uncaptured-error',
@@ -254,7 +254,107 @@ function compactBrowserConsoleLocation(message) {
   };
 }
 
-export function createBrowserConsoleCapture() {
+export function createBrowserProbeFatalSignal() {
+  let fatalTermination = null;
+  let resolveFatalTermination = null;
+  const promise = new Promise((resolve) => {
+    resolveFatalTermination = resolve;
+  });
+  return {
+    promise,
+    trip({
+      source = 'unknown',
+      category = 'device-lost',
+      message = 'browser probe observed a fatal GPU lifecycle event',
+      receivedAtMs = Date.now(),
+      detail = null
+    } = {}) {
+      if (fatalTermination !== null) return false;
+      fatalTermination = Object.freeze({
+        schema: 'peercompute.ulg.sph-probe-fatal-termination.v0',
+        status: 'probe-fatal-termination-observed',
+        source,
+        category,
+        message: String(message || 'browser probe fatal termination'),
+        receivedAtMs: Number.isFinite(Number(receivedAtMs))
+          ? Number(receivedAtMs)
+          : Date.now(),
+        detail
+      });
+      resolveFatalTermination(fatalTermination);
+      return true;
+    },
+    current() {
+      return fatalTermination;
+    }
+  };
+}
+
+export async function raceBrowserProbeOperationWithFatalSignal(
+  operation,
+  fatalSignal
+) {
+  const operationOutcome = Promise.resolve(operation).then(
+    (value) => ({ status: 'operation-completed', value }),
+    (error) => ({ status: 'operation-rejected', error })
+  );
+  const currentFatalTermination = fatalSignal.current();
+  if (currentFatalTermination !== null) {
+    return {
+      status: 'probe-fatal-termination',
+      fatalTermination: currentFatalTermination
+    };
+  }
+  const fatalOutcome = fatalSignal.promise.then((fatalTermination) => ({
+    status: 'probe-fatal-termination',
+    fatalTermination
+  }));
+  const outcome = await Promise.race([operationOutcome, fatalOutcome]);
+  if (outcome.status === 'operation-rejected') throw outcome.error;
+  return outcome;
+}
+
+async function awaitBrowserProbeOperation(operation, fatalSignal) {
+  const outcome = await raceBrowserProbeOperationWithFatalSignal(
+    operation,
+    fatalSignal
+  );
+  if (outcome.status === 'probe-fatal-termination') {
+    const error = new Error(outcome.fatalTermination.message);
+    error.browserProbeFatalTermination = outcome.fatalTermination;
+    throw error;
+  }
+  return outcome.value;
+}
+
+export async function awaitBrowserProbeFinalization(
+  finalize,
+  fatalSignal
+) {
+  if (typeof finalize !== 'function') {
+    throw new TypeError('browser probe finalizer must be a function');
+  }
+  const currentFatalTermination = fatalSignal.current();
+  if (currentFatalTermination !== null) {
+    const error = new Error(currentFatalTermination.message);
+    error.browserProbeFatalTermination = currentFatalTermination;
+    throw error;
+  }
+  const finalization = Promise.resolve().then(() => {
+    const fatalTerminationBeforeStart = fatalSignal.current();
+    if (fatalTerminationBeforeStart !== null) {
+      const error = new Error(fatalTerminationBeforeStart.message);
+      error.browserProbeFatalTermination = fatalTerminationBeforeStart;
+      throw error;
+    }
+    return finalize();
+  });
+  return awaitBrowserProbeOperation(finalization, fatalSignal);
+}
+
+export function createBrowserConsoleCapture({
+  onCriticalGpuMessage = null
+} = {}) {
   const entries = [];
   const issues = [];
   const pageErrors = [];
@@ -282,6 +382,14 @@ export function createBrowserConsoleCapture() {
     if (!firstCriticalGpuMessagesByCategory[criticalGpuCategory]) {
       firstCriticalGpuMessagesByCategory[criticalGpuCategory] =
         criticalGpuMessage;
+    }
+    if (typeof onCriticalGpuMessage === 'function') {
+      try {
+        onCriticalGpuMessage({ ...criticalGpuMessage });
+      } catch {
+        // Diagnostic callbacks must never hide the console evidence they
+        // observe. The one-shot fatal signal is deliberately best-effort here.
+      }
     }
   };
 
@@ -1873,6 +1981,36 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       residentAutoSchedule: overlay?.__mlsMpmResidentAutoSchedule || null,
       probeProgress: overlay?.__sphProbeProgress || null,
       residentRefreshProgress: sceneUserData.mlsMpmResidentStepsProgress || null,
+      workerLaneLastFallback: sceneUserData.sphWorkerLaneLastFallback || null,
+      workerOffscreenResidentStage: (() => {
+        const status = sceneUserData.sphWorkerOffscreenResidentStage || null;
+        if (!status) return null;
+        const result = status.residentScheduleResult || null;
+        return {
+          schema: status.schema ?? null,
+          status: status.status ?? null,
+          reason: status.reason ?? null,
+          errorName: status.errorName ?? null,
+          errorMessage: status.errorMessage ?? null,
+          taskId: status.taskId ?? null,
+          scheduleId: status.scheduleId ?? result?.scheduleId ?? null,
+          laneId: status.laneId ?? result?.laneId ?? null,
+          stateKey: status.stateKey ?? result?.stateKey ?? null,
+          residentScheduleError: status.residentScheduleError || null,
+          residentScheduleResult: result ? {
+            schema: result.schema ?? null,
+            status: result.status ?? null,
+            scheduleId: result.scheduleId ?? null,
+            laneId: result.laneId ?? null,
+            stateKey: result.stateKey ?? null,
+            requestedStepCount: result.requestedStepCount ?? null,
+            completedStepCount: result.completedStepCount ?? null,
+            cancelled: result.cancelled ?? null,
+            terminalStatus: result.terminalStatus ?? null,
+            gpuFence: result.gpuFence || null
+          } : null
+        };
+      })(),
       residentSchroederHierarchyHostTiming:
         sceneUserData.schroederHierarchyHostTimingAccumulator
           ?.snapshot?.()
@@ -1984,8 +2122,9 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       warningText: overlay?.querySelector?.('#sph-warning-bar')?.textContent || null
     };
   }, label);
+  let timeoutId = null;
   const timeout = new Promise((resolve) => {
-    setTimeout(() => resolve({
+    timeoutId = setTimeout(() => resolve({
       schema: 'peercompute.ulg.sph-probe-browser-snapshot.v0',
       status: 'snapshot-timeout',
       label,
@@ -2003,6 +2142,26 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       reason: error instanceof Error ? error.message : String(error),
       elapsedMs: Date.now() - started
     };
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
+async function collectInPagePartialTimeline(page, timeoutMs = 1000) {
+  if (!page) return null;
+  let timeoutId = null;
+  const partial = page.evaluate(() => (
+    globalThis.__ulgSphProbePartialTimeline || null
+  ));
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(null), timeoutMs);
+  });
+  try {
+    return await Promise.race([partial, timeout]);
+  } catch {
+    return null;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
 }
 
@@ -2049,12 +2208,15 @@ function startViteServer({ repoDir, port, viteBin, timeoutMs }) {
         return closed;
       }
       proc.kill('SIGTERM');
+      let gracefulTimeoutId = null;
       const graceful = await Promise.race([
         closed,
         new Promise((resolve) => {
-          setTimeout(() => resolve(null), 5_000);
+          gracefulTimeoutId = setTimeout(() => resolve(null), 5_000);
         })
-      ]);
+      ]).finally(() => {
+        if (gracefulTimeoutId !== null) clearTimeout(gracefulTimeoutId);
+      });
       if (graceful) return graceful;
       if (proc.exitCode === null && proc.signalCode === null) {
         proc.kill('SIGKILL');
@@ -2108,6 +2270,8 @@ async function runBrowserProbe({
   captureFrameEvery,
   captureFrameMax,
   initialResidentWaitMs,
+  workerLaneProgressEverySteps = 1,
+  useMountedResidentSchedule = false,
   artifactDetailMode,
   phaseVolumeMaxImpulseFraction,
   generatedGasTargetMaterial,
@@ -2120,12 +2284,32 @@ async function runBrowserProbe({
       captureFrames: visualIntervalCaptureRequested
   });
   let browser = null;
+  let page = null;
+  let consoleCapture = null;
   let completedTimeline = null;
+  let browserLifecycleSettled = false;
+  let buildFatalTimeline = null;
+  const preProbeSnapshots = [];
+  const fatalSignal = createBrowserProbeFatalSignal();
   try {
     browser = await launchProbeBrowser();
-    const page = await newProbePage(browser);
-    const preProbeSnapshots = [];
-    const consoleCapture = createBrowserConsoleCapture();
+    page = await newProbePage(browser);
+    consoleCapture = createBrowserConsoleCapture({
+      onCriticalGpuMessage(message) {
+        if (
+          message?.category === 'device-lost'
+          || message?.category === 'out-of-memory'
+        ) {
+          fatalSignal.trip({
+            source: 'browser-console',
+            category: message.category,
+            message: message.text,
+            receivedAtMs: message.receivedAtMs,
+            detail: message
+          });
+        }
+      }
+    });
     const pageConsole = consoleCapture.entries;
     page.on('console', (message) => {
       consoleCapture.recordConsole(message);
@@ -2133,6 +2317,107 @@ async function runBrowserProbe({
     page.on('pageerror', (error) => {
       consoleCapture.recordPageError(error);
     });
+    page.on('crash', () => {
+      if (browserLifecycleSettled) return;
+      fatalSignal.trip({
+        source: 'playwright-page-crash',
+        category: 'page-crash',
+        message: 'probe-owned Chromium page crashed'
+      });
+    });
+    browser.on('disconnected', () => {
+      if (browserLifecycleSettled) return;
+      fatalSignal.trip({
+        source: 'playwright-browser-disconnected',
+        category: 'browser-disconnected',
+        message: 'probe-owned Chromium browser disconnected unexpectedly'
+      });
+    });
+    buildFatalTimeline = async (fatalTermination) => {
+      const [partialTimeline, fatalSnapshot] = page
+        ? await Promise.all([
+            collectInPagePartialTimeline(page, 1000),
+            collectBrowserSnapshot(page, 'probe-fatal-termination', 2000)
+          ])
+        : [null, {
+          schema: 'peercompute.ulg.sph-probe-browser-snapshot.v0',
+          status: 'snapshot-unavailable',
+          label: 'probe-fatal-termination',
+          reason: 'probe page was unavailable'
+        }];
+      const retainedMetrics = Array.isArray(partialTimeline?.metrics)
+        ? partialTimeline.metrics
+        : [];
+      const retainedVisualFrames = Array.isArray(partialTimeline?.visualFrames)
+        ? partialTimeline.visualFrames
+        : [];
+      const retainedErrors = Array.isArray(partialTimeline?.errors)
+        ? partialTimeline.errors
+        : [];
+      const retainedCheckpointCapture =
+        partialTimeline?.authoritativeGpuCheckpointCapture || null;
+      return {
+        schema: 'peercompute.ulg.sph-history-long-horizon-probe.v0',
+        status: 'blocked',
+        reason: fatalTermination.message,
+        fatalTermination,
+        batchCount: batches,
+        batchStepCount: batchSteps,
+        requestedSubsteps: batches * batchSteps,
+        readbackMode,
+        compactSummaryMode,
+        renderReadbackMode,
+        renderRowsReadbackMode,
+        renderFieldSurfaceSummaryMode,
+        surfaceDrawDiagnosticMode,
+        surfaceDrawDiagnosticMaxFieldCells,
+        surfaceDrawDiagnosticMaxResolution,
+        nativeMarchingCubesMaxVertexRowsBufferByteLength,
+        nativeMarchingCubesMaxResolution,
+        nativeSurfaceDebugMode,
+        nativeSurfaceValidationWaitMs,
+        pressureInterfaceDisabled: Boolean(disablePressureInterface),
+        anomalyRowReadback: Boolean(anomalyRowReadback),
+        residentBufferDebug: Boolean(residentBufferDebug),
+        renderEveryBatches: renderEvery,
+        preProbeSnapshots: [...preProbeSnapshots, fatalSnapshot],
+        pageConsole,
+        visualFrameCapture: {
+          enabled: Boolean(captureFrames),
+          frameEveryBatches: captureFrameEvery,
+          maxFrames: captureFrameMax,
+          frameCount: retainedVisualFrames.length
+        },
+        authoritativeGpuCheckpointCapture: retainedCheckpointCapture || {
+          schema: 'peercompute.ulg.sph-authoritative-gpu-checkpoint-capture.v1',
+          status: captureFrames
+            ? 'probe-fatal-device-loss-before-checkpoint-return'
+            : 'disabled',
+          enabled: Boolean(captureFrames),
+          trigger: 'visual-validation-checkpoint',
+          diagnosticOnly: true,
+          physicsReference: false,
+          sourceBufferMutation: false,
+          normalHotLoopReadbackFree: true,
+          checkpointCount: 0,
+          capturedCount: 0,
+          unavailableCount: 0,
+          errorCount: 0
+        },
+        visualFrames: retainedVisualFrames,
+        errors: [...retainedErrors, {
+          batchIndex: null,
+          phase: 'probe-fatal-termination',
+          message: fatalTermination.message,
+          fatalTermination
+        }],
+        metrics: retainedMetrics,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    };
     await page.exposeFunction('__ulgCaptureSphProbeCompositedFrame', async ({ clip = null } = {}) => {
     const viewport = page.viewportSize();
     const requested = clip && typeof clip === 'object'
@@ -2580,16 +2865,46 @@ async function runBrowserProbe({
       contactBinMetadataReadback,
       reactionBinMetadataReadback
     }), baseUrl).toString();
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    await ensureProbeSphPhaseOverlay(page, { timeoutMs });
-    preProbeSnapshots.push(await collectBrowserSnapshot(page, 'overlay-ready'));
+    await awaitBrowserProbeOperation(
+      page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs }),
+      fatalSignal
+    );
+    const workerDeviceLossWatcher = page.waitForFunction(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const scene = overlay?.__sphScene;
+      const presentation =
+        scene?.getWorkerOffscreenPresentation?.()
+        || overlay?.__sphWorkerOffscreenPresentation
+        || null;
+      return presentation?.status === 'worker-offscreen-presentation-device-lost';
+    }, null, { timeout: 0 }).then(() => {
+      fatalSignal.trip({
+        source: 'worker-offscreen-presentation-status',
+        category: 'device-lost',
+        message: 'worker offscreen presentation reported device loss'
+      });
+    }, () => {});
+    // The watcher is intentionally not awaited. Its rejection is handled so
+    // closing the owned page cannot create a late unhandled rejection.
+    workerDeviceLossWatcher.catch(() => {});
+    await awaitBrowserProbeOperation(
+      ensureProbeSphPhaseOverlay(page, { timeoutMs }),
+      fatalSignal
+    );
+    preProbeSnapshots.push(await awaitBrowserProbeOperation(
+      collectBrowserSnapshot(page, 'overlay-ready'),
+      fatalSignal
+    ));
     try {
-      await page.waitForFunction(() => {
+      await awaitBrowserProbeOperation(page.waitForFunction(() => {
         const overlay = document.querySelector('#sph-phase-overlay');
         const scene = overlay?.__sphScene;
         return Boolean(scene?.getSphGpuParticleState?.()?.schema || overlay?.__sphDriver);
-      }, null, { timeout: timeoutMs });
+      }, null, { timeout: timeoutMs }), fatalSignal);
     } catch (readinessError) {
+      if (readinessError?.browserProbeFatalTermination) {
+        throw readinessError;
+      }
       // This wait is where a scenario that is simply too large for the current
       // build fails, and a bare Playwright timeout says nothing about why. The
       // console has already been captured; without flushing it here it is
@@ -2629,23 +2944,40 @@ async function runBrowserProbe({
       ].join('\n');
       throw new Error(`${readinessError?.message || readinessError}\n${detail}`);
     }
-    preProbeSnapshots.push(await collectBrowserSnapshot(page, 'particle-state-ready'));
-    const playText = await page.locator('#sph-play').textContent({ timeout: timeoutMs }).catch(() => '');
+    preProbeSnapshots.push(await awaitBrowserProbeOperation(
+      collectBrowserSnapshot(page, 'particle-state-ready'),
+      fatalSignal
+    ));
+    const playText = await awaitBrowserProbeOperation(
+      page.locator('#sph-play').textContent({ timeout: timeoutMs }).catch(() => ''),
+      fatalSignal
+    );
     if (/Pause/i.test(playText || '')) {
       await page.evaluate(() => document.querySelector('#sph-play')?.click());
     }
     const residentWaitMs = Math.max(1, Math.min(timeoutMs, initialResidentWaitMs));
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('#sph-phase-overlay');
-      const scene = overlay?.__sphScene;
-      const steps = scene?.getMlsMpmResidentSteps?.() || overlay?.__mlsMpmResidentSteps;
-      return Boolean(steps?.schema || overlay?.__sphDriver);
-    }, null, { timeout: residentWaitMs }).catch(() => null);
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('#sph-phase-overlay');
-      return !overlay?.__mlsMpmResidentStepsPending;
-    }, null, { timeout: residentWaitMs }).catch(() => null);
-    preProbeSnapshots.push(await collectBrowserSnapshot(page, 'before-in-page-probe'));
+    try {
+      await awaitBrowserProbeOperation(page.waitForFunction(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const scene = overlay?.__sphScene;
+        const steps = scene?.getMlsMpmResidentSteps?.() || overlay?.__mlsMpmResidentSteps;
+        return Boolean(steps?.schema || overlay?.__sphDriver);
+      }, null, { timeout: residentWaitMs }), fatalSignal);
+    } catch (error) {
+      if (error?.browserProbeFatalTermination) throw error;
+    }
+    try {
+      await awaitBrowserProbeOperation(page.waitForFunction(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        return !overlay?.__mlsMpmResidentStepsPending;
+      }, null, { timeout: residentWaitMs }), fatalSignal);
+    } catch (error) {
+      if (error?.browserProbeFatalTermination) throw error;
+    }
+    preProbeSnapshots.push(await awaitBrowserProbeOperation(
+      collectBrowserSnapshot(page, 'before-in-page-probe'),
+      fatalSignal
+    ));
     const nativeSurfaceCaptureUiSuppressed = Boolean(
       captureFrames
       && surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
@@ -2707,6 +3039,8 @@ async function runBrowserProbe({
         requestedNativeSurfaceExtractionAtVisualIntervals,
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
+      workerLaneProgressEverySteps: requestedWorkerLaneProgressEverySteps,
+      useMountedResidentSchedule: requestedUseMountedResidentSchedule,
       preProbeSnapshots: requestedPreProbeSnapshots,
       pageConsole: requestedPageConsole,
       nativeSurfaceCaptureUiSuppressed: requestedNativeSurfaceCaptureUiSuppressed,
@@ -5376,7 +5710,91 @@ async function runBrowserProbe({
       const metrics = [];
       const errors = [];
       const visualFrames = [];
+      const partialTimeline = {
+        schema: 'peercompute.ulg.sph-probe-partial-timeline.v0',
+        status: 'in-progress',
+        updatedAtMs: performance.now(),
+        metrics,
+        errors,
+        visualFrames,
+        authoritativeGpuCheckpointCapture: null
+      };
+      globalThis.__ulgSphProbePartialTimeline = partialTimeline;
       let execution = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
+      let mountedResidentSchedule = null;
+      if (
+        requestedUseMountedResidentSchedule
+        && requestedSurfaceDrawDiagnosticMode
+          === 'native-webgpu-surface-consumer'
+      ) {
+        const mountedSchedulerDeadlineMs = performance.now() + 60_000;
+        while (
+          typeof overlay.__sphScheduleMlsMpmResidentSteps !== 'function'
+          && performance.now() < mountedSchedulerDeadlineMs
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (typeof overlay.__sphScheduleMlsMpmResidentSteps !== 'function') {
+          throw new Error(
+            'native-surface probe requires the mounted resident scheduler'
+          );
+        }
+        mountedResidentSchedule =
+          overlay.__sphScheduleMlsMpmResidentSteps;
+      }
+      const runMountedResidentSchedule = async ({
+        stepCount,
+        readbackMode,
+        continueFromResidentState
+      }) => {
+        const previousScheduleId = execution?.workerOwnedResidentLane?.scheduleId ?? null;
+        const deadlineMs = performance.now() + Math.max(
+          60_000,
+          Math.max(1, Number(stepCount) || 1) * 4_000 + 30_000
+        );
+        let schedulePromise = null;
+        while (!schedulePromise && performance.now() < deadlineMs) {
+          const candidate = mountedResidentSchedule({
+            stepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
+            readbackMode,
+            continueFromResidentState,
+            force: true
+          });
+          if (candidate && typeof candidate.then === 'function') {
+            schedulePromise = candidate;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!schedulePromise) {
+          throw new Error(
+            'mounted resident scheduler did not admit the requested native-surface batch'
+          );
+        }
+        const settledExecution = await schedulePromise;
+        const mountedExecution = sceneApi.getMlsMpmResidentSteps?.()
+          || overlay.__mlsMpmResidentSteps
+          || null;
+        const mountedScheduleId =
+          mountedExecution?.workerOwnedResidentLane?.scheduleId ?? null;
+        if (
+          !settledExecution?.schema
+          || !mountedExecution
+          || mountedExecution !== settledExecution
+          || mountedScheduleId == null
+          || mountedScheduleId === previousScheduleId
+        ) {
+          throw new Error(
+            'mounted resident scheduler settled without publishing a new worker schedule'
+          );
+        }
+        if (overlay.__sphResidentRenderStateError) {
+          throw new Error(String(overlay.__sphResidentRenderStateError));
+        }
+        return mountedExecution;
+      };
       let latestThermalCandidateCsrRouteEvidence = {
         schema: 'peercompute.ulg.sph-probe-thermal-candidate-csr-route-evidence.v1',
         status: requestedCaptureThermalCandidateCsrRouteEvidence
@@ -5388,8 +5806,14 @@ async function runBrowserProbe({
       };
       const shouldCaptureFrame = (batchIndex, phase) => {
         if (!requestedCaptureFrames) return false;
-        if (visualFrames.length >= requestedCaptureFrameMax) return false;
-        if (batchIndex === 0 || batchIndex === requestedBatches) return true;
+        if (batchIndex === requestedBatches) {
+          return visualFrames.length < requestedCaptureFrameMax;
+        }
+        if (batchIndex === 0) return true;
+        // Reserve one bounded capture slot for the terminal frame. Without
+        // this, a long worker schedule consumes the cap on its first batches
+        // and the visual time-span gate never observes the completed horizon.
+        if (visualFrames.length >= requestedCaptureFrameMax - 1) return false;
         if (String(phase || '').includes('error') || String(phase || '').includes('anomaly')) return true;
         return batchIndex % requestedCaptureFrameEvery === 0;
       };
@@ -5553,7 +5977,10 @@ async function runBrowserProbe({
       };
       let authoritativeGpuCheckpointModulePromise = null;
       let authoritativeGeneratedGasCohortModulePromise = null;
+      let peerComputeBrowserResidentHostModulePromise = null;
+      let sphGpuBuffersModulePromise = null;
       let authoritativeGeneratedGasCohortTracker = null;
+      let authoritativeCheckpointDeviceResult = null;
       const loadAuthoritativeGpuCheckpointModule = () => {
         if (!authoritativeGpuCheckpointModulePromise) {
           authoritativeGpuCheckpointModulePromise = import('/scripts/sph-authoritative-gpu-checkpoint.mjs');
@@ -5567,6 +5994,22 @@ async function runBrowserProbe({
           );
         }
         return authoritativeGeneratedGasCohortModulePromise;
+      };
+      const loadPeerComputeBrowserResidentHostModule = () => {
+        if (!peerComputeBrowserResidentHostModulePromise) {
+          peerComputeBrowserResidentHostModulePromise = import(
+            '/src/runtime/peercomputeBrowserResidentHost.js'
+          );
+        }
+        return peerComputeBrowserResidentHostModulePromise;
+      };
+      const loadSphGpuBuffersModule = () => {
+        if (!sphGpuBuffersModulePromise) {
+          sphGpuBuffersModulePromise = import(
+            '/src/runtime/sph/sphGpuBuffers.js'
+          );
+        }
+        return sphGpuBuffersModulePromise;
       };
       const captureAuthoritativeGpuCheckpoint = async ({ batchIndex, phase, sampleIndex }) => {
         const checkpointBase = {
@@ -5677,17 +6120,245 @@ async function runBrowserProbe({
             expectedParticleCount: candidate.expectedParticleCount
           })
         }));
-        const selectedUploadPair = evaluatedUploadCandidates.find((candidate) => (
+        let selectedUploadPair = evaluatedUploadCandidates.find((candidate) => (
           candidate.validation.ready
           && candidate.validation.sharedSlotIdentityVerified
         )) ?? evaluatedUploadCandidates.find((candidate) => (
           candidate.validation.ready
         ));
+        if (!authoritativeCheckpointDeviceResult?.device) {
+          const renderBridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.()
+            || sceneApi?.scene?.userData?.sphResidentSurfaceDrawRenderBridge
+            || null;
+          authoritativeCheckpointDeviceResult = renderBridge?.device
+            ? { device: renderBridge.device, status: 'resident-render-bridge-device' }
+            : await sceneApi.requestOpticalGpuDevice?.();
+        }
+        const deviceResult = authoritativeCheckpointDeviceResult;
+        const device = deviceResult?.device || null;
+        if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.submit) {
+          return {
+            ...checkpointBase,
+            status: 'unavailable',
+            reason: deviceResult?.reason || 'resident GPUDevice is unavailable'
+          };
+        }
+
+        let temporarySnapshotUploads = null;
+        let workerSnapshotStatus = null;
+        if (!selectedUploadPair && phase !== 'initial') {
+          const lane = currentSteps?.workerOwnedResidentLane || null;
+          const requestedStepCount = Number(lane?.requestedStepCount);
+          const completedStepCount = Number(lane?.completedStepCount);
+          const workerSnapshotAuthorityReady = Boolean(
+            lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+            && lane?.terminalStatus
+              === 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+            && lane?.cancelled === false
+            && Number.isSafeInteger(requestedStepCount)
+            && requestedStepCount > 0
+            && Number.isSafeInteger(completedStepCount)
+            && completedStepCount === requestedStepCount
+            && lane?.gpuFence?.fenceSatisfied === true
+            && lane?.authority?.status
+              === 'state-manager-committed-worker-schedule'
+            && lane?.authority?.stateManagerCommitStatus === 'committed'
+            && currentSteps?.stateManagerCommit?.accepted === true
+          );
+          if (
+            workerSnapshotAuthorityReady
+            && typeof sceneApi.exportWorkerOffscreenRetainedCompactSnapshot
+              === 'function'
+          ) {
+            const currentSphState = sceneApi.getSphGpuParticleState?.()
+              || overlay.__sphPhaseViewState?.sphGpuParticleState
+              || null;
+            const currentMlsMpmState = sceneApi.getMlsMpmGpuParticleState?.()
+              || overlay.__sphPhaseViewState?.mlsMpmGpuParticleState
+              || null;
+            const expectedParticleCount = Math.max(
+              0,
+              Math.floor(Number(
+                lane?.perStepSummaries?.lastStep?.particleCount
+                ?? currentSphState?.particleCount
+                ?? currentMlsMpmState?.particleCount
+              ) || 0)
+            );
+            const expectedStep = Number(lane?.laneCompletedStepTotal);
+            const expectedTimeS = Number(lane?.laneSimTimeS);
+            const cacheKey = [
+              lane.scheduleId,
+              'authoritative-checkpoint',
+              batchIndex,
+              sampleIndex
+            ].join(':');
+            sceneApi.exportWorkerOffscreenRetainedCompactSnapshot({
+              laneId: lane.laneId,
+              stateKey: lane.stateKey,
+              cacheKey,
+              sourceStageId: 'schroederSameLevelMechanics',
+              particleCount: expectedParticleCount,
+              stateStrideFloats: 8,
+              thermoStrideFloats: 12,
+              mechanicsStrideFloats: 32,
+              step: expectedStep,
+              time: expectedTimeS,
+              dimension: currentSphState?.dimension ?? 3,
+              smoothingLengthM: currentSphState?.smoothingLengthM ?? 0,
+              timeoutMs: 15000,
+              reason: 'authoritative-gpu-checkpoint-worker-boundary'
+            });
+            const snapshotWaitStartedAtMs = performance.now();
+            while (performance.now() - snapshotWaitStartedAtMs < 16000) {
+              const current =
+                sceneApi.getWorkerOffscreenRetainedCompactSnapshotStatus?.()
+                || null;
+              const requestMatches = Boolean(
+                current?.cacheKey === cacheKey
+                && current?.laneId === lane.laneId
+                && current?.stateKey === lane.stateKey
+                && current?.sourceStageId === 'schroederSameLevelMechanics'
+              );
+              if (
+                requestMatches
+                && /exported|blocked|failed|timeout/.test(
+                  String(current?.status || '')
+                )
+              ) {
+                workerSnapshotStatus = current;
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            const snapshot = workerSnapshotStatus?.compactBufferSnapshot || null;
+            const snapshotMatchesRequest = Boolean(
+              workerSnapshotStatus?.status
+                === 'presentation-worker-retained-compact-snapshot-exported'
+              && workerSnapshotStatus?.portableSnapshotAvailable === true
+              && snapshot?.schema
+                === 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0'
+              && snapshot?.cacheKey === cacheKey
+              && snapshot?.laneId === lane.laneId
+              && snapshot?.stateKey === lane.stateKey
+              && snapshot?.sourceStageId === 'schroederSameLevelMechanics'
+              && Number(snapshot?.particleCount) === expectedParticleCount
+              && Number(snapshot?.step) === expectedStep
+              && Math.abs(Number(snapshot?.time) - expectedTimeS) <= 1e-9
+              && snapshot?.sharedSlotIdentityVerified === true
+              && snapshot?.workerLineageMetadata?.status
+                === 'worker-retained-compact-snapshot-lineage-metadata-ready'
+            );
+            if (snapshotMatchesRequest) {
+              const [{ refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot }, gpuBuffersModule] =
+                await Promise.all([
+                  loadPeerComputeBrowserResidentHostModule(),
+                  loadSphGpuBuffersModule()
+                ]);
+              let hotBufferRecord = null;
+              refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
+                device,
+                compactBufferSnapshot: snapshot,
+                materialProperties:
+                  overlay.__sphPhaseViewState?.materialProperties || null,
+                stateManager: {
+                  setHotBuffer(_key, record) {
+                    hotBufferRecord = record;
+                  }
+                },
+                cacheKey,
+                stateKey: `${lane.stateKey}:authoritative-checkpoint`,
+                hotBufferKey: `${cacheKey}:page-diagnostic-hot-buffer`
+              });
+              if (hotBufferRecord?.sphUpload && hotBufferRecord?.mlsMpmUpload) {
+                const slotMetadata = {
+                  slot: snapshot.slot ?? null,
+                  sourceSlot: snapshot.sourceSlot ?? null,
+                  nextSlot: snapshot.nextSlot ?? null
+                };
+                const sphParticleUpload = {
+                  ...hotBufferRecord.sphUpload,
+                  ...slotMetadata,
+                  step: snapshot.step,
+                  time: snapshot.time,
+                  topologyEpoch: snapshot.topologyEpoch ?? null,
+                  identityRevision: snapshot.identityRevision ?? null,
+                  phaseCarrierPlan:
+                    snapshot.sphPhaseCarrierPlan
+                    ?? snapshot.phaseCarrierPlan
+                    ?? null
+                };
+                const mlsMpmParticleUpload = {
+                  ...hotBufferRecord.mlsMpmUpload,
+                  ...slotMetadata,
+                  step: snapshot.step,
+                  time: snapshot.time,
+                  phaseCarrierPlan:
+                    snapshot.mechanicsPhaseCarrierPlan
+                    ?? snapshot.phaseCarrierPlan
+                    ?? null
+                };
+                const validation = checkpointModule.validateAuthoritativeGpuUploadPair({
+                  sphParticleUpload,
+                  mlsMpmParticleUpload,
+                  requireTimeZero: false,
+                  expectedStep: Number(snapshot.step),
+                  expectedTimeS: Number(snapshot.time),
+                  expectedParticleCount
+                });
+                temporarySnapshotUploads = {
+                  sphUpload: hotBufferRecord.sphUpload,
+                  mlsMpmUpload: hotBufferRecord.mlsMpmUpload,
+                  destroySphGpuParticleBuffers:
+                    gpuBuffersModule.destroySphGpuParticleBuffers,
+                  destroyMlsMpmGpuParticleBuffers:
+                    gpuBuffersModule.destroyMlsMpmGpuParticleBuffers
+                };
+                const workerUploadCandidate = {
+                  source: 'worker-retained-terminal-compact-snapshot-upload-pair',
+                  sphParticleUpload,
+                  mlsMpmParticleUpload,
+                  expectedStep: Number(snapshot.step),
+                  // The lane receipt intentionally compacts its public clock,
+                  // while the worker snapshot retains the exact accumulated
+                  // IEEE-754 value. The request gate above already binds them
+                  // within 1 ns; use the authenticated snapshot value for the
+                  // validator's strict parent-generation equality check.
+                  expectedTimeS: Number(snapshot.time),
+                  expectedParticleCount,
+                  validation,
+                  snapshotStatus: workerSnapshotStatus
+                };
+                evaluatedUploadCandidates.push(workerUploadCandidate);
+                if (validation.ready) selectedUploadPair = workerUploadCandidate;
+              }
+            }
+          }
+        }
         if (!selectedUploadPair) {
+          if (temporarySnapshotUploads) {
+            temporarySnapshotUploads.destroySphGpuParticleBuffers(
+              temporarySnapshotUploads.sphUpload
+            );
+            temporarySnapshotUploads.destroyMlsMpmGpuParticleBuffers(
+              temporarySnapshotUploads.mlsMpmUpload
+            );
+          }
           return {
             ...checkpointBase,
             status: 'unavailable',
             reason: 'a metadata-coherent retained state/thermo/mechanics upload pair is unavailable',
+            workerSnapshotStatus: workerSnapshotStatus ? {
+              status: workerSnapshotStatus.status ?? null,
+              reason: workerSnapshotStatus.reason ?? null,
+              cacheKey: workerSnapshotStatus.cacheKey ?? null,
+              sourceStageId: workerSnapshotStatus.sourceStageId ?? null,
+              portableSnapshotAvailable:
+                workerSnapshotStatus.portableSnapshotAvailable ?? null,
+              workerLineageMetadata:
+                workerSnapshotStatus.workerLineageMetadata
+                  ? { ...workerSnapshotStatus.workerLineageMetadata }
+                  : null
+            } : null,
             uploadPairCandidates: evaluatedUploadCandidates.map((candidate) => ({
               source: candidate.source,
               status: candidate.validation.status,
@@ -5716,29 +6387,20 @@ async function runBrowserProbe({
         const bufferParticleCapacity = Math.min(stateCapacity, thermoCapacity, mechanicsCapacity);
         const particleCount = uploadPairValidation.particleCount;
         if (!(particleCount > 0)) {
+          if (temporarySnapshotUploads) {
+            temporarySnapshotUploads.destroySphGpuParticleBuffers(
+              temporarySnapshotUploads.sphUpload
+            );
+            temporarySnapshotUploads.destroyMlsMpmGpuParticleBuffers(
+              temporarySnapshotUploads.mlsMpmUpload
+            );
+          }
           return {
             ...checkpointBase,
             status: 'unavailable',
             reason: 'retained resident particle count is empty or invalid',
             uploadSource,
             bufferParticleCapacity
-          };
-        }
-
-        const renderBridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.()
-          || sceneApi?.scene?.userData?.sphResidentSurfaceDrawRenderBridge
-          || null;
-        const deviceResult = renderBridge?.device
-          ? { device: renderBridge.device, status: 'resident-render-bridge-device' }
-          : await sceneApi.requestOpticalGpuDevice?.();
-        const device = deviceResult?.device || null;
-        if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.submit) {
-          return {
-            ...checkpointBase,
-            status: 'unavailable',
-            reason: deviceResult?.reason || 'resident GPUDevice is unavailable',
-            uploadSource,
-            particleCount
           };
         }
 
@@ -5821,6 +6483,12 @@ async function runBrowserProbe({
               };
           return {
             ...checkpointBase,
+            source: selectedUploadPair.snapshotStatus
+              ? 'worker-retained-terminal-compact-snapshot'
+              : checkpointBase.source,
+            authority: selectedUploadPair.snapshotStatus
+              ? 'worker-terminal-fence-and-state-manager-commit'
+              : checkpointBase.authority,
             uploadSource,
             sourceStep: uploadPairValidation.sourceStep,
             sourceTimeS: uploadPairValidation.sourceTimeS,
@@ -5837,13 +6505,31 @@ async function runBrowserProbe({
               thermo: thermoBuffer.label || null,
               mechanics: mechanicsBuffer.label || null
             },
+            workerSnapshotProvenance: selectedUploadPair.snapshotStatus ? {
+              status: selectedUploadPair.snapshotStatus.status ?? null,
+              cacheKey: selectedUploadPair.snapshotStatus.cacheKey ?? null,
+              laneId: selectedUploadPair.snapshotStatus.laneId ?? null,
+              stateKey: selectedUploadPair.snapshotStatus.stateKey ?? null,
+              sourceStageId:
+                selectedUploadPair.snapshotStatus.sourceStageId ?? null,
+              readbackByteLength:
+                selectedUploadPair.snapshotStatus.readbackByteLength ?? null,
+              workerLineageMetadata:
+                selectedUploadPair.snapshotStatus.workerLineageMetadata
+                  ? {
+                      ...selectedUploadPair.snapshotStatus
+                        .workerLineageMetadata
+                    }
+                  : null
+            } : null,
             retainedInput: {
               stateByteLength: stateInputByteLength,
               thermoByteLength: thermoInputByteLength,
               mechanicsByteLength: mechanicsInputByteLength,
               totalByteLength:
                 stateInputByteLength + thermoInputByteLength + mechanicsInputByteLength,
-              mappedByteLength: 0
+              mappedByteLength:
+                selectedUploadPair.snapshotStatus?.readbackByteLength ?? 0
             },
             ...reduction,
             generatedGasCohortCapture,
@@ -5865,6 +6551,15 @@ async function runBrowserProbe({
               mappedByteLength: 0
             }
           };
+        } finally {
+          if (temporarySnapshotUploads) {
+            temporarySnapshotUploads.destroySphGpuParticleBuffers(
+              temporarySnapshotUploads.sphUpload
+            );
+            temporarySnapshotUploads.destroyMlsMpmGpuParticleBuffers(
+              temporarySnapshotUploads.mlsMpmUpload
+            );
+          }
         }
       };
       const nativeSurfaceValidationSnapshot = () => {
@@ -6411,15 +7106,33 @@ async function runBrowserProbe({
           || sceneUserData.mlsMpmResidentSchroederAdoptedParticleStoragePublication
           || sceneUserData.schroederAdoptedParticleStoragePublication
           || null;
+        const workerTwoLevelEvidence =
+          steps?.workerOwnedResidentLane?.twoLevelMechanics
+          ?? steps?.twoLevelMechanicsWorkerEvidence
+          ?? steps?.workerOwnedResidentLane?.perStepSummaries
+            ?.twoLevelMechanics
+          ?? null;
+        const workerSurfaceStressEvidence =
+          steps?.workerOwnedResidentLane?.phaseVolumeSurfaceStress
+          ?? steps?.phaseVolumeSurfaceStressWorkerEvidence
+          ?? steps?.workerOwnedResidentLane?.perStepSummaries
+            ?.phaseVolumeSurfaceStress
+          ?? null;
         const finalResidentStep = residentStep || steps?.finalStep || null;
+        const finalTwoLevelResidentStep = finalResidentStep
+          || workerTwoLevelEvidence?.lastStep
+          || null;
         const twoLevelStepSummaries = Array.isArray(steps?.stepSummaries)
           ? steps.stepSummaries
           : [];
-        const twoLevelAuthoritativeStepCount = twoLevelStepSummaries.filter(
-          (summary) => (
-            summary?.status === 'schroeder-two-level-authoritative-step-executed'
-          )
-        ).length;
+        const twoLevelAuthoritativeStepCount = workerTwoLevelEvidence
+          ? Number(workerTwoLevelEvidence.exactAuthoritativeStepCount) || 0
+          : twoLevelStepSummaries.filter(
+              (summary) => (
+                summary?.status
+                  === 'schroeder-two-level-authoritative-step-executed'
+              )
+            ).length;
         const twoLevelMechanicsRequested = Boolean(
           config?.enableTwoLevelMechanics
           || options?.schroederEnableTwoLevelMechanics
@@ -6432,7 +7145,7 @@ async function runBrowserProbe({
           ? 'authoritative'
           : 'observation';
         const reportedTwoLevelAuthority =
-          finalResidentStep?.twoLevelMechanicsAuthority
+          finalTwoLevelResidentStep?.twoLevelMechanicsAuthority
           ?? null;
         const twoLevelMechanicsAuthorityObserved =
           reportedTwoLevelAuthority === 'authoritative'
@@ -6445,25 +7158,45 @@ async function runBrowserProbe({
             ?? config?.twoLevelFineSubstepCount
         );
         const twoLevelFineSubstepCountObserved = finiteOrNull(
-          finalResidentStep?.twoLevelFineSubstepCount
+          finalTwoLevelResidentStep?.twoLevelFineSubstepCount
         );
-        const twoLevelMechanicsStepStatus = finalResidentStep?.status ?? null;
+        const twoLevelMechanicsStepStatus =
+          finalTwoLevelResidentStep?.status ?? null;
         const twoLevelMechanicsActive = Boolean(
           twoLevelMechanicsStepStatus
             === 'schroeder-two-level-authoritative-step-executed'
           && twoLevelAuthoritativeStepCount > 0
         );
-        const twoLevelMechanicsCoverageComplete = Boolean(
-          twoLevelMechanicsRequested
-          && twoLevelMechanicsAuthorityRequested === 'authoritative'
-          && twoLevelMechanicsAuthorityObserved === 'authoritative'
-          && twoLevelMechanicsActive
-          && Number.isInteger(Number(steps?.completedStepCount))
-          && Number(steps.completedStepCount) > 0
-          && twoLevelAuthoritativeStepCount === Number(steps.completedStepCount)
-          && twoLevelFineSubstepCountObserved === twoLevelFineSubstepCountRequested
-          && finalResidentStep?.twoLevelAuthoritativeCommitVerified === true
-        );
+        const twoLevelMechanicsCoverageComplete = workerTwoLevelEvidence
+          ? Boolean(
+              workerTwoLevelEvidence.coverageComplete === true
+              && workerTwoLevelEvidence.requested === true
+              && workerTwoLevelEvidence.authorityRequested === 'authoritative'
+              && Number(workerTwoLevelEvidence.observedStepCount)
+                === Number(steps?.completedStepCount)
+              && Number(workerTwoLevelEvidence.exactAuthoritativeStepCount)
+                === Number(steps?.completedStepCount)
+              && twoLevelMechanicsAuthorityObserved === 'authoritative'
+              && twoLevelMechanicsActive
+              && twoLevelFineSubstepCountObserved
+                === twoLevelFineSubstepCountRequested
+              && finalTwoLevelResidentStep
+                ?.twoLevelAuthoritativeCommitVerified === true
+            )
+          : Boolean(
+              twoLevelMechanicsRequested
+              && twoLevelMechanicsAuthorityRequested === 'authoritative'
+              && twoLevelMechanicsAuthorityObserved === 'authoritative'
+              && twoLevelMechanicsActive
+              && Number.isInteger(Number(steps?.completedStepCount))
+              && Number(steps.completedStepCount) > 0
+              && twoLevelAuthoritativeStepCount
+                === Number(steps.completedStepCount)
+              && twoLevelFineSubstepCountObserved
+                === twoLevelFineSubstepCountRequested
+              && finalResidentStep
+                ?.twoLevelAuthoritativeCommitVerified === true
+            );
         const stageWorkerLane = overlayRef?.__sphMountedMechanicsStageWorkerLane || null;
         const requested = Boolean(config?.enabled || options?.schroederSimulation);
         const active = Boolean(steps?.schroederSimulation || residentStep?.schroederSimulation);
@@ -6500,18 +7233,24 @@ async function runBrowserProbe({
           twoLevelFineSubstepCountObserved,
           twoLevelMechanicsStepStatus,
           twoLevelMechanicsStatus:
-            finalResidentStep?.twoLevelMechanicsStatus
-            ?? finalResidentStep?.stageStatus?.twoLevelMechanics
+            finalTwoLevelResidentStep?.twoLevelMechanicsStatus
+            ?? finalTwoLevelResidentStep?.stageStatus?.twoLevelMechanics
             ?? null,
           twoLevelAuthoritativeCommitVerified:
-            finalResidentStep?.twoLevelAuthoritativeCommitVerified === true,
+            finalTwoLevelResidentStep
+              ?.twoLevelAuthoritativeCommitVerified === true,
           twoLevelAuthoritativeStepCount,
+          twoLevelObservedStepCount:
+            workerTwoLevelEvidence?.observedStepCount ?? null,
+          twoLevelFirstIncompleteStepOrdinal:
+            workerTwoLevelEvidence?.firstIncompleteStepOrdinal ?? null,
           twoLevelMechanicsCoverageComplete,
           phaseVolumeSurfaceStressSubmission:
             compactPhaseVolumeSurfaceStressSubmission(
               finalResidentStep?.gridUpdate
                 ?.phaseVolumeSurfaceStressSubmission
               ?? finalResidentStep?.phaseVolumeSurfaceStressSubmission
+              ?? workerSurfaceStressEvidence?.finalSubmission
             ),
           residentComputeManagerMode: steps?.residentComputeManagerMode ?? null,
           portableSummaryStatus: portableSummary?.status ?? null,
@@ -6714,6 +7453,105 @@ async function runBrowserProbe({
 	          || overlay.__sphPeerComputeRenderOwnershipPolicy
 	          || null,
 	        workerOffscreenPresentation: sceneUserData.sphWorkerOffscreenPresentation || null,
+	        workerLaneNativeSurfacePresentation: (() => {
+	          const presentation =
+	            overlay.__sphWorkerLaneNativeSurfacePresentation || null;
+	          if (!presentation) return null;
+	          return {
+	            schema: presentation.schema ?? null,
+	            status: presentation.status ?? null,
+	            scheduleId: presentation.scheduleId ?? null,
+	            laneId: presentation.laneId ?? null,
+	            stateKey: presentation.stateKey ?? null,
+	            requestId: presentation.requestId ?? null,
+	            cacheKey: presentation.cacheKey ?? null,
+	            sourceStageId: presentation.sourceStageId ?? null,
+	            sourceStep: presentation.sourceStep ?? null,
+	            sourceTimeS: presentation.sourceTimeS ?? null,
+	            particleCount: presentation.particleCount ?? null,
+	            readbackScope: presentation.readbackScope ?? null,
+	            terminalPresentationFullParticleReadbackPerformed:
+	              presentation.terminalPresentationFullParticleReadbackPerformed
+	                ?? null,
+	            physicsHotLoopParticipation:
+	              presentation.physicsHotLoopParticipation ?? null
+	          };
+	        })(),
+	        workerLaneNativeSurfaceSnapshotHandoff: (() => {
+	          const handoff = renderState?.residentRenderSource
+	            ?.workerLaneNativeSurfaceSnapshotHandoff || null;
+	          if (!handoff) return null;
+	          return {
+	            schema: handoff.schema ?? null,
+	            status: handoff.status ?? null,
+	            scheduleId: handoff.scheduleId ?? null,
+	            laneId: handoff.laneId ?? null,
+	            stateKey: handoff.stateKey ?? null,
+	            requestId: handoff.requestId ?? null,
+	            cacheKey: handoff.cacheKey ?? null,
+	            sourceStep: handoff.sourceStep ?? null,
+	            sourceTimeS: handoff.sourceTimeS ?? null,
+	            sharedSlotIdentityVerified:
+	              handoff.sharedSlotIdentityVerified ?? null,
+	            workerLineageMetadataStatus:
+	              handoff.workerLineageMetadataStatus ?? null,
+	            terminalCompactSnapshotReadback:
+	              handoff.terminalCompactSnapshotReadback ?? null
+	          };
+	        })(),
+	        workerOffscreenCanvas: (() => {
+	          const canvases = [...overlay.querySelectorAll(
+	            '#sph-scene canvas[data-ulg-worker-offscreen-presentation]'
+	          )];
+	          const canvas = canvases[0] || null;
+	          if (!canvas) return null;
+	          const style = getComputedStyle(canvas);
+	          const bounds = canvas.getBoundingClientRect();
+	          const isVisible = (candidate) => {
+	            const candidateStyle = getComputedStyle(candidate);
+	            const candidateBounds = candidate.getBoundingClientRect();
+	            return candidateStyle.visibility !== 'hidden'
+	              && candidateStyle.display !== 'none'
+	              && Number(candidateStyle.opacity) > 0
+	              && candidateBounds.width > 0
+	              && candidateBounds.height > 0;
+	          };
+	          return {
+	            count: canvases.length,
+	            visibleCount: canvases.filter(isVisible).length,
+	            visibility: style.visibility,
+	            display: style.display,
+	            opacity: style.opacity,
+	            width: bounds.width,
+	            height: bounds.height,
+	            visible: style.visibility !== 'hidden'
+	              && style.display !== 'none'
+	              && Number(style.opacity) > 0
+	              && bounds.width > 0
+	              && bounds.height > 0
+	          };
+	        })(),
+	        sceneCanvasVisibility: (() => {
+	          const canvases = [...overlay.querySelectorAll('#sph-scene canvas')];
+	          const workerCanvases = canvases.filter((canvas) => (
+	            canvas.hasAttribute('data-ulg-worker-offscreen-presentation')
+	          ));
+	          const isVisible = (canvas) => {
+	            const style = getComputedStyle(canvas);
+	            const bounds = canvas.getBoundingClientRect();
+	            return style.visibility !== 'hidden'
+	              && style.display !== 'none'
+	              && Number(style.opacity) > 0
+	              && bounds.width > 0
+	              && bounds.height > 0;
+	          };
+	          return {
+	            count: canvases.length,
+	            visibleCount: canvases.filter(isVisible).length,
+	            workerCount: workerCanvases.length,
+	            visibleWorkerCount: workerCanvases.filter(isVisible).length
+	          };
+	        })(),
 	        workerOffscreenRenderRows: sceneUserData.sphWorkerOffscreenRenderRows || null,
 	        workerOffscreenRetainedGpuBufferHandoff:
 	          sceneUserData.sphWorkerOffscreenRetainedGpuBufferHandoff || null,
@@ -6729,8 +7567,33 @@ async function runBrowserProbe({
 		          sceneUserData.sphWorkerOffscreenRetainedStatePromotionAdmission || null,
 		        workerOffscreenRetainedStateContinuation:
 		          sceneUserData.sphWorkerOffscreenRetainedStateContinuation || null,
-            workerOffscreenRetainedCompactSnapshot:
-              sceneUserData.sphWorkerOffscreenRetainedCompactSnapshot || null,
+            workerOffscreenRetainedCompactSnapshot: (() => {
+              const status =
+                sceneUserData.sphWorkerOffscreenRetainedCompactSnapshot || null;
+              if (!status) return null;
+              return {
+                schema: status.schema ?? null,
+                status: status.status ?? null,
+                reason: status.reason ?? null,
+                laneId: status.laneId ?? null,
+                stateKey: status.stateKey ?? null,
+                cacheKey: status.cacheKey ?? null,
+                sourceStageId: status.sourceStageId ?? null,
+                particleCount: status.particleCount ?? null,
+                portableSnapshotAvailable:
+                  status.portableSnapshotAvailable ?? null,
+                crossPeerReplayReady: status.crossPeerReplayReady ?? null,
+                readbackByteLength: status.readbackByteLength ?? null,
+                sphStateByteLength: status.sphStateByteLength ?? null,
+                sphThermoByteLength: status.sphThermoByteLength ?? null,
+                mlsMpmMechanicsByteLength:
+                  status.mlsMpmMechanicsByteLength ?? null,
+                workerLineageMetadata:
+                  status.workerLineageMetadata
+                    ? { ...status.workerLineageMetadata }
+                    : null
+              };
+            })(),
 		        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
@@ -6869,6 +7732,340 @@ async function runBrowserProbe({
             schema: steps.schema ?? null,
             backend: steps.backend ?? null,
             status: steps.status ?? null,
+            residentComputeManagerMode:
+              steps.residentComputeManagerMode ?? null,
+            workerLaneFallback: steps.workerLaneFallback ? {
+              schema: steps.workerLaneFallback.schema ?? null,
+              status: steps.workerLaneFallback.status ?? null,
+              reason: steps.workerLaneFallback.reason ?? null,
+              detail: steps.workerLaneFallback.detail ?? null
+            } : null,
+            workerOwnedResidentLane: steps.workerOwnedResidentLane ? {
+              schema: steps.workerOwnedResidentLane.schema ?? null,
+              laneId: steps.workerOwnedResidentLane.laneId ?? null,
+              stateKey: steps.workerOwnedResidentLane.stateKey ?? null,
+              scheduleId: steps.workerOwnedResidentLane.scheduleId ?? null,
+              residentScheduleStatus:
+                steps.workerOwnedResidentLane.residentScheduleStatus ?? null,
+              terminalStatus:
+                steps.workerOwnedResidentLane.terminalStatus ?? null,
+              requestedStepCount:
+                steps.workerOwnedResidentLane.requestedStepCount ?? null,
+              completedStepCount:
+                steps.workerOwnedResidentLane.completedStepCount ?? null,
+              progressEverySteps:
+                steps.workerOwnedResidentLane.progressEverySteps ?? null,
+              cancelled: steps.workerOwnedResidentLane.cancelled ?? null,
+              retainedBufferRefCount: Array.isArray(
+                steps.workerOwnedResidentLane.retainedBufferRefs
+              )
+                ? steps.workerOwnedResidentLane.retainedBufferRefs.length
+                : null,
+              laneCompletedStepTotal:
+                steps.workerOwnedResidentLane.laneCompletedStepTotal ?? null,
+              laneSimTimeS:
+                finiteOrNull(steps.workerOwnedResidentLane.laneSimTimeS),
+              finalEpochIdentity:
+                steps.workerOwnedResidentLane.finalEpochIdentity ? {
+                  storageGeneration:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.finalEpochIdentity
+                        .storageGeneration
+                    ),
+                  physicsTick:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.finalEpochIdentity
+                        .physicsTick
+                    ),
+                  positionEpoch:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.finalEpochIdentity
+                        .positionEpoch
+                    )
+                } : null,
+              gpuFence: steps.workerOwnedResidentLane.gpuFence ? {
+                scope: steps.workerOwnedResidentLane.gpuFence.scope ?? null,
+                terminalScheduleFence:
+                  steps.workerOwnedResidentLane.gpuFence
+                    .terminalScheduleFence ?? null,
+                fenceSatisfied:
+                  steps.workerOwnedResidentLane.gpuFence.fenceSatisfied
+                    ?? null,
+                queueCompletionStatus:
+                  steps.workerOwnedResidentLane.gpuFence
+                    .queueCompletionStatus ?? null,
+                queueCompletionMethod:
+                  steps.workerOwnedResidentLane.gpuFence
+                    .queueCompletionMethod ?? null,
+                authorityAdmissionReady:
+                  steps.workerOwnedResidentLane.gpuFence
+                    .authorityAdmissionReady ?? null
+              } : null,
+              authority: steps.workerOwnedResidentLane.authority ? {
+                status: steps.workerOwnedResidentLane.authority.status ?? null,
+                authority:
+                  steps.workerOwnedResidentLane.authority.authority ?? null,
+                computeManagerLeaseStatus:
+                  steps.workerOwnedResidentLane.authority
+                    .computeManagerLeaseStatus ?? null,
+                computeManagerFenceSatisfied:
+                  steps.workerOwnedResidentLane.authority
+                    .computeManagerFenceSatisfied ?? null,
+                stateManagerCommitStatus:
+                  steps.workerOwnedResidentLane.authority
+                    .stateManagerCommitStatus ?? null
+              } : null,
+              committedPresentation:
+                steps.workerOwnedResidentLane.committedPresentation ? {
+                  status:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .status ?? null,
+                  scheduleId:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .scheduleId ?? null,
+                  laneId:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .laneId ?? null,
+                  stateKey:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .stateKey ?? null,
+                  presentationLaneEpoch:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.committedPresentation
+                        .presentationLaneEpoch
+                    ),
+                  sphStep:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.committedPresentation
+                        .sphStep
+                    ),
+                  residentExecutionGeneration:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.committedPresentation
+                        .residentExecutionGeneration
+                    ),
+                  stepOrdinal:
+                    finiteOrNull(
+                      steps.workerOwnedResidentLane.committedPresentation
+                        .stepOrdinal
+                    ),
+                  residentScheduleCandidatePresentation:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .residentScheduleCandidatePresentation === true,
+                  stateManagerCommittedPresentation:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .stateManagerCommittedPresentation === true,
+                  authorityStatus:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .authorityStatus ?? null,
+                  computeManagerCompletionSchema:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .computeManagerCompletionSchema ?? null,
+                  computeManagerLeaseId:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .computeManagerLeaseId ?? null,
+                  computeManagerLeaseStatus:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .computeManagerLeaseStatus ?? null,
+                  computeManagerFenceSatisfied:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .computeManagerFenceSatisfied === true,
+                  stateManagerCommitStatus:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .stateManagerCommitStatus ?? null,
+                  stateManagerCommitAccepted:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .stateManagerCommitAccepted === true,
+                  terminalScheduleFence:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .terminalScheduleFence === true,
+                  terminalFenceScope:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .terminalFenceScope ?? null,
+                  terminalFenceSatisfied:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .terminalFenceSatisfied === true,
+                  terminalFenceAuthorityAdmissionReady:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .terminalFenceAuthorityAdmissionReady === true,
+                  producerSourceKind:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .producerSourceKind ?? null,
+                  producerSourceTransport:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .producerSourceTransport ?? null,
+                  sourceStageId:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .sourceStageId ?? null,
+                  retainedParticleStateStatus:
+                    steps.workerOwnedResidentLane.committedPresentation
+                      .retainedParticleStateStatus ?? null
+                } : null,
+              hierarchyStageSummary:
+                steps.workerOwnedResidentLane.hierarchyStageSummary ? {
+                  schema:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .schema ?? null,
+                  status:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .status ?? null,
+                  mechanicsLevelCount:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .mechanicsLevelCount ?? null,
+                  twoLevelMechanicsEnabled:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .twoLevelMechanicsEnabled === true,
+                  twoLevelMechanicsAuthority:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .twoLevelMechanicsAuthority ?? null,
+                  residentStepStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .residentStepStatus ?? null,
+                  twoLevelFineSubstepCount:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .twoLevelFineSubstepCount ?? null,
+                  twoLevelCflFactor:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .twoLevelCflFactor ?? null,
+                  twoLevelAuthoritativeCommitVerified:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .twoLevelAuthoritativeCommitVerified === true,
+                  mechanicsFieldPairV2Enabled:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .mechanicsFieldPairV2Enabled === true,
+                  mechanicsFieldConstructionMode:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .mechanicsFieldConstructionMode ?? null,
+                  lawQueueStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .lawQueueStatus ?? null,
+                  lawNeighborCandidateStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .lawNeighborCandidateStatus ?? null,
+                  crossLevelCouplingStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .crossLevelCouplingStatus ?? null,
+                  conservativeTransferStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .conservativeTransferStatus ?? null,
+                  stateMutationStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .stateMutationStatus ?? null,
+                  stateAuthorityStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .stateAuthorityStatus ?? null,
+                  phaseVolumeMigrationStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .phaseVolumeMigrationStatus ?? null,
+                  phaseVolumeLevelUpdateStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .phaseVolumeLevelUpdateStatus ?? null,
+                  pressureInterfaceOwnerScopeStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .pressureInterfaceOwnerScopeStatus ?? null,
+                  residentStageStatus: {
+                    ...(steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .residentStageStatus || {})
+                  },
+                  residentStageBackends: {
+                    ...(steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .residentStageBackends || {})
+                  },
+                  staticGpuTableUploadStatus: {
+                    ...(steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .staticGpuTableUploadStatus || {})
+                  },
+                  postMechanicsClosure:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .postMechanicsClosure ? {
+                        ...steps.workerOwnedResidentLane.hierarchyStageSummary
+                          .postMechanicsClosure,
+                        executedStageOrder: [
+                          ...(steps.workerOwnedResidentLane
+                            .hierarchyStageSummary.postMechanicsClosure
+                            .executedStageOrder || [])
+                        ]
+                      } : null,
+                  thermalRequested:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .thermalRequested === true,
+                  reactionRequested:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .reactionRequested === true,
+                  phaseVolumeSurfaceStressRequired:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .phaseVolumeSurfaceStressRequired === true,
+                  phaseVolumeSurfaceStressSubmissionExact:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .phaseVolumeSurfaceStressSubmissionExact === true,
+                  stageMechanicsTraceRequested:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .stageMechanicsTraceRequested === true,
+                  stageMechanicsTrace:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .stageMechanicsTrace ?? null,
+                  canonicalSpatialAuthorityTrace:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .canonicalSpatialAuthorityTrace ?? null,
+                  fullParticleReadbackFree:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .fullParticleReadbackFree ?? null,
+                  fullParticleReadbackPerformed:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .fullParticleReadbackPerformed === true,
+                  residentStageTiming:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .residentStageTiming ? {
+                        compactSummaryRequested:
+                          steps.workerOwnedResidentLane.hierarchyStageSummary
+                            .residentStageTiming.compactSummaryRequested
+                            ?? null
+                      } : null
+                } : null,
+              phaseVolumeSurfaceStress:
+                steps.workerOwnedResidentLane.phaseVolumeSurfaceStress ? {
+                  schema:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .schema ?? null,
+                  required:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .required === true,
+                  observedStepCount:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .observedStepCount ?? null,
+                  expectedSubmissionCount:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .expectedSubmissionCount ?? null,
+                  exactSubmissionCount:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .exactSubmissionCount ?? null,
+                  submissionEvidenceComplete:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .submissionEvidenceComplete === true,
+                  firstIncompleteStepOrdinal:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .firstIncompleteStepOrdinal ?? null,
+                  finalSubmissionStepOrdinal:
+                    steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                      .finalSubmissionStepOrdinal ?? null,
+                  finalSubmission:
+                    compactPhaseVolumeSurfaceStressSubmission(
+                      steps.workerOwnedResidentLane.phaseVolumeSurfaceStress
+                        .finalSubmission
+                    )
+                } : null,
+              twoLevelMechanics:
+                steps.workerOwnedResidentLane.twoLevelMechanics ? {
+                  ...steps.workerOwnedResidentLane.twoLevelMechanics,
+                  lastStep:
+                    steps.workerOwnedResidentLane.twoLevelMechanics.lastStep
+                      ? {
+                          ...steps.workerOwnedResidentLane.twoLevelMechanics
+                            .lastStep
+                        }
+                      : null
+                } : null
+            } : null,
             stepCount: steps.stepCount ?? null,
             completedStepCount: steps.completedStepCount ?? null,
             readbackMode: steps.readbackMode ?? null,
@@ -6985,6 +8182,36 @@ async function runBrowserProbe({
                     )
                   ))
                 : [],
+            phaseVolumeSurfaceStressWorkerEvidence:
+              steps.phaseVolumeSurfaceStressWorkerEvidence ? {
+                schema:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence.schema ?? null,
+                required:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence.required === true,
+                observedStepCount:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .observedStepCount ?? null,
+                expectedSubmissionCount:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .expectedSubmissionCount ?? null,
+                exactSubmissionCount:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .exactSubmissionCount ?? null,
+                submissionEvidenceComplete:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .submissionEvidenceComplete === true,
+                firstIncompleteStepOrdinal:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .firstIncompleteStepOrdinal ?? null,
+                finalSubmissionStepOrdinal:
+                  steps.phaseVolumeSurfaceStressWorkerEvidence
+                    .finalSubmissionStepOrdinal ?? null,
+                finalSubmission:
+                  compactPhaseVolumeSurfaceStressSubmission(
+                    steps.phaseVolumeSurfaceStressWorkerEvidence
+                      .finalSubmission
+                  )
+              } : null,
             schroederSpatialEpochGenerationSummaries: Array.isArray(
               steps.schroederSameLevelMechanicsSummaries
             )
@@ -7029,6 +8256,8 @@ async function runBrowserProbe({
                 steps.finalStep?.gridUpdate
                   ?.phaseVolumeSurfaceStressSubmission
                 ?? steps.finalStep?.phaseVolumeSurfaceStressSubmission
+                ?? steps.phaseVolumeSurfaceStressWorkerEvidence
+                  ?.finalSubmission
               ),
             residentSourceMode: steps.residentSourceMode ?? null,
             nextStep: steps.nextSphParticleState?.step ?? null,
@@ -7113,6 +8342,21 @@ async function runBrowserProbe({
               renderState.sourceResidentExecutionGenerationMatchesCurrent ?? null,
             sourceResidentNextStep: renderState.sourceResidentNextStep ?? null,
             sourceResidentNextTimeS: renderState.sourceResidentNextTimeS ?? null,
+            surfaceDrawOverlayPolicyStatus:
+              renderState.surfaceDrawOverlayPolicyStatus ?? null,
+            workerOffscreenPresentationStatus:
+              renderState.workerOffscreenPresentationStatus ?? null,
+            workerOffscreenRetainedCompactSnapshotStatus:
+              renderState.workerOffscreenRetainedCompactSnapshotStatus
+                ?? null,
+            workerOffscreenRetainedCompactSnapshotAvailable:
+              renderState.workerOffscreenRetainedCompactSnapshotAvailable
+                ?? null,
+            workerOffscreenRetainedCompactSnapshotStep:
+              renderState.workerOffscreenRetainedCompactSnapshotStep
+                ?? renderState.workerOffscreenRetainedCompactSnapshot
+                  ?.compactBufferSnapshotStep
+                ?? null,
             sourceResidentRetainedPrevious:
               renderState.sourceResidentRetainedPrevious ?? null,
             sourceResidentRetentionReason:
@@ -8308,6 +9552,7 @@ async function runBrowserProbe({
         if (!requestedCaptureFrames) {
           const retainedMetric = retainProbeMetric(metric);
           metrics.push(retainedMetric);
+          publishPartialTimeline();
           return retainedMetric;
         }
         if (requestedVisualIntervalCaptureRequested) {
@@ -8340,6 +9585,7 @@ async function runBrowserProbe({
               metric.authoritativeGpuCheckpoint?.materialPhaseCount ?? null
           });
         }
+        publishPartialTimeline();
         return retainedMetric;
       };
       const authoritativeGpuCheckpointCaptureSummary = () => {
@@ -8374,6 +9620,13 @@ async function runBrowserProbe({
           errorCount
         };
       };
+      const publishPartialTimeline = (status = partialTimeline.status) => {
+        partialTimeline.status = status;
+        partialTimeline.updatedAtMs = performance.now();
+        partialTimeline.authoritativeGpuCheckpointCapture =
+          authoritativeGpuCheckpointCaptureSummary();
+      };
+      publishPartialTimeline();
       if (requestedVisualIntervalCaptureRequested) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         // The final-only compact-summary path does not otherwise need an
@@ -9266,54 +10519,70 @@ async function runBrowserProbe({
         sourceExecution,
         stepCount,
         schroederGpuTimestampRecorder = null
-      }) => ({
-        preferWebGpu: true,
-        gasPressureSummary: overlay.__sphResidentGasPressureSummary
-          || overlay.__sphPhaseViewState?.gasPressureSummary
-          || null,
-        stepCount,
-        readbackMode: requestedReadbackMode,
-        compactSummaryMode: requestedCompactSummaryMode,
-        compactSummaryScope: requestedCompactSummaryScope,
-        continueFromResidentState: Boolean(
-          sourceExecution?.continuationAvailable
-        ),
-        force: true,
-        // Stage progress remains available through the in-page progress
-        // object. Mirroring ~50 debug messages per physics step through
-        // Playwright/CDP materially distorts long-horizon timing while adding
-        // no acceptance evidence.
-        emitResidentProgressConsole: false,
-        pressureInterfaceForceSolver:
-          requestedDisablePressureInterface ? null : undefined,
-        pressureInterfaceForceRowsBuffer:
-          requestedDisablePressureInterface ? null : undefined,
-        contactKinematicsParticleBinMetadataReadback:
-          Boolean(requestedContactBinMetadataReadback),
-        reactionParticleBinMetadataReadback:
-          Boolean(requestedReactionBinMetadataReadback),
-        thermalStepOptions: Number.isFinite(requestedThermalWallRate)
-          ? { wallRate: requestedThermalWallRate }
-          : undefined,
-        ...residentExecutionPolicy,
-        ...schroederExecutionOptions,
-        collectSchroederHierarchyHostTiming: Boolean(
-          requestedCollectSchroederHierarchyHostTiming
-        ),
-        ...(Number.isFinite(requestedPhaseVolumeMaxImpulseFraction)
-          ? {
-              phaseVolumeMaxImpulseFraction:
-                Math.max(0, requestedPhaseVolumeMaxImpulseFraction)
-            }
-          : {}),
-        ...(schroederGpuTimestampRecorder
-          ? { schroederGpuTimestampRecorder }
-          : {}),
-        measureFusedSequenceQueueFence: Boolean(
-          requestedMeasureGpuQueueFence
-          || residentExecutionPolicy?.measureFusedSequenceQueueFence
-        )
-      });
+      }) => {
+        // Direct scene API probes historically omitted the mounted authority
+        // host, which made an explicitly requested worker-owned renderer fail
+        // admission and silently execute the direct fallback. The mount
+        // publishes the exact live host after runtime admission; thread its
+        // managers through every probe schedule so the matrix measures the
+        // same ComputeManager/StateManager authority path as playback.
+        const residentAuthorityHost = globalThis.__ulgResidentAuthorityHost
+          || null;
+        return {
+          preferWebGpu: true,
+          computeManager: residentAuthorityHost?.computeManager ?? null,
+          residentStateManager: residentAuthorityHost?.stateManager ?? null,
+          residentAuthorityHost,
+          computeTaskDomainKey: 'sph-visual-sanity-matrix',
+          gasPressureSummary: overlay.__sphResidentGasPressureSummary
+            || overlay.__sphPhaseViewState?.gasPressureSummary
+            || null,
+          stepCount,
+          workerLaneProgressEverySteps:
+            requestedWorkerLaneProgressEverySteps,
+          readbackMode: requestedReadbackMode,
+          compactSummaryMode: requestedCompactSummaryMode,
+          compactSummaryScope: requestedCompactSummaryScope,
+          continueFromResidentState: Boolean(
+            sourceExecution?.continuationAvailable
+          ),
+          force: true,
+          // Stage progress remains available through the in-page progress
+          // object. Mirroring ~50 debug messages per physics step through
+          // Playwright/CDP materially distorts long-horizon timing while adding
+          // no acceptance evidence.
+          emitResidentProgressConsole: false,
+          pressureInterfaceForceSolver:
+            requestedDisablePressureInterface ? null : undefined,
+          pressureInterfaceForceRowsBuffer:
+            requestedDisablePressureInterface ? null : undefined,
+          contactKinematicsParticleBinMetadataReadback:
+            Boolean(requestedContactBinMetadataReadback),
+          reactionParticleBinMetadataReadback:
+            Boolean(requestedReactionBinMetadataReadback),
+          thermalStepOptions: Number.isFinite(requestedThermalWallRate)
+            ? { wallRate: requestedThermalWallRate }
+            : undefined,
+          ...residentExecutionPolicy,
+          ...schroederExecutionOptions,
+          collectSchroederHierarchyHostTiming: Boolean(
+            requestedCollectSchroederHierarchyHostTiming
+          ),
+          ...(Number.isFinite(requestedPhaseVolumeMaxImpulseFraction)
+            ? {
+                phaseVolumeMaxImpulseFraction:
+                  Math.max(0, requestedPhaseVolumeMaxImpulseFraction)
+              }
+            : {}),
+          ...(schroederGpuTimestampRecorder
+            ? { schroederGpuTimestampRecorder }
+            : {}),
+          measureFusedSequenceQueueFence: Boolean(
+            requestedMeasureGpuQueueFence
+            || residentExecutionPolicy?.measureFusedSequenceQueueFence
+          )
+        };
+      };
       const settlementIsPending = (candidate) => Boolean(
         String(
           candidate?.schroederSpatialEpochReleaseSettlementStatus ?? ''
@@ -9451,15 +10720,21 @@ async function runBrowserProbe({
             residentStageWallTrace.evidence();
           const residentStepsAwaitStartedAtMs = performance.now();
           const sourceExecution = execution;
-          const currentExecution = await sceneApi.refreshMlsMpmResidentSteps(
-            residentRefreshOptions({
-              sourceExecution,
-              stepCount: requestedBatchSteps,
-              schroederGpuTimestampRecorder:
-                residentStageWallTrace.recorder
-                ?? residentGpuStageTimestampRecorder.recorder
-            })
-          );
+          const currentExecution = mountedResidentSchedule
+            ? await runMountedResidentSchedule({
+                stepCount: requestedBatchSteps,
+                readbackMode: requestedReadbackMode,
+                continueFromResidentState: batchIndex > 1
+              })
+            : await sceneApi.refreshMlsMpmResidentSteps(
+                residentRefreshOptions({
+                  sourceExecution,
+                  stepCount: requestedBatchSteps,
+                  schroederGpuTimestampRecorder:
+                    residentStageWallTrace.recorder
+                    ?? residentGpuStageTimestampRecorder.recorder
+                })
+              );
           const publishedExecutionAfterCompute =
             sceneApi.getMlsMpmResidentSteps?.() || null;
           probeResidentBatchTiming.executionPublicationAfterCompute = {
@@ -9551,18 +10826,24 @@ async function runBrowserProbe({
           });
           overlay.__mlsMpmResidentSteps = execution;
           overlay.__mlsMpmResidentStep = sceneApi.getMlsMpmResidentStep?.() || execution?.finalStep || null;
-          overlay.__sphAppendResidentStageOrderTrace?.({
-            status: 'resident-execution-complete-direct-probe',
-            reason: 'sph-long-horizon-probe-direct-scene-refresh',
-            scheduleToken: batchIndex,
-            stepCount: requestedBatchSteps,
-            readbackMode: requestedReadbackMode,
-            continueFromResidentState: Boolean(execution?.continuedFromResidentState),
-            residentExecutionPolicy,
-            execution
-          });
+          if (!mountedResidentSchedule) {
+            overlay.__sphAppendResidentStageOrderTrace?.({
+              status: 'resident-execution-complete-direct-probe',
+              reason: 'sph-long-horizon-probe-direct-scene-refresh',
+              scheduleToken: batchIndex,
+              stepCount: requestedBatchSteps,
+              readbackMode: requestedReadbackMode,
+              continueFromResidentState: Boolean(execution?.continuedFromResidentState),
+              residentExecutionPolicy,
+              execution
+            });
+          }
           overlay.__sphUpdateResidentGasPressureSummary?.(overlay.__mlsMpmResidentStep);
-          if ((batchIndex % requestedRenderEvery === 0 || batchIndex === requestedBatches) && sceneApi.refreshSphResidentRenderState) {
+          if (
+            !mountedResidentSchedule
+            && (batchIndex % requestedRenderEvery === 0 || batchIndex === requestedBatches)
+            && sceneApi.refreshSphResidentRenderState
+          ) {
             markProbeProgress('resident-render-refresh-started', { batchIndex });
             const renderRefreshAwaitStartedAtMs = performance.now();
             overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
@@ -9760,9 +11041,15 @@ async function runBrowserProbe({
             message: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack || null : null
           });
-          await appendMetricWithValidationCapture(
+          // The failing operation may already have terminalized or exhausted
+          // the GPU device. Preserve its CPU-side metric and exact scene/worker
+          // receipts, but never start another checkpoint, render extraction,
+          // or readback from an error handler; that can mask the primary error
+          // with a secondary OOM/device-loss and can hang until scenario timeout.
+          metrics.push(retainProbeMetric(
             sample(batchIndex, 'resident-batch-error', performance.now() - started)
-          );
+          ));
+          publishPartialTimeline('completed-with-errors');
           break;
         }
       }
@@ -9823,12 +11110,18 @@ async function runBrowserProbe({
           error: null
         };
         try {
-          const drainExecution = await sceneApi.refreshMlsMpmResidentSteps(
-            residentRefreshOptions({
-              sourceExecution: drainSourceExecution,
-              stepCount: 1
-            })
-          );
+          const drainExecution = mountedResidentSchedule
+            ? await runMountedResidentSchedule({
+                stepCount: 1,
+                readbackMode: requestedReadbackMode,
+                continueFromResidentState: true
+              })
+            : await sceneApi.refreshMlsMpmResidentSteps(
+                residentRefreshOptions({
+                  sourceExecution: drainSourceExecution,
+                  stepCount: 1
+                })
+              );
           const settlement = await authenticatePendingBackgroundSettlement(
             pendingBackgroundSettlement,
             {
@@ -9936,11 +11229,16 @@ async function runBrowserProbe({
           ));
         }
       }
+      publishPartialTimeline(
+        errors.length ? 'completed-with-errors' : 'complete'
+      );
       return {
         schema: 'peercompute.ulg.sph-history-long-horizon-probe.v0',
         status: errors.length ? 'completed-with-errors' : 'complete',
         batchCount: requestedBatches,
         batchStepCount: requestedBatchSteps,
+        workerLaneProgressEverySteps:
+          requestedWorkerLaneProgressEverySteps,
         requestedSubsteps: requestedBatches * requestedBatchSteps,
         terminalDrainEvidence,
         readbackMode: requestedReadbackMode,
@@ -10038,6 +11336,8 @@ async function runBrowserProbe({
       nativeSurfaceExtractionAtVisualIntervals,
       captureFrameEvery,
       captureFrameMax,
+      workerLaneProgressEverySteps,
+      useMountedResidentSchedule,
       preProbeSnapshots,
       pageConsole,
       nativeSurfaceCaptureUiSuppressed,
@@ -10107,10 +11407,18 @@ async function runBrowserProbe({
       }, timeoutMs);
     });
     try {
-      const timeline = await Promise.race([inPageProbe, timeoutProbe]);
+      const timeline = await awaitBrowserProbeOperation(
+        Promise.race([
+          inPageProbe,
+          timeoutProbe
+        ]),
+        fatalSignal
+      );
+      const finalizedTimeline = await awaitBrowserProbeFinalization(async () => {
       const shouldCaptureCompositedPage = Boolean(
         captureFrames
         && timeline
+        && timeline.fatalTermination == null
         && Array.isArray(timeline.visualFrames)
         && (
           timeline.visualFrames.length < captureFrameMax
@@ -11534,18 +12842,47 @@ async function runBrowserProbe({
           ? 'same-page-warm-reset-cached-measurement-complete'
           : 'same-page-warm-reset-cached-measurement-incomplete';
       }
-      completedTimeline = attachBrowserConsoleTelemetry(timeline, consoleCapture);
+        return timeline;
+      }, fatalSignal);
+      completedTimeline = attachBrowserConsoleTelemetry(
+        finalizedTimeline,
+        consoleCapture
+      );
       return completedTimeline;
     } finally {
       if (timeoutProbeTimer) clearTimeout(timeoutProbeTimer);
     }
+  } catch (error) {
+    const fatalTermination =
+      error?.browserProbeFatalTermination
+      || fatalSignal.current();
+    if (!fatalTermination || typeof buildFatalTimeline !== 'function') {
+      throw error;
+    }
+    completedTimeline = attachBrowserConsoleTelemetry(
+      await buildFatalTimeline(fatalTermination),
+      consoleCapture
+    );
+    return completedTimeline;
   } finally {
+    browserLifecycleSettled = true;
     if (browser !== null) {
-      await closeOwnedProbeBrowser(browser);
-      if (completedTimeline !== null) {
+      try {
+        await closeOwnedProbeBrowser(browser);
+        if (completedTimeline !== null) {
+          completedTimeline.browserLifecycle = {
+            ownership: 'probe-launched-isolated-browser',
+            closeStatus: 'closed'
+          };
+        }
+      } catch (closeError) {
+        if (completedTimeline === null) throw closeError;
         completedTimeline.browserLifecycle = {
           ownership: 'probe-launched-isolated-browser',
-          closeStatus: 'closed'
+          closeStatus: 'close-error',
+          reason: closeError instanceof Error
+            ? closeError.message
+            : String(closeError)
         };
       }
     }
@@ -13932,14 +15269,16 @@ export function analyzeTimeline(timeline, {
   const internalPressureScaleSeries = finiteSeries('internalPressureScale');
   const nextTimeSeries = metrics
     .map((metric) => finiteMetric(
-      metric.sceneTimeS
+      metric.residentSteps?.workerOwnedResidentLane?.laneSimTimeS
+        ?? metric.sceneTimeS
         ?? metric.plainSphStepResult?.time
         ?? metric.residentStep?.particlePingPong?.nextTime
         ?? metric.residentSteps?.nextTime
     ))
     .filter(Number.isFinite);
   const metricTimeS = (metric) => finiteMetric(
-    metric?.sceneTimeS
+    metric?.residentSteps?.workerOwnedResidentLane?.laneSimTimeS
+      ?? metric?.sceneTimeS
       ?? metric?.plainSphStepResult?.time
       ?? metric?.residentStep?.particlePingPong?.nextTime
       ?? metric?.residentSteps?.nextTime
@@ -14106,6 +15445,8 @@ export function analyzeTimeline(timeline, {
   const compactSummaryDisabled = ['none', 'plan-only'].includes(timeline?.compactSummaryMode) || metrics.some((metric) => (
     metric?.residentStep?.stageTiming?.compactSummaryRequested === false
     || metric?.residentSteps?.finalStepStageTiming?.compactSummaryRequested === false
+    || metric?.residentSteps?.workerOwnedResidentLane?.hierarchyStageSummary
+      ?.residentStageTiming?.compactSummaryRequested === false
   ));
   const activeGridPredictedMotionSeries = activeGridDispatches
     .map((dispatch) => finiteVector3(dispatch?.predictedMotionM))
@@ -14353,8 +15694,171 @@ export function analyzeTimeline(timeline, {
     compactSummaryDisabled
     && (renderRowEstimatedMaxSpeedMPerS != null || renderRowMaxDisplacementM != null)
   );
+  const workerOwnedResidentRenderSourceSample = (metric, index) => {
+    const steps = metric?.residentSteps ?? null;
+    const lane = steps?.workerOwnedResidentLane ?? null;
+    const presentation = metric?.workerOffscreenPresentation ?? null;
+    const rendered = presentation?.displayOwnerLastRenderedContent ?? null;
+    const checkpoint = metric?.authoritativeGpuCheckpoint ?? null;
+    const snapshot = checkpoint?.workerSnapshotProvenance ?? null;
+    const lineage = snapshot?.workerLineageMetadata ?? null;
+    const laneCompletedStepTotal = finiteMetric(lane?.laneCompletedStepTotal);
+    const laneSimTimeS = finiteMetric(lane?.laneSimTimeS);
+    const renderedSphStep = finiteMetric(rendered?.sphStep);
+    const checkpointStep = finiteMetric(checkpoint?.sourceStep);
+    const checkpointTimeS = finiteMetric(checkpoint?.sourceTimeS);
+    const requestedStepCount = finiteMetric(lane?.requestedStepCount);
+    const completedStepCount = finiteMetric(lane?.completedStepCount);
+    const laneId = typeof lane?.laneId === 'string' ? lane.laneId.trim() : '';
+    const stateKey = typeof lane?.stateKey === 'string' ? lane.stateKey.trim() : '';
+    const scheduleId = typeof lane?.scheduleId === 'string'
+      ? lane.scheduleId.trim()
+      : '';
+    const snapshotCacheKey = typeof snapshot?.cacheKey === 'string'
+      ? snapshot.cacheKey.trim()
+      : '';
+    const checkpointTimeMatches = (
+      laneSimTimeS != null
+      && checkpointTimeS != null
+      && Math.abs(laneSimTimeS - checkpointTimeS) <= 1e-9
+    );
+    const ready = Boolean(
+      metric?.phase === 'resident-batch'
+      && steps?.residentComputeManagerMode === 'worker-owned-resident-lane'
+      && steps?.workerLaneFallback == null
+      && lane?.schema
+        === 'peercompute.ulg.sph-scene-worker-owned-resident-lane-execution.v0'
+      && lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+      && lane?.terminalStatus
+        === 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+      && laneId.length > 0
+      && stateKey.length > 0
+      && scheduleId.length > 0
+      && Number.isSafeInteger(requestedStepCount)
+      && requestedStepCount > 0
+      && completedStepCount === requestedStepCount
+      && lane?.cancelled === false
+      && Number.isSafeInteger(laneCompletedStepTotal)
+      && laneCompletedStepTotal > 0
+      && laneSimTimeS != null
+      && lane?.gpuFence?.scope === 'resident-schedule-terminal'
+      && lane?.gpuFence?.terminalScheduleFence === true
+      && lane?.gpuFence?.fenceSatisfied === true
+      && lane?.gpuFence?.queueCompletionStatus === 'queue-work-completed'
+      && lane?.gpuFence?.queueCompletionMethod
+        === 'worker-device.queue.onSubmittedWorkDone'
+      && lane?.gpuFence?.authorityAdmissionReady === true
+      && lane?.authority?.status === 'state-manager-committed-worker-schedule'
+      && lane?.authority?.computeManagerLeaseStatus === 'completed'
+      && lane?.authority?.computeManagerFenceSatisfied === true
+      && lane?.authority?.stateManagerCommitStatus === 'committed'
+      && metric?.peerComputeRenderOwnershipPolicy?.effectiveMode
+        === 'worker-owned-resident-render-producer'
+      && presentation?.transport === 'worker-owned-presented-canvas'
+      && presentation?.displayHandoff === 'transferControlToOffscreen'
+      && presentation?.frameCopyBackRejected === true
+      && presentation?.canvasTransferred === true
+      && presentation?.workerReady === true
+      && presentation?.contextStatus === 'webgpu-context-ready'
+      && presentation?.displayOwner === 'worker'
+      && presentation?.displayOwnerContentReady === true
+      && Number(presentation?.displayOwnerContentFrameSerial) > 0
+      && presentation?.displayCanvasVisible === true
+      && rendered?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
+      && rendered?.renderRowsSchema
+        === 'peercompute.ulg.worker-offscreen-render-rows.v0'
+      && rendered?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && rendered?.residentScheduleCandidatePresentation === true
+      && rendered?.stateManagerCommittedPresentation === true
+      && rendered?.scheduleId === scheduleId
+      && rendered?.laneId === laneId
+      && rendered?.stateKey === stateKey
+      && Number.isSafeInteger(Number(rendered?.presentationLaneEpoch))
+      && Number(rendered.presentationLaneEpoch) > 0
+      && Number(rendered?.residentExecutionGeneration)
+        === Number(lane?.finalEpochIdentity?.storageGeneration)
+      && Number(rendered?.stepOrdinal) === completedStepCount
+      && rendered?.authorityStatus
+        === 'state-manager-committed-worker-schedule'
+      && rendered?.computeManagerCompletionSchema
+        === 'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0'
+      && typeof rendered?.computeManagerLeaseId === 'string'
+      && rendered.computeManagerLeaseId.length > 0
+      && rendered?.computeManagerLeaseStatus === 'completed'
+      && rendered?.computeManagerFenceSatisfied === true
+      && rendered?.stateManagerCommitStatus === 'committed'
+      && rendered?.stateManagerCommitAccepted === true
+      && rendered?.terminalScheduleFence === true
+      && rendered?.terminalFenceScope === 'resident-schedule-terminal'
+      && rendered?.terminalFenceSatisfied === true
+      && rendered?.terminalFenceAuthorityAdmissionReady === true
+      && lane?.committedPresentation?.stateManagerCommittedPresentation === true
+      && lane?.committedPresentation?.scheduleId === scheduleId
+      && lane?.committedPresentation?.laneId === laneId
+      && lane?.committedPresentation?.stateKey === stateKey
+      && Number(lane?.committedPresentation?.presentationLaneEpoch)
+        === Number(rendered.presentationLaneEpoch)
+      && Number(lane?.committedPresentation?.sphStep) === renderedSphStep
+      && rendered?.producerSourceKind
+        === 'worker-retained-resident-stage-output'
+      && rendered?.producerSourceTransport
+        === 'worker-retained-resident-stage-output'
+      && rendered?.sourceStageId === 'schroederSameLevelMechanics'
+      && rendered?.retainedParticleStateStatus
+        === 'worker-retained-particle-state-ready'
+      && Number(rendered?.particleCount) > 0
+      && Number(rendered?.frameCount) > 0
+      && Number(rendered?.readyFrameCount) > 0
+      && Number(presentation?.frameCount) === Number(rendered?.frameCount)
+      && Number(presentation?.readyFrameCount)
+        === Number(rendered?.readyFrameCount)
+      && Number.isSafeInteger(renderedSphStep)
+      && renderedSphStep + 1 === laneCompletedStepTotal
+      && Number(presentation?.displayOwnerPresentedSphStep) === renderedSphStep
+      && checkpoint?.status === 'captured'
+      && checkpoint?.source === 'worker-retained-terminal-compact-snapshot'
+      && checkpoint?.authority
+        === 'worker-terminal-fence-and-state-manager-commit'
+      && checkpointStep === laneCompletedStepTotal
+      && checkpointTimeMatches
+      && snapshot?.status
+        === 'presentation-worker-retained-compact-snapshot-exported'
+      && snapshotCacheKey.startsWith(
+        `${scheduleId}:authoritative-checkpoint:`
+      )
+      && snapshot?.laneId === laneId
+      && snapshot?.stateKey === stateKey
+      && snapshot?.sourceStageId === 'schroederSameLevelMechanics'
+      && checkpoint?.uploadPairCoherenceStatus === 'ready'
+      && checkpoint?.uploadPairMetadataCoherent === true
+      && checkpoint?.uploadPairSharedSlotIdentityVerified === true
+      && checkpoint?.uploadPairCoherenceLevel === 'shared-slot-and-metadata'
+      && lineage?.status
+        === 'worker-retained-compact-snapshot-lineage-metadata-ready'
+      && lineage?.sharedSlotIdentityVerified === true
+    );
+    if (!ready) return null;
+    return {
+      index,
+      phase: metric.phase,
+      nextStep: laneCompletedStepTotal,
+      nextTimeS: laneSimTimeS,
+      generation: null,
+      currentGeneration: null,
+      generationMatchesCurrent: true,
+      retainedPrevious: false,
+      sourceMarkedStale: false,
+      retentionReason: null,
+      sourceAuthority:
+        'worker-terminal-fence-state-manager-display-and-snapshot-aligned'
+    };
+  };
   const residentRenderSourceSamples = metrics
     .map((metric, index) => {
+      const workerSource = workerOwnedResidentRenderSourceSample(metric, index);
+      if (workerSource) return workerSource;
       const renderState = metric?.renderState || {};
       const surfaceDraw = metric?.surfaceDraw || {};
       const nextStep = finiteMetric(
@@ -14572,23 +16076,101 @@ export function analyzeTimeline(timeline, {
         ?? metric?.surfaceDraw?.vertexCount
         ?? metric?.renderState?.surfaceDrawVertexCount
       ),
+      frameCount: finiteMetric(
+        workerRows?.frameCount
+        ?? metric?.renderState?.workerOffscreenRenderRowsFrameCount
+      ),
+      readyEver: workerRows?.readyEver
+        ?? metric?.renderState?.workerOffscreenRenderRowsReadyEver
+        ?? null,
       readyFrameCount: finiteMetric(
         workerRows?.readyFrameCount
         ?? metric?.renderState?.workerOffscreenRenderRowsReadyFrameCount
         ?? metric?.workerOffscreenPresentation?.readyFrameCount
         ?? metric?.renderState?.workerOffscreenPresentationReadyFrameCount
-      )
+      ),
+      lastPresentedSphStep: finiteMetric(
+        workerRows?.lastPresentedSphStep
+        ?? metric?.renderState?.workerOffscreenRenderRowsLastPresentedSphStep
+      ),
+      sphStep: finiteMetric(workerRows?.sphStep),
+      presentation: metric?.workerOffscreenPresentation ?? null,
+      renderedContent:
+        metric?.workerOffscreenPresentation?.displayOwnerLastRenderedContent
+        ?? null
     };
   };
   const workerOffscreenResidentParticleStateVisible = (metric) => {
     const evidence = workerOffscreenRenderRowsEvidence(metric);
-    return evidence.status === 'worker-offscreen-resident-particle-state-producer-rendered'
+    const presentation = evidence.presentation;
+    const renderedContent = evidence.renderedContent;
+    const renderedStep = finiteMetric(renderedContent?.sphStep);
+    const renderedNow = evidence.status
+      === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && evidence.sphStep === renderedStep;
+    // A later page-side draw can be correctly rejected as older than the
+    // already-presented worker candidate. Only the bridge's durable exact
+    // positive content receipt can prove the old frame is still displayed.
+    const renderedBeforeStaleRejection = evidence.status
+      === 'worker-offscreen-presentation-superseded-stale-step'
+      && Number.isSafeInteger(evidence.sphStep)
+      && Number.isSafeInteger(Number(evidence.lastPresentedSphStep))
+      && evidence.sphStep < Number(evidence.lastPresentedSphStep)
+      && Number(evidence.lastPresentedSphStep) === renderedStep;
+    return (renderedNow || renderedBeforeStaleRejection)
       && evidence.displayHandoff === 'transferControlToOffscreen'
       && evidence.frameCopyBackRejected === true
       && evidence.workerReady === true
       && evidence.contextStatus === 'webgpu-context-ready'
-      && Number(evidence.particleCount) > 0
-      && Number(evidence.readyFrameCount) > 0;
+      && presentation?.canvasTransferred === true
+      && presentation?.workerReady === true
+      && presentation?.contextStatus === 'webgpu-context-ready'
+      && presentation?.displayOwner === 'worker'
+      && presentation?.displayOwnerContentReady === true
+      && Number(presentation?.displayOwnerContentFrameSerial) > 0
+      && presentation?.displayCanvasVisible === true
+      && Number.isSafeInteger(renderedStep)
+      && renderedStep >= 0
+      && Number(presentation?.displayOwnerPresentedSphStep) === renderedStep
+      && renderedContent?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
+      && renderedContent?.renderRowsSchema
+        === 'peercompute.ulg.worker-offscreen-render-rows.v0'
+      && renderedContent?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && renderedContent?.residentScheduleCandidatePresentation === true
+      && renderedContent?.stateManagerCommittedPresentation === true
+      && renderedContent?.authorityStatus
+        === 'state-manager-committed-worker-schedule'
+      && Number.isSafeInteger(Number(
+        renderedContent?.presentationLaneEpoch
+      ))
+      && Number(renderedContent.presentationLaneEpoch) > 0
+      && renderedContent?.computeManagerCompletionSchema
+        === 'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0'
+      && typeof renderedContent?.computeManagerLeaseId === 'string'
+      && renderedContent.computeManagerLeaseId.length > 0
+      && renderedContent?.computeManagerLeaseStatus === 'completed'
+      && renderedContent?.computeManagerFenceSatisfied === true
+      && renderedContent?.stateManagerCommitStatus === 'committed'
+      && renderedContent?.stateManagerCommitAccepted === true
+      && renderedContent?.terminalScheduleFence === true
+      && renderedContent?.terminalFenceScope === 'resident-schedule-terminal'
+      && renderedContent?.terminalFenceSatisfied === true
+      && renderedContent?.terminalFenceAuthorityAdmissionReady === true
+      && renderedContent?.producerSourceKind
+        === 'worker-retained-resident-stage-output'
+      && renderedContent?.producerSourceTransport
+        === 'worker-retained-resident-stage-output'
+      && renderedContent?.sourceStageId === 'schroederSameLevelMechanics'
+      && renderedContent?.retainedParticleStateStatus
+        === 'worker-retained-particle-state-ready'
+      && Number(renderedContent?.particleCount) > 0
+      && Number(renderedContent?.frameCount) > 0
+      && Number(renderedContent?.readyFrameCount) > 0
+      && Number(presentation?.frameCount) === Number(renderedContent?.frameCount)
+      && Number(presentation?.readyFrameCount)
+        === Number(renderedContent?.readyFrameCount);
   };
   const renderStateHasH2oEvidence = (renderState = null) => {
     if (!renderState) return false;
@@ -16314,6 +17896,14 @@ async function main() {
     process.env.ULG_PROBE_INITIAL_RESIDENT_WAIT_MS,
     Math.min(timeoutMs, 5000)
   );
+  const workerLaneProgressEverySteps = positiveInteger(
+    process.env.ULG_PROBE_WORKER_PROGRESS_EVERY_STEPS,
+    1
+  );
+  const useMountedResidentSchedule = booleanEnv(
+    process.env.ULG_PROBE_USE_MOUNTED_RESIDENT_SCHEDULER,
+    false
+  );
   const artifactDetailMode = normalizeProbeArtifactDetailMode(
     process.env.ULG_PROBE_ARTIFACT_DETAIL_MODE || 'full'
   );
@@ -16494,6 +18084,8 @@ async function main() {
         captureFrameEvery,
         captureFrameMax,
         initialResidentWaitMs,
+        workerLaneProgressEverySteps,
+        useMountedResidentSchedule,
         artifactDetailMode,
         phaseVolumeMaxImpulseFraction,
         generatedGasTargetMaterial,

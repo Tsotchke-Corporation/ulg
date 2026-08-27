@@ -373,7 +373,7 @@ test('full Node policy pins the exact audited opt-in skip inventory and scrubs d
     ['tests/sphMlsMpmGpuStep.test.mjs', 'native four-lane resident summary keeps a live companion and ignores poisoned dormant lanes', 'set ULG_RUN_NATIVE_PHASE_LINEAGE_SUMMARY=1 for native WebGPU readback'],
     ['tests/sphMlsMpmGpuStep.test.mjs', 'native WebGPU executes ActiveSource-v2 sparse/A=0 P2G and compiles physical-direct G2P pipelines', 'set ULG_RUN_NATIVE_ACTIVE_SOURCE_P2G=1 for native WebGPU execution'],
     ['tests/sphMlsMpmGpuStep.test.mjs', 'native resident product-history promotion publishes READY control and exact filtered rows', 'set ULG_RUN_NATIVE_PRODUCT_HISTORY_PROMOTION=1 for native WebGPU readback'],
-    ['tests/schroederIronIceMechanicsDiagnostic.native.test.mjs', 'native iron/ice two-level mechanics diagnostic', 'set ULG_RUN_NATIVE_IRON_ICE_MECHANICS_DIAGNOSTIC=1 for native WebGPU'],
+    ['tests/schroederIronIceMechanicsDiagnostic.native.test.mjs', 'native iron-ice-quench two-level mechanics diagnostic', 'set ULG_RUN_NATIVE_IRON_ICE_MECHANICS_DIAGNOSTIC=1 for native WebGPU'],
     ['tests/schroederSpatialParentFieldViewGpu.test.mjs', 'native Vulkan parent-field union admits exact keys, CSR, maps, and residuals', 'set ULG_RUN_NATIVE_PARENT_FIELD_VIEW=1 for native WebGPU'],
     ['tests/schroederSpatialPhaseVolumeInterfaceProposalGpu.test.mjs', 'native S9-C shader admits a compact authenticated local span and fails no WebGPU validation', 'set ULG_RUN_NATIVE_PHASE_VOLUME_INTERFACE=1 for native WebGPU topology execution'],
     ['tests/sphPhaseCarrierTransferGpu.test.mjs', 'native WebGPU phase transfer performs a phase-pure conservative sweep and fails closed', 'set ULG_RUN_NATIVE_PHASE_CARRIER_TRANSFER=1 for native WebGPU readback'],

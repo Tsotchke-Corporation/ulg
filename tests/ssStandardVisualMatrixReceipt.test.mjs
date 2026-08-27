@@ -152,12 +152,28 @@ function syntheticMaterialPhase({
   meanVyMPerS = 0.1,
   liveParticleCount = 10
 }) {
+  const materialIdByKey = {
+    h2o: 3061144,
+    fe: 26,
+    na: 11,
+    naoh: 665383,
+    h2: 3022823,
+    f: 9,
+    cs: 55,
+    csf: 550009,
+    synthetic: 900001
+  };
+  const phaseIdByKey = { solid: 1, liquid: 2, gas: 3, plasma: 4 };
   return {
     material,
+    materialId:
+      materialIdByKey[String(material).toLowerCase()] ?? 990001,
     phase,
+    phaseId: phaseIdByKey[String(phase).toLowerCase()] ?? 0,
     massKg,
     liveParticleCount,
     phaseWeightedParticleCount: liveParticleCount,
+    speedSampleCount: liveParticleCount,
     mechanicsSampleCount: liveParticleCount,
     mechanicsProblemParticleCount: 0,
     minVolumeRatioJ: 1,
@@ -166,6 +182,9 @@ function syntheticMaterialPhase({
     yMinM: yCenterM - 0.1,
     yMaxM: yCenterM + 0.1,
     meanVyMPerS,
+    minVyMPerS: meanVyMPerS,
+    maxVyMPerS: meanVyMPerS,
+    maxSpeedMPerS: Math.abs(meanVyMPerS),
     vySampleMassKg: massKg,
     kineticEnergyJ: 0,
     temperatureMinK: temperatureK,
@@ -175,14 +194,47 @@ function syntheticMaterialPhase({
 }
 
 function syntheticCheckpoint(index, materialPhases, extra = {}) {
+  const retainedMaterialPhases = materialPhases.map((entry) => ({
+    ...entry,
+    // This fixture represents advancing retained mechanics independently of
+    // mass/temperature changes, which are deliberately excluded from the
+    // mechanics-freshness signature.
+    yMinM: entry.yMinM + index * 1e-4,
+    yMaxM: entry.yMaxM + index * 1e-4
+  }));
+  const liveParticleCount = retainedMaterialPhases.reduce(
+    (sum, entry) => sum + entry.liveParticleCount,
+    0
+  );
   return {
     status: 'captured',
+    schema:
+      'peercompute.ulg.sph-authoritative-gpu-material-phase-reduction.v1',
+    aggregationStatus: 'gpu-reduced',
+    backend: 'webgpu-compute',
     phase: index === 0 ? 'initial' : 'batch',
+    source: index === 0
+      ? 'retained-resident-particle-buffers'
+      : 'worker-retained-terminal-compact-snapshot',
+    authority: index === 0
+      ? 'gpu-resident-retained-state'
+      : 'worker-terminal-fence-and-state-manager-commit',
+    sourceStep: index * 128,
     sourceTimeS: index,
     totals: { massKg: 1 },
-    liveParticleCount: 10,
+    uploadPairCoherenceStatus: 'ready',
+    uploadPairMetadataCoherent: true,
+    uploadPairSharedSlotIdentityVerified: true,
+    materialMappingStatus: 'complete',
+    speedEvidenceStatus: 'complete',
+    mechanicsEvidenceStatus: 'complete',
+    liveParticleCount,
+    speedSampleCount: liveParticleCount,
+    mechanicsSampleCount: liveParticleCount,
     invalidMassParticleCount: 0,
-    materialPhases,
+    invalidMechanicsParticleCount: 0,
+    overflowContributionCount: 0,
+    materialPhases: retainedMaterialPhases,
     ...extra
   };
 }
@@ -429,7 +481,7 @@ function syntheticPassingCheckpoints(label) {
       ]
     ].map((rows, index) => syntheticCheckpoint(index, rows));
   }
-  return [0, 1].map((index) => syntheticCheckpoint(index, [
+  return [0, 1, 2].map((index) => syntheticCheckpoint(index, [
     syntheticMaterialPhase({
       material: 'synthetic',
       phase: 'solid',
@@ -441,13 +493,196 @@ function syntheticPassingCheckpoints(label) {
 
 function syntheticPassingTimeline(scenario) {
   const checkpoints = syntheticPassingCheckpoints(scenario.label);
-  return {
-    mechanicsIntegrator: scenario.expectedMechanics,
-    metrics: checkpoints.map((authoritativeGpuCheckpoint) => ({
-      phase: authoritativeGpuCheckpoint.phase,
+  const scheduleCount = scenario.workerSchedulePlan?.scheduleCount
+    ?? scenario.batches
+    ?? Math.max(1, checkpoints.length - 1);
+  const metrics = checkpoints.map((authoritativeGpuCheckpoint, index) => {
+    const residentBatch = index > 0 && index <= scheduleCount;
+    const requestedStepCount =
+      scenario.workerSchedulePlan?.scheduleStepCount
+      ?? scenario.batchSteps
+      ?? 128;
+    const scheduleId = `schedule:${scenario.label}:${index}`;
+    const laneId = `lane:${scenario.label}`;
+    const stateKey = `state:${scenario.label}`;
+    const physicsTick = index * requestedStepCount - 1;
+    const storageGeneration = index * 3;
+    const frameCount = index + 1;
+    const presentationLaneEpoch = index;
+    const residentRoute = residentBatch
+      ? {
+          workerOffscreenRenderRows: {
+            status:
+              'worker-offscreen-resident-particle-state-producer-rendered',
+            displayHandoff: 'transferControlToOffscreen',
+            frameCopyBackRejected: true,
+            workerReady: true,
+            contextStatus: 'webgpu-context-ready',
+            particleCount: authoritativeGpuCheckpoint.liveParticleCount,
+            frameCount,
+            readyEver: true,
+            sphStep: physicsTick,
+            lastPresentedSphStep: physicsTick,
+            readyFrameCount: frameCount
+          },
+          workerOffscreenPresentation: {
+            canvasTransferred: true,
+            workerReady: true,
+            contextStatus: 'webgpu-context-ready',
+            displayOwner: 'worker',
+            displayOwnerContentReady: true,
+            displayOwnerContentFrameSerial: frameCount,
+            displayOwnerPresentedSphStep: physicsTick,
+            displayCanvasVisible: true,
+            frameCount,
+            readyFrameCount: frameCount,
+            displayOwnerLastRenderedContent: {
+              schema:
+                'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0',
+              renderRowsSchema:
+                'peercompute.ulg.worker-offscreen-render-rows.v0',
+              status:
+                'worker-offscreen-resident-particle-state-producer-rendered',
+              sphStep: physicsTick,
+              particleCount: authoritativeGpuCheckpoint.liveParticleCount,
+              frameCount,
+              readyFrameCount: frameCount,
+              residentScheduleCandidatePresentation: true,
+              stateManagerCommittedPresentation: true,
+              committedPresentationSchema:
+                'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+              committedPresentationStatus:
+                'state-manager-committed-resident-schedule-presentation-admission',
+              scheduleId,
+              laneId,
+              stateKey,
+              presentationLaneEpoch,
+              residentExecutionGeneration: storageGeneration,
+              stepOrdinal: requestedStepCount,
+              authorityStatus: 'state-manager-committed-worker-schedule',
+              computeManagerCompletionSchema:
+                'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+              computeManagerLeaseId: `lease:${scenario.label}:${index}`,
+              computeManagerLeaseStatus: 'completed',
+              computeManagerFenceSatisfied: true,
+              stateManagerCommitStatus: 'committed',
+              stateManagerCommitAccepted: true,
+              terminalScheduleFence: true,
+              terminalFenceScope: 'resident-schedule-terminal',
+              terminalFenceSatisfied: true,
+              terminalFenceAuthorityAdmissionReady: true,
+              producerSourceKind: 'worker-retained-resident-stage-output',
+              producerSourceTransport: 'worker-retained-resident-stage-output',
+              sourceStageId: 'schroederSameLevelMechanics',
+              retainedParticleStateStatus:
+                'worker-retained-particle-state-ready'
+            }
+          },
+          residentSteps: {
+            residentComputeManagerMode: scenario.residentComputeManagerMode,
+            workerLaneFallback: null,
+            workerOwnedResidentLane: {
+              laneId,
+              stateKey,
+              scheduleId,
+              residentScheduleStatus: 'worker-resident-schedule-completed',
+              terminalStatus:
+                'worker-offscreen-resident-schedule-on-presentation-device-completed',
+              requestedStepCount,
+              completedStepCount: requestedStepCount,
+              laneCompletedStepTotal: index * requestedStepCount,
+              progressEverySteps: scenario.workerProgressEverySteps,
+              cancelled: false,
+              retainedBufferRefCount: 3,
+              finalEpochIdentity: {
+                storageGeneration,
+                physicsTick,
+                positionEpoch: index * requestedStepCount
+              },
+              gpuFence: {
+                scope: 'resident-schedule-terminal',
+                terminalScheduleFence: true,
+                fenceSatisfied: true,
+                queueCompletionStatus: 'queue-work-completed',
+                authorityAdmissionReady: true
+              },
+              authority: {
+                status: 'state-manager-committed-worker-schedule',
+                computeManagerLeaseStatus: 'completed',
+                computeManagerFenceSatisfied: true,
+                stateManagerCommitStatus: 'committed'
+              },
+              ...(scenario.label === 'standard-cesium-fluorine'
+                ? {
+                    twoLevelMechanics: {
+                      schema:
+                        'peercompute.ulg.worker-resident-schedule-two-level-mechanics-evidence.v0',
+                      requested: true,
+                      authorityRequested: 'authoritative',
+                      observedStepCount: requestedStepCount,
+                      exactAuthoritativeStepCount: requestedStepCount,
+                      cflFactorEvidenceRequired: true,
+                      cflFactorRequested: 0.8,
+                      cflFactorObservedStepCount: requestedStepCount,
+                      exactCflFactorCount: requestedStepCount,
+                      firstCflFactorMismatchStepOrdinal: null,
+                      lastCflFactor: 0.8,
+                      terminalRefluxReceiptRequired: true,
+                      terminalRefluxReceipt: {
+                        schema:
+                          'peercompute.ulg.worker-resident-schedule-terminal-reflux-receipt.v0',
+                        required: true,
+                        scheduleId,
+                        laneId,
+                        stateKey,
+                        expectedStepCount: requestedStepCount,
+                        observedStepCount: requestedStepCount,
+                        admittedStepCount: requestedStepCount,
+                        firstRejectedStepOrdinal: null,
+                        allStepsAdmitted: true,
+                        status:
+                          'terminal-reflux-schedule-receipt-admitted',
+                        reason: null,
+                        firstRejectedDiagnostic: null
+                      },
+                      terminalRefluxAdmittedStepCount: requestedStepCount,
+                      firstIncompleteStepOrdinal: null,
+                      coverageComplete: true,
+                      fineSubstepCountRequested: 2,
+                      lastStep: {
+                        status:
+                          'schroeder-two-level-authoritative-step-executed',
+                        twoLevelMechanicsEnabled: true,
+                        mechanicsLevelCount: 2,
+                        twoLevelMechanicsAuthority: 'authoritative',
+                        twoLevelFineSubstepCount: 2,
+                        twoLevelAuthoritativeCommitVerified: true
+                      }
+                    }
+                  }
+                : {}),
+              committedPresentation: {
+                status:
+                  'worker-offscreen-resident-particle-state-producer-rendered',
+                scheduleId,
+                laneId,
+                stateKey,
+                presentationLaneEpoch,
+                sphStep: physicsTick,
+                stateManagerCommittedPresentation: true
+              }
+            }
+          }
+        }
+      : {};
+    return {
+      phase: residentBatch ? 'resident-batch' : authoritativeGpuCheckpoint.phase,
       authoritativeGpuCheckpoint,
       surfaceDraw: {
         visibleRendererBridge: scenario.visualRendererMode
+      },
+      peerComputeRenderOwnershipPolicy: {
+        effectiveMode: scenario.visualRenderOwnershipMode
       },
       residentStep: {
         status: 'submitted-unverified',
@@ -458,14 +693,227 @@ function syntheticPassingTimeline(scenario) {
             }
           : {})
       },
-      ...(scenario.label === 'standard-cesium-fluorine'
-        ? {
-            schroederTelemetry: {
-              twoLevelMechanicsCoverageComplete: true
-            }
-          }
-        : {})
-    }))
+      schroederTelemetry: {
+        residentComputeManagerMode: scenario.residentComputeManagerMode,
+        ...(scenario.label === 'standard-cesium-fluorine'
+          ? { twoLevelMechanicsCoverageComplete: true }
+          : {})
+      },
+      ...residentRoute
+    };
+  });
+  const requestedStepCount = scenario.workerSchedulePlan?.scheduleStepCount
+    ?? scenario.batchSteps
+    ?? 128;
+  while (
+    metrics.filter((metric) => metric.phase === 'resident-batch').length
+      < scheduleCount
+  ) {
+    const metric = structuredClone(metrics.at(-1));
+    delete metric.authoritativeGpuCheckpoint;
+    metrics.push(metric);
+  }
+  const residentMetrics = metrics.filter(
+    (metric) => metric.phase === 'resident-batch'
+  );
+  for (const [index, metric] of residentMetrics.entries()) {
+    const scheduleOrdinal = index + 1;
+    const scheduleId = `schedule:${scenario.label}:${scheduleOrdinal}`;
+    const laneId = `lane:${scenario.label}`;
+    const stateKey = `state:${scenario.label}`;
+    const physicsTick = scheduleOrdinal * requestedStepCount - 1;
+    const storageGeneration = scheduleOrdinal * 3;
+    const presentation = metric.workerOffscreenPresentation;
+    const rendered = presentation.displayOwnerLastRenderedContent;
+    const lane = metric.residentSteps.workerOwnedResidentLane;
+    metric.residentSteps.completedStepCount = requestedStepCount;
+    metric.workerOffscreenRenderRows.sphStep = physicsTick;
+    metric.workerOffscreenRenderRows.lastPresentedSphStep = physicsTick;
+    presentation.displayOwnerPresentedSphStep = physicsTick;
+    rendered.sphStep = physicsTick;
+    rendered.scheduleId = scheduleId;
+    rendered.laneId = laneId;
+    rendered.stateKey = stateKey;
+    rendered.presentationLaneEpoch = scheduleOrdinal;
+    rendered.residentExecutionGeneration = storageGeneration;
+    rendered.computeManagerLeaseId =
+      `lease:${scenario.label}:${scheduleOrdinal}`;
+    lane.scheduleId = scheduleId;
+    lane.laneId = laneId;
+    lane.stateKey = stateKey;
+    lane.requestedStepCount = requestedStepCount;
+    lane.completedStepCount = requestedStepCount;
+    lane.laneCompletedStepTotal = scheduleOrdinal * requestedStepCount;
+    lane.finalEpochIdentity = {
+      storageGeneration,
+      physicsTick,
+      positionEpoch: scheduleOrdinal * requestedStepCount
+    };
+    lane.authority.status = 'state-manager-committed-worker-schedule';
+    lane.committedPresentation.scheduleId = scheduleId;
+    lane.committedPresentation.laneId = laneId;
+    lane.committedPresentation.stateKey = stateKey;
+    lane.committedPresentation.presentationLaneEpoch = scheduleOrdinal;
+    lane.committedPresentation.sphStep = physicsTick;
+    lane.laneSimTimeS = scheduleOrdinal * requestedStepCount * 0.0005;
+
+    const nativeSourceStep = physicsTick + 1;
+    const nativeRequestId = `${scheduleId}:native-surface:1:${scheduleOrdinal}`;
+    metric.workerLaneNativeSurfacePresentation = {
+      schema:
+        'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
+      status: 'worker-lane-native-surface-presentation-source-ready',
+      scheduleId,
+      laneId,
+      stateKey,
+      requestId: nativeRequestId,
+      cacheKey: nativeRequestId,
+      sourceStageId: 'schroederSameLevelMechanics',
+      sourceStep: nativeSourceStep,
+      sourceTimeS: lane.laneSimTimeS,
+      particleCount:
+        metric.authoritativeGpuCheckpoint?.liveParticleCount ?? 1,
+      readbackScope: 'resident-schedule-terminal-presentation',
+      terminalPresentationFullParticleReadbackPerformed: true,
+      physicsHotLoopParticipation: false
+    };
+    metric.workerLaneNativeSurfaceSnapshotHandoff = {
+      ...metric.workerLaneNativeSurfacePresentation,
+      status: 'worker-lane-native-surface-presentation-source-admitted',
+      sharedSlotIdentityVerified: true,
+      workerLineageMetadataStatus:
+        'worker-retained-compact-snapshot-lineage-metadata-ready',
+      terminalCompactSnapshotReadback: true
+    };
+    metric.workerOffscreenPresentation.displayOwner = 'main-native';
+    metric.workerOffscreenPresentation.displayCanvasVisible = false;
+    metric.workerOffscreenCanvas = {
+      count: 1,
+      visibleCount: 0,
+      visibility: 'hidden',
+      display: 'block',
+      opacity: '0',
+      width: 1280,
+      height: 800,
+      visible: false
+    };
+    metric.sceneCanvasVisibility = {
+      count: 2,
+      visibleCount: 1,
+      workerCount: 1,
+      visibleWorkerCount: 0
+    };
+    metric.renderState = {
+      status: 'resident-render-field-applied',
+      sourceResidentRenderSourceStatus: 'resident-render-source-current',
+      sourceResidentExecutionGenerationMatchesCurrent: true,
+      sourceResidentNextStep: nativeSourceStep,
+      sourceResidentNextTimeS: lane.laneSimTimeS,
+      surfaceDrawVisibleRendererBridge: scenario.visualRendererMode,
+      surfaceDrawOverlayPolicyStatus:
+        'surface-draw-native-webgpu-main-canvas',
+      workerOffscreenPresentationStatus:
+        'worker-offscreen-display-hidden-main-native-owner',
+      workerOffscreenRetainedCompactSnapshotStatus:
+        'presentation-worker-retained-compact-snapshot-exported',
+      workerOffscreenRetainedCompactSnapshotAvailable: true,
+      workerOffscreenRetainedCompactSnapshotStep: nativeSourceStep
+    };
+    metric.surfaceDraw = {
+      ...metric.surfaceDraw,
+      status: 'native-webgpu-surface-consumer-ready',
+      gpuBufferHandoffReady: true,
+      visibleGpuConsumerReady: true,
+      visibleGpuConsumerRuntimePresentationAdmitted: true,
+      sourceResidentRenderSourceStatus: 'resident-render-source-current',
+      sourceResidentExecutionGenerationMatchesCurrent: true,
+      sourceResidentNextStep: nativeSourceStep,
+      sourceResidentNextTimeS: lane.laneSimTimeS
+    };
+    metric.nativeSurfaceValidation = {
+      native: true,
+      ready: true,
+      admitted: true,
+      runtimePresentationAdmitted: true,
+      sourceGenerationMatchesCurrent: true,
+      sourceRetainedPrevious: false,
+      sourceMarkedStale: false,
+      sourceCurrent: true,
+      status: 'native-surface-presentation-admitted',
+      bridgeMode: scenario.visualRendererMode,
+      gpuBufferHandoffReady: true
+    };
+
+    const twoLevel = scenario.label === 'standard-cesium-fluorine';
+    const reaction = scenario.label === 'standard-sodium-water' || twoLevel;
+    lane.hierarchyStageSummary = {
+      schema: 'peercompute.ulg.worker-schroeder-hierarchy-stage-summary.v0',
+      status: 'worker-schroeder-hierarchy-stage-summary-ready',
+      mechanicsLevelCount: twoLevel ? 2 : 1,
+      twoLevelMechanicsEnabled: twoLevel,
+      twoLevelMechanicsAuthority: twoLevel ? 'authoritative' : 'observation',
+      twoLevelFineSubstepCount: twoLevel ? 2 : null,
+      twoLevelCflFactor: twoLevel ? 0.8 : null,
+      twoLevelAuthoritativeCommitVerified: twoLevel,
+      mechanicsFieldPairV2Enabled: twoLevel,
+      lawQueueStatus: twoLevel
+        ? 'disabled-local-law-queue'
+        : 'schroeder-law-queue-submitted',
+      lawNeighborCandidateStatus: twoLevel
+        ? 'disabled-local-law-queue'
+        : 'schroeder-law-neighbor-candidates-submitted',
+      residentStageStatus: {
+        thermal: 'thermal-step-executed',
+        reaction: reaction ? 'reaction-step-executed' : 'missing'
+      },
+      residentStageBackends: {
+        thermal: 'webgpu',
+        reaction: reaction ? 'webgpu' : null
+      },
+      staticGpuTableUploadStatus: {
+        thermalResponseGraph: 'webgpu-uploaded',
+        mechanicsMaterialPhase: 'webgpu-uploaded',
+        retainedAcrossSteps: true
+      },
+      postMechanicsClosure: twoLevel ? {
+        schema: 'peercompute.ulg.mls-mpm-post-mechanics-closure.v1',
+        status: 'post-mechanics-closure-complete',
+        backend: 'webgpu',
+        executedStageOrder: [
+          'thermal-phase',
+          'reaction-discovery',
+          'reaction-product',
+          'phase-carrier-transfer-v2',
+          'mechanics-constitutive-refresh'
+        ],
+        fullParticleReadbackFree: true,
+        residentContinuationReady: true
+      } : null,
+      thermalRequested: true,
+      reactionRequested: reaction,
+      fullParticleReadbackFree: true
+    };
+
+    if (scenario.label === 'standard-iron-ice-quench') {
+      metric.residentSteps.finalStepPhaseVolumeSurfaceStressSubmission =
+        SYNTHETIC_SURFACE_STRESS_SUBMISSION;
+      metric.residentSteps.phaseVolumeSurfaceStressWorkerEvidence = {
+        schema:
+          'peercompute.ulg.worker-resident-schedule-surface-stress-evidence.v0',
+        required: true,
+        observedStepCount: requestedStepCount,
+        expectedSubmissionCount: requestedStepCount,
+        exactSubmissionCount: requestedStepCount,
+        submissionEvidenceComplete: true,
+        firstIncompleteStepOrdinal: null,
+        finalSubmissionStepOrdinal: requestedStepCount,
+        finalSubmission: SYNTHETIC_SURFACE_STRESS_SUBMISSION
+      };
+    }
+  }
+  return {
+    mechanicsIntegrator: scenario.expectedMechanics,
+    metrics
   };
 }
 
@@ -513,7 +961,13 @@ async function createVisualFixture({
     await writeFile(stdoutPath, 'standard visual matrix synthetic stdout\n');
     await writeFile(stderrPath, '');
     const results = [];
+    const ownedByLabel = new Map([
+      ...STANDARD_SCENARIOS,
+      ...deterministicRandomPairScenarios()
+    ].map((scenario) => [scenario.label, scenario]));
     for (const scenario of policy.scenarios) {
+      const ownedScenario = ownedByLabel.get(scenario.label);
+      assert.ok(ownedScenario, scenario.label);
       const probePath = path.join(policy.outputRoot, `${scenario.label}.json`);
       const logPath = path.join(policy.outputRoot, `${scenario.label}.log`);
       const frameDir = path.join(
@@ -549,7 +1003,7 @@ async function createVisualFixture({
           browserConsoleWarningCount: 0,
           nativeBrowserFrameValidationStatus: 'passed'
         },
-        timeline: syntheticPassingTimeline(scenario),
+        timeline: syntheticPassingTimeline(ownedScenario),
         repoDir,
         probeMode: 'scene',
         baseUrl: 'http://127.0.0.1:5310',
@@ -581,6 +1035,8 @@ async function createVisualFixture({
       results.push({
         label: scenario.label,
         presetId: scenario.presetId,
+        acceptanceTrack: scenario.acceptanceTrack,
+        workerSchedulePlan: ownedScenario.workerSchedulePlan,
         randomPair: scenario.randomPair,
         url: scenario.url,
         visualRendererMode: scenario.visualRendererMode,
@@ -694,6 +1150,30 @@ test('standard visual policy pins the exact seven-scenario matrix', () => {
       { drop: 'Fr', base: 'fe', seed: 32767811622 }
     ]
   );
+  const cesium = scenarios.find(
+    (scenario) => scenario.label === 'standard-cesium-fluorine'
+  );
+  assert.ok(
+    scenarios.every(
+      (scenario) => scenario.acceptanceTrack === 'framework-liveness'
+    )
+  );
+  assert.equal(cesium.acceptanceTrack, 'framework-liveness');
+  assert.equal(cesium.totalStepCount, 256);
+  for (const scenario of scenarios.slice(0, 4)) {
+    assert.equal(scenario.acceptanceTrack, 'framework-liveness');
+    assert.equal(scenario.totalStepCount, 256, scenario.label);
+  }
+  for (const scenario of scenarios.slice(4)) {
+    assert.equal(scenario.acceptanceTrack, 'framework-liveness');
+    assert.equal(scenario.totalStepCount, 192);
+  }
+  assert.equal(
+    scenarios.some(
+      (scenario) => scenario.label.startsWith('scientific-calibration-')
+    ),
+    false
+  );
   const policy = createStandardVisualCommandPolicy({
     artifactDir: '/tmp/ulg-visual-policy-test'
   });
@@ -749,6 +1229,78 @@ test('synthetic visual receipt fixture independently satisfies every scenario ev
   }
 });
 
+test('framework reactive fixtures require real reactant consumption and product publication', () => {
+  const cases = [
+    {
+      label: 'standard-sodium-water',
+      reactant: 'Na',
+      products: ['naoh', 'h2'],
+      blockingIds: ['sodium-consumed', 'sodium-products-form']
+    },
+    {
+      label: 'standard-cesium-fluorine',
+      reactant: 'F',
+      products: ['csf'],
+      blockingIds: ['fluorine-consumed', 'csf-forms']
+    }
+  ];
+  for (const fixtureCase of cases) {
+    const scenario = STANDARD_SCENARIOS.find(
+      (candidate) => candidate.label === fixtureCase.label
+    );
+    assert.ok(scenario, fixtureCase.label);
+    const passingTimeline = syntheticPassingTimeline(scenario);
+    const passingProbe = {
+      issues: [],
+      analysis: { issues: [] },
+      timeline: passingTimeline
+    };
+    const passing = evaluateStandardScenarioBehavior(scenario, passingProbe);
+    assert.equal(passing.status, 'pass', fixtureCase.label);
+    for (const id of fixtureCase.blockingIds) {
+      assert.equal(
+        passing.checks.find((check) => check.id === id)?.acceptance,
+        'blocking',
+        `${fixtureCase.label}:${id}`
+      );
+    }
+
+    const noProductsProbe = structuredClone(passingProbe);
+    const noProductsRows = noProductsProbe.timeline.metrics
+      .filter((metric) => metric.authoritativeGpuCheckpoint)
+      .at(-1).authoritativeGpuCheckpoint.materialPhases;
+    for (const row of noProductsRows) {
+      if (fixtureCase.products.includes(row.material)) row.massKg = 0;
+    }
+    assert.equal(
+      evaluateStandardScenarioBehavior(scenario, noProductsProbe).status,
+      'fail',
+      `${fixtureCase.label}: product publication must be blocking`
+    );
+
+    const noConsumptionProbe = structuredClone(passingProbe);
+    const checkpointMetrics = noConsumptionProbe.timeline.metrics.filter(
+      (metric) => metric.authoritativeGpuCheckpoint
+    );
+    const initialReactantMass = checkpointMetrics[0]
+      .authoritativeGpuCheckpoint.materialPhases
+      .filter((row) => row.material === fixtureCase.reactant)
+      .reduce((sum, row) => sum + Number(row.massKg || 0), 0);
+    const finalReactantRows = checkpointMetrics.at(-1)
+      .authoritativeGpuCheckpoint.materialPhases.filter(
+        (row) => row.material === fixtureCase.reactant
+      );
+    assert.ok(finalReactantRows.length > 0, fixtureCase.label);
+    finalReactantRows[0].massKg = initialReactantMass;
+    for (const row of finalReactantRows.slice(1)) row.massKg = 0;
+    assert.equal(
+      evaluateStandardScenarioBehavior(scenario, noConsumptionProbe).status,
+      'fail',
+      `${fixtureCase.label}: reactant consumption must be blocking`
+    );
+  }
+});
+
 test('expected-behavior failures bind to synthesized issues without false telemetry drift', async () => {
   const fixture = await createVisualFixture();
   try {
@@ -769,8 +1321,9 @@ test('expected-behavior failures bind to synthesized issues without false teleme
 
     const failedEvidence = structuredClone(evidence);
     const probe = failedEvidence.scenarios[scenarioIndex].probe.json;
-    const finalIronRows = probe.timeline.metrics.at(-1)
-      .authoritativeGpuCheckpoint.materialPhases.filter(
+    const finalIronRows = probe.timeline.metrics
+      .filter((metric) => metric.authoritativeGpuCheckpoint)
+      .at(-1).authoritativeGpuCheckpoint.materialPhases.filter(
         (row) => row.material === 'fe'
       );
     assert.ok(finalIronRows.length > 0);
@@ -779,10 +1332,31 @@ test('expected-behavior failures bind to synthesized issues without false teleme
       row.temperatureMaxK = 1845;
       row.temperatureMassWeightedMeanK = 1845;
     }
-    const expectedBehavior = evaluateStandardScenarioBehavior(
+    const advisoryBehavior = evaluateStandardScenarioBehavior(
       scenario,
       probe
     );
+    assert.equal(advisoryBehavior.status, 'pass');
+    assert.equal(advisoryBehavior.scientificStatus, 'fail');
+    assert.equal(
+      advisoryBehavior.checks.find((check) => check.id === 'iron-cools')
+        ?.acceptance,
+      'scientific-advisory'
+    );
+    assert.deepEqual(
+      synthesizeStandardScenarioIssues(scenario, probe, {
+        expectedBehavior: advisoryBehavior
+      }),
+      []
+    );
+
+    for (const metric of probe.timeline.metrics.filter(
+      (entry) => entry.phase === 'resident-batch'
+    )) {
+      metric.residentSteps.workerOwnedResidentLane.hierarchyStageSummary
+        .lawQueueStatus = 'disabled-local-law-queue';
+    }
+    const expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe);
     assert.equal(expectedBehavior.status, 'fail');
     const issues = synthesizeStandardScenarioIssues(scenario, probe, {
       expectedBehavior

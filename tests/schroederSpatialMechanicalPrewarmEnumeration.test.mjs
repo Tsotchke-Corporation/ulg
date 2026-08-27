@@ -222,9 +222,9 @@ test('every enumerated descriptor prewarms into the cache the sync path then hit
   assert.equal(device.counters.sync, 0, 'the sync path never compiled');
 });
 
-test('worker lane-admission hook reports a truthful completed summary from the default enumeration', () => {
+test('worker lane-admission hook reports a truthful settled summary from the default enumeration', async () => {
   const device = fakeDevice();
-  const summary = prewarmWorkerSchroederLaneComputePipelines(device);
+  const summary = await prewarmWorkerSchroederLaneComputePipelines(device);
   assert.equal(
     summary.schema,
     'peercompute.ulg.worker-schroeder-lane-pipeline-prewarm.v0'
@@ -235,23 +235,24 @@ test('worker lane-admission hook reports a truthful completed summary from the d
     enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors().length;
   assert.equal(summary.requestedCount, expectedCount);
   assert.equal(summary.firedCount, expectedCount);
+  assert.equal(summary.settledCount, expectedCount);
+  assert.equal(summary.failedCount, 0);
 });
 
-test('worker lane-admission hook is fire-and-forget and fail-open', async () => {
+test('worker lane-admission hook settles failures and remains fail-open', async () => {
   // A device with no methods at all: every prewarm fails INSIDE the
   // primitive (resolved pipeline-prewarm-failed, never a rejection), and the
-  // hook still reports the truthful fired count synchronously.
-  const summary = prewarmWorkerSchroederLaneComputePipelines({});
+  // hook still resolves with a truthful failure summary.
+  const summary = await prewarmWorkerSchroederLaneComputePipelines({});
   assert.equal(summary.status, 'worker-lane-pipeline-prewarm-completed');
   assert.ok(summary.firedCount > 0);
   assert.equal(summary.firedCount, summary.requestedCount);
-  // Let the fire-and-forget promises settle; a rejection here would fail the
-  // test process, proving the fail-open path resolves.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(summary.settledCount, summary.requestedCount);
+  assert.equal(summary.failedCount, summary.requestedCount);
 });
 
-test('worker lane-admission hook reports a throwing enumeration truthfully', () => {
-  const summary = prewarmWorkerSchroederLaneComputePipelines(fakeDevice(), {
+test('worker lane-admission hook reports a throwing enumeration truthfully', async () => {
+  const summary = await prewarmWorkerSchroederLaneComputePipelines(fakeDevice(), {
     enumeratePipelines() {
       throw new Error('enumeration exploded');
     }
@@ -265,8 +266,8 @@ test('worker lane-admission hook reports a throwing enumeration truthfully', () 
   assert.equal(summary.firedCount, 0);
 });
 
-test('worker lane-admission hook reports an empty enumeration as a skip', () => {
-  const summary = prewarmWorkerSchroederLaneComputePipelines(fakeDevice(), {
+test('worker lane-admission hook reports an empty enumeration as a skip', async () => {
+  const summary = await prewarmWorkerSchroederLaneComputePipelines(fakeDevice(), {
     enumeratePipelines: () => []
   });
   assert.equal(

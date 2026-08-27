@@ -784,19 +784,43 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let causal_impulse = causal_alpha \* \(\s*impulse - pressure_impulse - drag_impulse\s*\);\s*let applied = pressure_impulse \+ drag_impulse \+ causal_impulse/
+    /let pressure_impulse = route_cfl_alpha \* raw_pressure_impulse;\s*let drag_impulse = route_cfl_alpha \* raw_drag_impulse;\s*let causal_impulse = route_cfl_alpha \* causal_alpha \* \(\s*impulse - raw_pressure_impulse - raw_drag_impulse\s*\);\s*let applied = pressure_impulse \+ drag_impulse \+ causal_impulse/
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let causal_impulse = causal_alpha \* \(\s*proposal - pressure_impulse - drag_impulse\s*\);\s*let applied = pressure_impulse \+ drag_impulse \+ causal_impulse/
+    /let pressure_impulse = route_cfl_alpha \* raw_pressure_impulse;\s*let drag_impulse = route_cfl_alpha \* raw_drag_impulse;\s*let causal_impulse = route_cfl_alpha \* causal_alpha \* \(\s*proposal - raw_pressure_impulse - raw_drag_impulse\s*\);\s*let applied = pressure_impulse \+ drag_impulse \+ causal_impulse/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /ws_store\(84u, bitcast<u32>\(cfl_alpha_limit\)\);\s*ws_store\(85u, bitcast<u32>\(causal_alpha\)\)/
   );
   assert.doesNotMatch(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let (?:pressure|drag)_impulse = causal_alpha \*/
+    /dot\((?:impulse|proposal), (?:impulse|proposal)\) > 1\.0e-24 && alpha_limit <= 0\.0/
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /let correction_speed = length\(applied \/ mass\)[\s\S]*params\.max_correction_m_per_s[\s\S]*STATUS_CFL_REJECTED/
+  );
+  const predictorStateSource =
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl
+      .split('fn update_predictor_state(base: u32, node: vec3<f32>) {')[1]
+      .split('\n}')[0];
+  assert.match(
+    predictorStateSource,
+    /params\.cfl_factor \* params\.coarse_spacing_m\s*\/ max\(params\.macro_dt, 1\.0e-12\)/
+  );
+  assert.doesNotMatch(
+    predictorStateSource,
+    /params\.coarse_spacing_m\s*\/ max\(params\.dt, 1\.0e-12\)/
+  );
+  assert.match(
+    predictorStateSource,
+    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\) \* params\.dt/
+  );
+  assert.doesNotMatch(
+    predictorStateSource,
+    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\) \* params\.macro_dt/
   );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn prepare_fine_transaction/);
   assert.match(

@@ -1133,7 +1133,26 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
   for (let ratio = 1; ratio <= 4; ratio += 1) {
     const fixture = productionM3Fixture({ fineSubstepCount: ratio });
     const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
-    const { result } = await runProductionM3Fixture(fixture, { counts });
+    const executionCflFactor = 0.75 + (ratio * 0.01);
+    const predictorCflFactors = [];
+    const { result, gridUpdates } = await runProductionM3Fixture(fixture, {
+      counts,
+      overrides: {
+        cflFactor: executionCflFactor,
+        parentFieldMechanicsWorkspaceRuntimeFactory: (...args) => {
+          const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+            ...args
+          );
+          return {
+            ...runtime,
+            encodePredictors(encoder, options) {
+              predictorCflFactors.push(options.cflFactor);
+              return runtime.encodePredictors(encoder, options);
+            }
+          };
+        }
+      }
+    });
 
     assert.deepEqual(counts, {
       p2g: 2 * ratio + 1,
@@ -1144,6 +1163,15 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     assert.equal(result.parentFieldMechanicsFineCorrectionCount, ratio);
     assert.equal(result.parentFieldMechanicsCoarseTerminalCount, 1);
     assert.equal(result.parentFieldMechanicsCoarsePublishCount, 0);
+    assert.equal(result.cflFactor, executionCflFactor);
+    assert.equal(gridUpdates.length, ratio + 1);
+    for (const update of gridUpdates) {
+      assert.equal(update.cflFactor, executionCflFactor);
+    }
+    assert.deepEqual(
+      predictorCflFactors,
+      Array.from({ length: ratio }, () => executionCflFactor)
+    );
     assert.equal(result.fullParticleReadbackPerformed, false);
     assert.equal(result.fullParticleReadbackFree, true);
     assert.equal(result.readbackTelemetryComplete, true);
@@ -1204,6 +1232,28 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     assert.equal(
       await result.pendingPostMechanicsClosure.completionPromise,
       false
+    );
+    assert.equal(await fixture.controller.completionPromise(), true);
+  }
+});
+
+test('two-level mechanics rejects invalid CFL profiles before GPU work', async () => {
+  for (const cflFactor of [0, -0.1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const fixture = productionM3Fixture({ fineSubstepCount: 2 });
+    const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
+    const submissionCount = fixture.device.submissions.length;
+    await assert.rejects(
+      runProductionM3Fixture(fixture, {
+        counts,
+        overrides: { cflFactor }
+      }),
+      /cflFactor must be finite and positive/
+    );
+    assert.deepEqual(counts, { p2g: 0, gridUpdate: 0, g2p: 0 });
+    assert.equal(fixture.device.submissions.length, submissionCount);
+    await fixture.controller.abortAllAfter(
+      new Error('invalid CFL profile fixture cleanup'),
+      { mechanicsRetirement: Promise.resolve(true) }
     );
     assert.equal(await fixture.controller.completionPromise(), true);
   }
@@ -1561,6 +1611,19 @@ test('Slice 9 transport fails before GPU work without its exact material upload'
         error?.code,
         'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_TRANSPORT_AUTHORITY'
       );
+      assert.deepEqual(
+        error?.failedRequirements,
+        ['mechanics-material-phase-upload-mismatch']
+      );
+      assert.equal(
+        error?.authorityDiagnostics?.materialUpload?.matches,
+        false
+      );
+      assert.equal(
+        error?.authorityDiagnostics?.materialUpload?.bufferPresent,
+        false
+      );
+      structuredClone(error.authorityDiagnostics);
       return true;
     }
   );

@@ -1232,7 +1232,10 @@ export function createSphReactionResolvePositionInvariantCertificate({
   device,
   ancestorGeneration,
   reactionInputStateBuffer,
-  reactionInputThermoBuffer = null,
+  reactionInputThermoBuffer,
+  reactionInputMechanicsBuffer,
+  transactionRollbackThermoBuffer,
+  transactionRollbackMechanicsBuffer,
   frozenResolvedStateBuffer,
   particleCount,
   reactionDiscoveryProposal = null,
@@ -1251,8 +1254,52 @@ export function createSphReactionResolvePositionInvariantCertificate({
   const exactReactionInputState = requireDeviceBuffer(
     device,
     reactionInputStateBuffer,
-    'reaction input state'
+    'reaction input state',
+    resolvedParticleCount
+      * SPH_GPU_PARTICLE_STATE_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
   );
+  const exactTransactionRollbackThermo = requireDeviceBuffer(
+    device,
+    transactionRollbackThermoBuffer,
+    'pre-reaction transaction rollback thermo',
+    resolvedParticleCount
+      * SPH_GPU_PARTICLE_THERMO_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const exactReactionInputThermo = requireDeviceBuffer(
+    device,
+    reactionInputThermoBuffer,
+    'reaction input thermo',
+    resolvedParticleCount
+      * SPH_GPU_PARTICLE_THERMO_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const exactTransactionRollbackMechanics = requireDeviceBuffer(
+    device,
+    transactionRollbackMechanicsBuffer,
+    'pre-reaction transaction rollback mechanics',
+    resolvedParticleCount
+      * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const exactReactionInputMechanics = requireDeviceBuffer(
+    device,
+    reactionInputMechanicsBuffer,
+    'reaction input mechanics',
+    resolvedParticleCount
+      * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  if (
+    exactReactionInputThermo !== exactTransactionRollbackThermo
+    || exactReactionInputMechanics !== exactTransactionRollbackMechanics
+  ) {
+    throw placementEpochError(
+      'reaction input thermo and mechanics must be the exact transaction rollback family',
+      'RESOLVE_ROLLBACK_AUTHORITY'
+    );
+  }
   const exactFrozenResolvedState = requireDeviceBuffer(
     device,
     frozenResolvedStateBuffer,
@@ -1265,23 +1312,17 @@ export function createSphReactionResolvePositionInvariantCertificate({
   );
   let prePlacementPositionChanged = false;
   let resolvedPositionEpoch = ancestorPositionEpoch;
-  let exactReactionInputThermo = null;
   let authenticatedReactionDiscovery = null;
   if (
     reactionDiscoveryProposal == null
-    && (reactionInputThermoBuffer != null || reactionTable != null)
+    && reactionTable != null
   ) {
     throw placementEpochError(
-      'reaction discovery thermo/table authority cannot be supplied without the exact branded proposal',
+      'reaction discovery table authority cannot be supplied without the exact branded proposal',
       'RESOLVE_DISCOVERY_AUTHORITY'
     );
   }
   if (reactionDiscoveryProposal != null) {
-    exactReactionInputThermo = requireDeviceBuffer(
-      device,
-      reactionInputThermoBuffer,
-      'reaction input thermo'
-    );
     authenticatedReactionDiscovery =
       resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
         reactionDiscoveryProposal,
@@ -1336,6 +1377,19 @@ export function createSphReactionResolvePositionInvariantCertificate({
       'RESOLVE_ALIAS'
     );
   }
+  if (
+    new Set([
+      exactReactionInputState,
+      exactTransactionRollbackThermo,
+      exactTransactionRollbackMechanics,
+      exactFrozenResolvedState
+    ]).size !== 4
+  ) {
+    throw placementEpochError(
+      'pre-reaction rollback state, thermo, mechanics, and post-reaction resolved state must not alias',
+      'RESOLVE_ALIAS'
+    );
+  }
   const certificate = Object.freeze({
     schema: ULG_SPH_REACTION_RESOLVE_POSITION_INVARIANT_CERTIFICATE_SCHEMA,
     status: 'reaction-resolve-position-invariance-certified',
@@ -1358,6 +1412,9 @@ export function createSphReactionResolvePositionInvariantCertificate({
     ancestorGeneration: ancestor,
     reactionInputStateBuffer: exactReactionInputState,
     reactionInputThermoBuffer: exactReactionInputThermo,
+    reactionInputMechanicsBuffer: exactReactionInputMechanics,
+    transactionRollbackThermoBuffer: exactTransactionRollbackThermo,
+    transactionRollbackMechanicsBuffer: exactTransactionRollbackMechanics,
     reactionDiscoveryProposal,
     reactionTable,
     sourceAuthority,
@@ -1374,13 +1431,38 @@ function positionInvariantCertificateSourceAuthorityIsCurrent(
   certificateRecord,
   { device, ancestorGeneration, particleCount }
 ) {
+  try {
+    if (
+      certificateRecord.reactionInputThermoBuffer
+        !== certificateRecord.transactionRollbackThermoBuffer
+      || certificateRecord.reactionInputMechanicsBuffer
+        !== certificateRecord.transactionRollbackMechanicsBuffer
+    ) return false;
+    requireDeviceBuffer(
+      device,
+      certificateRecord.transactionRollbackThermoBuffer,
+      'current pre-reaction transaction rollback thermo',
+      particleCount
+        * SPH_GPU_PARTICLE_THERMO_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    );
+    requireDeviceBuffer(
+      device,
+      certificateRecord.transactionRollbackMechanicsBuffer,
+      'current pre-reaction transaction rollback mechanics',
+      particleCount
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    );
+  } catch {
+    return false;
+  }
   if (
     certificateRecord.sourceAuthority
       === 'exact-ancestor-position-authority-state'
   ) {
     return certificateRecord.reactionDiscoveryProposal == null
       && certificateRecord.reactionTable == null
-      && certificateRecord.reactionInputThermoBuffer == null
       && certificateRecord.reactionInputStateBuffer
         === ancestorGeneration.source?.sourceStateBuffer
       && certificateRecord.prePlacementPositionChanged === false
@@ -1615,7 +1697,7 @@ export async function finalizeSchroederSpatialReactionPlacementPositionEpochFloo
     || placementArtifact.transactionalFailClosedRecoveryEncoded !== true
     || placementArtifact.transactionalAuxiliaryMaterializationEncoded !== true
     || placementArtifact.destinationPublicationMode
-      !== 'gpu-terminal-safe-placed-or-exact-frozen-fallback'
+      !== 'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback'
     || placementArtifact.positionMayChange !== true
     || placementArtifact.topologyMayChange !== true
     || placementArtifact.placementSourceFamily !== sourceFamily
@@ -1666,9 +1748,9 @@ export async function finalizeSchroederSpatialReactionPlacementPositionEpochFloo
     transactionalFailClosedRecoveryEncoded: true,
     transactionalAuxiliaryMaterializationEncoded: true,
     destinationPublicationMode:
-      'gpu-terminal-safe-placed-or-exact-frozen-fallback',
+      'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback',
     completionMode:
-      'gpu-resident-terminal-safe-placed-or-frozen-fallback',
+      'gpu-resident-terminal-safe-placed-or-pre-reaction-fallback',
     positionMutationObserved: false,
     positionMayHaveChanged: true,
     positionEpochAdvanceRequired: true,
@@ -1725,7 +1807,7 @@ export function validateSchroederSpatialReactionPlacementPositionEpochFloor(
     && receipt.transactionalFailClosedRecoveryEncoded === true
     && receipt.transactionalAuxiliaryMaterializationEncoded === true
     && receipt.destinationPublicationMode
-      === 'gpu-terminal-safe-placed-or-exact-frozen-fallback'
+      === 'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback'
     && receipt.positionMutationObserved === false
     && receipt.positionMayHaveChanged === true
     && receipt.positionEpochAdvanceRequired === true
@@ -2135,6 +2217,16 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     'frozen resolved mechanics',
     mechanicsBytes
   );
+  const frozenSources = [frozenState, frozenThermo, frozenMechanics];
+  const immutableSourceFamily = stableIdentityBuffer
+    ? [...frozenSources, stableIdentityBuffer]
+    : frozenSources;
+  if (new Set(immutableSourceFamily).size !== immutableSourceFamily.length) {
+    throw placementEpochError(
+      'frozen placement state, thermo, mechanics, and identity sources must be pairwise distinct',
+      'SOURCE_ALIAS'
+    );
+  }
   if (
     reactionWarmBuffers
     && (
@@ -2180,6 +2272,39 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       'POSITION_INVARIANCE'
     );
   }
+  const transactionRollbackStateBuffer = requireDeviceBuffer(
+    device,
+    certificateRecord.reactionInputStateBuffer,
+    'pre-reaction transaction rollback state',
+    stateBytes
+  );
+  const transactionRollbackThermoBuffer = requireDeviceBuffer(
+    device,
+    certificateRecord.transactionRollbackThermoBuffer,
+    'pre-reaction transaction rollback thermo',
+    thermoBytes
+  );
+  const transactionRollbackMechanicsBuffer = requireDeviceBuffer(
+    device,
+    certificateRecord.transactionRollbackMechanicsBuffer,
+    'pre-reaction transaction rollback mechanics',
+    mechanicsBytes
+  );
+  if (
+    new Set([
+      transactionRollbackStateBuffer,
+      transactionRollbackThermoBuffer,
+      transactionRollbackMechanicsBuffer,
+      frozenState,
+      frozenThermo,
+      frozenMechanics
+    ]).size !== 6
+  ) {
+    throw placementEpochError(
+      'pre-reaction rollback and post-reaction frozen buffer families must be pairwise distinct',
+      'RESOLVE_ALIAS'
+    );
+  }
   const identityRequired = sphParticleUpload?.identityRequired === true;
   const identityBytes = particleCount
     * SPH_GPU_PARTICLE_IDENTITY_UINTS
@@ -2209,16 +2334,6 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       purpose: 'reaction-placement-final-destination-family'
     });
 
-  const frozenSources = [frozenState, frozenThermo, frozenMechanics];
-  const immutableSourceFamily = stableIdentityBuffer
-    ? [...frozenSources, stableIdentityBuffer]
-    : frozenSources;
-  if (new Set(immutableSourceFamily).size !== immutableSourceFamily.length) {
-    throw placementEpochError(
-      'frozen placement state, thermo, mechanics, and identity sources must be pairwise distinct',
-      'SOURCE_ALIAS'
-    );
-  }
   const requestedDestinationState = placedDestinationStateBuffer
     ?? reactionWarmBuffers?.placedState
     ?? null;
@@ -2248,6 +2363,11 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
   ].filter(Boolean);
   if (
     providedDestinations.some((buffer) => frozenSources.includes(buffer))
+    || providedDestinations.some((buffer) => [
+      transactionRollbackStateBuffer,
+      transactionRollbackThermoBuffer,
+      transactionRollbackMechanicsBuffer
+    ].includes(buffer))
     || new Set(providedDestinations).size !== providedDestinations.length
   ) {
     throw placementEpochError(
@@ -2318,6 +2438,9 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     frozenSourceStateBuffer: frozenState,
     frozenSourceThermoBuffer: frozenThermo,
     frozenSourceMechanicsBuffer: frozenMechanics,
+    transactionRollbackStateBuffer,
+    transactionRollbackThermoBuffer,
+    transactionRollbackMechanicsBuffer,
     placedDestinationStateBuffer: destinationState,
     placedDestinationThermoBuffer: destinationThermo,
     placedDestinationMechanicsBuffer: destinationMechanics,

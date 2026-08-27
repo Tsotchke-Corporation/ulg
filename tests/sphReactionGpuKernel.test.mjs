@@ -19,6 +19,9 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
+  buildMlsMpmMechanicsMaterialTable
+} from '../src/runtime/sph/sphMechanicsMaterialTable.js';
+import {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
@@ -62,6 +65,10 @@ const materialProperties = {
 
 const sphReactionGpuKernelSource = readFileSync(
   new URL('../src/runtime/sph/sphReactionGpuKernel.js', import.meta.url),
+  'utf8'
+);
+const sphReactionGpuSummarySource = readFileSync(
+  new URL('../src/runtime/sph/sphReactionGpuSummary.js', import.meta.url),
   'utf8'
 );
 
@@ -329,6 +336,36 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   );
   assert.equal(table.scientificValidation, false);
   assert.equal(table.chemistryValidation, false);
+});
+
+test('SPH reaction product phase rows inherit the exact mechanics sound-speed profile', () => {
+  const profile = {
+    soundSpeedScale: 0.25,
+    cflMaxSoundSpeedMPerS: 20,
+    minGasSoundSpeedMPerS: 5
+  };
+  const table = buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    phaseRequirements: { b: ['liquid'] },
+    specificEnthalpyJPerKg: -1000
+  }], {
+    materialProperties,
+    contactRadiusM: 0.1,
+    ...profile
+  });
+  const mechanicsTable = buildMlsMpmMechanicsMaterialTable(materialProperties, profile);
+  const abMetadata = mechanicsTable.metadata.find((entry) => entry.material === 'ab');
+  const expected = mechanicsTable.records.slice(
+    abMetadata.phaseOffset * mechanicsTable.recordStrideFloats,
+    (abMetadata.phaseOffset + abMetadata.phaseCount) * mechanicsTable.recordStrideFloats
+  );
+
+  assert.deepEqual(Array.from(table.productPhaseRecords), Array.from(expected));
+  assert.equal(table.productPhaseRecords[3], 200000);
+  assert.equal(table.productPhaseRecords[6], 20);
 });
 
 test('SPH reaction table rejects ambiguous same-material binary roles', () => {
@@ -718,6 +755,37 @@ test('SPH reaction product placement receives simulation-domain dimensions, not 
   );
 });
 
+test('SPH reaction host sidecars observe the placement terminal and suppress rolled-back ledgers', () => {
+  assert.match(
+    sphReactionGpuSummarySource,
+    /const shouldObserveCanonicalPlacementCompletion = Boolean\([\s\S]*?shouldReadCompactSummary[\s\S]*?shouldRunGasSpecies[\s\S]*?shouldRunProductInventory[\s\S]*?shouldRunAtomResidual[\s\S]*?readProductEvents === true[\s\S]*?shouldReadProductPlacementSummary/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /diagnosticReadbackRequested:\s*shouldObserveCanonicalPlacementCompletion/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /const productEventPlacementCompletionReadBuffer =\s*shouldObserveCanonicalPlacementCompletion[\s\S]*?productPlacementWarmBuffers\.completionReadback/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /const reactionPlacementRolledBack = Boolean\([\s\S]*?SAFE_FROZEN_FALLBACK[\s\S]*?if \(!shouldReadCompactSummary\)/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /!reactionPlacementRolledBack[\s\S]*?&& shouldRunGasSpecies[\s\S]*?gasSpeciesReadBuffer\.mapAsync/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /product-placement-provenance-preserved-accumulator-current-source-count-unproven-after-rollback/
+  );
+  assert.match(
+    sphReactionGpuSummarySource,
+    /reaction-resident-product-event-buffer-atomic-placement-rollback/
+  );
+});
+
 test('SPH reaction product placement borrows the canonical directory and publishes only placed destinations', () => {
   assert.match(
     sphReactionGpuKernelSource,
@@ -741,7 +809,7 @@ test('SPH reaction product placement borrows the canonical directory and publish
   );
   assert.match(
     sphReactionGpuKernelSource,
-    /nextStateBuffer:\s*continuationStateBuffer,[\s\S]*?nextThermoBuffer:\s*continuationThermoBuffer,[\s\S]*?nextMechanicsBuffer:\s*continuationMechanicsBuffer/
+    /nextStateBuffer:\s*continuationStateBuffer,[\s\S]*?nextThermoBuffer:\s*continuationThermoBuffer,[\s\S]*?nextMechanicsBuffer:\s*canonicalReactionProductPlacementAuthority\s*\?\s*continuationMechanicsBuffer\s*:\s*null/
   );
   assert.match(
     sphReactionGpuKernelSource,
@@ -1371,11 +1439,28 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
   };
 
   const fallback = await runRetainedStep();
+  assert.equal(
+    fallback.result.reactionSummary?.status,
+    'reaction-resident-product-event-buffer-ready'
+  );
+  assert.equal(fallback.result.reactionSummary?.reason, undefined);
+  assert.equal(
+    fallback.result.residentProductMass?.status,
+    'resident-product-mass-buffer-retained'
+  );
+  assert.equal(
+    fallback.result.residentProductMass?.productEventBufferRetained,
+    true
+  );
+  assert.ok(fallback.result.residentProductMass?.productEventRowCount > 0);
+  assert.equal(fallback.result.canonicalSpatialReactionDiscovery, false);
   const fallbackFenceCountBeforeRelease =
     fallback.device.getQueueFenceCount();
-  assert.equal(fallback.result.observedHostQueueFenceCount, 1);
-  assert.equal(fallback.result.hostQueueFenceCount, 1);
-  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 1);
+  // The live sidecar summary has its own deferred local-buffer cleanup fence;
+  // the retained particle output remains the second unauthenticated owner.
+  assert.equal(fallback.result.observedHostQueueFenceCount, 2);
+  assert.equal(fallback.result.hostQueueFenceCount, 2);
+  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 2);
   assert.equal(fallback.result.unclassifiedHostQueueFenceCount, 0);
   assert.equal(fallback.result.normalHotLoopReadbackFree, false);
   assert.equal(fallback.result.productionHotLoopHostDependencyFree, true);
@@ -1384,9 +1469,9 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
     fallback.device.getQueueFenceCount(),
     fallbackFenceCountBeforeRelease + 1
   );
-  assert.equal(fallback.result.observedHostQueueFenceCount, 2);
-  assert.equal(fallback.result.hostQueueFenceCount, 2);
-  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 2);
+  assert.equal(fallback.result.observedHostQueueFenceCount, 3);
+  assert.equal(fallback.result.hostQueueFenceCount, 3);
+  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 3);
   assert.equal(fallback.result.unclassifiedHostQueueFenceCount, 0);
   assert.equal(fallback.result.normalHotLoopReadbackFree, false);
   assert.equal(fallback.result.productionHotLoopHostDependencyFree, true);
@@ -1468,13 +1553,13 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
     authenticated.device.getQueueFenceCount(),
     authenticatedFenceCountBeforeRelease
   );
-  assert.equal(authenticated.result.observedHostQueueFenceCount, 1);
-  assert.equal(authenticated.result.hostQueueFenceCount, 1);
+  assert.equal(authenticated.result.observedHostQueueFenceCount, 0);
+  assert.equal(authenticated.result.hostQueueFenceCount, 0);
   assert.equal(
     authenticated.result.deferredCleanupHostQueueFenceCount,
-    1
+    0
   );
-  assert.equal(authenticated.result.normalHotLoopReadbackFree, false);
+  assert.equal(authenticated.result.normalHotLoopReadbackFree, true);
   assert.equal(
     authenticated.result.productionHotLoopHostDependencyFree,
     true

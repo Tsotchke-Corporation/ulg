@@ -1,5 +1,208 @@
 # SS worker-lane refactor — handoff
 
+Branch: `ss-worker-lane-refactor`. Updated 2026-08-26. This document describes
+the current working tree; update it in place rather than appending a narrative
+log.
+
+Companion material:
+
+- `plan/refactor/diagrams/` — current/target/migration diagrams.
+- `plan/refactor/w4-worker-lane-verify.mjs` — durable Chromium/WebGPU route and
+  responsiveness proof.
+- `plan/todo/ss-regression.md` — architecture and framework acceptance contract.
+- ICC task `ss-hierarchy-test-suite-integration-20260826`.
+
+## Outcome
+
+Eligible same-device interactive SS runs now default to a worker-owned,
+GPU-resident schedule lane. The ordinary route no longer performs SS hierarchy
+construction, mechanics orchestration, or per-step continuation scheduling on
+the page thread.
+
+The route remains policy-driven and fail-closed:
+
+- SS must be enabled.
+- The browser must pass the module-Worker plus OffscreenCanvas transfer probe.
+- Explicit `main-thread-renderer` and `worker-offscreen-render-rows` ownership
+  requests are preserved and do not auto-upgrade.
+- Once the worker lane is requested, missing capability or any
+  seed/schedule/authority error fails closed with a typed receipt; it never
+  retries the page-owned SS route. The direct route remains available only
+  when worker ownership was not requested. The last failure is retained in
+  `scene.userData.sphWorkerLaneLastFallback` for diagnostics.
+
+The worker lane is selected explicitly with
+`renderOwnership=worker-owned-resident-render-producer`, or implicitly by the
+ordinary same-device interactive policy. Its execution seal is
+`residentComputeManagerMode = 'worker-owned-resident-lane'`.
+
+## Layer contracts
+
+The control plane is
+`src/runtime/sph/schroederWorkerLaneControlPlane.js`.
+`createSchroederWorkerLaneSequenceContract()` declares one ordered DAG:
+
+1. `schroederSpatialEpoch`
+2. `schroederHierarchyMechanics`
+3. `residentRenderCandidate`
+
+Each schedule obtains a ComputeManager GPU-resident lease. The presentation
+worker executes the batch, proves `worker-device.queue.onSubmittedWorkDone`,
+and returns retained buffer references plus compact hierarchy summaries. The
+page authority normalizes that exact worker spelling into the ComputeManager
+completion ABI, completes the lease, commits one compact delta, and verifies
+the StateManager warm commit before publishing the execution.
+
+The published compact receipt includes:
+
+- ComputeManager lease id and `completed` status;
+- ComputeManager fence satisfaction;
+- StateManager `committed` status;
+- final epoch identity and retained-buffer references; and
+- the last hierarchy-stage summary.
+
+No page-side publication is treated as authoritative before all three layers
+agree. A commit failure poisons the physically advanced worker lane so it can
+never continue as split-brain state.
+
+## Hierarchy and residency
+
+Seeding is the only structured-clone boundary for particle rows. A fresh lane
+rematerializes canonical SPH and MLS-MPM buffer families on the worker device
+from the live scene lineage. Every identity word is caller-supplied:
+`storageGeneration`, `physicsTick`, `physicsSubstep`, `positionEpoch`,
+`topologyEpoch`, `chartEpoch`, `levelEpoch`, and `supportEpoch`. Missing or
+rejected words fail closed; the worker never invents lineage.
+
+The worker retains the packed state descriptors after seeding, so schedule
+messages do not resend particle rows. Rematerialized uploads use the canonical
+ABI schemas, strides, and byte lengths and therefore do not require a second
+upload.
+
+For every step the spatial stage builds the exact mechanics-grid view, including
+adjacent exact 2:1 grids for two-level execution. It creates one authenticated
+spatial-epoch transaction over that generation/source family and hands the same
+opaque transaction to same-level mechanics. The mechanics layer validates the
+exact generation and buffer family and reuses the transaction; it does not
+construct a duplicate reader transaction.
+
+Two-level SS is supported in the lane. Compact hierarchy telemetry communicates
+mechanics level count, field construction mode, law queue/neighbour status,
+cross-level coupling/transfer status, state authority, phase-volume migration,
+pressure-owner status, and resident stage backends without exposing GPUBuffer
+objects or traversing the full hierarchy on the page.
+
+## Redundant-work and lifetime corrections
+
+- Pipeline descriptors prewarm concurrently during lane admission and the seed
+  awaits the settled summaries. Compile failures remain fail-open and visible.
+- Immutable thermal response and mechanics material tables upload once per lane
+  and are reused by later steps.
+- Dynamic reaction product mass is carried as the exact next-step owner instead
+  of allocating a new warm arena every step.
+- Previous resident-step buffers retire after the successor buffers and carried
+  product owner are identified.
+- Superseded lanes are explicitly retired; their resident step, static uploads,
+  and remaining lane-owned GPU buffers are destroyed.
+- Per-lane schedule admission rejects concurrent mutation of one lane. Distinct
+  lanes are not globally serialized; independent leases may prepare work while
+  the device queue preserves submission order.
+- `residentRenderCandidateMailbox` is newest-wins by generation/step, rejects
+  malformed or duplicate candidates, and supports an explicit lifecycle reset.
+- Normal execution performs no full particle readback. Presentation consumes
+  worker-retained candidates and compact descriptors.
+
+## Current verification
+
+- The exact-tree serial Node/material/build receipt completed **199/199
+  commands**: **2,914 pass**, **50 policy-admitted opt-in skips**, and **0
+  fail/cancel/todo** across 2,964 TAP tests. Material-bank validation and the
+  production Vite build passed. Receipt:
+  `/tmp/ulg-full-node-final4-4E7GxH/full-node.json` (SHA-256
+  `8b9339dc3b49f296adda757f57c28569e4d13caf66e1b0b98622c731d58d5834`).
+- Full unsafe-WebGPU Playwright completed **60 passed**, **2 intentional long
+  visual/probe skips**, and **0 failed** in 12.7 minutes. It covered worker
+  hierarchy profiles, fail-closed admission, derived body sizing, mounted
+  reaction/law/carrier continuation, native presentation, cross-level GPU
+  coupling, and a fresh-WebGPU worker-retained product-history process.
+- The worker-owned deep visual matrix completed **7/7 arms**, **17 schedules**,
+  and **1,600 authenticated steps** with no fallback, timeout, console issue,
+  or visible worker particle canvas. All **38/38** captured frames were
+  nonblank and manually inspected; they show the advancing native iso surface
+  without the square-particle overlay. Iron surface-stress execution,
+  sodium-product formation, CsF formation, authoritative two-level terminal
+  reflux, and all three random-pair advancement checks passed. Receipt:
+  `/tmp/ulg-visual-sanity-matrix/2026-08-27T03-18-28-299Z/summary.json`
+  (SHA-256
+  `096acd0e107255d2519b23242e758df2ee89ec280afad5ba571202097269b267`).
+- The contained native WebGPU matrix completed **11/11 arms** and **101/101
+  tests** with no skip/fail/cancel/todo, timeout, device loss, browser/GPU
+  diagnostic, or retained process. Both served-source attestations matched the
+  same 17 modules and 22 transform edges before and after execution. Receipt:
+  `/tmp/ulg-native-matrix-final-Y0mvKf/native-matrix.json` (SHA-256
+  `9211db919819c34758c7fd7bc342b6da855827f7c68c507c75d0400612304fba`).
+- Node/build and native receipts sealed the same exact source fingerprint,
+  `bc362712884fe070d73f1424b3d5f60b0e91cd470c6143fee6a3062ce5f1a4f7`,
+  before and after their runs. A post-browser drift audit found no executable,
+  source, configuration, or test changes relative to that fingerprint.
+
+These are framework/functionality receipts. Quantitative scientific-calibration
+checks for water, iron, and sodium remain advisory on this branch; their
+failure does not weaken the blocking authority, law-invocation, communication,
+presentation, or liveness evidence above.
+
+The persistent HTTPS development service on port 5173 advertises
+`wss://shitbox.tail5c077c.ts.net:5173` and remains reachable at
+`https://shitbox.tail5c077c.ts.net:5173/`. The isolated native receipt used a
+temporary port-5174 server with `ULG_VITE_VPN_HOST=127.0.0.1` and
+`ULG_VITE_HMR_CLIENT_PORT=5174`, so its HMR endpoint was correctly
+`wss://127.0.0.1:5174`; that temporary server was stopped after the receipt.
+
+## Remaining work
+
+The architecture and production-route acceptance items in
+`plan/todo/ss-regression.md` are implemented and covered by the exact-tree
+receipts above. No merge-blocking architecture, communication, presentation,
+or liveness work remains in this handoff. Quantitative scientific calibration
+is the next validation phase: conservation tolerances and long-horizon
+phase/thermal/reaction outcomes should remain formal calibration receipts
+rather than being folded into this architecture refactor.
+
+Strict TypeScript control-plane migration and selective contact-law admission
+remain separate follow-on work. Neither is required to keep the worker lane
+authoritative.
+
+## Re-running the route proof
+
+With the HTTPS demo server at `https://localhost:5173` (or with
+`ULG_W4_BASE_URL` set to another exact-source server):
+
+```sh
+# Ordinary production policy (no ownership override)
+node plan/refactor/w4-worker-lane-verify.mjs sodium-bomb default
+
+# Explicit worker selection
+node plan/refactor/w4-worker-lane-verify.mjs sodium-bomb worker-owned
+
+# Direct baseline, for scenarios whose direct validation inputs are complete
+node plan/refactor/w4-worker-lane-verify.mjs water-cycle direct
+```
+
+The harness asserts sim advancement, advancement during pointer interaction,
+worker route sealing, no fallback, completed ComputeManager lease, satisfied
+fence, committed StateManager delta, complete schedule step count, and retained
+worker output references.
+
+## Superseded baseline (retained for evidence provenance)
+
+<details>
+<summary>Original regression/refactor snapshot before this completion pass</summary>
+
+Verification counts, route defaults, commands, and server/HMR advice in this
+details block are historical and are superseded by the current sections above.
+
+# SS worker-lane refactor — handoff
+
 Branch `ss-worker-lane-refactor` @ `f39d088`, 10 commits ahead of `main`
 (`f92a41d`, the contained default-off SS merge). Tree clean, everything
 pushed. Written 2026-08-23. Update in place; do not append a narrative log.
@@ -49,12 +252,14 @@ throughout, no fallback seal, zero hot-loop readbacks.
 
 ## How the lane works now
 
-**Turn it on.** Append `&renderOwnership=worker-owned-resident-render-producer`
-to any SS demo URL. Nothing auto-upgrades into this mode; it is explicit
-request only, and it additionally requires SS on plus a passing
+**Turn it on.** Eligible same-device interactive SS presets select the worker
+lane by default; an explicit URL can request it with
+`&renderOwnership=worker-owned-resident-render-producer`. It requires SS,
+contact admission, the supervised authority host, and a passing
 `resolveUlgWorkerOffscreenPresentationCapability` probe
-(`transferControlToOffscreen`). Anything less and you get the direct route,
-unchanged.
+(`transferControlToOffscreen`). An explicitly requested lane that cannot meet
+those requirements fails closed. The direct route is reserved for an explicit
+main-thread/diagnostic ownership policy.
 
 **The chain, in order.** The mount decides readiness and passes
 `workerOwnedResidentProducerReady` into
@@ -65,9 +270,12 @@ a no-op before this branch. The scene then takes a worker-lane branch placed
 (`src/visualization/sphPhaseScene.js` ~:39917): seed the lane on first use,
 drive `run-resident-schedule-on-presentation-device` batches, adopt the
 terminal envelope, tag `residentComputeManagerMode = 'worker-owned-resident-lane'`.
-The offscreen presentation worker owns the canvas *and* the device and
-executes the schedule on it — one device, no cross-thread buffer copies, which
-is the constraint that makes the whole design possible.
+The offscreen presentation worker owns the resident physics device, retained
+state, and its hidden diagnostic canvas. It executes the schedule on that
+device without crossing worker-private GPU buffers to the page. At terminal
+cadence, an authenticated compact snapshot materializes a presentation-only
+mirror for the visible native isosurface; the worker particle canvas remains
+hidden unless its explicit debug overlay is requested.
 
 **Seeding (the part that is easy to get wrong).** A fresh lane cannot start an
 SS schedule from nothing: the epoch stage admits only a retained successor
@@ -100,11 +308,13 @@ schedule issuance (it still gates presentation). Candidates flow through
 newest-wins, with the high-water mark surviving `takeLatest` so a stale
 republish can never reorder forward.
 
-**Failure is always visible.** Any admission, seed, or schedule failure falls
-back to the direct route with `execution.workerLaneFallback = { reason }`
-sealed on the execution. Fields the worker cannot truthfully supply are sealed
-absent with named reasons in `workerLaneSealedAbsentFields` — never
-fabricated. The known reasons are `worker-lane-bridge-unavailable`,
+**Failure is always visible.** Any requested-lane admission, seed, or schedule
+failure records a typed diagnostic in
+`scene.userData.sphWorkerLaneLastFallback` and rejects the schedule without a
+page-owned retry. Fields a successful worker execution cannot truthfully
+supply are sealed absent with named reasons in
+`workerLaneSealedAbsentFields`—never fabricated. The known failure reasons
+include `worker-lane-bridge-unavailable`,
 `seed-lineage-missing`, `seed-particle-storage-rematerialization-blocked`,
 `seed-family-generation-rejected`, `seed-device-mismatch`,
 `lane-already-seeded`, `lane-already-stepped`,
@@ -230,3 +440,5 @@ parameter) or the **selective admission predicates** (research-shaped, and the
 one that might finally separate legitimate contact work from MPM-versus-pair
 fighting). The second is more interesting; the first is what makes the
 refactor matter to anyone who is not typing query strings by hand.
+
+</details>

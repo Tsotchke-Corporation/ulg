@@ -262,6 +262,13 @@ function normalizeResidentComputeManagerMode(value, fallback = null) {
     return 'direct';
   }
   if (
+    normalized === 'worker-owned-resident-lane'
+    || normalized === 'worker-resident-lane'
+    || normalized === 'resident-worker-lane'
+  ) {
+    return 'worker-owned-resident-lane';
+  }
+  if (
     normalized === 'compute-manager'
     || normalized === 'computemanager'
     || normalized === 'peercompute'

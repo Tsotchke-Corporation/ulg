@@ -11,7 +11,8 @@ import {
 import { createSphPhaseViewState } from '../src/runtime/sphPhaseViewState.js';
 import {
   SPH_INITIAL_BODIES_SCHEMA,
-  SphInitialBodiesValidationError
+  SphInitialBodiesValidationError,
+  deriveSphInitialBodySizeM
 } from '../src/runtime/sphInitialBodies.js';
 
 function near(actual, expected, tolerance = 1e-9) {
@@ -84,6 +85,91 @@ const THREE_RECTANGULAR_BODIES = container([
     velocityMPerS: [0, 0.1, 0.2]
   })
 ]);
+
+test('derived initial-body size preserves per-axis particle pitch and is immutable', () => {
+  const source = body({
+    id: 'pitch-authority',
+    domainId: 91,
+    material: 'h2o',
+    sizeM: [2, 1.5, 0.75],
+    centerM: [2, 2, 2],
+    temperatureK: 293.15,
+    particlesPerEdge: [4, 3, 3]
+  });
+  const sourceBefore = structuredClone(source);
+  const nextParticlesPerEdge = [6, 5, 8];
+
+  const derivedSizeM = deriveSphInitialBodySizeM(
+    source,
+    nextParticlesPerEdge
+  );
+
+  assert.deepEqual(derivedSizeM, [3, 2.5, 2]);
+  assert.equal(Object.isFrozen(derivedSizeM), true);
+  for (let axis = 0; axis < 3; axis += 1) {
+    nearRelative(
+      derivedSizeM[axis] / nextParticlesPerEdge[axis],
+      source.sizeM[axis] / source.particlesPerEdge[axis]
+    );
+  }
+  assert.deepEqual(source, sourceBefore);
+});
+
+test('derived initial-body size reuses strict count, budget, and float32 validation', () => {
+  const source = body({
+    id: 'pitch-validation',
+    domainId: 92,
+    material: 'h2o',
+    sizeM: [2, 1.5, 0.75],
+    centerM: [2, 2, 2],
+    temperatureK: 293.15,
+    particlesPerEdge: [4, 3, 3]
+  });
+  const invalidCounts = [
+    {
+      value: [2, 0, 3],
+      code: 'invalid-positive-integer',
+      path: 'bodies[0].particlesPerEdge[1]'
+    },
+    {
+      value: [2, 2.5, 3],
+      code: 'invalid-positive-integer',
+      path: 'bodies[0].particlesPerEdge[1]'
+    },
+    {
+      value: [2, 3],
+      code: 'invalid-vector3',
+      path: 'bodies[0].particlesPerEdge'
+    },
+    {
+      value: [65, 64, 64],
+      code: 'initial-live-particle-cap-exceeded',
+      path: 'bodies'
+    }
+  ];
+
+  for (const { value, code, path } of invalidCounts) {
+    assert.throws(
+      () => deriveSphInitialBodySizeM(source, value),
+      (error) => error instanceof SphInitialBodiesValidationError
+        && error.code === code
+        && error.path === path,
+      `${code}:${path}`
+    );
+  }
+
+  const nearFloat32Limit = {
+    ...source,
+    sizeM: [3e38, 1, 1],
+    particlesPerEdge: [1, 1, 1]
+  };
+  assert.throws(
+    () => deriveSphInitialBodySizeM(nearFloat32Limit, [2, 1, 1]),
+    (error) => error instanceof SphInitialBodiesValidationError
+      && error.code === 'float32-out-of-range'
+      && error.path === 'bodies[0].sizeM[0]'
+  );
+});
 
 test('initialBodies builds three independent rectangular lattices with stable identity and conserved mass', () => {
   const demo = buildSphPhaseDemoState({
@@ -255,6 +341,25 @@ test('initialBodies distinguishes live bodies from fixed MLS-MPM mechanics capac
     viewState.initialParticleEdgeDiagnostics.totalGeneratedParticleCount,
     live
   );
+});
+
+test('initialBodies honors the scenario reserve floor before phase-lane expansion', () => {
+  const demo = buildSphPhaseDemoState({
+    initialBodies: THREE_RECTANGULAR_BODIES,
+    allowFixtureMaterialProperties: true,
+    mechanics: 'mlsmpm',
+    reactionProductReserveMinimumLiveFraction: 1
+  });
+  const live = 38;
+  const reserve = 38;
+
+  assert.equal(demo.counts.live, live);
+  assert.equal(demo.counts.spareProductSlots, reserve);
+  assert.equal(demo.counts.phaseCompanionSlots, (live + reserve) * 3);
+  assert.equal(demo.counts.total, (live + reserve) * 4);
+  assert.equal(demo.reactionProductReservePlan.defaultSlotCount, 16);
+  assert.equal(demo.reactionProductReservePlan.minimumSlotCount, reserve);
+  assert.equal(demo.reactionProductReservePlan.slotCount, reserve);
 });
 
 test('initialBodies omits permanently dormant reaction-product rows for one-material MLS-MPM scenes', () => {

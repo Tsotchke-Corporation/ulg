@@ -199,6 +199,20 @@ test('resident render candidate mailbox fails closed on malformed candidates wit
     /nextStep must be a finite number/
   );
   expectTypeError(
+    {
+      ...candidate(),
+      version: { residentExecutionGeneration: '1', nextStep: 1 }
+    },
+    /residentExecutionGeneration must be a finite number/
+  );
+  expectTypeError(
+    {
+      ...candidate(),
+      epochIdentity: { ...identityWords(), physicsTick: '1' }
+    },
+    /epochIdentity\.physicsTick must be a finite number/
+  );
+  expectTypeError(
     { ...candidate(), epochIdentity: undefined },
     /epochIdentity is missing/
   );
@@ -220,6 +234,24 @@ test('resident render candidate mailbox fails closed on malformed candidates wit
   assert.equal(mailbox.stats().publishedCount, 0);
   assert.equal(mailbox.stats().droppedStaleCount, 0);
   assert.equal(mailbox.stats().latestVersion, null);
+});
+
+test('resident render candidate mailbox reset starts a fresh lifecycle high-water', () => {
+  const mailbox = createResidentRenderCandidateMailbox();
+  mailbox.publish(candidate({ generation: 8, step: 90 }));
+  const receipt = mailbox.reset();
+  assert.equal(receipt.status, 'resident-render-candidate-mailbox-reset');
+  assert.equal(mailbox.peekLatest(), null);
+  assert.equal(mailbox.stats().latestVersion, null);
+  assert.equal(
+    mailbox.publish(candidate({ generation: 1, step: 1 })).accepted,
+    true
+  );
+  assert.equal(mailbox.stats().publishedCount, 2);
+
+  mailbox.reset({ resetCounters: true });
+  assert.equal(mailbox.stats().publishedCount, 0);
+  assert.equal(mailbox.stats().droppedStaleCount, 0);
 });
 
 test('resident render candidate mailbox returns frozen objects', () => {

@@ -58,13 +58,15 @@ closure work falls back to CPU; and includes `Clear Cache` for ULG SPH
 localStorage cache families only. Its scenario menu includes the standard
 `water-cycle`, `iron-ice-quench`, `sodium-water`, and `cesium-fluorine`
 setups; the same immutable preset records drive
-`npm run test:sph-standard-visual`. That command records interval compositor
-frames, authoritative GPU material/phase checkpoints, performance timing, and
-three deterministic seeded random element-pair checks. Visual acceptance is
-pinned to `renderer=native-webgpu` with the
-`native-webgpu-surface-consumer`; captures suppress overlay UI and fail on any
-blank, uniform, stale, wrong-canvas, or fallback interval. Particle spheres
-and offscreen draws are diagnostic-only.
+`npm run test:sph-standard-visual`. That bounded framework canary executes two
+authoritative 128-step Cs/F schedules on one worker-owned SS lane. It requires
+the adjacent-level mechanics transaction, thermal/reaction closure, terminal
+reflux receipts, ComputeManager completion, StateManager commit, monotonic
+particle-state advancement, and committed OffscreenCanvas presentation. It
+also records authoritative GPU material/phase checkpoints and compositor
+frames, and fails on fallback, frozen mechanics, blank output, or a stalled
+schedule. The longer seven-arm `test:sph-standard-visual:deep` command remains
+available for scientific/calibration diagnostics.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

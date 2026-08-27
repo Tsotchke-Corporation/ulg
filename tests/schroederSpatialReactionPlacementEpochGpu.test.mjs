@@ -295,6 +295,16 @@ function fixture({
     * Uint32Array.BYTES_PER_ELEMENT;
   const ancestorState = buffer(gpu.device, 'ancestor-state', stateBytes);
   const reactionInputState = ancestorState;
+  const reactionInputThermo = buffer(
+    gpu.device,
+    'reaction-input-thermo',
+    thermoBytes
+  );
+  const reactionInputMechanics = buffer(
+    gpu.device,
+    'reaction-input-mechanics',
+    mechanicsBytes
+  );
   const frozenState = buffer(gpu.device, 'frozen-resolved-state', stateBytes);
   const frozenThermo = buffer(gpu.device, 'frozen-resolved-thermo', thermoBytes);
   const frozenMechanics = buffer(
@@ -401,6 +411,10 @@ function fixture({
       device: gpu.device,
       ancestorGeneration: ancestor,
       reactionInputStateBuffer: reactionInputState,
+      reactionInputThermoBuffer: reactionInputThermo,
+      reactionInputMechanicsBuffer: reactionInputMechanics,
+      transactionRollbackThermoBuffer: reactionInputThermo,
+      transactionRollbackMechanicsBuffer: reactionInputMechanics,
       frozenResolvedStateBuffer: frozenState,
       particleCount
     });
@@ -413,6 +427,8 @@ function fixture({
     ancestor,
     ancestorLevelAssignment,
     reactionInputState,
+    reactionInputThermo,
+    reactionInputMechanics,
     frozenState,
     frozenThermo,
     frozenMechanics,
@@ -663,9 +679,31 @@ function completedPlacementReceiptWords(authority, {
   return words;
 }
 
+function safeFallbackPlacementReceiptWords(authority) {
+  const words = completedPlacementReceiptWords(authority);
+  const put = (field, value) => {
+    words[SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX[field]] = value;
+  };
+  const eventLedgerRowCount = authority.productEventCapacity * 8;
+  put('status', SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CONTRACT_REJECTED);
+  put('noCarrierEventCount', 1);
+  put('transactionalCommittedParticleCount', 0);
+  put('transactionalFallbackParticleCount', authority.particleCount);
+  put('transactionalCommittedEventRowCount', 0);
+  put('transactionalFallbackEventRowCount', eventLedgerRowCount);
+  put('transactionalCommittedSummaryRowCount', 0);
+  put('transactionalFallbackSummaryRowCount', 8);
+  put(
+    'transactionalTerminalStatus',
+    SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_FROZEN_FALLBACK
+  );
+  return words;
+}
+
 function encodeGenuineResidentPlacement(fx, family, {
-  sourceStateBuffer,
-  sourceThermoBuffer,
+  sourceStateBuffer = family.transactionRollbackStateBuffer,
+  sourceThermoBuffer = family.transactionRollbackThermoBuffer,
+  sourceMechanicsBuffer = family.transactionRollbackMechanicsBuffer,
   labelPrefix = 'resident-placement',
   productEventCapacity = 2,
   productTermCount = 1,
@@ -678,7 +716,8 @@ function encodeGenuineResidentPlacement(fx, family, {
       particleCount: fx.particleCount,
       productEventCapacity,
       sourceStateBuffer,
-      sourceThermoBuffer
+      sourceThermoBuffer,
+      sourceMechanicsBuffer
     });
   const productEventBuffer = buffer(
     fx.device,
@@ -769,6 +808,9 @@ async function livePlacementContext() {
       ancestorGeneration: fx.ancestor,
       reactionInputStateBuffer: discovery.currentStateBuffer,
       reactionInputThermoBuffer: discovery.currentThermoBuffer,
+      reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+      transactionRollbackThermoBuffer: discovery.currentThermoBuffer,
+      transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
       frozenResolvedStateBuffer: fx.frozenState,
       particleCount: fx.particleCount,
       reactionDiscoveryProposal: discovery.proposal,
@@ -812,19 +854,15 @@ test('placement expectation arenas remain ABI-distinct on same-device V1 to V2 r
       frozenSourceMechanicsBuffer: fx.frozenMechanics,
       positionInvariantCertificate: fx.positionInvariantCertificate
     });
-    const sourceThermoBuffer = buffer(
-      fx.device,
-      `placement-v${directoryAbiVersion}-source-thermo`,
-      fx.thermoBytes
-    );
     const authority =
       createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
         device: fx.device,
         placementSourceFamily: family,
         particleCount: fx.particleCount,
         productEventCapacity: 2,
-        sourceStateBuffer: fx.reactionInputState,
-        sourceThermoBuffer
+        sourceStateBuffer: family.transactionRollbackStateBuffer,
+        sourceThermoBuffer: family.transactionRollbackThermoBuffer,
+        sourceMechanicsBuffer: family.transactionRollbackMechanicsBuffer
       });
     return { fx, family, authority };
   };
@@ -1080,6 +1118,62 @@ test('placement observation rechecks device liveness after map suspension', asyn
   });
 });
 
+test('placement observation authenticates an exact atomic pre-reaction fallback without admitting speculative products', async () => {
+  const { fx, discovery, family } = await livePlacementContext();
+  const prepared = encodeGenuineResidentPlacement(fx, family, {
+    sourceStateBuffer: discovery.currentStateBuffer,
+    sourceThermoBuffer: discovery.currentThermoBuffer,
+    diagnosticReadbackRequested: true
+  });
+  prepared.authority.completionReceiptBuffer._gpuWords =
+    safeFallbackPlacementReceiptWords(prepared.authority);
+  const sealed = sealSchroederSpatialReactionProductPlacementEncoding(
+    prepared.authority,
+    {
+      segmentedEncoding: prepared.segmentedEncoding,
+      completionReadbackBuffer:
+        prepared.arenaLease.completionReadbackBuffer
+    }
+  );
+  const submitted = submitSchroederSpatialReactionProductPlacementWebGpu({
+    authority: prepared.authority,
+    encoding: sealed
+  });
+  const observation =
+    await observeSchroederSpatialReactionProductPlacementCompletion(
+      prepared.authority,
+      {
+        submissionArtifact: submitted,
+        readbackBuffer: prepared.arenaLease.completionReadbackBuffer
+      }
+    );
+  assert.equal(observation.gpuCompleted, true);
+  assert.equal(observation.placementAccepted, false);
+  assert.equal(observation.fallbackObserved, true);
+  assert.equal(
+    observation.transactionOutcome,
+    'atomic-reaction-placement-pre-reaction-fallback'
+  );
+  const finalized = finalizeSchroederSpatialReactionProductPlacementAuthority(
+    prepared.authority,
+    {
+      submissionArtifact: submitted,
+      placementDecisionBuffer: prepared.segmentedEncoding.placementDecisionBuffer,
+      placementControlBuffer: prepared.segmentedEncoding.placementControlBuffer,
+      productEventBuffer: prepared.productEventBuffer,
+      completionObservation: observation,
+      dispatchCount: 1
+    }
+  );
+  assert.equal(finalized.ready, true);
+  assert.equal(finalized.placementAccepted, false);
+  assert.equal(finalized.fallbackObserved, true);
+  assert.equal(
+    finalized.status,
+    'schroeder-spatial-reaction-product-placement-observed-pre-reaction-fallback'
+  );
+});
+
 test('placement finalization rejects source retirement after a valid observation', async () => {
   const { fx, discovery, family } = await livePlacementContext();
   const prepared = encodeGenuineResidentPlacement(fx, family, {
@@ -1157,6 +1251,9 @@ test('resolve-position certificate reauthenticates the exact branded post-therma
     ancestorGeneration: fx.ancestor,
     reactionInputStateBuffer: discovery.currentStateBuffer,
     reactionInputThermoBuffer: discovery.currentThermoBuffer,
+    reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+    transactionRollbackThermoBuffer: discovery.currentThermoBuffer,
+    transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
     frozenResolvedStateBuffer: fx.frozenState,
     particleCount: fx.particleCount,
     reactionDiscoveryProposal: discovery.proposal,
@@ -1190,6 +1287,22 @@ test('resolve-position certificate reauthenticates the exact branded post-therma
     }
   );
 
+  const sameSizedDecoyRollbackMechanics = buffer(
+    fx.device,
+    'same-sized-decoy-rollback-mechanics',
+    fx.mechanicsBytes
+  );
+  assert.throws(
+    () => createSphReactionResolvePositionInvariantCertificate({
+      ...certificateOptions,
+      transactionRollbackMechanicsBuffer: sameSizedDecoyRollbackMechanics
+    }),
+    {
+      code:
+        'ERR_SCHROEDER_SPATIAL_REACTION_PLACEMENT_EPOCH_RESOLVE_ROLLBACK_AUTHORITY'
+    }
+  );
+
   const swappedCurrentThermo = buffer(
     fx.device,
     'swapped-post-thermal-thermo',
@@ -1202,7 +1315,7 @@ test('resolve-position certificate reauthenticates the exact branded post-therma
     }),
     {
       code:
-        'ERR_SCHROEDER_SPATIAL_REACTION_PLACEMENT_EPOCH_RESOLVE_DISCOVERY_AUTHORITY'
+        'ERR_SCHROEDER_SPATIAL_REACTION_PLACEMENT_EPOCH_RESOLVE_ROLLBACK_AUTHORITY'
     }
   );
 
@@ -1282,6 +1395,9 @@ test('resolve-position certificate reauthenticates the exact branded post-therma
       ancestorGeneration: zeroFx.ancestor,
       reactionInputStateBuffer: zeroDiscovery.currentStateBuffer,
       reactionInputThermoBuffer: zeroDiscovery.currentThermoBuffer,
+      reactionInputMechanicsBuffer: zeroFx.reactionInputMechanics,
+      transactionRollbackThermoBuffer: zeroDiscovery.currentThermoBuffer,
+      transactionRollbackMechanicsBuffer: zeroFx.reactionInputMechanics,
       frozenResolvedStateBuffer: zeroFx.frozenState,
       particleCount: zeroFx.particleCount,
       reactionDiscoveryProposal: zeroDiscovery.proposal,
@@ -1456,6 +1572,10 @@ test('placement rejects source-source aliases even when capacities and resolve i
     device: fx.device,
     ancestorGeneration: fx.ancestor,
     reactionInputStateBuffer: fx.reactionInputState,
+    reactionInputThermoBuffer: fx.reactionInputThermo,
+    reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+    transactionRollbackThermoBuffer: fx.reactionInputThermo,
+    transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
     frozenResolvedStateBuffer: fx.frozenThermo,
     particleCount: fx.particleCount
   });
@@ -1488,6 +1608,9 @@ test('genuine post-G2P discovery and one-shot placement establish a strict posit
       ancestorGeneration: fx.ancestor,
       reactionInputStateBuffer: discovery.currentStateBuffer,
       reactionInputThermoBuffer: discovery.currentThermoBuffer,
+      reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+      transactionRollbackThermoBuffer: discovery.currentThermoBuffer,
+      transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
       frozenResolvedStateBuffer: fx.frozenState,
       particleCount: fx.particleCount,
       reactionDiscoveryProposal: discovery.proposal,
@@ -1742,6 +1865,9 @@ test('mixed final component family preserves the authenticated placement positio
     ancestorGeneration: fx.ancestor,
     reactionInputStateBuffer: discovery.currentStateBuffer,
     reactionInputThermoBuffer: discovery.currentThermoBuffer,
+    reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+    transactionRollbackThermoBuffer: discovery.currentThermoBuffer,
+    transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
     frozenResolvedStateBuffer: fx.frozenState,
     particleCount: fx.particleCount,
     reactionDiscoveryProposal: discovery.proposal,
@@ -1903,11 +2029,9 @@ test('observed v2 placement artifact remains diagnostic and cannot advance succe
     positionInvariantCertificate: fx.positionInvariantCertificate,
     ...runners
   });
-  const sourceThermoBuffer = buffer(
-    fx.device,
-    'v2-authority-source-thermo',
-    fx.thermoBytes
-  );
+  const sourceStateBuffer = family.transactionRollbackStateBuffer;
+  const sourceThermoBuffer = family.transactionRollbackThermoBuffer;
+  const sourceMechanicsBuffer = family.transactionRollbackMechanicsBuffer;
   const productEventCapacity = 2;
   const authority =
     createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
@@ -1915,8 +2039,9 @@ test('observed v2 placement artifact remains diagnostic and cannot advance succe
       placementSourceFamily: family,
       particleCount: fx.particleCount,
       productEventCapacity,
-      sourceStateBuffer: fx.reactionInputState,
-      sourceThermoBuffer
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      sourceMechanicsBuffer
     });
   assert.equal(
     resolveSchroederSpatialReactionProductPlacementAuthority(authority, {
@@ -1924,8 +2049,9 @@ test('observed v2 placement artifact remains diagnostic and cannot advance succe
       generation: family.generation,
       particleCount: fx.particleCount,
       productEventCapacity,
-      sourceStateBuffer: fx.reactionInputState,
+      sourceStateBuffer,
       sourceThermoBuffer,
+      sourceMechanicsBuffer,
       placedDestinationStateBuffer: family.placedDestinationStateBuffer,
       placedDestinationThermoBuffer: family.placedDestinationThermoBuffer,
       placedDestinationMechanicsBuffer: family.placedDestinationMechanicsBuffer
@@ -2355,6 +2481,10 @@ test('shared-directory placement transfers warm destinations and returns them on
     device: fx.device,
     ancestorGeneration: fx.ancestor,
     reactionInputStateBuffer: fx.reactionInputState,
+    reactionInputThermoBuffer: fx.reactionInputThermo,
+    reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+    transactionRollbackThermoBuffer: fx.reactionInputThermo,
+    transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
     frozenResolvedStateBuffer: arena.buffers.resolvedState,
     particleCount: fx.particleCount
   });
@@ -2375,14 +2505,10 @@ test('shared-directory placement transfers warm destinations and returns them on
   assert.equal(family.placedDestinationStateBuffer, arena.buffers.placedState);
   assert.equal(family.placedDestinationThermoBuffer, arena.buffers.placedThermo);
   assert.equal(family.placedDestinationMechanicsBuffer, arena.buffers.placedMechanics);
-  const sourceThermoBuffer = buffer(
-    fx.device,
-    'warm-transfer-source-thermo',
-    fx.thermoBytes
-  );
   const { placementArtifact } = submitGenuineResidentPlacement(fx, family, {
-    sourceStateBuffer: fx.reactionInputState,
-    sourceThermoBuffer,
+    sourceStateBuffer: family.transactionRollbackStateBuffer,
+    sourceThermoBuffer: family.transactionRollbackThermoBuffer,
+    sourceMechanicsBuffer: family.transactionRollbackMechanicsBuffer,
     labelPrefix: 'warm-transfer-placement'
   });
   await finalizeSchroederSpatialReactionPlacementPositionEpochFloor(family, {

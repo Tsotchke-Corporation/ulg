@@ -4,6 +4,9 @@ import test from 'node:test';
 import {
   ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA
 } from '../src/visualization/residentRenderCandidateMailbox.js';
+import {
+  RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
+} from '../src/runtime/webgpuDeviceLimits.js';
 
 // The offscreen presentation worker is a module worker script: it has no DOM
 // dependency at import time but binds `self.onmessage` and posts through
@@ -31,9 +34,15 @@ const fakeDevice = {
   queue: { submit() {} },
   lost: new Promise(() => {})
 };
+let fakeCanvasConfigureCount = 0;
+let fakeCanvasUnconfigureCount = 0;
 const fakeCanvasContext = {
-  configure() {},
-  unconfigure() {},
+  configure() {
+    fakeCanvasConfigureCount += 1;
+  },
+  unconfigure() {
+    fakeCanvasUnconfigureCount += 1;
+  },
   getCurrentTexture: () => ({ createView: () => ({}) })
 };
 const fakeCanvas = {
@@ -41,9 +50,15 @@ const fakeCanvas = {
   height: 0,
   getContext: (kind) => (kind === 'webgpu' ? fakeCanvasContext : null)
 };
+let requestedDeviceDescriptor = null;
 fakeSelf.navigator = {
   gpu: {
-    requestAdapter: async () => ({ requestDevice: async () => fakeDevice }),
+    requestAdapter: async () => ({
+      requestDevice: async (descriptor) => {
+        requestedDeviceDescriptor = descriptor;
+        return fakeDevice;
+      }
+    }),
     getPreferredCanvasFormat: () => 'bgra8unorm'
   }
 };
@@ -129,6 +144,94 @@ test('presentation worker initializes on a synthetic WebGPU device through the m
     (message) => message?.status === 'worker-offscreen-presentation-ready'
   ));
   assert.equal(ready, true, 'presentation worker never reported ready on the fake device');
+  assert.equal(
+    requestedDeviceDescriptor?.requiredLimits?.maxStorageBuffersPerShaderStage,
+    RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
+    'presentation-owned physics must request the resident solver storage-buffer limit'
+  );
+});
+
+test('presentation worker reuses an unchanged canvas configuration and reconfigures only on resize', async () => {
+  const configureCountAfterInit = fakeCanvasConfigureCount;
+  assert.equal(configureCountAfterInit, 1);
+
+  const messagesBeforeSameSize = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'resize',
+      width: 8,
+      height: 8,
+      cssWidth: 8,
+      cssHeight: 8,
+      pixelRatio: 1,
+      reason: 'test-same-size-resize'
+    }
+  });
+  const sameSizeReady = await flushUntil(() => postedMessages
+    .slice(messagesBeforeSameSize)
+    .some((message) => message?.reason === 'test-same-size-resize'));
+  assert.equal(sameSizeReady, true);
+  assert.equal(fakeCanvasConfigureCount, configureCountAfterInit);
+  const sameSizeReceipt = postedMessages.findLast(
+    (message) => message?.reason === 'test-same-size-resize'
+  );
+  assert.equal(sameSizeReceipt.canvasConfigureCount, configureCountAfterInit);
+  assert.equal(sameSizeReceipt.canvasConfigureSkipCount, 1);
+
+  const messagesBeforeRealResize = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'resize',
+      width: 16,
+      height: 12,
+      cssWidth: 16,
+      cssHeight: 12,
+      pixelRatio: 1,
+      reason: 'test-backing-size-resize'
+    }
+  });
+  const resizedReady = await flushUntil(() => postedMessages
+    .slice(messagesBeforeRealResize)
+    .some((message) => message?.reason === 'test-backing-size-resize'));
+  assert.equal(resizedReady, true);
+  assert.equal(fakeCanvasConfigureCount, configureCountAfterInit + 1);
+  assert.equal(fakeCanvas.width, 16);
+  assert.equal(fakeCanvas.height, 12);
+  const resizedReceipt = postedMessages.findLast(
+    (message) => message?.reason === 'test-backing-size-resize'
+  );
+  assert.equal(resizedReceipt.canvasConfigureCount, configureCountAfterInit + 1);
+  assert.equal(resizedReceipt.canvasConfigureSkipCount, 1);
+
+  const messagesBeforeCandidate = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'draw-resident-particle-state-producer',
+      width: 16,
+      height: 12,
+      cssWidth: 16,
+      cssHeight: 12,
+      pixelRatio: 1,
+      particleCount: 0,
+      reason: 'test-empty-resident-candidate'
+    }
+  });
+  const candidateSkipped = await flushUntil(() => postedMessages
+    .slice(messagesBeforeCandidate)
+    .some((message) => message?.workerOffscreenRenderRows?.status
+      === 'worker-offscreen-resident-particle-state-producer-skipped-empty'));
+  assert.equal(candidateSkipped, true);
+  assert.equal(fakeCanvasConfigureCount, configureCountAfterInit + 1);
+  const candidateReceipt = postedMessages.findLast(
+    (message) => message?.workerOffscreenRenderRows?.status
+      === 'worker-offscreen-resident-particle-state-producer-skipped-empty'
+  );
+  assert.equal(candidateReceipt.canvasConfigureSkipCount, 2);
+  assert.equal(candidateReceipt.lastCanvasConfigureAction, 'reused');
+  assert.equal(
+    candidateReceipt.lastCanvasConfigureReason,
+    'draw-resident-particle-state-producer'
+  );
 });
 
 test('presentation worker schedule verb injects its own device, drives the W2 schedule driver, and emits versioned candidates', async () => {
@@ -251,6 +354,278 @@ test('presentation worker schedule verb injects its own device, drives the W2 sc
   const latest = workerModule.presentationResidentScheduleCandidateMailbox.peekLatest();
   assert.equal(latest.version.stepOrdinal, 3);
   assert.ok(Object.isFrozen(latest));
+});
+
+test('resident schedule candidates stay telemetry-only until exact committed admission', async () => {
+  let retainedResolveCount = 0;
+  let retainedResolveArgs = null;
+  const terminalFence = {
+    required: true,
+    scope: 'resident-schedule-terminal',
+    terminalScheduleFence: true,
+    fenceSatisfied: true,
+    authorityAdmissionReady: true,
+    scheduleId: 'ulg:test:sched-committed-draw',
+    laneId: 'ulg:test:lane-committed-draw',
+    stateKey: 'ulg:test:state-committed-draw',
+    completedStepCount: 1,
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone'
+  };
+  const fakeBuffer = { mapAsync() {} };
+  const fakeRunner = {
+    async runUlgMechanicsResidentStageWorkerSchedulePayload(_payload, { postProgress }) {
+      postProgress({
+        scheduleId: 'ulg:test:sched-committed-draw',
+        stepOrdinal: 1,
+        epochIdentity: scheduleEpochIdentity(1, { storageGeneration: 8 }),
+        stepSummary: {
+          particleCount: 1,
+          retainedBufferRefs: ['retained:committed-draw']
+        }
+      });
+      return {
+        schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
+        status: 'worker-resident-schedule-completed',
+        scheduleId: 'ulg:test:sched-committed-draw',
+        laneId: 'ulg:test:lane-committed-draw',
+        stateKey: 'ulg:test:state-committed-draw',
+        requestedStepCount: 1,
+        completedStepCount: 1,
+        cancelled: false,
+        retainedBufferRefs: ['retained:committed-draw'],
+        finalEpochIdentity: scheduleEpochIdentity(1, { storageGeneration: 8 }),
+        perStepSummaries: {
+          lastStep: { stepOrdinal: 1, particleCount: 2 }
+        },
+        gpuFence: terminalFence
+      };
+    },
+    resolveUlgMechanicsResidentStageWorkerRetainedParticleState(args) {
+      retainedResolveCount += 1;
+      retainedResolveArgs = args;
+      return {
+        status: 'worker-retained-particle-state-ready',
+        sourceStateBuffer: fakeBuffer,
+        sourceThermoBuffer: fakeBuffer,
+        particleCount: 2,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        stateBufferByteLength: 64,
+        thermoBufferByteLength: 96
+      };
+    }
+  };
+  await workerModule.runResidentScheduleOnPresentationDevice(
+    {
+      payload: {
+        schedule: {
+          scheduleId: 'ulg:test:sched-committed-draw',
+          stepCount: 1
+        },
+        lease: {
+          laneId: 'ulg:test:lane-committed-draw',
+          stateKey: 'ulg:test:state-committed-draw'
+        },
+        context: {
+          ulgMechanicsResidentStageWorker: {
+            common: {
+              presentationWorkerRenderRetainedStageOutput: {
+                enabled: true,
+                sourceStageId: 'schroederSameLevelMechanics',
+                particleCount: 1,
+                stateStrideFloats: 8,
+                thermoStrideFloats: 12,
+                stateByteLength: 32,
+                thermoByteLength: 48,
+                colorRowCount: 1,
+                colorRowsByteLength: 32,
+                materialColorRows: new Float32Array(8),
+                viewProjectionMatrix: new Float32Array(16)
+              }
+            }
+          }
+        }
+      }
+    },
+    { runnerModuleOverride: fakeRunner }
+  );
+  assert.equal(
+    retainedResolveCount,
+    0,
+    'progress and terminal candidate telemetry must not resolve/draw retained buffers'
+  );
+  let noRenderScheduleCallCount = 0;
+  await workerModule.runResidentScheduleOnPresentationDevice(
+    {
+      payload: {
+        schedule: { scheduleId: 'ulg:test:must-not-run', stepCount: 1 },
+        lease: {
+          laneId: 'ulg:test:other-lane',
+          stateKey: 'ulg:test:other-state'
+        }
+      }
+    },
+    {
+      runnerModuleOverride: {
+        async runUlgMechanicsResidentStageWorkerSchedulePayload() {
+          noRenderScheduleCallCount += 1;
+          return {};
+        }
+      }
+    }
+  );
+  assert.equal(noRenderScheduleCallCount, 0);
+  assert.equal(
+    residentStageStatuses().at(-1).status,
+    'worker-offscreen-resident-schedule-on-presentation-device-blocked-pending-committed-presentation'
+  );
+  assert.ok(
+    workerModule.presentationResidentScheduleCandidateMailbox.takeLatest(),
+    'telemetry mailbox should contain the schedule candidate before admission'
+  );
+
+  const exactAdmission = {
+    schema:
+      'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+    status:
+      'state-manager-committed-resident-schedule-presentation-admission',
+    scheduleId: 'ulg:test:sched-committed-draw',
+    laneId: 'ulg:test:lane-committed-draw',
+    stateKey: 'ulg:test:state-committed-draw',
+    candidateVersion: {
+      residentExecutionGeneration: 8,
+      nextStep: 101,
+      scheduleId: 'ulg:test:sched-committed-draw',
+      stepOrdinal: 1
+    },
+    authority: {
+      status: 'state-manager-committed-worker-schedule',
+      computeManagerCompletionSchema:
+        'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+      computeManagerLeaseId: 'lease:committed-draw',
+      computeManagerLeaseStatus: 'completed',
+      computeManagerFenceSatisfied: true,
+      stateManagerCommitStatus: 'committed',
+      stateManagerCommitAccepted: true
+    },
+    terminalFence
+  };
+  const wrongAdmission = workerModule.presentCommittedResidentScheduleCandidate({
+    ...exactAdmission,
+    scheduleId: 'ulg:test:wrong-schedule'
+  });
+  assert.equal(
+    wrongAdmission.status,
+    'worker-offscreen-committed-resident-schedule-presentation-blocked'
+  );
+  assert.equal(retainedResolveCount, 0);
+
+  const admitted = workerModule.presentCommittedResidentScheduleCandidate(
+    exactAdmission
+  );
+  assert.equal(retainedResolveCount, 1);
+  assert.deepEqual(retainedResolveArgs, {
+    laneId: 'ulg:test:lane-committed-draw',
+    stateKey: 'ulg:test:state-committed-draw',
+    sourceStageId: 'schroederSameLevelMechanics'
+  });
+  assert.equal(admitted.stateManagerCommittedPresentation, true);
+  assert.equal(admitted.scheduleId, 'ulg:test:sched-committed-draw');
+  assert.equal(admitted.stepOrdinal, 1);
+
+  const replay = workerModule.presentCommittedResidentScheduleCandidate(
+    exactAdmission
+  );
+  assert.equal(
+    replay.status,
+    'worker-offscreen-committed-resident-schedule-presentation-blocked'
+  );
+  assert.equal(retainedResolveCount, 1, 'committed admission must draw at most once');
+
+  const nextTerminalFence = {
+    ...terminalFence,
+    scheduleId: 'ulg:test:sched-committed-draw-next-lane',
+    laneId: 'ulg:test:lane-committed-draw-next',
+    stateKey: 'ulg:test:state-committed-draw-next'
+  };
+  const nextLaneRunner = {
+    ...fakeRunner,
+    async runUlgMechanicsResidentStageWorkerSchedulePayload(_payload, { postProgress }) {
+      const epochIdentity = scheduleEpochIdentity(1, { storageGeneration: 8 });
+      postProgress({
+        scheduleId: 'ulg:test:sched-committed-draw-next-lane',
+        stepOrdinal: 1,
+        epochIdentity,
+        stepSummary: { particleCount: 2 }
+      });
+      return {
+        schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
+        status: 'worker-resident-schedule-completed',
+        scheduleId: 'ulg:test:sched-committed-draw-next-lane',
+        laneId: 'ulg:test:lane-committed-draw-next',
+        stateKey: 'ulg:test:state-committed-draw-next',
+        requestedStepCount: 1,
+        completedStepCount: 1,
+        cancelled: false,
+        finalEpochIdentity: epochIdentity,
+        perStepSummaries: { lastStep: { particleCount: 2 } },
+        retainedBufferRefs: ['retained:next-lane'],
+        gpuFence: nextTerminalFence
+      };
+    }
+  };
+  await workerModule.runResidentScheduleOnPresentationDevice(
+    {
+      payload: {
+        schedule: {
+          scheduleId: 'ulg:test:sched-committed-draw-next-lane',
+          stepCount: 1
+        },
+        lease: {
+          laneId: 'ulg:test:lane-committed-draw-next',
+          stateKey: 'ulg:test:state-committed-draw-next'
+        },
+        context: {
+          ulgMechanicsResidentStageWorker: {
+            common: {
+              presentationWorkerRenderRetainedStageOutput: {
+                enabled: true,
+                sourceStageId: 'schroederSameLevelMechanics',
+                particleCount: 1,
+                stateStrideFloats: 8,
+                thermoStrideFloats: 12,
+                stateByteLength: 32,
+                thermoByteLength: 48,
+                colorRowCount: 1,
+                colorRowsByteLength: 32,
+                materialColorRows: new Float32Array(8),
+                viewProjectionMatrix: new Float32Array(16)
+              }
+            }
+          }
+        }
+      }
+    },
+    { runnerModuleOverride: nextLaneRunner }
+  );
+  assert.equal(
+    workerModule.presentCommittedResidentScheduleCandidate(exactAdmission).status,
+    'worker-offscreen-committed-resident-schedule-presentation-blocked'
+  );
+  const nextAdmission = {
+    ...exactAdmission,
+    scheduleId: 'ulg:test:sched-committed-draw-next-lane',
+    laneId: 'ulg:test:lane-committed-draw-next',
+    stateKey: 'ulg:test:state-committed-draw-next',
+    candidateVersion: {
+      ...exactAdmission.candidateVersion,
+      scheduleId: 'ulg:test:sched-committed-draw-next-lane'
+    },
+    terminalFence: nextTerminalFence
+  };
+  workerModule.presentCommittedResidentScheduleCandidate(nextAdmission);
+  assert.equal(retainedResolveCount, 2);
 });
 
 test('presentation worker schedule verb skips candidates truthfully when no epoch identity exists', async () => {
@@ -386,4 +761,42 @@ test('presentation worker message loop dispatches the schedule and cancel verbs 
       && /stepCount/.test(entry.errorMessage || '')
   ), { tries: 400 });
   assert.equal(failed, true, 'schedule dispatch never reported the fail-closed driver error');
+});
+
+test('presentation worker disposes its active canvas configuration exactly once', async () => {
+  let fakeDeviceDestroyCount = 0;
+  let fakeWorkerCloseCount = 0;
+  fakeDevice.destroy = () => {
+    fakeDeviceDestroyCount += 1;
+  };
+  fakeSelf.close = () => {
+    fakeWorkerCloseCount += 1;
+  };
+
+  fakeSelf.onmessage({
+    data: { type: 'dispose', reason: 'test-dispose' }
+  });
+  const disposedReceiptReady = await flushUntil(() => postedMessages.some(
+    (message) => message?.status === 'worker-offscreen-presentation-disposed'
+      && message?.reason === 'test-dispose'
+  ));
+  assert.equal(disposedReceiptReady, true);
+  const receipt = postedMessages.findLast(
+    (message) => message?.status === 'worker-offscreen-presentation-disposed'
+  );
+  assert.equal(fakeCanvasUnconfigureCount, 1);
+  assert.equal(fakeDeviceDestroyCount, 1);
+  assert.equal(fakeWorkerCloseCount, 1);
+  assert.equal(receipt.canvasConfigured, false);
+  assert.equal(receipt.canvasUnconfigureCount, 1);
+  assert.equal(receipt.lastCanvasConfigureAction, 'unconfigured');
+  assert.equal(receipt.lastCanvasConfigureReason, 'test-dispose');
+
+  fakeSelf.onmessage({
+    data: { type: 'dispose', reason: 'test-duplicate-dispose' }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fakeCanvasUnconfigureCount, 1);
+  assert.equal(fakeDeviceDestroyCount, 1);
+  assert.equal(fakeWorkerCloseCount, 1);
 });

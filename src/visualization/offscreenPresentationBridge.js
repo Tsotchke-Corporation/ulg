@@ -37,10 +37,182 @@ export const ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
 export const ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT =
   'offscreen-presentation-worker-device';
+export const ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA =
+  'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0';
+export const ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA =
+  'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0';
+export const ULG_WORKER_RESIDENT_SCHEDULE_TERMINAL_REFLUX_RECEIPT_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-terminal-reflux-receipt.v0';
 export const ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
   'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
+
+function nonEmptyString(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || null;
+}
+
+export function buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
+  workerLaneAuthority = null,
+  reason = 'present-committed-resident-schedule-candidate'
+} = {}) {
+  const scheduleResult = workerLaneAuthority?.scheduleResult;
+  const terminalFence = scheduleResult?.gpuFence;
+  const managerExecution = workerLaneAuthority?.gpuResidentLaneExecution;
+  const managerFence = managerExecution?.gpuFence;
+  const managerCompletion = workerLaneAuthority?.computeManagerCompletion;
+  const stateManagerCommit = workerLaneAuthority?.stateManagerCommit;
+  const scheduleId = nonEmptyString(scheduleResult?.scheduleId);
+  const laneId = nonEmptyString(scheduleResult?.laneId);
+  const stateKey = nonEmptyString(scheduleResult?.stateKey);
+  const completedStepCount = Number(scheduleResult?.completedStepCount);
+  const storageGeneration = Number(
+    scheduleResult?.finalEpochIdentity?.storageGeneration
+  );
+  const physicsTick = Number(scheduleResult?.finalEpochIdentity?.physicsTick);
+  const managerLease = managerExecution?.lease;
+  const managerLeaseId = nonEmptyString(managerLease?.leaseId);
+  const taskId = nonEmptyString(workerLaneAuthority?.taskId);
+  const queueCompletionMethod = nonEmptyString(
+    terminalFence?.queueCompletionMethod ?? terminalFence?.method
+  );
+  const twoLevelEvidence =
+    scheduleResult?.perStepSummaries?.twoLevelMechanics ?? null;
+  const terminalRefluxReceiptRequired = Boolean(
+    workerLaneAuthority?.twoLevelTerminalRefluxReceiptRequired === true
+    || (
+      twoLevelEvidence?.requested === true
+      && twoLevelEvidence?.authorityRequested === 'authoritative'
+    )
+  );
+  const terminalRefluxReceipt = terminalFence?.terminalRefluxReceipt ?? null;
+  const terminalRefluxReceiptReady = Boolean(
+    terminalRefluxReceiptRequired !== true
+    || (
+      terminalRefluxReceipt?.schema
+        === ULG_WORKER_RESIDENT_SCHEDULE_TERMINAL_REFLUX_RECEIPT_SCHEMA
+      && terminalRefluxReceipt.status
+        === 'terminal-reflux-schedule-receipt-admitted'
+      && terminalRefluxReceipt.required === true
+      && terminalRefluxReceipt.scheduleId === scheduleId
+      && terminalRefluxReceipt.laneId === laneId
+      && terminalRefluxReceipt.stateKey === stateKey
+      && terminalRefluxReceipt.expectedStepCount === completedStepCount
+      && terminalRefluxReceipt.observedStepCount === completedStepCount
+      && terminalRefluxReceipt.admittedStepCount === completedStepCount
+      && terminalRefluxReceipt.firstRejectedStepOrdinal == null
+      && terminalRefluxReceipt.allStepsAdmitted === true
+      && workerLaneAuthority?.terminalRefluxReceipt
+        === terminalRefluxReceipt
+    )
+  );
+  const ready = Boolean(
+    workerLaneAuthority?.status === 'state-manager-committed-worker-schedule'
+    && scheduleId
+    && laneId
+    && stateKey
+    && workerLaneAuthority?.scheduleId === scheduleId
+    && workerLaneAuthority?.laneId === laneId
+    && workerLaneAuthority?.stateKey === stateKey
+    && Number.isSafeInteger(completedStepCount)
+    && completedStepCount > 0
+    && Number.isSafeInteger(storageGeneration)
+    && storageGeneration >= 0
+    && Number.isSafeInteger(physicsTick)
+    && physicsTick >= 0
+    && terminalFence?.required === true
+    && terminalFence?.scope === 'resident-schedule-terminal'
+    && terminalFence?.terminalScheduleFence === true
+    && terminalFence?.fenceSatisfied === true
+    && terminalFence?.authorityAdmissionReady === true
+    && terminalRefluxReceiptReady
+    && terminalFence?.queueCompletionStatus === 'queue-work-completed'
+    && [
+      'queue.onSubmittedWorkDone',
+      'worker-device.queue.onSubmittedWorkDone'
+    ].includes(queueCompletionMethod)
+    && terminalFence?.scheduleId === scheduleId
+    && terminalFence?.laneId === laneId
+    && terminalFence?.stateKey === stateKey
+    && Number(terminalFence?.completedStepCount) === completedStepCount
+    && managerCompletion?.schema
+      === ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+    && managerCompletion?.status === 'completed'
+    && taskId
+    && managerCompletion?.taskId === taskId
+    && managerLeaseId
+    && managerCompletion?.leaseId === managerLeaseId
+    && managerCompletion?.laneId === laneId
+    && managerCompletion?.stateKey === stateKey
+    && managerCompletion?.fenceSatisfied === true
+    && managerLease?.status === 'completed'
+    && managerLease?.taskId === taskId
+    && managerFence?.fenceSatisfied === true
+    && managerFence?.laneId === laneId
+    && managerFence?.stateKey === stateKey
+    && managerLease?.laneId === laneId
+    && managerLease?.stateKey === stateKey
+    && stateManagerCommit?.accepted === true
+    && stateManagerCommit?.status === 'committed'
+    && stateManagerCommit?.taskId === taskId
+  );
+  if (!ready) {
+    return Object.freeze({
+      schema:
+        ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
+      status:
+        'state-manager-committed-resident-schedule-presentation-blocked-authority-unproven',
+      ready: false,
+      reason,
+      scheduleId,
+      laneId,
+      stateKey
+    });
+  }
+  return Object.freeze({
+    schema:
+      ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
+    status: 'state-manager-committed-resident-schedule-presentation-admission',
+    ready: true,
+    reason,
+    taskId,
+    scheduleId,
+    laneId,
+    stateKey,
+    candidateVersion: Object.freeze({
+      residentExecutionGeneration: storageGeneration,
+      nextStep: physicsTick,
+      scheduleId,
+      stepOrdinal: completedStepCount
+    }),
+    authority: Object.freeze({
+      status: 'state-manager-committed-worker-schedule',
+      computeManagerCompletionSchema: managerCompletion.schema,
+      computeManagerLeaseId: managerCompletion.leaseId,
+      computeManagerLeaseStatus: managerCompletion.status,
+      computeManagerFenceSatisfied:
+        managerCompletion.fenceSatisfied === true,
+      stateManagerCommitStatus: stateManagerCommit.status,
+      stateManagerCommitAccepted: stateManagerCommit.accepted === true
+    }),
+    terminalFence: Object.freeze({
+      required: true,
+      scope: 'resident-schedule-terminal',
+      terminalScheduleFence: true,
+      fenceSatisfied: true,
+      authorityAdmissionReady: true,
+      terminalRefluxReceiptRequired,
+      terminalRefluxReceiptAdmitted: terminalRefluxReceiptReady,
+      scheduleId,
+      laneId,
+      stateKey,
+      completedStepCount,
+      queueCompletionStatus: 'queue-work-completed',
+      queueCompletionMethod
+    })
+  });
+}
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -539,6 +711,66 @@ function setDisplayCanvasOwnedVisibility(canvas, visible) {
   canvas.style.visibility = visible ? 'visible' : 'hidden';
 }
 
+function retainedCompactSnapshotRequestIdentity(status = null) {
+  if (!status || typeof status !== 'object') return null;
+  return Object.freeze({
+    laneId: status.laneId ?? null,
+    stateKey: status.stateKey ?? null,
+    cacheKey: status.cacheKey ?? null,
+    sourceStageId: status.sourceStageId ?? null
+  });
+}
+
+function retainedCompactSnapshotIdentityMismatch(
+  status = null,
+  expectedIdentity = null
+) {
+  if (!status || !expectedIdentity) return null;
+  for (const field of ['laneId', 'stateKey', 'cacheKey', 'sourceStageId']) {
+    const expected = expectedIdentity[field];
+    const actual = status[field];
+    if (
+      expected != null
+      && actual != null
+      && String(actual) !== String(expected)
+    ) {
+      return field;
+    }
+  }
+  return null;
+}
+
+function compactRetainedCompactSnapshotPublicStatus(status = null) {
+  if (!status || typeof status !== 'object') return status;
+  const { compactBufferSnapshot = null, ...summary } = status;
+  return {
+    ...summary,
+    compactBufferSnapshot: null,
+    compactBufferSnapshotPayloadRetainedPrivately:
+      Boolean(compactBufferSnapshot),
+    compactBufferSnapshotSchema:
+      compactBufferSnapshot?.schema
+      || status.compactBufferSnapshotSchema
+      || null,
+    compactBufferSnapshotStatus:
+      compactBufferSnapshot?.status ?? null,
+    compactBufferSnapshotStep:
+      Number.isFinite(Number(compactBufferSnapshot?.step))
+        ? Number(compactBufferSnapshot.step)
+        : null,
+    compactBufferSnapshotTime:
+      Number.isFinite(Number(compactBufferSnapshot?.time))
+        ? Number(compactBufferSnapshot.time)
+        : null,
+    compactBufferSnapshotTopologyEpoch:
+      Number.isSafeInteger(Number(compactBufferSnapshot?.topologyEpoch))
+        ? Number(compactBufferSnapshot.topologyEpoch)
+        : null,
+    compactBufferSnapshotSharedSlotIdentityVerified:
+      compactBufferSnapshot?.sharedSlotIdentityVerified === true
+  };
+}
+
 function applyInitialCanvasBackingSize(canvas, size) {
   if (!canvas) return;
   canvas.width = size.backingWidth;
@@ -624,6 +856,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
     retainedGpuBufferHandoffStatus: null,
     residentStageStatus: null,
     retainedCompactSnapshotStatus: null,
+    retainedCompactSnapshotRequestIdentity: null,
+    retainedCompactSnapshotRejectedStaleCount: 0,
+    committedResidentSchedulePresentationStatus: null,
     // W3: bridge-owned mirror of the presentation worker's resident-schedule
     // render-candidate lane. Fed by 'resident-schedule-candidate' worker
     // messages; the mailbox drops stale/duplicate versions with counters and
@@ -634,6 +869,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     residentRenderCandidateMailbox: createResidentRenderCandidateMailbox({
       onCandidate: onResidentRenderCandidate
     }),
+    residentRenderCandidateStreamIdentity: null,
     residentRenderCandidateRejectedCount: 0,
     displayOwner: requested ? 'worker' : 'none',
     displayOwnerEpoch: 0,
@@ -641,6 +877,16 @@ export function createUlgWorkerOffscreenPresentationBridge({
     displayOwnerContentReady: false,
     displayOwnerContentFrameSerial: 0,
     displayOwnerPresentedSphStep: null,
+    // Durable proof of the exact positive worker frame that currently owns
+    // the canvas. `renderRowsStatus` is intentionally ephemeral (a later
+    // stale draw rejection replaces it), so presentation admission must not
+    // infer visible content from that last status alone.
+    displayOwnerLastRenderedContent: null,
+    // Exact positive candidate frame currently resident in the worker canvas,
+    // independent of which compositor owner is visible. This lets a worker
+    // handoff adopt pixels rendered while the native seed still owned display,
+    // but only while the framebuffer counters remain unchanged.
+    workerCanvasLastRenderedContent: null,
     residentRenderProducerSourceCacheKey: null,
     residentRenderProducerSourceParticleCount: 0,
     residentRenderProducerSourceStrideFloats: 0,
@@ -682,7 +928,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const normalizedOwner = owner === 'main-native'
         ? 'main-native'
         : (owner === 'worker' ? 'worker' : 'none');
-      const requestedEpoch = Number.isFinite(Number(epoch))
+      const requestedEpoch = epoch != null && Number.isFinite(Number(epoch))
         ? Math.max(0, Math.round(Number(epoch)))
         : (
           normalizedOwner === this.displayOwner
@@ -738,6 +984,25 @@ export function createUlgWorkerOffscreenPresentationBridge({
       if (displayOwnerChanged) {
         this.displayOwnerContentReady = normalizedOwner === 'main-native';
         this.displayOwnerPresentedSphStep = null;
+        this.displayOwnerLastRenderedContent = null;
+        if (normalizedOwner === 'main-native') {
+          // The main-native handoff below posts a worker clear.
+          this.workerCanvasLastRenderedContent = null;
+        } else if (
+          normalizedOwner === 'worker'
+          && this.workerCanvasLastRenderedContent
+          && Number(this.workerCanvasLastRenderedContent.frameCount)
+            === Number(this.status?.frameCount)
+          && Number(this.workerCanvasLastRenderedContent.readyFrameCount)
+            === Number(this.status?.readyFrameCount)
+        ) {
+          this.displayOwnerContentReady = true;
+          this.displayOwnerPresentedSphStep =
+            this.workerCanvasLastRenderedContent.sphStep;
+          this.displayOwnerLastRenderedContent =
+            this.workerCanvasLastRenderedContent;
+          this.displayOwnerContentFrameSerial += 1;
+        }
       }
       const workerCanvasVisible = Boolean(
         normalizedOwner === 'worker'
@@ -745,11 +1010,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
       );
       setDisplayCanvasOwnedVisibility(this.canvas, workerCanvasVisible);
       if (normalizedOwner === 'main-native' && this.worker && displayOwnerChanged) {
+        this.residentRenderCandidateMailbox.reset();
+        this.residentRenderCandidateStreamIdentity = null;
         this.worker.postMessage?.({
           type: 'clear',
           backgroundColor: currentBackgroundColor,
           clearAlpha,
           displayOwnerEpoch: requestedEpoch,
+          resetResidentScheduleCandidateMailbox: true,
           reason: `display-owner-main-native:${reason}`
         });
       }
@@ -766,6 +1034,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         displayOwnerContentReady: this.displayOwnerContentReady,
         displayOwnerContentFrameSerial: this.displayOwnerContentFrameSerial,
         displayOwnerPresentedSphStep: this.displayOwnerPresentedSphStep,
+        displayOwnerLastRenderedContent: this.displayOwnerLastRenderedContent,
         displayCanvasVisible: workerCanvasVisible
       });
     },
@@ -870,6 +1139,37 @@ export function createUlgWorkerOffscreenPresentationBridge({
       if (this.disposed) {
         return disposedMutationStatus('publishRetainedCompactSnapshotStatus');
       }
+      const identityMismatch = retainedCompactSnapshotIdentityMismatch(
+        nextStatus,
+        this.retainedCompactSnapshotRequestIdentity
+      );
+      if (identityMismatch) {
+        this.retainedCompactSnapshotRejectedStaleCount += 1;
+        const staleStatus = {
+          schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+          status:
+            'presentation-worker-retained-compact-snapshot-stale-response-rejected',
+          reason:
+            `retained compact snapshot ${identityMismatch} does not match the active export request`,
+          stale: true,
+          identityMismatch,
+          rejectedLaneId: nextStatus?.laneId ?? null,
+          rejectedStateKey: nextStatus?.stateKey ?? null,
+          rejectedCacheKey: nextStatus?.cacheKey ?? null,
+          rejectedSourceStageId: nextStatus?.sourceStageId ?? null,
+          activeRequestIdentity: this.retainedCompactSnapshotRequestIdentity,
+          rejectedStaleCount: this.retainedCompactSnapshotRejectedStaleCount,
+          compactBufferSnapshot: null,
+          portableSnapshotAvailable: false,
+          crossPeerReplayReady: false,
+          updatedAtMs: nowMs(),
+          scientificValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        };
+        onRetainedCompactSnapshotStatus?.(staleStatus);
+        return staleStatus;
+      }
       const status = {
         schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
         status: 'presentation-worker-retained-compact-snapshot-export-status',
@@ -908,14 +1208,32 @@ export function createUlgWorkerOffscreenPresentationBridge({
     },
     resize(next = {}) {
       if (this.disposed) return disposedMutationStatus('resize');
+      const previousSize = { ...size };
       const nextSize = resolveUlgWorkerOffscreenPresentationSize({
         container,
         width: next.width ?? width,
         height: next.height ?? height,
         devicePixelRatio: next.devicePixelRatio ?? devicePixelRatio
       });
+      const workerResizeRequired = Boolean(
+        nextSize.backingWidth !== previousSize.backingWidth
+        || nextSize.backingHeight !== previousSize.backingHeight
+        || nextSize.cssWidth !== previousSize.cssWidth
+        || nextSize.cssHeight !== previousSize.cssHeight
+        || nextSize.pixelRatio !== previousSize.pixelRatio
+      );
       Object.assign(size, nextSize);
-      if (this.worker) {
+      if (this.worker && workerResizeRequired) {
+        // The worker's resize path reconfigures and clears the OffscreenCanvas.
+        // Invalidate the exact content receipt before posting that operation;
+        // a later positive render receipt is required to reveal it again.
+        if (this.displayOwner === 'worker') {
+          this.displayOwnerContentReady = false;
+          this.displayOwnerPresentedSphStep = null;
+          this.displayOwnerLastRenderedContent = null;
+          this.workerCanvasLastRenderedContent = null;
+          setDisplayCanvasOwnedVisibility(this.canvas, false);
+        }
         this.worker.postMessage?.({
           type: 'resize',
           width: nextSize.backingWidth,
@@ -928,23 +1246,39 @@ export function createUlgWorkerOffscreenPresentationBridge({
       }
       return publish({
         ...(this.status || {}),
-        status: this.status?.status || 'worker-offscreen-presentation-resize-posted',
+        status: workerResizeRequired
+          ? (this.status?.status || 'worker-offscreen-presentation-resize-posted')
+          : (this.status?.status || 'worker-offscreen-presentation-resize-not-required'),
         reason: next.reason || 'resize',
+        workerResizeRequired,
         cssWidth: nextSize.cssWidth,
         cssHeight: nextSize.cssHeight,
         pixelRatio: nextSize.pixelRatio,
         backingWidth: nextSize.backingWidth,
-        backingHeight: nextSize.backingHeight
+        backingHeight: nextSize.backingHeight,
+        displayOwnerContentReady: this.displayOwnerContentReady,
+        displayOwnerContentFrameSerial: this.displayOwnerContentFrameSerial,
+        displayOwnerPresentedSphStep: this.displayOwnerPresentedSphStep,
+        displayOwnerLastRenderedContent: this.displayOwnerLastRenderedContent,
+        displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
       });
     },
     setBackgroundColor(color, { reason = 'background-color' } = {}) {
       if (this.disposed) return disposedMutationStatus('setBackgroundColor');
       currentBackgroundColor = color || currentBackgroundColor;
       if (this.worker) {
+        if (this.displayOwner === 'worker') {
+          this.displayOwnerContentReady = false;
+          this.displayOwnerPresentedSphStep = null;
+          this.displayOwnerLastRenderedContent = null;
+          this.workerCanvasLastRenderedContent = null;
+          setDisplayCanvasOwnedVisibility(this.canvas, false);
+        }
         this.worker.postMessage?.({
           type: 'clear',
           backgroundColor: currentBackgroundColor,
           clearAlpha,
+          resetResidentScheduleCandidateMailbox: false,
           reason
         });
       }
@@ -952,7 +1286,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
         ...(this.status || {}),
         status: this.status?.status || 'worker-offscreen-presentation-clear-posted',
         reason,
-        backgroundColor: color
+        backgroundColor: color,
+        displayOwnerContentReady: this.displayOwnerContentReady,
+        displayOwnerContentFrameSerial: this.displayOwnerContentFrameSerial,
+        displayOwnerPresentedSphStep: this.displayOwnerPresentedSphStep,
+        displayOwnerLastRenderedContent: this.displayOwnerLastRenderedContent,
+        displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
       });
     },
     drawRenderRows({
@@ -1473,6 +1812,46 @@ export function createUlgWorkerOffscreenPresentationBridge({
         workerDeviceProvided: true
       });
     },
+    presentCommittedResidentScheduleCandidate({
+      workerLaneAuthority = null,
+      reason = 'present-committed-resident-schedule-candidate'
+    } = {}) {
+      if (this.disposed) {
+        return disposedMutationStatus(
+          'presentCommittedResidentScheduleCandidate'
+        );
+      }
+      const admission =
+        buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
+          workerLaneAuthority,
+          reason
+        });
+      if (admission.ready !== true) {
+        this.committedResidentSchedulePresentationStatus = admission;
+        return admission;
+      }
+      if (!this.worker) {
+        const blocked = Object.freeze({
+          ...admission,
+          status:
+            'state-manager-committed-resident-schedule-presentation-blocked-worker-unavailable',
+          ready: false
+        });
+        this.committedResidentSchedulePresentationStatus = blocked;
+        return blocked;
+      }
+      this.worker.postMessage?.({
+        type: 'present-committed-resident-schedule-candidate',
+        ...admission
+      });
+      const posted = Object.freeze({
+        ...admission,
+        status:
+          'state-manager-committed-resident-schedule-presentation-admission-posted'
+      });
+      this.committedResidentSchedulePresentationStatus = posted;
+      return posted;
+    },
     cancelResidentScheduleOnPresentationDevice({
       id = null,
       reason = 'cancel-resident-schedule-on-presentation-device'
@@ -1526,6 +1905,17 @@ export function createUlgWorkerOffscreenPresentationBridge({
           inputTransport: null
         });
       }
+      this.retainedCompactSnapshotRequestIdentity =
+        retainedCompactSnapshotRequestIdentity({
+          laneId,
+          stateKey,
+          cacheKey,
+          sourceStageId
+        });
+      // Beginning a new export is the reset boundary for the private payload.
+      // Never keep the prior schedule's full typed arrays reachable while a
+      // newer request is active.
+      this.retainedCompactSnapshotStatus = null;
       const localMaterialization = allowLocalMaterializationBypass !== false
         ? retainedCompactSnapshotLocalMaterializationStatus({
             source: localMaterializationSource,
@@ -1587,6 +1977,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const messageHandler = this.workerMessageHandler;
       this.disposed = true;
       this.lifecycleGeneration += 1;
+      this.residentRenderCandidateMailbox.reset({ resetCounters: true });
+      this.residentRenderCandidateStreamIdentity = null;
       if (worker && messageHandler) {
         if (typeof worker.removeEventListener === 'function') {
           try { worker.removeEventListener('message', messageHandler); } catch {}
@@ -1614,13 +2006,21 @@ export function createUlgWorkerOffscreenPresentationBridge({
       this.residentParticleStateProducerStateByteLength = 0;
       this.residentParticleStateProducerThermoByteLength = 0;
       this.residentParticleStateProducerColorRowsByteLength = 0;
+      this.displayOwnerContentReady = false;
+      this.displayOwnerPresentedSphStep = null;
+      this.displayOwnerLastRenderedContent = null;
+      this.workerCanvasLastRenderedContent = null;
+      this.committedResidentSchedulePresentationStatus = null;
+      this.retainedCompactSnapshotStatus = null;
+      this.retainedCompactSnapshotRequestIdentity = null;
       return publish({
         ...(this.status || {}),
         status: 'worker-offscreen-presentation-disposed',
         reason: 'scene-dispose',
         workerReady: false,
         disposed: true,
-        lifecycleGeneration: this.lifecycleGeneration
+        lifecycleGeneration: this.lifecycleGeneration,
+        workerOffscreenRetainedCompactSnapshot: null
       }, { allowDisposed: true });
     }
   };
@@ -1655,13 +2055,61 @@ export function createUlgWorkerOffscreenPresentationBridge({
         bridge.disposed
         || bridge.lifecycleGeneration !== workerLifecycleGeneration
       ) return;
-      const data = event?.data || {};
+      let data = event?.data || {};
       // W3: resident-schedule render candidates arrive as their own message
       // type (not a presentation status envelope) and are arbitrated by the
       // bridge-owned versioned mailbox. Handled before the schema guard so
       // every existing status handler below stays untouched.
       if (data?.type === 'resident-schedule-candidate') {
         try {
+          const presentationLaneEpoch = Number(
+            data?.candidate?.presentationLaneEpoch
+          );
+          const laneId = nonEmptyString(
+            data?.candidate?.laneId ?? data?.laneId
+          );
+          const stateKey = nonEmptyString(
+            data?.candidate?.stateKey ?? data?.stateKey
+          );
+          if (
+            !Number.isSafeInteger(presentationLaneEpoch)
+            || presentationLaneEpoch <= 0
+            || !laneId
+            || !stateKey
+          ) {
+            throw new TypeError(
+              'resident schedule candidate lacks an exact presentation lane identity'
+            );
+          }
+          const activeStream = bridge.residentRenderCandidateStreamIdentity;
+          if (
+            activeStream
+            && (
+              presentationLaneEpoch < activeStream.presentationLaneEpoch
+              || (
+                presentationLaneEpoch === activeStream.presentationLaneEpoch
+                && (
+                  laneId !== activeStream.laneId
+                  || stateKey !== activeStream.stateKey
+                )
+              )
+            )
+          ) {
+            throw new TypeError(
+              'resident schedule candidate belongs to an inactive presentation lane'
+            );
+          }
+          if (
+            !activeStream
+            || presentationLaneEpoch > activeStream.presentationLaneEpoch
+          ) {
+            bridge.residentRenderCandidateMailbox.reset();
+            bridge.residentRenderCandidateStreamIdentity = Object.freeze({
+              presentationLaneEpoch,
+              laneId,
+              stateKey
+            });
+          }
           bridge.residentRenderCandidateMailbox.publish(data.candidate);
         } catch {
           // Fail-closed mailbox rejection (malformed candidate): counted,
@@ -1672,17 +2120,253 @@ export function createUlgWorkerOffscreenPresentationBridge({
       }
       if (data?.schema !== ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA) return;
       const contentReceipt = data.workerOffscreenRenderRows || null;
-      const contentReceiptReady = Boolean(
+      const exactFramebufferReceipt = Boolean(
         contentReceipt
         && /-rendered$/.test(String(contentReceipt.status || ''))
         && Math.max(0, Math.floor(Number(contentReceipt.particleCount) || 0)) > 0
+        // Clear/resize envelopes can carry the prior render-row status while
+        // advancing the actual presentation frame. Admit content only when
+        // the nested receipt names the exact framebuffer represented by this
+        // envelope; otherwise a cleared canvas could be falsely revealed.
+        && Number.isFinite(Number(contentReceipt.frameCount))
+        && Number(contentReceipt.frameCount) === Number(data.frameCount)
+        && Number.isFinite(Number(contentReceipt.readyFrameCount))
+        && Number(contentReceipt.readyFrameCount) === Number(data.readyFrameCount)
+      );
+      const committedReceiptLaneEpoch = Number(
+        contentReceipt?.presentationLaneEpoch
+      );
+      const committedReceiptLaneId = nonEmptyString(contentReceipt?.laneId);
+      const committedReceiptStateKey = nonEmptyString(contentReceipt?.stateKey);
+      if (
+        contentReceipt?.stateManagerCommittedPresentation === true
+        && Number.isSafeInteger(committedReceiptLaneEpoch)
+        && committedReceiptLaneEpoch > 0
+        && committedReceiptLaneId
+        && committedReceiptStateKey
         && (
-          Number(contentReceipt.displayOwnerEpoch) === bridge.displayOwnerEpoch
-          // W4b: candidate-driven presentations are ordered by the worker's
-          // own strictly advancing candidate version, not the page epoch (a
-          // per-refresh epoch bump would otherwise permanently hide a live
-          // worker-lane canvas).
-          || contentReceipt.residentScheduleCandidatePresentation === true
+          !bridge.residentRenderCandidateStreamIdentity
+          || committedReceiptLaneEpoch
+            > bridge.residentRenderCandidateStreamIdentity.presentationLaneEpoch
+        )
+      ) {
+        bridge.residentRenderCandidateMailbox.reset();
+        bridge.residentRenderCandidateStreamIdentity = Object.freeze({
+          presentationLaneEpoch: committedReceiptLaneEpoch,
+          laneId: committedReceiptLaneId,
+          stateKey: committedReceiptStateKey
+        });
+      }
+      const committedReceiptAuthorityReady = Boolean(
+        contentReceipt?.schema
+          === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA
+        && contentReceipt?.renderRowsSchema
+          === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
+        && contentReceipt?.residentScheduleCandidatePresentation === true
+        && contentReceipt?.stateManagerCommittedPresentation === true
+        && contentReceipt?.committedPresentationSchema
+          === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+        && contentReceipt?.committedPresentationStatus
+          === 'state-manager-committed-resident-schedule-presentation-admission'
+        && nonEmptyString(contentReceipt?.scheduleId)
+        && committedReceiptLaneId
+        && committedReceiptStateKey
+        && Number.isSafeInteger(committedReceiptLaneEpoch)
+        && committedReceiptLaneEpoch > 0
+        && committedReceiptLaneEpoch
+          === Number(
+            bridge.residentRenderCandidateStreamIdentity
+              ?.presentationLaneEpoch
+          )
+        && committedReceiptLaneId
+          === bridge.residentRenderCandidateStreamIdentity?.laneId
+        && committedReceiptStateKey
+          === bridge.residentRenderCandidateStreamIdentity?.stateKey
+        && Number.isSafeInteger(Number(
+          contentReceipt?.residentExecutionGeneration
+        ))
+        && Number(contentReceipt.residentExecutionGeneration) >= 0
+        && Number.isSafeInteger(Number(contentReceipt?.sphStep))
+        && Number(contentReceipt.sphStep) >= 0
+        && Number.isSafeInteger(Number(contentReceipt?.stepOrdinal))
+        && Number(contentReceipt.stepOrdinal) > 0
+        && contentReceipt?.authorityStatus
+          === 'state-manager-committed-worker-schedule'
+        && contentReceipt?.computeManagerCompletionSchema
+          === ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+        && nonEmptyString(contentReceipt?.computeManagerLeaseId)
+        && contentReceipt?.computeManagerLeaseStatus === 'completed'
+        && contentReceipt?.computeManagerFenceSatisfied === true
+        && contentReceipt?.stateManagerCommitStatus === 'committed'
+        && contentReceipt?.stateManagerCommitAccepted === true
+        && contentReceipt?.terminalScheduleFence === true
+        && contentReceipt?.terminalFenceScope === 'resident-schedule-terminal'
+        && contentReceipt?.terminalFenceSatisfied === true
+        && contentReceipt?.terminalFenceAuthorityAdmissionReady === true
+      );
+      const candidateReceiptReady = Boolean(
+        exactFramebufferReceipt
+        && committedReceiptAuthorityReady
+        && contentReceipt.schema
+          === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA
+        && contentReceipt.renderRowsSchema === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
+        && contentReceipt.status
+          === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && contentReceipt.residentScheduleCandidatePresentation === true
+        && contentReceipt.stateManagerCommittedPresentation === true
+        && contentReceipt.committedPresentationSchema
+          === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+        && contentReceipt.committedPresentationStatus
+          === 'state-manager-committed-resident-schedule-presentation-admission'
+        && nonEmptyString(contentReceipt.scheduleId)
+        && nonEmptyString(contentReceipt.laneId)
+        && nonEmptyString(contentReceipt.stateKey)
+        && Number.isSafeInteger(Number(
+          contentReceipt.presentationLaneEpoch
+        ))
+        && Number(contentReceipt.presentationLaneEpoch) > 0
+        && Number(contentReceipt.presentationLaneEpoch)
+          === Number(
+            bridge.residentRenderCandidateStreamIdentity
+              ?.presentationLaneEpoch
+          )
+        && contentReceipt.laneId
+          === bridge.residentRenderCandidateStreamIdentity?.laneId
+        && contentReceipt.stateKey
+          === bridge.residentRenderCandidateStreamIdentity?.stateKey
+        && Number.isSafeInteger(Number(
+          contentReceipt.residentExecutionGeneration
+        ))
+        && Number(contentReceipt.residentExecutionGeneration) >= 0
+        && Number.isSafeInteger(Number(contentReceipt.stepOrdinal))
+        && Number(contentReceipt.stepOrdinal) > 0
+        && contentReceipt.authorityStatus
+          === 'state-manager-committed-worker-schedule'
+        && contentReceipt.computeManagerCompletionSchema
+          === ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+        && nonEmptyString(contentReceipt.computeManagerLeaseId)
+        && contentReceipt.computeManagerLeaseStatus === 'completed'
+        && contentReceipt.computeManagerFenceSatisfied === true
+        && contentReceipt.stateManagerCommitStatus === 'committed'
+        && contentReceipt.stateManagerCommitAccepted === true
+        && contentReceipt.terminalScheduleFence === true
+        && contentReceipt.terminalFenceScope === 'resident-schedule-terminal'
+        && contentReceipt.terminalFenceSatisfied === true
+        && contentReceipt.terminalFenceAuthorityAdmissionReady === true
+        && contentReceipt.producerSourceKind
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt.producerSourceTransport
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt.sourceStageId === 'schroederSameLevelMechanics'
+        && contentReceipt.retainedParticleStateStatus
+          === 'worker-retained-particle-state-ready'
+      );
+      const committedPresentationTerminalReceipt = Boolean(
+        committedReceiptAuthorityReady
+        && (
+          (
+            contentReceipt.status
+              === 'worker-offscreen-resident-particle-state-producer-rendered'
+            && exactFramebufferReceipt
+          )
+          || /(?:blocked|failed|superseded)/.test(
+            String(contentReceipt.status || '')
+          )
+        )
+      );
+      if (committedPresentationTerminalReceipt) {
+        bridge.committedResidentSchedulePresentationStatus = Object.freeze({
+          ...contentReceipt
+        });
+      }
+      const compactContentReceipt = exactFramebufferReceipt
+        ? Object.freeze({
+            schema: contentReceipt.schema ?? null,
+            renderRowsSchema: contentReceipt.renderRowsSchema ?? null,
+            status: contentReceipt.status ?? null,
+            sphStep: Number.isFinite(Number(contentReceipt.sphStep))
+              ? Number(contentReceipt.sphStep)
+              : null,
+            particleCount: Math.max(
+              0,
+              Math.floor(Number(contentReceipt.particleCount) || 0)
+            ),
+            frameCount: Number(contentReceipt.frameCount),
+            readyFrameCount: Number(contentReceipt.readyFrameCount),
+            displayOwnerEpoch: Number.isFinite(Number(contentReceipt.displayOwnerEpoch))
+              ? Number(contentReceipt.displayOwnerEpoch)
+              : bridge.displayOwnerEpoch,
+            residentScheduleCandidatePresentation:
+              contentReceipt.residentScheduleCandidatePresentation === true,
+            stateManagerCommittedPresentation:
+              contentReceipt.stateManagerCommittedPresentation === true,
+            committedPresentationSchema:
+              contentReceipt.committedPresentationSchema ?? null,
+            committedPresentationStatus:
+              contentReceipt.committedPresentationStatus ?? null,
+            scheduleId: contentReceipt.scheduleId ?? null,
+            laneId: contentReceipt.laneId ?? null,
+            stateKey: contentReceipt.stateKey ?? null,
+            presentationLaneEpoch:
+              Number.isSafeInteger(Number(
+                contentReceipt.presentationLaneEpoch
+              ))
+                ? Number(contentReceipt.presentationLaneEpoch)
+                : null,
+            residentExecutionGeneration:
+              Number.isSafeInteger(Number(
+                contentReceipt.residentExecutionGeneration
+              ))
+                ? Number(contentReceipt.residentExecutionGeneration)
+                : null,
+            stepOrdinal: Number.isSafeInteger(Number(contentReceipt.stepOrdinal))
+              ? Number(contentReceipt.stepOrdinal)
+              : null,
+            authorityStatus: contentReceipt.authorityStatus ?? null,
+            computeManagerCompletionSchema:
+              contentReceipt.computeManagerCompletionSchema ?? null,
+            computeManagerLeaseId:
+              contentReceipt.computeManagerLeaseId ?? null,
+            computeManagerLeaseStatus:
+              contentReceipt.computeManagerLeaseStatus ?? null,
+            computeManagerFenceSatisfied:
+              contentReceipt.computeManagerFenceSatisfied === true,
+            stateManagerCommitStatus:
+              contentReceipt.stateManagerCommitStatus ?? null,
+            stateManagerCommitAccepted:
+              contentReceipt.stateManagerCommitAccepted === true,
+            terminalScheduleFence:
+              contentReceipt.terminalScheduleFence === true,
+            terminalFenceScope:
+              contentReceipt.terminalFenceScope ?? null,
+            terminalFenceSatisfied:
+              contentReceipt.terminalFenceSatisfied === true,
+            terminalFenceAuthorityAdmissionReady:
+              contentReceipt.terminalFenceAuthorityAdmissionReady === true,
+            producerSourceKind: contentReceipt.producerSourceKind ?? null,
+            producerSourceTransport: contentReceipt.producerSourceTransport ?? null,
+            sourceStageId: contentReceipt.sourceStageId ?? null,
+            retainedParticleStateStatus:
+              contentReceipt.retainedParticleStateStatus ?? null
+          })
+        : null;
+      if (candidateReceiptReady) {
+        bridge.workerCanvasLastRenderedContent = compactContentReceipt;
+        bridge.committedResidentSchedulePresentationStatus =
+          compactContentReceipt;
+      }
+      const contentReceiptReady = Boolean(
+        exactFramebufferReceipt
+        && (
+          (
+            contentReceipt.residentScheduleCandidatePresentation !== true
+            && Number(contentReceipt.displayOwnerEpoch)
+              === bridge.displayOwnerEpoch
+          )
+          // W4b: only the exact post-StateManager-commit candidate receipt may
+          // bypass the page epoch. Raw progress/terminal candidate markers are
+          // telemetry and can never reveal pixels.
+          || candidateReceiptReady
         )
         && bridge.displayOwner === 'worker'
       );
@@ -1692,6 +2376,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         bridge.displayOwnerPresentedSphStep = Number.isFinite(Number(contentReceipt.sphStep))
           ? Number(contentReceipt.sphStep)
           : null;
+        bridge.displayOwnerLastRenderedContent = compactContentReceipt;
         setDisplayCanvasOwnedVisibility(canvas, true);
       }
       if (
@@ -1711,7 +2396,23 @@ export function createUlgWorkerOffscreenPresentationBridge({
         data.workerOffscreenRetainedCompactSnapshot?.schema
         === ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA
       ) {
-        bridge.publishRetainedCompactSnapshotStatus(data.workerOffscreenRetainedCompactSnapshot);
+        const retainedCompactSnapshotStatus =
+          bridge.publishRetainedCompactSnapshotStatus(
+            data.workerOffscreenRetainedCompactSnapshot
+          );
+        data = {
+          ...data,
+          ...(retainedCompactSnapshotStatus?.stale === true
+            ? {
+                status: retainedCompactSnapshotStatus.status,
+                reason: retainedCompactSnapshotStatus.reason
+              }
+            : {}),
+          workerOffscreenRetainedCompactSnapshot:
+            compactRetainedCompactSnapshotPublicStatus(
+              retainedCompactSnapshotStatus
+            )
+        };
       }
       publish({
         ...data,
@@ -1722,6 +2423,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         displayOwnerContentReady: bridge.displayOwnerContentReady,
         displayOwnerContentFrameSerial: bridge.displayOwnerContentFrameSerial,
         displayOwnerPresentedSphStep: bridge.displayOwnerPresentedSphStep,
+        displayOwnerLastRenderedContent: bridge.displayOwnerLastRenderedContent,
         displayCanvasVisible: canvas?.style?.visibility !== 'hidden'
       });
     };

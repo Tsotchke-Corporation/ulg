@@ -205,7 +205,8 @@ import {
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   runSchroederSpatialEpochGenerationWithBackpressureWebGpu,
-  schroederSpatialEpochGenerationRetirementCapability
+  schroederSpatialEpochGenerationRetirementCapability,
+  validateSchroederSpatialEpochGenerationLevelAssignment
 } from './schroederSpatialEpochGpu.js';
 import {
   SCHROEDER_SPATIAL_MECHANICAL_CONSUMERS,
@@ -261,7 +262,8 @@ import {
   scheduleSchroederSpatialEpochTransactionRelease,
   sealSchroederSpatialEpochTransactionReaders,
   sealSchroederSpatialEpochTransactionProposals,
-  summarizeSchroederSpatialEpochTransaction
+  summarizeSchroederSpatialEpochTransaction,
+  validateSchroederSpatialEpochTransactionSourceFamily
 } from './schroederSpatialEpochTransaction.js';
 import {
   bindSchroederHierarchyArtifactLedgerSpatialEpoch,
@@ -276,8 +278,10 @@ import {
 } from './schroederHierarchyArtifactLedger.js';
 import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
   abandonSchroederFusedMechanicsPendingClosureAfter,
   completeSchroederFusedMechanicsPendingClosureAfter,
+  encodeSchroederFusedTerminalRefluxReceiptCopy,
   publishSchroederFusedMechanicsPendingClosure,
   validateSchroederFusedMechanicsPendingClosure,
   validateSchroederFusedMechanicsPublicationReceipt
@@ -16779,6 +16783,78 @@ export function createSchroederTwoLevelCanonicalEpochController({
   return Object.freeze(controller);
 }
 
+function schroederSameLevelMechanicsTransactionReaderPlan({
+  twoLevelAuthoritative = false,
+  residentStepOptions = null,
+  residentRunnerExactNearConsumerAware = true
+} = {}) {
+  const enabledConsumerReaderIds = twoLevelAuthoritative
+    ? []
+    : (residentRunnerExactNearConsumerAware ? [
+        SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
+        ...(residentStepOptions?.reactionTable?.reactionCount > 0
+            && residentStepOptions?.thermalMaterialTable
+          ? [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]
+          : []),
+        SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
+        ...(residentStepOptions?.thermalMaterialTable
+          ? [
+              SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
+              SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION
+            ]
+          : []),
+        SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE
+      ] : []);
+  const supportProfileByReaderId = {
+    [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.PRESSURE_CONTACT_INTERFACE,
+    [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_DISCOVERY,
+    [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.SEPARATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_CONDUCTION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_RADIATION,
+    [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
+      SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.LOCAL_MATERIAL_INTERFACE
+  };
+  return {
+    enabledConsumerReaderIds,
+    consumerSupportProfileIds: Object.fromEntries(
+      enabledConsumerReaderIds.map((readerId) => [
+        readerId,
+        supportProfileByReaderId[readerId]
+      ])
+    )
+  };
+}
+
+export function createSchroederSameLevelMechanicsSpatialEpochTransaction({
+  device,
+  generation,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  residentStepOptions = null,
+  twoLevelAuthoritative = false,
+  residentRunnerExactNearConsumerAware = true
+} = {}) {
+  const readerPlan = schroederSameLevelMechanicsTransactionReaderPlan({
+    twoLevelAuthoritative,
+    residentStepOptions,
+    residentRunnerExactNearConsumerAware
+  });
+  return createSchroederSpatialEpochTransaction({
+    device,
+    generation,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    twoLevelAuthoritative,
+    phaseVolumeInterfaceProposalAuthoritative: twoLevelAuthoritative,
+    ...readerPlan
+  });
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -16790,6 +16866,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   levelAssignmentSourceFamilyLease = null,
   activeNodeList = null,
   spatialEpochGeneration = null,
+  schroederSpatialEpochTransaction = null,
   coarseActiveNodeList = null,
   enableTwoLevelMechanics = false,
   enableMechanicsFieldPairV2 = false,
@@ -17642,11 +17719,31 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       === runSchroederPhaseVolumeDiagnosticSummaryWebGpu
     && canonicalSingleLevelResidentRunnerFamilyExact
   );
+  const injectedCanonicalSingleLevelCleanupAuthorityReady = Boolean(
+    enableSpatialEpochGeneration === false
+    && spatialEpochGeneration?.selected === true
+    && spatialEpochGeneration?.ready === true
+    && spatialEpochGeneration?.releaseScheduled !== true
+    && schroederSpatialEpochTransaction
+    && schroederSpatialEpochTransaction.state
+      === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+    && validateSchroederSpatialEpochTransactionSourceFamily(
+      schroederSpatialEpochTransaction,
+      {
+        generation: spatialEpochGeneration,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+  );
   const exactCanonicalSingleLevelQueueOrderedCleanup = Boolean(
     enableCanonicalSingleLevelQueueOrderedCleanup
     && !enableTwoLevelMechanics
     && !enableMechanicsFieldPairV2
-    && enableSpatialEpochGeneration
+    && (
+      enableSpatialEpochGeneration
+      || injectedCanonicalSingleLevelCleanupAuthorityReady
+    )
     && readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
     && phaseVolumeDiagnosticReadbackMode
       === SCHROEDER_NO_FULL_READBACK_MODE
@@ -17663,7 +17760,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && exactCanonicalSingleLevelQueueOrderedCleanup !== true
   ) {
     const error = new Error(
-      'Canonical single-level queue-ordered cleanup requires the exact production no-full-readback runner family'
+      'Canonical single-level queue-ordered cleanup requires the exact production no-full-readback runner family and an authenticated spatial generation source'
     );
     error.code =
       'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_CLEANUP_AUTHORITY';
@@ -17734,11 +17831,38 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION';
     throw error;
   }
+  const authenticatedInjectedGenerationLevelAssignment = Boolean(
+    enableSpatialEpochGeneration === false
+    && levelAssignment
+    && spatialEpochGeneration?.selected === true
+    && spatialEpochGeneration?.ready === true
+    && spatialEpochGeneration?.releaseScheduled !== true
+    && schroederSpatialEpochTransaction?.state
+      === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+    && validateSchroederSpatialEpochTransactionSourceFamily(
+      schroederSpatialEpochTransaction,
+      {
+        generation: spatialEpochGeneration,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+    && validateSchroederSpatialEpochGenerationLevelAssignment(
+      spatialEpochGeneration,
+      {
+        device,
+        levelAssignment,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+  );
   if (
     enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative'
     && levelAssignment
     && !successorAssignmentAdmissionRequested
+    && !authenticatedInjectedGenerationLevelAssignment
   ) {
     const error = new Error(
       'Authoritative two-level mechanics rejects an injected level '
@@ -18156,11 +18280,44 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       throw error;
     }
   }
+  const injectedSpatialEpochTransactionReady = Boolean(
+    schroederSpatialEpochTransaction
+    && schroederSpatialEpochTransaction.state
+      === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+    && validateSchroederSpatialEpochTransactionSourceFamily(
+      schroederSpatialEpochTransaction,
+      {
+        generation: resolvedSpatialEpochGeneration,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+  );
+  if (schroederSpatialEpochTransaction && !injectedSpatialEpochTransactionReady) {
+    const error = new Error(
+      'Injected spatial epoch transaction does not authenticate the exact generation/source family'
+    );
+    error.code = 'ERR_SCHROEDER_SPATIAL_TRANSACTION_SOURCE_AUTHORITY';
+    throw error;
+  }
+  const hierarchyRetiresResolvedSpatialEpochGeneration = Boolean(
+    ownsResolvedSpatialEpochGeneration
+    || (
+      exactCanonicalSingleLevelQueueOrderedCleanup
+      && injectedSpatialEpochTransactionReady
+    )
+  );
   const spatialEpochTransactionEligibility = Object.freeze({
     mechanicsAuthoritySupported: true,
     internalLevelAssignment:
-      ownsResolvedLevelAssignment || authenticatedSuccessorLevelAssignment,
-    internalGeneration: ownsResolvedSpatialEpochGeneration,
+      (
+        ownsResolvedLevelAssignment
+        && ownsResolvedSpatialEpochGeneration
+      )
+      || authenticatedSuccessorLevelAssignment
+      || authenticatedInjectedGenerationLevelAssignment,
+    internalGeneration:
+      ownsResolvedSpatialEpochGeneration || injectedSpatialEpochTransactionReady,
     transactionAwareExecution: twoLevelAuthoritative
       || residentStepRunner === runMlsMpmResidentStepWithOptionalWebGpu
       || residentStepRunner?.schroederSpatialEpochTransactionAware === true
@@ -18189,7 +18346,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     error.spatialEpochGenerationReason = generationReason;
     throw error;
   }
-  let spatialEpochTransaction = null;
+  let spatialEpochTransaction = injectedSpatialEpochTransactionReady
+    ? schroederSpatialEpochTransaction
+    : null;
   let singleLevelQueueOrderedCleanupCapability = null;
   let spatialEpochTransactionReleaseScheduled = false;
   let spatialEpochTransactionReleasePromise = null;
@@ -18216,6 +18375,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let finalTwoLevelContinuationUploads = null;
   let finalTwoLevelContinuationLedgerOwned = false;
   let pendingTwoLevelPostMechanicsClosure = null;
+  let twoLevelTerminalRefluxReceiptCopy = null;
   let twoLevelMechanicsPublicationReceipt = null;
   let twoLevelMechanicsPositiveCompletionPromise = null;
   let spatialTopologyTransitionReceipt = null;
@@ -18949,71 +19109,37 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   if (
     spatialEpochTransactionEligible
     && resolvedSpatialEpochGeneration?.selected === true
+    && !spatialEpochTransaction
   ) {
     // This first live transaction is intentionally restricted to the exact
     // same-call level-assignment -> active-node -> generation chain. An
     // injected generation does not prove which particle buffer family
     // produced its active-node rows.
-    const enabledConsumerReaderIds = twoLevelAuthoritative
-      ? []
-      : (residentRunnerExactNearConsumerAware ? [
-          SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,
-          ...(residentStepOptions?.reactionTable?.reactionCount > 0
-              && residentStepOptions?.thermalMaterialTable
-            ? [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]
-            : []),
-          SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION,
-          ...(residentStepOptions?.thermalMaterialTable
-            ? [
-                SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION,
-                SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION
-              ]
-            : []),
-          SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE
-        ] : []);
-    const supportProfileByReaderId = {
-      [SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.PRESSURE_CONTACT_INTERFACE,
-      [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.REACTION_DISCOVERY,
-      [SCHROEDER_SPATIAL_EPOCH_READER.SEPARATION]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.SEPARATION,
-      [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_CONDUCTION,
-      [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.THERMAL_RADIATION,
-      [SCHROEDER_SPATIAL_EPOCH_READER.LOCAL_MATERIAL_INTERFACE]:
-        SCHROEDER_SPATIAL_EPOCH_SUPPORT_PROFILE_ID.LOCAL_MATERIAL_INTERFACE
-    };
-    const consumerSupportProfileIds = Object.fromEntries(
-      enabledConsumerReaderIds.map((readerId) => [
-        readerId,
-        supportProfileByReaderId[readerId]
-      ])
-    );
-    spatialEpochTransaction = createSchroederSpatialEpochTransaction({
+    spatialEpochTransaction = createSchroederSameLevelMechanicsSpatialEpochTransaction({
       device,
       generation: resolvedSpatialEpochGeneration,
       sphParticleUpload,
       mlsMpmParticleUpload,
+      residentStepOptions,
       twoLevelAuthoritative,
-      phaseVolumeInterfaceProposalAuthoritative: twoLevelAuthoritative,
-      enabledConsumerReaderIds,
-      consumerSupportProfileIds
+      residentRunnerExactNearConsumerAware
     });
-    if (exactCanonicalSingleLevelQueueOrderedCleanup) {
-      singleLevelQueueOrderedCleanupCapability =
-        createSchroederSingleLevelQueueOrderedCleanupCapability(
-          spatialEpochTransaction,
-          {
-            device,
-            generation: resolvedSpatialEpochGeneration,
-            sphParticleUpload,
-            mlsMpmParticleUpload,
-            readbackMode
-          }
-        );
-    }
+  }
+  if (
+    exactCanonicalSingleLevelQueueOrderedCleanup
+    && spatialEpochTransaction
+  ) {
+    singleLevelQueueOrderedCleanupCapability =
+      createSchroederSingleLevelQueueOrderedCleanupCapability(
+        spatialEpochTransaction,
+        {
+          device,
+          generation: resolvedSpatialEpochGeneration,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          readbackMode
+        }
+      );
   }
   if (
     exactCanonicalSingleLevelQueueOrderedCleanup
@@ -19152,6 +19278,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       baseGridSpacingM: plan.baseGridSpacingM,
       boxDimsM,
       dt,
+      cflFactor,
       gravityMPerS2,
       internalPressureScale: residentStepOptions.internalPressureScale ?? 1,
       ambientPressurePa: residentStepOptions.ambientPressurePa ?? 0,
@@ -20068,6 +20195,28 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     error.code = 'ERR_SCHROEDER_TWO_LEVEL_PENDING_CLOSURE_STALE';
     throw error;
   }
+  const terminalRefluxReceiptTarget = residentStepOptions?.[
+    SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
+  ] ?? null;
+  if (terminalRefluxReceiptTarget != null) {
+    if (!twoLevelAuthoritative || !pendingTwoLevelPostMechanicsClosure) {
+      const error = new Error(
+        'Terminal reflux receipt targets require the exact authoritative two-level pending closure'
+      );
+      error.code = 'ERR_SCHROEDER_TWO_LEVEL_TERMINAL_REFLUX_TARGET_INVALID';
+      throw error;
+    }
+    // The exact macro ledger is still live here and final G2P has already
+    // been submitted. Queue this compact copy before public E* publication
+    // can retire the private ledger. The cloneable receipt is deliberately
+    // unverified until the worker's schedule-terminal fence maps the target.
+    twoLevelTerminalRefluxReceiptCopy =
+      encodeSchroederFusedTerminalRefluxReceiptCopy(
+        device,
+        pendingTwoLevelPostMechanicsClosure,
+        terminalRefluxReceiptTarget
+      );
+  }
   const rawTwoLevelCoupledUploads =
     resolvedTwoLevelMechanics?.nextParticleUploads
     ?? (pendingTwoLevelPostMechanicsClosure
@@ -20887,9 +21036,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     scheduleTwoLevelAggregateTraversalCleanup({
       queueOrderedAuthority: twoLevelSpatialAggregateTraversalReceipt
     });
+    // This boolean describes the public E* transaction commit only. The
+    // worker-owned schedule separately withholds outward authority until its
+    // compact terminal reflux ring has been mapped and admitted.
     resolvedTwoLevelMechanics.authoritativeCommitVerified = true;
     resolvedTwoLevelMechanics.authoritativeCommitStatus =
       'public-e-star-transaction-committed';
+    resolvedTwoLevelMechanics.terminalRefluxReceiptPending =
+      terminalRefluxReceiptTarget != null;
     if (pendingTwoLevelPostMechanicsClosure) {
       twoLevelMechanicsPublicationReceipt =
         publishSchroederFusedMechanicsPendingClosure(
@@ -21349,8 +21503,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       twoLevelMechanicsStatus: resolvedTwoLevelMechanics?.status ?? null,
       twoLevelFineSubstepCount:
         resolvedTwoLevelMechanics?.fineSubstepCount ?? null,
+      twoLevelCflFactor:
+        resolvedTwoLevelMechanics?.cflFactor ?? null,
       twoLevelAuthoritativeCommitVerified:
         resolvedTwoLevelMechanics?.authoritativeCommitVerified === true,
+      twoLevelTerminalRefluxReceiptCopy,
+      twoLevelTerminalRefluxReceiptPending:
+        resolvedTwoLevelMechanics?.terminalRefluxReceiptPending === true,
       phaseVolumeInterfaceTransport:
         resolvedTwoLevelMechanics?.phaseVolumeInterfaceTransport ?? null,
       internalEnergyTransferStatus:
@@ -21641,17 +21800,24 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && pendingTwoLevelPostMechanicsClosure
     && twoLevelMechanicsPositiveCompletionPromise
   );
-  const releaseOwnedSpatialEpochGeneration = () => {
-    if (
-      exactCanonicalSingleLevelQueueOrderedCleanup
-      && singleLevelQueueOrderedCleanupCapability != null
-      && resolvedFinalRenderActiveNodeList
-        ?.queueOrderedFinalConsumerCapability != null
-      && canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
-        resolvedSpatialEpochGeneration,
-        device
-      )
-    ) {
+  const releaseResolvedSpatialEpochGeneration = () => {
+    if (exactCanonicalSingleLevelQueueOrderedCleanup) {
+      if (
+        singleLevelQueueOrderedCleanupCapability == null
+        || resolvedFinalRenderActiveNodeList
+          ?.queueOrderedFinalConsumerCapability == null
+        || !canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
+          resolvedSpatialEpochGeneration,
+          device
+        )
+      ) {
+        const error = new Error(
+          'Exact canonical single-level generation lacks queue-ordered final-consumer retirement authority'
+        );
+        error.code =
+          'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_GENERATION_RETIREMENT';
+        throw error;
+      }
       try {
         const released =
           releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(
@@ -21659,9 +21825,32 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             device
           );
         spatialEpochGenerationQueueOrderedRelease = released === true;
-        return released;
-      } catch {
+        if (released !== true) {
+          const error = new Error(
+            'Exact canonical single-level generation did not confirm queue-ordered retirement'
+          );
+          error.code =
+            'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_GENERATION_RETIREMENT';
+          throw error;
+        }
+        return true;
+      } catch (cause) {
         spatialEpochGenerationQueueOrderedRelease = false;
+        if (
+          cause?.code
+            === 'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_GENERATION_RETIREMENT'
+        ) {
+          throw cause;
+        }
+        const error = new Error(
+          `Exact canonical single-level queue-ordered generation retirement failed: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`
+        );
+        error.code =
+          'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_GENERATION_RETIREMENT';
+        error.cause = cause;
+        throw error;
       }
     }
     return releaseSchroederSpatialEpochGenerationAfterQueue(
@@ -21724,10 +21913,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       // directory.  Preparation deliberately remains before commit because
       // it authenticates the still-live generation.
       if (
-        ownsResolvedSpatialEpochGeneration
+        hierarchyRetiresResolvedSpatialEpochGeneration
         && resolvedSpatialEpochGeneration?.releaseScheduled !== true
       ) {
-        releaseOwnedSpatialEpochGeneration();
+        releaseResolvedSpatialEpochGeneration();
       }
       if (
         !topologyTransitionRunnerExplicitlyInjected
@@ -21830,14 +22019,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       spatialSuccessorPublicationReceipt.reason;
   }
   if (
-    ownsResolvedSpatialEpochGeneration
+    hierarchyRetiresResolvedSpatialEpochGeneration
     && !controllerOwnsInitialEpochRetirement
     && resolvedSpatialEpochGeneration?.releaseScheduled !== true
   ) {
-    releaseOwnedSpatialEpochGeneration();
+    releaseResolvedSpatialEpochGeneration();
   }
   const spatialEpochGenerationReleaseScheduled = Boolean(
-    ownsResolvedSpatialEpochGeneration
+    hierarchyRetiresResolvedSpatialEpochGeneration
     && resolvedSpatialEpochGeneration?.releaseScheduled === true
   );
   if (spatialEpochTransaction) {
@@ -22988,6 +23177,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         twoLevelCoverageAdmission?.allLiveRowsCovered === true,
       fineSubstepCount: resolvedTwoLevelMechanics.fineSubstepCount,
       fineSubstepDt: resolvedTwoLevelMechanics.fineSubstepDt,
+      cflFactor: resolvedTwoLevelMechanics.cflFactor,
       internalPressureScale: resolvedTwoLevelMechanics.internalPressureScale,
       ambientPressurePa: resolvedTwoLevelMechanics.ambientPressurePa,
       ambientPressureAppliedInStressProjection:
@@ -23006,6 +23196,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         resolvedTwoLevelMechanics.authoritativeCommitVerified === true,
       authoritativeCommitStatus:
         resolvedTwoLevelMechanics.authoritativeCommitStatus ?? null,
+      terminalRefluxReceiptCopy: twoLevelTerminalRefluxReceiptCopy,
+      terminalRefluxReceiptPending:
+        resolvedTwoLevelMechanics.terminalRefluxReceiptPending === true,
       publicPostMechanicsEpochGenerationId:
         twoLevelPostMechanicsEpoch?.generation?.execution?.generationId ?? null,
       publicPostMechanicsEpochPhysicsTick:

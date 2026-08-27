@@ -100,6 +100,8 @@ const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
 // placement v5 requires every above-threshold term to become a mechanics
 // carrier, so the old gas-only reserve basis must be provisioned per term.
 const REACTION_PRODUCT_RESERVE_TERM_MULTIPLIER = 2;
+const DEFAULT_REACTION_PRODUCT_RESERVE_LIVE_FRACTION = 0.25;
+const MAX_REACTION_PRODUCT_RESERVE_MINIMUM_LIVE_FRACTION = 1;
 const PHASE_VOLUME_EXPANSIVE_PHASE_NAMES = new Set(['gas', 'vapor', 'vapour', 'plasma']);
 const DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA = 2e-3;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
@@ -131,6 +133,50 @@ function reactionProductReserveTermMultiplierForMaterials(materialKeys = []) {
   return distinctMaterialKeys.size > 1
     ? REACTION_PRODUCT_RESERVE_TERM_MULTIPLIER
     : 0;
+}
+
+function reactionProductReservePlan({
+  liveParticleCount,
+  materialKeys = [],
+  minimumLiveFraction = null
+} = {}) {
+  const liveCount = Math.max(0, Math.round(Number(liveParticleCount) || 0));
+  const termMultiplier =
+    reactionProductReserveTermMultiplierForMaterials(materialKeys);
+  let requestedMinimumLiveFraction = null;
+  if (minimumLiveFraction != null && minimumLiveFraction !== '') {
+    const value = Number(minimumLiveFraction);
+    if (
+      !Number.isFinite(value)
+      || value < 0
+      || value > MAX_REACTION_PRODUCT_RESERVE_MINIMUM_LIVE_FRACTION
+    ) {
+      throw new RangeError(
+        'reactionProductReserveMinimumLiveFraction must be finite in [0, 1]'
+      );
+    }
+    requestedMinimumLiveFraction = value;
+  }
+  const defaultSlotCount = termMultiplier > 0
+    ? termMultiplier * Math.max(8, Math.round(liveCount / 8))
+    : 0;
+  const minimumSlotCount = termMultiplier > 0
+    ? Math.ceil(liveCount * (requestedMinimumLiveFraction ?? 0))
+    : 0;
+  const slotCount = Math.max(defaultSlotCount, minimumSlotCount);
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-reaction-product-reserve-plan.v0',
+    status: slotCount > 0
+      ? 'reaction-product-reserve-ready'
+      : 'reaction-product-reserve-not-required',
+    liveParticleCount: liveCount,
+    productTermMultiplier: termMultiplier,
+    defaultLiveFraction: DEFAULT_REACTION_PRODUCT_RESERVE_LIVE_FRACTION,
+    requestedMinimumLiveFraction,
+    defaultSlotCount,
+    minimumSlotCount,
+    slotCount
+  });
 }
 const SPH_SURFACE_TENSION_LAW_ADMISSION_SCHEMA =
   'peercompute.ulg.sph-surface-tension-law-admission.v0';
@@ -2228,6 +2274,7 @@ function buildSphInitialBodiesDemoState({
   allowReducedProductProperties,
   initialBodies,
   initialTargetNeighborCount,
+  reactionProductReserveMinimumLiveFraction,
   mechanics,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
@@ -2330,13 +2377,13 @@ function buildSphInitialBodiesDemoState({
 
   const all = [...liveParticles];
   const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
-  const reactionProductReserveTermMultiplier =
-    reactionProductReserveTermMultiplierForMaterials(
-      normalizedInitialBodies.bodies.map((body) => body.material)
-    );
+  const reactionProductReserve = reactionProductReservePlan({
+    liveParticleCount: liveParticles.length,
+    materialKeys: normalizedInitialBodies.bodies.map((body) => body.material),
+    minimumLiveFraction: reactionProductReserveMinimumLiveFraction
+  });
   const spareProductSlotCount = gpuResidentMechanics
-    ? reactionProductReserveTermMultiplier
-      * Math.max(8, Math.round(liveParticles.length / 8))
+    ? reactionProductReserve.slotCount
     : 0;
   const spareTemplate = liveParticles[0];
   const boxCenterM = boxDims.map((extent) => extent / 2);
@@ -2505,6 +2552,7 @@ function buildSphInitialBodiesDemoState({
       ...(legacyBase ? { base: countsByBodyId[legacyBase.id] } : {}),
       ...(legacyDrop ? { drop: countsByBodyId[legacyDrop.id] } : {})
     },
+    reactionProductReservePlan: reactionProductReserve,
     materialProperties: Object.fromEntries(
       Object.entries(resolved).map(([key, closure]) => [key, closure.properties])
     )
@@ -2537,6 +2585,7 @@ export function buildSphPhaseDemoState({
   adaptiveParticleSpacing = true,
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
+  reactionProductReserveMinimumLiveFraction = null,
   mechanics = 'mlsmpm',
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
@@ -2551,6 +2600,7 @@ export function buildSphPhaseDemoState({
       allowReducedProductProperties,
       initialBodies,
       initialTargetNeighborCount,
+      reactionProductReserveMinimumLiveFraction,
       mechanics,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
@@ -2841,14 +2891,13 @@ export function buildSphPhaseDemoState({
   // Placed slots are permanent, and placement v5 rejects above-threshold
   // product mass that cannot become a moving mechanics carrier.
   const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
-  const reactionProductReserveTermMultiplier =
-    reactionProductReserveTermMultiplierForMaterials([
-      dropMaterial,
-      baseMaterial
-    ]);
+  const reactionProductReserve = reactionProductReservePlan({
+    liveParticleCount: all.length,
+    materialKeys: [dropMaterial, baseMaterial],
+    minimumLiveFraction: reactionProductReserveMinimumLiveFraction
+  });
   const spareProductSlotCount = gpuResidentMechanics
-    ? reactionProductReserveTermMultiplier
-      * Math.max(8, Math.round(all.length / 8))
+    ? reactionProductReserve.slotCount
     : 0;
   const spareTemplate = all[0];
   const firstSpareContinuityDomainId =
@@ -2964,6 +3013,7 @@ export function buildSphPhaseDemoState({
         : {}),
       total: all.length
     },
+    reactionProductReservePlan: reactionProductReserve,
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
 }

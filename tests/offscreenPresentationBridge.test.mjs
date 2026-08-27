@@ -3,7 +3,10 @@ import test from 'node:test';
 
 import {
   createUlgWorkerOffscreenPresentationBridge,
+  buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission,
+  ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
   ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+  ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
   ULG_WORKER_OFFSCREEN_PRESENTATION_HANDOFF,
   ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
   ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
@@ -25,6 +28,32 @@ import {
   resolveUlgWorkerOffscreenPresentationCapability,
   resolveUlgWorkerOffscreenPresentationSize
 } from '../src/visualization/offscreenPresentationBridge.js';
+
+const COMMITTED_CANDIDATE_RECEIPT_FIELDS = Object.freeze({
+  stateManagerCommittedPresentation: true,
+  committedPresentationSchema:
+    ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
+  committedPresentationStatus:
+    'state-manager-committed-resident-schedule-presentation-admission',
+  scheduleId: 'schedule:committed-frame',
+  laneId: 'lane:committed-frame',
+  stateKey: 'state:committed-frame',
+  presentationLaneEpoch: 1,
+  residentExecutionGeneration: 7,
+  stepOrdinal: 1,
+  authorityStatus: 'state-manager-committed-worker-schedule',
+  computeManagerLeaseStatus: 'completed',
+  computeManagerCompletionSchema:
+    ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
+  computeManagerLeaseId: 'lease:committed-frame',
+  computeManagerFenceSatisfied: true,
+  stateManagerCommitStatus: 'committed',
+  stateManagerCommitAccepted: true,
+  terminalScheduleFence: true,
+  terminalFenceScope: 'resident-schedule-terminal',
+  terminalFenceSatisfied: true,
+  terminalFenceAuthorityAdmissionReady: true
+});
 
 test('worker offscreen presentation capability is fail-closed around transferred canvas ownership', () => {
   const notRequested = resolveUlgWorkerOffscreenPresentationCapability({
@@ -75,6 +104,150 @@ test('worker offscreen presentation sizing caps device-pixel ratio for display c
   assert.equal(size.pixelRatio, 2);
   assert.equal(size.backingWidth, 780);
   assert.equal(size.backingHeight, 1688);
+});
+
+test('committed resident schedule presentation posts only after exact authority', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      worker = this;
+    }
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+    addEventListener() {}
+    terminate() {}
+  }
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() { return { offscreen: true }; }
+  };
+  const container = {
+    clientWidth: 32,
+    clientHeight: 32,
+    appendChild(child) { child.parentNode = this; },
+    removeChild(child) { if (child.parentNode === this) child.parentNode = null; },
+    ownerDocument: { createElement() { return canvas; } }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    container,
+    width: 32,
+    height: 32,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  const terminalFence = {
+    required: true,
+    scope: 'resident-schedule-terminal',
+    terminalScheduleFence: true,
+    fenceSatisfied: true,
+    authorityAdmissionReady: true,
+    scheduleId: 'schedule:authority',
+    laneId: 'lane:authority',
+    stateKey: 'state:authority',
+    completedStepCount: 1,
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone'
+  };
+  const authority = {
+    status: 'state-manager-committed-worker-schedule',
+    taskId: 'task:authority',
+    scheduleId: 'schedule:authority',
+    laneId: 'lane:authority',
+    stateKey: 'state:authority',
+    scheduleResult: {
+      scheduleId: 'schedule:authority',
+      laneId: 'lane:authority',
+      stateKey: 'state:authority',
+      completedStepCount: 1,
+      finalEpochIdentity: { storageGeneration: 9, physicsTick: 4 },
+      gpuFence: terminalFence
+    },
+    gpuResidentLaneExecution: {
+      lease: {
+        leaseId: 'lease:authority',
+        taskId: 'task:authority',
+        laneId: 'lane:authority',
+        stateKey: 'state:authority',
+        status: 'completed'
+      },
+      gpuFence: {
+        fenceSatisfied: true,
+        laneId: 'lane:authority',
+        stateKey: 'state:authority'
+      }
+    },
+    computeManagerCompletion: {
+      schema: ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
+      status: 'completed',
+      taskId: 'task:authority',
+      leaseId: 'lease:authority',
+      laneId: 'lane:authority',
+      stateKey: 'state:authority',
+      fenceSatisfied: true
+    },
+    stateManagerCommit: {
+      status: 'committed',
+      accepted: true,
+      taskId: 'task:authority'
+    }
+  };
+  const admission =
+    buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
+      workerLaneAuthority: authority
+    });
+  assert.equal(admission.ready, true);
+  assert.equal(
+    admission.schema,
+    ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+  );
+  assert.equal(admission.candidateVersion.nextStep, 4);
+  assert.doesNotThrow(() => structuredClone(admission));
+
+  const activeLeaseAdmission =
+    buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
+      workerLaneAuthority: {
+        ...authority,
+        gpuResidentLaneExecution: {
+          ...authority.gpuResidentLaneExecution,
+          lease: {
+            ...authority.gpuResidentLaneExecution.lease,
+            status: 'active'
+          }
+        }
+      }
+    });
+  assert.equal(activeLeaseAdmission.ready, false);
+
+  const messageCountBeforeBlocked = worker.messages.length;
+  const blocked = bridge.presentCommittedResidentScheduleCandidate({
+    workerLaneAuthority: {
+      ...authority,
+      stateManagerCommit: { status: 'committed', accepted: false }
+    }
+  });
+  assert.equal(blocked.ready, false);
+  assert.equal(worker.messages.length, messageCountBeforeBlocked);
+
+  const posted = bridge.presentCommittedResidentScheduleCandidate({
+    workerLaneAuthority: authority
+  });
+  assert.equal(
+    posted.status,
+    'state-manager-committed-resident-schedule-presentation-admission-posted'
+  );
+  const message = worker.messages.at(-1).data;
+  assert.equal(message.type, 'present-committed-resident-schedule-candidate');
+  assert.equal(message.scheduleId, 'schedule:authority');
+  assert.equal(message.authority.stateManagerCommitAccepted, true);
+  assert.equal(message.terminalFence.terminalScheduleFence, true);
+  bridge.dispose();
 });
 
 test('worker offscreen display ownership hides native non-owner and reveals only matching content receipt', () => {
@@ -151,19 +324,84 @@ test('worker offscreen display ownership hides native non-owner and reveals only
   assert.equal(worker.messages.at(-1)?.data?.type, 'clear');
   assert.equal(worker.messages.at(-1)?.data?.displayOwnerEpoch, 7);
 
+  const implicitSameOwner = bridge.setDisplayOwner({
+    owner: 'main-native',
+    reason: 'unit-implicit-same-owner'
+  });
+  assert.equal(implicitSameOwner.displayOwner, 'main-native');
+  assert.equal(implicitSameOwner.displayOwnerEpoch, 7);
+
   const stale = bridge.setDisplayOwner({ owner: 'worker', epoch: 6 });
   assert.equal(stale.status, 'worker-offscreen-display-owner-stale-epoch-rejected');
   assert.equal(bridge.displayOwner, 'main-native');
   assert.equal(canvas.style.visibility, 'hidden');
 
+  // The worker can finish a candidate while the validated native seed still
+  // owns composition. Keep the exact framebuffer receipt hidden but durable
+  // so the subsequent worker handoff can adopt those already-rendered pixels.
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
+      displayOwnerEpoch: 7,
+      sphStep: 11,
+      particleCount: 1,
+      frameCount: 1,
+      readyFrameCount: 1,
+      residentScheduleCandidatePresentation: true,
+      producerSourceKind: 'worker-retained-resident-stage-output',
+      producerSourceTransport: 'worker-retained-resident-stage-output',
+      sourceStageId: 'schroederSameLevelMechanics',
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent,
+    null,
+    'an uncommitted progress/terminal marker must not become drawable content'
+  );
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
+      displayOwnerEpoch: 7,
+      sphStep: 11,
+      particleCount: 1,
+      frameCount: 1,
+      readyFrameCount: 1,
+      residentScheduleCandidatePresentation: true,
+      ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      producerSourceKind: 'worker-retained-resident-stage-output',
+      producerSourceTransport: 'worker-retained-resident-stage-output',
+      sourceStageId: 'schroederSameLevelMechanics',
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+    }
+  });
+  assert.equal(canvas.style.visibility, 'hidden');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerLastRenderedContent, null);
+  assert.equal(bridge.workerCanvasLastRenderedContent.sphStep, 11);
+
   const workerOwner = bridge.setDisplayOwner({
     owner: 'worker',
-    epoch: 8,
     revealWhenContentReady: true,
     reason: 'unit-worker-owner'
   });
-  assert.equal(workerOwner.displayCanvasVisible, false);
-  assert.equal(canvas.style.visibility, 'hidden');
+  assert.equal(workerOwner.displayOwnerEpoch, 8);
+  assert.equal(workerOwner.displayCanvasVisible, true);
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
 
   const drawStatus = bridge.drawRenderRows({
     sphStep: 12,
@@ -177,30 +415,39 @@ test('worker offscreen display ownership hides native non-owner and reveals only
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
     workerOffscreenRenderRows: {
       schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-render-rows-rendered',
       displayOwnerEpoch: 7,
       sphStep: 11,
-      particleCount: 1
+      particleCount: 1,
+      frameCount: 1,
+      readyFrameCount: 1
     }
   });
-  assert.equal(canvas.style.visibility, 'hidden');
-  assert.equal(bridge.displayOwnerContentReady, false);
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
     workerOffscreenRenderRows: {
       schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-render-rows-rendered',
       displayOwnerEpoch: 8,
       sphStep: 12,
-      particleCount: 1
+      particleCount: 1,
+      frameCount: 1,
+      readyFrameCount: 1
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
   assert.equal(bridge.displayOwnerContentReady, true);
-  assert.equal(bridge.displayOwnerContentFrameSerial, 1);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 2);
   assert.equal(bridge.displayOwnerPresentedSphStep, 12);
 
   const sameWorkerNextEpoch = bridge.setDisplayOwner({
@@ -216,12 +463,16 @@ test('worker offscreen display ownership hides native non-owner and reveals only
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
     workerOffscreenRenderRows: {
       schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-render-rows-rendered',
       displayOwnerEpoch: 8,
       sphStep: 13,
-      particleCount: 1
+      particleCount: 1,
+      frameCount: 1,
+      readyFrameCount: 1
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -229,17 +480,82 @@ test('worker offscreen display ownership hides native non-owner and reveals only
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 2,
+    readyFrameCount: 2,
     workerOffscreenRenderRows: {
-      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
-      status: 'worker-offscreen-render-rows-rendered',
+      schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
       displayOwnerEpoch: 9,
       sphStep: 14,
-      particleCount: 1
+      particleCount: 1,
+      frameCount: 2,
+      readyFrameCount: 2,
+      residentScheduleCandidatePresentation: true,
+      ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      producerSourceKind: 'worker-retained-resident-stage-output',
+      producerSourceTransport: 'worker-retained-resident-stage-output',
+      sourceStageId: 'schroederSameLevelMechanics',
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
   assert.equal(bridge.displayOwnerPresentedSphStep, 14);
-  assert.equal(bridge.displayOwnerContentFrameSerial, 2);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 3);
+  assert.deepEqual(bridge.displayOwnerLastRenderedContent, {
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+    renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    sphStep: 14,
+    particleCount: 1,
+    frameCount: 2,
+    readyFrameCount: 2,
+    displayOwnerEpoch: 9,
+    residentScheduleCandidatePresentation: true,
+    ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: 'worker-retained-resident-stage-output',
+    sourceStageId: 'schroederSameLevelMechanics',
+    retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+  });
+
+  // A page-side legacy draw may arrive after the newer worker candidate and
+  // be rejected as stale. That last status must not erase the exact positive
+  // content receipt or hide the pixels that remain on the canvas.
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-presentation-superseded-stale-step',
+      sphStep: 0,
+      lastPresentedSphStep: 14,
+      particleCount: 1,
+      frameCount: 2,
+      readyFrameCount: 2
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 14);
+  assert.equal(
+    bridge.displayOwnerLastRenderedContent.status,
+    'worker-offscreen-resident-particle-state-producer-rendered'
+  );
+
+  // Viewport refresh calls resize on every sample. An identical size must not
+  // clear the OffscreenCanvas or invalidate the durable worker frame.
+  const redundantResizeMessageCount = worker.messages.length;
+  const redundantResize = bridge.resize({
+    width: 64,
+    height: 64,
+    devicePixelRatio: 1,
+    reason: 'unit-identical-viewport-refresh'
+  });
+  assert.equal(redundantResize.workerResizeRequired, false);
+  assert.equal(worker.messages.length, redundantResizeMessageCount);
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerLastRenderedContent.sphStep, 14);
 
   const rejectedCas = bridge.setDisplayOwner({
     owner: 'main-native',
@@ -732,6 +1048,193 @@ test('worker offscreen bridge can request retained compact snapshot export', () 
   assert.equal(bridge.retainedCompactSnapshotStatus.readbackByteLength, 256);
 });
 
+test('worker offscreen compact snapshot stays private, rejects stale exports, and clears on dispose', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      this.listeners = [];
+      worker = this;
+    }
+
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (type === 'message') {
+        this.listeners = this.listeners.filter((entry) => entry !== listener);
+      }
+    }
+
+    emit(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+
+    terminate() {}
+  }
+
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() {
+      return { offscreen: true };
+    }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) {
+      child.parentNode = this;
+    },
+    removeChild(child) {
+      if (child.parentNode === this) child.parentNode = null;
+    },
+    ownerDocument: {
+      createElement(name) {
+        assert.equal(name, 'canvas');
+        return canvas;
+      }
+    }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    retainedGpuBufferHandoffRequested: false,
+    container,
+    width: 64,
+    height: 64,
+    devicePixelRatio: 1,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  const laneId = 'ulg:test:private-snapshot-lane';
+  const stateKey = 'ulg:test:private-snapshot-state';
+  const emitSnapshot = (cacheKey, step) => {
+    const compactBufferSnapshot = {
+      schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      status: 'compact-buffer-snapshot-exported-from-worker-retained-state',
+      laneId,
+      stateKey,
+      cacheKey,
+      sourceStageId: 'schroederSameLevelMechanics',
+      particleCount: 1,
+      step,
+      time: step * 0.001,
+      topologyEpoch: step,
+      sharedSlotIdentityVerified: true,
+      sphState: new Float32Array(8),
+      sphThermo: new Float32Array(12),
+      sphIdentity: new Uint32Array(4),
+      mlsMpmMechanics: new Float32Array(32)
+    };
+    worker.emit({
+      schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+      status: 'presentation-worker-retained-compact-snapshot-exported',
+      workerOffscreenRetainedCompactSnapshot: {
+        schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+        status: 'presentation-worker-retained-compact-snapshot-exported',
+        laneId,
+        stateKey,
+        cacheKey,
+        sourceStageId: 'schroederSameLevelMechanics',
+        portableSnapshotAvailable: true,
+        crossPeerReplayReady: true,
+        readbackByteLength: 224,
+        compactBufferSnapshot
+      }
+    });
+    return compactBufferSnapshot;
+  };
+  const requestSnapshot = (cacheKey) => bridge.exportRetainedCompactSnapshot({
+    laneId,
+    stateKey,
+    cacheKey,
+    sourceStageId: 'schroederSameLevelMechanics',
+    particleCount: 1,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    mechanicsStrideFloats: 32,
+    allowLocalMaterializationBypass: false
+  });
+
+  requestSnapshot('snapshot:a');
+  const snapshotA = emitSnapshot('snapshot:a', 4);
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.compactBufferSnapshot,
+    snapshotA
+  );
+  assert.ok(
+    bridge.retainedCompactSnapshotStatus.compactBufferSnapshot.sphState
+      instanceof Float32Array
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot.compactBufferSnapshot,
+    null
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot
+      .compactBufferSnapshotPayloadRetainedPrivately,
+    true
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot
+      .compactBufferSnapshotStep,
+    4
+  );
+
+  requestSnapshot('snapshot:b');
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.status,
+    'presentation-worker-retained-compact-snapshot-export-submit-posted'
+  );
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.compactBufferSnapshot,
+    undefined
+  );
+  emitSnapshot('snapshot:a', 4);
+  assert.equal(bridge.retainedCompactSnapshotRejectedStaleCount, 1);
+  assert.equal(bridge.retainedCompactSnapshotStatus.cacheKey, 'snapshot:b');
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.status,
+    'presentation-worker-retained-compact-snapshot-export-submit-posted'
+  );
+  assert.equal(
+    bridge.status.status,
+    'presentation-worker-retained-compact-snapshot-stale-response-rejected'
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot.compactBufferSnapshot,
+    null
+  );
+
+  const snapshotB = emitSnapshot('snapshot:b', 5);
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.compactBufferSnapshot,
+    snapshotB
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot.compactBufferSnapshot,
+    null
+  );
+  assert.equal(
+    bridge.status.workerOffscreenRetainedCompactSnapshot
+      .compactBufferSnapshotStep,
+    5
+  );
+
+  bridge.dispose();
+  assert.equal(bridge.retainedCompactSnapshotStatus, null);
+  assert.equal(bridge.retainedCompactSnapshotRequestIdentity, null);
+  assert.equal(bridge.status.workerOffscreenRetainedCompactSnapshot, null);
+});
+
 test('worker offscreen retained compact snapshot export bypasses mapAsync when local materialization is ready', () => {
   let worker = null;
   class FakeWorker {
@@ -965,6 +1468,9 @@ test('worker offscreen bridge arbitrates resident-schedule-candidate messages th
   });
   const candidate = (step, stepOrdinal = step) => ({
     schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    laneId: 'ulg:test:bridge-lane',
+    stateKey: 'ulg:test:bridge-state',
+    presentationLaneEpoch: 1,
     version: {
       residentExecutionGeneration: 7,
       nextStep: 100 + step,
@@ -1021,4 +1527,33 @@ test('worker offscreen bridge arbitrates resident-schedule-candidate messages th
   worker.emit({ type: 'resident-schedule-candidate', candidate: candidate(2) });
   assert.equal(bridge.residentRenderCandidateMailbox.peekLatest(), null);
   assert.equal(bridge.residentRenderCandidateMailbox.stats().droppedStaleCount, 2);
+
+  const nextLaneCandidate = {
+    ...candidate(1),
+    laneId: 'ulg:test:bridge-lane-next',
+    stateKey: 'ulg:test:bridge-state-next',
+    presentationLaneEpoch: 2,
+    version: {
+      ...candidate(1).version,
+      scheduleId: 'ulg:test:bridge-sched-next'
+    }
+  };
+  worker.emit({
+    type: 'resident-schedule-candidate',
+    candidate: nextLaneCandidate
+  });
+  assert.equal(
+    bridge.residentRenderCandidateMailbox.peekLatest().version.nextStep,
+    101,
+    'a newer presentation lane must accept a lower physics version'
+  );
+  worker.emit({
+    type: 'resident-schedule-candidate',
+    candidate: candidate(9)
+  });
+  assert.equal(
+    bridge.residentRenderCandidateMailbox.peekLatest().laneId,
+    'ulg:test:bridge-lane-next'
+  );
+  assert.equal(bridge.residentRenderCandidateRejectedCount, 3);
 });

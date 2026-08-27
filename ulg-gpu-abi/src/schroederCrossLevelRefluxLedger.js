@@ -502,7 +502,9 @@ export function deriveSchroederCrossLevelRefluxEnergyClosure({
   });
 }
 
-export function decodeSchroederCrossLevelRefluxEvidence(words) {
+function decodeSchroederCrossLevelRefluxEvidenceWords(words, {
+  requireRows
+}) {
   if (!(words instanceof Uint32Array)
     || words.length < SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS) {
     return null;
@@ -524,9 +526,10 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
       === new Int32Array(words.buffer, words.byteOffset, words.length)[77] + 1
     && Number.isFinite(f32(words, 79))
     && f32(words, 79) > 0
-    && SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
-      + words[3] * SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS
-      <= words.length;
+    && (!requireRows
+      || SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+        + words[3] * SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS
+        <= words.length);
   const statusAdmitted = structuralValid && words[2] === (
     SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY
     | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED
@@ -594,6 +597,7 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
     && words[119] === 1
     && words[120] === words[54]
     && words[121] === 1
+    && words[122] === 0
     && words[124] === UINT32_MAX
     && words[125] === 0
     && operatorSplitValid
@@ -745,6 +749,22 @@ export function decodeSchroederCrossLevelRefluxEvidence(words) {
       cumulativeExternalWorkJ: cumulativeAmbientExternalWorkJ,
       valid: ambientBoundaryValid
     })
+  });
+}
+
+export function decodeSchroederCrossLevelRefluxEvidence(words) {
+  return decodeSchroederCrossLevelRefluxEvidenceWords(words, {
+    requireRows: true
+  });
+}
+
+export function decodeSchroederCrossLevelRefluxTerminalHeader(words) {
+  if (!(words instanceof Uint32Array)
+      || words.length !== SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS) {
+    return null;
+  }
+  return decodeSchroederCrossLevelRefluxEvidenceWords(words, {
+    requireRows: false
   });
 }
 

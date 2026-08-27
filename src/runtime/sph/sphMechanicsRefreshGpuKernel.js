@@ -29,7 +29,8 @@ import {
 import {
   tagWebGpuBufferDevice,
   typedArrayContentFingerprint,
-  webGpuBufferDevice
+  webGpuBufferDevice,
+  webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
 import {
   appendGpuReadbackTelemetryObservation,
@@ -306,25 +307,70 @@ export function destroyMlsMpmMechanicsMaterialPhaseUpload(upload) {
   upload.destroyed = true;
 }
 
+export function diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
+  upload,
+  mechanicsMaterialTable,
+  device = null
+) {
+  const buffer = upload?.recordsBuffer || upload?.materialPhaseBuffer || null;
+  const sourceDevice = webGpuBufferDevice(buffer);
+  const tableFingerprint = typedArrayContentFingerprint(
+    mechanicsMaterialTable?.records
+  );
+  const diagnostics = {
+    schema:
+      'peercompute.ulg.mls-mpm-mechanics-material-phase-upload-match.v0',
+    statusUploaded: upload?.status === 'webgpu-uploaded',
+    notDestroyed: upload?.destroyed !== true,
+    bufferPresent: Boolean(buffer),
+    schemaMatch:
+      upload?.sourceMaterialTableSchema === mechanicsMaterialTable?.schema,
+    fingerprintMatch:
+      upload?.sourceMaterialTableContentFingerprint === tableFingerprint,
+    countMatch:
+      upload?.phaseRecordCount === mechanicsMaterialTable?.phaseRecordCount,
+    byteLengthMatch:
+      upload?.recordsByteLength === mechanicsMaterialTable?.records?.byteLength,
+    sameDevice: !device || sourceDevice === device,
+    uploadStatus: upload?.status ?? null,
+    uploadDestroyed: upload?.destroyed === true,
+    uploadSchema: upload?.sourceMaterialTableSchema ?? null,
+    tableSchema: mechanicsMaterialTable?.schema ?? null,
+    uploadFingerprint:
+      upload?.sourceMaterialTableContentFingerprint ?? null,
+    tableFingerprint,
+    uploadPhaseRecordCount: upload?.phaseRecordCount ?? null,
+    tablePhaseRecordCount: mechanicsMaterialTable?.phaseRecordCount ?? null,
+    uploadRecordsByteLength: upload?.recordsByteLength ?? null,
+    tableRecordsByteLength: mechanicsMaterialTable?.records?.byteLength ?? null,
+    sourceDeviceId: sourceDevice ? webGpuDeviceId(sourceDevice) : null,
+    consumerDeviceId: device ? webGpuDeviceId(device) : null
+  };
+  return Object.freeze({
+    ...diagnostics,
+    matches: Boolean(
+      diagnostics.statusUploaded
+      && diagnostics.notDestroyed
+      && diagnostics.bufferPresent
+      && diagnostics.schemaMatch
+      && diagnostics.fingerprintMatch
+      && diagnostics.countMatch
+      && diagnostics.byteLengthMatch
+      && diagnostics.sameDevice
+    )
+  });
+}
+
 export function uploadedMechanicsMaterialPhaseRecordsMatch(
   upload,
   mechanicsMaterialTable,
   device = null
 ) {
-  return Boolean(
-    upload?.status === 'webgpu-uploaded'
-    && upload.destroyed !== true
-    && (upload.recordsBuffer || upload.materialPhaseBuffer)
-    && upload.sourceMaterialTableSchema === mechanicsMaterialTable?.schema
-    && upload.sourceMaterialTableContentFingerprint === typedArrayContentFingerprint(
-      mechanicsMaterialTable?.records
-    )
-    && upload.phaseRecordCount === mechanicsMaterialTable?.phaseRecordCount
-    && upload.recordsByteLength === mechanicsMaterialTable?.records?.byteLength
-    && (!device || webGpuBufferDevice(
-      upload.recordsBuffer || upload.materialPhaseBuffer
-    ) === device)
-  );
+  return diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
+    upload,
+    mechanicsMaterialTable,
+    device
+  ).matches;
 }
 
 function createParamsArray({ particleCount, phaseRecordCount, materialBankWarmInputRowCount = 0 }) {

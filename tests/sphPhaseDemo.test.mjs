@@ -228,6 +228,42 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   assert.ok(minIronY >= maxIceY - 1e-9);
 });
 
+test('demo product reserve can provision one full live cohort without changing the default', () => {
+  const common = {
+    allowFixtureMaterialProperties: true,
+    adaptiveParticleSpacing: false,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    mechanics: 'mlsmpm'
+  };
+  const ordinary = buildSphPhaseDemoState(common);
+  const expanded = buildSphPhaseDemoState({
+    ...common,
+    reactionProductReserveMinimumLiveFraction: 1
+  });
+  const live = ordinary.counts.drop + ordinary.counts.base;
+
+  assert.equal(live, 152);
+  assert.equal(ordinary.counts.spareProductSlots, 38);
+  assert.equal(expanded.counts.spareProductSlots, live);
+  assert.equal(expanded.counts.phaseCompanionSlots, (live + live) * 3);
+  assert.equal(expanded.counts.total, (live + live) * 4);
+  assert.equal(expanded.reactionProductReservePlan.defaultSlotCount, 38);
+  assert.equal(expanded.reactionProductReservePlan.minimumSlotCount, live);
+  assert.equal(expanded.reactionProductReservePlan.slotCount, live);
+  assert.equal(
+    expanded.reactionProductReservePlan.requestedMinimumLiveFraction,
+    1
+  );
+  assert.throws(
+    () => buildSphPhaseDemoState({
+      ...common,
+      reactionProductReserveMinimumLiveFraction: 1.01
+    }),
+    /must be finite in \[0, 1\]/
+  );
+});
+
 test('demo initial particle spacing preserves requested edges and derives material-state diagnostics', () => {
   const demo = buildSphPhaseDemoState({
     dropParticleEdge: 3,

@@ -57,8 +57,7 @@ function candidateTypeError(reason) {
 }
 
 function finiteNumber(value) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 // Recursively freeze plain objects and arrays. ArrayBuffers and their views
@@ -207,6 +206,20 @@ export function createResidentRenderCandidateMailbox({
       latest = null;
       takenCount += 1;
       return taken;
+    },
+    reset({ resetCounters = false } = {}) {
+      latest = null;
+      latestVersion = null;
+      if (resetCounters === true) {
+        publishedCount = 0;
+        droppedStaleCount = 0;
+        takenCount = 0;
+        onCandidateErrorCount = 0;
+      }
+      return Object.freeze({
+        status: 'resident-render-candidate-mailbox-reset',
+        resetCounters: resetCounters === true
+      });
     },
     stats() {
       return Object.freeze({

@@ -8,6 +8,7 @@
       "path_patterns": [
         "src/runtime/peercomputeBrowserResidentHost.js",
         "src/runtime/sphPhaseDemo.js",
+        "src/visualization/offscreenPresentationBridge.js",
         "src/visualization/sphPhaseScene.js",
         "src/visualization/sphPhaseDemoMount.js",
         "src/runtime/sph/sphRenderGpuKernel.js",
@@ -15,6 +16,7 @@
         "src/runtime/sph/sphMlsMpmGpuStep.js",
         "src/runtime/sph/sphThermalGpuKernel.js",
         "src/services/ulgMechanicsResidentStage.worker.js",
+        "src/services/ulgOffscreenRender.worker.js",
         "ulg-gpu-abi/src/wgsl.js",
         "ulg-gpu-abi/src/index.js",
         "tests/demo.e2e.mjs",
@@ -98,6 +100,7 @@
     },
     {
       "path_patterns": [
+        "scripts/sph-visual-animation-liveness-receipt.mjs",
         "scripts/ss-physical-pixel-mobile-liveness-receipt.mjs",
         "scripts/ss-standard-visual-matrix-receipt.mjs",
         "scripts/stage6-interactive-presentation-receipt.mjs"

@@ -133,6 +133,35 @@ test('resident commit bridge rejects deferred cleanup mislabeled as a satisfied 
   assert.ok(admission.issues.includes('gpu-fence-status-not-completed'));
 });
 
+test('resident commit bridge admits retained same-device queue ordering evidence', () => {
+  const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
+  delta.payload.gpuFence.status = 'same-device-queue-ordering-established';
+  delta.payload.gpuFence.method = 'same-device-queue-submit-order';
+  delta.payload.gpuFence.queueFencePolicy =
+    'same-device-queue-ordering-before-admission';
+
+  const admission = validateResidentStepsCommitDelta(delta);
+
+  assert.equal(admission.accepted, true);
+  assert.equal(admission.gpuFenceSatisfied, true);
+  assert.equal(
+    admission.gpuFenceStatus,
+    'same-device-queue-ordering-established'
+  );
+});
+
+test('resident commit bridge rejects same-device queue ordering with a mismatched method', () => {
+  const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
+  delta.payload.gpuFence.status = 'same-device-queue-ordering-established';
+  delta.payload.gpuFence.method = 'resident-step-retained-webgpu-chain';
+
+  const admission = validateResidentStepsCommitDelta(delta);
+
+  assert.equal(admission.accepted, false);
+  assert.equal(admission.reason, 'gpu-fence-completion-method-invalid');
+  assert.ok(admission.issues.includes('gpu-fence-completion-method-invalid'));
+});
+
 test('resident commit bridge rejects a completed status without the completion method', () => {
   const delta = residentDeltaWithSchroederAdoptedStorageDescriptor();
   delta.payload.gpuFence.method = 'resident-step-retained-webgpu-chain';

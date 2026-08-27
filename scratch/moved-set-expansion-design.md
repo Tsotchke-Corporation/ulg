@@ -409,3 +409,26 @@ buffers or rely on submit(buffers) identity), or an exception path
 swallowed by the fall-through. Debug worker-side with the page console
 captured (preset-rate-probe-shot pattern) before re-attempting; keep
 the counts-only census meanwhile (it is validated and fast).
+
+## Addendum (2026-08-27, commits d52e6cb + 2779f12): the wall was the GPU process, not the GPU
+
+Chromium spends ~0.25 ms of GPU-process main-thread CPU validating every
+`dispatchWorkgroupsIndirect` (73x a direct dispatch — `scratch/indirect-cost-probe.mjs`).
+The step issued 138; the GPU process saturated while the silicon idled at
+collapsed clocks. Converting the GpuCount radix paths to element-guarded
+direct-ceiling dispatches (parent-offset adds and 2D-folded shapes stay
+indirect) removed 105 of them: budget-16 went 20.3 → 37.2 steps/s and the
+terminal tail 1.25 s → 0.5 s, bit-identical. A fenced 4-byte live-count
+observation at each schedule tail re-tightens the product-history bound
+(emitted "counts" are the 2,432-row per-step capacity; the true live count
+is zero for sodium-water), keeping the gas-EOS/spatial-epoch sort capacity
+ramping 4096→131072 instead of pinned at 262144.
+
+Sustained 150 s menu: 16 → 38.7 (flat over 4,480 steps), 32 → 34.3,
+**48+K2 → 32.1 (best ≥30-quality config)**, 48 → 30.6, 64+K2 → 28.0,
+96 → 22.4, default 512+K2 → ~23 early degrading to ~7 after ~450 steps.
+The late decay is physics (contact growth saturating the owner budget) —
+default-quality 30 fps needs the Jacobi-wide owner solver redesign.
+~33 indirect dispatches/step remain outside the radix module (grid-update
+×7, epoch/phase-volume/EOS singles) — same conversion pattern per site,
+each needs its kernel's element-guard verified.

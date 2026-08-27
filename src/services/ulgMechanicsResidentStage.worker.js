@@ -4401,6 +4401,18 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
         : 'schroeder-active-node-particles',
       selectedLevel,
       mechanicsGrid,
+      // Bound the directory sort key domain to the mechanics grid, exactly as
+      // the hierarchy-owned refresh epochs do (schroederHierarchyGpu.js
+      // exactCellAtlas). Without a bounded atlas the significant-digit-row
+      // pruner keeps all 24 cell nibble rows, so this worker-prebuilt E0 pays
+      // 25 radix passes per step while its successor refresh epochs pay 7.
+      // The atlas is enforced fail-closed in key emission: a particle outside
+      // the grid becomes a rejected row with evidence — the same admission the
+      // successor epochs already apply every step to the same particle set.
+      exactCellAtlas: {
+        cellMin: [0, 0, 0],
+        cellCount: [...mechanicsGrid.gridDims]
+      },
       ...(coarseGridSpec
         ? {
             mechanicsLevels: [

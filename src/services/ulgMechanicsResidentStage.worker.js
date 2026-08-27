@@ -7070,7 +7070,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         storageGeneration: currentStepSeal.storageGeneration ?? null,
         physicsTick: currentStepSeal.physicsTick ?? null,
         positionEpoch: currentStepSeal.positionEpoch ?? null,
-        mechanicsStatus: mechanicsStageResult.value?.status ?? null
+        mechanicsStatus: mechanicsStageResult.value?.status ?? null,
+        stepStartedAtMs,
+        stepElapsedMs: lastStepSummary.stepElapsedMs,
+        epochStageElapsedMs,
+        mechanicsStageElapsedMs
       });
       if (
         stepSummaryRing.length

@@ -161,7 +161,7 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT = 128;
 export const ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS = 16;
 // Terminal schedule results keep the LAST step's full summary plus a compact
 // fixed-capacity per-step ring so envelopes stay bounded for any stepCount.
-export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY = 32;
+export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY = 64;
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -6639,6 +6639,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let lastMechanicsStageResult = null;
     let lastStepSummary = null;
     const stepSummaryRing = [];
+    // Worker-clock schedule phase stamps for inter-cycle diagnosis: the gap
+    // between one schedule's result assembly and the next schedule's first
+    // step start is main-thread turnaround (commit, verify, re-request).
+    let scheduleFirstStepStartedAtMs = null;
+    let scheduleLastStepEndedAtMs = null;
     // Lagged-drain state: the queue fence started at the previous drain
     // checkpoint (see the checkpoint block below). Seeded immediately so the
     // first checkpoint awaits a real fence (covering lane seed uploads)
@@ -6743,6 +6748,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         let mechanicsStageResult = null;
         let mechanicsStageStarted = false;
         const stepStartedAtMs = workerResidentScheduleNowMs();
+        if (scheduleFirstStepStartedAtMs == null) {
+          scheduleFirstStepStartedAtMs = stepStartedAtMs;
+        }
         let epochStageElapsedMs = null;
         let mechanicsStageElapsedMs = null;
         try {
@@ -7194,6 +7202,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         epochQueueTimeline:
           epochStageResult.value?.epochQueueTimeline ?? null
       });
+      scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       if (
         stepSummaryRing.length
           > ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY
@@ -7309,6 +7318,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           terminalRefluxRingBuffer,
           terminalRefluxExpectations
         });
+    const tailTerminalFenceDoneAtMs = workerResidentScheduleNowMs();
     if (scheduleLoopError) {
       const terminalReceiptLoopFailure =
         scheduleLoopError.residentScheduleError?.reason
@@ -7547,6 +7557,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       requestedStepCount: stepCount,
       completedStepCount,
       cancelled,
+      // Worker-clock phase stamps (see declaration): consecutive schedule
+      // results on one lane share this clock, so the inter-schedule
+      // turnaround is directly computable from them.
+      scheduleFirstStepStartedAtMs,
+      scheduleLastStepEndedAtMs,
+      tailTerminalFenceDoneAtMs,
+      resultAssembledAtMs: workerResidentScheduleNowMs(),
       progressEverySteps,
       queueDrainIntervalSteps:
         ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS,

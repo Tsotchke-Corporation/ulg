@@ -52927,6 +52927,14 @@ fn main(
         requestedStepCount: result.requestedStepCount ?? null,
         completedStepCount: result.completedStepCount ?? null,
         cancelled: result.cancelled === true,
+        // Worker-clock schedule phase stamps (inter-schedule turnaround
+        // diagnosis; same clock across a lane's consecutive results).
+        scheduleFirstStepStartedAtMs:
+          result.scheduleFirstStepStartedAtMs ?? null,
+        scheduleLastStepEndedAtMs:
+          result.scheduleLastStepEndedAtMs ?? null,
+        tailTerminalFenceDoneAtMs: result.tailTerminalFenceDoneAtMs ?? null,
+        resultAssembledAtMs: result.resultAssembledAtMs ?? null,
         progressEverySteps: result.progressEverySteps ?? null,
         finalEpochIdentity: result.finalEpochIdentity ?? null,
         finalEpochSeal: result.finalEpochSeal ?? null,

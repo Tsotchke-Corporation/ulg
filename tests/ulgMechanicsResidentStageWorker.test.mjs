@@ -18,6 +18,7 @@ import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT,
   ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS,
+  ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY,
   ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
@@ -5426,28 +5427,46 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
 
   const { result: exact } = await run({
     laneSuffix: 'two-level-evidence-exact',
-    stepCount: 33
+    stepCount: ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
   });
-  assert.equal(exact.perStepSummaries.ring.length, 32);
+  assert.equal(
+    exact.perStepSummaries.ring.length,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY
+  );
   assert.equal(exact.perStepSummaries.droppedStepCount, 1);
   const exactEvidence = exact.perStepSummaries.twoLevelMechanics;
   assert.equal(
     exactEvidence.schema,
     'peercompute.ulg.worker-resident-schedule-two-level-mechanics-evidence.v0'
   );
-  assert.equal(exactEvidence.observedStepCount, 33);
-  assert.equal(exactEvidence.exactAuthoritativeStepCount, 33);
+  assert.equal(
+    exactEvidence.observedStepCount,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
+  );
+  assert.equal(
+    exactEvidence.exactAuthoritativeStepCount,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
+  );
   assert.equal(exactEvidence.cflFactorEvidenceRequired, true);
   assert.equal(exactEvidence.cflFactorRequested, 0.8);
-  assert.equal(exactEvidence.cflFactorObservedStepCount, 33);
-  assert.equal(exactEvidence.exactCflFactorCount, 33);
+  assert.equal(
+    exactEvidence.cflFactorObservedStepCount,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
+  );
+  assert.equal(
+    exactEvidence.exactCflFactorCount,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
+  );
   assert.equal(exactEvidence.firstCflFactorMismatchStepOrdinal, null);
   assert.equal(exactEvidence.lastCflFactor, 0.8);
   assert.equal(exactEvidence.lastStep.twoLevelCflFactor, 0.8);
   assert.equal(exactEvidence.coverageComplete, true);
   assert.equal(exactEvidence.firstIncompleteStepOrdinal, null);
   assert.equal(exactEvidence.terminalRefluxReceiptRequired, true);
-  assert.equal(exactEvidence.terminalRefluxAdmittedStepCount, 33);
+  assert.equal(
+    exactEvidence.terminalRefluxAdmittedStepCount,
+    ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1
+  );
   assert.equal(
     exactEvidence.terminalRefluxReceipt.status,
     'terminal-reflux-schedule-receipt-admitted'

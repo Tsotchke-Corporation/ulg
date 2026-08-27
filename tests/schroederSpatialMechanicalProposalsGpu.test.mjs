@@ -3963,20 +3963,30 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     schroederSpatialMechanicalGraphSolverWgsl,
     /let frozen_pair = mechanical_matching_constraint_pair\([\s\S]*frozen_pair\.active_pair != 0u[\s\S]*atomicOr\([\s\S]*ACTIVE_FLAG_BASE \+ peer_index/
   );
-  // Expansion's pair evaluation lives in the shared per-member function so
-  // the full-scan and moved-set modes admit identically; both modes must
-  // call it between the expansion gate and the execute gate.
+  // Expansion's pair evaluation lives in the shared cursor-strided function
+  // so the full-scan and moved-set modes admit identically; the full scan
+  // uses the whole-row wrapper (member-per-lane, preserving same-pass
+  // cascade order) while the moved-set mode spreads each mover's row over a
+  // lane group. Both must run between the expansion gate and the execute
+  // gate.
   assert.match(
-    wgslFunctionSource('mechanical_matching_owner_expand_member'),
+    wgslFunctionSource('mechanical_matching_owner_expand_member_strided'),
     /mechanical_matching_constraint_pair\([\s\S]*pair\.active_pair != 0u && pair\.unilateral != 0u/
   );
+  const expansionGateSource = schroederSpatialMechanicalGraphSolverWgsl.slice(
+    schroederSpatialMechanicalGraphSolverWgsl.indexOf('let expand_frontier ='),
+    schroederSpatialMechanicalGraphSolverWgsl.indexOf('let execute_pass =')
+  );
   assert.equal(
-    (schroederSpatialMechanicalGraphSolverWgsl.slice(
-      schroederSpatialMechanicalGraphSolverWgsl.indexOf('let expand_frontier ='),
-      schroederSpatialMechanicalGraphSolverWgsl.indexOf('let execute_pass =')
-    ).match(/mechanical_matching_owner_expand_member\(/g) || []).length,
-    2,
-    'both expansion modes must run the shared per-member dormant scan'
+    (expansionGateSource
+      .match(/mechanical_matching_owner_expand_member\(/g) || []).length,
+    1,
+    'the full-sweep mode runs the whole-row per-member dormant scan'
+  );
+  assert.match(
+    expansionGateSource,
+    /mechanical_matching_owner_expand_member_strided\(\s*moved_index,\s*published_total,\s*lane % 8u,\s*8u\s*\)/,
+    'the moved-set mode spreads each mover row across an eight-lane group'
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
@@ -4031,7 +4041,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     'owner must snapshot the maintained counters before and after expansion'
   );
   assert.equal(
-    (wgslFunctionSource('mechanical_matching_owner_expand_member')
+    (wgslFunctionSource('mechanical_matching_owner_expand_member_strided')
       .match(/mechanical_matching_owner_note_admission\(/g) || [])
       .length,
     2,
@@ -4124,11 +4134,11 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     /select_matching_cleanup_edge_for_index\(self_index, false\);/
   );
   assert.match(
-    wgslFunctionSource('mechanical_matching_owner_expand_member'),
+    wgslFunctionSource('mechanical_matching_owner_expand_member_strided'),
     /if \(mechanical_matching_edge_ever_active\(encoded_peer\)\) \{[\s\S]*continue;[\s\S]*mechanical_matching_constraint_pair/
   );
   assert.match(
-    wgslFunctionSource('mechanical_matching_owner_expand_member'),
+    wgslFunctionSource('mechanical_matching_owner_expand_member_strided'),
     /peer_prior_flags[\s\S]*MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT/
   );
   assert.match(

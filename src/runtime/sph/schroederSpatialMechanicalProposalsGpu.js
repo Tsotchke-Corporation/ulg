@@ -16394,6 +16394,30 @@ fn mechanical_matching_owner_expand_member(
   self_index: u32,
   published_total: u32
 ) {
+  mechanical_matching_owner_expand_member_strided(
+    self_index,
+    published_total,
+    0u,
+    1u
+  );
+}
+
+// Cursor-strided form: a fixed group of lanes shares one member's row, each
+// lane evaluating every cursor_stride-th cursor from its offset. Admissions
+// are order-independent (idempotent flag ORs, commutative counter adds, and
+// the note_admission transition fires on the unique lane whose atomicOr
+// flipped the bit), and every per-pass phase iterates its list order-free,
+// so the strided scan admits the identical set with identical effects --
+// it only changes which lane performs each evaluation. The moved-set
+// incremental loop uses this to spread ~a dozen movers' serial row scans
+// (measured ~0.19 ms of the ~0.40 ms logical pass, latency-bound on as
+// many lanes as there are movers) across the full workgroup.
+fn mechanical_matching_owner_expand_member_strided(
+  self_index: u32,
+  published_total: u32,
+  cursor_offset: u32,
+  cursor_stride: u32
+) {
   let begin = source_offsets[self_index];
   let end = source_offsets[self_index + 1u];
   if (
@@ -16409,7 +16433,11 @@ fn mechanical_matching_owner_expand_member(
     );
     return;
   }
-  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+  for (
+    var cursor = begin + cursor_offset;
+    cursor < end;
+    cursor = cursor + cursor_stride
+  ) {
     let encoded_peer = csr_peers[cursor];
     let peer_index = mechanical_solver_peer_index(encoded_peer);
     if (peer_index >= mechanical_params.particle_count) {
@@ -16693,10 +16721,17 @@ fn run_matching_cleanup_global_owner(
           );
         }
       } else {
+        // Eight lanes share each mover's row, cursor-strided: the typical
+        // pass has ~a dozen movers with ~30-cursor rows, so member-per-lane
+        // left >100 lanes idle while each busy lane walked its whole row
+        // serially (latency-bound, measured ~0.19 ms of the ~0.40 ms pass).
+        // The strided scan admits the identical set (see the strided
+        // expander's comment); duplicate per-mover flag loads across a
+        // group are idempotent reads.
         for (
-          var moved_slot = lane;
+          var moved_slot = lane / 8u;
           moved_slot < moved_prev_count;
-          moved_slot = moved_slot + 128u
+          moved_slot = moved_slot + 16u
         ) {
           var moved_index = 0u;
           if (mechanical_matching_owner_moved_phase == 0u) {
@@ -16715,9 +16750,11 @@ fn run_matching_cleanup_global_owner(
           if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
             continue;
           }
-          mechanical_matching_owner_expand_member(
+          mechanical_matching_owner_expand_member_strided(
             moved_index,
-            published_total
+            published_total,
+            lane % 8u,
+            8u
           );
         }
       }

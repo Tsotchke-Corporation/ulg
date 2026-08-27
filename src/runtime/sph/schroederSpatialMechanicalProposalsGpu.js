@@ -5865,6 +5865,10 @@ const MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS}u;
 const MECHANICAL_MATCHING_OWNER_FRONTIER_BIT: u32 = 0x00000001u;
 const MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT: u32 = 0x00000002u;
+// Set when a particle's state changed since its last wall evaluation; the
+// wall phase claims (clears) it exactly once, so duplicate mover-list
+// entries can never double-project a member within one logical pass.
+const MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT: u32 = 0x00000004u;
 const MECHANICAL_MATCHING_OWNER_CONTACT_BIT: u32 = 0x80000000u;
 
 fn mechanical_solver_full_path_enabled() -> bool {
@@ -16059,8 +16063,18 @@ var<workgroup> mechanical_matching_owner_moved_count_a: atomic<u32>;
 var<workgroup> mechanical_matching_owner_moved_count_b: atomic<u32>;
 var<workgroup> mechanical_matching_owner_moved_phase: u32;
 var<workgroup> mechanical_matching_owner_moved_prev_valid: u32;
+var<workgroup> mechanical_matching_owner_wall_pending_count: atomic<u32>;
 
 fn mechanical_matching_owner_record_mover(moved_index: u32) {
+  let pending_prior = atomicOr(
+    &matching_cleanup_dispatch[
+      MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + moved_index
+    ],
+    MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
+  );
+  if ((pending_prior & MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT) == 0u) {
+    atomicAdd(&mechanical_matching_owner_wall_pending_count, 1u);
+  }
   if (mechanical_matching_owner_moved_phase == 0u) {
     let slot = atomicAdd(&mechanical_matching_owner_moved_count_a, 1u);
     if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
@@ -16114,6 +16128,7 @@ fn mechanical_matching_owner_frontier_counts(
       if (
         (flags & ~(MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
           | MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+          | MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
           | MECHANICAL_MATCHING_OWNER_CONTACT_BIT)) != 0u
         || (contact_active && !frontier_active)
       ) {
@@ -16222,6 +16237,7 @@ fn mechanical_matching_owner_seed_frontier(
       if (
         (flags & ~(MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
           | MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+          | MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
           | MECHANICAL_MATCHING_OWNER_CONTACT_BIT)) != 0u
         || (contact_active && !frontier_active)
       ) {
@@ -16600,6 +16616,23 @@ fn run_matching_cleanup_global_owner(
     // dormant face. Scan those rows before selection and admit both endpoints
     // in the same logical pass. Two unflagged endpoints never move, so their
     // dormant constraint cannot become active behind this frontier.
+    // Full-sweep vs incremental pass selection, shared by the expansion and
+    // wall phases. Plain reads: these words are written only by lane 0
+    // between the pass barriers, so their values are workgroup-uniform here
+    // without a control barrier (which would be illegal in conditional
+    // flow).
+    var owner_moved_prev_count = 0u;
+    if (mechanical_matching_owner_moved_phase == 0u) {
+      owner_moved_prev_count =
+        atomicLoad(&mechanical_matching_owner_moved_count_b);
+    } else {
+      owner_moved_prev_count =
+        atomicLoad(&mechanical_matching_owner_moved_count_a);
+    }
+    let owner_full_sweep_pass =
+      mechanical_matching_owner_moved_prev_valid == 0u
+      || owner_moved_prev_count > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u;
+
     if (expand_frontier) {
       let published_total = atomicLoad(&graph_control[12u]);
       // Moved-set incremental expansion: a dormant pair's activity decision
@@ -16612,22 +16645,8 @@ fn run_matching_cleanup_global_owner(
       // admissions still occur through the mover set exactly when the
       // enabling movement happened, which is the same pass the full scan
       // first evaluates them with changed inputs.
-      // Plain read: the flag is written only by lane 0 between the pass
-      // barriers, so its value is workgroup-uniform here without a control
-      // barrier (which would be illegal inside this conditional).
-      let moved_prev_ready = mechanical_matching_owner_moved_prev_valid;
-      var moved_prev_count = 0u;
-      if (mechanical_matching_owner_moved_phase == 0u) {
-        moved_prev_count =
-          atomicLoad(&mechanical_matching_owner_moved_count_b);
-      } else {
-        moved_prev_count =
-          atomicLoad(&mechanical_matching_owner_moved_count_a);
-      }
-      if (
-        moved_prev_ready == 0u
-        || moved_prev_count > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
-      ) {
+      let moved_prev_count = owner_moved_prev_count;
+      if (owner_full_sweep_pass) {
         for (
           var self_index = lane;
           self_index < mechanical_params.particle_count;
@@ -16800,19 +16819,29 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (lane == 0u && execute_pass) {
+      // Pass 0 must re-baseline output from the Jacobi-final input (the
+      // solver iterations ping-pong the buffers before cleanup). From pass 1
+      // on, the propagate phase leaves input_state == output_state for every
+      // frontier member at each pass end, so the re-baseline is a
+      // value-identical no-op: store the completeness proof directly and
+      // skip the traversal. The standalone per-pass pipeline path keeps the
+      // explicit copy dispatch on every pass.
+      var copy_workset_count = 0u;
+      if (mechanical_matching_persistent_pass == 0u) {
+        copy_workset_count = mechanical_matching_persistent_active_count;
+      }
       atomicStore(
         &traversal_evidence[
           mechanical_matching_copy_count_word(
             mechanical_matching_persistent_pass
           )
         ],
-        mechanical_params.particle_count
-          - mechanical_matching_persistent_active_count
+        mechanical_params.particle_count - copy_workset_count
       );
     }
     storageBarrier();
 
-    if (execute_pass) {
+    if (execute_pass && mechanical_matching_persistent_pass == 0u) {
       let owner_list_total = min(
         atomicLoad(&mechanical_matching_owner_list_count),
         ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
@@ -16833,6 +16862,8 @@ fn run_matching_cleanup_global_owner(
         }
       }
     }
+    storageBarrier();
+
     storageBarrier();
 
     if (lane == 0u && execute_pass) {
@@ -16872,61 +16903,172 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (lane == 0u && execute_pass) {
+      // Full-sweep passes wall-project every frontier member (completeness
+      // complement = N - frontier). Incremental passes project exactly the
+      // wall-pending claims (complement = N - pending): a member's wall
+      // outcome is a pure function of its own output state, so a member
+      // whose state did not change since its last projection re-derives
+      // bit-identical writes and is exactly skippable.
+      var wall_workset_count = mechanical_matching_persistent_active_count;
+      if (!owner_full_sweep_pass) {
+        wall_workset_count =
+          atomicLoad(&mechanical_matching_owner_wall_pending_count);
+      }
       atomicStore(
         &traversal_evidence[
           mechanical_matching_wall_count_word(
             mechanical_matching_persistent_pass
           )
         ],
-        mechanical_params.particle_count
-          - mechanical_matching_persistent_active_count
+        mechanical_params.particle_count - wall_workset_count
       );
     }
     storageBarrier();
 
     if (execute_pass) {
-      let owner_list_total = min(
-        atomicLoad(&mechanical_matching_owner_list_count),
-        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
-      );
-      for (
-        var list_slot = lane;
-        list_slot < owner_list_total;
-        list_slot = list_slot + 128u
-      ) {
-        let self_index = mechanical_matching_owner_list[list_slot];
-        let flags = atomicLoad(
-          &matching_cleanup_dispatch[
-            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-          ]
+      if (owner_full_sweep_pass) {
+        let owner_list_total = min(
+          atomicLoad(&mechanical_matching_owner_list_count),
+          ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
         );
-        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
-          project_matching_cleanup_walls_for_index(self_index);
+        for (
+          var list_slot = lane;
+          list_slot < owner_list_total;
+          list_slot = list_slot + 128u
+        ) {
+          let self_index = mechanical_matching_owner_list[list_slot];
+          let prior_flags = atomicAnd(
+            &matching_cleanup_dispatch[
+              MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+            ],
+            ~MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
+          );
+          if (
+            (prior_flags & MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT) != 0u
+          ) {
+            atomicSub(&mechanical_matching_owner_wall_pending_count, 1u);
+          }
+          if ((prior_flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+            project_matching_cleanup_walls_for_index(self_index);
+          }
+        }
+      } else {
+        // Incremental wall: exactly the pending claims. Every pending member
+        // is present in the previous or current mover list (record_mover
+        // appends where it sets the bit; a fresh dispatch full-sweeps), and
+        // the atomicAnd claim admits each member once even when it appears
+        // in both lists.
+        var wall_prev_total = 0u;
+        if (mechanical_matching_owner_moved_phase == 0u) {
+          wall_prev_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_b);
+        } else {
+          wall_prev_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_a);
+        }
+        wall_prev_total = min(wall_prev_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        var wall_cur_total = 0u;
+        if (mechanical_matching_owner_moved_phase == 0u) {
+          wall_cur_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_a);
+        } else {
+          wall_cur_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_b);
+        }
+        wall_cur_total = min(wall_cur_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        for (
+          var wall_slot = lane;
+          wall_slot < wall_prev_total + wall_cur_total;
+          wall_slot = wall_slot + 128u
+        ) {
+          var wall_index = 0u;
+          if (wall_slot < wall_prev_total) {
+            if (mechanical_matching_owner_moved_phase == 0u) {
+              wall_index = mechanical_matching_owner_moved_b[wall_slot];
+            } else {
+              wall_index = mechanical_matching_owner_moved_a[wall_slot];
+            }
+          } else {
+            let cur_slot = wall_slot - wall_prev_total;
+            if (mechanical_matching_owner_moved_phase == 0u) {
+              wall_index = mechanical_matching_owner_moved_a[cur_slot];
+            } else {
+              wall_index = mechanical_matching_owner_moved_b[cur_slot];
+            }
+          }
+          if (wall_index >= mechanical_params.particle_count) {
+            continue;
+          }
+          let prior_flags = atomicAnd(
+            &matching_cleanup_dispatch[
+              MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + wall_index
+            ],
+            ~MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
+          );
+          if (
+            (prior_flags & MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT) == 0u
+          ) {
+            continue;
+          }
+          atomicSub(&mechanical_matching_owner_wall_pending_count, 1u);
+          if ((prior_flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+            project_matching_cleanup_walls_for_index(wall_index);
+          }
         }
       }
     }
     storageBarrier();
 
     if (execute_pass) {
-      let owner_list_total = min(
-        atomicLoad(&mechanical_matching_owner_list_count),
-        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
-      );
-      for (
-        var list_slot = lane;
-        list_slot < owner_list_total;
-        list_slot = list_slot + 128u
-      ) {
-        let self_index = mechanical_matching_owner_list[list_slot];
-        let flags = atomicLoad(
-          &matching_cleanup_dispatch[
-            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-          ]
+      if (owner_full_sweep_pass) {
+        let owner_list_total = min(
+          atomicLoad(&mechanical_matching_owner_list_count),
+          ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
         );
-        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
+        for (
+          var list_slot = lane;
+          list_slot < owner_list_total;
+          list_slot = list_slot + 128u
+        ) {
+          let self_index = mechanical_matching_owner_list[list_slot];
           input_state[self_index * 2u] = output_state[self_index * 2u];
           input_state[self_index * 2u + 1u] =
             output_state[self_index * 2u + 1u];
+        }
+      } else {
+        // Only members whose output changed this pass (apply members plus
+        // wall changes, i.e. exactly the current mover list) need the
+        // output -> input propagate; everyone else is already equal.
+        // Duplicate entries are harmless value-identical copies.
+        var propagate_total = 0u;
+        if (mechanical_matching_owner_moved_phase == 0u) {
+          propagate_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_a);
+        } else {
+          propagate_total =
+            atomicLoad(&mechanical_matching_owner_moved_count_b);
+        }
+        propagate_total = min(propagate_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        for (
+          var propagate_slot = lane;
+          propagate_slot < propagate_total;
+          propagate_slot = propagate_slot + 128u
+        ) {
+          var propagate_index = 0u;
+          if (mechanical_matching_owner_moved_phase == 0u) {
+            propagate_index =
+              mechanical_matching_owner_moved_a[propagate_slot];
+          } else {
+            propagate_index =
+              mechanical_matching_owner_moved_b[propagate_slot];
+          }
+          if (propagate_index >= mechanical_params.particle_count) {
+            continue;
+          }
+          input_state[propagate_index * 2u] =
+            output_state[propagate_index * 2u];
+          input_state[propagate_index * 2u + 1u] =
+            output_state[propagate_index * 2u + 1u];
         }
       }
     }

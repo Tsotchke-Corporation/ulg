@@ -3942,7 +3942,9 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     (schroederSpatialMechanicalGraphSolverWgsl.match(
       /input_state\[[^\]]+\]\s*=/g
     ) || []).length,
-    2
+    // The owner's propagate phase has a full-sweep pair and an incremental
+    // (current-movers) pair; both live inside the owner entry point.
+    4
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
@@ -4044,11 +4046,31 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   // The order-free phases iterate the compacted frontier list; the
   // dormant-discovery expansion keeps its deterministic full particle scan.
+  // Selection and apply iterate the compacted frontier list; wall and
+  // propagate use it on full-sweep passes and the mover lists otherwise;
+  // the input->output copy phase is proven redundant in the owner (the
+  // completeness proof is stored directly).
   assert.equal(
     (ownerSource.match(/mechanical_matching_owner_list\[list_slot\]/g) || [])
       .length,
     5,
-    'selection/copy/apply/wall/propagate must iterate the compacted list'
+    'selection/apply/pass-0-copy plus full-sweep wall/propagate iterate the compacted list'
+  );
+  assert.match(
+    ownerSource,
+    /execute_pass && mechanical_matching_persistent_pass == 0u[\s\S]{0,900}copy_matching_cleanup_state_for_index\(/,
+    'the owner re-baselines output from the Jacobi-final input on pass 0 only'
+  );
+  assert.equal(
+    (ownerSource.match(/copy_matching_cleanup_state_for_index\(/g) || [])
+      .length,
+    1,
+    'later passes skip the value-identical state copy'
+  );
+  assert.match(
+    ownerSource,
+    /MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT[\s\S]*atomicSub\(&mechanical_matching_owner_wall_pending_count, 1u\)/,
+    'incremental wall must claim pending members exactly once'
   );
   assert.match(
     ownerSource,

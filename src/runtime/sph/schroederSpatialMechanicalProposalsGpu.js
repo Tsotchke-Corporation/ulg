@@ -143,6 +143,15 @@ export const
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES =
     1024;
+// Mover-list capacity for moved-set incremental expansion. Movers per pass
+// are bounded by applied pairs (few) plus wall changes; overflow forces the
+// next pass to a complete frontier sweep, which is bit-identical to the
+// incremental pass by the moved-set soundness argument, so this cap trades
+// workgroup memory against full-sweep frequency, never correctness. 512
+// frees 4 KB of the 16 KB baseline workgroup budget for the selection
+// reduction scratch below.
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY = 512;
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS =
     131072;
@@ -13099,18 +13108,106 @@ fn mechanical_matching_preflight(pass_index: u32) -> bool {
   return true;
 }
 
-fn select_matching_cleanup_edge_for_index(
+struct MechanicalMatchingSelectionScan {
+  best_peer: u32,
+  best_rank: u32,
+  best_cursor: u32,
+  best_low_high: u32,
+  best_priority: f32,
+  best_face_alignment: f32,
+  reserved_peer: u32,
+  reserved_rank: u32,
+  reserved_cursor: u32,
+  reserved_low_high: u32,
+  reserved_priority: f32,
+  reserved_face_alignment: f32,
+  row_max_position_ratio: f32,
+  row_max_velocity_residual_m_per_s: f32,
+};
+
+fn mechanical_matching_selection_empty_scan() ->
+  MechanicalMatchingSelectionScan {
+  var scan: MechanicalMatchingSelectionScan;
+  scan.best_peer = 0xffffffffu;
+  scan.best_rank = 0xffffffffu;
+  scan.best_cursor = 0xffffffffu;
+  scan.best_low_high = 0xffffffffu;
+  scan.best_priority = 0.0;
+  scan.best_face_alignment = 0.0;
+  scan.reserved_peer = 0xffffffffu;
+  scan.reserved_rank = 0xffffffffu;
+  scan.reserved_cursor = 0xffffffffu;
+  scan.reserved_low_high = 0xffffffffu;
+  scan.reserved_priority = -1.0;
+  scan.reserved_face_alignment = 0.0;
+  scan.row_max_position_ratio = 0.0;
+  // A negative sentinel marks a failed scan: real row maxima are always
+  // >= 0, and the epilogue is skipped for failed members exactly as the
+  // serial path's early return skipped it.
+  scan.row_max_velocity_residual_m_per_s = 0.0;
+  return scan;
+}
+
+// Jacobi-converged pass-0 shortcut, one member's ledger sentinel and
+// evidence contribution. Extracted verbatim from the serial selection.
+fn mechanical_matching_selection_converged_for_index(
   self_index: u32,
-  force_full_selection: bool
+  pass_index: u32
 ) {
-  if (self_index >= mechanical_params.particle_count) { return; }
-  if (!mechanical_solver_full_path_enabled()) { return; }
-  let pass_index = mechanical_matching_current_pass();
-  if (
-    pass_index
-      >= ${solverBudget.cleanupPassBudget}u
-  ) { return; }
-  if (!mechanical_matching_preflight(pass_index)) { return; }
+  let final_iteration = mechanical_params.solver_iteration_count - 1u;
+  let position_ratio = atomicLoad(
+    &graph_control[
+      mechanical_pre_solve_position_violation_ratio_word(final_iteration)
+    ]
+  );
+  let velocity_residual = atomicLoad(
+    &graph_control[
+      mechanical_pre_solve_velocity_residual_word(final_iteration)
+    ]
+  );
+  var invalid_index = 0xffffffffu;
+  energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
+    bitcast<f32>(invalid_index),
+    0.0,
+    bitcast<f32>(invalid_index),
+    bitcast<f32>(invalid_index)
+  );
+  atomicMax(
+    &traversal_evidence[
+      mechanical_matching_max_position_ratio_word(pass_index)
+    ],
+    position_ratio
+  );
+  atomicMax(
+    &traversal_evidence[
+      mechanical_matching_max_velocity_residual_word(pass_index)
+    ],
+    velocity_residual
+  );
+  atomicAdd(
+    &traversal_evidence[
+      mechanical_matching_selection_count_word(pass_index)
+    ],
+    1u
+  );
+}
+
+// The candidate row scan over every cursor_stride-th cursor from
+// cursor_offset. Byte-for-byte the serial selection's scan; the serial
+// path calls it with (0, 1). The winner over any cursor partition is
+// scan-order independent because the selection predicate is a strict
+// total order (priority desc, face-alignment desc, rank asc, then the
+// unique (low, high) pair), so merging per-sublane partial results
+// reproduces the serial winner exactly.
+fn mechanical_matching_selection_scan_range(
+  self_index: u32,
+  pass_index: u32,
+  full_selection: bool,
+  begin_new_sweep: bool,
+  cursor_offset: u32,
+  cursor_stride: u32
+) -> MechanicalMatchingSelectionScan {
+  var scan_failed = false;
   let begin = source_offsets[self_index];
   let end = source_offsets[self_index + 1u];
   let total = atomicLoad(&graph_control[12u]);
@@ -13119,60 +13216,22 @@ fn select_matching_cleanup_edge_for_index(
       &graph_control[14u],
       ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
     );
-    return;
+    var failed = mechanical_matching_selection_empty_scan();
+    failed.row_max_velocity_residual_m_per_s = -1.0;
+    return failed;
   }
-  let begin_new_sweep = pass_index == 0u
-    || mechanical_matching_prior_applied_pair_count(pass_index) == 0u;
   if (begin_new_sweep) {
     // The CSR high bit is solver-private and final verification always strips
     // it before publication. Reuse it as one fixed-order sweep marker.
-    for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    for (
+      var cursor = begin + cursor_offset;
+      cursor < end;
+      cursor = cursor + cursor_stride
+    ) {
       csr_peers[cursor] = csr_peers[cursor]
         & (MECHANICAL_SOLVER_EDGE_PEER_MASK
           | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT);
     }
-  }
-  if (
-    pass_index == 0u
-    && mechanical_matching_jacobi_residual_converged()
-  ) {
-    let final_iteration = mechanical_params.solver_iteration_count - 1u;
-    let position_ratio = atomicLoad(
-      &graph_control[
-        mechanical_pre_solve_position_violation_ratio_word(final_iteration)
-      ]
-    );
-    let velocity_residual = atomicLoad(
-      &graph_control[
-        mechanical_pre_solve_velocity_residual_word(final_iteration)
-      ]
-    );
-    var invalid_index = 0xffffffffu;
-    energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
-      bitcast<f32>(invalid_index),
-      0.0,
-      bitcast<f32>(invalid_index),
-      bitcast<f32>(invalid_index)
-    );
-    atomicMax(
-      &traversal_evidence[
-        mechanical_matching_max_position_ratio_word(pass_index)
-      ],
-      position_ratio
-    );
-    atomicMax(
-      &traversal_evidence[
-        mechanical_matching_max_velocity_residual_word(pass_index)
-      ],
-      velocity_residual
-    );
-    atomicAdd(
-      &traversal_evidence[
-        mechanical_matching_selection_count_word(pass_index)
-      ],
-      1u
-    );
-    return;
   }
   var best_peer = 0xffffffffu;
   var best_low = 0xffffffffu;
@@ -13190,17 +13249,11 @@ fn select_matching_cleanup_edge_for_index(
   var reserved_face_alignment = 0.0;
   var row_max_position_ratio = 0.0;
   var row_max_velocity_residual_m_per_s = 0.0;
-  let owner_flags = atomicLoad(
-    &matching_cleanup_dispatch[
-      MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-    ]
-  );
-  // The production owner partitions dormant discovery from known-active
-  // selection. The standalone diagnostic/legacy topology has no expansion
-  // phase, so its wrapper forces the historical complete row scan.
-  let full_selection = force_full_selection
-    || (owner_flags & MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT) != 0u;
-  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+  for (
+    var cursor = begin + cursor_offset;
+    cursor < end;
+    cursor = cursor + cursor_stride
+  ) {
     let encoded_peer = csr_peers[cursor];
     if (
       !full_selection
@@ -13219,7 +13272,8 @@ fn select_matching_cleanup_edge_for_index(
         &graph_control[14u],
         ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
       );
-      return;
+      scan_failed = true;
+      break;
     }
     if (pair.active_pair == 0u || pair.unilateral == 0u) { continue; }
     if (!mechanical_matching_edge_ever_active(encoded_peer)) {
@@ -13333,17 +13387,137 @@ fn select_matching_cleanup_edge_for_index(
       best_face_alignment = face_alignment;
     }
   }
+  var scan = mechanical_matching_selection_empty_scan();
+  if (scan_failed) {
+    scan.row_max_velocity_residual_m_per_s = -1.0;
+    return scan;
+  }
+  scan.best_peer = best_peer;
+  scan.best_rank = best_rank;
+  scan.best_cursor = best_cursor;
+  scan.best_low_high = (best_low << 16u) | (best_high & 0xffffu);
+  scan.best_priority = best_priority;
+  scan.best_face_alignment = best_face_alignment;
+  scan.reserved_peer = reserved_peer;
+  scan.reserved_rank = reserved_rank;
+  scan.reserved_cursor = reserved_cursor;
+  scan.reserved_low_high = (reserved_low << 16u) | (reserved_high & 0xffffu);
+  scan.reserved_priority = reserved_priority;
+  scan.reserved_face_alignment = reserved_face_alignment;
+  scan.row_max_position_ratio = row_max_position_ratio;
+  scan.row_max_velocity_residual_m_per_s = row_max_velocity_residual_m_per_s;
+  return scan;
+}
+
+// Fold two partial scans. The packed (low << 16 | high) word compares
+// exactly as the lexicographic (low, high) tie-break because particle
+// indexes fit sixteen bits. NaN priorities compare false everywhere and
+// therefore never displace a candidate, matching the serial scan.
+fn mechanical_matching_selection_merge(
+  a: MechanicalMatchingSelectionScan,
+  b: MechanicalMatchingSelectionScan
+) -> MechanicalMatchingSelectionScan {
+  var out = a;
+  if (b.best_peer != 0xffffffffu) {
+    let take = out.best_peer == 0xffffffffu
+      || b.best_priority > out.best_priority
+      || (
+        b.best_priority == out.best_priority
+        && (
+          b.best_face_alignment > out.best_face_alignment
+          || (
+            b.best_face_alignment == out.best_face_alignment
+            && (
+              b.best_rank < out.best_rank
+              || (
+                b.best_rank == out.best_rank
+                && b.best_low_high < out.best_low_high
+              )
+            )
+          )
+        )
+      );
+    if (take) {
+      out.best_peer = b.best_peer;
+      out.best_rank = b.best_rank;
+      out.best_cursor = b.best_cursor;
+      out.best_low_high = b.best_low_high;
+      out.best_priority = b.best_priority;
+      out.best_face_alignment = b.best_face_alignment;
+    }
+  }
+  if (b.reserved_peer != 0xffffffffu) {
+    let take = out.reserved_peer == 0xffffffffu
+      || b.reserved_priority > out.reserved_priority
+      || (
+        b.reserved_priority == out.reserved_priority
+        && (
+          b.reserved_face_alignment > out.reserved_face_alignment
+          || (
+            b.reserved_face_alignment == out.reserved_face_alignment
+            && (
+              b.reserved_rank < out.reserved_rank
+              || (
+                b.reserved_rank == out.reserved_rank
+                && b.reserved_low_high < out.reserved_low_high
+              )
+            )
+          )
+        )
+      );
+    if (take) {
+      out.reserved_peer = b.reserved_peer;
+      out.reserved_rank = b.reserved_rank;
+      out.reserved_cursor = b.reserved_cursor;
+      out.reserved_low_high = b.reserved_low_high;
+      out.reserved_priority = b.reserved_priority;
+      out.reserved_face_alignment = b.reserved_face_alignment;
+    }
+  }
+  out.row_max_position_ratio = max(
+    out.row_max_position_ratio,
+    b.row_max_position_ratio
+  );
+  out.row_max_velocity_residual_m_per_s = min(
+    max(
+      out.row_max_velocity_residual_m_per_s,
+      b.row_max_velocity_residual_m_per_s
+    ),
+    select(
+      3.4e38,
+      -1.0,
+      out.row_max_velocity_residual_m_per_s < 0.0
+        || b.row_max_velocity_residual_m_per_s < 0.0
+    )
+  );
+  return out;
+}
+
+// The per-member selection epilogue: reserved fallback, ledger
+// publication, transient full-selection clear, and the pass evidence
+// contribution. Extracted verbatim from the serial selection.
+fn mechanical_matching_selection_epilogue(
+  self_index: u32,
+  pass_index: u32,
+  full_selection: bool,
+  scan: MechanicalMatchingSelectionScan
+) {
+  var best_peer = scan.best_peer;
+  var best_cursor = scan.best_cursor;
+  var best_priority = scan.best_priority;
+  let reserved_peer = scan.reserved_peer;
+  let reserved_cursor = scan.reserved_cursor;
+  let reserved_priority = scan.reserved_priority;
+  let row_max_position_ratio = scan.row_max_position_ratio;
+  let row_max_velocity_residual_m_per_s =
+    scan.row_max_velocity_residual_m_per_s;
   if (
     best_peer >= mechanical_params.particle_count
     && reserved_peer < mechanical_params.particle_count
   ) {
     best_peer = reserved_peer;
-    best_low = reserved_low;
-    best_high = reserved_high;
-    best_rank = reserved_rank;
     best_cursor = reserved_cursor;
     best_priority = reserved_priority;
-    best_face_alignment = reserved_face_alignment;
   }
   energy_ledger[mechanical_energy_base(self_index)] = vec4<f32>(
     bitcast<f32>(best_peer),
@@ -13374,6 +13548,69 @@ fn select_matching_cleanup_edge_for_index(
   atomicAdd(
     &traversal_evidence[mechanical_matching_selection_count_word(pass_index)],
     1u
+  );
+}
+
+fn select_matching_cleanup_edge_for_index(
+  self_index: u32,
+  force_full_selection: bool
+) {
+  if (self_index >= mechanical_params.particle_count) { return; }
+  if (!mechanical_solver_full_path_enabled()) { return; }
+  let pass_index = mechanical_matching_current_pass();
+  if (
+    pass_index
+      >= ${solverBudget.cleanupPassBudget}u
+  ) { return; }
+  if (!mechanical_matching_preflight(pass_index)) { return; }
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  let total = atomicLoad(&graph_control[12u]);
+  if (begin > end || end > total) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
+    );
+    return;
+  }
+  let begin_new_sweep = pass_index == 0u
+    || mechanical_matching_prior_applied_pair_count(pass_index) == 0u;
+  if (
+    pass_index == 0u
+    && mechanical_matching_jacobi_residual_converged()
+  ) {
+    mechanical_matching_selection_converged_for_index(
+      self_index,
+      pass_index
+    );
+    return;
+  }
+  let owner_flags = atomicLoad(
+    &matching_cleanup_dispatch[
+      MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+    ]
+  );
+  // The production owner partitions dormant discovery from known-active
+  // selection. The standalone diagnostic/legacy topology has no expansion
+  // phase, so its wrapper forces the historical complete row scan.
+  let full_selection = force_full_selection
+    || (owner_flags & MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT) != 0u;
+  let scan = mechanical_matching_selection_scan_range(
+    self_index,
+    pass_index,
+    full_selection,
+    begin_new_sweep,
+    0u,
+    1u
+  );
+  if (scan.row_max_velocity_residual_m_per_s < 0.0) {
+    return;
+  }
+  mechanical_matching_selection_epilogue(
+    self_index,
+    pass_index,
+    full_selection,
+    scan
   );
 }
 
@@ -16083,14 +16320,24 @@ var<workgroup> mechanical_matching_owner_list_count: atomic<u32>;
 // the next logical pass's expansion evaluates only those rows. Overflow or
 // a fresh dispatch forces the complete frontier scan instead (fail-safe).
 var<workgroup> mechanical_matching_owner_moved_a:
-  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
+  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}>;
 var<workgroup> mechanical_matching_owner_moved_b:
-  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
+  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}>;
 var<workgroup> mechanical_matching_owner_moved_count_a: atomic<u32>;
 var<workgroup> mechanical_matching_owner_moved_count_b: atomic<u32>;
 var<workgroup> mechanical_matching_owner_moved_phase: u32;
 var<workgroup> mechanical_matching_owner_moved_prev_valid: u32;
 var<workgroup> mechanical_matching_owner_wall_pending_count: atomic<u32>;
+// Selection reduction scratch: eight lanes share each contact member's row
+// scan (the same lane-group shape as the moved-set expansion), each writing
+// its partial candidates here; the group's first lane folds the eight
+// partials with the strict total-order merge and runs the per-member
+// epilogue. Sized for one candidate record per lane.
+var<workgroup> mechanical_matching_selection_scratch:
+  array<MechanicalMatchingSelectionScan, 128>;
+// Lane-0-written, workgroupUniformLoad-read: the provably uniform member
+// count that bounds the barrier-carrying selection wave loop.
+var<workgroup> mechanical_matching_owner_selection_member_total: u32;
 
 fn mechanical_matching_owner_record_mover(moved_index: u32) {
   let pending_prior = atomicOr(
@@ -16104,12 +16351,12 @@ fn mechanical_matching_owner_record_mover(moved_index: u32) {
   }
   if (mechanical_matching_owner_moved_phase == 0u) {
     let slot = atomicAdd(&mechanical_matching_owner_moved_count_a, 1u);
-    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u) {
       mechanical_matching_owner_moved_a[slot] = moved_index;
     }
   } else {
     let slot = atomicAdd(&mechanical_matching_owner_moved_count_b, 1u);
-    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u) {
       mechanical_matching_owner_moved_b[slot] = moved_index;
     }
   }
@@ -16686,7 +16933,7 @@ fn run_matching_cleanup_global_owner(
     }
     let owner_full_sweep_pass =
       mechanical_matching_owner_moved_prev_valid == 0u
-      || owner_moved_prev_count > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u;
+      || owner_moved_prev_count > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u;
 
     if (expand_frontier) {
       let published_total = atomicLoad(&graph_control[12u]);
@@ -16867,26 +17114,113 @@ fn run_matching_cleanup_global_owner(
     }
     storageBarrier();
 
-    if (execute_pass) {
-      let owner_list_total = min(
+    // Selection, lane-grouped: eight lanes share each contact member's
+    // row (cursor-strided scan into the reduction scratch), then the
+    // group's first lane folds the partials and runs the epilogue. The
+    // wave loop's trip count comes from a workgroupUniformLoad so its
+    // interior barriers sit in provably uniform control flow; per-member
+    // work stays gated inside. Winners are scan-order independent (strict
+    // total-order predicate), members never read each other's rows,
+    // ledger entries, or flags during this phase, and every guard the
+    // serial wrapper applies is replicated here, so the grouped phase is
+    // value-identical to the member-per-lane loop it replaces.
+    if (lane == 0u) {
+      mechanical_matching_owner_selection_member_total = min(
         atomicLoad(&mechanical_matching_owner_list_count),
         ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
       );
-      for (
-        var list_slot = lane;
-        list_slot < owner_list_total;
-        list_slot = list_slot + 128u
+    }
+    let selection_member_total = workgroupUniformLoad(
+      &mechanical_matching_owner_selection_member_total
+    );
+    let selection_preflight_ok = execute_pass
+      && mechanical_matching_preflight(mechanical_matching_persistent_pass);
+    let selection_begin_new_sweep =
+      mechanical_matching_persistent_pass == 0u
+      || mechanical_matching_prior_applied_pair_count(
+        mechanical_matching_persistent_pass
+      ) == 0u;
+    let selection_converged =
+      mechanical_matching_persistent_pass == 0u
+      && mechanical_matching_jacobi_residual_converged();
+    let selection_waves = (selection_member_total + 15u) / 16u;
+    for (
+      var selection_wave = 0u;
+      selection_wave < selection_waves;
+      selection_wave = selection_wave + 1u
+    ) {
+      let selection_slot = selection_wave * 16u + lane / 8u;
+      var selection_member = 0xffffffffu;
+      var selection_full = false;
+      var selection_scan = mechanical_matching_selection_empty_scan();
+      if (
+        selection_preflight_ok
+        && selection_slot < selection_member_total
       ) {
-        let self_index = mechanical_matching_owner_list[list_slot];
-        let flags = atomicLoad(
-          &matching_cleanup_dispatch[
-            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-          ]
-        );
-        if ((flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u) {
-          select_matching_cleanup_edge_for_index(self_index, false);
+        let candidate = mechanical_matching_owner_list[selection_slot];
+        if (candidate < mechanical_params.particle_count) {
+          let member_flags = atomicLoad(
+            &matching_cleanup_dispatch[
+              MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + candidate
+            ]
+          );
+          if (
+            (member_flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u
+          ) {
+            selection_member = candidate;
+            selection_full = (member_flags
+              & MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT) != 0u;
+            if (!selection_converged) {
+              selection_scan = mechanical_matching_selection_scan_range(
+                selection_member,
+                mechanical_matching_persistent_pass,
+                selection_full,
+                selection_begin_new_sweep,
+                lane & 7u,
+                8u
+              );
+            }
+          }
         }
       }
+      mechanical_matching_selection_scratch[lane] = selection_scan;
+      workgroupBarrier();
+      if ((lane & 7u) == 0u && selection_member != 0xffffffffu) {
+        if (selection_converged) {
+          let begin = source_offsets[selection_member];
+          let end = source_offsets[selection_member + 1u];
+          let total = atomicLoad(&graph_control[12u]);
+          if (begin > end || end > total) {
+            atomicOr(
+              &graph_control[14u],
+              ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+                .CSR_BOUNDS_OR_RANK}u
+            );
+          } else {
+            mechanical_matching_selection_converged_for_index(
+              selection_member,
+              mechanical_matching_persistent_pass
+            );
+          }
+        } else {
+          var merged = mechanical_matching_selection_scratch[lane];
+          for (var fold = 1u; fold < 8u; fold = fold + 1u) {
+            merged = mechanical_matching_selection_merge(
+              merged,
+              mechanical_matching_selection_scratch[lane + fold]
+            );
+          }
+          if (merged.row_max_velocity_residual_m_per_s >= 0.0) {
+            mechanical_matching_selection_epilogue(
+              selection_member,
+              mechanical_matching_persistent_pass,
+              selection_full,
+              merged
+            );
+          }
+        }
+      }
+      workgroupBarrier();
     }
     storageBarrier();
 
@@ -17050,7 +17384,7 @@ fn run_matching_cleanup_global_owner(
           wall_prev_total =
             atomicLoad(&mechanical_matching_owner_moved_count_a);
         }
-        wall_prev_total = min(wall_prev_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        wall_prev_total = min(wall_prev_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u);
         var wall_cur_total = 0u;
         if (mechanical_matching_owner_moved_phase == 0u) {
           wall_cur_total =
@@ -17059,7 +17393,7 @@ fn run_matching_cleanup_global_owner(
           wall_cur_total =
             atomicLoad(&mechanical_matching_owner_moved_count_b);
         }
-        wall_cur_total = min(wall_cur_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        wall_cur_total = min(wall_cur_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u);
         for (
           var wall_slot = lane;
           wall_slot < wall_prev_total + wall_cur_total;
@@ -17132,7 +17466,7 @@ fn run_matching_cleanup_global_owner(
           propagate_total =
             atomicLoad(&mechanical_matching_owner_moved_count_b);
         }
-        propagate_total = min(propagate_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u);
+        propagate_total = min(propagate_total, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MOVED_CAPACITY}u);
         for (
           var propagate_slot = lane;
           propagate_slot < propagate_total;

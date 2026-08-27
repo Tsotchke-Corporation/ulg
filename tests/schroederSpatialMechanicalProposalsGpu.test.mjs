@@ -4064,8 +4064,13 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.equal(
     (ownerSource.match(/mechanical_matching_owner_list\[list_slot\]/g) || [])
       .length,
-    5,
-    'selection/apply/pass-0-copy plus full-sweep wall/propagate iterate the compacted list'
+    4,
+    'apply/pass-0-copy plus full-sweep wall/propagate iterate the compacted list'
+  );
+  assert.match(
+    ownerSource,
+    /mechanical_matching_owner_list\[selection_slot\]/,
+    'the lane-grouped selection phase indexes the compacted list by wave slot'
   );
   assert.match(
     ownerSource,
@@ -4119,7 +4124,9 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
-    /fn select_matching_cleanup_edge_for_index[\s\S]*!full_selection[\s\S]*!mechanical_matching_edge_ever_active\(encoded_peer\)[\s\S]*continue;/
+    // The dormant-skip now lives in the shared cursor-strided scan the
+    // serial wrapper delegates to.
+    /fn mechanical_matching_selection_scan_range[\s\S]*!full_selection[\s\S]*!mechanical_matching_edge_ever_active\(encoded_peer\)[\s\S]*continue;/
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
@@ -4131,7 +4138,10 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.match(
     ownerSource,
-    /select_matching_cleanup_edge_for_index\(self_index, false\);/
+    // The owner's selection phase is lane-grouped: sublane scans feed the
+    // total-order merge and the shared epilogue instead of the serial
+    // per-member wrapper (which the standalone pipeline entry keeps).
+    /mechanical_matching_selection_scan_range\(\s*selection_member,[\s\S]*mechanical_matching_selection_merge\([\s\S]*mechanical_matching_selection_epilogue\(/
   );
   assert.match(
     wgslFunctionSource('mechanical_matching_owner_expand_member_strided'),

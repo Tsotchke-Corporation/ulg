@@ -283,6 +283,17 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // continuation path.
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',
+      // Interactive real-time contact budget, measured on this preset
+      // (RTX 5060 Ti / Vulkan, 150 s sustained runs, branch `performance`):
+      // 48 cleanup passes with 2 inner rounds per pass sustain 32 steps/s
+      // over 4,000+ steps at ~96 effective selection/apply rounds per step
+      // — deeper resolution than the 96-pass single-round config, which
+      // sustains only 22. The compiled 512-pass budget degrades to ~7
+      // steps/s once the reaction saturates the owner. Explicit URL values
+      // still win (e.g. ?contactCleanupPasses=512&contactInnerRounds=1
+      // restores the archival-quality budget for validation runs).
+      contactCleanupPasses: '48',
+      contactInnerRounds: '2',
       // Look across the contact band instead of down through the remaining
       // opaque sodium. These values are normalized by the box dimensions, so
       // the real NaOH and H2 product layers stay exposed on desktop and Pixel

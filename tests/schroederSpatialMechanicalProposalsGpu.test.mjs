@@ -4072,6 +4072,26 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     /MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT[\s\S]*atomicSub\(&mechanical_matching_owner_wall_pending_count, 1u\)/,
     'incremental wall must claim pending members exactly once'
   );
+  assert.equal(
+    (ownerSource.match(
+      /atomicSub\(&mechanical_matching_owner_wall_pending_count, 1u\)/g
+    ) || []).length,
+    1,
+    'only the incremental wall path decrements per claim; the full sweep '
+      + 'claims stale cross-dispatch bits the zero-initialized workgroup '
+      + 'counter never counted, so a per-claim decrement there wraps u32'
+  );
+  assert.match(
+    ownerSource,
+    /owner_wall_pending_rebase =\s*atomicLoad\(&mechanical_matching_owner_wall_pending_count\)/,
+    'the full sweep snapshots the pending counter before claiming'
+  );
+  assert.match(
+    ownerSource,
+    /atomicSub\(\s*&mechanical_matching_owner_wall_pending_count,\s*owner_wall_pending_rebase\s*\)/,
+    'the full sweep rebases by fixed-amount subtract, which commutes with '
+      + 'its own concurrent record_mover increments'
+  );
   assert.match(
     ownerSource,
     /if \(expand_frontier\) \{[\s\S]*?for \(\s*var self_index = lane;\s*self_index < mechanical_params\.particle_count;/

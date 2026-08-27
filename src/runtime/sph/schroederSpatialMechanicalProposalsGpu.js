@@ -16929,6 +16929,15 @@ fn run_matching_cleanup_global_owner(
     }
     storageBarrier();
 
+    // Snapshot for the full-sweep pending-counter rebase below. The
+    // workgroup counter zero-initializes each chunked dispatch while
+    // WALL_PENDING bits persist in storage, so a full sweep claims bits
+    // this dispatch never counted; per-claim decrements would wrap the
+    // counter below zero. Instead the sweep leaves the counter alone and
+    // lane 0 subtracts this pre-sweep snapshot afterwards: a fixed-amount
+    // subtract commutes with the sweep's own concurrent record_mover
+    // increments, leaving exactly the freshly recorded pending count.
+    var owner_wall_pending_rebase = 0u;
     if (lane == 0u && execute_pass) {
       // Full-sweep passes wall-project every frontier member (completeness
       // complement = N - frontier). Incremental passes project exactly the
@@ -16939,6 +16948,9 @@ fn run_matching_cleanup_global_owner(
       var wall_workset_count = mechanical_matching_persistent_active_count;
       if (!owner_full_sweep_pass) {
         wall_workset_count =
+          atomicLoad(&mechanical_matching_owner_wall_pending_count);
+      } else {
+        owner_wall_pending_rebase =
           atomicLoad(&mechanical_matching_owner_wall_pending_count);
       }
       atomicStore(
@@ -16964,17 +16976,17 @@ fn run_matching_cleanup_global_owner(
           list_slot = list_slot + 128u
         ) {
           let self_index = mechanical_matching_owner_list[list_slot];
+          // Claim (clear) the pending bit but do NOT decrement the counter
+          // per claim: bits set by the previous dispatch were never counted
+          // by this dispatch's zero-initialized workgroup counter, and a
+          // per-claim decrement wraps it. Lane 0 rebases the counter by the
+          // pre-sweep snapshot after this loop instead.
           let prior_flags = atomicAnd(
             &matching_cleanup_dispatch[
               MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
             ],
             ~MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT
           );
-          if (
-            (prior_flags & MECHANICAL_MATCHING_OWNER_WALL_PENDING_BIT) != 0u
-          ) {
-            atomicSub(&mechanical_matching_owner_wall_pending_count, 1u);
-          }
           if ((prior_flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u) {
             project_matching_cleanup_walls_for_index(self_index);
           }
@@ -17110,6 +17122,17 @@ fn run_matching_cleanup_global_owner(
     // cleared. Zero-initialized workgroup state makes the first pass of a
     // fresh dispatch fall back to the complete frontier scan.
     if (lane == 0u && execute_pass) {
+      if (owner_full_sweep_pass) {
+        // Rebase the pending counter: the full sweep claimed every set
+        // WALL_PENDING bit without touching the counter, so subtracting
+        // the pre-sweep snapshot leaves exactly the count of bits the
+        // sweep's own wall projections freshly recorded. The fixed-amount
+        // subtract commutes with those concurrent increments.
+        atomicSub(
+          &mechanical_matching_owner_wall_pending_count,
+          owner_wall_pending_rebase
+        );
+      }
       mechanical_matching_owner_moved_prev_valid = 1u;
       if (mechanical_matching_owner_moved_phase == 0u) {
         mechanical_matching_owner_moved_phase = 1u;

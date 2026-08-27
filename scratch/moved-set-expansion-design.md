@@ -390,3 +390,14 @@ Next: wrap these four with marker pairs (all infra exists) for direct
 per-site device time. The census wrapper lives in the schedule payload
 (diagnostic-only, armed by residentGpuTimestampProfile=1) and surfaces
 as scheduleResult.submitCensus.
+
+ATTEMPTED per-submit device-time census (marker command buffers appended
+inside every intercepted submit): correct in principle (order-exact,
+submit([m1,...bufs,m2])) but the naive always-on form crawled the run
+to ~1 step/s — per-submit Error() stacks plus two encoder+buffer
+creations per submit compound with the per-step profile serialization.
+REVERTED to the counts-only census. The right form: SAMPLE exactly one
+step per schedule (arm the marker context at one ring push, disarm at
+the next), which bounds the overhead to ~30 marker pairs per schedule.
+The scene mirror and probe already read submitCensusDeviceMs when a
+future worker emits it.

@@ -1,0 +1,53 @@
+{
+ "schema": "ulg.perf-campaign-baseline.v0",
+ "branch": "performance",
+ "baseCommit": "c676bbe",
+ "recordedAt": "2026-08-26T22:35:00-08:00",
+ "scenario": "sodium-water preset, mounted worker-owned lane, 64-step schedules, headless Vulkan Chromium, RTX 5060 Ti",
+ "method": "committed-step timestamps from laneCompletedStepTotal; steady-state schedules exclude the first (pipeline compile); no concurrent GPU work",
+ "points": [
+  {
+   "particleCount": 576,
+   "steadySchedulewallS": 5.0,
+   "committedStepsPerSecond": 12.8,
+   "msPerStep": 78
+  },
+  {
+   "particleCount": 1216,
+   "steadySchedulewallS": 20.5,
+   "committedStepsPerSecond": 3.1,
+   "msPerStep": 320
+  }
+ ],
+ "fit": "t(N) ~ 8ms + 0.00021ms*N^2 (quadratic pair-scan dominated above ~200 particles)",
+ "workerEncodePerStepMs": 21,
+ "target": "sim-real-time with >=30fps presentation; at sdt=1ms that is 1000 steps/s",
+ "campaign": {
+  "commits": [
+   "c676bbe schedule batching",
+   "f60842c E0 atlas",
+   "6837381 cleanup profile diagnostic",
+   "70e077a owner list compaction (bit-identical, neutral at N=1216)",
+   "ba55498 moved-set incremental expansion (bit-identical profile, 17.5s -> 13-14s per 64-step schedule)",
+   "1842bd8 pass-slim copy/wall/propagate (bit-identical; neutral at N=1216)"
+  ],
+  "currentStepMs": 210,
+  "decomposition": {
+   "cleanupActivePassesPerStep": "~260-290 (converged tail synthesized after; budget 512)",
+   "cleanupMsPerStep": "~120-190 (0.45ms/pass, single 128-thread workgroup, full-N phase scans)",
+   "appliedPairsPerPass": "~6 constant through pass 259 (serial chain admission)",
+   "positionViolationRatioDecay": "1.98 -> 0.50 over ~260 passes",
+   "jacobiMsPerStep": 8,
+   "residualMsPerStep": "~55 (epoch radix + 25-40 submits + fused MLS-MPM)",
+   "afterMovedSet": "remaining pass cost is the barrier/phase skeleton (~0.2-0.3ms x ~260 active passes) + 16 per-dispatch full seed/expansion scans + Jacobi 8ms + residual ~55ms"
+  },
+  "nextLevers": [
+   "per-pass skeleton reduction: skip phase groups when the pass has no contact work; fewer barriers per pass",
+   "Jacobi iteration adaptivity (8ms)",
+   "residual 55ms: submit fusion, pair-sort pruning, residentActiveGrid default",
+   "pass-count algorithmics (selective admission / parallel chain relaxation) - physics-order-affecting, needs standard-matrix validation train"
+  ],
+  "currentStepsPerSecond": 4.7,
+  "selectionFinding": "selection is stateful (per-cursor sweep marker, row-cleared at zero-applied sweep boundaries); slim attempt reverted; pass-count lever = sweep admission redesign"
+ }
+}

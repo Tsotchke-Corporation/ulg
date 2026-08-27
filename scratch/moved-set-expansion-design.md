@@ -355,3 +355,21 @@ handling. Next experiment: worker-side queue markers bracketing the
 commit boundary (schedule-end marker already exists via the phase
 stamps; add one at next-schedule start and read the early steps'
 queue:* timeline instead of the last step's).
+
+EXECUTED (2856b0a+): the ring now carries per-step stageGpuMs; early
+steps' queue windows are CLEAN (14.7 ms uniform under profiling) — the
+foreign work drains OUTSIDE all stage windows. The per-step epoch
+bracket (an occupancy meter) shows ~38 ms/step of queue occupancy early
+in the sodium run and ~23 ms late against 0.93 ms of true epoch work:
+i.e. ~19-23 ms/step of device work from an unidentified per-step
+producer, surviving presentation-off, refresh-disabled, surfaceDraw-off,
+and progressEvery=8 (~3 ms/step only). Under no-profiling runs the same
+producer accounts for the checkpoint stalls and the terminal-fence tail
+(64 x ~19 ms ~ 1.2 s/cycle). Water-cycle is NOT a counterexample: its
+16-step schedules fire no drain checkpoints (stepOrdinal < stepCount
+gate), so its 0.5 s tail is the whole schedule's ordinary GPU drain.
+Remaining suspects for the sodium producer: per-step product-mass /
+particle-storage materialization submits, per-step writeBuffer traffic,
+or another non-stage submitter on the shared queue. Instrument by
+enumerating queue.submit call sites hit per step (host-side counter in
+the worker device wrapper) before guessing further.

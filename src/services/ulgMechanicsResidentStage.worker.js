@@ -7200,7 +7200,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         epochQueueIntervalMs:
           epochStageResult.value?.epochQueueIntervalMs ?? null,
         epochQueueTimeline:
-          epochStageResult.value?.epochQueueTimeline ?? null
+          epochStageResult.value?.epochQueueTimeline ?? null,
+        // Diagnostic-only per-step device timing map (null unless
+        // residentGpuTimestampProfile=1): the contact pass durations plus
+        // the queue:* stage-window timeline for THIS step.
+        stageGpuMs:
+          hierarchyStageSummary?.residentStageTiming?.stageGpuMs ?? null
       });
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       if (

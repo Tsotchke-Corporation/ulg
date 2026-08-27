@@ -3995,19 +3995,48 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   const ownerSource = wgslFunctionSource(
     'run_matching_cleanup_global_owner'
   );
+  // The owner certifies the complete frontier ONCE per chunked dispatch (a
+  // validated full-particle seed that also builds the compacted list), then
+  // reads exact incrementally maintained counters before and after every
+  // expansion; every admission transition passes through the note-admission
+  // bookkeeping on the unique lane whose atomicOr flipped the bit.
   assert.equal(
-    (ownerSource.match(/mechanical_matching_owner_frontier_counts\(/g) || [])
+    (ownerSource.match(/mechanical_matching_owner_seed_frontier\(/g) || [])
+      .length,
+    1,
+    'owner must certify the complete frontier once per chunked dispatch'
+  );
+  assert.equal(
+    (ownerSource.match(/mechanical_matching_owner_counter_snapshot\(/g) || [])
       .length,
     2,
-    'owner must certify the complete frontier before and after expansion'
+    'owner must snapshot the maintained counters before and after expansion'
+  );
+  assert.equal(
+    (ownerSource.match(/mechanical_matching_owner_note_admission\(/g) || [])
+      .length,
+    2,
+    'both expansion admission sites must maintain the frontier counters'
   );
   assert.match(
     ownerSource,
-    /mechanical_matching_owner_frontier_counts\([\s\S]*lane,[\s\S]*published_total_before_expansion[\s\S]*if \(lane == 0u\)[\s\S]*workgroupBarrier\(\);[\s\S]*let expand_frontier =/
+    /mechanical_matching_owner_counter_snapshot\(\s*published_total_before_expansion\s*\)[\s\S]*if \(lane == 0u\)[\s\S]*workgroupBarrier\(\);[\s\S]*let expand_frontier =/
   );
   assert.match(
     ownerSource,
-    /storageBarrier\(\);[\s\S]*mechanical_matching_owner_frontier_counts\([\s\S]*lane,[\s\S]*published_total_after_expansion[\s\S]*if \(lane == 0u && expand_frontier\)/
+    /workgroupBarrier\(\);\s*storageBarrier\(\);[\s\S]*mechanical_matching_owner_counter_snapshot\(\s*published_total_after_expansion\s*\)[\s\S]*if \(lane == 0u && expand_frontier\)/
+  );
+  // The order-free phases iterate the compacted frontier list; the
+  // dormant-discovery expansion keeps its deterministic full particle scan.
+  assert.equal(
+    (ownerSource.match(/mechanical_matching_owner_list\[list_slot\]/g) || [])
+      .length,
+    5,
+    'selection/copy/apply/wall/propagate must iterate the compacted list'
+  );
+  assert.match(
+    ownerSource,
+    /if \(expand_frontier\) \{[\s\S]*?for \(\s*var self_index = lane;\s*self_index < mechanical_params\.particle_count;/
   );
   assert.match(
     ownerSource,

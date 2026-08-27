@@ -16021,6 +16021,14 @@ var<workgroup> mechanical_matching_owner_active_count: atomic<u32>;
 var<workgroup> mechanical_matching_owner_contact_count: atomic<u32>;
 var<workgroup> mechanical_matching_owner_cursor_count: atomic<u32>;
 var<workgroup> mechanical_matching_owner_count_invalid: atomic<u32>;
+// Compacted frontier list for the chunked owner: seeded by one validated
+// full-particle scan per dispatch, appended at admission transitions inside
+// expansion. Capacity mirrors the owner's active-particle cap; a frontier
+// larger than the cap fails the pass closed before any phase consumes a
+// truncated list.
+var<workgroup> mechanical_matching_owner_list:
+  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
+var<workgroup> mechanical_matching_owner_list_count: atomic<u32>;
 
 fn mechanical_matching_owner_frontier_counts(
   lane: u32,
@@ -16121,6 +16129,175 @@ fn mechanical_matching_owner_frontier_counts(
   return result;
 }
 
+// Seed the compacted frontier list for one chunked owner dispatch. This runs
+// the exact validation of mechanical_matching_owner_frontier_counts over
+// every particle once per dispatch and records each frontier member's index,
+// so the order-free per-pass phases (selection/copy/apply/wall/propagate)
+// iterate the bounded contact set instead of rescanning every particle. The
+// dormant-discovery expansion phase deliberately KEEPS its full particle
+// scan: same-pass cascade admission order is part of the deterministic
+// logical-pass contract and must not depend on list order.
+fn mechanical_matching_owner_seed_frontier(
+  lane: u32,
+  published_total: u32
+) -> MechanicalMatchingOwnerFrontierCounts {
+  var result = MechanicalMatchingOwnerFrontierCounts(0u, 0u, 0u, 0u);
+  if (lane == 0u) {
+    atomicStore(&mechanical_matching_owner_active_count, 0u);
+    atomicStore(&mechanical_matching_owner_contact_count, 0u);
+    atomicStore(&mechanical_matching_owner_cursor_count, 0u);
+    atomicStore(&mechanical_matching_owner_count_invalid, 0u);
+    atomicStore(&mechanical_matching_owner_list_count, 0u);
+  }
+  workgroupBarrier();
+  var local_active_count = 0u;
+  var local_contact_count = 0u;
+  var local_cursor_count = 0u;
+  var local_invalid = 0u;
+  if (
+    arrayLength(&source_offsets) < mechanical_params.particle_count + 1u
+    || published_total > arrayLength(&matching_constraints)
+    || published_total > arrayLength(&csr_peers)
+  ) {
+    local_invalid = 1u;
+  } else {
+    for (
+      var self_index = lane;
+      self_index < mechanical_params.particle_count;
+      self_index = self_index + 128u
+    ) {
+      let flags = atomicLoad(
+        &matching_cleanup_dispatch[
+          MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+        ]
+      );
+      let frontier_active =
+        (flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) != 0u;
+      let contact_active =
+        (flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) != 0u;
+      if (
+        (flags & ~(MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+          | MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+          | MECHANICAL_MATCHING_OWNER_CONTACT_BIT)) != 0u
+        || (contact_active && !frontier_active)
+      ) {
+        local_invalid = 1u;
+        continue;
+      }
+      if (frontier_active) {
+        let begin = source_offsets[self_index];
+        let end = source_offsets[self_index + 1u];
+        if (begin > end || end > published_total) {
+          local_invalid = 1u;
+          continue;
+        }
+        let degree = end - begin;
+        if (local_cursor_count > published_total - degree) {
+          local_invalid = 1u;
+          continue;
+        }
+        local_active_count = local_active_count + 1u;
+        local_cursor_count = local_cursor_count + degree;
+        let slot = atomicAdd(&mechanical_matching_owner_list_count, 1u);
+        if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+          mechanical_matching_owner_list[slot] = self_index;
+        }
+      }
+      if (contact_active) {
+        local_contact_count = local_contact_count + 1u;
+      }
+    }
+  }
+  if (local_invalid != 0u) {
+    atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+  } else {
+    atomicAdd(
+      &mechanical_matching_owner_active_count,
+      local_active_count
+    );
+    atomicAdd(
+      &mechanical_matching_owner_contact_count,
+      local_contact_count
+    );
+    let prior_cursor_count = atomicAdd(
+      &mechanical_matching_owner_cursor_count,
+      local_cursor_count
+    );
+    if (prior_cursor_count > published_total - local_cursor_count) {
+      atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+    }
+  }
+  workgroupBarrier();
+  if (atomicLoad(&mechanical_matching_owner_count_invalid) != 0u) {
+    return result;
+  }
+  result.active_count =
+    atomicLoad(&mechanical_matching_owner_active_count);
+  result.contact_count =
+    atomicLoad(&mechanical_matching_owner_contact_count);
+  result.active_cursor_count =
+    atomicLoad(&mechanical_matching_owner_cursor_count);
+  result.valid = 1u;
+  return result;
+}
+
+// Uniform snapshot of the incrementally maintained owner counters. Equals a
+// full recount of the flag words because every flag transition passes
+// through mechanical_matching_owner_note_admission on the unique lane whose
+// atomicOr flipped the bit.
+fn mechanical_matching_owner_counter_snapshot(
+  published_total: u32
+) -> MechanicalMatchingOwnerFrontierCounts {
+  var result = MechanicalMatchingOwnerFrontierCounts(0u, 0u, 0u, 0u);
+  if (
+    atomicLoad(&mechanical_matching_owner_count_invalid) != 0u
+    || atomicLoad(&mechanical_matching_owner_cursor_count) > published_total
+  ) {
+    return result;
+  }
+  result.active_count =
+    atomicLoad(&mechanical_matching_owner_active_count);
+  result.contact_count =
+    atomicLoad(&mechanical_matching_owner_contact_count);
+  result.active_cursor_count =
+    atomicLoad(&mechanical_matching_owner_cursor_count);
+  result.valid = 1u;
+  return result;
+}
+
+// Counter/list bookkeeping for one admission transition, called by the lane
+// whose atomicOr observed the bit flip (uniqueness comes from the atomic).
+fn mechanical_matching_owner_note_admission(
+  admitted_index: u32,
+  prior_flags: u32,
+  published_total: u32
+) {
+  if ((prior_flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
+    let begin = source_offsets[admitted_index];
+    let end = source_offsets[admitted_index + 1u];
+    if (begin > end || end > published_total) {
+      atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+    } else {
+      atomicAdd(&mechanical_matching_owner_active_count, 1u);
+      let degree = end - begin;
+      let prior_cursor_count = atomicAdd(
+        &mechanical_matching_owner_cursor_count,
+        degree
+      );
+      if (prior_cursor_count > published_total - degree) {
+        atomicOr(&mechanical_matching_owner_count_invalid, 1u);
+      }
+      let slot = atomicAdd(&mechanical_matching_owner_list_count, 1u);
+      if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+        mechanical_matching_owner_list[slot] = admitted_index;
+      }
+    }
+  }
+  if ((prior_flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) == 0u) {
+    atomicAdd(&mechanical_matching_owner_contact_count, 1u);
+  }
+}
+
 @compute @workgroup_size(128)
 fn run_matching_cleanup_global_owner(
   @builtin(local_invocation_id) local_id: vec3<u32>
@@ -16172,6 +16349,21 @@ fn run_matching_cleanup_global_owner(
     return;
   }
   storageBarrier();
+  // One validated full-particle frontier scan + list build per dispatch;
+  // every later pass reads the incrementally maintained counters and
+  // iterates the compacted list in its order-free phases.
+  let owner_seed_counts = mechanical_matching_owner_seed_frontier(
+    lane,
+    atomicLoad(&graph_control[12u])
+  );
+  if (lane == 0u && owner_seed_counts.valid == 0u) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.CSR_BOUNDS_OR_RANK}u
+    );
+  }
+  workgroupBarrier();
+  storageBarrier();
 
   for (
     var owner_pass = 0u;
@@ -16211,8 +16403,7 @@ fn run_matching_cleanup_global_owner(
     }
     let published_total_before_expansion = atomicLoad(&graph_control[12u]);
     let frontier_counts_before_expansion =
-      mechanical_matching_owner_frontier_counts(
-        lane,
+      mechanical_matching_owner_counter_snapshot(
         published_total_before_expansion
       );
     if (lane == 0u) {
@@ -16331,17 +16522,27 @@ fn run_matching_cleanup_global_owner(
               encoded_peer | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
             let contact_flags = MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
               | MECHANICAL_MATCHING_OWNER_CONTACT_BIT;
-            atomicOr(
+            let self_prior_flags = atomicOr(
               &matching_cleanup_dispatch[
                 MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
               ],
               contact_flags
+            );
+            mechanical_matching_owner_note_admission(
+              self_index,
+              self_prior_flags,
+              published_total
             );
             let peer_prior_flags = atomicOr(
               &matching_cleanup_dispatch[
                 MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
               ],
               contact_flags
+            );
+            mechanical_matching_owner_note_admission(
+              peer_index,
+              peer_prior_flags,
+              published_total
             );
             // A just-admitted peer may already have passed expansion in this
             // workgroup. Give it one complete selection scan so its reverse
@@ -16361,12 +16562,12 @@ fn run_matching_cleanup_global_owner(
         }
       }
     }
+    workgroupBarrier();
     storageBarrier();
 
     let published_total_after_expansion = atomicLoad(&graph_control[12u]);
     let frontier_counts_after_expansion =
-      mechanical_matching_owner_frontier_counts(
-        lane,
+      mechanical_matching_owner_counter_snapshot(
         published_total_after_expansion
       );
     if (lane == 0u && expand_frontier) {
@@ -16462,11 +16663,16 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (execute_pass) {
+      let owner_list_total = min(
+        atomicLoad(&mechanical_matching_owner_list_count),
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+      );
       for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+        var list_slot = lane;
+        list_slot < owner_list_total;
+        list_slot = list_slot + 128u
       ) {
+        let self_index = mechanical_matching_owner_list[list_slot];
         let flags = atomicLoad(
           &matching_cleanup_dispatch[
             MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
@@ -16493,11 +16699,16 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (execute_pass) {
+      let owner_list_total = min(
+        atomicLoad(&mechanical_matching_owner_list_count),
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+      );
       for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+        var list_slot = lane;
+        list_slot < owner_list_total;
+        list_slot = list_slot + 128u
       ) {
+        let self_index = mechanical_matching_owner_list[list_slot];
         let flags = atomicLoad(
           &matching_cleanup_dispatch[
             MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
@@ -16524,11 +16735,16 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (execute_pass) {
+      let owner_list_total = min(
+        atomicLoad(&mechanical_matching_owner_list_count),
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+      );
       for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+        var list_slot = lane;
+        list_slot < owner_list_total;
+        list_slot = list_slot + 128u
       ) {
+        let self_index = mechanical_matching_owner_list[list_slot];
         let flags = atomicLoad(
           &matching_cleanup_dispatch[
             MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
@@ -16555,11 +16771,16 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (execute_pass) {
+      let owner_list_total = min(
+        atomicLoad(&mechanical_matching_owner_list_count),
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+      );
       for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+        var list_slot = lane;
+        list_slot < owner_list_total;
+        list_slot = list_slot + 128u
       ) {
+        let self_index = mechanical_matching_owner_list[list_slot];
         let flags = atomicLoad(
           &matching_cleanup_dispatch[
             MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
@@ -16573,11 +16794,16 @@ fn run_matching_cleanup_global_owner(
     storageBarrier();
 
     if (execute_pass) {
+      let owner_list_total = min(
+        atomicLoad(&mechanical_matching_owner_list_count),
+        ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
+      );
       for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+        var list_slot = lane;
+        list_slot < owner_list_total;
+        list_slot = list_slot + 128u
       ) {
+        let self_index = mechanical_matching_owner_list[list_slot];
         let flags = atomicLoad(
           &matching_cleanup_dispatch[
             MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index

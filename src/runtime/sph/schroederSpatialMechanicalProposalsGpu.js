@@ -242,8 +242,11 @@ const MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD =
 const MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD =
   MATCHING_CLEANUP_MAX_POSITION_RATIO_WORD
     + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
-const MATCHING_CLEANUP_CONTROL_EXPECTED_WORDS =
+const MATCHING_CLEANUP_CONTACT_COUNT_WORD =
   MATCHING_CLEANUP_MAX_VELOCITY_RESIDUAL_WORD
+    + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
+const MATCHING_CLEANUP_CONTROL_EXPECTED_WORDS =
+  MATCHING_CLEANUP_CONTACT_COUNT_WORD
     + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES;
 if (
   MATCHING_CLEANUP_CONTROL_EXPECTED_WORDS
@@ -333,12 +336,13 @@ export function resolveSchroederSpatialMechanicalSolverBudget({
   const appliedPairCountWord = wallCountWord + cleanupPassBudget;
   const maxPositionRatioWord = appliedPairCountWord + cleanupPassBudget;
   const maxVelocityResidualWord = maxPositionRatioWord + cleanupPassBudget;
+  const contactCountWord = maxVelocityResidualWord + cleanupPassBudget;
   const matchingCleanupControlWords =
     schroederSpatialMechanicalMatchingCleanupControlWordsForPasses(
       cleanupPassBudget
     );
   if (
-    matchingCleanupControlWords !== maxVelocityResidualWord + cleanupPassBudget
+    matchingCleanupControlWords !== contactCountWord + cleanupPassBudget
   ) {
     throw new Error(
       'mechanical matching-cleanup control ABI word count drifted for the declared budget'
@@ -375,6 +379,7 @@ export function resolveSchroederSpatialMechanicalSolverBudget({
     appliedPairCountWord,
     maxPositionRatioWord,
     maxVelocityResidualWord,
+    contactCountWord,
     matchingCleanupControlWords,
     diagnosticTargetTraceWords,
     diagnosticTargetTraceBytes:
@@ -7964,6 +7969,10 @@ fn mechanical_matching_max_velocity_residual_word(pass_index: u32) -> u32 {
   return ${solverBudget.maxVelocityResidualWord}u + pass_index;
 }
 
+fn mechanical_matching_contact_count_word(pass_index: u32) -> u32 {
+  return ${solverBudget.contactCountWord}u + pass_index;
+}
+
 fn mechanical_matching_jacobi_ready() -> bool {
   let final_iteration = mechanical_params.solver_iteration_count - 1u;
   return mechanical_solver_full_path_enabled()
@@ -15451,6 +15460,16 @@ fn finalize_matching_cleanup_pass_body() {
           ],
           terminal_velocity_residual
         );
+        atomicStore(
+          &traversal_evidence[
+            mechanical_matching_contact_count_word(completed_pass)
+          ],
+          atomicLoad(
+            &traversal_evidence[
+              mechanical_matching_contact_count_word(pass_index)
+            ]
+          )
+        );
       }
       atomicStore(
         &graph_control[${SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORD
@@ -16764,6 +16783,14 @@ fn run_matching_cleanup_global_owner(
         mechanical_params.particle_count
           - mechanical_matching_persistent_contact_count
       );
+      atomicStore(
+        &traversal_evidence[
+          mechanical_matching_contact_count_word(
+            mechanical_matching_persistent_pass
+          )
+        ],
+        mechanical_matching_persistent_contact_count
+      );
       if (
         mechanical_matching_persistent_pass == 0u
         && mechanical_matching_jacobi_residual_converged()
@@ -18041,6 +18068,12 @@ fn complete_zero_contact_proposal(
       atomicStore(
         &matching_cleanup_control[
           ${solverBudget.maxVelocityResidualWord}u + cleanup_pass
+        ],
+        0u
+      );
+      atomicStore(
+        &matching_cleanup_control[
+          ${solverBudget.contactCountWord}u + cleanup_pass
         ],
         0u
       );

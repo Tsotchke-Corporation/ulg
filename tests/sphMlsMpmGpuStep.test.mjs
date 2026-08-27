@@ -1227,7 +1227,7 @@ function canonicalMechanicalProposalFixture({
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
   });
   const contactGraph = Object.freeze({
-    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v8',
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v9',
     status: 'schroeder-spatial-mechanical-pair-graph-prepared',
     selectedLevel: 0,
     directedPairCapacity: 4,

@@ -4339,7 +4339,7 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
     );
     assert.equal(
       preset.matchingCleanupControlWords,
-      12 + 7 * preset.cleanupPassBudget
+      12 + 8 * preset.cleanupPassBudget
     );
   }
   // 4. The declared budget is compiled into the shader variant: the terminal
@@ -4369,7 +4369,7 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
   assert.match(interactiveWgsl.solver, /\+ 16u\s*>= 512u/);
   assert.match(
     interactiveWgsl.apply,
-    new RegExp(`>= ${12 + 7 * 512}u`)
+    new RegExp(`>= ${12 + 8 * 512}u`)
   );
   // Every pass-clock comparison in the 512 variant carries 512, never the
   // batch horizon. (`== 1024u` still legitimately appears as the targeted
@@ -4412,7 +4412,7 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
   assert.equal(
     proposal.contactGraph.layout.bufferLayouts.matchingCleanupControl
       .wordLength,
-    12 + 7 * 512
+    12 + 8 * 512
   );
   assert.equal(
     isLiveSchroederSpatialMechanicalProposal(proposal, {
@@ -4430,7 +4430,7 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
   );
   assert.equal(
     cleanupHeaderWrite.bytes.byteLength,
-    (12 + 7 * 512) * 4,
+    (12 + 8 * 512) * 4,
     'the control write covers the budget-sized lane arena'
   );
   const headerWords = new Uint32Array(
@@ -5391,7 +5391,7 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
   );
   assert.equal(
     first.contactGraph.layout.bufferLayouts.matchingCleanupControl.wordLength,
-    7_180
+    8_204
   );
   assert.equal(first.contactGraph.energyLedgerAliasedToProposalRows, true);
   assert.equal(
@@ -5831,13 +5831,13 @@ test('a tighter pair-graph byte budget cannot reuse an oversized warm arena', as
 
   const constrained = runSchroederSpatialMechanicalProposalWebGpu({
     ...fixture,
-    pairGraphByteBudget: 34 * 1024
+    pairGraphByteBudget: 38 * 1024
   });
   assert.equal(constrained.proposalPoolCacheHit, false);
-  assert.ok(constrained.candidateByteBudget <= 34 * 1024);
-  assert.equal(constrained.configuredRetainedByteBudget, 34 * 1024);
-  assert.ok(constrained.totalRetainedGraphByteLength <= 34 * 1024);
-  assert.ok(34 * 1024 - constrained.totalRetainedGraphByteLength < 32);
+  assert.ok(constrained.candidateByteBudget <= 38 * 1024);
+  assert.equal(constrained.configuredRetainedByteBudget, 38 * 1024);
+  assert.ok(constrained.totalRetainedGraphByteLength <= 38 * 1024);
+  assert.ok(38 * 1024 - constrained.totalRetainedGraphByteLength < 32);
   assert.equal(
     fixture.device.buffers.filter(
       ({ label }) => label.startsWith(

@@ -1,18 +1,19 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v8';
+  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v9';
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_MAGIC = 0x4d50_4731;
-export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 8;
+export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 9;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS = 130;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS = 48;
 // The matching-cleanup control buffer holds one fixed 12-word header plus
-// seven per-pass evidence lanes (selection/copy/apply/wall counts, applied
-// pair count, max position ratio, max velocity residual). The pass budget is
-// a declared per-invocation solver parameter; the words scale with it.
+// eight per-pass evidence lanes (selection/copy/apply/wall counts, applied
+// pair count, max position ratio, max velocity residual, contact-frontier
+// count). The pass budget is a declared per-invocation solver parameter; the
+// words scale with it.
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_HEADER_WORDS = 12;
 export const
-  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT = 7;
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_CONTROL_LANE_COUNT = 8;
 // Reference pass budget mirrored by the batch/native/diagnostic preset of the
 // mechanical proposals solver. Callers with a different declared budget must
 // size their control buffer through the function below.

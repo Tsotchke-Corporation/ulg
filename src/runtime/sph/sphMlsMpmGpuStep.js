@@ -33368,7 +33368,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         );
         profileReadbackBuffer.unmap();
         const appliedBase = Number(profileBudget.appliedPairCountWord);
-        const selectionBase = Number(profileBudget.selectionCountWord);
+        const contactBase = Number(profileBudget.contactCountWord);
         const positionRatioBase = Number(profileBudget.maxPositionRatioWord);
         const velocityResidualBase = Number(
           profileBudget.maxVelocityResidualWord
@@ -33397,11 +33397,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           if (appliedAtPass > 0) lastNonzeroAppliedPass = pass;
           else if (firstZeroAppliedPass < 0) firstZeroAppliedPass = pass;
           appliedPairPerBucket[bucket] += appliedAtPass;
-          const selectionAtPass = profileWords[selectionBase + pass] ?? 0;
-          const contactAtPass = Math.max(
-            0,
-            profileParticleCount - selectionAtPass
-          );
+          const contactAtPass = Number.isInteger(contactBase)
+            ? (profileWords[contactBase + pass] ?? 0)
+            : 0;
           if (contactAtPass > contactCountPerBucketMax[bucket]) {
             contactCountPerBucketMax[bucket] = contactAtPass;
           }

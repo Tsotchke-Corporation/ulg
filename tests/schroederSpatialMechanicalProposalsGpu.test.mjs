@@ -3960,9 +3960,24 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     schroederSpatialMechanicalGraphSolverWgsl,
     /let frozen_pair = mechanical_matching_constraint_pair\([\s\S]*frozen_pair\.active_pair != 0u[\s\S]*atomicOr\([\s\S]*ACTIVE_FLAG_BASE \+ peer_index/
   );
+  // Expansion's pair evaluation lives in the shared per-member function so
+  // the full-scan and moved-set modes admit identically; both modes must
+  // call it between the expansion gate and the execute gate.
+  assert.match(
+    wgslFunctionSource('mechanical_matching_owner_expand_member'),
+    /mechanical_matching_constraint_pair\([\s\S]*pair\.active_pair != 0u && pair\.unilateral != 0u/
+  );
+  assert.equal(
+    (schroederSpatialMechanicalGraphSolverWgsl.slice(
+      schroederSpatialMechanicalGraphSolverWgsl.indexOf('let expand_frontier ='),
+      schroederSpatialMechanicalGraphSolverWgsl.indexOf('let execute_pass =')
+    ).match(/mechanical_matching_owner_expand_member\(/g) || []).length,
+    2,
+    'both expansion modes must run the shared per-member dormant scan'
+  );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
-    /let expand_frontier =[\s\S]*mechanical_matching_constraint_pair\([\s\S]*storageBarrier\(\);[\s\S]*let execute_pass =/
+    /let expand_frontier =[\s\S]*mechanical_matching_owner_moved_prev_valid[\s\S]*storageBarrier\(\);[\s\S]*let execute_pass =/
   );
   const ownerFrontierCountsSource = wgslFunctionSource(
     'mechanical_matching_owner_frontier_counts'
@@ -4013,7 +4028,8 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     'owner must snapshot the maintained counters before and after expansion'
   );
   assert.equal(
-    (ownerSource.match(/mechanical_matching_owner_note_admission\(/g) || [])
+    (wgslFunctionSource('mechanical_matching_owner_expand_member')
+      .match(/mechanical_matching_owner_note_admission\(/g) || [])
       .length,
     2,
     'both expansion admission sites must maintain the frontier counters'
@@ -4065,11 +4081,11 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     /select_matching_cleanup_edge_for_index\(self_index, false\);/
   );
   assert.match(
-    ownerSource,
+    wgslFunctionSource('mechanical_matching_owner_expand_member'),
     /if \(mechanical_matching_edge_ever_active\(encoded_peer\)\) \{[\s\S]*continue;[\s\S]*mechanical_matching_constraint_pair/
   );
   assert.match(
-    ownerSource,
+    wgslFunctionSource('mechanical_matching_owner_expand_member'),
     /peer_prior_flags[\s\S]*MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT/
   );
   assert.match(

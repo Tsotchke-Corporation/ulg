@@ -13635,6 +13635,10 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
           vec4<f32>(three_block.secondary_velocity, secondary_next_u);
         output_state[tertiary_index * 2u + 1u] =
           vec4<f32>(three_block.tertiary_velocity, tertiary_next_u);
+        mechanical_matching_owner_record_mover(center_index);
+        mechanical_matching_owner_record_mover(primary_index);
+        mechanical_matching_owner_record_mover(secondary_index);
+        mechanical_matching_owner_record_mover(tertiary_index);
         energy_ledger[mechanical_energy_base(center_index) + 1u] =
           vec4<f32>(
             center_cumulative.x + three_block.center_kinetic_delta_j,
@@ -13779,6 +13783,9 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
           vec4<f32>(three_block.primary_velocity, primary_next_u);
         output_state[secondary_index * 2u + 1u] =
           vec4<f32>(three_block.secondary_velocity, secondary_next_u);
+        mechanical_matching_owner_record_mover(center_index);
+        mechanical_matching_owner_record_mover(primary_index);
+        mechanical_matching_owner_record_mover(secondary_index);
         energy_ledger[mechanical_energy_base(center_index) + 1u] =
           vec4<f32>(
             center_cumulative.x + three_block.center_kinetic_delta_j,
@@ -13950,6 +13957,8 @@ fn apply_matching_cleanup_edge_for_index(self_index: u32) {
         vec4<f32>(refinement.low_velocity, low_next_u);
       output_state[high_index * 2u + 1u] =
         vec4<f32>(refinement.high_velocity, high_next_u);
+      mechanical_matching_owner_record_mover(low_index);
+      mechanical_matching_owner_record_mover(high_index);
       energy_ledger[mechanical_energy_base(low_index) + 1u] = vec4<f32>(
         low_cumulative.x + refinement.low_pair_kinetic_delta_j,
         low_next_pair_heat_j,
@@ -15301,6 +15310,15 @@ fn project_matching_cleanup_walls_for_index(self_index: u32) {
     );
     return;
   }
+  if (
+    any(position != pos_mass.xyz)
+    || any(velocity != vel_u.xyz)
+  ) {
+    // Pair activity reads only endpoint positions and velocities; a wall
+    // projection that changed either makes this particle a mover for the
+    // next pass's moved-set expansion.
+    mechanical_matching_owner_record_mover(self_index);
+  }
   output_state[self_index * 2u] = vec4<f32>(position, pos_mass.w);
   output_state[self_index * 2u + 1u] = vec4<f32>(velocity, next_u);
   energy_ledger[mechanical_energy_base(self_index) + 1u] = vec4<f32>(
@@ -16029,6 +16047,32 @@ var<workgroup> mechanical_matching_owner_count_invalid: atomic<u32>;
 var<workgroup> mechanical_matching_owner_list:
   array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
 var<workgroup> mechanical_matching_owner_list_count: atomic<u32>;
+// Double-buffered mover lists for moved-set incremental expansion: the
+// apply and wall phases record every particle whose state word they wrote;
+// the next logical pass's expansion evaluates only those rows. Overflow or
+// a fresh dispatch forces the complete frontier scan instead (fail-safe).
+var<workgroup> mechanical_matching_owner_moved_a:
+  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
+var<workgroup> mechanical_matching_owner_moved_b:
+  array<u32, ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}>;
+var<workgroup> mechanical_matching_owner_moved_count_a: atomic<u32>;
+var<workgroup> mechanical_matching_owner_moved_count_b: atomic<u32>;
+var<workgroup> mechanical_matching_owner_moved_phase: u32;
+var<workgroup> mechanical_matching_owner_moved_prev_valid: u32;
+
+fn mechanical_matching_owner_record_mover(moved_index: u32) {
+  if (mechanical_matching_owner_moved_phase == 0u) {
+    let slot = atomicAdd(&mechanical_matching_owner_moved_count_a, 1u);
+    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+      mechanical_matching_owner_moved_a[slot] = moved_index;
+    }
+  } else {
+    let slot = atomicAdd(&mechanical_matching_owner_moved_count_b, 1u);
+    if (slot < ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u) {
+      mechanical_matching_owner_moved_b[slot] = moved_index;
+    }
+  }
+}
 
 fn mechanical_matching_owner_frontier_counts(
   lane: u32,
@@ -16298,6 +16342,105 @@ fn mechanical_matching_owner_note_admission(
   }
 }
 
+
+// One frontier member's dormant-discovery scan: evaluate every
+// not-yet-ever-active cursor of the member's CSR row against live state and
+// admit newly active unilateral pairs. Shared by the full-scan and moved-set
+// expansion modes so both admit identically for a given evaluation set.
+fn mechanical_matching_owner_expand_member(
+  self_index: u32,
+  published_total: u32
+) {
+  let begin = source_offsets[self_index];
+  let end = source_offsets[self_index + 1u];
+  if (
+    begin > end
+    || end > published_total
+    || published_total > arrayLength(&matching_constraints)
+    || published_total > arrayLength(&csr_peers)
+  ) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+        .CSR_BOUNDS_OR_RANK}u
+    );
+    return;
+  }
+  for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
+    let encoded_peer = csr_peers[cursor];
+    let peer_index = mechanical_solver_peer_index(encoded_peer);
+    if (peer_index >= mechanical_params.particle_count) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
+    .CSR_BOUNDS_OR_RANK}u
+      );
+      continue;
+    }
+    // Known-active constraints are re-evaluated by deterministic row
+    // selection below. Expansion owns only dormant discovery, so a
+    // steady-state cursor executes the pair law in just one phase; its
+    // first active transition is deliberately rechecked by selection.
+    if (mechanical_matching_edge_ever_active(encoded_peer)) {
+      continue;
+    }
+    let low_index = min(self_index, peer_index);
+    let high_index = max(self_index, peer_index);
+    let pair = mechanical_matching_constraint_pair(
+      low_index,
+      high_index,
+      cursor
+    );
+    if (pair.valid == 0u) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+      );
+    } else if (pair.active_pair != 0u && pair.unilateral != 0u) {
+      csr_peers[cursor] =
+        encoded_peer | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
+      let contact_flags = MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
+        | MECHANICAL_MATCHING_OWNER_CONTACT_BIT;
+      let self_prior_flags = atomicOr(
+        &matching_cleanup_dispatch[
+    MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+        ],
+        contact_flags
+      );
+      mechanical_matching_owner_note_admission(
+        self_index,
+        self_prior_flags,
+        published_total
+      );
+      let peer_prior_flags = atomicOr(
+        &matching_cleanup_dispatch[
+    MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
+        ],
+        contact_flags
+      );
+      mechanical_matching_owner_note_admission(
+        peer_index,
+        peer_prior_flags,
+        published_total
+      );
+      // A just-admitted peer may already have passed expansion in this
+      // workgroup. Give it one complete selection scan so its reverse
+      // cursor is visible in this same logical pass; selection records
+      // active cursors and clears this transient flag afterward.
+      if (
+        (peer_prior_flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) == 0u
+      ) {
+        atomicOr(
+    &matching_cleanup_dispatch[
+      MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
+    ],
+    MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
+        );
+      }
+    }
+  }
+}
+
 @compute @workgroup_size(128)
 fn run_matching_cleanup_global_owner(
   @builtin(local_invocation_id) local_id: vec3<u32>
@@ -16459,106 +16602,77 @@ fn run_matching_cleanup_global_owner(
     // dormant constraint cannot become active behind this frontier.
     if (expand_frontier) {
       let published_total = atomicLoad(&graph_control[12u]);
-      for (
-        var self_index = lane;
-        self_index < mechanical_params.particle_count;
-        self_index = self_index + 128u
+      // Moved-set incremental expansion: a dormant pair's activity decision
+      // reads only the frozen constraint row and the two endpoints' live
+      // input_state, so its outcome is bit-identical until an endpoint's
+      // state changes. After the first pass of a chunked dispatch, only the
+      // rows of particles recorded as movers by the previous pass's apply
+      // and wall phases need re-evaluation; recorder overflow or a fresh
+      // dispatch falls back to the complete frontier scan. Same-pass cascade
+      // admissions still occur through the mover set exactly when the
+      // enabling movement happened, which is the same pass the full scan
+      // first evaluates them with changed inputs.
+      // Plain read: the flag is written only by lane 0 between the pass
+      // barriers, so its value is workgroup-uniform here without a control
+      // barrier (which would be illegal inside this conditional).
+      let moved_prev_ready = mechanical_matching_owner_moved_prev_valid;
+      var moved_prev_count = 0u;
+      if (mechanical_matching_owner_moved_phase == 0u) {
+        moved_prev_count =
+          atomicLoad(&mechanical_matching_owner_moved_count_b);
+      } else {
+        moved_prev_count =
+          atomicLoad(&mechanical_matching_owner_moved_count_a);
+      }
+      if (
+        moved_prev_ready == 0u
+        || moved_prev_count > ${SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_PARTICLES}u
       ) {
-        let flags = atomicLoad(
-          &matching_cleanup_dispatch[
-            MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-          ]
-        );
-        if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
-          continue;
-        }
-        let begin = source_offsets[self_index];
-        let end = source_offsets[self_index + 1u];
-        if (
-          begin > end
-          || end > published_total
-          || published_total > arrayLength(&matching_constraints)
-          || published_total > arrayLength(&csr_peers)
+        for (
+          var self_index = lane;
+          self_index < mechanical_params.particle_count;
+          self_index = self_index + 128u
         ) {
-          atomicOr(
-            &graph_control[14u],
-            ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
-              .CSR_BOUNDS_OR_RANK}u
+          let flags = atomicLoad(
+            &matching_cleanup_dispatch[
+              MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
+            ]
           );
-          continue;
+          if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
+            continue;
+          }
+          mechanical_matching_owner_expand_member(
+            self_index,
+            published_total
+          );
         }
-        for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
-          let encoded_peer = csr_peers[cursor];
-          let peer_index = mechanical_solver_peer_index(encoded_peer);
-          if (peer_index >= mechanical_params.particle_count) {
-            atomicOr(
-              &graph_control[14u],
-              ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
-                .CSR_BOUNDS_OR_RANK}u
-            );
+      } else {
+        for (
+          var moved_slot = lane;
+          moved_slot < moved_prev_count;
+          moved_slot = moved_slot + 128u
+        ) {
+          var moved_index = 0u;
+          if (mechanical_matching_owner_moved_phase == 0u) {
+            moved_index = mechanical_matching_owner_moved_b[moved_slot];
+          } else {
+            moved_index = mechanical_matching_owner_moved_a[moved_slot];
+          }
+          if (moved_index >= mechanical_params.particle_count) {
             continue;
           }
-          // Known-active constraints are re-evaluated by deterministic row
-          // selection below. Expansion owns only dormant discovery, so a
-          // steady-state cursor executes the pair law in just one phase; its
-          // first active transition is deliberately rechecked by selection.
-          if (mechanical_matching_edge_ever_active(encoded_peer)) {
-            continue;
-          }
-          let low_index = min(self_index, peer_index);
-          let high_index = max(self_index, peer_index);
-          let pair = mechanical_matching_constraint_pair(
-            low_index,
-            high_index,
-            cursor
+          let flags = atomicLoad(
+            &matching_cleanup_dispatch[
+              MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + moved_index
+            ]
           );
-          if (pair.valid == 0u) {
-            atomicOr(
-              &graph_control[14u],
-              ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
-            );
-          } else if (pair.active_pair != 0u && pair.unilateral != 0u) {
-            csr_peers[cursor] =
-              encoded_peer | MECHANICAL_MATCHING_EDGE_EVER_ACTIVE_BIT;
-            let contact_flags = MECHANICAL_MATCHING_OWNER_FRONTIER_BIT
-              | MECHANICAL_MATCHING_OWNER_CONTACT_BIT;
-            let self_prior_flags = atomicOr(
-              &matching_cleanup_dispatch[
-                MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + self_index
-              ],
-              contact_flags
-            );
-            mechanical_matching_owner_note_admission(
-              self_index,
-              self_prior_flags,
-              published_total
-            );
-            let peer_prior_flags = atomicOr(
-              &matching_cleanup_dispatch[
-                MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
-              ],
-              contact_flags
-            );
-            mechanical_matching_owner_note_admission(
-              peer_index,
-              peer_prior_flags,
-              published_total
-            );
-            // A just-admitted peer may already have passed expansion in this
-            // workgroup. Give it one complete selection scan so its reverse
-            // cursor is visible in this same logical pass; selection records
-            // active cursors and clears this transient flag afterward.
-            if (
-              (peer_prior_flags & MECHANICAL_MATCHING_OWNER_CONTACT_BIT) == 0u
-            ) {
-              atomicOr(
-                &matching_cleanup_dispatch[
-                  MECHANICAL_MATCHING_OWNER_ACTIVE_FLAG_BASE + peer_index
-                ],
-                MECHANICAL_MATCHING_OWNER_FULL_SELECTION_BIT
-              );
-            }
+          if ((flags & MECHANICAL_MATCHING_OWNER_FRONTIER_BIT) == 0u) {
+            continue;
           }
+          mechanical_matching_owner_expand_member(
+            moved_index,
+            published_total
+          );
         }
       }
     }
@@ -16822,6 +16936,21 @@ fn run_matching_cleanup_global_owner(
       finalize_matching_cleanup_pass_body();
     }
     storageBarrier();
+    // Rotate the mover buffers: this pass's recorded movers become the next
+    // pass's expansion set, and the buffer that will collect next pass is
+    // cleared. Zero-initialized workgroup state makes the first pass of a
+    // fresh dispatch fall back to the complete frontier scan.
+    if (lane == 0u && execute_pass) {
+      mechanical_matching_owner_moved_prev_valid = 1u;
+      if (mechanical_matching_owner_moved_phase == 0u) {
+        mechanical_matching_owner_moved_phase = 1u;
+        atomicStore(&mechanical_matching_owner_moved_count_b, 0u);
+      } else {
+        mechanical_matching_owner_moved_phase = 0u;
+        atomicStore(&mechanical_matching_owner_moved_count_a, 0u);
+      }
+    }
+    workgroupBarrier();
   }
   if (lane == 0u && arrayLength(&matching_cleanup_dispatch) >= 3u) {
     atomicStore(

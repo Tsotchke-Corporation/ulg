@@ -12,6 +12,7 @@ import {
   ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
 } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  diagnoseUploadedMechanicsMaterialPhaseRecordsMatch,
   destroyMlsMpmMechanicsMaterialPhaseUpload,
   refreshMlsMpmMechanicsCpu,
   runMlsMpmMechanicsRefreshWebGpu,
@@ -633,7 +634,31 @@ test('mechanics material phase uploads are reusable only on their owning device'
   const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(deviceA, table);
 
   assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, deviceA), true);
+  const exactDiagnostics = diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
+    upload,
+    table,
+    deviceA
+  );
+  assert.equal(exactDiagnostics.matches, true);
+  for (const field of [
+    'statusUploaded',
+    'notDestroyed',
+    'bufferPresent',
+    'schemaMatch',
+    'fingerprintMatch',
+    'countMatch',
+    'byteLengthMatch',
+    'sameDevice'
+  ]) {
+    assert.equal(exactDiagnostics[field], true, field);
+  }
+  assert.equal(structuredClone(exactDiagnostics).matches, true);
   assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, deviceB), false);
+  assert.equal(
+    diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(upload, table, deviceB)
+      .sameDevice,
+    false
+  );
   assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch({
     ...upload,
     recordsBuffer: { label: 'untagged-mechanics-records' },
@@ -656,4 +681,23 @@ test('mechanics material phase uploads are reusable only on their owning device'
     uploadedMechanicsMaterialPhaseRecordsMatch(upload, equivalentTable, deviceA),
     true
   );
+
+  const mismatches = [
+    [{ ...upload, status: 'not-uploaded' }, 'statusUploaded'],
+    [{ ...upload, destroyed: true }, 'notDestroyed'],
+    [{ ...upload, recordsBuffer: null, materialPhaseBuffer: null }, 'bufferPresent'],
+    [{ ...upload, sourceMaterialTableSchema: 'wrong-schema' }, 'schemaMatch'],
+    [{ ...upload, sourceMaterialTableContentFingerprint: 'wrong' }, 'fingerprintMatch'],
+    [{ ...upload, phaseRecordCount: upload.phaseRecordCount + 1 }, 'countMatch'],
+    [{ ...upload, recordsByteLength: upload.recordsByteLength + 4 }, 'byteLengthMatch']
+  ];
+  for (const [candidate, expectedFailedField] of mismatches) {
+    const diagnostics = diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
+      candidate,
+      table,
+      deviceA
+    );
+    assert.equal(diagnostics.matches, false, expectedFailedField);
+    assert.equal(diagnostics[expectedFailedField], false, expectedFailedField);
+  }
 });

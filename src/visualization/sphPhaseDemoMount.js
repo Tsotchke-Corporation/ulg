@@ -10,6 +10,7 @@ import {
   SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS,
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
+  ULG_WORKER_LANE_NATIVE_SURFACE_PRESENTATION_SOURCE_SCHEMA,
   compactPageVisibleGpuReadbackTelemetry,
   createSphPhaseScene,
   inspectExactSphSpatialGasPressureAuthorityImport,
@@ -17,7 +18,8 @@ import {
   normalizeSphSceneLightingMode,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend,
-  resolveOpticalSurfaceVisibility
+  resolveOpticalSurfaceVisibility,
+  resolveSphSchroederHierarchyContactAdmission
 } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import {
@@ -25,6 +27,7 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -48,11 +51,24 @@ import {
 import {
   buildUlgSphMlsMpmRemoteSeedTaskGraph,
   ensurePeerComputeResidentAuthorityHost,
+  refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot,
   summarizePeerComputeResidentAuthorityHost
 } from '../runtime/peercomputeBrowserResidentHost.js';
 import {
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  destroyMlsMpmGpuParticleBuffers,
+  destroySphGpuParticleBuffers
+} from '../runtime/sph/sphGpuBuffers.js';
+import {
+  ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES,
+  normalizePeerComputeRenderOwnershipMode,
   resolvePeerComputeRenderOwnershipPolicy
 } from '../runtime/peercomputeRenderOwnershipPolicy.js';
+import {
+  ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
+  ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
+  resolveUlgWorkerOffscreenPresentationCapability
+} from './offscreenPresentationBridge.js';
 import {
   SPH_COLD_START_CACHE_SCHEMA,
   SPH_COLD_START_CACHE_STORAGE_KEY,
@@ -81,6 +97,7 @@ import {
 } from '../runtime/sphPhaseScenarioPresets.js';
 import {
   allocateNextSphInitialBodyIdentity,
+  deriveSphInitialBodySizeM,
   duplicateSphInitialBody,
   moveSphInitialBody,
   normalizeSphInitialBodies,
@@ -308,9 +325,34 @@ const RESIDENT_VISIBLE_MOTION_THRESHOLD_MIN_M = 1e-6;
 const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
 const DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE = 'same-device-interactive';
 
+// Bounded status telemetry (plan/todo/ss-regression.md correction 4): the
+// full status traversal is expensive scene-wide work, so it may never run
+// per resident step. Hidden panel: zero traversals, one deferred flush on
+// expand. Visible panel: leading-edge render, then trailing coalescence at
+// this cadence.
+export const SPH_STATUS_REFRESH_MIN_INTERVAL_MS = 250;
+
+export function resolveSphStatusRefreshDecision({
+  panelHidden = false,
+  lastRenderMs = 0,
+  nowMs = 0,
+  minIntervalMs = SPH_STATUS_REFRESH_MIN_INTERVAL_MS
+} = {}) {
+  if (panelHidden) return Object.freeze({ action: 'skip-hidden', delayMs: 0 });
+  const elapsed = Math.max(0, Number(nowMs) - Number(lastRenderMs));
+  if (!Number.isFinite(elapsed) || elapsed >= minIntervalMs) {
+    return Object.freeze({ action: 'render-now', delayMs: 0 });
+  }
+  return Object.freeze({
+    action: 'defer',
+    delayMs: Math.max(1, minIntervalMs - elapsed)
+  });
+}
+
 export function resolveSphResidentScheduleStepCount({
   requestedStepCount = 1,
-  schroederSimulationEnabled = false
+  schroederSimulationEnabled = false,
+  workerLaneActive = false
 } = {}) {
   const normalized = Math.max(
     1,
@@ -320,16 +362,286 @@ export function resolveSphResidentScheduleStepCount({
     )
   );
   // One canonical SS generation is immutable for exactly one position epoch.
-  // Asking the resident sequence executor to reuse it across a multi-step
-  // mounted batch is rejected before step 1. Keep playback live by publishing
-  // one completed epoch per schedule; the RAF continuation builds the next
-  // hierarchy generation for the next physics step.
-  return schroederSimulationEnabled ? 1 : normalized;
+  // Asking the DIRECT scene-resident sequence executor to reuse it across a
+  // multi-step mounted batch is rejected before step 1, so the direct route
+  // publishes one completed epoch per schedule and the RAF continuation
+  // builds the next hierarchy generation for the next physics step.
+  //
+  // W4b: the worker-owned resident lane batches legally. Each worker schedule
+  // step builds and seals ITS OWN spatial epoch generation (the W2 driver
+  // fails closed with 'epoch-identity-regressed' if a step does not advance),
+  // so a multi-step batch never reuses a generation across a position epoch
+  // and the whole batch runs off the page thread.
+  if (schroederSimulationEnabled) return workerLaneActive ? normalized : 1;
+  return normalized;
+}
+
+export function resolveSphMountedWorkerLaneScheduleStepCount({
+  requestedStepCount = 1,
+  residentStepsPerScheduleMax = null,
+  workerLaneActive = false
+} = {}) {
+  const requested = Math.max(1, Math.round(Number(requestedStepCount) || 1));
+  const policyMax = Number.isInteger(Number(residentStepsPerScheduleMax))
+    && Number(residentStepsPerScheduleMax) > 0
+    ? Number(residentStepsPerScheduleMax)
+    : RESIDENT_PARTICLE_BRIDGE_STEPS_PER_SCHEDULE_MAX;
+  return resolveSphResidentScheduleStepCount({
+    requestedStepCount: Math.min(requested, policyMax),
+    schroederSimulationEnabled: true,
+    workerLaneActive
+  });
+}
+
+export function resolveSphMountedScheduleControlEvidence({
+  requestedStepCount = 1,
+  residentStepsPerScheduleMax = null,
+  workerLaneActive = false
+} = {}) {
+  const requested = Math.max(1, Math.round(Number(requestedStepCount) || 1));
+  const policyMax = Number.isInteger(Number(residentStepsPerScheduleMax))
+    && Number(residentStepsPerScheduleMax) > 0
+    ? Number(residentStepsPerScheduleMax)
+    : RESIDENT_PARTICLE_BRIDGE_STEPS_PER_SCHEDULE_MAX;
+  const effective = resolveSphMountedWorkerLaneScheduleStepCount({
+    requestedStepCount: requested,
+    residentStepsPerScheduleMax: policyMax,
+    workerLaneActive
+  });
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-mounted-schedule-control-evidence.v0',
+    status: 'mounted-schedule-control-evidence-ready',
+    requestedStepCount: requested,
+    policyMaxStepCount: policyMax,
+    effectiveStepCount: effective,
+    workerLaneActive: workerLaneActive === true,
+    requestCappedByPolicy: effective < requested
+  });
+}
+
+export function resolveSphMountedArchitectureControlState({
+  mechanicsMode = 'mlsmpm',
+  ss = false,
+  twoLevel = false,
+  activeNodeIndex = false,
+  activeNodeSortedIndex = false,
+  lawQueue = false,
+  lawNeighborCandidates = false,
+  crossLevelCoupling = false,
+  phaseVolumeMigration = false,
+  mechanicsFieldPairV2 = false,
+  contactSolver = true,
+  surfaceDraw = 'auto',
+  surfaceOverlay = false,
+  workerParticleOverlay = false,
+  twoLevelAuthority = 'observation',
+  fineSubsteps = 2,
+  normalizeDependencies = false
+} = {}) {
+  const state = {
+    mechanicsMode: String(mechanicsMode || 'mlsmpm'),
+    ss: ss === true,
+    twoLevel: twoLevel === true,
+    activeNodeIndex: activeNodeIndex === true,
+    activeNodeSortedIndex: activeNodeSortedIndex === true,
+    lawQueue: lawQueue === true,
+    lawNeighborCandidates: lawNeighborCandidates === true,
+    crossLevelCoupling: crossLevelCoupling === true,
+    phaseVolumeMigration: phaseVolumeMigration === true,
+    mechanicsFieldPairV2: mechanicsFieldPairV2 === true,
+    contactSolver: contactSolver !== false,
+    surfaceDraw: String(surfaceDraw || 'auto'),
+    surfaceOverlay: surfaceOverlay === true,
+    workerParticleOverlay: workerParticleOverlay === true,
+    twoLevelAuthority:
+      String(twoLevelAuthority).toLowerCase() === 'authoritative'
+        ? 'authoritative'
+        : 'observation',
+    fineSubsteps: Math.max(1, Math.min(4, Math.round(Number(fineSubsteps) || 1)))
+  };
+  const workerSs = state.mechanicsMode === 'mlsmpm' && state.ss;
+  if (normalizeDependencies) {
+    // Plain SPH owns a CPU-reference route and cannot host the Schroeder
+    // hierarchy. Selecting it is an explicit architecture opt-out, so clear
+    // the parent switch together with all of its dependent controls.
+    if (state.mechanicsMode !== 'mlsmpm') state.ss = false;
+    // Canonical SS mechanics owns the pair-contact solve. Treat contact as a
+    // required law for every worker-SS profile: a disabled contact toggle must
+    // never silently turn the entire hierarchy into the legacy direct route.
+    if (workerSs) state.contactSolver = true;
+    if (!workerSs) {
+      for (const key of [
+        'twoLevel',
+        'activeNodeIndex',
+        'activeNodeSortedIndex',
+        'lawQueue',
+        'lawNeighborCandidates',
+        'crossLevelCoupling',
+        'phaseVolumeMigration',
+        'mechanicsFieldPairV2',
+        'workerParticleOverlay'
+      ]) state[key] = false;
+      state.twoLevelAuthority = 'observation';
+    }
+    if (!state.twoLevel) {
+      state.crossLevelCoupling = false;
+      state.mechanicsFieldPairV2 = false;
+      state.twoLevelAuthority = 'observation';
+    } else if (state.twoLevelAuthority === 'authoritative') {
+      // Authoritative adjacent-level transport is the paired-field terminal
+      // reflux transaction. The generic coupling-candidate path is an
+      // observation-mode subsystem and is deliberately bypassed by the GPU
+      // hierarchy in authoritative mode.
+      state.crossLevelCoupling = false;
+    }
+    if (!state.activeNodeIndex) state.activeNodeSortedIndex = false;
+    if (!state.lawQueue) state.lawNeighborCandidates = false;
+    if (
+      state.twoLevel
+      && state.twoLevelAuthority === 'authoritative'
+      && state.fineSubsteps < 2
+    ) state.fineSubsteps = 2;
+  }
+  const normalizedWorkerSs = state.mechanicsMode === 'mlsmpm' && state.ss;
+  const normalizedTwoLevel = normalizedWorkerSs && state.twoLevel;
+  const dependencyIssues = [];
+  if (state.ss && state.mechanicsMode !== 'mlsmpm') {
+    dependencyIssues.push('ss-requires-mlsmpm');
+  }
+  if (state.twoLevel && !normalizedWorkerSs) dependencyIssues.push('two-level-requires-worker-ss');
+  if (state.activeNodeSortedIndex && !state.activeNodeIndex) {
+    dependencyIssues.push('sorted-active-index-requires-active-index');
+  }
+  if (state.lawNeighborCandidates && !state.lawQueue) {
+    dependencyIssues.push('law-neighbor-candidates-require-law-queue');
+  }
+  if (state.crossLevelCoupling) {
+    if (!normalizedTwoLevel) {
+      dependencyIssues.push('cross-level-coupling-requires-two-level');
+    } else if (state.twoLevelAuthority === 'authoritative') {
+      dependencyIssues.push(
+        'generic-cross-level-coupling-superseded-by-authoritative-paired-fields'
+      );
+    }
+  }
+  if (state.mechanicsFieldPairV2 && !normalizedTwoLevel) {
+    dependencyIssues.push('paired-fields-require-two-level');
+  }
+  if (state.workerParticleOverlay && !normalizedWorkerSs) {
+    dependencyIssues.push('worker-particle-overlay-requires-worker-ss');
+  }
+  if (normalizedWorkerSs && !state.contactSolver) {
+    dependencyIssues.push('worker-ss-requires-contact-solver');
+  }
+  if (
+    normalizedTwoLevel
+    && state.twoLevelAuthority === 'authoritative'
+    && state.fineSubsteps < 2
+  ) dependencyIssues.push('authoritative-two-level-requires-two-fine-substeps');
+  const disabled = Object.freeze({
+    // Keep a dirty checked URL repairable; once SS is off, plain SPH makes the
+    // unavailable hierarchy control explicitly read-only.
+    ss: state.mechanicsMode !== 'mlsmpm' && !state.ss,
+    twoLevel: !normalizedWorkerSs,
+    activeNodeIndex: !normalizedWorkerSs,
+    activeNodeSortedIndex: !normalizedWorkerSs || !state.activeNodeIndex,
+    lawQueue: !normalizedWorkerSs,
+    lawNeighborCandidates: !normalizedWorkerSs || !state.lawQueue,
+    crossLevelCoupling:
+      !normalizedTwoLevel || state.twoLevelAuthority === 'authoritative',
+    phaseVolumeMigration: !normalizedWorkerSs,
+    mechanicsFieldPairV2: !normalizedTwoLevel,
+    // While valid SS is active contact is a required, read-only law. Keep an
+    // invalid unchecked control enabled so a dirty URL can be repaired in the
+    // UI instead of trapping the user in an uneditable state.
+    contactSolver: normalizedWorkerSs && state.contactSolver,
+    workerParticleOverlay: !normalizedWorkerSs,
+    twoLevelAuthority: !normalizedTwoLevel,
+    fineSubsteps: !normalizedTwoLevel
+  });
+  const canonicalWorkerCommon = Boolean(
+    normalizedWorkerSs
+    && state.activeNodeIndex
+    && state.activeNodeSortedIndex
+    && state.lawQueue
+    && state.lawNeighborCandidates
+    && state.phaseVolumeMigration
+    && state.contactSolver
+    && state.surfaceDraw === 'native-webgpu-surface-consumer'
+    && !state.surfaceOverlay
+    && !state.workerParticleOverlay
+  );
+  let profile = 'custom';
+  if (
+    canonicalWorkerCommon
+    && !state.twoLevel
+    && !state.crossLevelCoupling
+    && !state.mechanicsFieldPairV2
+    && state.twoLevelAuthority === 'observation'
+    && state.fineSubsteps === 2
+  ) {
+    profile = 'ss-single-worker';
+  } else if (
+    canonicalWorkerCommon
+    && state.twoLevel
+    && state.mechanicsFieldPairV2
+    && state.fineSubsteps === 2
+    && (
+      (state.twoLevelAuthority === 'authoritative'
+        && !state.crossLevelCoupling)
+      || (state.twoLevelAuthority === 'observation'
+        && state.crossLevelCoupling)
+    )
+  ) {
+    profile = state.twoLevelAuthority === 'authoritative'
+      ? 'ss-two-authoritative-worker'
+      : 'ss-two-observation-worker';
+  } else if (
+    !state.ss
+    && !state.twoLevel
+    && !state.activeNodeIndex
+    && !state.activeNodeSortedIndex
+    && !state.lawQueue
+    && !state.lawNeighborCandidates
+    && !state.crossLevelCoupling
+    && !state.phaseVolumeMigration
+    && !state.mechanicsFieldPairV2
+    && !state.surfaceOverlay
+    && !state.workerParticleOverlay
+    && state.contactSolver
+    && state.surfaceDraw === 'auto'
+  ) {
+    profile = 'main-thread-diagnostic';
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-mounted-architecture-control-state.v0',
+    status: 'mounted-architecture-control-state-ready',
+    ...state,
+    workerSs,
+    normalizedWorkerSs,
+    normalizedTwoLevel,
+    crossLevelTransportMode: normalizedTwoLevel
+      ? (state.twoLevelAuthority === 'authoritative'
+        ? 'authoritative-paired-fields-terminal-reflux'
+        : (state.crossLevelCoupling
+          ? 'generic-coupling-candidates-observation'
+          : 'disabled'))
+      : 'disabled',
+    authoritativeFineSubstepMinimum:
+      normalizedTwoLevel && state.twoLevelAuthority === 'authoritative' ? 2 : 1,
+    contactSolverMode: normalizedWorkerSs
+      ? 'required-canonical-spatial-contact'
+      : 'diagnostic-inactive-without-worker-ss',
+    dependencyIssues: Object.freeze(dependencyIssues),
+    disabled,
+    profile
+  });
 }
 
 export function resolveSphResidentInterfaceRefreshContinuationPolicy({
   schroederSimulationEnabled = false,
   residentComputeManagerMode = 'direct',
+  workerOwnedResidentLaneActive = false,
   pressureEnabled = true,
   reactionsEnabled = true,
   reactionCount = 0,
@@ -340,8 +652,16 @@ export function resolveSphResidentInterfaceRefreshContinuationPolicy({
     schroederSimulationEnabled === true
     && directResidentExecution
   );
+  const canonicalSchroederWorkerHotLoop = Boolean(
+    schroederSimulationEnabled === true
+    && workerOwnedResidentLaneActive === true
+  );
+  const canonicalSchroederHotLoop = Boolean(
+    canonicalSchroederDirectHotLoop
+    || canonicalSchroederWorkerHotLoop
+  );
   const legacyPressureRowContinuationGate = Boolean(
-    !canonicalSchroederDirectHotLoop
+    !canonicalSchroederHotLoop
     && directResidentExecution
     && pressureEnabled !== false
     && reactionsEnabled !== false
@@ -349,10 +669,12 @@ export function resolveSphResidentInterfaceRefreshContinuationPolicy({
   );
   return Object.freeze({
     canonicalSchroederDirectHotLoop,
-    startLegacyPostStepInterfaceRefresh: !canonicalSchroederDirectHotLoop,
+    canonicalSchroederWorkerHotLoop,
+    canonicalSchroederHotLoop,
+    startLegacyPostStepInterfaceRefresh: !canonicalSchroederHotLoop,
     requireInterfaceBeforeNextResidentContinuation: legacyPressureRowContinuationGate,
     awaitLegacyPostStepInterfaceRefresh: Boolean(
-      !canonicalSchroederDirectHotLoop
+      !canonicalSchroederHotLoop
       && (
         interfaceRefreshMode === 'blocking'
         || legacyPressureRowContinuationGate
@@ -456,11 +778,15 @@ export function sphResidentChainedContinuationAllowed({
 
 export function shouldSkipSphResidentPressureInterfaceForRenderRefresh({
   schroederSimulationEnabled = false,
-  residentComputeManagerMode = null
+  residentComputeManagerMode = null,
+  workerOwnedResidentLaneActive = false
 } = {}) {
   return Boolean(
     schroederSimulationEnabled === true
-    && residentComputeManagerMode === 'direct'
+    && (
+      residentComputeManagerMode === 'direct'
+      || workerOwnedResidentLaneActive === true
+    )
   );
 }
 
@@ -823,9 +1149,15 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawv',
   'lawst',
   'blob',
+  'sdt',
+  'cfl',
+  'cflSafety',
   'avAlpha',
+  'diffAlpha',
+  'wallAlpha',
   'sep',
   'sepVel',
+  'reactionProductReserveMinimumLiveFraction',
   'contactSolver',
   'contactJacobiIterations',
   'contactCleanupPasses',
@@ -862,6 +1194,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'surfaceDrawDiagnostic',
   'nativeSurfacePixelValidation',
   'surfaceOverlay',
+  'workerParticleOverlay',
   'schroeder',
   'ss',
   'schroederSimulation',
@@ -886,6 +1219,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'ssSortedIndex',
   'schroederActiveNodeSortedIndexPolicy',
   'schroederCrossLevelCoupling',
+  'schroederPhaseVolumeMigration',
+  'ssPhaseVolumeMigration',
   'schroederLawQueue',
   'stageMechanicsTrace',
   'schroederLawNeighbors',
@@ -2953,6 +3288,347 @@ export function residentGpuContinuationEvidenceReady(execution = null) {
   }
 }
 
+// W4b: continuation readiness for the worker-owned resident lane. The lane
+// retains its post-step particle buffers INSIDE the presentation worker, so
+// the page-device continuation evidence (nextParticleUploads with live
+// GPUBuffers) truthfully does not exist on a worker-lane execution. The lane
+// itself is the continuation: a completed, uncancelled schedule whose
+// terminal envelope proves retained worker refs and a sealed final epoch
+// identity is ready for the next batched schedule on the SAME lane.
+export function residentWorkerLaneContinuationReady(execution = null) {
+  const lane = execution?.workerOwnedResidentLane;
+  const presentation = lane?.committedPresentation;
+  return Boolean(
+    execution?.residentComputeManagerMode === 'worker-owned-resident-lane'
+    && execution?.workerLaneFallback == null
+    && lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+    && lane?.cancelled !== true
+    && Number.isSafeInteger(Number(lane?.completedStepCount))
+    && Number(lane.completedStepCount) > 0
+    && lane?.finalEpochIdentity
+    && typeof lane.finalEpochIdentity === 'object'
+    && Array.isArray(lane?.retainedBufferRefs)
+    && lane.retainedBufferRefs.length > 0
+    && presentation?.status
+      === 'worker-offscreen-resident-particle-state-producer-rendered'
+    && presentation?.committedPresentationSchema
+      === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+    && presentation?.committedPresentationStatus
+      === 'state-manager-committed-resident-schedule-presentation-admission'
+    && presentation?.residentScheduleCandidatePresentation === true
+    && presentation?.stateManagerCommittedPresentation === true
+    && presentation?.scheduleId === lane?.scheduleId
+    && presentation?.laneId === lane?.laneId
+    && presentation?.stateKey === lane?.stateKey
+    && Number(presentation?.residentExecutionGeneration)
+      === Number(lane?.finalEpochIdentity?.storageGeneration)
+    && Number(presentation?.sphStep)
+      === Number(lane?.finalEpochIdentity?.physicsTick)
+    && Number(presentation?.stepOrdinal)
+      === Number(lane?.completedStepCount)
+    && presentation?.authorityStatus
+      === 'state-manager-committed-worker-schedule'
+    && presentation?.computeManagerCompletionSchema
+      === ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+    && typeof presentation?.computeManagerLeaseId === 'string'
+    && presentation.computeManagerLeaseId.length > 0
+    && presentation?.computeManagerLeaseStatus === 'completed'
+    && presentation?.computeManagerFenceSatisfied === true
+    && presentation?.stateManagerCommitStatus === 'committed'
+    && presentation?.stateManagerCommitAccepted === true
+    && presentation?.terminalScheduleFence === true
+    && presentation?.terminalFenceScope === 'resident-schedule-terminal'
+    && presentation?.terminalFenceSatisfied === true
+    && presentation?.terminalFenceAuthorityAdmissionReady === true
+    && presentation?.producerSourceKind
+      === 'worker-retained-resident-stage-output'
+    && presentation?.producerSourceTransport
+      === 'worker-retained-resident-stage-output'
+    && presentation?.sourceStageId === 'schroederSameLevelMechanics'
+    && presentation?.retainedParticleStateStatus
+      === 'worker-retained-particle-state-ready'
+  );
+}
+
+export function residentWorkerLaneNativeSurfacePresentationReady({
+  execution = null,
+  presentation = null,
+  renderState = null,
+  surfaceDraw = null
+} = {}) {
+  const lane = execution?.workerOwnedResidentLane;
+  const committedPresentation = lane?.committedPresentation;
+  const sourceStep = Number(presentation?.sourceStep);
+  const sourceTimeS = Number(presentation?.sourceTimeS);
+  const renderSource = renderState?.residentRenderSource || null;
+  const handoff = renderSource?.workerLaneNativeSurfaceSnapshotHandoff || null;
+  const presentationProof = resolveSphResidentPresentationProof({
+    renderState,
+    surfaceDraw,
+    requireCurrentSource: true
+  });
+  return Boolean(
+    residentWorkerLaneContinuationReady(execution)
+    && presentation?.schema
+      === ULG_WORKER_LANE_NATIVE_SURFACE_PRESENTATION_SOURCE_SCHEMA
+    && presentation?.status
+      === 'worker-lane-native-surface-presentation-source-ready'
+    && presentation?.scheduleId === lane?.scheduleId
+    && presentation?.laneId === lane?.laneId
+    && presentation?.stateKey === lane?.stateKey
+    && typeof presentation?.requestId === 'string'
+    && presentation.requestId.length > 0
+    && presentation?.cacheKey === presentation.requestId
+    && Number.isSafeInteger(sourceStep)
+    && sourceStep === Number(committedPresentation?.sphStep) + 1
+    && Number.isFinite(sourceTimeS)
+    && Math.abs(sourceTimeS - Number(lane?.laneSimTimeS)) <= 1e-9
+    && presentation?.readbackScope
+      === 'resident-schedule-terminal-presentation'
+    && presentation?.terminalPresentationFullParticleReadbackPerformed === true
+    && presentation?.physicsHotLoopParticipation === false
+    && renderState?.status === 'resident-render-field-applied'
+    && renderState?.sourceResidentRenderSourceStatus
+      === 'resident-render-source-current'
+    && renderState?.surfaceDrawOverlayPolicyStatus
+      === 'surface-draw-native-webgpu-main-canvas'
+    && renderState?.workerOffscreenPresentationStatus
+      === 'worker-offscreen-display-hidden-main-native-owner'
+    && renderState?.workerOffscreenRetainedCompactSnapshotStatus
+      === 'presentation-worker-retained-compact-snapshot-exported'
+    && renderState?.workerOffscreenRetainedCompactSnapshotAvailable === true
+    && Number(
+      renderState?.workerOffscreenRetainedCompactSnapshotStep
+        ?? renderState?.workerOffscreenRetainedCompactSnapshot
+          ?.compactBufferSnapshotStep
+    )
+      === sourceStep
+    && renderSource?.residentExecutionGenerationMatchesCurrent === true
+    && Number(renderSource?.nextStep) === sourceStep
+    && Math.abs(Number(renderSource?.nextTimeS) - sourceTimeS) <= 1e-9
+    && handoff?.schema
+      === ULG_WORKER_LANE_NATIVE_SURFACE_PRESENTATION_SOURCE_SCHEMA
+    && handoff?.status
+      === 'worker-lane-native-surface-presentation-source-admitted'
+    && handoff?.scheduleId === presentation.scheduleId
+    && handoff?.laneId === presentation.laneId
+    && handoff?.stateKey === presentation.stateKey
+    && handoff?.requestId === presentation.requestId
+    && handoff?.cacheKey === presentation.cacheKey
+    && Number(handoff?.sourceStep) === sourceStep
+    && Math.abs(Number(handoff?.sourceTimeS) - sourceTimeS) <= 1e-9
+    && handoff?.sharedSlotIdentityVerified === true
+    && handoff?.workerLineageMetadataStatus
+      === 'worker-retained-compact-snapshot-lineage-metadata-ready'
+    && handoff?.terminalCompactSnapshotReadback === true
+    && presentationProof.bridge === 'native-webgpu-surface-consumer'
+    && presentationProof.admitted === true
+    && presentationProof.sourceCurrent === true
+  );
+}
+
+export async function materializeSphWorkerLaneNativeSurfacePresentationSource({
+  sceneApi = null,
+  execution = null,
+  generation = 0,
+  scheduleToken = 0,
+  materialProperties = null,
+  timeoutMs = 16000,
+  pollIntervalMs = 20
+} = {}) {
+  if (!residentWorkerLaneContinuationReady(execution)) {
+    throw new Error(
+      'native surface snapshot requires an admitted worker resident schedule'
+    );
+  }
+  if (
+    typeof sceneApi?.exportWorkerOffscreenRetainedCompactSnapshot !== 'function'
+    || typeof sceneApi?.getWorkerOffscreenRetainedCompactSnapshotStatus
+      !== 'function'
+    || typeof sceneApi?.requestOpticalGpuDevice !== 'function'
+  ) {
+    throw new Error('native surface snapshot APIs are unavailable');
+  }
+  const lane = execution.workerOwnedResidentLane;
+  const sourceStageId = 'schroederSameLevelMechanics';
+  const particleCount = Math.max(0, Math.floor(Number(
+    lane?.perStepSummaries?.lastStep?.particleCount
+      ?? sceneApi.getSphGpuParticleState?.()?.particleCount
+      ?? sceneApi.getMlsMpmGpuParticleState?.()?.particleCount
+  ) || 0));
+  const sourceStep = Number(lane?.committedPresentation?.sphStep) + 1;
+  const sourceTimeS = Number(lane?.laneSimTimeS);
+  if (
+    particleCount < 1
+    || !Number.isSafeInteger(sourceStep)
+    || sourceStep < 0
+    || !Number.isFinite(sourceTimeS)
+  ) {
+    throw new Error('worker terminal snapshot identity is incomplete');
+  }
+  const cacheKey = [
+    lane.scheduleId,
+    'native-surface',
+    Math.max(0, Math.floor(Number(generation) || 0)),
+    Math.max(0, Math.floor(Number(scheduleToken) || 0))
+  ].join(':');
+  const currentSphState = sceneApi.getSphGpuParticleState?.() || null;
+  sceneApi.exportWorkerOffscreenRetainedCompactSnapshot({
+    laneId: lane.laneId,
+    stateKey: lane.stateKey,
+    cacheKey,
+    sourceStageId,
+    particleCount,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    mechanicsStrideFloats: 32,
+    step: sourceStep,
+    time: sourceTimeS,
+    dimension: currentSphState?.dimension ?? 3,
+    smoothingLengthM: currentSphState?.smoothingLengthM ?? 0,
+    timeoutMs: Math.max(1, Number(timeoutMs) - 1000),
+    allowLocalMaterializationBypass: false,
+    reason: 'worker-terminal-native-surface-presentation'
+  });
+  const startedAtMs = performance.now();
+  let snapshotStatus = null;
+  while (performance.now() - startedAtMs < timeoutMs) {
+    const current =
+      sceneApi.getWorkerOffscreenRetainedCompactSnapshotStatus?.() || null;
+    const requestMatches = Boolean(
+      current?.cacheKey === cacheKey
+      && current?.laneId === lane.laneId
+      && current?.stateKey === lane.stateKey
+      && current?.sourceStageId === sourceStageId
+    );
+    if (
+      requestMatches
+      && /exported|blocked|failed|timeout/.test(String(current?.status || ''))
+    ) {
+      snapshotStatus = current;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  const snapshot = snapshotStatus?.compactBufferSnapshot || null;
+  const snapshotReady = Boolean(
+    snapshotStatus?.status
+      === 'presentation-worker-retained-compact-snapshot-exported'
+    && snapshotStatus?.portableSnapshotAvailable === true
+    && snapshot?.schema
+      === 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0'
+    && snapshot?.cacheKey === cacheKey
+    && snapshot?.laneId === lane.laneId
+    && snapshot?.stateKey === lane.stateKey
+    && snapshot?.sourceStageId === sourceStageId
+    && Number(snapshot?.particleCount) === particleCount
+    && Number(snapshot?.step) === sourceStep
+    && Math.abs(Number(snapshot?.time) - sourceTimeS) <= 1e-9
+    && snapshot?.sharedSlotIdentityVerified === true
+    && snapshot?.workerLineageMetadata?.status
+      === 'worker-retained-compact-snapshot-lineage-metadata-ready'
+  );
+  if (!snapshotReady) {
+    throw new Error(
+      snapshotStatus?.reason
+      || snapshotStatus?.errorMessage
+      || 'worker terminal compact snapshot did not become ready'
+    );
+  }
+  if (
+    snapshot.identityRequired === true
+    && (
+      snapshot.identitySchema
+        !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+      || !(snapshot.sphIdentity instanceof Uint32Array)
+      || snapshot.sphIdentity.length
+        !== particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS
+    )
+  ) {
+    throw new Error('worker terminal compact snapshot identity rows are incomplete');
+  }
+  const deviceResult = await sceneApi.requestOpticalGpuDevice();
+  const device = deviceResult?.device || null;
+  if (!device?.queue?.writeBuffer) {
+    throw new Error('native surface presentation device is unavailable');
+  }
+  let hotBufferRecord = null;
+  refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
+    device,
+    compactBufferSnapshot: snapshot,
+    materialProperties,
+    stateManager: {
+      setHotBuffer(_key, record) {
+        hotBufferRecord = record;
+      }
+    },
+    cacheKey,
+    stateKey: `${lane.stateKey}:native-surface-presentation`,
+    hotBufferKey: `${cacheKey}:page-native-surface`
+  });
+  if (!hotBufferRecord?.sphUpload || !hotBufferRecord?.mlsMpmUpload) {
+    throw new Error('native surface compact snapshot uploads were not materialized');
+  }
+  const slotMetadata = {
+    slot: snapshot.slot ?? null,
+    sourceSlot: snapshot.sourceSlot ?? null,
+    nextSlot: snapshot.nextSlot ?? null,
+    topologyEpoch: snapshot.topologyEpoch ?? null,
+    identityRevision: snapshot.identityRevision ?? null
+  };
+  const sphParticleState = Object.freeze({
+    ...hotBufferRecord.sphPacked,
+    ...slotMetadata
+  });
+  const mlsMpmParticleState = Object.freeze({
+    ...hotBufferRecord.mlsMpmPacked,
+    ...slotMetadata
+  });
+  const sphParticleUpload = Object.freeze({
+    ...hotBufferRecord.sphUpload,
+    ...slotMetadata
+  });
+  const mlsMpmParticleUpload = Object.freeze({
+    ...hotBufferRecord.mlsMpmUpload,
+    ...slotMetadata
+  });
+  let released = false;
+  const releaseAfterQueue = async () => {
+    if (released) return false;
+    released = true;
+    try {
+      await device.queue?.onSubmittedWorkDone?.();
+    } catch {}
+    destroySphGpuParticleBuffers(hotBufferRecord.sphUpload);
+    destroyMlsMpmGpuParticleBuffers(hotBufferRecord.mlsMpmUpload);
+    return true;
+  };
+  return Object.freeze({
+    schema: ULG_WORKER_LANE_NATIVE_SURFACE_PRESENTATION_SOURCE_SCHEMA,
+    status: 'worker-lane-native-surface-presentation-source-ready',
+    scheduleId: lane.scheduleId,
+    laneId: lane.laneId,
+    stateKey: lane.stateKey,
+    requestId: cacheKey,
+    cacheKey,
+    sourceStageId,
+    sourceStep,
+    sourceTimeS,
+    particleCount,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    sharedSlotIdentityVerified: true,
+    workerLineageMetadataStatus:
+      snapshot.workerLineageMetadata.status,
+    readbackScope: 'resident-schedule-terminal-presentation',
+    terminalPresentationFullParticleReadbackPerformed: true,
+    physicsHotLoopParticipation: false,
+    releaseAfterQueue
+  });
+}
+
 function compactResidentStageOrderFamilyOwners(familyOwners = {}) {
   return Object.fromEntries(
     Object.entries(familyOwners || {}).map(([family, owner]) => [family, {
@@ -4676,9 +5352,17 @@ function buildOverlayShell() {
       .sph-initial-body-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px; }
       .sph-initial-body-field { display:flex;flex-direction:column;gap:2px;min-width:0;color:#75c7f7;font-size:9px; }
       .sph-initial-body-field input { width:100%;padding:3px;background:#0a1418;color:#bfe9d8;border:1px solid #14342c; }
+      .sph-initial-body-derived { min-height:36px;display:flex;align-items:center;padding:3px 6px;box-sizing:border-box;background:#081216;color:#9fcaba;border:1px dashed #245447;font-size:12px;overflow-wrap:anywhere; }
       .sph-initial-body-row-label { grid-column:1/-1;color:#75c7f7;font-size:10px;margin-top:3px; }
       .sph-initial-body-material { grid-column:1/-1; }
       .sph-initial-body-velocity { grid-column:1/-1;border:1px solid #14342c;padding:5px;margin-top:3px; }
+      .sph-advanced-controls { margin:10px 0 8px;border:1px solid #245447;background:rgba(5,18,20,.66);padding:7px; }
+      .sph-advanced-controls > summary { cursor:pointer;color:#75f7b4;font-size:11px;font-weight:700; }
+      .sph-advanced-grid { display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px; }
+      .sph-advanced-grid > label { display:flex;flex-direction:column;gap:3px;color:#75c7f7;font-size:10px;min-width:0; }
+      .sph-advanced-checks { display:grid;grid-template-columns:1fr;gap:3px;margin-top:7px; }
+      .sph-advanced-checks > label { display:flex;align-items:center;gap:7px;color:#bfe9d8;font-size:10px;min-height:25px; }
+      .sph-advanced-checks input[type="checkbox"] { width:16px;height:16px;accent-color:#1d8b6d; }
       .sph-initial-body-velocity summary { color:#75c7f7;font-size:10px;cursor:pointer; }
       .sph-initial-body-error { display:none;border:1px solid #f7c675;background:rgba(46,30,8,.92);color:#ffe7b2;padding:5px;margin:0 0 7px;font-size:10px;line-height:1.35; }
       .sph-initial-body-error.visible { display:block; }
@@ -4743,28 +5427,28 @@ function buildOverlayShell() {
       </div>
       <p style="opacity:.6;font-size:11px;line-height:1.4;">Strict first-principles mode. The demo will not run reference or reduced material constants as physics; missing condensed, liquid, optical, or product closures are reported as blockers.</p>
       <div style="margin:8px 0;display:flex;flex-wrap:wrap;">
-        <button id="sph-preflight" type="button">Preflight</button>
-        <button id="sph-play" type="button">Play</button>
-        <button id="sph-step" type="button">Step</button>
-        <button id="sph-reset" type="button">Reset</button>
+        <button id="sph-preflight" type="button">Validate &amp; Apply</button>
+        <button id="sph-play" type="button" disabled>Play</button>
+        <button id="sph-step" type="button" disabled>Step</button>
+        <button id="sph-reset" type="button" disabled>Reset</button>
         <button id="sph-clear-cache" type="button">Clear Cache</button>
       </div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">scenario preset - auto-applies</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">scenario preset — reload-applied</div>
       <div id="sph-scenario-preset" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">lighting — live</div>
       <div id="sph-lighting-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">mechanics integrator — auto-applies</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">mechanics integrator — reload-applied</div>
       <div id="sph-mechanics-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">physical law groups — auto-applies</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">physical law groups — staged; Apply, Play, or Step commits</div>
       <div id="sph-laws" style="display:grid;grid-template-columns:1fr;gap:4px;margin:4px 0 8px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K) — staged; Apply, Play, or Step commits</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <section class="sph-initial-bodies-box" aria-labelledby="sph-initial-bodies-label">
         <div class="sph-initial-bodies-head">
           <strong id="sph-initial-bodies-label" style="font-size:11px;color:#75f7b4;">initial material bodies</strong>
           <button id="sph-add-body" class="sph-add-body" type="button">+ add body</button>
         </div>
-        <p class="sph-initial-bodies-help">Each axis is independent. Changes apply when a field is committed; body identity remains stable when reordered. Keep size ÷ particles at roughly the same cell pitch on every axis and across bodies.</p>
+        <p class="sph-initial-bodies-help">Particle count per edge is the geometry control. Physical size is derived from the body's existing per-axis particle pitch; body identity remains stable when reordered.</p>
         <div id="sph-initial-bodies-error" class="sph-initial-body-error" role="alert"></div>
         <div id="sph-initial-bodies" class="sph-initial-bodies-list"></div>
       </section>
@@ -4778,14 +5462,24 @@ function buildOverlayShell() {
         <div style="font-size:11px;color:#75c7f7;margin-top:6px;">legacy particles per block edge</div>
         <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       </div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — auto-applies</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — staged</div>
       <div id="sph-box" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">isosurface blob size (× — independent of box) — live</div>
       <div id="sph-blob" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">render mode — live</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">render mode — live within a backend; cross-backend changes reload</div>
       <div id="sph-render-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">background — live (local images stay on this device)</div>
       <div id="sph-background-color" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
+      <details id="sph-advanced-controls" class="sph-advanced-controls">
+        <summary>advanced architecture &amp; execution</summary>
+        <div style="font-size:10px;color:#8fc7b2;margin-top:7px;line-height:1.35;">Architecture changes are serialized into the URL and reload atomically so the UI, worker lane, SS hierarchy, and presentation owner cannot disagree.</div>
+        <div class="sph-advanced-grid">
+          <label>architecture profile<div id="sph-architecture-profile"></div></label>
+          <label>two-level authority<div id="sph-two-level-authority"></div></label>
+        </div>
+        <div id="sph-architecture-toggles" class="sph-advanced-checks"></div>
+        <div id="sph-execution-controls" class="sph-advanced-grid"></div>
+      </details>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -4995,6 +5689,110 @@ export async function mountSphPhaseDemoOverlay({
     scenarioPresetSelect.appendChild(option);
   }
   scenarioPresetEl.appendChild(scenarioPresetSelect);
+
+  const architectureProfileEl = overlay.querySelector('#sph-architecture-profile');
+  const architectureProfileSelect = document.createElement('select');
+  architectureProfileSelect.setAttribute('aria-label', 'Choose SS architecture profile');
+  for (const [value, label] of [
+    ['preset', 'Preset defaults'],
+    ['ss-single-worker', 'SS worker · single-level'],
+    ['ss-two-authoritative-worker', 'SS worker · two-level authoritative'],
+    ['ss-two-observation-worker', 'SS worker · two-level observation'],
+    ['main-thread-diagnostic', 'Main-thread diagnostic'],
+    ['custom', 'Custom architecture']
+  ]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    if (value === 'custom') option.disabled = true;
+    architectureProfileSelect.appendChild(option);
+  }
+  architectureProfileEl.appendChild(architectureProfileSelect);
+
+  const twoLevelAuthorityEl = overlay.querySelector('#sph-two-level-authority');
+  const twoLevelAuthoritySelect = document.createElement('select');
+  twoLevelAuthoritySelect.setAttribute('aria-label', 'Choose two-level mechanics authority');
+  for (const [value, label] of [
+    ['observation', 'Observation'],
+    ['authoritative', 'Authoritative']
+  ]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    twoLevelAuthoritySelect.appendChild(option);
+  }
+  twoLevelAuthorityEl.appendChild(twoLevelAuthoritySelect);
+
+  const architectureTogglesEl = overlay.querySelector('#sph-architecture-toggles');
+  const architectureInputs = {};
+  const appendArchitectureToggle = (key, label, checked = false) => {
+    const wrap = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    input.dataset.architectureControl = key;
+    const text = document.createElement('span');
+    text.textContent = label;
+    wrap.append(input, text);
+    architectureTogglesEl.appendChild(wrap);
+    architectureInputs[key] = input;
+  };
+  appendArchitectureToggle('ss', 'Enable Schroeder hierarchy', false);
+  appendArchitectureToggle('schroederTwoLevel', 'Two-level mechanics', false);
+  appendArchitectureToggle('schroederActiveNodeIndex', 'Active-node index', true);
+  appendArchitectureToggle('schroederActiveNodeSortedIndex', 'Sorted active-node index', true);
+  appendArchitectureToggle('schroederLawQueue', 'Local law queue', true);
+  appendArchitectureToggle('schroederLawNeighborCandidates', 'Law-neighbor candidates', true);
+  appendArchitectureToggle(
+    'schroederCrossLevelCoupling',
+    'Generic coupling candidates (observation only)',
+    false
+  );
+  appendArchitectureToggle('schroederPhaseVolumeMigration', 'Phase-volume migration proposals', true);
+  appendArchitectureToggle('schroederMechanicsFieldPairV2', 'Paired two-level mechanics fields', false);
+  appendArchitectureToggle('contactSolver', 'Contact solver (required for SS)', true);
+  appendArchitectureToggle('surfaceOverlay', 'Show native surface/debug overlay', false);
+  appendArchitectureToggle('workerParticleOverlay', 'Show worker particle/debug overlay', false);
+
+  const executionControlsEl = overlay.querySelector('#sph-execution-controls');
+  const executionInputs = {};
+  const appendExecutionNumber = ({ key, label, value, min, max, step }) => {
+    const wrap = document.createElement('label');
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(value);
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.dataset.architectureControl = key;
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input);
+    executionControlsEl.appendChild(wrap);
+    executionInputs[key] = input;
+  };
+  appendExecutionNumber({
+    key: 'schroederTwoLevelSubsteps', label: 'fine substeps / macro step', value: 2,
+    min: 1, max: 4, step: 1
+  });
+  appendExecutionNumber({
+    key: 'residentStepsPerSchedule', label: 'authenticated steps / worker schedule',
+    // Match currentResidentStepsPerSchedule()'s interactive SS default.  A
+    // preset may still request a larger authenticated batch (for example the
+    // sodium 64-step contact horizon), but an untouched control must describe
+    // the schedule that this mount will actually submit.
+    value: RESIDENT_STEPS_PER_SCHEDULE_MAX,
+    min: 1, max: 128, step: 1
+  });
+  const residentScheduleEffectiveEl = document.createElement('output');
+  residentScheduleEffectiveEl.id = 'sph-resident-schedule-effective';
+  residentScheduleEffectiveEl.setAttribute('aria-live', 'polite');
+  residentScheduleEffectiveEl.style.cssText =
+    'grid-column:1/-1;color:#8fc7b2;font-size:10px;line-height:1.35;';
+  residentScheduleEffectiveEl.textContent = 'effective schedule: resolving policy…';
+  executionControlsEl.appendChild(residentScheduleEffectiveEl);
+  appendExecutionNumber({ key: 'cfl', label: 'CFL factor', value: 0.6, min: 0.01, max: 2, step: 0.05 });
+  appendExecutionNumber({ key: 'cflSafety', label: 'CFL stiffness safety', value: 0.4, min: 0.01, max: 2, step: 0.05 });
 
   const wallsEl = overlay.querySelector('#sph-walls');
   const lawsEl = overlay.querySelector('#sph-laws');
@@ -5236,6 +6034,8 @@ export async function mountSphPhaseDemoOverlay({
   let currentInitialBodies = null;
   let initialBodiesEditorReady = false;
   let stopPlaybackForInvalidInitialBodyDraft = null;
+  let interactiveSimulationStateReady = false;
+  let syncSphInteractiveControlAvailability = () => {};
   addInitialBodyButton.disabled = true;
   initialBodiesEl.inert = true;
 
@@ -5248,10 +6048,7 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__sphInitialBodiesEditorError = message || null;
     const draftInvalid = Boolean(message && blocksSimulation);
     overlay.__sphInitialBodiesDraftInvalid = draftInvalid;
-    for (const selector of ['#sph-play', '#sph-step']) {
-      const button = overlay.querySelector(selector);
-      if (button) button.disabled = draftInvalid;
-    }
+    syncSphInteractiveControlAvailability();
     if (draftInvalid) stopPlaybackForInvalidInitialBodyDraft?.();
   }
 
@@ -5452,9 +6249,32 @@ export async function mountSphPhaseDemoOverlay({
         step
       }));
     };
+    const appendDerivedVector = ({ title: rowTitle, field, values, labels }) => {
+      const rowLabel = document.createElement('div');
+      rowLabel.className = 'sph-initial-body-row-label';
+      rowLabel.textContent = rowTitle;
+      grid.appendChild(rowLabel);
+      values.forEach((value, axis) => {
+        const wrap = document.createElement('label');
+        wrap.className = 'sph-initial-body-field';
+        wrap.textContent = labels[axis];
+        const output = document.createElement('output');
+        output.className = 'sph-initial-body-derived';
+        output.dataset.bodyDerivedField = field;
+        output.dataset.axis = String(axis);
+        output.value = String(value);
+        output.textContent = Number(value).toPrecision(6);
+        wrap.appendChild(output);
+        grid.appendChild(wrap);
+      });
+    };
     appendVector({
-      title: 'axis-aligned edge lengths (m)', field: 'sizeM', values: body.sizeM,
-      labels: ['X', 'Y', 'Z'], min: Number.EPSILON
+      title: 'particle count per edge', field: 'particlesPerEdge', values: body.particlesPerEdge,
+      labels: ['X', 'Y', 'Z'], min: 1, step: 1
+    });
+    appendDerivedVector({
+      title: 'derived edge length (m)', field: 'sizeM', values: body.sizeM,
+      labels: ['X', 'Y', 'Z']
     });
     appendVector({
       title: 'center position (m)', field: 'centerM', values: body.centerM,
@@ -5471,11 +6291,6 @@ export async function mountSphPhaseDemoOverlay({
       value: body.temperatureK,
       min: Number.EPSILON
     });
-    appendVector({
-      title: 'particles per edge', field: 'particlesPerEdge', values: body.particlesPerEdge,
-      labels: ['X', 'Y', 'Z'], min: 1, step: 1
-    });
-
     const velocity = document.createElement('details');
     velocity.className = 'sph-initial-body-velocity';
     const velocitySummary = document.createElement('summary');
@@ -5520,13 +6335,16 @@ export async function mountSphPhaseDemoOverlay({
         : `[data-body-field="${field}"][data-axis="${axis}"]`;
       return card.querySelector(selector)?.value;
     };
+    const particlesPerEdge = [0, 1, 2].map(
+      (axis) => valueFor('particlesPerEdge', axis)
+    );
     return {
       ...existing,
       material: valueFor('material'),
-      sizeM: [0, 1, 2].map((axis) => valueFor('sizeM', axis)),
+      sizeM: deriveSphInitialBodySizeM(existing, particlesPerEdge),
       centerM: [0, 1, 2].map((axis) => valueFor('centerM', axis)),
       temperatureK: valueFor('temperatureK'),
-      particlesPerEdge: [0, 1, 2].map((axis) => valueFor('particlesPerEdge', axis)),
+      particlesPerEdge,
       velocityMPerS: [0, 1, 2].map((axis) => valueFor('velocityMPerS', axis))
     };
   }
@@ -5644,11 +6462,43 @@ export async function mountSphPhaseDemoOverlay({
     lawr: lawInputs.reactions,
     lawv: lawInputs.viscosity,
     lawst: lawInputs.surfaceTension,
+    ss: architectureInputs.ss,
+    schroederTwoLevel: architectureInputs.schroederTwoLevel,
+    schroederActiveNodeIndex: architectureInputs.schroederActiveNodeIndex,
+    schroederActiveNodeSortedIndex:
+      architectureInputs.schroederActiveNodeSortedIndex,
+    schroederLawQueue: architectureInputs.schroederLawQueue,
+    schroederLawNeighborCandidates:
+      architectureInputs.schroederLawNeighborCandidates,
+    schroederCrossLevelCoupling:
+      architectureInputs.schroederCrossLevelCoupling,
+    schroederPhaseVolumeMigration:
+      architectureInputs.schroederPhaseVolumeMigration,
+    schroederMechanicsFieldPairV2:
+      architectureInputs.schroederMechanicsFieldPairV2,
+    contactSolver: architectureInputs.contactSolver,
+    surfaceOverlay: architectureInputs.surfaceOverlay,
+    schroederTwoLevelAuthority: twoLevelAuthoritySelect,
+    schroederTwoLevelSubsteps: executionInputs.schroederTwoLevelSubsteps,
+    residentStepsPerSchedule: executionInputs.residentStepsPerSchedule,
+    cfl: executionInputs.cfl,
+    cflSafety: executionInputs.cflSafety,
+    workerParticleOverlay: architectureInputs.workerParticleOverlay,
     blob: blobInput,
     lighting: lightingModeSelect,
     bg: backgroundColorInput,
     bgimg: backgroundImageSelect
   };
+  function canonicalMountedLocationWithHash(
+    params,
+    { clearSearchKeys = [] } = {}
+  ) {
+    const search = new URLSearchParams(window.location.search);
+    for (const key of clearSearchKeys) search.delete(key);
+    const query = search.toString();
+    const hash = params.toString();
+    return `${window.location.pathname}${query ? `?${query}` : ''}${hash ? `#${hash}` : ''}`;
+  }
   function urlValueForControl(key, el) {
     if (
       key === 'bgimg'
@@ -5685,20 +6535,27 @@ export async function mountSphPhaseDemoOverlay({
       }
     }
     for (const [key, el] of Object.entries(urlControls)) {
-      const v = hash.get(key) ?? query.get(key);
+      const v = hash.get(key) ?? query.get(key) ?? requestedPreset?.runtime?.[key];
       if (v != null && v !== '') applyUrlValueToControl(key, el, v);
     }
     const legacyInitialBodies = legacyInitialBodiesFromProxyControls();
-    const serializedInitialBodies = hash.get('bodies') ?? query.get('bodies');
-    let explicitInitialBodiesDifferFromLegacy = false;
+    const serializedInitialBodies = hash.get('bodies')
+      ?? query.get('bodies')
+      ?? requestedPreset?.runtime?.bodies;
+    let explicitInitialBodiesDifferFromPreset = false;
     if (serializedInitialBodies != null && serializedInitialBodies !== '') {
       try {
         currentInitialBodies = validateInitialBodiesEditorState(
           parseSphInitialBodies(serializedInitialBodies)
         );
-        explicitInitialBodiesDifferFromLegacy =
+        const expectedPresetInitialBodies = requestedPreset?.runtime?.bodies
+          ? validateInitialBodiesEditorState(
+              parseSphInitialBodies(requestedPreset.runtime.bodies)
+            )
+          : legacyInitialBodies;
+        explicitInitialBodiesDifferFromPreset =
           serializeSphInitialBodies(currentInitialBodies)
-          !== serializeSphInitialBodies(legacyInitialBodies);
+          !== serializeSphInitialBodies(expectedPresetInitialBodies);
         setInitialBodiesEditorError();
       } catch (error) {
         currentInitialBodies = legacyInitialBodies;
@@ -5718,10 +6575,378 @@ export async function mountSphPhaseDemoOverlay({
         if (explicitValue == null || explicitValue === '' || !control) return false;
         return urlValueForControl(key, control) !== String(expected);
       });
-      if (presetDiffers || explicitInitialBodiesDifferFromLegacy) {
+      if (presetDiffers || explicitInitialBodiesDifferFromPreset) {
         scenarioPresetSelect.value = 'custom';
       }
     }
+  }
+  const mountedRuntimeControlKeys = new Set([
+    'mech',
+    'ss',
+    'schroederTwoLevel',
+    'schroederActiveNodeIndex',
+    'schroederActiveNodeSortedIndex',
+    'schroederLawQueue',
+    'schroederLawNeighborCandidates',
+    'schroederCrossLevelCoupling',
+    'schroederPhaseVolumeMigration',
+    'schroederMechanicsFieldPairV2',
+    'contactSolver',
+    'surfaceOverlay',
+    'schroederTwoLevelAuthority',
+    'schroederTwoLevelSubsteps',
+    'residentStepsPerSchedule',
+    'cfl',
+    'cflSafety',
+    'workerParticleOverlay'
+  ]);
+  const mountedPresentationPolicyResetKeys = Object.freeze([
+    'renderer',
+    'rendererPresentation',
+    'rendererPresentationUnsafe',
+    'rendererResidentDevice',
+    'surfaceBufferPresentation',
+    'surfaceDraw',
+    'surfaceDrawDiagnostic',
+    'surfaceOverlay',
+    'renderOwnership',
+    'renderOwner',
+    'peercomputeRenderOwnership',
+    'workerOffscreenPresentation',
+    'workerParticleOverlay',
+    'residentWorkers',
+    'residentComputeManagerMode',
+    'residentStepsPerScheduleMax',
+    'residentMaxStepsPerSchedule',
+    'residentVisualStepsMax'
+  ]);
+  const mountedHierarchyPolicyResetKeys = Object.freeze([
+    'schroeder',
+    'ss',
+    'schroederSimulation',
+    'schroederLevel',
+    'schroederSelectedLevel',
+    'ssLevel',
+    'schroederMinLevel',
+    'ssMinLevel',
+    'schroederMaxLevel',
+    'ssMaxLevel',
+    'schroederBaseGridSpacing',
+    'schroederBaseGridSpacingM',
+    'schroederPortableSummary',
+    'ssPortableSummary',
+    'schroederActiveNodeIndex',
+    'ssIndex',
+    'schroederActiveNodeSortedIndex',
+    'ssSortedIndex',
+    'schroederActiveNodeSortedIndexPolicy',
+    'schroederLawQueue',
+    'schroederLawNeighbors',
+    'schroederLawNeighborCandidates',
+    'schroederCrossLevelCoupling',
+    'schroederPhaseVolumeMigration',
+    'ssPhaseVolumeMigration',
+    'schroederTwoLevel',
+    'ssTwoLevel',
+    'schroederTwoLevelAuthority',
+    'schroederTwoLevelSubsteps',
+    'schroederMechanicsFieldPairV2',
+    'ssMechanicsFieldPairV2'
+  ]);
+  const mountedPresetRuntimeResetKeys = Object.freeze([
+    // Mechanics is a preset control rather than runtime metadata, but it must
+    // be cleared alongside mount-time policy. Otherwise "Preset defaults"
+    // can resurrect worker SS around a stale Plain-SPH opt-out.
+    'mech',
+    'sdt',
+    'cfl',
+    'cflSafety',
+    'avAlpha',
+    'diffAlpha',
+    'wallAlpha',
+    'sep',
+    'sepVel',
+    'reactionProductReserveMinimumLiveFraction',
+    'hydroInit',
+    'residentStepsPerSchedule',
+    'residentStepBatch',
+    'residentVisualSteps',
+    'residentInterfaceRefreshMode',
+    'residentInterfaceRefresh',
+    'residentPostStepInterfaceRefresh',
+    'sceneLengthScale',
+    'wallModel',
+    'cameraPositionNormalized',
+    'cameraTargetNormalized',
+    'bodies',
+    'contactSolver',
+    'contactJacobiIterations',
+    'contactCleanupPasses',
+    ...mountedPresentationPolicyResetKeys,
+    ...mountedHierarchyPolicyResetKeys
+  ]);
+  let mountedRuntimeControlReloadPending = false;
+  function readArchitectureControlState({ normalizeDependencies = false } = {}) {
+    return resolveSphMountedArchitectureControlState({
+      mechanicsMode: mechanicsModeSelect.value,
+      ss: architectureInputs.ss.checked,
+      twoLevel: architectureInputs.schroederTwoLevel.checked,
+      activeNodeIndex: architectureInputs.schroederActiveNodeIndex.checked,
+      activeNodeSortedIndex:
+        architectureInputs.schroederActiveNodeSortedIndex.checked,
+      lawQueue: architectureInputs.schroederLawQueue.checked,
+      lawNeighborCandidates:
+        architectureInputs.schroederLawNeighborCandidates.checked,
+      crossLevelCoupling:
+        architectureInputs.schroederCrossLevelCoupling.checked,
+      phaseVolumeMigration:
+        architectureInputs.schroederPhaseVolumeMigration.checked,
+      mechanicsFieldPairV2:
+        architectureInputs.schroederMechanicsFieldPairV2.checked,
+      contactSolver: architectureInputs.contactSolver.checked,
+      surfaceDraw: renderModeSelect.value || 'auto',
+      surfaceOverlay: architectureInputs.surfaceOverlay.checked,
+      workerParticleOverlay: architectureInputs.workerParticleOverlay.checked,
+      twoLevelAuthority: twoLevelAuthoritySelect.value,
+      fineSubsteps: executionInputs.schroederTwoLevelSubsteps.value,
+      normalizeDependencies
+    });
+  }
+  function syncArchitectureControlDependencies({ normalizeDependencies = false } = {}) {
+    const state = readArchitectureControlState({ normalizeDependencies });
+    if (normalizeDependencies) {
+      architectureInputs.ss.checked = state.ss;
+      architectureInputs.schroederTwoLevel.checked = state.twoLevel;
+      architectureInputs.schroederActiveNodeIndex.checked = state.activeNodeIndex;
+      architectureInputs.schroederActiveNodeSortedIndex.checked =
+        state.activeNodeSortedIndex;
+      architectureInputs.schroederLawQueue.checked = state.lawQueue;
+      architectureInputs.schroederLawNeighborCandidates.checked =
+        state.lawNeighborCandidates;
+      architectureInputs.schroederCrossLevelCoupling.checked =
+        state.crossLevelCoupling;
+      architectureInputs.schroederPhaseVolumeMigration.checked =
+        state.phaseVolumeMigration;
+      architectureInputs.schroederMechanicsFieldPairV2.checked =
+        state.mechanicsFieldPairV2;
+      architectureInputs.contactSolver.checked = state.contactSolver;
+      architectureInputs.surfaceOverlay.checked = state.surfaceOverlay;
+      architectureInputs.workerParticleOverlay.checked = state.workerParticleOverlay;
+      twoLevelAuthoritySelect.value = state.twoLevelAuthority;
+      executionInputs.schroederTwoLevelSubsteps.value = String(state.fineSubsteps);
+    }
+    architectureInputs.ss.disabled = state.disabled.ss;
+    architectureInputs.schroederTwoLevel.disabled = state.disabled.twoLevel;
+    architectureInputs.schroederActiveNodeIndex.disabled = state.disabled.activeNodeIndex;
+    architectureInputs.schroederActiveNodeSortedIndex.disabled =
+      state.disabled.activeNodeSortedIndex;
+    architectureInputs.schroederLawQueue.disabled = state.disabled.lawQueue;
+    architectureInputs.schroederLawNeighborCandidates.disabled =
+      state.disabled.lawNeighborCandidates;
+    architectureInputs.schroederCrossLevelCoupling.disabled =
+      state.disabled.crossLevelCoupling;
+    architectureInputs.schroederPhaseVolumeMigration.disabled =
+      state.disabled.phaseVolumeMigration;
+    architectureInputs.schroederMechanicsFieldPairV2.disabled =
+      state.disabled.mechanicsFieldPairV2;
+    architectureInputs.contactSolver.disabled = state.disabled.contactSolver;
+    architectureInputs.workerParticleOverlay.disabled =
+      state.disabled.workerParticleOverlay;
+    twoLevelAuthoritySelect.disabled = state.disabled.twoLevelAuthority;
+    executionInputs.schroederTwoLevelSubsteps.disabled = state.disabled.fineSubsteps;
+    executionInputs.schroederTwoLevelSubsteps.min = String(
+      state.authoritativeFineSubstepMinimum
+    );
+    const invalidAuthoritativeFineSubsteps = Boolean(
+      state.normalizedTwoLevel
+      && state.twoLevelAuthority === 'authoritative'
+      && state.fineSubsteps < 2
+    );
+    executionInputs.schroederTwoLevelSubsteps.setCustomValidity(
+      invalidAuthoritativeFineSubsteps
+        ? 'Authoritative two-level mechanics requires at least two fine substeps.'
+        : ''
+    );
+    architectureProfileSelect.value = state.profile;
+    overlay.__sphMountedArchitectureControlState = state;
+    return state;
+  }
+  function architectureProfileFromControls() {
+    return readArchitectureControlState().profile;
+  }
+  function validateMountedArchitectureControls() {
+    const state = syncArchitectureControlDependencies({
+      normalizeDependencies: false
+    });
+    for (const input of Object.values(executionInputs)) {
+      if (typeof input.checkValidity === 'function' && !input.checkValidity()) {
+        input.reportValidity?.();
+        throw new RangeError(input.validationMessage || 'Invalid architecture execution value.');
+      }
+    }
+    if (state.dependencyIssues.length > 0) {
+      throw new RangeError(
+        `Architecture controls are inconsistent: ${state.dependencyIssues.join(', ')}.`
+      );
+    }
+    return state;
+  }
+  function replaceMountedRuntimeHashAndReload({
+    reason = 'mounted-runtime-control-change',
+    resetToPreset = false,
+    architectureStateOverride = null
+  } = {}) {
+    syncUrlFromControls();
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const controlledKeys = [...mountedRuntimeControlKeys];
+    const clearedSearchKeys = new Set([
+      ...controlledKeys,
+      ...mountedPresentationPolicyResetKeys,
+      ...mountedHierarchyPolicyResetKeys
+    ]);
+    if (resetToPreset) {
+      for (const key of mountedPresetRuntimeResetKeys) params.delete(key);
+      for (const key of mountedPresetRuntimeResetKeys) clearedSearchKeys.add(key);
+      // A mount-time architecture override intentionally marks the visible
+      // scenario selector Custom. "Preset defaults" still means the scenario
+      // named by the current URL, so fall back to the preset resolved when
+      // this mount was created instead of restoring only its visible controls.
+      const presetEntry = sphPhaseScenarioPresetById(scenarioPresetSelect.value)
+        || initialScenarioPreset;
+      for (const [key, value] of Object.entries(presetEntry?.runtime || {})) {
+        if (value != null && value !== '') params.set(key, String(value));
+      }
+    } else {
+      const architectureState = architectureStateOverride
+        ?? syncArchitectureControlDependencies({ normalizeDependencies: true });
+      const architectureControlValues = {
+        mech: architectureState.mechanicsMode,
+        ss: architectureState.ss ? '1' : '0',
+        schroederTwoLevel: architectureState.twoLevel ? '1' : '0',
+        schroederActiveNodeIndex:
+          architectureState.activeNodeIndex ? '1' : '0',
+        schroederActiveNodeSortedIndex:
+          architectureState.activeNodeSortedIndex ? '1' : '0',
+        schroederLawQueue: architectureState.lawQueue ? '1' : '0',
+        schroederLawNeighborCandidates:
+          architectureState.lawNeighborCandidates ? '1' : '0',
+        schroederCrossLevelCoupling:
+          architectureState.crossLevelCoupling ? '1' : '0',
+        schroederPhaseVolumeMigration:
+          architectureState.phaseVolumeMigration ? '1' : '0',
+        schroederMechanicsFieldPairV2:
+          architectureState.mechanicsFieldPairV2 ? '1' : '0',
+        contactSolver: architectureState.contactSolver ? '1' : '0',
+        surfaceOverlay: architectureState.surfaceOverlay ? '1' : '0',
+        workerParticleOverlay:
+          architectureState.workerParticleOverlay ? '1' : '0',
+        schroederTwoLevelAuthority: architectureState.twoLevelAuthority,
+        schroederTwoLevelSubsteps: String(architectureState.fineSubsteps)
+      };
+      for (const key of controlledKeys) {
+        const value = architectureControlValues[key];
+        if (value != null) {
+          params.set(key, value);
+          continue;
+        }
+        const control = urlControls[key];
+        if (control) params.set(key, urlValueForControl(key, control));
+      }
+      const workerProfile = architectureState.normalizedWorkerSs;
+      params.set('renderer', workerProfile ? 'native-webgpu' : 'webgl');
+      params.set(
+        'renderOwnership',
+        workerProfile
+          ? 'worker-owned-resident-render-producer'
+          : 'main-thread-renderer'
+      );
+      params.set('workerOffscreenPresentation', workerProfile ? '1' : '0');
+      params.set(
+        'surfaceDraw',
+        workerProfile ? 'native-webgpu-surface-consumer' : 'auto'
+      );
+      params.set('surfaceOverlay', architectureState.surfaceOverlay ? '1' : '0');
+      params.set('contactSolver', architectureState.contactSolver ? '1' : '0');
+      // The interactive mount requires its supervised runtime Worker even
+      // when presentation is a main-thread diagnostic.
+      params.set('residentWorkers', '1');
+      params.set(
+        'residentComputeManagerMode',
+        workerProfile ? 'worker-owned-resident-lane' : 'direct'
+      );
+      params.set('schroederLevel', '0');
+      params.set('schroederMinLevel', '0');
+      params.set(
+        'schroederMaxLevel',
+        architectureState.twoLevel ? '1' : '0'
+      );
+      params.set('schroederPortableSummary', workerProfile ? '1' : '0');
+    }
+    // Once the exact mount-time policy is serialized, freeze old-page URL
+    // writers until navigation commits. Async rebuild/render callbacks can
+    // otherwise run syncUrlFromControls() in this brief window and erase
+    // non-visible architecture keys such as renderOwnership.
+    mountedRuntimeControlReloadPending = true;
+    overlay.__sphMountedRuntimeControlReload = {
+      schema: 'peercompute.ulg.sph-mounted-runtime-control-reload.v0',
+      status: 'mounted-runtime-controls-serialized-for-reload',
+      reason,
+      profile: resetToPreset ? 'preset' : architectureProfileFromControls(),
+      updatedAtMs: performance.now()
+    };
+    window.history.replaceState(
+      null,
+      '',
+      canonicalMountedLocationWithHash(params, {
+        clearSearchKeys: [...clearedSearchKeys]
+      })
+    );
+    window.location.reload();
+  }
+  function applyArchitectureProfile(profile) {
+    if (profile === 'custom') {
+      architectureProfileSelect.value = architectureProfileFromControls();
+      return;
+    }
+    if (profile === 'preset') {
+      replaceMountedRuntimeHashAndReload({
+        reason: 'architecture-profile-preset-defaults',
+        resetToPreset: true
+      });
+      return;
+    }
+    const workerProfile = profile !== 'main-thread-diagnostic';
+    mechanicsModeSelect.value = 'mlsmpm';
+    architectureInputs.ss.checked = workerProfile;
+    architectureInputs.schroederTwoLevel.checked =
+      profile === 'ss-two-authoritative-worker'
+      || profile === 'ss-two-observation-worker';
+    twoLevelAuthoritySelect.value = profile === 'ss-two-authoritative-worker'
+      ? 'authoritative'
+      : 'observation';
+    architectureInputs.schroederActiveNodeIndex.checked = workerProfile;
+    architectureInputs.schroederActiveNodeSortedIndex.checked = workerProfile;
+    architectureInputs.schroederLawQueue.checked = workerProfile;
+    architectureInputs.schroederLawNeighborCandidates.checked = workerProfile;
+    architectureInputs.schroederCrossLevelCoupling.checked =
+      profile === 'ss-two-observation-worker';
+    architectureInputs.schroederPhaseVolumeMigration.checked = workerProfile;
+    architectureInputs.schroederMechanicsFieldPairV2.checked =
+      architectureInputs.schroederTwoLevel.checked;
+    architectureInputs.contactSolver.checked = true;
+    architectureInputs.surfaceOverlay.checked = false;
+    architectureInputs.workerParticleOverlay.checked = false;
+    executionInputs.schroederTwoLevelSubsteps.value = '2';
+    renderModeSelect.value = workerProfile
+      ? 'native-webgpu-surface-consumer'
+      : 'auto';
+    const architectureState = syncArchitectureControlDependencies({
+      normalizeDependencies: true
+    });
+    replaceMountedRuntimeHashAndReload({
+      reason: `architecture-profile-${profile}`,
+      architectureStateOverride: architectureState
+    });
   }
   const initialQuery = new URLSearchParams(window.location.search);
   const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -5805,7 +7030,9 @@ export async function mountSphPhaseDemoOverlay({
       : 'infinite-fixed-temperature-reservoir';
   })();
   const initialResidentWorkersEnabled = booleanUrlParam(
-    initialHash.get('residentWorkers') ?? initialQuery.get('residentWorkers'),
+    initialHash.get('residentWorkers')
+      ?? initialQuery.get('residentWorkers')
+      ?? initialScenarioRuntime.residentWorkers,
     true
   );
   const initialResidentStageWorkersEnabled = booleanUrlParam(
@@ -5858,6 +7085,12 @@ export async function mountSphPhaseDemoOverlay({
     initialHash.get('residentGpuTimestampFeature')
       ?? initialQuery.get('residentGpuTimestampFeature'),
     initialResidentGpuTimestampProfilingEnabled
+  );
+  const initialWorkerParticleOverlayEnabled = booleanUrlParam(
+    initialHash.get('workerParticleOverlay')
+      ?? initialQuery.get('workerParticleOverlay')
+      ?? initialScenarioRuntime.workerParticleOverlay,
+    false
   );
   const initialContactBinMetadataReadbackEnabled = booleanUrlParam(
     initialHash.get('contactBinMetadataReadback')
@@ -5917,6 +7150,10 @@ export async function mountSphPhaseDemoOverlay({
   const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
   const initialParticleSeparationRelaxation = numericUrlOption('sep');
   const initialParticleSeparationVelocityDamping = numericUrlOption('sepVel', { max: 1 });
+  const initialReactionProductReserveMinimumLiveFraction = numericUrlOption(
+    'reactionProductReserveMinimumLiveFraction',
+    { max: 1 }
+  );
   // Contact-solver knobs. Absent params stay null so the scene's interactive
   // preset (16 Jacobi rounds, 512 cleanup passes) applies; out-of-range
   // values clamp, and the clamped value is what gets sealed into telemetry.
@@ -5956,7 +7193,18 @@ export async function mountSphPhaseDemoOverlay({
   function initialUrlOrSchroederPolicyValue(urlKeys = [], policyKeys = urlKeys) {
     const urlValue = initialUrlParamValue(urlKeys);
     if (urlValue != null) return urlValue;
-    return policyParamValue(peerSchroederSimulationPolicy, policyKeys);
+    const policyValue = policyParamValue(
+      peerSchroederSimulationPolicy,
+      policyKeys
+    );
+    if (policyValue != null) return policyValue;
+    // Preset-only hierarchy geometry (notably Cs/F base spacing and max
+    // level) has no basic UI field. It is nevertheless executable policy and
+    // must reach the immutable mount config instead of falling back to the
+    // generic single-level grid.
+    return policyParamValue(initialScenarioRuntime, [
+      ...new Set([...urlKeys, ...policyKeys])
+    ]);
   }
   function optionalStringParam(value) {
     if (value == null) return null;
@@ -6245,19 +7493,11 @@ export async function mountSphPhaseDemoOverlay({
         schroederContactSolverEnabled: config?.contactSolverEnabled !== false
       };
     }
-    // contactSolver=0 reuses the existing schroeder-simulation enable seam:
-    // the canonical spatial proposals route (which owns the pair-contact
-    // solve) is turned off entirely and the pre-canonical separation path
-    // runs instead. The scene seals the skip into telemetry.
-    if (config.contactSolverEnabled === false) {
-      return {
-        schroederSimulation: false,
-        schroederContactSolverEnabled: false
-      };
-    }
     return {
       schroederSimulation: true,
-      schroederContactSolverEnabled: true,
+      // Preserve the explicit request so the scene can reject an invalid
+      // SS-without-contact schedule. Never translate it into ss=false.
+      schroederContactSolverEnabled: config.contactSolverEnabled !== false,
       schroederContactJacobiIterations: config.contactJacobiIterations,
       schroederContactCleanupPassBudget: config.contactCleanupPassBudget,
       schroederSelectedLevel: config.selectedLevel,
@@ -6294,20 +7534,25 @@ export async function mountSphPhaseDemoOverlay({
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
     initialHash.get('surfaceOverlay')
       ?? initialQuery.get('surfaceOverlay')
+      ?? initialScenarioRuntime.surfaceOverlay
       ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
   );
-  const rawResidentSurfaceDrawDiagnosticMode =
+  const explicitResidentSurfaceDrawDiagnosticMode =
     initialHash.get('surfaceDraw')
     ?? initialQuery.get('surfaceDraw')
     ?? initialHash.get('surfaceDrawDiagnostic')
     ?? initialQuery.get('surfaceDrawDiagnostic');
+  const rawResidentSurfaceDrawDiagnosticMode =
+    explicitResidentSurfaceDrawDiagnosticMode
+    ?? initialScenarioRuntime.surfaceDraw;
   const rawRendererBackend =
     initialHash.get('renderer')
     ?? initialQuery.get('renderer')
     ?? initialHash.get('sphRenderer')
     ?? initialQuery.get('sphRenderer')
     ?? initialHash.get('threeRenderer')
-    ?? initialQuery.get('threeRenderer');
+    ?? initialQuery.get('threeRenderer')
+    ?? initialScenarioRuntime.renderer;
   const rendererSurfaceStartupSelection =
     resolveSphRendererSurfaceStartupSelection({
       requestedRendererBackend: rawRendererBackend,
@@ -6372,7 +7617,7 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('surfacePixelValidation'),
     false
   );
-  const rawRenderOwnershipMode =
+  const explicitRenderOwnershipMode =
     initialHash.get('renderOwnership')
     ?? initialQuery.get('renderOwnership')
     ?? initialHash.get('renderOwner')
@@ -6381,6 +7626,9 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('peercomputeRenderOwnership')
     ?? initialHash.get('rendererOwnership')
     ?? initialQuery.get('rendererOwnership');
+  const rawRenderOwnershipMode =
+    explicitRenderOwnershipMode
+    ?? initialScenarioRuntime.renderOwnership;
   const rawRenderOwnershipModeExplicitNonAuto = Boolean(
     rawRenderOwnershipMode != null
     && String(rawRenderOwnershipMode).trim().toLowerCase() !== 'auto'
@@ -6399,7 +7647,8 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialHash.get('offscreenPresentation')
     ?? initialQuery.get('offscreenPresentation')
     ?? initialHash.get('workerCanvas')
-    ?? initialQuery.get('workerCanvas');
+    ?? initialQuery.get('workerCanvas')
+    ?? initialScenarioRuntime.workerOffscreenPresentation;
   const directWorkerOffscreenPresentationEnabled = booleanUrlParam(
     rawWorkerOffscreenPresentationParam,
     false
@@ -6452,6 +7701,7 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentVisualStepsMax')
       ?? initialHash.get('presentationStepsPerScheduleMax')
       ?? initialQuery.get('presentationStepsPerScheduleMax')
+      ?? initialScenarioRuntime.residentStepsPerScheduleMax
   );
   const residentParticleBridgeTargetBatchTimeS = positiveNumberUrlParam(
     initialHash.get('residentParticleBridgeTargetBatchTimeS')
@@ -6532,7 +7782,23 @@ export async function mountSphPhaseDemoOverlay({
         ?? null
     }
     : null;
-  const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+  // W4b policy readiness: resolve the requested ownership mode once without
+  // claiming producer readiness, probe only when that policy selects the SS
+  // worker lane, then resolve the final policy with the measured capability.
+  // This admits the same-device interactive default while preserving explicit
+  // main-thread/offscreen choices and PeerCompute policy overrides.
+  const explicitRenderOwnershipRequest = normalizePeerComputeRenderOwnershipMode(
+    rawRenderOwnershipMode,
+    null
+  );
+  const workerOwnedResidentLaneModeExplicitlyRequested = Boolean(
+    explicitRenderOwnershipRequest
+      === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+    || explicitRenderOwnershipRequest
+      === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES
+        .PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
+  );
+  const initialRenderOwnershipPolicyOptions = {
     peercomputePolicy:
       currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
       || runtime?.peercomputeRenderOwnershipPolicy
@@ -6550,9 +7816,53 @@ export async function mountSphPhaseDemoOverlay({
     residentInterfaceRefreshWarmupFrames,
     residentComputeManagerMode,
     useCase: renderOwnershipUseCase,
-    source: rawRenderOwnershipMode
+    source: explicitRenderOwnershipMode != null
       ? 'sph-phase-demo-url'
-      : 'sph-phase-demo'
+      : initialScenarioRuntime.renderOwnership != null
+        ? 'sph-phase-demo-preset'
+        : 'sph-phase-demo'
+  };
+  const pendingPeerComputeRenderOwnershipPolicy =
+    resolvePeerComputeRenderOwnershipPolicy({
+      ...initialRenderOwnershipPolicyOptions,
+      workerOwnedResidentProducerReady: false
+    });
+  const workerOwnedResidentLaneModeRequested = Boolean(
+    pendingPeerComputeRenderOwnershipPolicy.workerOwnedResidentProducerRequested
+  );
+  const workerOwnedResidentLaneCapabilityProbe =
+    workerOwnedResidentLaneModeRequested && initialSchroederSimulationEnabled
+      ? resolveUlgWorkerOffscreenPresentationCapability({
+          requested: true,
+          canvas: typeof document?.createElement === 'function'
+            ? document.createElement('canvas')
+            : null,
+          windowRef: window,
+          navigatorRef: globalThis.navigator
+        })
+      : null;
+  const initialWorkerOwnedResidentLaneReady = Boolean(
+    workerOwnedResidentLaneModeRequested
+    && initialSchroederSimulationEnabled
+    && workerOwnedResidentLaneCapabilityProbe?.status
+      === 'worker-offscreen-presentation-transfer-ready'
+  );
+  overlay.__sphWorkerOwnedResidentLaneAdmission = {
+    schema: 'peercompute.ulg.sph-demo-worker-owned-resident-lane-admission.v0',
+    ready: initialWorkerOwnedResidentLaneReady,
+    explicitRenderOwnershipRequest,
+    workerOwnedResidentLaneModeExplicitlyRequested,
+    workerOwnedResidentLaneModeRequested,
+    requestedRenderOwnershipMode:
+      pendingPeerComputeRenderOwnershipPolicy.requestedMode ?? null,
+    schroederSimulationRequested: initialSchroederSimulationEnabled,
+    capabilityProbeStatus: workerOwnedResidentLaneCapabilityProbe?.status ?? null,
+    capabilityProbeReason: workerOwnedResidentLaneCapabilityProbe?.reason ?? null,
+    updatedAtMs: performance.now()
+  };
+  const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    ...initialRenderOwnershipPolicyOptions,
+    workerOwnedResidentProducerReady: initialWorkerOwnedResidentLaneReady,
   });
   const workerOffscreenPresentationEnabled = Boolean(
     initialPeerComputeRenderOwnershipPolicy.workerOffscreenPresentationRequested
@@ -6711,6 +8021,21 @@ export async function mountSphPhaseDemoOverlay({
     workerCapability: null,
     updatedAtMs: performance.now()
   });
+  let interactiveControlHandlersBound = false;
+  syncSphInteractiveControlAvailability = () => {
+    const commonReady = Boolean(
+      simulationRuntimeAdmission.ready
+      && interactiveControlHandlersBound
+      && overlay.__sphInitialBodiesDraftInvalid !== true
+    );
+    const stateReady = interactiveSimulationStateReady;
+    for (const selector of ['#sph-play', '#sph-step']) {
+      const control = overlay.querySelector(selector);
+      if (control) control.disabled = !(commonReady && stateReady);
+    }
+    const resetControl = overlay.querySelector('#sph-reset');
+    if (resetControl) resetControl.disabled = !commonReady;
+  };
   overlay.__sphSimulationRuntimeAdmission = simulationRuntimeAdmission;
   for (const selector of ['#sph-play', '#sph-step', '#sph-reset']) {
     const control = overlay.querySelector(selector);
@@ -6760,6 +8085,27 @@ export async function mountSphPhaseDemoOverlay({
     return simulationRuntimeAdmission;
   }
 
+  const initialSchroederHierarchyContactAdmission =
+    resolveSphSchroederHierarchyContactAdmission({
+      schroederSimulation: initialSchroederSimulationConfig.enabled,
+      contactSolver: initialSchroederSimulationConfig.contactSolverEnabled
+    });
+  overlay.__sphSchroederHierarchyContactAdmission =
+    initialSchroederHierarchyContactAdmission;
+  if (
+    initialSchroederHierarchyContactAdmission.hierarchyRequested
+    && !initialSchroederHierarchyContactAdmission.admitted
+  ) {
+    blockSphSimulationRuntime(
+      'Schroeder hierarchy requires the canonical contact solver; '
+      + 'disable SS before selecting the contact-off diagnostic.',
+      {
+        source: 'schroeder-hierarchy-contact-admission',
+        errorCode: initialSchroederHierarchyContactAdmission.reason
+      }
+    );
+  }
+
   function admitSphSimulationRuntime(workerCapability) {
     if (simulationRuntimeBlocked()) return false;
     if (workerCapability?.status !== 'worker-capability-ready') {
@@ -6779,12 +8125,7 @@ export async function mountSphPhaseDemoOverlay({
     });
     overlay.__sphSimulationRuntimeAdmission = simulationRuntimeAdmission;
     overlay.dataset.sphSimulationRuntime = 'ready';
-    if (overlay.__sphInitialBodiesDraftInvalid !== true) {
-      for (const selector of ['#sph-play', '#sph-step', '#sph-reset']) {
-        const control = overlay.querySelector(selector);
-        if (control) control.disabled = false;
-      }
-    }
+    syncSphInteractiveControlAvailability();
     return true;
   }
 
@@ -6796,7 +8137,8 @@ export async function mountSphPhaseDemoOverlay({
   // Explicit render-mode selections (URL surfaceDraw= or the render-mode
   // menu) must override the auto render-ownership policy's worker-owned
   // presentation; a defaulted mode must not.
-  let residentSurfaceDrawDiagnosticModeExplicit = rawResidentSurfaceDrawDiagnosticMode != null;
+  let residentSurfaceDrawDiagnosticModeExplicit =
+    explicitResidentSurfaceDrawDiagnosticMode != null;
   renderModeSelect.value = residentSurfaceDrawDiagnosticMode;
   if (renderModeSelect.value !== residentSurfaceDrawDiagnosticMode) {
     renderModeSelect.value = defaultThreeResidentSurfaceDrawMode;
@@ -6814,7 +8156,7 @@ export async function mountSphPhaseDemoOverlay({
       variableSizeSphereMode: particleRenderMode === 'variable-size-spheres',
       requiresLivePhysicsRefresh: particleRenderMode != null,
       requiresFreshPhysicsReadback: particleRenderMode != null,
-      selectedByUrl: rawResidentSurfaceDrawDiagnosticMode != null,
+      selectedByUrl: explicitResidentSurfaceDrawDiagnosticMode != null,
       updatedAtMs: performance.now(),
       ...extra
     };
@@ -6837,6 +8179,7 @@ export async function mountSphPhaseDemoOverlay({
   publishRenderModeSelection('render-mode-initialized');
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {
+    if (mountedRuntimeControlReloadPending) return;
     const q = new URLSearchParams();
     for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(key, el));
     if (currentInitialBodies) {
@@ -6863,6 +8206,12 @@ export async function mountSphPhaseDemoOverlay({
     }
     if (initialParticleSeparationVelocityDamping != null) {
       q.set('sepVel', String(initialParticleSeparationVelocityDamping));
+    }
+    if (initialReactionProductReserveMinimumLiveFraction != null) {
+      q.set(
+        'reactionProductReserveMinimumLiveFraction',
+        String(initialReactionProductReserveMinimumLiveFraction)
+      );
     }
     if (initialHydrostaticInitialization != null) {
       q.set('hydroInit', initialHydrostaticInitialization ? '1' : '0');
@@ -6977,9 +8326,10 @@ export async function mountSphPhaseDemoOverlay({
       }
       q.set('schroederUseCase', initialSchroederPortableSummaryPeerComputeUseCase);
     }
-    window.history.replaceState(null, '', `#${q.toString()}`);
+    window.history.replaceState(null, '', canonicalMountedLocationWithHash(q));
   }
   applyUrlToControls(); // restore from the URL before the first build
+  syncArchitectureControlDependencies({ normalizeDependencies: false });
   syncUrlFromControls(); // and reflect the full current state in the URL
 
   function referenceBoxDimensionsFromControls() {
@@ -6996,12 +8346,10 @@ export async function mountSphPhaseDemoOverlay({
   function scenarioFromControls() {
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
-    // Scenario default drop volume is 1/8 of the base block (drop edge = half
-    // the base edge). The old override pinned the drop volume EQUAL to the
-    // base block, which made every drop read as implausibly huge regardless
-    // of the requested particle edge (user report: "drop block size is
-    // perpetually too big"). The particle-edge inputs control sampling
-    // resolution within these physical blocks, not the physical size itself.
+    // The canonical initial-body editor owns body geometry. Particle counts
+    // are its editable authority; each body's existing per-axis particle pitch
+    // determines the derived physical edge length. This scenario object owns
+    // only container and wall configuration.
     return createSphPhaseScenario({
       wallFaces,
       wallModel: initialWallModel,
@@ -7053,6 +8401,8 @@ export async function mountSphPhaseDemoOverlay({
       dropParticleEdge: Number.isFinite(dropEdge) && dropEdge >= 1 ? dropEdge : DROP_PARTICLE_EDGE_DEFAULT,
       baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT,
       mechanics: mechanicsModeFromControls(),
+      reactionProductReserveMinimumLiveFraction:
+        initialReactionProductReserveMinimumLiveFraction,
       physicalLawGroups: physicalLawGroupsFromControls(),
       schroederSimulationConfig: initialSchroederSimulationConfig,
       allowReducedProductProperties: true,
@@ -8752,6 +10102,7 @@ export async function mountSphPhaseDemoOverlay({
     lightingMode: lightingModeOf(),
     nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
     workerOffscreenPresentation: workerOffscreenPresentationEnabled,
+    workerParticleOverlay: initialWorkerParticleOverlayEnabled,
     renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
     materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
     residentAuthorityHost: currentResidentAuthorityHostForScene(),
@@ -8952,6 +10303,24 @@ export async function mountSphPhaseDemoOverlay({
   overlay.__sphNativeSurfaceCameraPresentationRecovery =
     residentNativeSurfaceCameraPresentationRecovery;
   let residentNativeSurfaceCameraPresentationRecoveryContext = null;
+  let workerLaneNativeSurfacePresentationMirror = null;
+  const releaseWorkerLaneNativeSurfacePresentationMirror = (
+    source = workerLaneNativeSurfacePresentationMirror
+  ) => {
+    if (!source) return Promise.resolve(false);
+    if (workerLaneNativeSurfacePresentationMirror === source) {
+      workerLaneNativeSurfacePresentationMirror = null;
+    }
+    return Promise.resolve(source.releaseAfterQueue?.()).catch(() => false);
+  };
+  const adoptWorkerLaneNativeSurfacePresentationMirror = (source) => {
+    const previous = workerLaneNativeSurfacePresentationMirror;
+    workerLaneNativeSurfacePresentationMirror = source || null;
+    if (previous && previous !== source) {
+      void Promise.resolve(previous.releaseAfterQueue?.()).catch(() => false);
+    }
+    return workerLaneNativeSurfacePresentationMirror;
+  };
   // A completed candidate can publish after the bounded post-step handoff
   // wait. Keep this recovery single-flight and generation-guarded: it may
   // only re-prove a scheduler-current exact receipt, never revive a reset or
@@ -9291,6 +10660,12 @@ export async function mountSphPhaseDemoOverlay({
         ?? overlay.__mlsMpmResidentStep?.particlePingPong?.nextTime
         ?? scene.getMlsMpmResidentSteps?.()?.nextSphParticleState?.time
         ?? overlay.__mlsMpmResidentSteps?.nextSphParticleState?.time
+        // W4b: the worker-owned resident lane retains its post-step state
+        // worker-side (no page-device nextSphParticleState exists); the
+        // truthful adopted clock is baseTime + completedStepCount * dt from
+        // the terminal schedule envelope.
+        ?? scene.getMlsMpmResidentSteps?.()?.workerLaneSimTime?.timeS
+        ?? overlay.__mlsMpmResidentSteps?.workerLaneSimTime?.timeS
         ?? driver?.demo?.state?.time
         ?? activeViewState?.time
     );
@@ -9401,15 +10776,33 @@ export async function mountSphPhaseDemoOverlay({
   } = {}) {
     const sources = [];
     if (residentSteps != null) sources.push(residentSteps);
+    const workerLanePageMirrorsSealed = Boolean(
+      residentWorkerLaneContinuationReady(residentSteps)
+      && typeof residentSteps?.workerLaneSealedAbsentFields?.finalStep
+        === 'string'
+      && residentSteps.workerLaneSealedAbsentFields.finalStep.length > 0
+    );
     if (
       residentSteps
       && typeof residentSteps === 'object'
       && !Array.isArray(residentSteps)
       && Object.prototype.hasOwnProperty.call(residentSteps, 'finalStep')
     ) {
-      sources.push(residentSteps.finalStep);
+      const finalStep = residentSteps.finalStep;
+      // Worker-owned schedules intentionally seal the page-device finalStep
+      // mirror absent. Their exact terminal lane receipt is the continuation
+      // authority, so a deliberate null mirror is not a missing telemetry
+      // participant. Direct/page-device schedules remain fail-closed.
+      if (
+        finalStep != null
+        || !workerLanePageMirrorsSealed
+      ) {
+        sources.push(finalStep);
+      }
     }
-    if (residentStep != null) sources.push(residentStep);
+    if (residentStep != null && !workerLanePageMirrorsSealed) {
+      sources.push(residentStep);
+    }
     return sources;
   }
 
@@ -9447,7 +10840,7 @@ export async function mountSphPhaseDemoOverlay({
       return messages;
     }
     if (pendingControlEdit) {
-      messages.push('Control changes staged — press Play or Reset to apply.');
+      messages.push('Control changes staged — press Apply, Play, Step, or Reset to apply.');
     }
     if (!navigator?.gpu) {
       messages.push('WebGPU unavailable: simulation admission is blocked.');
@@ -9478,6 +10871,18 @@ export async function mountSphPhaseDemoOverlay({
     const p2gProjection = scene.getMlsMpmP2gGridProjection?.() || overlay.__mlsMpmP2gGridProjection || null;
     const gridUpdate = scene.getMlsMpmGridUpdate?.() || overlay.__mlsMpmGridUpdate || null;
     const renderState = scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
+    const surfaceDraw = scene.getSphResidentSurfaceDraw?.()
+      || overlay.__sphResidentSurfaceDraw
+      || null;
+    const workerLaneNativeSurfacePresentation =
+      overlay.__sphWorkerLaneNativeSurfacePresentation || null;
+    const workerLaneNativeSurfacePresentationCurrent =
+      residentWorkerLaneNativeSurfacePresentationReady({
+        execution: residentSteps,
+        presentation: workerLaneNativeSurfacePresentation,
+        renderState,
+        surfaceDraw
+      });
     const renderCadence = renderState?.renderReadbackCadence || overlay.__sphResidentRenderReadbackCadence || null;
     const particleBridgeLiveReadback = Boolean(
       renderCadence?.particleRenderModeRefresh === true
@@ -9535,6 +10940,7 @@ export async function mountSphPhaseDemoOverlay({
     if (
       (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown')
       && !particleBridgeLiveReadback
+      && !workerLaneNativeSurfacePresentationCurrent
     ) {
       messages.push('Resident physics is stepping, but compact motion proof is unavailable.');
     } else if (motion.status === 'motion-below-visible-threshold') {
@@ -10217,6 +11623,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function mlsMpmResidentStepsSignature({
     stepCount = currentResidentStepsPerSchedule(),
+    workerLaneProgressEverySteps = 1,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     residentStageWorkersEnabled = false,
     fuseNoFullResidentMechanicsSequence = false,
@@ -10264,6 +11671,7 @@ export async function mountSphPhaseDemoOverlay({
       (mls?.gravityMPerS2 ?? [0, -9.80665, 0]).join(','),
       mls?.gridCflFactor ?? 0.6,
       Math.max(1, Math.round(Number(stepCount) || 1)),
+      `workerProgress=${Math.max(1, Math.round(Number(workerLaneProgressEverySteps) || 1))}`,
       readbackMode,
       Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(','),
       `stageWorkers=${Boolean(residentStageWorkersEnabled) ? 1 : 0}`,
@@ -10330,6 +11738,18 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentResidentComputeManagerMode() {
     const policy = currentPeerComputeRenderOwnershipPolicy();
+    // The worker-owned SS producer is an admitted ComputeManager lane, not a
+    // direct scene execution. Some scenario presets still carry the legacy
+    // same-device `direct` cadence hint; allowing that hint to null the
+    // manager here makes the worker route structurally impossible even after
+    // its render-ownership admission is ready. Worker-lane authority wins
+    // because it is the more specific execution contract.
+    if (
+      policy?.workerOwnedResidentProducerRequested === true
+      && policy?.workerOwnedResidentProducerReady === true
+    ) {
+      return 'compute-manager';
+    }
     const rawMode = String(
       policy?.residentComputeManagerMode
       ?? policy?.residentPlaybackCadencePolicy?.computeManagerMode
@@ -10362,10 +11782,31 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentResidentStepsPerSchedule() {
     if (initialSchroederSimulationConfig.enabled) {
-      return resolveSphResidentScheduleStepCount({
-        requestedStepCount: 1,
-        schroederSimulationEnabled: true
+      // The scenario override is a requested batch size, not permission to
+      // bypass the resolved interactive presentation policy. Worker-owned
+      // committed-frame playback deliberately caps at one step (the retained
+      // presentation-only use case caps at four); throughput/science policies
+      // expose a null max and keep the normal global cap.
+      const playbackPolicy = currentPeerComputeRenderOwnershipPolicy();
+      const workerLaneRequestedStepCount = positiveIntegerUrlParam(
+        playbackPolicy?.residentStepsPerScheduleOverride
+      ) ?? RESIDENT_STEPS_PER_SCHEDULE_MAX;
+      const workerLanePolicyMax = positiveIntegerUrlParam(
+        playbackPolicy?.residentStepsPerScheduleMax
+      ) ?? RESIDENT_PARTICLE_BRIDGE_STEPS_PER_SCHEDULE_MAX;
+      const evidence = resolveSphMountedScheduleControlEvidence({
+        requestedStepCount: initialWorkerOwnedResidentLaneReady
+          ? workerLaneRequestedStepCount
+          : 1,
+        residentStepsPerScheduleMax: workerLanePolicyMax,
+        workerLaneActive: initialWorkerOwnedResidentLaneReady
       });
+      overlay.__sphResidentScheduleControlEvidence = evidence;
+      residentScheduleEffectiveEl.textContent = evidence.workerLaneActive
+        ? `effective schedule: ${evidence.effectiveStepCount} step${evidence.effectiveStepCount === 1 ? '' : 's'} `
+          + `(requested ${workerLaneRequestedStepCount}, policy maximum ${evidence.policyMaxStepCount})`
+        : `effective schedule: waiting for worker lane (requested ${workerLaneRequestedStepCount})`;
+      return evidence.effectiveStepCount;
     }
     let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
     const candidates = [
@@ -11438,6 +12879,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function scheduleMlsMpmResidentSteps({
     stepCount = currentResidentStepsPerSchedule(),
+    workerLaneProgressEverySteps = 1,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     continueFromResidentState = false,
     continuationBudget = RESIDENT_CONTINUATION_CHAIN_BUDGET,
@@ -11483,6 +12925,7 @@ export async function mountSphPhaseDemoOverlay({
           kind: 'resident-schedule',
           scheduleOptions: {
             stepCount,
+            workerLaneProgressEverySteps,
             readbackMode,
             continueFromResidentState,
             continuationBudget,
@@ -11505,14 +12948,20 @@ export async function mountSphPhaseDemoOverlay({
       return;
     }
     const requestedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
+    const requestedWorkerLaneProgressEverySteps = Math.max(
+      1,
+      Math.round(Number(workerLaneProgressEverySteps) || 1)
+    );
     const normalizedStepCount = resolveSphResidentScheduleStepCount({
       requestedStepCount,
-      schroederSimulationEnabled: initialSchroederSimulationConfig.enabled
+      schroederSimulationEnabled: initialSchroederSimulationConfig.enabled,
+      workerLaneActive: initialWorkerOwnedResidentLaneReady
     });
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     const schroederExecutionOptions = schroederResidentExecutionOptionsFromConfig();
     const baseSignature = mlsMpmResidentStepsSignature({
       stepCount: normalizedStepCount,
+      workerLaneProgressEverySteps: requestedWorkerLaneProgressEverySteps,
       readbackMode,
       ...residentExecutionPolicy,
       ...schroederExecutionOptions
@@ -11576,6 +13025,10 @@ export async function mountSphPhaseDemoOverlay({
     let scheduleContinuation = false;
     let scheduleLatestGeneration = false;
     let restartPlaybackContinuation = false;
+    // W4b: set when the settled execution is a worker-owned resident-lane
+    // batch. Its continuation issues directly from schedule completion (the
+    // batch itself is the pacing) instead of the per-step rAF chain.
+    let workerLaneScheduleCompletionContinuation = false;
     // Any continuation that crosses an await must retain the exact mounted
     // scene and schedule identity it began with.  In particular, reset can
     // replace the scene and advance its generation while a native candidate
@@ -11781,7 +13234,7 @@ export async function mountSphPhaseDemoOverlay({
         return report;
       });
     }
-    remoteRefreshPreludePromise.then(() => {
+    const mountedResidentSchedulePromise = remoteRefreshPreludePromise.then(() => {
       if (!residentScheduleIsCurrent()) return null;
       traceResidentSchedule('refresh-invoked');
       const refreshPromise = scheduledScene.refreshMlsMpmResidentSteps?.({
@@ -11797,6 +13250,7 @@ export async function mountSphPhaseDemoOverlay({
       pressureInterfaceGasCellFieldImport: scheduledScene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
       pressureInterfaceGasCellFieldAdmission: scheduledScene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
       stepCount: normalizedStepCount,
+      workerLaneProgressEverySteps: requestedWorkerLaneProgressEverySteps,
       readbackMode,
       // Mounted playback is a literal zero-map hot loop. Motion telemetry may
       // remain pending when the renderer consumes retained GPU buffers; it
@@ -11971,6 +13425,8 @@ export async function mountSphPhaseDemoOverlay({
         resolveSphResidentInterfaceRefreshContinuationPolicy({
           schroederSimulationEnabled: initialSchroederSimulationEnabled,
           residentComputeManagerMode: residentComputeManagerModeForSchedule,
+          workerOwnedResidentLaneActive:
+            residentWorkerLaneContinuationReady(execution),
           pressureEnabled: activePhysicalLawGroups.pressure,
           reactionsEnabled: activePhysicalLawGroups.reactions,
           reactionCount: scene.getSphReactionTable?.()?.reactionCount ?? 0,
@@ -12090,8 +13546,14 @@ export async function mountSphPhaseDemoOverlay({
           }
         }
       }
+      // W4b: worker-lane continuation readiness is lane-resident evidence
+      // (the presentation worker retains the post-step buffers); the direct
+      // page-device continuation evidence stays byte-identical.
+      const workerLaneContinuationReady =
+        residentWorkerLaneContinuationReady(execution);
+      workerLaneScheduleCompletionContinuation = workerLaneContinuationReady;
       scheduleContinuation = Boolean(
-        residentGpuContinuationReady(execution)
+        (residentGpuContinuationReady(execution) || workerLaneContinuationReady)
         && continuationBudget > 0
         && generation === particleSyncGeneration
         && requiredInterfaceRefreshReady
@@ -12120,7 +13582,8 @@ export async function mountSphPhaseDemoOverlay({
       restartPlaybackContinuation = sphResidentPlaybackRestartAllowed({
         scheduleContinuation,
         playing,
-        continuationReady: residentGpuContinuationReady(execution),
+        continuationReady:
+          residentGpuContinuationReady(execution) || workerLaneContinuationReady,
         generationCurrent: generation === particleSyncGeneration,
         requiredInterfaceRefreshReady
       });
@@ -12129,6 +13592,10 @@ export async function mountSphPhaseDemoOverlay({
         const selectedParticleRenderMode = residentSurfaceDrawParticleRenderMode(selectedSurfaceDrawDiagnosticMode);
         const selectedNativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(
           selectedSurfaceDrawDiagnosticMode
+        );
+        const workerLaneNativeSurfaceSnapshotRefresh = Boolean(
+          selectedNativeSurfaceConsumerRefresh
+          && workerLaneContinuationReady
         );
         const residentRenderScheduleIsCurrent = () => (
           sphResidentRenderSchedulePublicationIsCurrent({
@@ -12170,6 +13637,8 @@ export async function mountSphPhaseDemoOverlay({
         const forceAccumulatedMotionRefresh = accumulatedMotion.accumulatedMotionVisible;
         const forceResidentRenderRefreshReason = forceInitialRenderStateRefresh
           ? 'resident-initial-visual-refresh'
+          : workerLaneNativeSurfaceSnapshotRefresh
+          ? 'worker-lane-terminal-native-surface-snapshot'
           : forceNativeSurfacePresentationRecovery
           ? 'native-surface-visible-presentation-recovery-refresh'
           : forceMotionProvenRefresh
@@ -12188,7 +13657,8 @@ export async function mountSphPhaseDemoOverlay({
             || forceMotionProvenRefresh
             || forceBatchMotionEstimateRefresh
             || forceAccumulatedMotionRefresh
-            || forceParticleRenderModeRefresh,
+            || forceParticleRenderModeRefresh
+            || workerLaneNativeSurfaceSnapshotRefresh,
           forceReason: forceResidentRenderRefreshReason,
           suppressDue: suppressSubvisiblePlaybackRender,
           suppressReason: 'resident-motion-below-visible-threshold'
@@ -12201,7 +13671,11 @@ export async function mountSphPhaseDemoOverlay({
               ?.sphNativeSurfaceCandidateValidationScheduler
               || null
           });
-        if (cadence.due && nativeSurfaceStartupRefresh.deferRefresh) {
+        if (
+          cadence.due
+          && nativeSurfaceStartupRefresh.deferRefresh
+          && !workerLaneNativeSurfaceSnapshotRefresh
+        ) {
           // The active startup candidate is still the only presentation that
           // could retire the control-envelope preview. Do not enqueue a newer
           // candidate yet: the latest-wins scheduler correctly supersedes
@@ -12243,10 +13717,12 @@ export async function mountSphPhaseDemoOverlay({
         // inputs as the ordinary post-step render refresh. Keep the option
         // construction here so a recovery cannot accidentally render a CPU,
         // stale, or differently configured source.
+        let workerLaneNativeSurfacePresentationSource = null;
         const refreshResidentRenderForExactExecution = () =>
           scheduledScene.refreshSphResidentRenderState?.({
             preferWebGpu: true,
             residentSteps: execution,
+            workerLaneNativeSurfacePresentationSource,
             materialProperties: activeMaterialProperties(),
             gasPressureSummary: overlay.__sphResidentGasPressureSummary
               || activeViewStateGasPressure
@@ -12275,6 +13751,39 @@ export async function mountSphPhaseDemoOverlay({
           });
         try {
           if (cadence.due) {
+            if (workerLaneNativeSurfaceSnapshotRefresh) {
+              const materializedSource =
+                await materializeSphWorkerLaneNativeSurfacePresentationSource({
+                  sceneApi: scheduledScene,
+                  execution,
+                  generation,
+                  scheduleToken,
+                  materialProperties: activeMaterialProperties()
+                });
+              if (!residentRenderScheduleIsCurrent()) {
+                await materializedSource.releaseAfterQueue?.();
+                discardStaleResidentPresentationContinuation();
+                return;
+              }
+              workerLaneNativeSurfacePresentationSource =
+                adoptWorkerLaneNativeSurfacePresentationMirror(materializedSource);
+              overlay.__sphWorkerLaneNativeSurfacePresentation = Object.freeze({
+                schema: materializedSource.schema,
+                status: materializedSource.status,
+                scheduleId: materializedSource.scheduleId,
+                laneId: materializedSource.laneId,
+                stateKey: materializedSource.stateKey,
+                requestId: materializedSource.requestId,
+                cacheKey: materializedSource.cacheKey,
+                sourceStageId: materializedSource.sourceStageId,
+                sourceStep: materializedSource.sourceStep,
+                sourceTimeS: materializedSource.sourceTimeS,
+                particleCount: materializedSource.particleCount,
+                readbackScope: materializedSource.readbackScope,
+                terminalPresentationFullParticleReadbackPerformed: true,
+                physicsHotLoopParticipation: false
+              });
+            }
             const renderStartMs = performance.now();
             const refreshedResidentRenderState =
               await refreshResidentRenderForExactExecution();
@@ -12283,6 +13792,7 @@ export async function mountSphPhaseDemoOverlay({
               return;
             }
             overlay.__sphResidentRenderState = refreshedResidentRenderState;
+            overlay.__sphResidentRenderStateError = null;
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
             overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
@@ -12329,6 +13839,8 @@ export async function mountSphPhaseDemoOverlay({
                     'peercompute.ulg.sph-native-surface-camera-presentation-recovery-context.v0',
                   generation,
                   scheduleToken,
+                  workerLaneProgressEverySteps:
+                    requestedWorkerLaneProgressEverySteps,
                   execution,
                   sourceResidentExecutionGeneration:
                     candidateHandoff.expectedResidentExecutionGeneration ?? null,
@@ -12881,7 +14393,16 @@ export async function mountSphPhaseDemoOverlay({
                       ?.proofWaitStatus ?? null
                 }
               );
-              if (residentPostStepPresentationGate?.active) {
+              if (
+                residentPostStepPresentationGate?.active
+                // W4b: worker-lane schedule issuance is never suppressed by
+                // the native-surface presentation gate — the worker lane's
+                // presentation flows through the resident render candidate
+                // mailbox, so holding physics for a page-side presentation
+                // proof would deadlock playback against a proof that this
+                // route never produces.
+                && !workerLaneScheduleCompletionContinuation
+              ) {
                 // A non-terminal exact-generation proof still owns the
                 // continuation. Terminal unadmitted/error/timeout outcomes are
                 // inactive fail-open receipts and preserve playback.
@@ -12984,6 +14505,7 @@ export async function mountSphPhaseDemoOverlay({
       }
       renderStatus();
       updateWarningBanner();
+      return execution;
     }).catch((error) => {
       if (!residentScheduleIsCurrent()) {
         discardStaleResidentPresentationContinuation();
@@ -13063,12 +14585,38 @@ export async function mountSphPhaseDemoOverlay({
           if (!overlay.isConnected || resetRebuildPending) return;
           scheduleMlsMpmResidentSteps({
             stepCount: normalizedStepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
             readbackMode,
             continueFromResidentState: false,
             continuationBudget,
             generation: particleSyncGeneration
           });
         });
+      } else if (
+        workerLaneScheduleCompletionContinuation
+        && scheduleContinuation
+        && residentScheduleIsCurrent()
+      ) {
+        // W4b: the worker lane issues its next batched schedule directly
+        // from THIS schedule's completion. The per-step rAF chain below
+        // paces one-epoch direct schedules against page presentation; a
+        // worker batch is its own pacing and never waits on a page frame.
+        if (sphResidentChainedContinuationAllowed({
+          scheduleContinuation,
+          playing,
+          scheduleCurrent: residentScheduleIsCurrent()
+        })) {
+          scheduleMlsMpmResidentSteps({
+            stepCount: normalizedStepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
+            readbackMode,
+            continueFromResidentState: true,
+            continuationBudget: continuationBudget - 1,
+            generation
+          });
+        }
       } else if (scheduleContinuation && residentScheduleIsCurrent()) {
         window.requestAnimationFrame(() => {
           if (!sphResidentChainedContinuationAllowed({
@@ -13078,17 +14626,39 @@ export async function mountSphPhaseDemoOverlay({
           })) return;
           scheduleMlsMpmResidentSteps({
             stepCount: normalizedStepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
             readbackMode,
             continueFromResidentState: true,
             continuationBudget: continuationBudget - 1,
             generation
           });
         });
+      } else if (
+        workerLaneScheduleCompletionContinuation
+        && restartPlaybackContinuation
+        && residentScheduleIsCurrent()
+      ) {
+        // W4b: worker-lane playback restart also issues from schedule
+        // completion rather than a page frame.
+        if (overlay.isConnected && playing && generation === particleSyncGeneration) {
+          scheduleMlsMpmResidentSteps({
+            stepCount: normalizedStepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
+            readbackMode,
+            continueFromResidentState: true,
+            continuationBudget: RESIDENT_CONTINUATION_CHAIN_BUDGET,
+            generation
+          });
+        }
       } else if (restartPlaybackContinuation && residentScheduleIsCurrent()) {
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;
           scheduleMlsMpmResidentSteps({
             stepCount: normalizedStepCount,
+            workerLaneProgressEverySteps:
+              requestedWorkerLaneProgressEverySteps,
             readbackMode,
             continueFromResidentState: true,
             continuationBudget: RESIDENT_CONTINUATION_CHAIN_BUDGET,
@@ -13097,7 +14667,16 @@ export async function mountSphPhaseDemoOverlay({
         });
       }
     });
+    return mountedResidentSchedulePromise;
   }
+
+  // The long-horizon architecture probe must exercise the mounted scheduler,
+  // not call the scene's compute method directly.  The mounted scheduler owns
+  // the terminal worker-snapshot -> native-surface handoff and therefore is
+  // the only path that can prove the preset does not reveal the worker's
+  // diagnostic particle canvas after an authoritative schedule commits.
+  overlay.__sphScheduleMlsMpmResidentSteps = (options = {}) =>
+    scheduleMlsMpmResidentSteps(options);
 
   async function refreshResidentRenderForCurrentMode(reason = 'render-mode-change') {
     const mode = currentResidentSurfaceDrawDiagnosticMode();
@@ -13154,7 +14733,9 @@ export async function mountSphPhaseDemoOverlay({
           shouldSkipSphResidentPressureInterfaceForRenderRefresh({
             schroederSimulationEnabled:
               initialSchroederSimulationConfig.enabled,
-            residentComputeManagerMode: renderModeComputeManagerMode
+            residentComputeManagerMode: renderModeComputeManagerMode,
+            workerOwnedResidentLaneActive:
+              residentWorkerLaneContinuationReady(execution)
           }),
         renderFieldReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
         renderRowsReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
@@ -13218,8 +14799,13 @@ export async function mountSphPhaseDemoOverlay({
     }
   }
 
-  // Blob size is live: update the scene's surface scale and re-render without a reset.
-  blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
+  // Blob size is presentation-only. Never call syncParticles() here: doing so
+  // invalidates the worker-retained authority just to change an isosurface
+  // radius. The next native presentation refresh consumes the new scale.
+  blobInput.addEventListener('input', () => {
+    scene.setSurfaceRadiusScale(blobScaleOf());
+    renderStatus();
+  });
 
   function revokeLocalBackgroundImageObjectUrl(url, reason = 'local-background-image-retired') {
     if (!url || revokedLocalBackgroundImageObjectUrls.has(url)) return false;
@@ -13453,6 +15039,10 @@ export async function mountSphPhaseDemoOverlay({
   renderModeSelect.addEventListener('change', () => {
     residentSurfaceDrawDiagnosticModeExplicit = true;
     const selectedMode = currentResidentSurfaceDrawDiagnosticMode();
+    // Render mode is part of the architecture profile contract. Keep the
+    // selector truthful even when the new mode uses the already-mounted
+    // backend and therefore does not reload the page.
+    syncArchitectureControlDependencies({ normalizeDependencies: false });
     syncUrlFromControls();
     const requiredBackend = sphRendererBackendRequiredForRenderMode(selectedMode);
     if (requiredBackend !== initialSphRendererBackend) {
@@ -13504,6 +15094,7 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__sphNativeSurfaceCameraPresentationRecovery = null;
     residentNativeSurfaceCameraPresentationRecoveryEpoch += 1;
     residentNativeSurfaceCameraPresentationRecoveryContext = null;
+    void releaseWorkerLaneNativeSurfacePresentationMirror();
     residentNativeSurfaceLatePresentationRecoveryEpoch += 1;
     residentNativeSurfaceLatePresentationRecovery = null;
     overlay.__sphNativeSurfaceLatePresentationRecovery = null;
@@ -13625,6 +15216,7 @@ export async function mountSphPhaseDemoOverlay({
       lightingMode: lightingModeOf(),
       nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
       workerOffscreenPresentation: workerOffscreenPresentationEnabled,
+      workerParticleOverlay: initialWorkerParticleOverlayEnabled,
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
       residentAuthorityHost: currentResidentAuthorityHostForScene(),
@@ -13838,7 +15430,17 @@ export async function mountSphPhaseDemoOverlay({
     syncParticles(viewState, 'peercompute-worker-packed-state');
     renderStatus();
     updateWarningBanner();
-    if (residentAutoStartEnabled) startWorkerResidentPlayback();
+    const postRebuildIntent = consumePendingPostRebuildIntent();
+    if (postRebuildIntent === 'play' || postRebuildIntent === 'step') {
+      queueMicrotask(() => {
+        if (!overlay.isConnected) return;
+        overlay.querySelector(
+          postRebuildIntent === 'play' ? '#sph-play' : '#sph-step'
+        )?.click();
+      });
+    } else if (postRebuildIntent == null && residentAutoStartEnabled) {
+      startWorkerResidentPlayback();
+    }
     return true;
   }
 
@@ -13952,6 +15554,7 @@ export async function mountSphPhaseDemoOverlay({
       applyWorkerRebuildResult(result, generation);
     }).catch((error) => {
       if (generation !== workerRebuildGeneration) return;
+      pendingPostRebuildIntent = null;
       recordPerformanceSpan('ulg-runtime worker createSphPhaseDemo failed', submittedAtMs, performance.now(), {
         reason,
         error: error instanceof Error ? error.message : String(error)
@@ -13985,6 +15588,8 @@ export async function mountSphPhaseDemoOverlay({
     syncUrlFromControls();
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     playing = false;
+    interactiveSimulationStateReady = false;
+    syncSphInteractiveControlAvailability();
     overlay.querySelector('#sph-play').textContent = 'Play';
     publishPendingBodyEnvelopePreview({
       reason: 'replacement-material-closure-pending',
@@ -14059,32 +15664,25 @@ export async function mountSphPhaseDemoOverlay({
     // controls, driver, renderer, and resident host all share one authority.
     syncUrlFromControls();
     const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    for (const key of [
-      'sdt',
-      'cfl',
-      'cflSafety',
-      'avAlpha',
-      'diffAlpha',
-      'wallAlpha',
-      'sep',
-      'sepVel',
-      'hydroInit',
-      'residentStepsPerSchedule',
-      'residentInterfaceRefreshMode',
-      'residentComputeManagerMode',
-      'sceneLengthScale',
-      'wallModel',
-      'cameraPositionNormalized',
-      'cameraTargetNormalized'
-    ]) {
+    for (const key of mountedPresetRuntimeResetKeys) {
       params.delete(key);
     }
     for (const [key, value] of Object.entries(entry.runtime || {})) {
       if (value != null && value !== '') params.set(key, String(value));
     }
-    window.history.replaceState(null, '', `#${params.toString()}`);
+    mountedRuntimeControlReloadPending = true;
+    window.history.replaceState(
+      null,
+      '',
+      canonicalMountedLocationWithHash(params, {
+        clearSearchKeys: ['scenario', ...mountedPresetRuntimeResetKeys]
+      })
+    );
     window.location.reload();
   }
+  architectureProfileSelect.addEventListener('change', () => {
+    applyArchitectureProfile(architectureProfileSelect.value);
+  });
   initialBodiesEditorReady = true;
   initialBodiesEl.inert = false;
   addInitialBodyButton.disabled = false;
@@ -14104,6 +15702,16 @@ export async function mountSphPhaseDemoOverlay({
         setInitialBodiesEditorError();
         renderInitialBodiesEditor();
         reloadWithScenarioPresetRuntime(entry);
+      });
+    } else if (mountedRuntimeControlKeys.has(key)) {
+      el.addEventListener('change', () => {
+        if (typeof el.checkValidity === 'function' && !el.checkValidity()) {
+          el.reportValidity?.();
+          return;
+        }
+        replaceMountedRuntimeHashAndReload({
+          reason: `mounted-runtime-control-${key}`
+        });
       });
     } else if (key === 'blob') {
       el.addEventListener('change', syncUrlFromControls);
@@ -14145,6 +15753,7 @@ export async function mountSphPhaseDemoOverlay({
     particleSyncGeneration += 1;
     const viewState = viewStateOverride || (driver ? createSphPhaseViewState(driver) : null);
     if (!viewState) {
+      interactiveSimulationStateReady = false;
       activeViewState = null;
       activeViewStateTotals = null;
       activeViewStatePhaseSummary = null;
@@ -14168,6 +15777,7 @@ export async function mountSphPhaseDemoOverlay({
       overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
       overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
       overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+      syncSphInteractiveControlAvailability();
       return;
     }
     activeViewState = viewState;
@@ -14266,6 +15876,8 @@ export async function mountSphPhaseDemoOverlay({
     }
     bindPendingBodyEnvelopePreviewToParticleGeneration(particleSyncGeneration);
     scheduleInitialMlsMpmResidentSteps({ generation: particleSyncGeneration });
+    interactiveSimulationStateReady = true;
+    syncSphInteractiveControlAvailability();
   }
 
   function stepDemoForVisualTest(steps = 1) {
@@ -14407,7 +16019,48 @@ export async function mountSphPhaseDemoOverlay({
     return `requested=${requestedMode} particle=${particleRenderMode} sizing=${sphereSizingMode} pbr=${pbrSource}`;
   }
 
+  let statusRenderLastMs = 0;
+  let statusRenderTimer = null;
+  let statusRenderDirty = false;
+  function statusPanelHidden() {
+    return overlay.querySelector('#sph-panel')?.classList?.contains('collapsed') === true;
+  }
+  function flushStatusRender() {
+    if (statusRenderTimer) {
+      clearTimeout(statusRenderTimer);
+      statusRenderTimer = null;
+    }
+    statusRenderDirty = false;
+    renderStatusNow();
+  }
   function renderStatus() {
+    const decision = resolveSphStatusRefreshDecision({
+      panelHidden: statusPanelHidden(),
+      lastRenderMs: statusRenderLastMs,
+      nowMs: Date.now()
+    });
+    if (decision.action === 'skip-hidden') {
+      statusRenderDirty = true;
+      return;
+    }
+    if (decision.action === 'render-now') {
+      statusRenderDirty = false;
+      renderStatusNow();
+      return;
+    }
+    statusRenderDirty = true;
+    if (statusRenderTimer) return;
+    statusRenderTimer = setTimeout(() => {
+      statusRenderTimer = null;
+      if (statusRenderDirty && !statusPanelHidden()) {
+        statusRenderDirty = false;
+        renderStatusNow();
+      }
+    }, decision.delayMs);
+  }
+  function renderStatusNow() {
+    statusRenderLastMs = Date.now();
+    currentResidentStepsPerSchedule();
     if (simulationRuntimeBlocked()) {
       statusEl.textContent = `simulation blocked — ${simulationRuntimeAdmission.reason}`;
       return;
@@ -14794,6 +16447,7 @@ export async function mountSphPhaseDemoOverlay({
   // that move geometry, does it while the solver is mid-step. Changes apply on
   // Play or Reset.
   let pendingControlEdit = false;
+  let pendingPostRebuildIntent = null;
   function stageControlEdit() {
     pendingControlEdit = true;
     if (playing) {
@@ -14805,10 +16459,16 @@ export async function mountSphPhaseDemoOverlay({
     renderStatus();
     updateWarningBanner();
   }
-  function applyPendingControlEditIfAny() {
+  function applyPendingControlEditIfAny(intent = 'preflight') {
     if (!pendingControlEdit) return false;
+    pendingPostRebuildIntent = intent;
     scheduleDemoRebuild();
     return true;
+  }
+  function consumePendingPostRebuildIntent() {
+    const intent = pendingPostRebuildIntent;
+    pendingPostRebuildIntent = null;
+    return intent;
   }
   let playbackLoopScheduled = false;
   stopPlaybackForInvalidInitialBodyDraft = () => {
@@ -15513,6 +17173,8 @@ export async function mountSphPhaseDemoOverlay({
           return;
         }
         scheduleMlsMpmResidentSteps({
+          workerLaneProgressEverySteps:
+            context.workerLaneProgressEverySteps,
           continueFromResidentState:
             residentGpuContinuationReady(context.execution),
           generation: context.generation
@@ -15649,10 +17311,36 @@ export async function mountSphPhaseDemoOverlay({
     requestPlaybackTick();
   }
 
-  overlay.querySelector('#sph-preflight').addEventListener('click', renderStatus);
+  overlay.querySelector('#sph-preflight').addEventListener('click', () => {
+    try {
+      const bodies = validateInitialBodiesEditorState(currentInitialBodies);
+      const architecture = validateMountedArchitectureControls();
+      overlay.__sphControlPreflight = {
+        schema: 'peercompute.ulg.sph-mounted-control-preflight.v0',
+        status: pendingControlEdit
+          ? 'control-preflight-rebuild-submitted'
+          : 'control-preflight-current-state-admitted',
+        bodyCount: bodies.bodies.length,
+        particleCount: bodies.bodies.reduce((sum, body) => (
+          sum + body.particlesPerEdge.reduce((product, count) => product * count, 1)
+        ), 0),
+        architectureProfile: architecture.profile,
+        architectureDependencyIssues: architecture.dependencyIssues,
+        pendingControlEdit,
+        simulationRuntimeReady: simulationRuntimeAdmission.ready === true,
+        updatedAtMs: performance.now()
+      };
+      if (applyPendingControlEditIfAny('preflight')) return;
+      renderStatus();
+      updateWarningBanner();
+    } catch (error) {
+      setInitialBodiesEditorError(error, { blocksSimulation: true });
+    }
+  });
   overlay.querySelector('#sph-step').addEventListener('click', () => {
     if (!simulationRuntimeAdmission.ready) return;
     if (overlay.__sphInitialBodiesDraftInvalid === true) return;
+    if (applyPendingControlEditIfAny('step')) return;
     if (!driver) {
       if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
         driver = createDriverFromControls({ preferActiveViewStateCache: true });
@@ -15699,13 +17387,9 @@ export async function mountSphPhaseDemoOverlay({
   overlay.querySelector('#sph-play').addEventListener('click', (e) => {
     if (!simulationRuntimeAdmission.ready) return;
     if (overlay.__sphInitialBodiesDraftInvalid === true) return;
-    // Staged control edits apply here rather than at edit time. The rebuild
-    // leaves playback paused so the user sees the new initial state before
-    // stepping it.
-    if (applyPendingControlEditIfAny()) {
-      e.target.textContent = 'Play';
-      return;
-    }
+    // One click applies a staged edit, then resumes this exact Play intent
+    // after the supervised rebuild publishes the replacement state.
+    if (applyPendingControlEditIfAny('play')) return;
     if (!driver) {
       if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
         driver = createDriverFromControls({ preferActiveViewStateCache: true });
@@ -15743,9 +17427,12 @@ export async function mountSphPhaseDemoOverlay({
     if (playing) requestPlaybackTick();
   });
   overlay.querySelector('#sph-reset').addEventListener('click', () => {
+    pendingPostRebuildIntent = null;
     syncUrlFromControls();
     scheduleDemoRebuild();
   });
+  interactiveControlHandlersBound = true;
+  syncSphInteractiveControlAvailability();
   overlay.querySelector('#sph-clear-cache').addEventListener('click', () => {
     clearLocalDerivedCachesAndRebuild();
   });
@@ -15759,6 +17446,9 @@ export async function mountSphPhaseDemoOverlay({
     panel.classList.toggle('collapsed', collapsed);
     toggle.textContent = collapsed ? '☰ menu' : '✕ hide';
     toggle.setAttribute('aria-expanded', String(!collapsed));
+    // Deferred status work accumulated while hidden lands exactly once on
+    // expand, so an opened panel is never stale and a hidden one costs zero.
+    if (!collapsed && statusRenderDirty) flushStatusRender();
   }
   toggle.addEventListener('click', () => { collapsed = !collapsed; applyCollapsed(); });
   applyCollapsed();
@@ -15780,9 +17470,14 @@ export async function mountSphPhaseDemoOverlay({
     fpsLoopRunning = false;
     staticTableCacheReadGeneration += 1;
     staticTableCacheGeneration += 1;
+    if (statusRenderTimer != null) {
+      clearTimeout(statusRenderTimer);
+      statusRenderTimer = null;
+    }
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     disposeMountedMechanicsStageWorkerRunner('demo-close');
     cancelPendingLocalBackgroundImage('sph-demo-close-pending-background-image');
+    void releaseWorkerLaneNativeSurfacePresentationMirror();
     const retiredLocalBackgroundImageUrl = detachActiveLocalBackgroundImage();
     scene.dispose();
     revokeLocalBackgroundImageObjectUrl(

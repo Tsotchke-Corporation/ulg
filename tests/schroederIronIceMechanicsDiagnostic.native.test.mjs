@@ -7,6 +7,10 @@ import { test } from 'node:test';
 // intended to identify the earliest stage at which mass or velocity disappears.
 const RUN_NATIVE =
   process.env.ULG_RUN_NATIVE_IRON_ICE_MECHANICS_DIAGNOSTIC === '1';
+const DIAGNOSTIC_PRESET_ID =
+  process.env.ULG_MECHANICS_DIAGNOSTIC_PRESET === 'cesium-fluorine'
+    ? 'cesium-fluorine'
+    : 'iron-ice-quench';
 const NATIVE_BASE_URL =
   process.env.ULG_IRON_ICE_MECHANICS_DIAGNOSTIC_BASE_URL
   || 'https://127.0.0.1:5174/';
@@ -17,7 +21,7 @@ const DIAGNOSTIC_MODE =
 const SMOKE_MODE =
   process.env.ULG_IRON_ICE_MECHANICS_DIAGNOSTIC_SMOKE === '1';
 
-test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics diagnostic`, {
+test(`native ${DIAGNOSTIC_PRESET_ID} ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics diagnostic`, {
   skip: RUN_NATIVE
     ? false
     : 'set ULG_RUN_NATIVE_IRON_ICE_MECHANICS_DIAGNOSTIC=1 for native WebGPU',
@@ -44,7 +48,11 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async ({ diagnosticMode, smokeMode }) => {
+    native = await page.evaluate(async ({
+      diagnosticMode,
+      diagnosticPresetId,
+      smokeMode
+    }) => {
       const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance'
       });
@@ -124,10 +132,12 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
       device.pushErrorScope('validation');
 
       const preset = presetsModule.sphPhaseScenarioPresetById(
-        'iron-ice-quench'
+        diagnosticPresetId
       );
       const controls = preset.controls;
-      const sceneLengthScale = Number(preset.runtime.sceneLengthScale);
+      const sceneLengthScale = Number(
+        preset.runtime.sceneLengthScale ?? 1
+      );
       const wallFaces = Object.fromEntries([
         ['xMin', 'wxmin'],
         ['xMax', 'wxmax'],
@@ -135,7 +145,13 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
         ['yMax', 'wymax'],
         ['zMin', 'wzmin'],
         ['zMax', 'wzmax']
-      ].map(([faceId, key]) => [faceId, Number(controls[key])]));
+      ].map(([faceId, key]) => {
+        const temperatureK = Number(controls[key]);
+        return [
+          faceId,
+          Number.isFinite(temperatureK) ? temperatureK : 293.15
+        ];
+      }));
       const scenario = scenarioModule.createSphPhaseScenario({
         wallFaces,
         wallModel: preset.runtime.wallModel,
@@ -143,22 +159,35 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
         boxDimensionsM:
           ['boxx', 'boxy', 'boxz'].map((key) => Number(controls[key]))
       });
-      const initialBodies =
-        bodiesModule.sphInitialBodiesFromLegacyPhaseControls({
-          baseMaterial: controls.base,
-          dropMaterial: controls.drop,
-          baseTemperatureK: Number(controls.baset),
-          dropTemperatureK: Number(controls.dropt),
-          baseParticlesPerEdge: smokeMode ? 2 : Number(controls.basen),
-          dropParticlesPerEdge: smokeMode ? 2 : Number(controls.dropn),
-          referenceBaseEdgeM: scenario.referenceGeometry.iceEdgeM,
-          referenceBaseParticlesPerEdge: 5,
-          sceneLengthScale,
-          referenceBoxDimensionsM:
-            scenario.referenceGeometry.boxDimensionsM,
-          referenceBaseBottomM: Number(controls.iceh),
-          referenceDropBottomM: Number(controls.ironh)
-        });
+      const cesiumFluorine = diagnosticPresetId === 'cesium-fluorine';
+      const initialBodies = cesiumFluorine
+        ? bodiesModule.sphInitialBodiesFromLegacyDropBase({
+            baseMaterial: 'F',
+            dropMaterial: 'Cs',
+            baseSizeM: [1, 1, 1],
+            dropSizeM: [0.6, 0.6, 0.6],
+            baseCenterM: [2, 0.5, 2],
+            dropCenterM: [2, 1.31, 2],
+            baseTemperatureK: 293.15,
+            dropTemperatureK: 293.15,
+            baseParticlesPerEdge: smokeMode ? [2, 2, 2] : [5, 5, 5],
+            dropParticlesPerEdge: smokeMode ? [2, 2, 2] : [5, 5, 5]
+          })
+        : bodiesModule.sphInitialBodiesFromLegacyPhaseControls({
+            baseMaterial: controls.base,
+            dropMaterial: controls.drop,
+            baseTemperatureK: Number(controls.baset),
+            dropTemperatureK: Number(controls.dropt),
+            baseParticlesPerEdge: smokeMode ? 2 : Number(controls.basen),
+            dropParticlesPerEdge: smokeMode ? 2 : Number(controls.dropn),
+            referenceBaseEdgeM: scenario.referenceGeometry.iceEdgeM,
+            referenceBaseParticlesPerEdge: 5,
+            sceneLengthScale,
+            referenceBoxDimensionsM:
+              scenario.referenceGeometry.boxDimensionsM,
+            referenceBaseBottomM: Number(controls.iceh),
+            referenceDropBottomM: Number(controls.ironh)
+          });
       const demo = demoModule.buildSphPhaseDemoState({
         scenario,
         initialBodies,
@@ -261,6 +290,8 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
       let p2gCalls = 0;
       let gridUpdateCalls = 0;
       let g2pCalls = 0;
+      let fieldProjectionQueued = false;
+      let observedTwoLevelMechanics = null;
       let observedSpatialProposal = null;
       let observedSpatialProposalGeneration = null;
       const observedSpatialProposalRunner = (options) => {
@@ -289,12 +320,18 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
         const productionP2gRunner = options.p2gRunner;
         const productionGridUpdateRunner = options.gridUpdateRunner;
         const productionG2pRunner = options.g2pRunner;
-        return crossLevelModule.runSchroederTwoLevelMechanicsStepWebGpu({
+        observedTwoLevelMechanics =
+          await crossLevelModule.runSchroederTwoLevelMechanicsStepWebGpu({
           ...options,
+          canonicalSpatialAuthorityTrace: true,
           p2gRunner: async (p2gOptions) => {
             p2gCalls += 1;
             const projection = await productionP2gRunner(p2gOptions);
-            if (p2gCalls === 1) {
+            if (
+              !fieldProjectionQueued
+              && projection?.mechanicsFieldViewBuffer
+            ) {
+              fieldProjectionQueued = true;
               const field = projection.mechanicsFieldViewExecution;
               queueReadback(
                 'fine-p2g-field',
@@ -379,17 +416,22 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
               {
                 kind: 'particle-state',
                 particleCount: packedSph.particleCount,
-                strideWords: packedSph.stateStrideFloats
+                strideWords: packedSph.stateStrideFloats,
+                referenceState: packedSph.state
               }
             );
             return reconstruction;
           }
         });
+        return observedTwoLevelMechanics;
       };
       observedTwoLevelMechanicsRunner
         .schroederSpatialTopologyTransitionAware = true;
 
       let residentCalls = 0;
+      const baseGridSpacingM = cesiumFluorine
+        ? Math.cbrt((3 * (0.6 / 5) ** 3) / (4 * Math.PI)) / 1.5
+        : packedSph.smoothingLengthM;
       const hierarchyResult =
         await hierarchyModule.runSchroederSameLevelMechanicsWebGpu({
           device,
@@ -400,8 +442,13 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
           selectedLevel: 0,
           minLevel: 0,
           maxLevel: diagnosticMode === 'single-level' ? 0 : 1,
-          baseGridSpacingM: packedSph.smoothingLengthM,
-          targetSupportCells: 4,
+          baseGridSpacingM,
+          // Match the production worker-owned Cesium/F lane classifier.  The
+          // iron diagnostic historically requests four cells explicitly,
+          // while the Cesium preset leaves the hierarchy at its canonical
+          // 1.5-cell default; forcing four here collapses every live Cs/F row
+          // onto level zero and manufactures a zero-coarse-registry failure.
+          targetSupportCells: cesiumFluorine ? 1.5 : 4,
           boxDimsM: scenario.box.dimensionsM,
           dt: 0.0005,
           gravityMPerS2: packedMls.gravityMPerS2,
@@ -440,7 +487,8 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
         {
           kind: 'particle-state',
           particleCount: packedSph.particleCount,
-          strideWords: packedSph.stateStrideFloats
+          strideWords: packedSph.stateStrideFloats,
+          referenceState: packedSph.state
         }
       );
       if (observedSpatialProposal) {
@@ -669,7 +717,10 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
       const summarizeParticleState = (words, pending) => {
         const floats = new Float32Array(words.buffer);
         let liveCount = 0;
+        let referenceLiveCount = 0;
         let movingCount = 0;
+        let positionChangedCount = 0;
+        let maxPositionDeltaM = 0;
         let maxSpeedMPerS = 0;
         let kineticEnergyJ = 0;
         const totalMomentumKgMPerS = [0, 0, 0];
@@ -678,6 +729,19 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
           const mass = floats[offset + 3];
           if (!(mass > 0)) continue;
           liveCount += 1;
+          if (
+            pending.referenceState
+            && pending.referenceState[offset + 3] > 0
+          ) {
+            referenceLiveCount += 1;
+            const positionDelta = Math.hypot(
+              floats[offset] - pending.referenceState[offset],
+              floats[offset + 1] - pending.referenceState[offset + 1],
+              floats[offset + 2] - pending.referenceState[offset + 2]
+            );
+            if (positionDelta > 0) positionChangedCount += 1;
+            maxPositionDeltaM = Math.max(maxPositionDeltaM, positionDelta);
+          }
           const velocity = [
             floats[offset + 4],
             floats[offset + 5],
@@ -695,7 +759,10 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
           firstParticle: Array.from(floats.slice(0, pending.strideWords)),
           particleCount: pending.particleCount,
           liveCount,
+          referenceLiveCount,
           movingCount,
+          positionChangedCount,
+          maxPositionDeltaM,
           maxSpeedMPerS,
           kineticEnergyJ,
           totalMomentumKgMPerS
@@ -836,9 +903,12 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
           0
         ),
         smoothingLengthM: packedSph.smoothingLengthM,
+        baseGridSpacingM,
         boxDimensionsM: scenario.box.dimensionsM,
         dt: 0.0005,
         authority: residentStep?.authority ?? residentStep?.status ?? null,
+        canonicalSpatialAuthorityTrace:
+          observedTwoLevelMechanics?.canonicalSpatialAuthorityTrace ?? null,
         spatialProposalMetadata: observedSpatialProposal
           ? {
               aggregateHierarchyEnabled:
@@ -869,16 +939,26 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
         Promise.resolve(null)
       ]);
       return result;
-    }, { diagnosticMode: DIAGNOSTIC_MODE, smokeMode: SMOKE_MODE });
+    }, {
+      diagnosticMode: DIAGNOSTIC_MODE,
+      diagnosticPresetId: DIAGNOSTIC_PRESET_ID,
+      smokeMode: SMOKE_MODE
+    });
   } finally {
     await browser.close();
   }
 
+  console.log(
+    `IRON_ICE_MECHANICS_DIAGNOSTIC ${JSON.stringify(native)}`
+  );
   assert.equal(native.status, 'executed', JSON.stringify(native));
-  assert.equal(native.presetId, 'iron-ice-quench');
+  assert.equal(native.presetId, DIAGNOSTIC_PRESET_ID);
   if (SMOKE_MODE) {
     assert.equal(native.initialLiveCount, 16);
     assert.ok(native.particleCount >= native.initialLiveCount);
+  } else if (DIAGNOSTIC_PRESET_ID === 'cesium-fluorine') {
+    assert.equal(native.particleCount, 1248);
+    assert.equal(native.initialLiveCount, 250);
   } else {
     assert.equal(native.particleCount, 5472);
     assert.equal(native.initialLiveCount, 1216);
@@ -886,13 +966,44 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
   assert.equal(native.validationError, null, JSON.stringify(native));
   assert.deepEqual(native.uncapturedErrors, [], JSON.stringify(native));
   if (DIAGNOSTIC_MODE === 'two-level') {
-    assert.equal(native.evidence['level-assignment'].liveCount, 1216);
-    assert.equal(native.evidence['level-assignment'].dormantCount, 4256);
+    assert.equal(
+      native.evidence['level-assignment'].liveCount,
+      SMOKE_MODE
+        ? 16
+        : (DIAGNOSTIC_PRESET_ID === 'cesium-fluorine' ? 250 : 1216)
+    );
+    assert.equal(
+      native.evidence['level-assignment'].dormantCount,
+      native.particleCount - native.initialLiveCount
+    );
     assert.ok(native.runnerCalls.p2g > 0);
     assert.ok(native.runnerCalls.gridUpdate > 0);
     assert.ok(native.runnerCalls.g2p > 0);
     assert.ok(native.evidence['fine-p2g-field']);
     assert.ok(native.evidence['fine-grid-update-field']);
+    if (!SMOKE_MODE && DIAGNOSTIC_PRESET_ID === 'cesium-fluorine') {
+      assert.deepEqual(
+        native.evidence['level-assignment'].liveLevelCounts,
+        { 0: 125, 1: 125 }
+      );
+      assert.equal(
+        native.canonicalSpatialAuthorityTrace?.status,
+        'canonical-authority-trace-sequence-admitted',
+        JSON.stringify(native.canonicalSpatialAuthorityTrace)
+      );
+      assert.equal(native.evidence['g2p-1-reflux']?.rollbackCount, 0);
+      const firstFineState = native.evidence['g2p-1-particle-state'];
+      const terminalState = native.evidence['final-particle-state'];
+      assert.equal(firstFineState?.positionChangedCount, 125);
+      assert.equal(terminalState?.liveCount, native.initialLiveCount);
+      assert.equal(terminalState?.referenceLiveCount, native.initialLiveCount);
+      assert.equal(terminalState?.positionChangedCount, native.initialLiveCount);
+      assert.ok(
+        terminalState?.maxPositionDeltaM
+          > native.baseGridSpacingM * 1e-3,
+        JSON.stringify(terminalState)
+      );
+    }
   } else {
     assert.ok(native.evidence['single-level-contact-evidence']);
     assert.ok(native.evidence['single-level-contact-control']);
@@ -900,7 +1011,4 @@ test(`native iron/ice ${DIAGNOSTIC_MODE}${SMOKE_MODE ? ' smoke' : ''} mechanics 
     assert.ok(native.evidence['single-level-contact-proposal']);
   }
   assert.ok(native.evidence['final-particle-state']);
-  console.log(
-    `IRON_ICE_MECHANICS_DIAGNOSTIC ${JSON.stringify(native)}`
-  );
 });

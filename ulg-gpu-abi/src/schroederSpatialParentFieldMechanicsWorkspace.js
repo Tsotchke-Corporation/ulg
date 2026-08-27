@@ -122,7 +122,7 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT = 
   'proposedFineQuadraticEnergyCoefficientJ:f32-bits',
   'proposedCoarseLinearEnergyCoefficientJ:f32-bits',
   'proposedCoarseQuadraticEnergyCoefficientJ:f32-bits',
-  'coarseContactEnergyDeltaJ:f32-bits',
+  'sealedRouteCflAlpha:f32-bits',
   'sealedCorrectionAlpha:f32-bits',
   'routeRejectCount:u32',
   'registryRejectCount:u32',

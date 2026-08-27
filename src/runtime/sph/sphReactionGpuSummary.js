@@ -7,6 +7,7 @@ import {
   SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT,
   SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,
+  SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
   SPH_REACTION_STRICT_GATE_BLOCKER,
   SPH_REACTION_STRICT_GATE_BYTES,
@@ -602,6 +603,10 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     source: 'reaction-summary-product-events-and-inventory',
     productEventBuffer: retainedProductEventBuffer ? reactionSummary.productEventBuffer : null,
     productEventBufferRetained: retainedProductEventBuffer,
+    reactionPlacementRolledBack:
+      reactionSummary.reactionPlacementRolledBack === true,
+    reactionPlacementTransactionOutcome:
+      reactionSummary.reactionPlacementTransactionOutcome ?? null,
     productEventBufferByteLength: reactionSummary.productEventBufferByteLength ?? 0,
     productEventRowCount: reactionSummary.productEventRowCount ?? productEvents?.rowCount ?? 0,
     productEventActiveEventCount: reactionSummary.productEventActiveEventCount ?? productEvents?.activeEventCount ?? 0,
@@ -2014,6 +2019,7 @@ export async function runSphReactionSummaryWebGpu({
           productEventCapacity: productEventCount,
           sourceStateBuffer,
           sourceThermoBuffer,
+          sourceMechanicsBuffer,
           placedDestinationStateBuffer: nextStateBuffer,
           placedDestinationThermoBuffer: nextThermoBuffer,
           placedDestinationMechanicsBuffer: nextMechanicsBuffer
@@ -2049,6 +2055,24 @@ export async function runSphReactionSummaryWebGpu({
     error.readbackTelemetry = readbackTelemetry.snapshot();
     throw error;
   }
+  // Every host-visible reaction sidecar is produced before the transactional
+  // placement terminal decides whether the reaction may commit.  A caller is
+  // therefore not allowed to map any of those sidecars without also observing
+  // the exact terminal receipt; otherwise SAFE_FROZEN_FALLBACK could restore
+  // the particles while speculative gas/inventory rows escaped to the host.
+  // The ordinary resident hot loop requests none of these reads and remains
+  // fully GPU-resident.
+  const shouldObserveCanonicalPlacementCompletion = Boolean(
+    canonicalSpatialPlacementEnabled
+    && (
+      shouldReadCompactSummary
+      || shouldRunGasSpecies
+      || shouldRunProductInventory
+      || shouldRunAtomResidual
+      || (useProductEventBuffer && readProductEvents === true)
+      || shouldReadProductPlacementSummary
+    )
+  );
   const placementClassificationProgram = canonicalSpatialPlacementEnabled
     ? resolveSphReactionProductPlacementClassificationProgram(
         canonicalSpatialPlacement
@@ -2071,7 +2095,8 @@ export async function runSphReactionSummaryWebGpu({
         eventCapacity: productEventCount,
         productTermCapacity: productTermCount,
         eventStrideVec4: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
-        diagnosticReadbackRequested: shouldReadProductPlacementSummary
+        diagnosticReadbackRequested:
+          shouldObserveCanonicalPlacementCompletion
       })
     : null;
   const productPlacementSegmentedArena =
@@ -2260,7 +2285,7 @@ export async function runSphReactionSummaryWebGpu({
               }), device)
         );
   const productEventPlacementCompletionReadBuffer =
-    canonicalSpatialPlacementEnabled && shouldReadProductPlacementSummary
+    shouldObserveCanonicalPlacementCompletion
       ? productPlacementWarmBuffers.completionReadback
       : null;
   if (
@@ -3352,6 +3377,12 @@ export async function runSphReactionSummaryWebGpu({
             placementSummaryBuffer: placementAccumulatorBuffer,
             frozenSourceStateBuffer: productPlacementFrozenSourceStateBuffer,
             frozenSourceThermoBuffer: productPlacementFrozenSourceThermoBuffer,
+            transactionRollbackStateBuffer:
+              canonicalSpatialPlacement.sourceStateBuffer,
+            transactionRollbackThermoBuffer:
+              canonicalSpatialPlacement.sourceThermoBuffer,
+            transactionRollbackMechanicsBuffer:
+              canonicalSpatialPlacement.sourceMechanicsBuffer,
             compactCountBuffer: productEventCompactCountBuffer,
             placementDecisionBuffer: productEventPlacementDecisionBuffer,
             placementControlBuffer: productEventPlacementControlBuffer,
@@ -3513,9 +3544,19 @@ export async function runSphReactionSummaryWebGpu({
             : () => productEventBuffer.destroy?.()
         )
       : null;
+    const reactionPlacementRolledBack = Boolean(
+      reactionProductPlacementArtifact?.fallbackObserved === true
+      && reactionProductPlacementArtifact.transactionalTerminalStatus
+        === SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS
+          .SAFE_FROZEN_FALLBACK
+    );
     const emptyGasSpeciesLedger = {
       schema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
-      status: shouldRunGasSpecies ? 'gas-species-compact-ledger-pending-readback' : 'gas-species-compact-ledger-not-run',
+      status: reactionPlacementRolledBack
+        ? 'gas-species-compact-ledger-atomic-placement-rollback-no-commit'
+        : (shouldRunGasSpecies
+            ? 'gas-species-compact-ledger-pending-readback'
+            : 'gas-species-compact-ledger-not-run'),
       records: [],
       bySpecies: {},
       recordCount: 0,
@@ -3527,7 +3568,11 @@ export async function runSphReactionSummaryWebGpu({
     };
     const emptyProductInventory = {
       schema: ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
-      status: shouldRunProductInventory ? 'product-inventory-compact-ledger-pending-readback' : 'product-inventory-compact-ledger-not-run',
+      status: reactionPlacementRolledBack
+        ? 'product-inventory-atomic-placement-rollback-no-commit'
+        : (shouldRunProductInventory
+            ? 'product-inventory-compact-ledger-pending-readback'
+            : 'product-inventory-compact-ledger-not-run'),
       records: [],
       byMaterial: {},
       recordCount: 0,
@@ -3539,7 +3584,11 @@ export async function runSphReactionSummaryWebGpu({
     };
     const residentProductEvents = {
       schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
-      status: useProductEventBuffer ? 'product-event-sparse-storage-gpu-resident' : 'product-event-sparse-storage-not-run',
+      status: reactionPlacementRolledBack
+        ? 'product-event-sparse-storage-atomic-placement-rollback-empty'
+        : (useProductEventBuffer
+            ? 'product-event-sparse-storage-gpu-resident'
+            : 'product-event-sparse-storage-not-run'),
       records: [],
       byMaterial: {},
       activeEventCount: 0,
@@ -3559,7 +3608,11 @@ export async function runSphReactionSummaryWebGpu({
     };
     const emptyAtomResidualSummary = {
       schema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
-      status: shouldRunAtomResidual ? 'atom-residual-compact-ledger-pending-readback' : 'atom-residual-compact-ledger-not-run',
+      status: reactionPlacementRolledBack
+        ? 'atom-residual-atomic-placement-rollback-no-commit'
+        : (shouldRunAtomResidual
+            ? 'atom-residual-compact-ledger-pending-readback'
+            : 'atom-residual-compact-ledger-not-run'),
       records: [],
       atomResidualMolByZ: {},
       maxAbsAtomResidualMol: 0,
@@ -3602,6 +3655,19 @@ export async function runSphReactionSummaryWebGpu({
           ? 'caller-owned-resident-sequence'
           : 'single-reaction-step'
       };
+      if (reactionPlacementRolledBack) {
+        productPlacementProvenance = {
+          ...productPlacementProvenance,
+          available: false,
+          status:
+            'product-placement-provenance-preserved-accumulator-current-source-count-unproven-after-rollback',
+          sourceSummaryCount: null,
+          currentSummaryCommitted: false,
+          reactionPlacementRolledBack: true,
+          reactionPlacementTransactionOutcome:
+            reactionProductPlacementArtifact.transactionOutcome
+        };
+      }
     }
     if (!shouldReadCompactSummary) {
       deferLocalBufferCleanup = true;
@@ -3612,7 +3678,12 @@ export async function runSphReactionSummaryWebGpu({
       // submitted above, so this maps a tiny buffer that is ready.
       let residentGasSpeciesLedger = emptyGasSpeciesLedger;
       let residentGasSpeciesFloatCount = 0;
-      if (shouldRunGasSpecies && gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
+      if (
+        !reactionPlacementRolledBack
+        && shouldRunGasSpecies
+        && gasSpeciesReadBuffer
+        && gasSpeciesByteLength > 0
+      ) {
         readbackTelemetry.recordMapAsync(
           gasSpeciesByteLength,
           'reaction-gas-species-control-ledger'
@@ -3634,9 +3705,11 @@ export async function runSphReactionSummaryWebGpu({
         schema: ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
         executionSchema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
         backend: 'webgpu',
-        status: useProductEventBuffer
-          ? 'reaction-resident-product-event-buffer-ready'
-          : 'reaction-resident-summary-readback-skipped',
+        status: reactionPlacementRolledBack
+          ? 'reaction-resident-product-event-buffer-atomic-placement-rollback'
+          : (useProductEventBuffer
+              ? 'reaction-resident-product-event-buffer-ready'
+              : 'reaction-resident-summary-readback-skipped'),
         kernelScope: SUMMARY_SCOPE,
         reductionStrategy: 'skipped-resident-product-event-buffer-only',
         particleCount,
@@ -3716,12 +3789,17 @@ export async function runSphReactionSummaryWebGpu({
         reactionProductPlacementArtifact,
         reactionProductPlacementReceipt:
           reactionProductPlacementArtifact?.receipt ?? null,
+        reactionPlacementRolledBack,
+        reactionPlacementTransactionOutcome:
+          reactionProductPlacementArtifact?.transactionOutcome ?? null,
         productPlacementProvenance,
         productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
         productPlacementProvenanceStatus: productPlacementProvenance?.status
-          ?? (shouldRunProductPlacement
-              ? 'product-placement-provenance-gpu-resident-not-read'
-              : 'product-placement-provenance-not-run'),
+          ?? (reactionPlacementRolledBack
+            ? 'product-placement-provenance-atomic-placement-rollback-source-count-unproven'
+            : (shouldRunProductPlacement
+                ? 'product-placement-provenance-gpu-resident-not-read'
+                : 'product-placement-provenance-not-run')),
         productPlacementProvenanceReadbackFloatCount:
           productPlacementProvenance?.readbackFloatCount ?? 0,
         productPlacementProvenanceReadbackByteLength:
@@ -3736,7 +3814,21 @@ export async function runSphReactionSummaryWebGpu({
         atomResidualCount: 0,
         atomResidualReadbackFloatCount: 0,
         atomResidualReadbackByteLength: 0,
-        strictReactionGate: {
+        strictReactionGate: reactionPlacementRolledBack
+          ? {
+              schema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
+              status: 'strict-reaction-gate-blocked',
+              blockers: [
+                'reaction-product-placement-atomic-rollback-no-new-products'
+              ],
+              warnings: [],
+              strictForceCouplingAllowed: false,
+              reactionPlacementRolledBack: true,
+              scientificValidation: false,
+              chemistryValidation: false,
+              fullPhysicsValidation: false
+            }
+          : {
           schema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
           status: 'strict-reaction-gate-not-run-resident-no-readback',
           blockers: ['compact reaction ledger readback skipped'],
@@ -3771,7 +3863,11 @@ export async function runSphReactionSummaryWebGpu({
     const values = new Float32Array(readBuffer.getMappedRange()).slice(0, SPH_GPU_REACTION_SUMMARY_FLOATS);
     readBuffer.unmap();
     let gasSpeciesLedger = emptyGasSpeciesLedger;
-    if (gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
+    if (
+      !reactionPlacementRolledBack
+      && gasSpeciesReadBuffer
+      && gasSpeciesByteLength > 0
+    ) {
       readbackTelemetry.recordMapAsync(
         gasSpeciesByteLength,
         'reaction-gas-species-control-ledger'
@@ -3782,7 +3878,11 @@ export async function runSphReactionSummaryWebGpu({
       gasSpeciesLedger = decodeSphReactionGasSpeciesSummaryValues(gasValues, reactionTable);
     }
     let productInventory = emptyProductInventory;
-    if (productInventoryReadBuffer && productInventoryByteLength > 0) {
+    if (
+      !reactionPlacementRolledBack
+      && productInventoryReadBuffer
+      && productInventoryByteLength > 0
+    ) {
       readbackTelemetry.recordMapAsync(
         productInventoryByteLength,
         'reaction-product-inventory-control-ledger'
@@ -3793,7 +3893,11 @@ export async function runSphReactionSummaryWebGpu({
       productInventory = decodeSphReactionProductInventoryValues(inventoryValues, reactionTable);
     }
     let productEvents = residentProductEvents;
-    if (productEventReadBuffer && productEventByteLength > 0) {
+    if (
+      !reactionPlacementRolledBack
+      && productEventReadBuffer
+      && productEventByteLength > 0
+    ) {
       readbackTelemetry.recordMapAsync(
         productEventByteLength,
         'reaction-product-event-readback'
@@ -3804,7 +3908,11 @@ export async function runSphReactionSummaryWebGpu({
       productEvents = decodeSphReactionProductEventValues(productEventValues, reactionTable);
     }
     let atomResidualSummary = emptyAtomResidualSummary;
-    if (atomResidualReadBuffer && atomResidualByteLength > 0) {
+    if (
+      !reactionPlacementRolledBack
+      && atomResidualReadBuffer
+      && atomResidualByteLength > 0
+    ) {
       readbackTelemetry.recordMapAsync(
         atomResidualByteLength,
         'reaction-strict-gate-atom-residual'
@@ -3814,30 +3922,89 @@ export async function runSphReactionSummaryWebGpu({
       atomResidualReadBuffer.unmap();
       atomResidualSummary = decodeSphReactionAtomResidualValues(residualValues, reactionTable);
     }
-    const compactSummary = decodeSphReactionSummaryValues(values);
-    const strictReactionGate = reactionStrictGateFromSummary({
-      compactSummary,
-      atomResidualSummary,
-      reactionTable
-    });
+    const decodedCompactSummary = decodeSphReactionSummaryValues(values);
+    const compactSummary = reactionPlacementRolledBack
+      ? {
+          ...decodedCompactSummary,
+          status:
+            'reaction-compact-summary-atomic-placement-rollback-no-commit',
+          changedMaterialCount: 0,
+          changedMassCount: 0,
+          visibleProductMassKg: 0,
+          visibleGasProductMassKg: 0,
+          outputGasPhaseMassKg: 0,
+          nextMassKg: decodedCompactSummary.sourceMassKg,
+          massDeltaKg: 0,
+          thermalReadyCount: 0,
+          thermalProblemCount: 0,
+          finiteTemperatureCount: 0,
+          canonicalReactionEventCount: 0,
+          consumedReactantMassKg: 0,
+          expectedProductMassKg: 0,
+          rawProductMassKg: 0,
+          ledgerVisibleProductMassKg: 0,
+          ledgerUnplacedProductMassKg: 0,
+          ledgerGasProductMassKg: 0,
+          ledgerVisibleGasProductMassKg: 0,
+          ledgerUnplacedGasProductMassKg: 0,
+          sealedBoxGasProductMoles: 0,
+          reactionHeatJ: 0,
+          ledgerMassResidualKg: 0,
+          ledgerReadyEventCount: 0,
+          ledgerProblemEventCount: 0,
+          proposalMutualPairCount: 0,
+          reactionPlacementRolledBack: true,
+          reactionPlacementTransactionOutcome:
+            reactionProductPlacementArtifact.transactionOutcome
+        }
+      : decodedCompactSummary;
+    const strictReactionGate = reactionPlacementRolledBack
+      ? {
+          ...reactionStrictGateFromSummary({
+            compactSummary,
+            atomResidualSummary,
+            reactionTable
+          }),
+          status: 'strict-reaction-gate-blocked',
+          blockers: [
+            'reaction-product-placement-atomic-rollback-no-new-products'
+          ],
+          strictForceCouplingAllowed: false,
+          reactionPlacementRolledBack: true
+        }
+      : reactionStrictGateFromSummary({
+          compactSummary,
+          atomResidualSummary,
+          reactionTable
+        });
     return attachQueueOrderedFinalConsumer({
       ...compactSummary,
       gasSpeciesLedger,
       gasSpeciesLedgerSchema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
       gasSpeciesLedgerCount: gasSpeciesLedger.recordCount,
       gasSpeciesReadbackFloatCount: gasSpeciesLedger.recordCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS,
-      gasSpeciesReadbackByteLength: gasSpeciesByteLength,
+      gasSpeciesReadbackByteLength: reactionPlacementRolledBack
+        ? 0
+        : gasSpeciesByteLength,
       productInventory,
       productInventorySchema: ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
       productInventoryCount: productInventory.recordCount,
       productInventoryReadbackFloatCount: productInventory.recordCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS,
-      productInventoryReadbackByteLength: productInventoryByteLength,
+      productInventoryReadbackByteLength: reactionPlacementRolledBack
+        ? 0
+        : productInventoryByteLength,
       productEvents,
       productEventSchema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
       productEventRowCount: productEvents.rowCount,
       productEventActiveEventCount: productEvents.activeEventCount,
-      productEventReadbackFloatCount: productEventReadBuffer ? productEvents.rowCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0,
-      productEventReadbackByteLength: productEventReadBuffer ? productEventByteLength : 0,
+      productEventReadbackFloatCount:
+        !reactionPlacementRolledBack && productEventReadBuffer
+          ? productEvents.rowCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+          : 0,
+      productEventReadbackByteLength:
+        !reactionPlacementRolledBack && productEventReadBuffer
+          ? productEventByteLength
+          : 0,
       productEventBufferByteLength: useProductEventBuffer ? productEventByteLength : 0,
       productEventDevice: retainedProductEventBuffer ? device : null,
       productEventWorkgroupCount,
@@ -3848,12 +4015,17 @@ export async function runSphReactionSummaryWebGpu({
       reactionProductPlacementArtifact,
       reactionProductPlacementReceipt:
         reactionProductPlacementArtifact?.receipt ?? null,
+      reactionPlacementRolledBack,
+      reactionPlacementTransactionOutcome:
+        reactionProductPlacementArtifact?.transactionOutcome ?? null,
       productPlacementProvenance,
       productPlacementProvenanceSchema: ULG_SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_SCHEMA,
       productPlacementProvenanceStatus: productPlacementProvenance?.status
-        ?? (shouldRunProductPlacement
-            ? 'product-placement-provenance-gpu-resident-not-read'
-            : 'product-placement-provenance-not-run'),
+        ?? (reactionPlacementRolledBack
+          ? 'product-placement-provenance-atomic-placement-rollback-source-count-unproven'
+          : (shouldRunProductPlacement
+              ? 'product-placement-provenance-gpu-resident-not-read'
+              : 'product-placement-provenance-not-run')),
       productPlacementProvenanceReadbackFloatCount:
         productPlacementProvenance?.readbackFloatCount ?? 0,
       productPlacementProvenanceReadbackByteLength:
@@ -3867,7 +4039,9 @@ export async function runSphReactionSummaryWebGpu({
       atomResidualSchema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
       atomResidualCount: atomResidualSummary.recordCount,
       atomResidualReadbackFloatCount: atomResidualSummary.recordCount * SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS,
-      atomResidualReadbackByteLength: atomResidualByteLength,
+      atomResidualReadbackByteLength: reactionPlacementRolledBack
+        ? 0
+        : atomResidualByteLength,
       strictReactionGate,
       strictReactionGateSchema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
       compactReadbackFloatCount: SPH_GPU_REACTION_SUMMARY_FLOATS,

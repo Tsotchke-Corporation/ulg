@@ -1329,17 +1329,18 @@ fn finalize_segmented_placement_receipt(@builtin(local_invocation_id) local_id: 
 }
 `;
 
-// Placement mutations are speculative until the compact completion receipt is
-// finalized. This last same-queue pass is the publication gate: a COMPLETE
-// receipt keeps the candidate destination, while every rejected/unknown state
-// restores the exact frozen family before any successor consumer can run.
-// The hot path therefore remains fully GPU resident without treating queue
-// submission itself as proof that the placement contract was accepted.
+// Reaction resolve and placement mutations are one speculative transaction
+// until the compact completion receipt is finalized. This same-queue
+// publication gate keeps the post-reaction candidate only for COMPLETE; every
+// rejected/unknown state restores the exact pre-reaction family before any
+// successor consumer can run. The hot path therefore remains fully GPU
+// resident without treating queue submission itself as proof of atomic
+// reaction-plus-placement acceptance.
 export const sphReactionProductPlacementTransactionalPublishWgsl = /* wgsl */ `
 ${PARAMS}
-@group(0) @binding(0) var<storage, read> frozen_state: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> frozen_thermo: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> frozen_mechanics: array<vec4<f32>>;
+@group(0) @binding(0) var<storage, read> rollback_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> rollback_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> rollback_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> destination_state: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> destination_thermo: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> destination_mechanics: array<vec4<f32>>;
@@ -1373,13 +1374,13 @@ fn publish_or_restore_placement_destination(
     let thermo_base = particle * params.thermo_stride_vec4;
     let mechanics_base = particle * params.mechanics_stride_vec4;
     for (var row = 0u; row < params.state_stride_vec4; row = row + 1u) {
-      destination_state[state_base + row] = frozen_state[state_base + row];
+      destination_state[state_base + row] = rollback_state[state_base + row];
     }
     for (var row = 0u; row < params.thermo_stride_vec4; row = row + 1u) {
-      destination_thermo[thermo_base + row] = frozen_thermo[thermo_base + row];
+      destination_thermo[thermo_base + row] = rollback_thermo[thermo_base + row];
     }
     for (var row = 0u; row < params.mechanics_stride_vec4; row = row + 1u) {
-      destination_mechanics[mechanics_base + row] = frozen_mechanics[mechanics_base + row];
+      destination_mechanics[mechanics_base + row] = rollback_mechanics[mechanics_base + row];
     }
     atomicAdd(
       &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.transactionalFallbackParticleCount}],
@@ -1532,12 +1533,12 @@ fn seal_transactional_placement_publication(
 // The terminal status is the sole destination-publication selector. Even when
 // the core receipt said COMPLETE, any incomplete or inconsistent pre-terminal
 // publication evidence produces UNSAFE and this total pass restores every
-// destination row from the frozen source family.
+// destination row from the exact pre-reaction rollback family.
 export const sphReactionProductPlacementTransactionalDestinationRecoveryWgsl = /* wgsl */ `
 ${PARAMS}
-@group(0) @binding(0) var<storage, read> frozen_state: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> frozen_thermo: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> frozen_mechanics: array<vec4<f32>>;
+@group(0) @binding(0) var<storage, read> rollback_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> rollback_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> rollback_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> destination_state: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> destination_thermo: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> destination_mechanics: array<vec4<f32>>;
@@ -1558,20 +1559,23 @@ fn recover_unsafe_placement_destination(
   let thermo_base = particle * params.thermo_stride_vec4;
   let mechanics_base = particle * params.mechanics_stride_vec4;
   for (var row = 0u; row < params.state_stride_vec4; row = row + 1u) {
-    destination_state[state_base + row] = frozen_state[state_base + row];
+    destination_state[state_base + row] = rollback_state[state_base + row];
   }
   for (var row = 0u; row < params.thermo_stride_vec4; row = row + 1u) {
-    destination_thermo[thermo_base + row] = frozen_thermo[thermo_base + row];
+    destination_thermo[thermo_base + row] = rollback_thermo[thermo_base + row];
   }
   for (var row = 0u; row < params.mechanics_stride_vec4; row = row + 1u) {
-    destination_mechanics[mechanics_base + row] = frozen_mechanics[mechanics_base + row];
+    destination_mechanics[mechanics_base + row] = rollback_mechanics[mechanics_base + row];
   }
 }
 `;
 
-// Published event and summary ledgers are materialized only after the terminal
-// proof. SAFE_FROZEN_FALLBACK, UNSAFE, PENDING, and every unknown selector all
-// retain the caller's exact pre-placement bytes.
+// Published current-step events are materialized only after the terminal
+// proof. A rejected/unsafe reaction-plus-placement transaction clears its
+// speculative event rows so restored reactants cannot coexist with newly
+// retained product mass. The placement summary can be caller-owned across
+// steps, so rejection leaves it untouched; SAFE_PLACED alone replaces it with
+// the candidate summary that already includes the prior accumulator.
 export const sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl = /* wgsl */ `
 ${PARAMS}
 @group(0) @binding(0) var<storage, read> candidate_events: array<vec4<f32>>;
@@ -1589,13 +1593,16 @@ fn materialize_safe_placement_ledgers(
   let safe_placed = atomicLoad(
     &receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.transactionalTerminalStatus}]
   ) == ${SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_PLACED}u;
-  if (!safe_placed) { return; }
   let event_row_count = params.event_row_count * params.event_stride_vec4;
   if (row < event_row_count) {
-    published_events[row] = candidate_events[row];
+    published_events[row] = select(
+      vec4<f32>(0.0),
+      candidate_events[row],
+      safe_placed
+    );
   }
   let summary_row_count = params.product_term_count * 8u;
-  if (row < summary_row_count) {
+  if (row < summary_row_count && safe_placed) {
     published_summary[row] = candidate_summary[row];
   }
 }

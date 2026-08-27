@@ -9,13 +9,10 @@ import {
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
-  serializeSphInitialBodies,
-  sphInitialBodiesFromLegacyDropBase
-} from '../src/runtime/sphInitialBodies.js';
-import {
   coldCeilingCondensationEvidence,
   condensedLaunchEvidence,
   generatedCohortTrajectoryEvidence,
+  mechanicsStateAdvanceEvidence,
   phaseAwareVolumeRatioEvidence
 } from './sph-visual-phase-acceptance.mjs';
 import {
@@ -30,6 +27,36 @@ const DEFAULT_BATCH_STEPS = 24;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_FRAME_MAX = 16;
 const DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION = 1e-6;
+export const STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE =
+  'worker-owned-resident-render-producer';
+export const STANDARD_VISUAL_MATRIX_RENDERER_MODE =
+  'native-webgpu-surface-consumer';
+const WORKER_PARTICLE_PRESENTATION_RENDERER_MODE =
+  'worker-owned-resident-particle-state-producer';
+export const STANDARD_VISUAL_MATRIX_RESIDENT_COMPUTE_MODE =
+  'worker-owned-resident-lane';
+// The presentation worker rejects schedules above 128 steps. Preserve each
+// preset's complete validation horizon by splitting its logical batches into
+// exact admitted schedules instead of silently falling back to the direct
+// main-thread route. The worker's internal 16-step drains bound queued work;
+// using the full admitted 128-step chunk avoids duplicating terminal snapshots
+// and authority-fence overhead for presets whose interactive chunk is smaller.
+export const STANDARD_VISUAL_MATRIX_WORKER_SCHEDULE_MAX_STEPS = 128;
+// Standard validation advances 1 ms or less per physics step. Presenting any
+// intermediate state before the shared-device terminal fence can invalidate
+// Dawn's external Vulkan Instance on the sodium and iron workloads. A cadence
+// larger than the admitted schedule cap suppresses pre-fence candidates; the
+// presentation worker still draws its exact terminal candidate after the
+// canonical queue fence. Interactive playback keeps the scene default of one
+// candidate per step.
+export const STANDARD_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS =
+  STANDARD_VISUAL_MATRIX_WORKER_SCHEDULE_MAX_STEPS + 1;
+const STANDARD_VISUAL_MATRIX_TIMEOUT_MIN_MS_BY_PRESET = Object.freeze({
+  'water-cycle': 1_200_000,
+  'iron-ice-quench': 2_700_000,
+  'sodium-water': 1_800_000,
+  'cesium-fluorine': 1_800_000
+});
 
 export const SPH_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION_ENV =
   'ULG_VISUAL_MATRIX_DURABLE_RELEASE_PUBLICATION';
@@ -110,7 +137,15 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
       interfaceSelector: Object.freeze({ excludePhases: Object.freeze(['gas']) }),
       minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
       minimumSustainedRiseM: 0.05,
-      tailSampleCount: 2
+      minimumSustainedMeanVyMPerS: 0.001,
+      tailSampleCount: 2,
+      upperWallTerminal: Object.freeze({
+        boundaryCondition: 'closed-g2p-clamped',
+        boxMaxYM: 3,
+        wallInsetM: 0.12407009817988002,
+        contactToleranceM: 2.4814019635976003e-7,
+        maximumTailRetreatM: 0.0024814019635976003
+      })
     })
   })
 });
@@ -128,7 +163,26 @@ export function scaleStandardPhaseAcceptance(acceptance, sceneLengthScale = 1) {
           generatedGas: Object.freeze({
             ...acceptance.generatedGas,
             minimumSustainedRiseM:
-              acceptance.generatedGas.minimumSustainedRiseM * scale
+              acceptance.generatedGas.minimumSustainedRiseM * scale,
+            ...(acceptance.generatedGas.upperWallTerminal
+              ? {
+                  upperWallTerminal: Object.freeze({
+                    ...acceptance.generatedGas.upperWallTerminal,
+                    boxMaxYM:
+                      acceptance.generatedGas.upperWallTerminal.boxMaxYM
+                      * scale,
+                    wallInsetM:
+                      acceptance.generatedGas.upperWallTerminal.wallInsetM
+                      * scale,
+                    contactToleranceM:
+                      acceptance.generatedGas.upperWallTerminal
+                        .contactToleranceM * scale,
+                    maximumTailRetreatM:
+                      acceptance.generatedGas.upperWallTerminal
+                        .maximumTailRetreatM * scale
+                  })
+                }
+              : {})
           })
         }
       : {}),
@@ -184,80 +238,106 @@ export function resolveVisualMatrixScenarioTimeoutMs({
     : scenarioTimeoutMs ?? matrixTimeoutMs;
 }
 
-const CESIUM_FLUORINE_TWO_LEVEL_BODIES = serializeSphInitialBodies(
-  sphInitialBodiesFromLegacyDropBase({
-    baseMaterial: 'F',
-    dropMaterial: 'Cs',
-    baseSizeM: [1, 1, 1],
-    dropSizeM: [0.6, 0.6, 0.6],
-    baseCenterM: [2, 0.5, 2],
-    dropCenterM: [2, 1.31, 2],
-    baseTemperatureK: 293.15,
-    dropTemperatureK: 293.15,
-    baseParticlesPerEdge: [5, 5, 5],
-    dropParticlesPerEdge: [5, 5, 5]
-  })
-);
-const CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M = Math.cbrt(
-  (3 * (0.6 / 5) ** 3) / (4 * Math.PI)
-);
-const CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M =
-  CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M / 1.5;
-
-function standardScenarioSchroederParams(entry) {
-  if (entry.id === 'cesium-fluorine') {
-    return {
-      bodies: CESIUM_FLUORINE_TWO_LEVEL_BODIES,
-      schroederLevel: '0',
-      schroederMinLevel: '0',
-      schroederMaxLevel: '1',
-      schroederBaseGridSpacingM:
-        String(CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M),
-      schroederTwoLevel: '1',
-      schroederTwoLevelAuthority: 'authoritative',
-      schroederTwoLevelSubsteps: '2',
-      schroederCrossLevelCoupling: '1',
-      schroederMechanicsFieldPairV2: '1'
-    };
+export function workerOwnedStandardScenarioSchedulePlan(
+  entry,
+  validation = entry?.validation
+) {
+  const sourceBatches = positiveInteger(validation?.batches, 1);
+  const sourceBatchSteps = positiveInteger(validation?.batchSteps, 1);
+  const totalStepCount = sourceBatches * sourceBatchSteps;
+  let scheduleStepCount = Math.min(
+    sourceBatchSteps,
+    STANDARD_VISUAL_MATRIX_WORKER_SCHEDULE_MAX_STEPS
+  );
+  // Keep the terminal checkpoint on the exact preset horizon even for a
+  // future validation shape that is not divisible by its preferred chunk.
+  while (scheduleStepCount > 1 && totalStepCount % scheduleStepCount !== 0) {
+    scheduleStepCount -= 1;
   }
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-worker-owned-visual-schedule-plan.v0',
+    sourceBatches,
+    sourceBatchSteps,
+    totalStepCount,
+    scheduleStepCount,
+    scheduleCount: totalStepCount / scheduleStepCount
+  });
+}
+
+function standardScenarioFromPreset(
+  entry,
+  {
+    validation = entry.validation,
+    label = `standard-${entry.id}`,
+    acceptanceTrack = validation?.acceptanceTrack ?? 'scientific-validation'
+  } = {}
+) {
+  const workerSchedulePlan = workerOwnedStandardScenarioSchedulePlan(
+    entry,
+    validation
+  );
   return {
-    schroederLevel: '0',
-    schroederMinLevel: '0',
-    schroederMaxLevel: '0',
-    schroederTwoLevel: '0',
-    schroederCrossLevelCoupling: '0'
+    label,
+    presetId: entry.id,
+    acceptanceTrack,
+    // The preset runtime is the architecture source of truth. The matrix owns
+    // only the paused/manual harness cadence; it must not silently manufacture
+    // a second hierarchy, renderer, or body configuration.
+    url: sphPhaseScenarioPresetUrl(entry.id, { residentAuto: '0' }),
+    visualRendererMode: entry.runtime?.surfaceDraw ?? null,
+    visualRenderOwnershipMode: entry.runtime?.renderOwnership ?? null,
+    residentComputeManagerMode:
+      entry.runtime?.residentComputeManagerMode ?? null,
+    workerProgressEverySteps:
+      STANDARD_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS,
+    ...validation,
+    timeoutMs: Math.max(
+      STANDARD_VISUAL_MATRIX_TIMEOUT_MIN_MS_BY_PRESET[entry.id]
+        ?? 1_200_000,
+      Number(validation.timeoutMs) || 0
+    ),
+    batches: workerSchedulePlan.scheduleCount,
+    batchSteps: workerSchedulePlan.scheduleStepCount,
+    workerSchedulePlan,
+    phaseAwareAcceptance: scaleStandardPhaseAcceptance(
+      STANDARD_PHASE_ACCEPTANCE_BY_PRESET[entry.id] || null,
+      standardScenarioPhysicalLengthScale(entry)
+    ),
+    expectedCheckpoints: validation.checkpoints,
+    expectAuthoritativeTwoLevelMechanics: Boolean(
+      entry.runtime?.schroederTwoLevel === '1'
+      && entry.runtime?.schroederTwoLevelAuthority === 'authoritative'
+    ),
+    expectedTwoLevelCflFactor:
+      entry.runtime?.schroederTwoLevel === '1'
+        ? Number(entry.runtime?.cfl)
+        : null,
+    standardEnabled: true,
+    defaultEnabled: false
   };
 }
 
-export const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
-  label: `standard-${entry.id}`,
-  presetId: entry.id,
-  url: sphPhaseScenarioPresetUrl(entry.id, {
-    renderer: 'native-webgpu',
-    renderOwnership: 'main-thread-renderer',
-    surfaceDraw: 'native-webgpu-surface-consumer',
-    ss: '1',
-    // Cs/F is the smallest standard arm with an explicit, preflight-admitted
-    // adjacent-level carrier fixture. Other standard arms remain single-level.
-    ...standardScenarioSchroederParams(entry),
-    schroederPortableSummary: '1',
-    schroederActiveNodeIndex: '1',
-    schroederPhaseVolumeMigration: '1',
-    schroederLawQueue: '1',
-    schroederLawNeighborCandidates: '1'
-  }),
-  visualRendererMode: 'native-webgpu-surface-consumer',
-  ...entry.validation,
-  phaseAwareAcceptance: scaleStandardPhaseAcceptance(
-    STANDARD_PHASE_ACCEPTANCE_BY_PRESET[entry.id] || null,
-    standardScenarioPhysicalLengthScale(entry)
-  ),
-  expectedCheckpoints: entry.validation.checkpoints,
-  expectAuthoritativeTwoLevelMechanics:
-    entry.id === 'cesium-fluorine',
-  standardEnabled: true,
-  defaultEnabled: false
-}));
+export const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => (
+  standardScenarioFromPreset(entry, {
+    validation: entry.frameworkValidation ?? entry.validation,
+    acceptanceTrack:
+      entry.frameworkValidation?.acceptanceTrack ?? 'framework-liveness'
+  })
+));
+
+// A framework arm may deliberately end after it has exercised every intended
+// authority and presentation component. Preserve its original longer horizon
+// as an explicit, independently selectable calibration diagnostic. These arms
+// stay fail-closed and retain the same physics checks, but are not silently
+// folded into ULG_VISUAL_MATRIX_STANDARD or the seven-scenario release receipt.
+export const SCIENTIFIC_CALIBRATION_SCENARIOS =
+  SPH_PHASE_SCENARIO_PRESETS
+    .filter((entry) => entry.frameworkValidation)
+    .map((entry) => standardScenarioFromPreset(entry, {
+      validation: entry.validation,
+      label: `scientific-calibration-${entry.id}`,
+      acceptanceTrack: 'scientific-calibration'
+    }));
 
 const LEGACY_SCENARIOS = [
   {
@@ -388,7 +468,11 @@ const LEGACY_SCENARIOS = [
   }
 ];
 
-const SCENARIOS = [...STANDARD_SCENARIOS, ...LEGACY_SCENARIOS];
+const SCENARIOS = [
+  ...STANDARD_SCENARIOS,
+  ...SCIENTIFIC_CALIBRATION_SCENARIOS,
+  ...LEGACY_SCENARIOS
+];
 
 function positiveInteger(value, fallback) {
   const number = Number(value);
@@ -442,13 +526,336 @@ function inferMechanicsIntegrator(probe) {
   return null;
 }
 
-function effectiveVisualRendererModes(probe) {
-  return uniqueStrings(arrayOf(probe?.timeline?.metrics).map((metric) => (
+function workerOwnedResidentPresentationProven(metric) {
+  const rows = metric?.workerOffscreenRenderRows;
+  const presentation = metric?.workerOffscreenPresentation;
+  const renderedContent = presentation?.displayOwnerLastRenderedContent;
+  const lane = metric?.residentSteps?.workerOwnedResidentLane;
+  const committedPresentation = lane?.committedPresentation;
+  if (!rows || !presentation || !renderedContent) return false;
+  const renderedStep = Number(renderedContent.sphStep);
+  const finalPhysicsTick = Number(lane?.finalEpochIdentity?.physicsTick);
+  const currentRowsMatchRenderedContent = rows.status
+    === 'worker-offscreen-resident-particle-state-producer-rendered'
+    && Number(rows.sphStep) === renderedStep;
+  const staleRowsPreserveRenderedContent = rows.status
+    === 'worker-offscreen-presentation-superseded-stale-step'
+    && Number.isSafeInteger(Number(rows.sphStep))
+    && Number.isSafeInteger(Number(rows.lastPresentedSphStep))
+    && Number(rows.sphStep) < Number(rows.lastPresentedSphStep)
+    && Number(rows.lastPresentedSphStep) === renderedStep;
+  return Boolean(
+    (currentRowsMatchRenderedContent || staleRowsPreserveRenderedContent)
+    && rows.displayHandoff === 'transferControlToOffscreen'
+    && rows.frameCopyBackRejected === true
+    && rows.workerReady === true
+    && rows.contextStatus === 'webgpu-context-ready'
+    && presentation.canvasTransferred === true
+    && presentation.workerReady === true
+    && presentation.contextStatus === 'webgpu-context-ready'
+    && presentation.displayOwner === 'worker'
+    && presentation.displayOwnerContentReady === true
+    && Number(presentation.displayOwnerContentFrameSerial) > 0
+    && presentation.displayCanvasVisible === true
+    && Number.isSafeInteger(renderedStep)
+    && renderedStep >= 0
+    && Number.isSafeInteger(finalPhysicsTick)
+    && renderedStep === finalPhysicsTick
+    && Number(presentation.displayOwnerPresentedSphStep) === renderedStep
+    && renderedContent.schema
+      === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
+    && renderedContent.renderRowsSchema
+      === 'peercompute.ulg.worker-offscreen-render-rows.v0'
+    && renderedContent.status
+      === 'worker-offscreen-resident-particle-state-producer-rendered'
+    && renderedContent.residentScheduleCandidatePresentation === true
+    && renderedContent.stateManagerCommittedPresentation === true
+    && renderedContent.committedPresentationSchema
+      === 'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0'
+    && renderedContent.committedPresentationStatus
+      === 'state-manager-committed-resident-schedule-presentation-admission'
+    && renderedContent.scheduleId === lane?.scheduleId
+    && renderedContent.laneId === lane?.laneId
+    && renderedContent.stateKey === lane?.stateKey
+    && Number.isSafeInteger(Number(renderedContent.presentationLaneEpoch))
+    && Number(renderedContent.presentationLaneEpoch) > 0
+    && Number(renderedContent.residentExecutionGeneration)
+      === Number(lane?.finalEpochIdentity?.storageGeneration)
+    && Number(renderedContent.stepOrdinal) === Number(lane?.completedStepCount)
+    && renderedContent.authorityStatus
+      === 'state-manager-committed-worker-schedule'
+    && renderedContent.computeManagerCompletionSchema
+      === 'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0'
+    && typeof renderedContent.computeManagerLeaseId === 'string'
+    && renderedContent.computeManagerLeaseId.length > 0
+    && renderedContent.computeManagerLeaseStatus === 'completed'
+    && renderedContent.computeManagerFenceSatisfied === true
+    && renderedContent.stateManagerCommitStatus === 'committed'
+    && renderedContent.stateManagerCommitAccepted === true
+    && renderedContent.terminalScheduleFence === true
+    && renderedContent.terminalFenceScope === 'resident-schedule-terminal'
+    && renderedContent.terminalFenceSatisfied === true
+    && renderedContent.terminalFenceAuthorityAdmissionReady === true
+    && committedPresentation?.stateManagerCommittedPresentation === true
+    && committedPresentation?.scheduleId === lane?.scheduleId
+    && committedPresentation?.laneId === lane?.laneId
+    && committedPresentation?.stateKey === lane?.stateKey
+    && Number(committedPresentation?.presentationLaneEpoch)
+      === Number(renderedContent.presentationLaneEpoch)
+    && Number(committedPresentation?.sphStep) === renderedStep
+    && renderedContent.producerSourceKind
+      === 'worker-retained-resident-stage-output'
+    && renderedContent.producerSourceTransport
+      === 'worker-retained-resident-stage-output'
+    && renderedContent.sourceStageId === 'schroederSameLevelMechanics'
+    && renderedContent.retainedParticleStateStatus
+      === 'worker-retained-particle-state-ready'
+    && Number(renderedContent.particleCount) > 0
+    && Number(renderedContent.frameCount) > 0
+    && Number(renderedContent.readyFrameCount) > 0
+    && Number(presentation.frameCount) === Number(renderedContent.frameCount)
+    && Number(presentation.readyFrameCount)
+      === Number(renderedContent.readyFrameCount)
+  );
+}
+
+function workerOwnedNativeSurfacePresentationProven(metric) {
+  const lane = metric?.residentSteps?.workerOwnedResidentLane;
+  const committedPresentation = lane?.committedPresentation;
+  const presentation = metric?.workerLaneNativeSurfacePresentation;
+  const handoff = metric?.workerLaneNativeSurfaceSnapshotHandoff;
+  const workerPresentation = metric?.workerOffscreenPresentation;
+  const workerCanvas = metric?.workerOffscreenCanvas;
+  const sceneCanvases = metric?.sceneCanvasVisibility;
+  const renderState = metric?.renderState;
+  const surfaceDraw = metric?.surfaceDraw;
+  const nativeValidation = metric?.nativeSurfaceValidation;
+  const sourceStep = Number(presentation?.sourceStep);
+  const sourceTimeS = Number(presentation?.sourceTimeS);
+  const expectedSourceStep = Number(committedPresentation?.sphStep) + 1;
+  const laneTimeS = Number(lane?.laneSimTimeS);
+  const visibleBridge = surfaceDraw?.visibleRendererBridge
+    ?? renderState?.surfaceDrawVisibleRendererBridge
+    ?? surfaceDraw?.rendererBridge
+    ?? null;
+  return Boolean(
+    lane
+    && committedPresentation?.stateManagerCommittedPresentation === true
+    && committedPresentation?.scheduleId === lane.scheduleId
+    && committedPresentation?.laneId === lane.laneId
+    && committedPresentation?.stateKey === lane.stateKey
+    && presentation?.schema
+      === 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0'
+    && presentation?.status
+      === 'worker-lane-native-surface-presentation-source-ready'
+    && presentation?.scheduleId === lane.scheduleId
+    && presentation?.laneId === lane.laneId
+    && presentation?.stateKey === lane.stateKey
+    && typeof presentation?.requestId === 'string'
+    && presentation.requestId.length > 0
+    && presentation.cacheKey === presentation.requestId
+    && Number.isSafeInteger(sourceStep)
+    && sourceStep === expectedSourceStep
+    && Number.isFinite(sourceTimeS)
+    && Number.isFinite(laneTimeS)
+    && Math.abs(sourceTimeS - laneTimeS) <= 1e-9
+    && presentation?.readbackScope
+      === 'resident-schedule-terminal-presentation'
+    && presentation?.terminalPresentationFullParticleReadbackPerformed === true
+    && presentation?.physicsHotLoopParticipation === false
+    && Number(presentation?.particleCount) > 0
+    && handoff?.schema === presentation.schema
+    && handoff?.status
+      === 'worker-lane-native-surface-presentation-source-admitted'
+    && handoff?.scheduleId === presentation.scheduleId
+    && handoff?.laneId === presentation.laneId
+    && handoff?.stateKey === presentation.stateKey
+    && handoff?.requestId === presentation.requestId
+    && handoff?.cacheKey === presentation.cacheKey
+    && Number(handoff?.sourceStep) === sourceStep
+    && Math.abs(Number(handoff?.sourceTimeS) - sourceTimeS) <= 1e-9
+    && handoff?.sharedSlotIdentityVerified === true
+    && handoff?.workerLineageMetadataStatus
+      === 'worker-retained-compact-snapshot-lineage-metadata-ready'
+    && handoff?.terminalCompactSnapshotReadback === true
+    && renderState?.status === 'resident-render-field-applied'
+    && renderState?.sourceResidentRenderSourceStatus
+      === 'resident-render-source-current'
+    && renderState?.sourceResidentExecutionGenerationMatchesCurrent === true
+    && Number(renderState?.sourceResidentNextStep) === sourceStep
+    && Math.abs(Number(renderState?.sourceResidentNextTimeS) - sourceTimeS)
+      <= 1e-9
+    && renderState?.surfaceDrawOverlayPolicyStatus
+      === 'surface-draw-native-webgpu-main-canvas'
+    && renderState?.workerOffscreenPresentationStatus
+      === 'worker-offscreen-display-hidden-main-native-owner'
+    && renderState?.workerOffscreenRetainedCompactSnapshotStatus
+      === 'presentation-worker-retained-compact-snapshot-exported'
+    && renderState?.workerOffscreenRetainedCompactSnapshotAvailable === true
+    && Number(renderState?.workerOffscreenRetainedCompactSnapshotStep)
+      === sourceStep
+    && surfaceDraw?.sourceResidentRenderSourceStatus
+      === 'resident-render-source-current'
+    && surfaceDraw?.sourceResidentExecutionGenerationMatchesCurrent === true
+    && Number(surfaceDraw?.sourceResidentNextStep) === sourceStep
+    && Math.abs(Number(surfaceDraw?.sourceResidentNextTimeS) - sourceTimeS)
+      <= 1e-9
+    && visibleBridge === STANDARD_VISUAL_MATRIX_RENDERER_MODE
+    && surfaceDraw?.gpuBufferHandoffReady === true
+    && surfaceDraw?.visibleGpuConsumerReady === true
+    && surfaceDraw?.visibleGpuConsumerRuntimePresentationAdmitted === true
+    && nativeValidation?.native === true
+    && nativeValidation?.bridgeMode === STANDARD_VISUAL_MATRIX_RENDERER_MODE
+    && nativeValidation?.ready === true
+    && nativeValidation?.admitted === true
+    && nativeValidation?.sourceCurrent === true
+    && nativeValidation?.runtimePresentationAdmitted === true
+    && nativeValidation?.gpuBufferHandoffReady === true
+    && workerPresentation?.displayOwner === 'main-native'
+    && workerPresentation?.displayCanvasVisible === false
+    && workerCanvas?.visible === false
+    && workerCanvas?.visibility === 'hidden'
+    && Number(workerCanvas?.visibleCount) === 0
+    && Number(sceneCanvases?.visibleWorkerCount) === 0
+    && Number(sceneCanvases?.visibleCount) === 1
+  );
+}
+
+function workerParticleOverlayVisibleOverNativeSurface(metric) {
+  const visibleBridge = metric?.surfaceDraw?.visibleRendererBridge
+    ?? metric?.renderState?.surfaceDrawVisibleRendererBridge
+    ?? metric?.surfaceDraw?.rendererBridge
+    ?? null;
+  const presentation = metric?.workerOffscreenPresentation;
+  const workerCanvas = metric?.workerOffscreenCanvas;
+  return Boolean(
+    visibleBridge === STANDARD_VISUAL_MATRIX_RENDERER_MODE
+    && (
+      presentation?.displayCanvasVisible === true
+      || workerCanvas?.visible === true
+      || Number(workerCanvas?.visibleCount) > 0
+      || Number(metric?.sceneCanvasVisibility?.visibleWorkerCount) > 0
+    )
+  );
+}
+
+function effectiveVisualRendererModes(probe, { residentOnly = false } = {}) {
+  const metrics = arrayOf(probe?.timeline?.metrics).filter((metric) => (
+    !residentOnly || metric?.phase === 'resident-batch'
+  ));
+  return uniqueStrings(metrics.map((metric) => (
     metric?.surfaceDraw?.visibleRendererBridge
-      ?? metric?.renderState?.surfaceDrawVisibleRendererBridge
-      ?? metric?.surfaceDraw?.rendererBridge
+    ?? metric?.renderState?.surfaceDrawVisibleRendererBridge
+    ?? metric?.surfaceDraw?.rendererBridge
+    ?? (workerOwnedResidentPresentationProven(metric)
+      ? WORKER_PARTICLE_PRESENTATION_RENDERER_MODE
+      : null)
+  )));
+}
+
+function effectiveVisualRenderOwnershipModes(probe) {
+  return uniqueStrings(arrayOf(probe?.timeline?.metrics).map((metric) => (
+    metric?.peerComputeRenderOwnershipPolicy?.effectiveMode ?? null
+  )));
+}
+
+function effectiveResidentComputeManagerModes(probe) {
+  return uniqueStrings(arrayOf(probe?.timeline?.metrics).map((metric) => (
+    metric?.schroederTelemetry?.residentComputeManagerMode
+      ?? metric?.residentSteps?.residentComputeManagerMode
       ?? null
   )));
+}
+
+export function workerOwnedVisualRouteIssues(scenario, probe) {
+  if (
+    scenario?.visualRenderOwnershipMode
+      !== STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE
+  ) {
+    return [];
+  }
+  const metrics = arrayOf(probe?.timeline?.metrics).filter((metric) => (
+    metric?.phase === 'resident-batch' && metric?.residentSteps
+  ));
+  if (metrics.length === 0) {
+    return ['worker-owned-resident-route-missing'];
+  }
+  const issues = [];
+  const expectedProgressEverySteps = positiveInteger(
+    scenario?.workerProgressEverySteps,
+    0
+  );
+  for (const metric of metrics) {
+    const steps = metric.residentSteps;
+    const lane = steps.workerOwnedResidentLane;
+    if (steps.workerLaneFallback) {
+      issues.push('worker-owned-resident-fallback');
+    }
+    if (!lane) {
+      issues.push('worker-owned-resident-route-missing');
+      continue;
+    }
+    const requestedStepCount = Number(lane.requestedStepCount);
+    const completedStepCount = Number(lane.completedStepCount);
+    if (
+      lane.residentScheduleStatus !== 'worker-resident-schedule-completed'
+      || lane.terminalStatus
+        !== 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+      || lane.cancelled !== false
+      || !Number.isSafeInteger(requestedStepCount)
+      || requestedStepCount <= 0
+      || !Number.isSafeInteger(completedStepCount)
+      || completedStepCount !== requestedStepCount
+      || !Number.isSafeInteger(Number(lane.retainedBufferRefCount))
+      || Number(lane.retainedBufferRefCount) <= 0
+    ) {
+      issues.push('worker-owned-resident-schedule-incomplete');
+    }
+    if (
+      expectedProgressEverySteps > 0
+      && Number(lane.progressEverySteps) !== expectedProgressEverySteps
+    ) {
+      issues.push('worker-owned-resident-progress-cadence-mismatch');
+    }
+    if (
+      lane.gpuFence?.scope !== 'resident-schedule-terminal'
+      || lane.gpuFence?.terminalScheduleFence !== true
+      || lane.gpuFence?.fenceSatisfied !== true
+      || lane.gpuFence?.queueCompletionStatus !== 'queue-work-completed'
+      || lane.gpuFence?.authorityAdmissionReady !== true
+      || lane.authority?.computeManagerLeaseStatus !== 'completed'
+      || lane.authority?.computeManagerFenceSatisfied !== true
+      || lane.authority?.stateManagerCommitStatus !== 'committed'
+    ) {
+      issues.push('worker-owned-resident-authority-uncommitted');
+    }
+  }
+  const nativeSurfacePresentationRequired =
+    scenario?.visualRendererMode === STANDARD_VISUAL_MATRIX_RENDERER_MODE;
+  const presentationProven = Boolean(
+    metrics.length > 0
+    && metrics.every((metric) => (
+      nativeSurfacePresentationRequired
+        ? workerOwnedNativeSurfacePresentationProven(metric)
+        : workerOwnedResidentPresentationProven(metric)
+    ))
+  );
+  if (!presentationProven) {
+    issues.push('worker-owned-render-presentation-unproven');
+  }
+  if (
+    nativeSurfacePresentationRequired
+    && (
+      metrics.some(workerParticleOverlayVisibleOverNativeSurface)
+      || Number(
+        probe?.analysis
+          ?.workerOffscreenResidentParticleStateVisibleSampleCount
+      ) > 0
+    )
+  ) {
+    issues.push('worker-particle-overlay-visible-over-native-surface');
+  }
+  return uniqueStrings(issues);
 }
 
 export function synthesizeStandardScenarioIssues(
@@ -457,7 +864,12 @@ export function synthesizeStandardScenarioIssues(
   {
     expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe),
     mechanicsIntegrator = inferMechanicsIntegrator(probe),
-    rendererModes = effectiveVisualRendererModes(probe)
+    rendererModes = effectiveVisualRendererModes(probe, {
+      residentOnly: scenario?.visualRenderOwnershipMode
+        === STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE
+    }),
+    renderOwnershipModes = effectiveVisualRenderOwnershipModes(probe),
+    residentComputeManagerModes = effectiveResidentComputeManagerModes(probe)
   } = {}
 ) {
   const mechanicsMismatchIssues = scenario?.expectedMechanics
@@ -474,16 +886,41 @@ export function synthesizeStandardScenarioIssues(
     )
     ? ['visual-renderer-mode-mismatch']
     : [];
+  const renderOwnershipMismatchIssues = scenario?.visualRenderOwnershipMode
+    && (
+      renderOwnershipModes.length === 0
+      || renderOwnershipModes.some(
+        (mode) => mode !== scenario.visualRenderOwnershipMode
+      )
+    )
+    ? ['visual-render-ownership-mode-mismatch']
+    : [];
+  const residentComputeManagerMismatchIssues = scenario?.residentComputeManagerMode
+    && (
+      residentComputeManagerModes.length === 0
+      || residentComputeManagerModes.some(
+        (mode) => mode !== scenario.residentComputeManagerMode
+      )
+    )
+    ? ['resident-compute-manager-mode-mismatch']
+    : [];
+  const workerOwnedRouteIssues = workerOwnedVisualRouteIssues(scenario, probe);
   const expectedBehaviorIssues = expectedBehavior?.status === 'pass'
     ? []
     : expectedBehavior?.checks
-      ?.filter((check) => check.status !== 'pass')
+      ?.filter((check) => (
+        check.status !== 'pass'
+        && check.acceptance !== 'scientific-advisory'
+      ))
       .map((check) => `expected-behavior:${check.id}`) || [];
   return uniqueStrings(
     probe?.issues,
     probe?.analysis?.issues,
     mechanicsMismatchIssues,
     rendererMismatchIssues,
+    renderOwnershipMismatchIssues,
+    residentComputeManagerMismatchIssues,
+    workerOwnedRouteIssues,
     expectedBehaviorIssues
   );
 }
@@ -597,29 +1034,54 @@ export function deterministicRandomPairScenarios() {
       mech: 'mlsmpm'
     });
     params.set('renderer', 'native-webgpu');
-    params.set('renderOwnership', 'main-thread-renderer');
-    params.set('surfaceDraw', 'native-webgpu-surface-consumer');
+    params.set('renderOwnership', STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE);
+    params.set('surfaceDraw', STANDARD_VISUAL_MATRIX_RENDERER_MODE);
+    params.set('residentAuto', '0');
     params.set('ss', '1');
     params.set('schroederLevel', '0');
     params.set('schroederMinLevel', '0');
     params.set('schroederMaxLevel', '0');
     params.set('schroederPortableSummary', '1');
     params.set('schroederActiveNodeIndex', '1');
+    params.set('schroederActiveNodeSortedIndex', '1');
     // See STANDARD_SCENARIOS: these equal-spacing visual fixtures occupy one
     // SS level. Cross-level mechanics is covered by populated native fixtures.
     params.set('schroederTwoLevel', '0');
     params.set('schroederCrossLevelCoupling', '0');
+    params.set('schroederMechanicsFieldPairV2', '0');
     params.set('schroederPhaseVolumeMigration', '1');
     params.set('schroederLawQueue', '1');
     params.set('schroederLawNeighborCandidates', '1');
+    const batches = positiveInteger(
+      process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCHES,
+      3
+    );
+    const batchSteps = positiveInteger(
+      process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCH_STEPS,
+      64
+    );
+    const workerSchedulePlan = Object.freeze({
+      schema: 'peercompute.ulg.sph-worker-owned-visual-schedule-plan.v0',
+      sourceBatches: batches,
+      sourceBatchSteps: batchSteps,
+      totalStepCount: batches * batchSteps,
+      scheduleStepCount: batchSteps,
+      scheduleCount: batches
+    });
     scenarios.push({
       label: `random-elements-${drop.key.toLowerCase()}-${base.key.toLowerCase()}`,
       randomPair: { drop: drop.key, base: base.key, seed: rawSeed },
+      acceptanceTrack: 'framework-liveness',
       url: `/?${params.toString()}`,
       expectedMechanics: 'mlsmpm',
-      batches: positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCHES, 3),
-      batchSteps: positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCH_STEPS, 64),
-      visualRendererMode: 'native-webgpu-surface-consumer',
+      batches,
+      batchSteps,
+      workerSchedulePlan,
+      workerProgressEverySteps:
+        STANDARD_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS,
+      visualRendererMode: STANDARD_VISUAL_MATRIX_RENDERER_MODE,
+      visualRenderOwnershipMode: STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE,
+      residentComputeManagerMode: STANDARD_VISUAL_MATRIX_RESIDENT_COMPUTE_MODE,
       visualOnly: true,
       standardEnabled: true,
       defaultEnabled: false,
@@ -809,6 +1271,69 @@ function behaviorCheck(id, expectation, passed, observed, { inconclusive = false
   };
 }
 
+const FRAMEWORK_BLOCKING_BEHAVIOR_CHECK_IDS = new Set([
+  'authoritative-checkpoint-series',
+  'mechanics-state-advanced',
+  'worker-owned-ss-framework-path',
+  'surface-stress-execution-evidence',
+  'authoritative-two-level-mechanics-coverage',
+  'initial-state-captured',
+  // Reaction-stage dispatch alone is insufficient architecture evidence: the
+  // bounded reactive fixtures must consume a reactant and publish a real
+  // product population across the worker-owned hierarchy. Quantitative heat,
+  // plume, melt, and cooling outcomes remain scientific calibration.
+  'sodium-consumed',
+  'sodium-products-form',
+  'fluorine-consumed',
+  'csf-forms',
+  'random-pair-advances'
+]);
+
+function standardScenarioBehaviorResult({
+  scenario,
+  checkpointCount,
+  checkpoints = undefined,
+  phaseAwareEvidence,
+  checks
+}) {
+  const frameworkTrack = scenario?.acceptanceTrack === 'framework-liveness';
+  const classifiedChecks = checks.map((check) => ({
+    ...check,
+    acceptance: frameworkTrack
+      && !FRAMEWORK_BLOCKING_BEHAVIOR_CHECK_IDS.has(check.id)
+      ? 'scientific-advisory'
+      : 'blocking'
+  }));
+  const blockingChecks = classifiedChecks.filter(
+    (check) => check.acceptance === 'blocking'
+  );
+  const statusFor = (selectedChecks) => selectedChecks.some(
+    (check) => check.status === 'fail'
+  )
+    ? 'fail'
+    : selectedChecks.some((check) => check.status === 'inconclusive')
+      ? 'inconclusive'
+      : 'pass';
+  const scientificStatus = statusFor(classifiedChecks);
+  const status = statusFor(blockingChecks);
+  return {
+    schema: 'peercompute.ulg.sph-standard-scenario-behavior.v1',
+    status,
+    scientificStatus,
+    acceptanceTrack: scenario?.acceptanceTrack ?? null,
+    presetId: scenario?.presetId || null,
+    checkpointCount,
+    ...(checkpoints === undefined ? {} : { checkpoints }),
+    phaseAwareEvidence,
+    blockingCheckIds: blockingChecks.map((check) => check.id),
+    scientificAdvisories: classifiedChecks.filter((check) => (
+      check.acceptance === 'scientific-advisory'
+      && check.status !== 'pass'
+    )),
+    checks: classifiedChecks
+  };
+}
+
 const SURFACE_STRESS_SUBMISSION_SCHEMA =
   'peercompute.ulg.schroeder-phase-volume-surface-stress-submission.v2';
 const SURFACE_STRESS_SUBMISSION_STATUS =
@@ -821,6 +1346,10 @@ const SURFACE_STRESS_AMBIENT_BUOYANCY_MODE =
 function metricSurfaceStressSubmission(metric) {
   return metric?.residentStep?.phaseVolumeSurfaceStressSubmission
     ?? metric?.residentSteps?.finalStepPhaseVolumeSurfaceStressSubmission
+    ?? metric?.residentSteps?.phaseVolumeSurfaceStressWorkerEvidence
+      ?.finalSubmission
+    ?? metric?.residentSteps?.workerOwnedResidentLane
+      ?.phaseVolumeSurfaceStress?.finalSubmission
     ?? metric?.schroederTelemetry?.phaseVolumeSurfaceStressSubmission
     ?? null;
 }
@@ -854,6 +1383,30 @@ function metricSurfaceStressEvidenceExact(metric, selectedLevel) {
   const steps = metric?.residentSteps;
   if (!steps) return true;
   const completedStepCount = Number(steps.completedStepCount);
+  const workerEvidence =
+    steps.phaseVolumeSurfaceStressWorkerEvidence
+    ?? steps.workerOwnedResidentLane?.phaseVolumeSurfaceStress
+    ?? null;
+  if (workerEvidence) {
+    return Boolean(
+      workerEvidence.schema
+        === 'peercompute.ulg.worker-resident-schedule-surface-stress-evidence.v0'
+      && workerEvidence.required === true
+      && workerEvidence.submissionEvidenceComplete === true
+      && Number.isInteger(completedStepCount)
+      && completedStepCount > 0
+      && Number(workerEvidence.observedStepCount) === completedStepCount
+      && Number(workerEvidence.expectedSubmissionCount) === completedStepCount
+      && Number(workerEvidence.exactSubmissionCount) === completedStepCount
+      && workerEvidence.firstIncompleteStepOrdinal == null
+      && Number(workerEvidence.finalSubmissionStepOrdinal)
+        === completedStepCount
+      && surfaceStressSubmissionExact(
+        workerEvidence.finalSubmission,
+        selectedLevel
+      )
+    );
+  }
   const submissions = arrayOf(steps.phaseVolumeSurfaceStressSubmissions);
   return Boolean(
     steps.phaseVolumeSurfaceStressRequired === true
@@ -871,6 +1424,140 @@ function metricSurfaceStressEvidenceExact(metric, selectedLevel) {
   );
 }
 
+function residentExecutionMetricsForEvidence(scenario, probe) {
+  const metrics = arrayOf(probe?.timeline?.metrics);
+  const workerOwned = Boolean(
+    scenario?.visualRenderOwnershipMode
+      === STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE
+    || scenario?.residentComputeManagerMode
+      === STANDARD_VISUAL_MATRIX_RESIDENT_COMPUTE_MODE
+  );
+  if (!workerOwned) {
+    return {
+      workerOwned: false,
+      metrics: metrics.filter((metric) => (
+        !String(metric?.phase || '').includes('error')
+        && (
+          metric?.residentStep != null
+          || Number(metric?.residentSteps?.completedStepCount) > 0
+        )
+      )),
+      expectedSampleCount: null,
+      duplicateScheduleIdCount: 0,
+      primaryAttemptCount: 0,
+      invalidExecutionSampleCount: 0,
+      coverageComplete: true
+    };
+  }
+  const expectedSampleCount = positiveInteger(
+    scenario?.workerSchedulePlan?.scheduleCount,
+    positiveInteger(scenario?.batches, 0)
+  );
+  const seenScheduleIds = new Set();
+  let duplicateScheduleIdCount = 0;
+  let primaryAttemptCount = 0;
+  let invalidExecutionSampleCount = 0;
+  const successful = [];
+  const expectedScheduleStepCount = positiveInteger(
+    scenario?.workerSchedulePlan?.scheduleStepCount,
+    0
+  );
+  const expectedProgressEverySteps = positiveInteger(
+    scenario?.workerProgressEverySteps,
+    0
+  );
+  const expectedTotalStepCount = positiveInteger(
+    scenario?.workerSchedulePlan?.totalStepCount,
+    expectedScheduleStepCount * expectedSampleCount
+  );
+  for (const metric of metrics) {
+    if (!String(metric?.phase || '').startsWith('resident-batch')) continue;
+    primaryAttemptCount += 1;
+    const steps = metric?.residentSteps ?? null;
+    const lane = steps?.workerOwnedResidentLane ?? null;
+    const scheduleId = String(lane?.scheduleId || '').trim();
+    const requestedStepCount = Number(lane?.requestedStepCount);
+    const completedStepCount = Number(lane?.completedStepCount);
+    const exact = Boolean(
+      metric?.phase === 'resident-batch'
+      && steps?.residentComputeManagerMode === 'worker-owned-resident-lane'
+      && steps?.workerLaneFallback == null
+      && lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+      && lane?.terminalStatus
+        === 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+      && scheduleId
+      && Number.isSafeInteger(requestedStepCount)
+      && requestedStepCount > 0
+      && (
+        expectedScheduleStepCount <= 0
+        || requestedStepCount === expectedScheduleStepCount
+      )
+      && completedStepCount === requestedStepCount
+      && (
+        expectedProgressEverySteps <= 0
+        || Number(lane?.progressEverySteps) === expectedProgressEverySteps
+      )
+      && lane?.cancelled === false
+      && lane?.gpuFence?.scope === 'resident-schedule-terminal'
+      && lane?.gpuFence?.terminalScheduleFence === true
+      && lane?.gpuFence?.fenceSatisfied === true
+      && lane?.gpuFence?.authorityAdmissionReady === true
+      && lane?.authority?.status === 'state-manager-committed-worker-schedule'
+      && lane?.authority?.computeManagerLeaseStatus === 'completed'
+      && lane?.authority?.computeManagerFenceSatisfied === true
+      && lane?.authority?.stateManagerCommitStatus === 'committed'
+    );
+    if (!exact) {
+      invalidExecutionSampleCount += 1;
+      continue;
+    }
+    if (seenScheduleIds.has(scheduleId)) {
+      duplicateScheduleIdCount += 1;
+      continue;
+    }
+    seenScheduleIds.add(scheduleId);
+    successful.push(metric);
+  }
+  const requestedStepCountSum = successful.reduce((sum, metric) => (
+    sum + Number(
+      metric?.residentSteps?.workerOwnedResidentLane?.requestedStepCount || 0
+    )
+  ), 0);
+  const finalLaneCompletedStepTotal = Number(
+    successful.at(-1)?.residentSteps?.workerOwnedResidentLane
+      ?.laneCompletedStepTotal
+  );
+  const coverageComplete = Boolean(
+    expectedSampleCount > 0
+    && successful.length === expectedSampleCount
+    && primaryAttemptCount === expectedSampleCount
+    && invalidExecutionSampleCount === 0
+    && duplicateScheduleIdCount === 0
+    && (
+      expectedTotalStepCount <= 0
+      || (
+        requestedStepCountSum === expectedTotalStepCount
+        && finalLaneCompletedStepTotal === expectedTotalStepCount
+      )
+    )
+  );
+  return {
+    workerOwned: true,
+    metrics: successful,
+    expectedSampleCount,
+    duplicateScheduleIdCount,
+    primaryAttemptCount,
+    invalidExecutionSampleCount,
+    expectedScheduleStepCount,
+    expectedTotalStepCount,
+    requestedStepCountSum,
+    finalLaneCompletedStepTotal: Number.isSafeInteger(finalLaneCompletedStepTotal)
+      ? finalLaneCompletedStepTotal
+      : null,
+    coverageComplete
+  };
+}
+
 /**
  * Require queue-submission evidence from every retained resident execution
  * sample when a standard scenario requests the surface-tension law.
@@ -883,11 +1570,11 @@ export function evaluateSurfaceStressExecutionEvidence(scenario, probe) {
   if (!requested) return null;
 
   const selectedLevel = Number(url.searchParams.get('schroederLevel'));
-  const metrics = arrayOf(probe?.timeline?.metrics);
-  const residentMetrics = metrics.filter((metric) => (
-    metric?.residentStep != null
-    || Number(metric?.residentSteps?.completedStepCount) > 0
-  ));
+  const executionEvidence = residentExecutionMetricsForEvidence(
+    scenario,
+    probe
+  );
+  const residentMetrics = executionEvidence.metrics;
   const submissions = residentMetrics.map(metricSurfaceStressSubmission);
   const exactSubmissionCount = residentMetrics.filter((metric) => (
     metricSurfaceStressEvidenceExact(metric, selectedLevel)
@@ -898,6 +1585,12 @@ export function evaluateSurfaceStressExecutionEvidence(scenario, probe) {
     && residentMetrics.length > 0
     && exactSubmissionCount === residentMetrics.length
     && metricSurfaceStressEvidenceExact(residentMetrics.at(-1), selectedLevel)
+    && executionEvidence.duplicateScheduleIdCount === 0
+    && executionEvidence.invalidExecutionSampleCount === 0
+    && (
+      executionEvidence.workerOwned !== true
+      || executionEvidence.coverageComplete === true
+    )
   );
 
   return behaviorCheck(
@@ -908,6 +1601,16 @@ export function evaluateSurfaceStressExecutionEvidence(scenario, probe) {
       requested,
       selectedLevel: Number.isInteger(selectedLevel) ? selectedLevel : null,
       residentExecutionSampleCount: residentMetrics.length,
+      expectedExecutionSampleCount: executionEvidence.expectedSampleCount,
+      duplicateScheduleIdCount: executionEvidence.duplicateScheduleIdCount,
+      primaryAttemptCount: executionEvidence.primaryAttemptCount,
+      invalidExecutionSampleCount:
+        executionEvidence.invalidExecutionSampleCount,
+      expectedScheduleStepCount: executionEvidence.expectedScheduleStepCount,
+      expectedTotalStepCount: executionEvidence.expectedTotalStepCount,
+      requestedStepCountSum: executionEvidence.requestedStepCountSum,
+      finalLaneCompletedStepTotal:
+        executionEvidence.finalLaneCompletedStepTotal,
       exactSubmissionCount,
       lastSubmission
     }
@@ -919,27 +1622,325 @@ export function evaluateAuthoritativeTwoLevelMechanicsEvidence(
   probe
 ) {
   if (scenario?.expectAuthoritativeTwoLevelMechanics !== true) return null;
-  const metrics = arrayOf(probe?.timeline?.metrics);
-  const residentMetrics = metrics.filter((metric) => (
-    metric?.residentStep != null
-    || Number(metric?.residentSteps?.completedStepCount) > 0
-  ));
-  const completeSampleCount = residentMetrics.filter((metric) => (
-    metric?.schroederTelemetry?.twoLevelMechanicsCoverageComplete === true
-  )).length;
+  const executionEvidence = residentExecutionMetricsForEvidence(
+    scenario,
+    probe
+  );
+  const residentMetrics = executionEvidence.metrics;
+  const expectedCflFactor = Number(scenario?.expectedTwoLevelCflFactor);
+  const expectedCflFactorRequired = Number.isFinite(expectedCflFactor)
+    && expectedCflFactor > 0;
+  const metricCoverageComplete = (metric) => {
+    const lane = metric?.residentSteps?.workerOwnedResidentLane ?? null;
+    const evidence = lane?.twoLevelMechanics ?? null;
+    if (!evidence) {
+      return !expectedCflFactorRequired && metric?.schroederTelemetry
+        ?.twoLevelMechanicsCoverageComplete === true;
+    }
+    const completedStepCount = Number(lane.completedStepCount);
+    const lastStep = evidence.lastStep ?? null;
+    const terminalRefluxReceipt = evidence.terminalRefluxReceipt ?? null;
+    return Boolean(
+      evidence.schema
+        === 'peercompute.ulg.worker-resident-schedule-two-level-mechanics-evidence.v0'
+      && evidence.requested === true
+      && evidence.authorityRequested === 'authoritative'
+      && Number.isInteger(completedStepCount)
+      && completedStepCount > 0
+      && Number(evidence.observedStepCount) === completedStepCount
+      && Number(evidence.exactAuthoritativeStepCount)
+        === completedStepCount
+      && (
+        !expectedCflFactorRequired
+        || (
+          evidence.cflFactorEvidenceRequired === true
+          && Number(evidence.cflFactorRequested) === expectedCflFactor
+          && Number(evidence.cflFactorObservedStepCount)
+            === completedStepCount
+          && Number(evidence.exactCflFactorCount) === completedStepCount
+          && evidence.firstCflFactorMismatchStepOrdinal == null
+          && Number(evidence.lastCflFactor) === expectedCflFactor
+        )
+      )
+      && evidence.firstIncompleteStepOrdinal == null
+      && evidence.coverageComplete === true
+      && evidence.terminalRefluxReceiptRequired === true
+      && terminalRefluxReceipt?.schema
+        === 'peercompute.ulg.worker-resident-schedule-terminal-reflux-receipt.v0'
+      && terminalRefluxReceipt.required === true
+      && terminalRefluxReceipt.scheduleId === lane.scheduleId
+      && terminalRefluxReceipt.laneId === lane.laneId
+      && terminalRefluxReceipt.stateKey === lane.stateKey
+      && Number(terminalRefluxReceipt.expectedStepCount)
+        === completedStepCount
+      && Number(terminalRefluxReceipt.observedStepCount)
+        === completedStepCount
+      && Number(terminalRefluxReceipt.admittedStepCount)
+        === completedStepCount
+      && Number(evidence.terminalRefluxAdmittedStepCount)
+        === completedStepCount
+      && terminalRefluxReceipt.firstRejectedStepOrdinal == null
+      && terminalRefluxReceipt.allStepsAdmitted === true
+      && terminalRefluxReceipt.status
+        === 'terminal-reflux-schedule-receipt-admitted'
+      && terminalRefluxReceipt.reason == null
+      && terminalRefluxReceipt.firstRejectedDiagnostic == null
+      && lastStep.status
+        === 'schroeder-two-level-authoritative-step-executed'
+      && lastStep.twoLevelMechanicsEnabled === true
+      && Number(lastStep.mechanicsLevelCount) >= 2
+      && lastStep.twoLevelMechanicsAuthority === 'authoritative'
+      && Number(lastStep.twoLevelFineSubstepCount)
+        === Number(evidence.fineSubstepCountRequested)
+      && lastStep.twoLevelAuthoritativeCommitVerified === true
+    );
+  };
+  const completeSampleCount = residentMetrics.filter(
+    metricCoverageComplete
+  ).length;
   return behaviorCheck(
     'authoritative-two-level-mechanics-coverage',
     'every retained resident execution completes authoritative adjacent-level mechanics',
     (
       residentMetrics.length > 0
       && completeSampleCount === residentMetrics.length
+      && executionEvidence.duplicateScheduleIdCount === 0
+      && executionEvidence.invalidExecutionSampleCount === 0
+      && (
+        executionEvidence.workerOwned !== true
+        || executionEvidence.coverageComplete === true
+      )
     ),
     {
       requested: true,
+      expectedCflFactor:
+        expectedCflFactorRequired ? expectedCflFactor : null,
       residentExecutionSampleCount: residentMetrics.length,
+      expectedExecutionSampleCount: executionEvidence.expectedSampleCount,
+      duplicateScheduleIdCount: executionEvidence.duplicateScheduleIdCount,
+      primaryAttemptCount: executionEvidence.primaryAttemptCount,
+      invalidExecutionSampleCount:
+        executionEvidence.invalidExecutionSampleCount,
+      expectedScheduleStepCount: executionEvidence.expectedScheduleStepCount,
+      expectedTotalStepCount: executionEvidence.expectedTotalStepCount,
+      requestedStepCountSum: executionEvidence.requestedStepCountSum,
+      finalLaneCompletedStepTotal:
+        executionEvidence.finalLaneCompletedStepTotal,
       completeSampleCount,
       lastSchroederTelemetry:
         residentMetrics.at(-1)?.schroederTelemetry ?? null
+    }
+  );
+}
+
+/**
+ * Prove that the framework path, rather than a calibrated outcome, executed
+ * on every committed worker schedule. Single-level arms exercise the explicit
+ * local law queue and neighbor candidate stages. The adjacent-level Cs/F arm
+ * uses the canonical mechanics-field transaction instead, whose authority is
+ * independently sealed by the terminal reflux evaluator above.
+ */
+export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
+  const executionEvidence = residentExecutionMetricsForEvidence(
+    scenario,
+    probe
+  );
+  if (executionEvidence.workerOwned !== true) return null;
+
+  const twoLevelRequired =
+    scenario?.expectAuthoritativeTwoLevelMechanics === true;
+  const reactionRequired = scenario?.presetId === 'sodium-water'
+    || scenario?.presetId === 'cesium-fluorine';
+  const minimumScheduleCount = scenario?.acceptanceTrack === 'framework-liveness'
+    ? 2
+    : 1;
+  const samples = [];
+  let cumulativeCompletedStepCount = 0;
+  let previousCompletedTotal = 0;
+  let previousStorageGeneration = null;
+  let previousPhysicsTick = null;
+  let previousPositionEpoch = null;
+  let canonicalLaneId = null;
+  let canonicalStateKey = null;
+
+  for (const metric of executionEvidence.metrics) {
+    const lane = metric?.residentSteps?.workerOwnedResidentLane ?? null;
+    const hierarchy = lane?.hierarchyStageSummary ?? null;
+    const blockers = [];
+    const completedStepCount = Number(lane?.completedStepCount);
+    const completedTotal = Number(lane?.laneCompletedStepTotal);
+    const storageGeneration = Number(
+      lane?.finalEpochIdentity?.storageGeneration
+    );
+    const physicsTick = Number(lane?.finalEpochIdentity?.physicsTick);
+    const positionEpoch = Number(lane?.finalEpochIdentity?.positionEpoch);
+    const laneId = String(lane?.laneId || '');
+    const stateKey = String(lane?.stateKey || '');
+
+    if (canonicalLaneId == null) canonicalLaneId = laneId;
+    if (canonicalStateKey == null) canonicalStateKey = stateKey;
+    if (!laneId || laneId !== canonicalLaneId) blockers.push('lane-identity-drift');
+    if (!stateKey || stateKey !== canonicalStateKey) {
+      blockers.push('state-identity-drift');
+    }
+
+    cumulativeCompletedStepCount += Number.isSafeInteger(completedStepCount)
+      ? completedStepCount
+      : 0;
+    if (
+      !Number.isSafeInteger(completedTotal)
+      || completedTotal !== cumulativeCompletedStepCount
+      || completedTotal <= previousCompletedTotal
+    ) {
+      blockers.push('lane-step-total-not-monotonic');
+    }
+    previousCompletedTotal = completedTotal;
+
+    const epochFields = [storageGeneration, physicsTick, positionEpoch];
+    if (!epochFields.every(Number.isSafeInteger)) {
+      blockers.push('terminal-epoch-identity-incomplete');
+    } else if (
+      previousStorageGeneration != null
+      && (
+        storageGeneration <= previousStorageGeneration
+        || physicsTick <= previousPhysicsTick
+        || positionEpoch <= previousPositionEpoch
+      )
+    ) {
+      blockers.push('terminal-epoch-identity-not-monotonic');
+    }
+    previousStorageGeneration = storageGeneration;
+    previousPhysicsTick = physicsTick;
+    previousPositionEpoch = positionEpoch;
+
+    if (
+      hierarchy?.schema
+        !== 'peercompute.ulg.worker-schroeder-hierarchy-stage-summary.v0'
+      || hierarchy?.status
+        !== 'worker-schroeder-hierarchy-stage-summary-ready'
+    ) {
+      blockers.push('hierarchy-stage-summary-unproven');
+    }
+    if (
+      hierarchy?.fullParticleReadbackPerformed === true
+      || hierarchy?.fullParticleReadbackFree !== true
+    ) {
+      blockers.push('hierarchy-hot-loop-readback-observed');
+    }
+    if (
+      hierarchy?.staticGpuTableUploadStatus?.retainedAcrossSteps !== true
+      || hierarchy?.staticGpuTableUploadStatus?.thermalResponseGraph
+        !== 'webgpu-uploaded'
+      || hierarchy?.staticGpuTableUploadStatus?.mechanicsMaterialPhase
+        !== 'webgpu-uploaded'
+    ) {
+      blockers.push('static-gpu-table-path-unproven');
+    }
+    if (twoLevelRequired) {
+      const closure = hierarchy?.postMechanicsClosure ?? null;
+      const executedStageOrder = arrayOf(closure?.executedStageOrder);
+      const requiredClosureStageOrder = [
+        'thermal-phase',
+        'reaction-discovery',
+        'reaction-product',
+        'phase-carrier-transfer-v2',
+        'mechanics-constitutive-refresh'
+      ];
+      let previousStageIndex = -1;
+      const closureStagesOrdered = requiredClosureStageOrder.every(
+        (stage) => {
+          const index = executedStageOrder.indexOf(stage);
+          if (index <= previousStageIndex) return false;
+          previousStageIndex = index;
+          return true;
+        }
+      );
+      if (
+        Number(hierarchy?.mechanicsLevelCount) < 2
+        || hierarchy?.twoLevelMechanicsEnabled !== true
+        || hierarchy?.twoLevelMechanicsAuthority !== 'authoritative'
+        || hierarchy?.twoLevelAuthoritativeCommitVerified !== true
+        || hierarchy?.mechanicsFieldPairV2Enabled !== true
+      ) {
+        blockers.push('adjacent-level-mechanics-path-unproven');
+      }
+      if (
+        hierarchy?.thermalRequested !== true
+        || hierarchy?.reactionRequested !== true
+        || closure?.schema
+          !== 'peercompute.ulg.mls-mpm-post-mechanics-closure.v1'
+        || closure?.status !== 'post-mechanics-closure-complete'
+        || closure?.backend !== 'webgpu'
+        || closure?.fullParticleReadbackFree !== true
+        || closure?.residentContinuationReady !== true
+        || !closureStagesOrdered
+      ) {
+        blockers.push('post-mechanics-law-closure-unproven');
+      }
+    } else {
+      if (
+        hierarchy?.thermalRequested !== true
+        || hierarchy?.residentStageStatus?.thermal
+          !== 'thermal-step-executed'
+        || hierarchy?.residentStageBackends?.thermal !== 'webgpu'
+      ) {
+        blockers.push('thermal-law-path-unproven');
+      }
+      if (
+        reactionRequired
+        && (
+          hierarchy?.reactionRequested !== true
+          || hierarchy?.residentStageStatus?.reaction
+            !== 'reaction-step-executed'
+          || hierarchy?.residentStageBackends?.reaction !== 'webgpu'
+        )
+      ) {
+        blockers.push('reaction-law-path-unproven');
+      }
+      if (
+        Number(hierarchy?.mechanicsLevelCount) < 1
+        || hierarchy?.lawQueueStatus !== 'schroeder-law-queue-submitted'
+        || hierarchy?.lawNeighborCandidateStatus
+          !== 'schroeder-law-neighbor-candidates-submitted'
+      ) {
+        blockers.push('local-law-queue-path-unproven');
+      }
+    }
+
+    samples.push({
+      scheduleId: lane?.scheduleId ?? null,
+      laneId: laneId || null,
+      stateKey: stateKey || null,
+      completedStepCount:
+        Number.isSafeInteger(completedStepCount) ? completedStepCount : null,
+      laneCompletedStepTotal:
+        Number.isSafeInteger(completedTotal) ? completedTotal : null,
+      finalEpochIdentity: lane?.finalEpochIdentity ?? null,
+      hierarchyStageSummary: hierarchy,
+      blockers
+    });
+  }
+
+  const passed = Boolean(
+    executionEvidence.coverageComplete === true
+    && samples.length >= minimumScheduleCount
+    && samples.every((sample) => sample.blockers.length === 0)
+  );
+  return behaviorCheck(
+    'worker-owned-ss-framework-path',
+    'the worker-owned SS hierarchy executes its law path and advances one persistent lane without fallback or a stalled worker schedule',
+    passed,
+    {
+      acceptanceTrack: scenario?.acceptanceTrack ?? null,
+      twoLevelRequired,
+      reactionRequired,
+      minimumScheduleCount,
+      residentExecutionSampleCount: samples.length,
+      expectedExecutionSampleCount: executionEvidence.expectedSampleCount,
+      coverageComplete: executionEvidence.coverageComplete,
+      finalLaneCompletedStepTotal:
+        executionEvidence.finalLaneCompletedStepTotal,
+      samples
     }
   );
 }
@@ -950,7 +1951,17 @@ export function evaluateStandardScenarioBehavior(scenario, probe) {
     evaluateSurfaceStressExecutionEvidence(scenario, probe);
   const authoritativeTwoLevelMechanicsCheck =
     evaluateAuthoritativeTwoLevelMechanicsEvidence(scenario, probe);
+  const workerOwnedSsFrameworkCheck =
+    evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe);
   const checkpoints = authoritativeCheckpointSeries(probe);
+  const mechanicsStateAdvance = mechanicsStateAdvanceEvidence(checkpoints);
+  const mechanicsStateAdvanceCheck = behaviorCheck(
+    'mechanics-state-advanced',
+    'authoritative mechanics state advances across captured checkpoints',
+    mechanicsStateAdvance.status === 'pass',
+    mechanicsStateAdvance,
+    { inconclusive: mechanicsStateAdvance.status === 'inconclusive' }
+  );
   if (checkpoints.length < 2) {
     const checks = [
       behaviorCheck(
@@ -960,20 +1971,21 @@ export function evaluateStandardScenarioBehavior(scenario, probe) {
         { checkpointCount: checkpoints.length },
         { inconclusive: true }
       ),
+      mechanicsStateAdvanceCheck,
+      ...(workerOwnedSsFrameworkCheck ? [workerOwnedSsFrameworkCheck] : []),
       ...(surfaceStressExecutionCheck ? [surfaceStressExecutionCheck] : []),
       ...(authoritativeTwoLevelMechanicsCheck
         ? [authoritativeTwoLevelMechanicsCheck]
         : [])
     ];
-    return {
-      schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
-      status: checks.some((check) => check.status === 'fail')
-        ? 'fail'
-        : 'inconclusive',
-      presetId: scenario.presetId || null,
+    return standardScenarioBehaviorResult({
+      scenario,
       checkpointCount: checkpoints.length,
+      phaseAwareEvidence: {
+        mechanicsStateAdvance
+      },
       checks
-    };
+    });
   }
 
   const capturedInitial = checkpoints.find((checkpoint) => (
@@ -1020,13 +2032,14 @@ export function evaluateStandardScenarioBehavior(scenario, probe) {
     Number.isFinite(massRelativeSpan) && massRelativeSpan <= 1e-3,
     { massMinKg: massMin, massMaxKg: massMax, relativeSpan: massRelativeSpan },
     { inconclusive: !Number.isFinite(massRelativeSpan) }
-  ), behaviorCheck(
+  ), mechanicsStateAdvanceCheck, behaviorCheck(
     'phase-volume-ratios-bounded',
     'condensed and gas mechanics remain inside their phase-appropriate volume-ratio domains',
     volumeRatioEvidence.status === 'pass',
     volumeRatioEvidence,
     { inconclusive: volumeRatioEvidence.status === 'inconclusive' }
   )];
+  if (workerOwnedSsFrameworkCheck) checks.push(workerOwnedSsFrameworkCheck);
   if (surfaceStressExecutionCheck) checks.push(surfaceStressExecutionCheck);
   if (authoritativeTwoLevelMechanicsCheck) {
     checks.push(authoritativeTwoLevelMechanicsCheck);
@@ -1144,7 +2157,7 @@ export function evaluateStandardScenarioBehavior(scenario, probe) {
         requiredRiseK: minimumTemperatureRise,
         maxTemperaturesK: maxTemperatures
       }, { inconclusive: !Number.isFinite(initialMaxTemperature) || maxTemperatures.length === 0 }),
-      behaviorCheck('hydrogen-rises', 'hydrogen products sustain upward motion after formation', (
+      behaviorCheck('hydrogen-rises', 'hydrogen products rise into the headspace and remain there or sustain upward motion', (
         generatedGasEvidence?.status === 'pass'
         && generatedGasEvidence.minimumSustainedRiseM >= minimumHydrogenRise
       ), generatedGasEvidence, { inconclusive: generatedGasEvidence?.formed !== true })
@@ -1196,24 +2209,19 @@ export function evaluateStandardScenarioBehavior(scenario, probe) {
     ));
   }
 
-  return {
-    schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
-    status: checks.some((check) => check.status === 'fail')
-      ? 'fail'
-      : checks.some((check) => check.status === 'inconclusive')
-      ? 'inconclusive'
-      : 'pass',
-    presetId: scenario.presetId || null,
+  return standardScenarioBehaviorResult({
+    scenario,
     checkpointCount: checkpoints.length,
     checkpoints,
     phaseAwareEvidence: {
       volumeRatio: volumeRatioEvidence,
+      mechanicsStateAdvance,
       generatedGas: generatedGasEvidence,
       coldCeilingCondensation: condensationEvidence,
       condensedLaunch: launchEvidence
     },
     checks
-  };
+  });
 }
 
 function timestampSlug(date = new Date()) {
@@ -1309,6 +2317,8 @@ export function scenarioEnv({
     ULG_PROBE_TIMEOUT_MS: String(timeoutMs),
     ULG_PROBE_FAIL_ON_BAD: '1'
   };
+  delete env.ULG_PROBE_WORKER_PROGRESS_EVERY_STEPS;
+  delete env.ULG_PROBE_USE_MOUNTED_RESIDENT_SCHEDULER;
   // Child durability is controlled solely by the matrix's explicit opt-in,
   // rather than an unrelated inherited probe setting.
   delete env.ULG_PROBE_DURABLE_RELEASE_PUBLICATION;
@@ -1316,6 +2326,7 @@ export function scenarioEnv({
     env.ULG_PROBE_DURABLE_RELEASE_PUBLICATION = '1';
   }
   if (scenario.standardEnabled) {
+    env.ULG_PROBE_USE_MOUNTED_RESIDENT_SCHEDULER = '1';
     // The visual gate covers a desktop and a mobile preset. Without
     // ULG_VISUAL_MATRIX_MOBILE the matrix only ever ran 1280x800 at scale 1,
     // so the mobile half of the gate was never actually executed.
@@ -1340,6 +2351,20 @@ export function scenarioEnv({
     // expansion at J=0.1 as a condensed collapse.
     env.ULG_PROBE_MIN_J = '0.1';
     env.ULG_PROBE_MAX_J = '1000';
+    if (scenario.visualRendererMode === STANDARD_VISUAL_MATRIX_RENDERER_MODE) {
+      const requestedWorkerProgressEverySteps =
+        process.env.ULG_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS;
+      const workerProgressEverySteps = requestedWorkerProgressEverySteps == null
+        ? STANDARD_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS
+        : positiveInteger(requestedWorkerProgressEverySteps, null);
+      if (workerProgressEverySteps == null) {
+        throw new RangeError(
+          'ULG_VISUAL_MATRIX_WORKER_PROGRESS_EVERY_STEPS must be a positive integer'
+        );
+      }
+      env.ULG_PROBE_WORKER_PROGRESS_EVERY_STEPS =
+        String(workerProgressEverySteps);
+    }
   }
   if (scenario.phaseAwareAcceptance?.generatedGas) {
     const generatedGas = scenario.phaseAwareAcceptance.generatedGas;
@@ -1362,12 +2387,16 @@ export function scenarioEnv({
       )
     );
   }
-  if (scenario.visualRendererMode === 'native-webgpu-surface-consumer') {
+  if (
+    scenario.visualRendererMode === 'native-webgpu-surface-consumer'
+    || scenario.visualRendererMode === STANDARD_VISUAL_MATRIX_RENDERER_MODE
+  ) {
     env.ULG_PROBE_READBACK_MODE = 'no-full-readback';
     env.ULG_PROBE_RENDER_READBACK_MODE = 'no-full-readback';
     env.ULG_PROBE_RENDER_ROWS_READBACK_MODE = 'no-full-readback';
     env.ULG_PROBE_COMPACT_SUMMARY_MODE = 'final-only';
-    env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE = 'native-webgpu-surface-consumer';
+    env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE =
+      'native-webgpu-surface-consumer';
     env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS =
       process.env.ULG_VISUAL_MATRIX_NATIVE_SURFACE_VALIDATION_WAIT_MS || '1500';
   }
@@ -1437,16 +2466,31 @@ export function scenarioEnv({
   if (scenario.visualOnly === true) {
     env.ULG_PROBE_VISUAL_ONLY = '1';
   }
+  const captureFrameMax = positiveInteger(
+    process.env.ULG_VISUAL_MATRIX_FRAME_MAX,
+    DEFAULT_FRAME_MAX
+  );
+  const captureBatchCount = positiveInteger(
+    scenario?.batches,
+    batches
+  );
+  const captureFrameEvery = positiveInteger(
+    process.env.ULG_VISUAL_MATRIX_FRAME_EVERY,
+    Math.max(
+      1,
+      Math.ceil(captureBatchCount / Math.max(1, captureFrameMax - 1))
+    )
+  );
   if (process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES === '1') {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
     env.ULG_PROBE_FRAME_DIR = frameDir;
-    env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));
-    env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, DEFAULT_FRAME_MAX));
+    env.ULG_PROBE_FRAME_EVERY = String(captureFrameEvery);
+    env.ULG_PROBE_FRAME_MAX = String(captureFrameMax);
   } else if (captureFrames) {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
     env.ULG_PROBE_FRAME_DIR = frameDir;
-    env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));
-    env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, DEFAULT_FRAME_MAX));
+    env.ULG_PROBE_FRAME_EVERY = String(captureFrameEvery);
+    env.ULG_PROBE_FRAME_MAX = String(captureFrameMax);
   }
   return env;
 }
@@ -1548,11 +2592,20 @@ async function main() {
     const analysis = probe?.analysis || {};
     const expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe);
     const mechanicsIntegrator = inferMechanicsIntegrator(probe);
-    const effectiveRendererModes = effectiveVisualRendererModes(probe);
+    const effectiveRendererModes = effectiveVisualRendererModes(probe, {
+      residentOnly: scenario?.visualRenderOwnershipMode
+        === STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE
+    });
+    const effectiveRenderOwnershipModes =
+      effectiveVisualRenderOwnershipModes(probe);
+    const effectiveResidentComputeModes =
+      effectiveResidentComputeManagerModes(probe);
     const issues = synthesizeStandardScenarioIssues(scenario, probe, {
       expectedBehavior,
       mechanicsIntegrator,
-      rendererModes: effectiveRendererModes
+      rendererModes: effectiveRendererModes,
+      renderOwnershipModes: effectiveRenderOwnershipModes,
+      residentComputeManagerModes: effectiveResidentComputeModes
     });
     const visualSurfaceIssues = uniqueVisualSurfaceIssues(
       probe?.visualSurfaceIssues,
@@ -1562,6 +2615,7 @@ async function main() {
     results.push({
       label: scenario.label,
       presetId: scenario.presetId || null,
+      acceptanceTrack: scenario.acceptanceTrack || null,
       randomPair: scenario.randomPair || null,
       visualRendererMode: scenario.visualRendererMode || null,
       effectiveVisualRendererModes: effectiveRendererModes,
@@ -1569,6 +2623,24 @@ async function main() {
         ? effectiveRendererModes.length > 0
           && effectiveRendererModes.every((mode) => mode === scenario.visualRendererMode)
         : null,
+      visualRenderOwnershipMode: scenario.visualRenderOwnershipMode || null,
+      effectiveVisualRenderOwnershipModes: effectiveRenderOwnershipModes,
+      visualRenderOwnershipModeMatched: scenario.visualRenderOwnershipMode
+        ? effectiveRenderOwnershipModes.length > 0
+          && effectiveRenderOwnershipModes.every(
+            (mode) => mode === scenario.visualRenderOwnershipMode
+          )
+        : null,
+      residentComputeManagerMode: scenario.residentComputeManagerMode || null,
+      effectiveResidentComputeManagerModes: effectiveResidentComputeModes,
+      residentComputeManagerModeMatched: scenario.residentComputeManagerMode
+        ? effectiveResidentComputeModes.length > 0
+          && effectiveResidentComputeModes.every(
+            (mode) => mode === scenario.residentComputeManagerMode
+          )
+        : null,
+      workerSchedulePlan: scenario.workerSchedulePlan || null,
+      workerProgressEverySteps: scenario.workerProgressEverySteps ?? null,
       url: scenario.url,
       expectedMechanics: scenario.expectedMechanics || null,
       mechanicsIntegrator,
@@ -1576,6 +2648,7 @@ async function main() {
       timedOut: run.timedOut,
       status: probe?.status || null,
       analysisStatus: analysis.status || null,
+      fatalTermination: probe?.timeline?.fatalTermination || null,
       issues,
       issueCount: issues.length,
       visualSurfaceIssues,

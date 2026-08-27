@@ -1,3 +1,8 @@
+import {
+  serializeSphInitialBodies,
+  sphInitialBodiesFromLegacyDropBase
+} from './sphInitialBodies.js';
+
 export const SPH_PHASE_SCENARIO_PRESET_SCHEMA =
   'peercompute.ulg.sph-phase-scenario-preset.v0';
 
@@ -25,19 +30,94 @@ const COMMON_CONTROLS = Object.freeze({
   blob: '1'
 });
 
-function preset({ id, label, controls, runtime, validation }) {
+// UI presets and automated standard fixtures share one architecture source of
+// truth. Quantitative scenario tuning can still override these values, but a
+// menu selection now exercises the worker-owned SS lane instead of silently
+// falling back to a different main-thread topology.
+const COMMON_RUNTIME = Object.freeze({
+  renderer: 'native-webgpu',
+  surfaceDraw: 'native-webgpu-surface-consumer',
+  surfaceOverlay: '0',
+  renderOwnership: 'worker-owned-resident-render-producer',
+  workerOffscreenPresentation: '1',
+  workerParticleOverlay: '0',
+  residentWorkers: '1',
+  residentComputeManagerMode: 'worker-owned-resident-lane',
+  // This is the requested authenticated batch. Interactive presentation may
+  // apply a smaller safety maximum; the mounted controls publish both values
+  // instead of pretending the request is the effective schedule size.
+  residentStepsPerSchedule: '16',
+  contactSolver: '1',
+  ss: '1',
+  schroederLevel: '0',
+  schroederMinLevel: '0',
+  schroederMaxLevel: '0',
+  schroederPortableSummary: '1',
+  schroederActiveNodeIndex: '1',
+  schroederActiveNodeSortedIndex: '1',
+  schroederLawQueue: '1',
+  schroederLawNeighborCandidates: '1',
+  schroederCrossLevelCoupling: '0',
+  schroederPhaseVolumeMigration: '1',
+  schroederTwoLevel: '0',
+  schroederMechanicsFieldPairV2: '0'
+});
+
+const CESIUM_FLUORINE_TWO_LEVEL_BODIES = serializeSphInitialBodies(
+  sphInitialBodiesFromLegacyDropBase({
+    baseMaterial: 'F',
+    dropMaterial: 'Cs',
+    baseSizeM: [1, 1, 1],
+    dropSizeM: [0.6, 0.6, 0.6],
+    baseCenterM: [2, 0.5, 2],
+    dropCenterM: [2, 1.31, 2],
+    baseTemperatureK: 293.15,
+    dropTemperatureK: 293.15,
+    baseParticlesPerEdge: [5, 5, 5],
+    dropParticlesPerEdge: [5, 5, 5]
+  })
+);
+const CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M = Math.cbrt(
+  (3 * (0.6 / 5) ** 3) / (4 * Math.PI)
+);
+const CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M =
+  CESIUM_FLUORINE_FINE_SUPPORT_RADIUS_M / 1.5;
+
+function freezeValidation(validation) {
+  return Object.freeze({
+    ...validation,
+    checkpoints: Object.freeze((validation?.checkpoints || []).map((checkpoint) => (
+      Object.freeze({ ...checkpoint })
+    )))
+  });
+}
+
+function preset({
+  id,
+  label,
+  controls,
+  runtime,
+  validation,
+  frameworkValidation = null
+}) {
+  const frozenValidation = freezeValidation(validation);
   return Object.freeze({
     schema: SPH_PHASE_SCENARIO_PRESET_SCHEMA,
     id,
     label,
     controls: Object.freeze({ ...COMMON_CONTROLS, ...controls }),
-    runtime: Object.freeze({ ...(runtime || {}) }),
-    validation: Object.freeze({
-      ...validation,
-      checkpoints: Object.freeze((validation?.checkpoints || []).map((checkpoint) => (
-        Object.freeze({ ...checkpoint })
-      )))
-    })
+    runtime: Object.freeze({ ...COMMON_RUNTIME, ...(runtime || {}) }),
+    validation: frozenValidation,
+    ...(frameworkValidation
+      ? {
+          frameworkValidation: freezeValidation({
+            ...validation,
+            ...frameworkValidation,
+            checkpoints:
+              frameworkValidation.checkpoints ?? validation?.checkpoints
+          })
+        }
+      : {})
   });
 }
 
@@ -72,6 +152,20 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'flow', expectation: 'the falling cohort merges and the liquid free surface moves' },
         { id: 'boil', expectation: 'the 400 K floor produces rising water vapor' },
         { id: 'return', expectation: 'vapor cools near the 200 K ceiling, condenses, and descends' }
+      ]
+    },
+    frameworkValidation: {
+      acceptanceTrack: 'framework-liveness',
+      batches: 2,
+      batchSteps: 128,
+      // The bounded framework arm proves that both worker schedules reach the
+      // visible native surface. The 4.5 s span above remains exclusive to the
+      // scientific water-cycle calibration arm.
+      minVisualFrameTimeSpanS: 0.128,
+      checkpoints: [
+        { id: 'initial', expectation: 'both water cohorts enter the worker-owned spatial hierarchy' },
+        { id: 'thermal-active', expectation: 'mechanics, wall thermal transport, and phase-carrier closure execute' },
+        { id: 'bounded-terminal', expectation: 'two authenticated schedules advance and present without fallback' }
       ]
     }
   }),
@@ -130,6 +224,19 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'quench', expectation: 'iron emission falls while its solid fraction grows' },
         { id: 'late', expectation: 'steam rises into the headspace while meltwater remains below' }
       ]
+    },
+    frameworkValidation: {
+      acceptanceTrack: 'framework-liveness',
+      batches: 2,
+      batchSteps: 128,
+      // Keep the full 2 s quench horizon on the scientific arm while requiring
+      // the bounded framework capture to span both 128-step worker schedules.
+      minVisualFrameTimeSpanS: 0.128,
+      checkpoints: [
+        { id: 'initial', expectation: 'refined iron and ice carriers enter the worker-owned spatial hierarchy' },
+        { id: 'surface-stress-active', expectation: 'the exact surface-stress lifecycle submits on every schedule' },
+        { id: 'bounded-terminal', expectation: 'two authenticated schedules advance and present without fallback' }
+      ]
     }
   }),
   preset({
@@ -149,15 +256,32 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       // The sodium starts 1 cm above the water. At the stable 1 ms preview
       // step, a 32-step visual batch ends before the ~45 ms free-fall contact
-      // time and therefore looks frozen. Amortize the resident submission and
-      // present 128 ms per completed batch so the first visible continuation
-      // contains real contact-driven motion. Explicit URL values still win.
+      // time and therefore looks frozen. A 64-step worker batch crosses that
+      // contact horizon, drains the shared compute/presentation queue every 16
+      // steps, and reaches one authority-admitting terminal drain at the chunk
+      // boundary. The former single-fence 128-step default could lose the
+      // browser WebGPU device before admission. Explicit URL values still win.
       sdt: '0.001',
       cfl: '0.6',
       cflSafety: '0.4',
       avAlpha: '0',
-      residentStepsPerSchedule: '128',
-      residentComputeManagerMode: 'direct',
+      // Sodium-water acceptance requires real NaOH/H2 mechanics carriers.
+      // The non-SS resident-product sidecar can render/account reaction mass,
+      // but it cannot transport an H2 plume. Route the preset through the
+      // canonical single-level spatial placement authority by default; an
+      // explicit ?ss=0 remains available for degraded-path diagnostics.
+      ss: '1',
+      // The default product reserve is one quarter of the live population.
+      // This 2.56 s canned horizon empirically activates about 0.84 product
+      // carriers per initial live particle, so provision one full live cohort
+      // while the placement transaction still fails closed at exhaustion.
+      reactionProductReserveMinimumLiveFraction: '1',
+      residentStepsPerSchedule: '64',
+      // Keep the menu preset on the same worker-owned authority route as the
+      // standard fixture. `direct` here used to override COMMON_RUNTIME and
+      // made this one canned scenario silently exercise the retired page-side
+      // continuation path.
+      residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',
       // Look across the contact band instead of down through the remaining
       // opaque sodium. These values are normalized by the box dimensions, so
@@ -182,6 +306,17 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'plume', expectation: 'hot products expand upward with evolving vapor and smoke color' },
         { id: 'late', expectation: 'reactants and products remain mass-bounded after the violent transient' }
       ]
+    },
+    frameworkValidation: {
+      acceptanceTrack: 'framework-liveness',
+      batches: 2,
+      batchSteps: 128,
+      minVisualFrameTimeSpanS: 0.128,
+      checkpoints: [
+        { id: 'initial', expectation: 'sodium and water enter the worker-owned spatial hierarchy' },
+        { id: 'reaction-active', expectation: 'thermal, reaction-discovery, reaction-product, and carrier stages execute' },
+        { id: 'bounded-terminal', expectation: 'two authenticated schedules advance and present without fallback' }
+      ]
     }
   }),
   preset({
@@ -190,6 +325,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     controls: {
       drop: 'Cs',
       base: 'F',
+      dropn: '5',
+      basen: '5',
       dropt: '293.15',
       baset: '293.15',
       wymin: '293.15',
@@ -197,6 +334,27 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       boxx: '4',
       boxy: '4',
       boxz: '4'
+    },
+    runtime: {
+      // Cs/F is deliberately an energetic architecture fixture. Keep the
+      // execution CFL below one cell per step, but soften the preview-only
+      // modulus cap so the two-level worker route exercises and verifies its
+      // real operators instead of immediately rolling the whole step back.
+      // Scientific CFL/stiffness convergence remains a later calibration
+      // gate; neither value weakens the fail-closed terminal receipt.
+      cfl: '0.8',
+      cflSafety: '0.2',
+      bodies: CESIUM_FLUORINE_TWO_LEVEL_BODIES,
+      schroederMaxLevel: '1',
+      schroederBaseGridSpacingM:
+        String(CESIUM_FLUORINE_TWO_LEVEL_BASE_DX_M),
+      schroederTwoLevel: '1',
+      schroederTwoLevelAuthority: 'authoritative',
+      schroederTwoLevelSubsteps: '2',
+      // Generic coupling candidates are observation-only. Authoritative
+      // adjacent-level communication uses paired fields + terminal reflux.
+      schroederCrossLevelCoupling: '0',
+      schroederMechanicsFieldPairV2: '1'
     },
     validation: {
       batches: 10,
@@ -212,6 +370,23 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'ignition', expectation: 'contact produces an immediate exothermic CsF reaction front' },
         { id: 'runaway', expectation: 'radiation and conduction spread heat beyond the first contact layer' },
         { id: 'late', expectation: 'the hot product cloud cools without losing mass or leaving frozen rows' }
+      ]
+    },
+    frameworkValidation: {
+      // This bounded arm owns refactor/framework acceptance: it reaches real
+      // CsF creation, melting, cooling, two-level continuation, terminal
+      // reflux admission, StateManager commit, and worker presentation. The
+      // longer validation horizon above remains a separate fail-closed
+      // scientific-calibration diagnostic until its energetic mechanics are
+      // calibrated; it is not silently weakened or treated as passing.
+      acceptanceTrack: 'framework-liveness',
+      batches: 2,
+      batchSteps: 128,
+      minVisualFrameTimeSpanS: 0.128,
+      checkpoints: [
+        { id: 'initial', expectation: 'cesium and fluorine populate the declared adjacent mechanics levels' },
+        { id: 'reaction-active', expectation: 'the exact worker route creates and advects hot CsF products' },
+        { id: 'bounded-terminal', expectation: 'two terminal reflux receipts commit and present advancing state' }
       ]
     }
   })

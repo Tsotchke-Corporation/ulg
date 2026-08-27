@@ -4,6 +4,10 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+} from '../../../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
+import {
+  webGpuBufferDevice,
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
@@ -42,6 +46,20 @@ export const ULG_SCHROEDER_FUSED_COARSE_TERMINAL_TRANSACTION_SCHEMA =
   'peercompute.ulg.schroeder-fused-coarse-terminal-transaction.v0';
 export const ULG_SCHROEDER_FUSED_MECHANICS_PENDING_CLOSURE_SCHEMA =
   'peercompute.ulg.schroeder-fused-mechanics-pending-closure.v0';
+export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_SCHEMA =
+  'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-target.v0';
+export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA =
+  'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-copy.v0';
+export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION =
+  'schroederFusedTerminalRefluxReceiptTarget';
+
+const GPU_BUFFER_USAGE = {
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+  COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8
+};
+const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
+export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH =
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS * UINT32_BYTES;
 
 const macroAuthorityOrigins = new WeakMap();
 const particleContinuationOrigins = new WeakMap();
@@ -50,6 +68,8 @@ const fineTransactionOrigins = new WeakMap();
 const coarseTerminalTransactionOrigins = new WeakMap();
 const pendingClosureOrigins = new WeakMap();
 const mechanicsFieldPublicationReceiptOrigins = new WeakMap();
+const terminalRefluxReceiptTargetOrigins = new WeakMap();
+const terminalRefluxReceiptTargetBuffers = new WeakMap();
 
 const FINE_STAGE_ORDER = Object.freeze([
   'p2g',
@@ -213,6 +233,40 @@ function refluxLedgerAdmitted(device, ledger, {
   } catch {
     return false;
   }
+}
+
+function refluxLedgerAdmissionFailure(device, ledger, {
+  parentFieldView,
+  fineSubstepCount,
+  fineLevel,
+  coarseLevel
+}) {
+  const probes = [
+    ['ledger-core', {}],
+    ['coarse-capacity', {
+      minimumCoarseFieldCapacity: parentFieldView?.coarseFieldCapacity
+    }],
+    ['fine-substep-count', { fineSubstepCount }],
+    ['fine-level', { fineLevel }],
+    ['coarse-level', { coarseLevel }],
+    ['coarse-grid-spacing', {
+      coarseGridSpacingM: parentFieldView?.coarseFieldView?.gridSpacingM
+    }]
+  ];
+  for (const [label, options] of probes) {
+    try {
+      if (
+        validateLocallyOwnedSchroederCrossLevelRefluxLedgerGpu(
+          device,
+          ledger,
+          options
+        ) !== true
+      ) return label;
+    } catch {
+      return label;
+    }
+  }
+  return 'combined-contract';
 }
 
 function macroMatchesOrigin(device, macroAuthority, origin) {
@@ -381,39 +435,65 @@ export function createSchroederTwoLevelMacroAuthority({
   const resolvedCoarseLevel = Number(coarseLevel);
   const resolvedFineDt = positiveFinite(fineDt, 'fineDt');
   const resolvedMacroDt = positiveFinite(macroDt, 'macroDt');
-  if (
-    !device
-    || generation?.selected !== true
-    || generation?.ready !== true
-    || execution?.submitPerformed !== true
-    || execution?.released === true
-    || parentFieldView?.fineLevel !== resolvedFineLevel
-    || parentFieldView?.coarseLevel !== resolvedCoarseLevel
-    || parentFieldView?.exactLevelCount !== 2
-    || !parentFieldView?.fineFieldView
-    || !parentFieldView?.coarseFieldView
-    || generation.source?.sourceStateBuffer
-      !== sourceSphParticleUpload?.stateBuffer
-    || parentFieldView.fineFieldView.identityBuffer
-      !== sourceSphParticleUpload?.identityBuffer
-    || parentFieldView.coarseFieldView.identityBuffer
-      !== sourceSphParticleUpload?.identityBuffer
-    || sourceSphParticleUpload?.status !== 'webgpu-uploaded'
-    || sourceMlsMpmParticleUpload?.status !== 'webgpu-uploaded'
-    || sourceSphParticleUpload?.particleCount
-      !== sourceMlsMpmParticleUpload?.particleCount
-    || Math.fround(resolvedFineDt * substepCount)
-      !== Math.fround(resolvedMacroDt)
-    || !refluxLedgerAdmitted(device, refluxLedger, {
+  const macroAuthorityRequirements = Object.freeze({
+    'device-present': Boolean(device),
+    'generation-live': generation?.selected === true
+      && generation?.ready === true,
+    'generation-submitted': execution?.submitPerformed === true
+      && execution?.released !== true,
+    'parent-levels-exact': parentFieldView?.fineLevel === resolvedFineLevel
+      && parentFieldView?.coarseLevel === resolvedCoarseLevel
+      && parentFieldView?.exactLevelCount === 2,
+    'parent-fields-present': Boolean(
+      parentFieldView?.fineFieldView
+      && parentFieldView?.coarseFieldView
+    ),
+    'source-state-current': generation?.source?.sourceStateBuffer
+      === sourceSphParticleUpload?.stateBuffer,
+    'fine-identity-current': parentFieldView?.fineFieldView?.identityBuffer
+      === sourceSphParticleUpload?.identityBuffer,
+    'coarse-identity-current': parentFieldView?.coarseFieldView?.identityBuffer
+      === sourceSphParticleUpload?.identityBuffer,
+    'sph-upload-ready': sourceSphParticleUpload?.status === 'webgpu-uploaded',
+    'mls-upload-ready': sourceMlsMpmParticleUpload?.status === 'webgpu-uploaded',
+    'particle-count-paired': sourceSphParticleUpload?.particleCount
+      === sourceMlsMpmParticleUpload?.particleCount,
+    'macro-time-exact': Math.fround(resolvedFineDt * substepCount)
+      === Math.fround(resolvedMacroDt),
+    'reflux-ledger-admitted': refluxLedgerAdmitted(device, refluxLedger, {
       parentFieldView,
       fineSubstepCount: substepCount,
       fineLevel: resolvedFineLevel,
       coarseLevel: resolvedCoarseLevel
     })
-  ) {
-    throw new TypeError(
-      'fused fine-substep macro authority requires one exact live frozen generation, particle family, parent-field dictionary, and reflux ledger'
+  });
+  const failedMacroAuthorityRequirements = Object.entries(
+    macroAuthorityRequirements
+  ).filter(([, ready]) => ready !== true).map(([requirement]) => requirement);
+  if (failedMacroAuthorityRequirements.length > 0) {
+    const reportedFailedRequirements = failedMacroAuthorityRequirements.map(
+      (requirement) => requirement !== 'reflux-ledger-admitted'
+        ? requirement
+        : `${requirement}:${refluxLedgerAdmissionFailure(
+            device,
+            refluxLedger,
+            {
+              parentFieldView,
+              fineSubstepCount: substepCount,
+              fineLevel: resolvedFineLevel,
+              coarseLevel: resolvedCoarseLevel
+            }
+          )}`
     );
+    const error = new TypeError(
+      'fused fine-substep macro authority requires one exact live frozen generation, particle family, parent-field dictionary, and reflux ledger'
+        + ` (${reportedFailedRequirements.join(', ')})`
+    );
+    error.code = 'ERR_SCHROEDER_FUSED_MACRO_AUTHORITY';
+    error.failedRequirements = Object.freeze([
+      ...reportedFailedRequirements
+    ]);
+    throw error;
   }
   const completionOrdinal = exactU32(
     refluxLedger.completionOrdinal,
@@ -3788,6 +3868,238 @@ export function validateSchroederFusedMechanicsPendingClosure(
     && (finalMlsMpmParticleUpload == null
       || finalMlsMpmParticleUpload === closureOrigin.finalMlsMpmParticleUpload)
   );
+}
+
+export function createSchroederFusedTerminalRefluxReceiptTarget({
+  device,
+  scheduleId,
+  laneId,
+  stateKey,
+  stepOrdinal,
+  targetBuffer,
+  targetOffsetBytes,
+  expectedCompletionOrdinal,
+  expectedFineSubstepCount,
+  expectedFineLevel,
+  expectedCoarseLevel
+} = {}) {
+  const byteLength = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+  const resolvedStepOrdinal = Number(stepOrdinal);
+  const resolvedOffset = Number(targetOffsetBytes);
+  const usage = Number(targetBuffer?.usage);
+  if (
+    !device
+    || typeof scheduleId !== 'string'
+    || scheduleId.length === 0
+    || typeof laneId !== 'string'
+    || laneId.length === 0
+    || typeof stateKey !== 'string'
+    || stateKey.length === 0
+    || !Number.isSafeInteger(resolvedStepOrdinal)
+    || resolvedStepOrdinal < 1
+    || !Number.isSafeInteger(resolvedOffset)
+    || resolvedOffset !== (resolvedStepOrdinal - 1) * byteLength
+    || !targetBuffer
+    || webGpuBufferDevice(targetBuffer) !== device
+    || targetBuffer.mapState !== 'unmapped'
+    || !Number.isSafeInteger(usage)
+    || (usage & (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST))
+      !== (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST)
+    || Number(targetBuffer.size) < resolvedOffset + byteLength
+    || !Number.isSafeInteger(Number(expectedCompletionOrdinal))
+    || !Number.isSafeInteger(Number(expectedFineSubstepCount))
+    || Number(expectedFineSubstepCount) < 1
+    || !Number.isInteger(Number(expectedFineLevel))
+    || !Number.isInteger(Number(expectedCoarseLevel))
+  ) {
+    throw new TypeError(
+      'terminal reflux receipt target requires one exact unmapped schedule ring slot'
+    );
+  }
+  let bufferOrigin = terminalRefluxReceiptTargetBuffers.get(targetBuffer);
+  if (!bufferOrigin) {
+    bufferOrigin = {
+      deviceId: webGpuDeviceId(device),
+      scheduleId,
+      laneId,
+      stateKey,
+      reservedOffsets: new Set()
+    };
+    terminalRefluxReceiptTargetBuffers.set(targetBuffer, bufferOrigin);
+  }
+  if (
+    bufferOrigin.deviceId !== webGpuDeviceId(device)
+    || bufferOrigin.scheduleId !== scheduleId
+    || bufferOrigin.laneId !== laneId
+    || bufferOrigin.stateKey !== stateKey
+    || bufferOrigin.reservedOffsets.has(resolvedOffset)
+  ) {
+    throw new Error(
+      'terminal reflux receipt target ring identity or slot reservation is stale'
+    );
+  }
+  const target = Object.freeze({
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_SCHEMA,
+    scheduleId,
+    laneId,
+    stateKey,
+    stepOrdinal: resolvedStepOrdinal,
+    targetBuffer,
+    targetOffsetBytes: resolvedOffset,
+    targetByteLength: byteLength,
+    expectedCompletionOrdinal: Number(expectedCompletionOrdinal),
+    expectedFineSubstepCount: Number(expectedFineSubstepCount),
+    expectedFineLevel: Number(expectedFineLevel),
+    expectedCoarseLevel: Number(expectedCoarseLevel)
+  });
+  const origin = {
+    target,
+    deviceId: webGpuDeviceId(device),
+    scheduleId,
+    laneId,
+    stateKey,
+    stepOrdinal: resolvedStepOrdinal,
+    targetBuffer,
+    targetOffsetBytes: resolvedOffset,
+    targetByteLength: byteLength,
+    expectedCompletionOrdinal: Number(expectedCompletionOrdinal),
+    expectedFineSubstepCount: Number(expectedFineSubstepCount),
+    expectedFineLevel: Number(expectedFineLevel),
+    expectedCoarseLevel: Number(expectedCoarseLevel),
+    consumed: false
+  };
+  terminalRefluxReceiptTargetOrigins.set(target, origin);
+  bufferOrigin.reservedOffsets.add(resolvedOffset);
+  return target;
+}
+
+/**
+ * Queue one compact, schedule-owned copy of the exact terminal reflux header.
+ *
+ * The caller is deliberately unable to select a reflux source: the source is
+ * recovered from the module-private pending-closure origin. The returned
+ * receipt contains only cloneable scalar provenance; it is not authority by
+ * itself. Authority is established after the schedule terminal fence maps and
+ * decodes the copied header.
+ */
+export function encodeSchroederFusedTerminalRefluxReceiptCopy(
+  device,
+  closure,
+  target
+) {
+  const closureOrigin = pendingClosureOrigins.get(closure);
+  const macroAuthority = closureOrigin?.macroAuthority ?? null;
+  const refluxLedger = macroAuthority?.refluxLedger ?? null;
+  const targetOrigin = terminalRefluxReceiptTargetOrigins.get(target);
+  const byteLength = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+  const targetBuffer = targetOrigin?.targetBuffer ?? null;
+  const targetOffsetBytes = Number(targetOrigin?.targetOffsetBytes);
+  const stepOrdinal = Number(targetOrigin?.stepOrdinal);
+  const expectedCompletionOrdinal = Number(
+    targetOrigin?.expectedCompletionOrdinal
+  );
+  const expectedFineSubstepCount = Number(
+    targetOrigin?.expectedFineSubstepCount
+  );
+  const expectedFineLevel = Number(targetOrigin?.expectedFineLevel);
+  const expectedCoarseLevel = Number(targetOrigin?.expectedCoarseLevel);
+  const targetUsage = Number(targetBuffer?.usage);
+  if (
+    !validateSchroederFusedMechanicsPendingClosure(device, closure)
+    || closureOrigin?.terminalRefluxReceiptCopy != null
+    || !targetOrigin
+    || targetOrigin.target !== target
+    || targetOrigin.deviceId !== webGpuDeviceId(device)
+    || targetOrigin.consumed === true
+    || !Object.isFrozen(target)
+    || target?.schema
+      !== ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_SCHEMA
+    || typeof target.scheduleId !== 'string'
+    || target.scheduleId.length === 0
+    || typeof target.laneId !== 'string'
+    || target.laneId.length === 0
+    || typeof target.stateKey !== 'string'
+    || target.stateKey.length === 0
+    || !Number.isSafeInteger(stepOrdinal)
+    || stepOrdinal < 1
+    || !Number.isSafeInteger(targetOffsetBytes)
+    || targetOffsetBytes < 0
+    || targetOffsetBytes % UINT32_BYTES !== 0
+    || targetOffsetBytes !== (stepOrdinal - 1) * byteLength
+    || Number(target.targetByteLength) !== byteLength
+    || !targetBuffer
+    || targetBuffer.destroyed === true
+    || webGpuBufferDevice(targetBuffer) !== device
+    || targetBuffer.mapState !== 'unmapped'
+    || targetBuffer === refluxLedger?.buffer
+    || Number(targetBuffer.size) < targetOffsetBytes + byteLength
+    || !Number.isSafeInteger(targetUsage)
+    || (targetUsage & (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST))
+      !== (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST)
+    || !Number.isSafeInteger(expectedCompletionOrdinal)
+    || expectedCompletionOrdinal !== macroAuthority?.completionOrdinal
+    || !Number.isSafeInteger(expectedFineSubstepCount)
+    || expectedFineSubstepCount !== macroAuthority?.fineSubstepCount
+    || !Number.isSafeInteger(expectedFineLevel)
+    || expectedFineLevel !== macroAuthority?.fineLevel
+    || !Number.isSafeInteger(expectedCoarseLevel)
+    || expectedCoarseLevel !== macroAuthority?.coarseLevel
+    || refluxLedger?.evidenceBuffer !== refluxLedger?.buffer
+    || refluxLedger?.evidenceOffsetBytes !== 0
+    || refluxLedger?.evidenceByteLength !== byteLength
+    || validateLocallyOwnedSchroederCrossLevelRefluxLedgerGpu(
+      device,
+      refluxLedger,
+      {
+        minimumCoarseFieldCapacity:
+          macroAuthority.parentFieldView.coarseFieldCapacity,
+        fineSubstepCount: expectedFineSubstepCount,
+        fineLevel: expectedFineLevel,
+        coarseLevel: expectedCoarseLevel,
+        coarseGridSpacingM:
+          macroAuthority.parentFieldView.coarseFieldView.gridSpacingM
+      }
+    ) !== true
+    || typeof device?.createCommandEncoder !== 'function'
+    || typeof device?.queue?.submit !== 'function'
+  ) {
+    const error = new Error(
+      'terminal reflux receipt copy requires one exact live fused closure and schedule-owned target'
+    );
+    error.code = 'ERR_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET';
+    throw error;
+  }
+  const encoder = device.createCommandEncoder({
+    label: `ulg-schroeder-terminal-reflux-receipt-${target.scheduleId}-${stepOrdinal}`
+  });
+  encoder.copyBufferToBuffer(
+    refluxLedger.evidenceBuffer,
+    refluxLedger.evidenceOffsetBytes,
+    targetBuffer,
+    targetOffsetBytes,
+    byteLength
+  );
+  device.queue.submit([encoder.finish()]);
+  const receipt = Object.freeze({
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
+    status: 'terminal-reflux-header-copy-submitted-unverified',
+    scheduleId: target.scheduleId,
+    laneId: target.laneId,
+    stateKey: target.stateKey,
+    stepOrdinal,
+    targetOffsetBytes,
+    targetByteLength: byteLength,
+    completionOrdinal: macroAuthority.completionOrdinal,
+    macroOwnerId: refluxLedger.macroOwnerId,
+    ownerGeneration: refluxLedger.ownerGeneration,
+    fineSubstepCount: macroAuthority.fineSubstepCount,
+    fineLevel: macroAuthority.fineLevel,
+    coarseLevel: macroAuthority.coarseLevel,
+    queueSubmissionStatus: 'copy-submitted-unverified'
+  });
+  targetOrigin.consumed = true;
+  closureOrigin.terminalRefluxReceiptCopy = receipt;
+  return receipt;
 }
 
 export function publishSchroederFusedMechanicsPendingClosure(

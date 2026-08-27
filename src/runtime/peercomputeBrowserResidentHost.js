@@ -998,6 +998,39 @@ function normalizeMechanicsCompactBufferSnapshot({
       resolvedParticleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
       'mlsMpmMechanics'
     );
+    const identityRequired = snapshot.identityRequired === true;
+    const identitySource = snapshot.sphIdentity
+      ?? snapshot.sphIdentityRows
+      ?? snapshot.identity
+      ?? null;
+    const identityProvided = identitySource != null;
+    if (
+      (identityRequired || identityProvided)
+      && snapshot.identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+    ) {
+      throw new TypeError(
+        'compact buffer snapshot identity rows require the canonical identity schema'
+      );
+    }
+    if (
+      identityRequired
+      && (
+        Number(snapshot.identityStrideUints) !== SPH_GPU_PARTICLE_IDENTITY_UINTS
+        || Number(snapshot.identityStrideBytes)
+          !== SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+        || Number(snapshot.sphIdentityByteLength)
+          !== resolvedParticleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS
+            * Uint32Array.BYTES_PER_ELEMENT
+      )
+    ) {
+      throw new TypeError('compact buffer snapshot identity ABI metadata is incomplete');
+    }
+    const sphIdentity = snapshotUint32Array(
+      identitySource,
+      resolvedParticleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS,
+      'sphIdentity',
+      { required: identityRequired }
+    );
     return {
       status: 'validated-compact-buffer-snapshot-ready',
       reason: 'compact-candidate-carries-validated-portable-buffer-snapshot',
@@ -1012,12 +1045,23 @@ function normalizeMechanicsCompactBufferSnapshot({
         dimension: finiteSeedNumber(snapshot.dimension, 3),
         smoothingLengthM: finiteSeedNumber(snapshot.smoothingLengthM, 0),
         phaseCarrierPlan,
+        identityRequired,
+        identitySchema: snapshot.identitySchema
+          ?? ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+        identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
+        identityStrideBytes:
+          SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+        sphIdentityByteLength: sphIdentity.byteLength,
+        identityRevision: snapshot.identityRevision ?? null,
+        renderDomainKeys: { ...(snapshot.renderDomainKeys || {}) },
+        sphIdentity,
         sphState,
         sphThermo,
         mlsMpmMechanics
       },
       byteLength: bufferByteLength(sphState)
         + bufferByteLength(sphThermo)
+        + bufferByteLength(sphIdentity)
         + bufferByteLength(mlsMpmMechanics)
     };
   } catch (error) {
@@ -2004,7 +2048,9 @@ function snapshotUint32Array(value, expectedLength, label, { required = false } 
   if (value instanceof Uint32Array) {
     out = new Uint32Array(value);
   } else if (ArrayBuffer.isView(value)) {
-    out = new Uint32Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    throw new TypeError(
+      `compact buffer snapshot ${label} must use Uint32Array identity rows`
+    );
   } else if (value instanceof ArrayBuffer) {
     out = new Uint32Array(value.slice(0));
   } else if (Array.isArray(value)) {
@@ -2063,14 +2109,32 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     'mlsMpmMechanics'
   );
   const identityRequired = snapshot.identityRequired === true;
+  const identitySource = snapshot.sphIdentity
+    ?? snapshot.sphIdentityRows
+    ?? snapshot.identity
+    ?? null;
+  const identityProvided = identitySource != null;
   if (
-    identityRequired
+    (identityRequired || identityProvided)
     && snapshot.identitySchema !== ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
   ) {
     throw new TypeError('compact buffer snapshot arbitrary domains require the particle identity schema');
   }
+  if (
+    (identityRequired || identityProvided)
+    && (
+      Number(snapshot.identityStrideUints) !== SPH_GPU_PARTICLE_IDENTITY_UINTS
+      || Number(snapshot.identityStrideBytes)
+        !== SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+      || Number(snapshot.sphIdentityByteLength)
+        !== particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS
+          * Uint32Array.BYTES_PER_ELEMENT
+    )
+  ) {
+    throw new TypeError('compact buffer snapshot particle identity ABI metadata is incomplete');
+  }
   const sphIdentity = snapshotUint32Array(
-    snapshot.sphIdentity || snapshot.sphIdentityRows || snapshot.identity,
+    identitySource,
     particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS,
     'sphIdentity',
     { required: identityRequired }

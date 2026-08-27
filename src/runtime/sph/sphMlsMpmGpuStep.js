@@ -11522,7 +11522,13 @@ export function resolvePhaseVolumeAmbientBuoyancyExecution({
   });
   const productAwareP2gRequired =
     residentProductMassRequiresProductAwareP2g(residentProductMass);
-  const required = authorityRequired && !productAwareP2gRequired;
+  // Retained product rows select the mechanics-field P2G admission path; they
+  // are not authority to omit ambient physics. That path authenticates the
+  // live product prefix on-GPU and fails closed unless it is gas-only with no
+  // mechanics scatter. The older host-side skip silently removed buoyancy as
+  // soon as any reaction history existed, even when every product was already
+  // carried by the canonical phase topology.
+  const required = authorityRequired;
   return {
     requested,
     authorityRequired,
@@ -11530,11 +11536,7 @@ export function resolvePhaseVolumeAmbientBuoyancyExecution({
     productAwareP2gRequired,
     skipReason:
       requested && !required
-        ? (
-            productAwareP2gRequired && authorityRequired
-              ? 'resident-product-mass-requires-dense-p2g-compatibility'
-              : 'noncanonical-spatial-authority-not-selected'
-          )
+        ? 'noncanonical-spatial-authority-not-selected'
         : null
   };
 }
@@ -23174,7 +23176,15 @@ function firstMechanicsWorkerPublicationBlocker({
   return null;
 }
 
-function buildMechanicsWorkerCompactPublicationCandidate({
+function workerStageLaneSummaryProvesZeroReadback(summary = null) {
+  return Boolean(
+    summary?.readbackMode === NO_FULL_READBACK_MODE
+    && summary?.fullReadbackPerformed !== true
+    && finiteNumber(summary?.copyBudgetReadbackBytes, 0) === 0
+  );
+}
+
+export function buildMechanicsWorkerCompactPublicationCandidate({
   stageExecution = null,
   stageLaneSummaries = {},
   stageWorkerResidencyStatuses = {},
@@ -23198,6 +23208,18 @@ function buildMechanicsWorkerCompactPublicationCandidate({
   );
   const stageReadbackModes = Object.fromEntries(
     MECHANICS_STAGE_ORDER.map((stageId) => [stageId, stageLaneSummaries[stageId]?.readbackMode || null])
+  );
+  const stageFullReadbackPerformed = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [
+      stageId,
+      stageLaneSummaries[stageId]?.fullReadbackPerformed === true
+    ])
+  );
+  const stageCopyBudgetReadbackBytes = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [
+      stageId,
+      finiteNumber(stageLaneSummaries[stageId]?.copyBudgetReadbackBytes, 0)
+    ])
   );
   const stageWorkerWebGpuStatuses = Object.fromEntries(
     MECHANICS_STAGE_ORDER.map((stageId) => [
@@ -23226,8 +23248,7 @@ function buildMechanicsWorkerCompactPublicationCandidate({
   ));
   const allWebGpuBackends = MECHANICS_STAGE_ORDER.every((stageId) => stageBackends[stageId] === 'webgpu');
   const noFullReadback = MECHANICS_STAGE_ORDER.every((stageId) => (
-    stageReadbackModes[stageId] === NO_FULL_READBACK_MODE
-      && stageLaneSummaries[stageId]?.normalHotLoopReadbackFree === true
+    workerStageLaneSummaryProvesZeroReadback(stageLaneSummaries[stageId])
   ));
   const blocker = firstMechanicsWorkerPublicationBlocker({
     workerRunnerSupplied,
@@ -23282,6 +23303,8 @@ function buildMechanicsWorkerCompactPublicationCandidate({
     observedStageOrder: (stageExecution?.stageResults || []).map((entry) => entry.stageId).filter(Boolean),
     stageBackends,
     stageReadbackModes,
+    stageFullReadbackPerformed,
+    stageCopyBudgetReadbackBytes,
     stageWorkerWebGpuStatuses,
     stageWorkerResidencyStatuses: { ...stageWorkerResidencyStatuses },
     stageWorkerRetainedBufferRefCounts,
@@ -23353,6 +23376,8 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     || pressureSummary.pressureInterfaceGasCellFieldAdmissionApproved === true;
   const backend = pressureSummary.backend || null;
   const readbackMode = pressureSummary.readbackMode || null;
+  const noFullReadback =
+    workerStageLaneSummaryProvesZeroReadback(pressureSummary);
   const workerResidencyStatus = stageWorkerResidencyStatuses[PRESSURE_INTERFACE_STAGE_ID] || null;
   const solverStatus = pressureSummary.pressureInterfaceForceSolverStatus || null;
   const evidencePassed = pressureSummary.pressureInterfaceEvidencePassed === true;
@@ -23385,7 +23410,7 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     blocker = 'pressure-interface-worker-residency-not-ready';
   } else if (!backendAllowed) {
     blocker = 'pressure-interface-worker-webgpu-retained-buffer-required';
-  } else if (readbackMode !== NO_FULL_READBACK_MODE || pressureSummary.normalHotLoopReadbackFree !== true) {
+  } else if (!noFullReadback) {
     blocker = 'pressure-interface-no-full-readback-required';
   } else if (!evidencePassed) {
     blocker = 'pressure-interface-force-row-evidence-not-passed';
@@ -23417,7 +23442,7 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       : blocker,
     sameDeviceMainThreadHandlesAvailable: false,
     workerLocalRetainedRefsOnly: true,
-    compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && pressureSummary.normalHotLoopReadbackFree === true
+    compactSummaryStatus: noFullReadback
       ? 'worker-pressure-interface-compact-summary-required'
       : 'blocked-full-readback-mode',
     compactSummaryRequired: true,
@@ -23429,6 +23454,15 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     observedStageOrder: stageResults.map((entry) => entry.stageId).filter(Boolean),
     stageBackends: { [PRESSURE_INTERFACE_STAGE_ID]: backend },
     stageReadbackModes: { [PRESSURE_INTERFACE_STAGE_ID]: readbackMode },
+    stageFullReadbackPerformed: {
+      [PRESSURE_INTERFACE_STAGE_ID]: pressureSummary.fullReadbackPerformed === true
+    },
+    stageCopyBudgetReadbackBytes: {
+      [PRESSURE_INTERFACE_STAGE_ID]: finiteNumber(
+        pressureSummary.copyBudgetReadbackBytes,
+        0
+      )
+    },
     stageWorkerResidencyStatuses: { [PRESSURE_INTERFACE_STAGE_ID]: workerResidencyStatus },
     pressureInterfaceEvidencePassed: evidencePassed,
     pressureInterfaceAuthoritativeMutation: pressureSummary.pressureInterfaceAuthoritativeMutation ?? null,
@@ -23621,6 +23655,8 @@ function buildThermalPhaseWorkerCompactPublicationCandidate({
   const hasThermoRef = workerRetainedThermoBufferRefs.length > 0 || retainedThermoBufferRefs.length > 0;
   const backend = thermalSummary.backend || null;
   const readbackMode = thermalSummary.readbackMode || null;
+  const noFullReadback =
+    workerStageLaneSummaryProvesZeroReadback(thermalSummary);
   const workerResidencyStatus = stageWorkerResidencyStatuses[THERMAL_PHASE_STAGE_ID] || null;
   const blocker = !workerRunnerSupplied
     ? 'worker-runner-not-supplied'
@@ -23630,7 +23666,7 @@ function buildThermalPhaseWorkerCompactPublicationCandidate({
         ? 'thermal-phase-worker-residency-not-ready'
         : (backend !== 'webgpu'
           ? 'thermal-phase-webgpu-backend-not-proven'
-          : (readbackMode !== NO_FULL_READBACK_MODE || thermalSummary.normalHotLoopReadbackFree !== true
+          : (!noFullReadback
             ? 'thermal-phase-no-full-readback-required'
             : (!hasThermoRef
               ? 'worker-retained-thermal-buffer-ref-missing'
@@ -23652,7 +23688,7 @@ function buildThermalPhaseWorkerCompactPublicationCandidate({
       : blocker,
     sameDeviceMainThreadHandlesAvailable: false,
     workerLocalRetainedRefsOnly: true,
-    compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && thermalSummary.normalHotLoopReadbackFree === true
+    compactSummaryStatus: noFullReadback
       ? 'worker-thermal-phase-compact-summary-required'
       : 'blocked-full-readback-mode',
     compactSummaryRequired: true,
@@ -23664,6 +23700,15 @@ function buildThermalPhaseWorkerCompactPublicationCandidate({
     observedStageOrder: stageResults.map((entry) => entry.stageId).filter(Boolean),
     stageBackends: { [THERMAL_PHASE_STAGE_ID]: backend },
     stageReadbackModes: { [THERMAL_PHASE_STAGE_ID]: readbackMode },
+    stageFullReadbackPerformed: {
+      [THERMAL_PHASE_STAGE_ID]: thermalSummary.fullReadbackPerformed === true
+    },
+    stageCopyBudgetReadbackBytes: {
+      [THERMAL_PHASE_STAGE_ID]: finiteNumber(
+        thermalSummary.copyBudgetReadbackBytes,
+        0
+      )
+    },
     stageWorkerResidencyStatuses: { [THERMAL_PHASE_STAGE_ID]: workerResidencyStatus },
     thermalPhaseEvidencePassed: thermalSummary.thermalPhaseEvidencePassed === true,
     thermalPhaseAuthoritativeMutation: thermalSummary.thermalPhaseAuthoritativeMutation ?? null,
@@ -23709,6 +23754,8 @@ function buildReactionProductWorkerCompactPublicationCandidate({
   const hasProductRef = workerRetainedProductBufferRefs.length > 0 || retainedProductBufferRefs.length > 0;
   const backend = reactionSummary.backend || null;
   const readbackMode = reactionSummary.readbackMode || null;
+  const noFullReadback =
+    workerStageLaneSummaryProvesZeroReadback(reactionSummary);
   const workerResidencyStatus = stageWorkerResidencyStatuses[REACTION_PRODUCT_STAGE_ID] || null;
   const blocker = !workerRunnerSupplied
     ? 'worker-runner-not-supplied'
@@ -23718,7 +23765,7 @@ function buildReactionProductWorkerCompactPublicationCandidate({
         ? 'reaction-product-worker-residency-not-ready'
         : (backend !== 'webgpu'
           ? 'reaction-product-webgpu-backend-not-proven'
-          : (readbackMode !== NO_FULL_READBACK_MODE || reactionSummary.normalHotLoopReadbackFree !== true
+          : (!noFullReadback
             ? 'reaction-product-no-full-readback-required'
             : (!hasWorkerRetainedRefs
               ? 'worker-retained-reaction-product-buffer-refs-missing'
@@ -23742,7 +23789,7 @@ function buildReactionProductWorkerCompactPublicationCandidate({
       : blocker,
     sameDeviceMainThreadHandlesAvailable: false,
     workerLocalRetainedRefsOnly: true,
-    compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && reactionSummary.normalHotLoopReadbackFree === true
+    compactSummaryStatus: noFullReadback
       ? 'worker-reaction-product-compact-summary-required'
       : 'blocked-full-readback-mode',
     compactSummaryRequired: true,
@@ -23754,6 +23801,15 @@ function buildReactionProductWorkerCompactPublicationCandidate({
     observedStageOrder: stageResults.map((entry) => entry.stageId).filter(Boolean),
     stageBackends: { [REACTION_PRODUCT_STAGE_ID]: backend },
     stageReadbackModes: { [REACTION_PRODUCT_STAGE_ID]: readbackMode },
+    stageFullReadbackPerformed: {
+      [REACTION_PRODUCT_STAGE_ID]: reactionSummary.fullReadbackPerformed === true
+    },
+    stageCopyBudgetReadbackBytes: {
+      [REACTION_PRODUCT_STAGE_ID]: finiteNumber(
+        reactionSummary.copyBudgetReadbackBytes,
+        0
+      )
+    },
     stageWorkerResidencyStatuses: { [REACTION_PRODUCT_STAGE_ID]: workerResidencyStatus },
     reactionProductEvidencePassed: reactionSummary.reactionProductEvidencePassed === true,
     reactionProductAuthoritativeMutation: reactionSummary.reactionProductAuthoritativeMutation ?? null,
@@ -23857,6 +23913,28 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && exactGasPressureMechanicsResidentProductMass?.productEventBuffer
     && exactGasPressureMechanicsProductEventRowCapacity > 0
   );
+  const ambientBuoyancyExecutionThisStep =
+    gasPressureMechanicsBoundaryRequiredThisStep
+      ? resolvePhaseVolumeAmbientBuoyancyExecution({
+          canonicalSpatialRequired:
+            stepOptions.canonicalSpatialRequired === true,
+          schroederSpatialEpochGeneration:
+            stepOptions.schroederSpatialEpochGeneration ?? null,
+          mechanicsMaterialTable:
+            stepOptions.mechanicsMaterialTable ?? null,
+          ambientPressurePa: stepOptions.ambientPressurePa,
+          gravityMPerS2:
+            stepOptions.gravityMPerS2
+            ?? stepOptions.mlsMpmParticleState?.gravityMPerS2
+            ?? DEFAULT_GRAVITY_M_PER_S2,
+          residentProductMass:
+            exactGasPressureMechanicsResidentProductMass
+        })
+      : null;
+  const phaseVolumeAmbientBuoyancyRequiredThisStep =
+    gasPressureMechanicsBoundaryRequiredThisStep
+      ? ambientBuoyancyExecutionThisStep?.required === true
+      : stepOptions.phaseVolumeAmbientBuoyancyRequired === true;
   if (
     gasPressureMechanicsBoundaryEnabled === true
     && exactGasPressureMechanicsProductRowsAdvertised
@@ -25106,7 +25184,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
               ?.mechanicsMaterialPhaseUpload || null,
           ambientPressurePa: finiteNumber(stepOptions.ambientPressurePa, 0),
           phaseVolumeAmbientBuoyancyRequired:
-            stepOptions.phaseVolumeAmbientBuoyancyRequired === true,
+            phaseVolumeAmbientBuoyancyRequiredThisStep,
           phaseVolumePressureScale:
             finiteNumber(stepOptions.internalPressureScale, 1),
           phaseVolumeInterfaceTransportRequired: false,
@@ -26096,6 +26174,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       : 0,
     gasPressureMechanicsBoundaryRequired:
       gasPressureMechanicsBoundaryRequiredThisStep,
+    phaseVolumeAmbientBuoyancyRequired:
+      phaseVolumeAmbientBuoyancyRequiredThisStep,
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
     mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
@@ -26404,6 +26484,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gasPressureMechanicsBoundaryEnabled:
       gasPressureMechanicsBoundaryEnabled === true,
     gasPressureMechanicsBoundaryRequiredThisStep,
+    phaseVolumeAmbientBuoyancyRequested:
+      ambientBuoyancyExecutionThisStep?.requested
+      ?? (stepOptions.phaseVolumeAmbientBuoyancyRequired === true),
+    phaseVolumeAmbientBuoyancyRequired:
+      phaseVolumeAmbientBuoyancyRequiredThisStep,
+    phaseVolumeAmbientBuoyancySkipReason:
+      ambientBuoyancyExecutionThisStep?.skipReason ?? null,
     gasPressureMechanicsBoundaryStatus:
       gasPressureMechanicsBoundaryRequiredThisStep
         ? (stageResults.gridUpdate?.gasPressureBoundarySubmitted === true
@@ -28893,6 +28980,28 @@ export async function mergeResidentProductMassBuffersWebGpu({
   readbackTelemetryAccumulator = null,
   allowHostCompactionObservation = true
 } = {}) {
+  // SAFE_FROZEN_FALLBACK is an atomic rejection of the current reaction and
+  // placement transaction. Its event buffer is deliberately all zeroes and
+  // must not become a new logical history generation: doing so would grow the
+  // retained arena and its host capacity bounds on every rejected reaction.
+  // Preserve the exact prior handle, or no history when this was generation
+  // one. The emitted handle remains owned by its reaction result and is
+  // retired by the normal step cleanup path.
+  if (emittedResidentProductMass?.reactionPlacementRolledBack === true) {
+    if (
+      emittedResidentProductMass.reactionPlacementTransactionOutcome
+        !== 'atomic-reaction-placement-pre-reaction-fallback'
+    ) {
+      throw residentProductHistoryArenaError(
+        'resident product-history rollback marker lacks the exact atomic placement outcome',
+        'ERR_SPH_PRODUCT_HISTORY_ROLLBACK_OUTCOME_INVALID'
+      );
+    }
+    return inputResidentProductMass
+      && inputResidentProductMass !== emittedResidentProductMass
+      ? inputResidentProductMass
+      : null;
+  }
   const singleSourceResidentProductMass = inputResidentProductMass
     || emittedResidentProductMass
     || null;
@@ -29202,11 +29311,20 @@ export async function mergeResidentProductMassBuffersWebGpu({
   // older pass while merging newly emitted gas would authorize pressure from
   // mass that the old proof never covered. Intermediate no-readback steps are
   // therefore fail-closed until the final compact evidence arrives.
-  const strictReactionGate = strictReactionGateIsClassified(
-    emittedResidentProductMass.strictReactionGate
-  )
-    ? emittedResidentProductMass.strictReactionGate
-    : null;
+  const strictReactionGate = emittedResidentProductMass
+    .reactionPlacementRolledBack === true
+    ? (
+        strictReactionGateIsClassified(inputResidentProductMass.strictReactionGate)
+          ? inputResidentProductMass.strictReactionGate
+          : null
+      )
+    : (
+        strictReactionGateIsClassified(
+          emittedResidentProductMass.strictReactionGate
+        )
+          ? emittedResidentProductMass.strictReactionGate
+          : null
+      );
   const pool = residentProductHistoryArenaPool(device);
   const bufferCreationCountBefore = pool.bufferCreationCount;
   const releaseSourceBorrows = [];
@@ -29574,6 +29692,10 @@ export async function mergeResidentProductMassBuffersWebGpu({
     productEventMergeBufferCreationCount:
       pool.bufferCreationCount - bufferCreationCountBefore,
     productEventMergeHostFenceAwaited,
+    reactionPlacementRolledBack:
+      emittedResidentProductMass.reactionPlacementRolledBack === true,
+    reactionPlacementTransactionOutcome:
+      emittedResidentProductMass.reactionPlacementTransactionOutcome ?? null,
     productInventorySchema: emittedResidentProductMass.productInventorySchema || inputResidentProductMass.productInventorySchema || null,
     productInventoryCount: (inputResidentProductMass.productInventoryCount ?? 0)
       + (emittedResidentProductMass.productInventoryCount ?? 0),
@@ -29713,6 +29835,12 @@ export async function mergeResidentProductMassBuffersWebGpu({
 }
 
 function residentProductMassMergeStatus({ inputResidentProductMass = null, emittedResidentProductMass = null, mergedResidentProductMass = null } = {}) {
+  if (emittedResidentProductMass?.reactionPlacementRolledBack === true) {
+    return mergedResidentProductMass === inputResidentProductMass
+      && inputResidentProductMass
+      ? 'resident-product-mass-input-preserved-after-atomic-placement-rollback'
+      : 'resident-product-mass-atomic-placement-rollback-no-history';
+  }
   if (mergedResidentProductMass?.status === 'resident-product-mass-merged-gpu-resident') {
     return 'resident-product-mass-merged-gpu-resident';
   }
@@ -29863,7 +29991,7 @@ function buildNextParticleUploads({
   mechanicsRefreshStep = null,
   phaseCarrierTransferStep = null,
   inputResidentProductMass = null,
-  mergedResidentProductMass = null,
+  mergedResidentProductMass = undefined,
   particlePingPong,
   device = null,
   continuationIdentity = null
@@ -29916,7 +30044,9 @@ function buildNextParticleUploads({
   const identityRequired = schroederParticleStorage?.identityRequired === true
     || sphParticleUpload?.identityRequired === true
     || sphParticleStateRequiresExplicitIdentity(sphParticleState);
-  const residentProductMass = mergedResidentProductMass || reaction.residentProductMass || inputResidentProductMass || null;
+  const residentProductMass = mergedResidentProductMass !== undefined
+    ? mergedResidentProductMass
+    : (reaction.residentProductMass || inputResidentProductMass || null);
   if (!stateBuffer || !mechanicsBuffer) return null;
   if (!thermoBuffer) return null;
   if (identityRequired && !identityBuffer) return null;
@@ -30225,7 +30355,7 @@ export function adoptSphReactionPlacementContinuationWebGpu({
     && placementArtifact.transactionalFailClosedRecoveryEncoded === true
     && placementArtifact.transactionalAuxiliaryMaterializationEncoded === true
     && placementArtifact.destinationPublicationMode
-      === 'gpu-terminal-safe-placed-or-exact-frozen-fallback'
+      === 'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback'
     && placementArtifact.positionMayChange === true
     && placementArtifact.topologyMayChange === true
     && placementArtifact.placementSourceFamily
@@ -33363,7 +33493,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
   phaseVolumeMaxImpulseFraction = 0.5,
   mechanicsMaterialTable = null,
   mechanicsMaterialPhaseUpload = null,
-  phaseVolumeAmbientBuoyancyRequired = false,
+  phaseVolumeAmbientBuoyancyRequired:
+    explicitPhaseVolumeAmbientBuoyancyRequired = false,
   gasPressureMechanicsBoundaryRequired = false,
   gasPressureMechanicsAuthoritySource = null,
   gasPressureMechanicsChartId = 0,
@@ -33406,6 +33537,31 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
+  const ambientBuoyancyExecution =
+    resolvePhaseVolumeAmbientBuoyancyExecution({
+      canonicalSpatialRequired,
+      schroederSpatialEpochGeneration,
+      mechanicsMaterialTable,
+      ambientPressurePa,
+      gravityMPerS2: gravity,
+      residentProductMass
+    });
+  const phaseVolumeAmbientBuoyancyRequested = Boolean(
+    ambientBuoyancyExecution.requested
+    || explicitPhaseVolumeAmbientBuoyancyRequired === true
+  );
+  const phaseVolumeAmbientBuoyancyRequired = Boolean(
+    ambientBuoyancyExecution.required
+    || explicitPhaseVolumeAmbientBuoyancyRequired === true
+  );
+  const phaseVolumeAmbientBuoyancySkipReason =
+    phaseVolumeAmbientBuoyancyRequired
+      ? null
+      : ambientBuoyancyExecution.skipReason;
+  const mechanicsFieldRequired = Boolean(
+    gasPressureMechanicsBoundaryRequired
+    || phaseVolumeAmbientBuoyancyRequired
+  );
   const algorithmMaterialContactRows = mlsMpmParticleState?.algorithmMaterialContactRows ?? null;
   const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
@@ -33503,9 +33659,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       gridSpacingM,
       boxDimsM: dims,
       dt: dtSeconds,
-      residentProductMass: gasPressureMechanicsBoundaryRequired
-        ? residentProductMass
-        : null,
+      residentProductMass,
       internalPressureScale: gasPressureMechanicsBoundaryRequired
         ? finiteNumber(internalPressureScale, 1)
         : 0,
@@ -33514,7 +33668,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         : 0,
       externalGaugePressurePa: 0,
       externalGaugePressureEnabled: false,
-      mechanicsFieldMode: gasPressureMechanicsBoundaryRequired
+      mechanicsFieldMode: mechanicsFieldRequired
         ? MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
         : undefined,
       gasPressureMechanicsBoundaryRequired,
@@ -33523,7 +33677,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       device: resolvedDevice,
       deviceResult: sharedDeviceResult,
       parityTolerance: parityTolerances.p2g ?? 5e-2,
-      retainGridBuffer: gasPressureMechanicsBoundaryRequired ? false : true,
+      retainGridBuffer: !mechanicsFieldRequired,
       readbackMode: requestedReadbackMode,
       webGpuRunner: p2gRunner,
       onDeviceLost(info) {
@@ -33547,7 +33701,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       pressureInterfaceForceRowsBuffer: null,
       pressureInterfaceForceSolver: null,
       pressureInterfaceGridForceAdmission: null,
-      mechanicsFieldMode: gasPressureMechanicsBoundaryRequired
+      mechanicsFieldMode: mechanicsFieldRequired
         ? MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
         : p2gGridProjection.mechanicsFieldMode,
       dt: dtSeconds,
@@ -33577,7 +33731,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       deviceResult: sharedDeviceResult,
       parityTolerance: parityTolerances.gridUpdate ?? 1e-5,
       retainUpdatedGridBuffer:
-        gasPressureMechanicsBoundaryRequired ? false : true,
+        !mechanicsFieldRequired,
       readbackMode: requestedReadbackMode,
       webGpuRunner: gridUpdateRunner,
       onDeviceLost(info) {
@@ -33725,6 +33879,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         ? finiteNumber(internalPressureScale, 1)
         : 0,
       ambientPressurePa: finiteNumber(ambientPressurePa, 0),
+      phaseVolumeAmbientBuoyancyRequested,
+      phaseVolumeAmbientBuoyancyRequired,
+      phaseVolumeAmbientBuoyancySkipReason,
       stageTiming
     }));
     step.gasPressureMechanicsBoundary = Object.freeze({
@@ -35374,9 +35531,17 @@ function residentStepExecutedProductPlacementDispatch(step, expectedAccumulatorB
   );
   if (accumulatorByteLength !== expectedAccumulatorByteLength) return false;
   const provenance = diagnostics.reactionProductPlacementProvenance;
-  if (provenance?.available === true) return true;
-  return diagnostics.reactionProductPlacementProvenanceStatus
-    === 'product-placement-provenance-gpu-resident-not-read';
+  // Encoding a placement dispatch does not prove that its transactional
+  // terminal selected SAFE_PLACED.  In particular, SAFE_FROZEN_FALLBACK
+  // intentionally leaves the shared accumulator untouched.  Only a decoded
+  // terminal-bound provenance receipt can increment the host source count;
+  // no-readback intermediate steps remain explicitly unproven until a future
+  // GPU-resident commit counter replaces this conservative host evidence.
+  return Boolean(
+    provenance?.available === true
+    && provenance.reactionPlacementRolledBack !== true
+    && diagnostics.reactionPlacementRolledBack !== true
+  );
 }
 
 export async function runMlsMpmResidentStepsWithOptionalWebGpu({
@@ -35837,11 +36002,15 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
           productPlacementAccumulatorBuffer,
           readReactionProductPlacementSummary: index === count - 1,
           reactionProductPlacementReadbackCadence: 'resident-sequence-final-only',
-          // Count only prior dispatches proven by returned step evidence. The
-          // current dispatch is included because a decoded final provenance
-          // row can only exist after this call's placement pass ran.
+          // Count only prior SAFE_PLACED dispatches proven by returned terminal
+          // evidence. The current final diagnostic is proposed as one more;
+          // the sequence wrapper accepts that count only if every earlier
+          // dispatch was independently observed (normally false for a
+          // no-readback hot loop).
           reactionProductPlacementSourceSummaryCount:
-            productPlacementSuccessfulDispatchCount + 1
+            productPlacementDispatchEvidenceComplete
+              ? productPlacementSuccessfulDispatchCount + 1
+              : null
         } : {})
       },
       onResidentStageProgress(progress = {}) {
@@ -36040,7 +36209,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   const productPlacementEvidenceIncomplete = Boolean(
     productPlacementAccumulatorBuffer
     && productPlacementAccumulatorByteLength > 0
-    && !productPlacementDispatchEvidenceComplete
+    && !finalProductPlacementSourceCountVerified
   );
   if (productPlacementEvidenceIncomplete) {
     const status = 'resident-sequence-product-placement-dispatch-evidence-incomplete';

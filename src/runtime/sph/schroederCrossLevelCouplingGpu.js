@@ -129,7 +129,7 @@ import {
   MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
 } from './sphGridGpuKernel.js';
 import {
-  uploadedMechanicsMaterialPhaseRecordsMatch
+  diagnoseUploadedMechanicsMaterialPhaseRecordsMatch
 } from './sphMechanicsRefreshGpuKernel.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -2388,6 +2388,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   baseGridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = [4, 4, 4],
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  cflFactor = mlsMpmParticleState?.gridCflFactor ?? DEFAULT_CFL_FACTOR,
   gravityMPerS2 = [0, -9.80665, 0],
   internalPressureScale = 1,
   ambientPressurePa = 0,
@@ -2519,23 +2520,44 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       'canonicalEpochController initial epoch does not match the supplied two-level authority'
     );
   }
-  if (phaseVolumeInterfaceTransportEnabled && (
-    !activeCanonicalEpoch
-    || activeCanonicalEpoch.transaction
-      ?.phaseVolumeInterfaceProposalAuthoritative !== true
-    || canonicalEpochController?.summary?.()
-      .phaseVolumeInterfaceTransportEnabled !== true
-    || !uploadedMechanicsMaterialPhaseRecordsMatch(
-      mechanicsMaterialPhaseUpload,
-      mechanicsMaterialTable,
-      device
-    )
-  )) {
+  const mechanicsMaterialPhaseUploadDiagnostics =
+    phaseVolumeInterfaceTransportEnabled
+      ? diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
+          mechanicsMaterialPhaseUpload,
+          mechanicsMaterialTable,
+          device
+        )
+      : null;
+  const phaseVolumeInterfaceTransportAuthorityFailures =
+    phaseVolumeInterfaceTransportEnabled ? [
+      ...(!activeCanonicalEpoch
+        ? ['canonical-epoch-missing']
+        : []),
+      ...(activeCanonicalEpoch?.transaction
+        ?.phaseVolumeInterfaceProposalAuthoritative !== true
+        ? ['s9c-transaction-not-authoritative']
+        : []),
+      ...(canonicalEpochController?.summary?.()
+        .phaseVolumeInterfaceTransportEnabled !== true
+        ? ['canonical-controller-transport-disabled']
+        : []),
+      ...(!mechanicsMaterialPhaseUploadDiagnostics?.matches
+        ? ['mechanics-material-phase-upload-mismatch']
+        : [])
+    ] : [];
+  if (phaseVolumeInterfaceTransportAuthorityFailures.length > 0) {
     const error = new TypeError(
       'Phase-volume interface transport requires a matching S9-C canonical controller and same-device mechanics material upload'
+        + ` (${phaseVolumeInterfaceTransportAuthorityFailures.join(', ')})`
     );
     error.code =
       'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_TRANSPORT_AUTHORITY';
+    error.failedRequirements = Object.freeze([
+      ...phaseVolumeInterfaceTransportAuthorityFailures
+    ]);
+    error.authorityDiagnostics = Object.freeze({
+      materialUpload: mechanicsMaterialPhaseUploadDiagnostics
+    });
     throw error;
   }
   const runGpuQueueStage = async (stage, runner, metadata = {}) => {
@@ -2591,6 +2613,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   const fineDx = Math.fround(baseDx * (2 ** resolvedFineLevel));
   const coarseDx = Math.fround(fineDx * 2);
   const dtSeconds = finiteNumber(dt, 0);
+  const resolvedCflFactor = Number(cflFactor);
+  if (!Number.isFinite(resolvedCflFactor) || !(resolvedCflFactor > 0)) {
+    throw new RangeError(
+      'Schroeder two-level mechanics cflFactor must be finite and positive'
+    );
+  }
   // Subcycling: the coarse level advances one full dt while the fine level
   // takes fineSubstepCount substeps of dt / fineSubstepCount, each applying
   // its time-interpolated share of the coarse velocity correction.
@@ -3213,7 +3241,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             terminalOperation: false,
             gravityMPerS2,
             boxDimsM,
-            cflFactor: DEFAULT_CFL_FACTOR,
+            cflFactor: resolvedCflFactor,
             // Full-J acceptance is governed by the resulting fine/coarse CFL
             // endpoints. A second coarse-dx/macro-dt delta-v ceiling is not
             // ratio invariant and would reject valid r=4 transactions.
@@ -3504,6 +3532,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
           fusedFineSubstepTransaction: fineTransaction,
           dt: dtFine,
+          cflFactor: resolvedCflFactor,
           gravityMPerS2,
           boxDimsM,
           ambientPressurePa,
@@ -3853,6 +3882,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
         fusedCoarseTerminalTransaction: terminalTransaction,
         dt: dtSeconds,
+        cflFactor: resolvedCflFactor,
         gravityMPerS2,
         boxDimsM,
         ambientPressurePa,
@@ -4191,6 +4221,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           gridDims: Object.freeze([...(update.gridDims ?? [])]),
           gridSpacingM: update.gridSpacingM ?? 0,
           dt: update.dt ?? 0,
+          cflFactor: update.cflFactor ?? resolvedCflFactor,
           fieldStateUpdateSubmittedInPlace:
             update.fieldStateUpdateSubmittedInPlace === true,
           fieldStateUpdatedInPlace: role === 'final-coarse',
@@ -4226,6 +4257,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       fineGridDims: fineSpec.gridDims,
       coarseGridDims: coarseSpec.gridDims,
       dt: dtSeconds,
+      cflFactor: resolvedCflFactor,
       particleCount: sphParticleState.particleCount,
       compactHierarchyViewConsumed: true,
       parentFieldViewConsumed: true,
@@ -4511,6 +4543,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     p2gGridProjection: fineParentProjection,
     p2gGridBuffer: fineParentProjection.gridBuffer,
     dt: dtSeconds,
+    cflFactor: resolvedCflFactor,
     gravityMPerS2,
     boxDimsM,
     retainUpdatedGridBuffer: true,
@@ -4531,6 +4564,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     p2gGridProjection: coarseProjection,
     p2gGridBuffer: coarseProjection.gridBuffer,
     dt: dtSeconds,
+    cflFactor: resolvedCflFactor,
     gravityMPerS2,
     boxDimsM,
     retainUpdatedGridBuffer: true,
@@ -4613,6 +4647,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       p2gGridProjection: substepProjection,
       p2gGridBuffer: substepProjection.gridBuffer,
       dt: dtFine,
+      cflFactor: resolvedCflFactor,
       gravityMPerS2,
       boxDimsM,
       retainUpdatedGridBuffer: true,
@@ -4639,9 +4674,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       boxDimsM,
       deltaScale: 1 / substeps,
       preVelocityGrid: true,
-      // CFL ceiling the coarse grid update itself applied (same default
-      // cfl factor; gridUpdateRunner above is invoked without an override).
-      maxCoarseVelocityMPerS: (DEFAULT_CFL_FACTOR * coarseDx) / Math.max(dtSeconds, 1e-12),
+      // CFL ceiling the coarse grid update itself applied. Keep the
+      // prolongation clamp on the exact scenario-selected numerical profile
+      // rather than silently reverting authoritative two-level mechanics to
+      // the module default.
+      maxCoarseVelocityMPerS: (resolvedCflFactor * coarseDx) / Math.max(dtSeconds, 1e-12),
       sharedAccelerationDtMPerS: [0, 0, 0],
       coarsePreGridBuffer: fineParentGridUpdate.updatedGridBuffer,
       coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
@@ -4832,6 +4869,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       p2gGridProjection: finalCoarseProjection,
       p2gGridBuffer: finalCoarseProjection.gridBuffer,
       dt: dtSeconds,
+      cflFactor: resolvedCflFactor,
       gravityMPerS2,
       boxDimsM,
       retainUpdatedGridBuffer: true,
@@ -5003,6 +5041,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     fineGridDims: fineSpec.gridDims,
     coarseGridDims: coarseSpec.gridDims,
     dt: dtSeconds,
+    cflFactor: resolvedCflFactor,
     particleCount: sphParticleState.particleCount,
     compactHierarchyViewConsumed: Boolean(epochHierarchy()),
     hierarchyGenerationId:

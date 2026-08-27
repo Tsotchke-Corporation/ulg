@@ -675,19 +675,19 @@ test('canonical placement uses stable segmented reductions and disjoint direct-p
   );
   assert.match(
     sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
-    /destination_state\[state_base \+ row\] = frozen_state\[state_base \+ row\]/
+    /destination_state\[state_base \+ row\] = rollback_state\[state_base \+ row\]/
   );
   assert.match(
     sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
-    /destination_thermo\[thermo_base \+ row\] = frozen_thermo\[thermo_base \+ row\]/
+    /destination_thermo\[thermo_base \+ row\] = rollback_thermo\[thermo_base \+ row\]/
   );
   assert.match(
     sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
-    /destination_mechanics\[mechanics_base \+ row\] = frozen_mechanics\[mechanics_base \+ row\]/
+    /destination_mechanics\[mechanics_base \+ row\] = rollback_mechanics\[mechanics_base \+ row\]/
   );
   assert.match(
     sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
-    /if \(!safe_placed\) \{ return; \}[\s\S]*published_events\[row\] = candidate_events\[row\][\s\S]*published_summary\[row\] = candidate_summary\[row\]/
+    /published_events\[row\] = select\([\s\S]*vec4<f32>\(0\.0\)[\s\S]*candidate_events\[row\][\s\S]*safe_placed[\s\S]*if \(row < summary_row_count && safe_placed\)[\s\S]*published_summary\[row\] = candidate_summary\[row\]/
   );
   for (const source of segmentedSources) {
     assert.doesNotMatch(source, /@workgroup_size\(1\)/);

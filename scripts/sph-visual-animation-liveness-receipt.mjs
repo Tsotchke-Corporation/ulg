@@ -205,7 +205,9 @@ export function standardVisualLivenessScenarios(selection = null) {
         label: scenario.label,
         url: `${url.pathname}${url.search}`,
         expectedRenderer: 'native-webgpu',
-        expectedSurfaceDraw: 'native-webgpu-surface-consumer'
+        expectedSurfaceDraw: url.searchParams.get('surfaceDraw'),
+        expectedRenderOwnership:
+          url.searchParams.get('renderOwnership')
       });
     });
   if (selected != null && scenarios.length !== selected.size) {

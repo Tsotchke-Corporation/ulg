@@ -407,7 +407,7 @@ test('visual liveness deadlines are hard ceilings and cannot be extended by env'
   );
 });
 
-test('bounded standard inventory starts paused for a quiescent frame then uses real autoplay', () => {
+test('bounded standard inventory preserves the worker-owned route while starting paused', () => {
   const scenarios = standardVisualLivenessScenarios();
   assert.deepEqual(
     scenarios.map((scenario) => scenario.id),
@@ -424,6 +424,18 @@ test('bounded standard inventory starts paused for a quiescent frame then uses r
     assert.equal(
       url.searchParams.get('surfaceDraw'),
       'native-webgpu-surface-consumer'
+    );
+    assert.equal(
+      url.searchParams.get('renderOwnership'),
+      'worker-owned-resident-render-producer'
+    );
+    assert.equal(
+      scenario.expectedSurfaceDraw,
+      'native-webgpu-surface-consumer'
+    );
+    assert.equal(
+      scenario.expectedRenderOwnership,
+      'worker-owned-resident-render-producer'
     );
   }
   const explicitCanonicalInventory = standardVisualLivenessScenarios(
@@ -1050,11 +1062,11 @@ test('normal visual commands are bounded and legacy campaigns are explicitly nam
   );
   assert.equal(
     packageJson.scripts['test:sph-visual'],
-    'node scripts/sph-visual-animation-liveness-receipt.mjs'
+    'ULG_VISUAL_MATRIX_SCENARIOS=standard-cesium-fluorine ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 node scripts/sph-visual-sanity-matrix.mjs'
   );
   assert.equal(
     packageJson.scripts['test:sph-standard-visual'],
-    'node scripts/sph-visual-animation-liveness-receipt.mjs'
+    'ULG_VISUAL_MATRIX_SCENARIOS=standard-cesium-fluorine ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 node scripts/sph-visual-sanity-matrix.mjs'
   );
   assert.match(
     packageJson.scripts['test:sph-standard-visual:deep'],

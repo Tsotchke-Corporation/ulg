@@ -1,5 +1,117 @@
 # SS UI and Scheduling Regression
 
+Date: 2026-08-23 AKDT
+Updated: 2026-08-25 AKDT
+Status: architecture correction implemented; physics validation is the next
+formal validation-framework todo
+
+## Disposition
+
+The original P0 scheduling regression is corrected in the current
+`ss-worker-lane-refactor` working tree. Eligible same-device interactive SS now
+uses a worker-owned resident WebGPU lane by default, with explicit
+ComputeManager lease and StateManager commit authority. Explicit ownership
+overrides and capability failures remain fail-closed.
+
+The original failure mode was not slow GPU arithmetic. SS kernels ran on the
+GPU, but the page thread owned hierarchy/epoch construction, command authoring,
+schedule publication, presentation gating, status traversal, and one-step
+continuation. That destroyed preset batching and made renderer latency control
+physics cadence.
+
+## Acceptance mapping
+
+- **Canonical SS is not direct scene-owned:** the ordinary route publishes
+  `residentComputeManagerMode = 'worker-owned-resident-lane'`.
+- **Valid batching without stale epochs:** each worker step creates and seals a
+  fresh epoch; schedule identity must advance and fail-closes on regression.
+- **UI and compositor decoupled:** continuation follows worker schedule
+  completion, while versioned render candidates independently feed
+  presentation.
+- **Explicit authority:** each schedule completes a ComputeManager resident-lane
+  lease and commits a compact StateManager delta before page publication.
+- **Hierarchy layer communication:** one exact spatial-epoch transaction is
+  authenticated and handed from epoch generation to same-level mechanics;
+  compact hierarchy status crosses back to presentation.
+- **No redundant materialization:** seed rows cross once, static thermal and
+  mechanics tables upload once per lane, and the exact resident product owner
+  carries forward.
+- **Pipeline startup:** the full mechanical descriptor set prewarms concurrently
+  on lane admission and is awaited to a truthful settled summary.
+- **High concurrency:** one lane rejects overlapping mutation, while independent
+  lane leases are not globally serialized and share the ordered device queue.
+- **Readback discipline:** the normal hot loop performs no full particle
+  readback; presentation uses worker-retained candidates and compact summaries.
+- **Responsive browser evidence:** the durable Chromium/WebGPU harness observes
+  advancing sim time during pointer drag and zero measured main-thread long
+  tasks on both explicit and default sodium-bomb worker routes.
+
+Do not weaken these properties by increasing timeouts, reusing an immutable
+epoch across positions, inventing lineage, admitting a sentinel readback as the
+required queue fence, or counting GPU-only timing as interactive throughput.
+
+## Current sodium-water live evidence
+
+The literal headed sodium-water acceptance run on 2026-08-25 completed two
+consecutive 64-step schedules on the same retained worker lane and device. Each
+schedule placed non-authoritative shared-queue drains at steps 16, 32, and 48,
+then reached its sole authority-admitting terminal drain at step 64. All eight
+drains completed through `worker-device.queue.onSubmittedWorkDone`;
+ComputeManager completed both leases, StateManager committed cumulative totals
+64 then 128, all 128 candidate frames rendered, and no fallback or device loss
+appeared.
+
+A post-commit retained-state snapshot contained positive NaOH and H2 carrier
+mass in the expected reaction ratio, proving endpoint conversion into real
+mechanics carriers rather than sidecar-only accounting. The H2 carriers had
+negative mean vertical velocity at 0.128 s, so this architecture receipt is
+deliberately not promoted to sustained-plume or full-physics validation.
+
+## Next formal validation-framework todo: physics
+
+Architecture liveness is not a physics proof. Add a separate formal validation
+layer that consumes compact worker receipts and bounded diagnostic arms without
+putting readbacks into the normal hot loop.
+
+Required initial receipts:
+
+1. Mass, momentum, and energy conservation across single- and two-level steps,
+   with explicit tolerances and authority lineage.
+2. Exact 2:1 cross-level transfer and phase-volume migration balance, including
+   split/merge and storage materialization generations.
+3. Thermal, phase-change, gas-pressure, and reaction-product closure over
+   bounded reference scenarios.
+4. Monotonic epoch/source-family identities and exactly-once StateManager
+   admission across schedule boundaries.
+5. Scenario milestone receipts for sodium-bomb, water-cycle, rain, and
+   iron/ice, correlated with compositor motion and guarded by an early
+   no-progress watchdog.
+6. Separate timings for resident GPU work, worker orchestration, authority
+   commit, presentation latency, and accepted/presented step cadence.
+
+These should be opt-in native or bounded validation runs where readback is
+scientifically necessary. They must not silently change production execution
+or label architecture-only liveness as full physics validation.
+
+## Separate follow-ons
+
+- Incremental strict TypeScript/JSDoc control-plane typing: discriminated
+  lifecycle unions, branded lineage/device/buffer identifiers, and single-source
+  WGSL ABI layouts.
+- Selective contact-law admission based on interface, kinematic, scale, and
+  settledness predicates.
+- Algorithmic improvement to the sweep admission rate beneath the already
+  chunked matching cleanup.
+
+See `plan/refactor/handoff.md` for implementation details and current evidence.
+
+## Superseded baseline (retained for evidence provenance)
+
+<details>
+<summary>Original regression/refactor snapshot before this completion pass</summary>
+
+# SS UI and Scheduling Regression
+
 Date: 2026-08-10 AKDT
 Status: P0 for default enablement; accepted post-merge debt for the contained,
 default-off merge only
@@ -143,3 +255,5 @@ correctness. Those still require ABI assertions and bounded native tests.
 Do not conceal this regression by increasing visual-test timeouts, lowering
 scientific workloads, reusing a stale SS epoch, or counting GPU-only timing as
 interactive throughput.
+
+</details>

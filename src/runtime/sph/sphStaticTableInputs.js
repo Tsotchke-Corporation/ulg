@@ -121,11 +121,73 @@ export function thermalMaterialTablesExactlyEqual(cachedTable, liveTable) {
   );
 }
 
+export function reactionTablesExactlyEqual(cachedTable, liveTable) {
+  if (!cachedTable?.schema || !liveTable?.schema) return false;
+  for (const field of [
+    'schema',
+    'reactionClosureSchema',
+    'reactionCount',
+    'reactionHeaderCount',
+    'reactantTermCount',
+    'productTermCount',
+    'gasProductCount',
+    'atomTermCount',
+    'productPhaseCount',
+    'recordStrideFloats',
+    'reactionHeaderStrideFloats',
+    'reactantTermStrideFloats',
+    'productTermStrideFloats',
+    'gasProductStrideFloats',
+    'atomTermStrideFloats',
+    'productPhaseStrideFloats'
+  ]) {
+    if (cachedTable[field] !== liveTable[field]) return false;
+  }
+  for (const field of [
+    'recordLayout',
+    'reactionHeaderLayout',
+    'reactantTermLayout',
+    'productTermLayout',
+    'gasProductLayout',
+    'atomTermLayout',
+    'productPhaseLayout'
+  ]) {
+    if (JSON.stringify(cachedTable[field]) !== JSON.stringify(liveTable[field])) {
+      return false;
+    }
+  }
+  return [
+    'records',
+    'reactionHeaders',
+    'reactantTermRecords',
+    'productTermRecords',
+    'gasProductRecords',
+    'atomTermRecords',
+    'productPhaseRecords'
+  ].every((field) => typedArrayBytesExactlyEqual(cachedTable[field], liveTable[field]));
+}
+
 export function buildSphThermalMaterialTableFromViewState(viewState = {}) {
   const materialProperties = viewState.materialProperties || {};
   return buildSphThermalMaterialTable(materialProperties, {
     materialPropertyBankGpuWarmInputTable:
       viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
+  });
+}
+
+export function buildSphReactionTableFromViewState(viewState = {}) {
+  const mechanicsProfile = viewState.mlsMpmGpuParticleState
+    ?? viewState.gpuMechanics
+    ?? {};
+  return buildSphReactionTable(viewState.reactions || [], {
+    materialProperties: viewState.materialProperties || {},
+    contactRadiusM:
+      viewState.reactionContactRadiusM
+      ?? viewState.sphGpuParticleState?.smoothingLengthM
+      ?? 0,
+    soundSpeedScale: mechanicsProfile.soundSpeedScale,
+    cflMaxSoundSpeedMPerS: mechanicsProfile.cflMaxSoundSpeedMPerS,
+    minGasSoundSpeedMPerS: mechanicsProfile.minGasSoundSpeedMPerS
   });
 }
 
@@ -145,10 +207,7 @@ export function sphStaticTableInputsFromViewState(viewState = {}, {
         viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
     }
   );
-  const reactionTable = buildSphReactionTable(viewState.reactions || [], {
-    materialProperties,
-    contactRadiusM: viewState.reactionContactRadiusM ?? viewState.sphGpuParticleState?.smoothingLengthM ?? 0
-  });
+  const reactionTable = buildSphReactionTableFromViewState(viewState);
   return {
     thermalMaterialTable,
     thermalClosureGraphSet,

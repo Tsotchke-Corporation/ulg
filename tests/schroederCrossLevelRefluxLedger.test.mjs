@@ -10,11 +10,13 @@ import {
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED,
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_FAIL_CLOSED,
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY,
+  SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_CONSUMED,
   SCHROEDER_CROSS_LEVEL_REFLUX_TERMINAL_RECEIPT_CONSUMED,
   createSchroederCrossLevelRefluxLedgerHeader,
   createSchroederCrossLevelRefluxLedgerLayout,
   deriveSchroederCrossLevelRefluxEnergyClosure,
-  decodeSchroederCrossLevelRefluxEvidence
+  decodeSchroederCrossLevelRefluxEvidence,
+  decodeSchroederCrossLevelRefluxTerminalHeader
 } from '../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
 import {
   createSchroederCrossLevelRefluxLedgerGpu,
@@ -37,6 +39,72 @@ function fakeDevice() {
     queue: { writeBuffer() {} }
   };
 }
+
+function strictTerminalRefluxWords({ headerOnly = false } = {}) {
+  const words = new Uint32Array(
+    SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+      + (headerOnly ? 0 : SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_ROW_WORDS)
+  );
+  words.set(createSchroederCrossLevelRefluxLedgerHeader({
+    rowCapacity: 1,
+    completionOrdinal: 7,
+    fineSubstepCount: 2,
+    fineLevel: 0,
+    coarseLevel: 1,
+    coarseGridSpacingM: 0.5,
+    macroOwnerId: 7,
+    macroOwnerGeneration: 9
+  }));
+  words[2] = SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED;
+  words[4] = 1;
+  words[8] = 2;
+  words[9] = 1;
+  words[15] = 2;
+  words[59] = SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_CONSUMED;
+  words[80] = SCHROEDER_CROSS_LEVEL_REFLUX_TERMINAL_RECEIPT_CONSUMED;
+  words[81] = 0x1234abcd;
+  words[95] = words[81];
+  words[96] = 1;
+  words[97] = words[98];
+  words[99] = 1;
+  words[100] = 1;
+  words[101] = 1;
+  words[102] = 1;
+  words[103] = 1;
+  words[111] = words[98] + 1;
+  words[118] = 1;
+  words[119] = 1;
+  words[120] = 2;
+  words[121] = 1;
+  words[122] = 0;
+  words[124] = 0xffff_ffff;
+  words[125] = 0;
+  return words;
+}
+
+test('reflux-v3 compact terminal header authenticates terminal admission and rejects rollback', () => {
+  const fullWords = strictTerminalRefluxWords();
+  const headerWords = strictTerminalRefluxWords({ headerOnly: true });
+
+  assert.equal(decodeSchroederCrossLevelRefluxEvidence(fullWords).terminalAdmitted, true);
+  assert.equal(
+    decodeSchroederCrossLevelRefluxEvidence(headerWords).structuralValid,
+    false
+  );
+  assert.equal(
+    decodeSchroederCrossLevelRefluxTerminalHeader(headerWords).terminalAdmitted,
+    true
+  );
+  assert.equal(decodeSchroederCrossLevelRefluxTerminalHeader(fullWords), null);
+
+  headerWords[122] = 1;
+  const rolledBack = decodeSchroederCrossLevelRefluxTerminalHeader(headerWords);
+  assert.equal(rolledBack.structuralValid, true);
+  assert.equal(rolledBack.admitted, true);
+  assert.equal(rolledBack.mutationRollbackCount, 1);
+  assert.equal(rolledBack.terminalAdmitted, false);
+});
 
 test('reflux-v3 header round-trips pressure, drag, ambient, provenance, and measured scales', () => {
   assert.equal(SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS, 136);

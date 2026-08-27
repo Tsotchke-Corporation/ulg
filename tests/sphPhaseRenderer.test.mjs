@@ -100,6 +100,8 @@ import {
   resolveNativeSurfaceTemperatureRetirement,
   resolveSphNativeWebGpuSurfaceValidationCadence,
   resolveSchroederNativeSurfaceAdmissionMode,
+  resolveSphSchroederHierarchyContactAdmission,
+  resolveSphWorkerLanePolicyAdmission,
   summarizeThreeWebGpuDeviceLimits,
   buildSchroederPressureInterfaceGasCellFieldImportPublicationFromResidentExecution,
   selectSchroederPressureInterfaceGasCellFieldImportFromResidentExecution,
@@ -153,6 +155,7 @@ import {
   nativeMarchingCubesVertexRowsBudgetPerSurface,
   packedNormalRowsCoverCompactPositionPrefix,
   resolveSphSceneThermalStepOptions,
+  workerResidentParticleStateProducerColorRows,
   workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
 import {
@@ -162,6 +165,49 @@ import {
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork
 } from '../src/runtime/webgpuComputeLayout.js';
+
+test('SS contact admission rejects contact-off without changing the requested architecture', () => {
+  const rejected = resolveSphSchroederHierarchyContactAdmission({
+    schroederSimulation: true,
+    contactSolver: false
+  });
+  assert.deepEqual(rejected, {
+    schema: 'peercompute.ulg.sph-schroeder-hierarchy-contact-admission.v0',
+    status: 'schroeder-hierarchy-contact-requirement-rejected',
+    hierarchyRequested: true,
+    contactSolverRequested: false,
+    admitted: false,
+    reason: 'worker-ss-requires-contact-solver'
+  });
+  assert.equal(Object.isFrozen(rejected), true);
+  assert.equal(resolveSphSchroederHierarchyContactAdmission({
+    schroederSimulation: true,
+    contactSolver: true
+  }).admitted, true);
+});
+
+test('explicit worker ownership fails closed when its producer is not ready', () => {
+  const admission = resolveSphWorkerLanePolicyAdmission({
+    workerOwnedResidentProducerRequested: true,
+    workerOwnedResidentProducerReady: false
+  });
+  assert.deepEqual(admission, {
+    requested: true,
+    eligible: false,
+    reason: 'worker-lane-not-ready',
+    detail: 'mounted render-ownership policy does not declare workerOwnedResidentProducerReady'
+  });
+  assert.equal(Object.isFrozen(admission), true);
+  assert.deepEqual(resolveSphWorkerLanePolicyAdmission({
+    workerOwnedResidentProducerRequested: false,
+    workerOwnedResidentProducerReady: false
+  }), {
+    requested: false,
+    eligible: false,
+    reason: 'worker-lane-not-requested',
+    detail: 'render ownership request does not select the worker-owned resident producer'
+  });
+});
 
 test('resident artifact queue-ordered retirement fences unauthorized cleanup', async () => {
   let resolveFence;
@@ -523,6 +569,7 @@ import {
 } from '../src/runtime/material/opticalGpuBuffers.js';
 import {
   residentMotionDiagnostic,
+  residentWorkerLaneNativeSurfacePresentationReady,
   resolveMountedWorkerPressureInterfaceGasCellImportDescriptor,
   summarizeMountedPressureInterfaceGasCellImport
 } from '../src/visualization/sphPhaseDemoMount.js';
@@ -1304,6 +1351,62 @@ test('worker resident particle-state source cache keys avoid full hashes for ver
   assert.equal(staleDescriptor.cpuStateStale, true);
   assert.match(staleDescriptor.key, /sourceKeyStrategy:content-hash/);
   assert.match(staleDescriptor.key, /\|state:\d+:/);
+});
+
+test('worker resident particle-state color rows cover admitted reaction products and every phase lane', () => {
+  const materialProperties = {
+    Na: {},
+    h2o: {},
+    h2: {},
+    naoh: { intrinsicColorSrgb: [0.78, 0.8, 0.82] }
+  };
+  const sodiumMaterialId = stableOpticalMaterialId('Na');
+  const waterMaterialId = stableOpticalMaterialId('h2o');
+  const hydrogenMaterialId = stableOpticalMaterialId('h2');
+  const sodiumHydroxideMaterialId = stableOpticalMaterialId('NaOH');
+  const reactionTable = {
+    productTermMetadata: [
+      { material: 'NaOH', materialId: sodiumHydroxideMaterialId },
+      { material: 'h2', materialId: hydrogenMaterialId }
+    ]
+  };
+  const colorRows = workerResidentParticleStateProducerColorRows(null, {
+    sphParticleState: {
+      metadata: [
+        { material: 'Na', materialId: sodiumMaterialId, phase: 'solid', phaseId: GPU_PHASE_IDS.solid },
+        { material: 'h2o', materialId: waterMaterialId, phase: 'liquid', phaseId: GPU_PHASE_IDS.liquid }
+      ]
+    },
+    materialProperties,
+    reactionTable
+  });
+  const keys = new Set();
+  const rowsByKey = new Map();
+  for (let offset = 0; offset < colorRows.length; offset += 8) {
+    const key = `${Math.round(colorRows[offset + 0])}:${Math.round(colorRows[offset + 1])}`;
+    keys.add(key);
+    rowsByKey.set(key, colorRows.slice(offset, offset + 8));
+  }
+
+  assert.ok(keys.has(`${sodiumMaterialId}:${GPU_PHASE_IDS.solid}`));
+  assert.ok(keys.has(`${waterMaterialId}:${GPU_PHASE_IDS.liquid}`));
+  for (const materialId of [hydrogenMaterialId, sodiumHydroxideMaterialId]) {
+    for (const phaseId of [
+      GPU_PHASE_IDS.solid,
+      GPU_PHASE_IDS.liquid,
+      GPU_PHASE_IDS.gas,
+      GPU_PHASE_IDS.plasma
+    ]) {
+      assert.ok(keys.has(`${materialId}:${phaseId}`));
+    }
+  }
+  const sodiumHydroxideGas = rowsByKey.get(
+    `${sodiumHydroxideMaterialId}:${GPU_PHASE_IDS.gas}`
+  );
+  assert.ok(sodiumHydroxideGas);
+  assert.ok(Math.abs(sodiumHydroxideGas[4] - 0.78) < 1e-6);
+  assert.ok(Math.abs(sodiumHydroxideGas[5] - 0.8) < 1e-6);
+  assert.ok(Math.abs(sodiumHydroxideGas[6] - 0.82) < 1e-6);
 });
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
@@ -2092,6 +2195,173 @@ test('resident motion diagnostic treats batch-visible motion as a refresh trigge
   assert.ok(diagnostic.estimatedBatchDisplacementUpperBoundM > diagnostic.visibleThresholdM);
   assert.equal(diagnostic.scientificValidation, false);
   assert.equal(diagnostic.fullPhysicsValidation, false);
+});
+
+test('worker terminal native surface presentation is exact and readback-scoped outside the physics hot loop', () => {
+  const execution = {
+    residentComputeManagerMode: 'worker-owned-resident-lane',
+    workerLaneFallback: null,
+    workerOwnedResidentLane: {
+      laneId: 'lane:native-surface',
+      stateKey: 'state:native-surface',
+      scheduleId: 'schedule:native-surface:2',
+      residentScheduleStatus: 'worker-resident-schedule-completed',
+      cancelled: false,
+      completedStepCount: 1,
+      laneSimTimeS: 0.004,
+      finalEpochIdentity: { storageGeneration: 12, physicsTick: 7 },
+      retainedBufferRefs: ['worker:state'],
+      committedPresentation: {
+        status: 'worker-offscreen-resident-particle-state-producer-rendered',
+        committedPresentationSchema:
+          'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+        committedPresentationStatus:
+          'state-manager-committed-resident-schedule-presentation-admission',
+        residentScheduleCandidatePresentation: true,
+        stateManagerCommittedPresentation: true,
+        scheduleId: 'schedule:native-surface:2',
+        laneId: 'lane:native-surface',
+        stateKey: 'state:native-surface',
+        residentExecutionGeneration: 12,
+        sphStep: 7,
+        stepOrdinal: 1,
+        authorityStatus: 'state-manager-committed-worker-schedule',
+        computeManagerCompletionSchema:
+          'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+        computeManagerLeaseId: 'lease:native-surface:2',
+        computeManagerLeaseStatus: 'completed',
+        computeManagerFenceSatisfied: true,
+        stateManagerCommitStatus: 'committed',
+        stateManagerCommitAccepted: true,
+        terminalScheduleFence: true,
+        terminalFenceScope: 'resident-schedule-terminal',
+        terminalFenceSatisfied: true,
+        terminalFenceAuthorityAdmissionReady: true,
+        producerSourceKind: 'worker-retained-resident-stage-output',
+        producerSourceTransport: 'worker-retained-resident-stage-output',
+        sourceStageId: 'schroederSameLevelMechanics',
+        retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      }
+    }
+  };
+  const presentation = {
+    schema: 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
+    status: 'worker-lane-native-surface-presentation-source-ready',
+    scheduleId: 'schedule:native-surface:2',
+    laneId: 'lane:native-surface',
+    stateKey: 'state:native-surface',
+    requestId: 'request:native-surface:2',
+    cacheKey: 'request:native-surface:2',
+    sourceStep: 8,
+    sourceTimeS: 0.004,
+    readbackScope: 'resident-schedule-terminal-presentation',
+    terminalPresentationFullParticleReadbackPerformed: true,
+    physicsHotLoopParticipation: false
+  };
+  const renderState = {
+    schema: 'peercompute.ulg.sph-resident-render-state.v0',
+    status: 'resident-render-field-applied',
+    sourceResidentRenderSourceStatus: 'resident-render-source-current',
+    surfaceDrawVisibleRendererBridge: 'native-webgpu-surface-consumer',
+    surfaceDrawVisibleGpuConsumerReady: true,
+    surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration: 2,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundResourceGeneration: 2,
+    surfaceDrawVisibleGpuConsumerSameQueueStructuralSubmissionAdmitted: true,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundValidationStatus:
+      'passed',
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundProofKind:
+      'same-queue-private-staged-composite-submission',
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSameQueueSubmissionBoundary:
+      true,
+    surfaceDrawVisibleGpuConsumerNativeCandidateForegroundSubmittedDrawCount: 4,
+    surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted: true,
+    surfaceDrawRenderBridgeLastRenderStatus:
+      'native-webgpu-surface-consumer-candidate-staged-composite-presented',
+    surfaceDrawRenderBridgeFrameCount: 3,
+    surfaceDrawRenderBridgeLastSubmittedDrawCount: 4,
+    surfaceDrawRenderBridgeNativeSurfaceCandidateStagedPresentationStatus:
+      'candidate-staged-presentation-canvas-copy-submitted',
+    surfaceDrawRenderBridgeNativeSurfaceCandidatePresentationCopyCount: 2,
+    surfaceDrawRenderBridgeNativeSurfaceCandidatePresentationPostAdmissionGeometrySubmitCount:
+      0,
+    surfaceDrawSourceResidentExecutionGenerationMatchesCurrent: true,
+    surfaceDrawSourceResidentRetainedPrevious: false,
+    residentRenderSourceStaleAfterPublish: false,
+    surfaceDrawOverlayPolicyStatus: 'surface-draw-native-webgpu-main-canvas',
+    workerOffscreenPresentationStatus:
+      'worker-offscreen-display-hidden-main-native-owner',
+    workerOffscreenRetainedCompactSnapshotStatus:
+      'presentation-worker-retained-compact-snapshot-exported',
+    workerOffscreenRetainedCompactSnapshotAvailable: true,
+    workerOffscreenRetainedCompactSnapshot: {
+      compactBufferSnapshotStep: 8
+    },
+    residentRenderSource: {
+      residentExecutionGenerationMatchesCurrent: true,
+      nextStep: 8,
+      nextTimeS: 0.004,
+      workerLaneNativeSurfaceSnapshotHandoff: {
+        schema:
+          'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
+        status: 'worker-lane-native-surface-presentation-source-admitted',
+        scheduleId: 'schedule:native-surface:2',
+        laneId: 'lane:native-surface',
+        stateKey: 'state:native-surface',
+        requestId: 'request:native-surface:2',
+        cacheKey: 'request:native-surface:2',
+        sourceStep: 8,
+        sourceTimeS: 0.004,
+        sharedSlotIdentityVerified: true,
+        workerLineageMetadataStatus:
+          'worker-retained-compact-snapshot-lineage-metadata-ready',
+        terminalCompactSnapshotReadback: true
+      }
+    }
+  };
+
+  assert.equal(residentWorkerLaneNativeSurfacePresentationReady({
+    execution,
+    presentation,
+    renderState
+  }), true);
+  assert.equal(residentWorkerLaneNativeSurfacePresentationReady({
+    execution,
+    presentation: { ...presentation, physicsHotLoopParticipation: true },
+    renderState
+  }), false);
+  assert.equal(residentWorkerLaneNativeSurfacePresentationReady({
+    execution,
+    presentation,
+    renderState: {
+      ...renderState,
+      workerOffscreenRetainedCompactSnapshot: {
+        compactBufferSnapshotStep: 7
+      }
+    }
+  }), false);
+  assert.equal(residentWorkerLaneNativeSurfacePresentationReady({
+    execution,
+    presentation,
+    renderState: {
+      ...renderState,
+      residentRenderSource: {
+        ...renderState.residentRenderSource,
+        workerLaneNativeSurfaceSnapshotHandoff: {
+          ...renderState.residentRenderSource
+            .workerLaneNativeSurfaceSnapshotHandoff,
+          scheduleId: 'schedule:stale'
+        }
+      }
+    }
+  }), false);
+  assert.equal(residentWorkerLaneNativeSurfacePresentationReady({
+    execution,
+    presentation,
+    renderState: {
+      ...renderState,
+      surfaceDrawSourceResidentExecutionGenerationMatchesCurrent: false
+    }
+  }), false);
 });
 
 test('SPH phase renderer preserves material and phase descriptors for optical closures', () => {
@@ -4873,6 +5143,30 @@ test('SPH successor source-family enforcement is scoped to Schroeder continuatio
       uploads: genericUploads
     }),
     true
+  );
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      residentExecution: {
+        schroederSimulation: true,
+        residentExecutionPolicy: { schroederSimulation: true }
+      },
+      uploads: genericUploads,
+      renderOnlyWorkerSnapshotAdmitted: true
+    }),
+    false,
+    'an exact terminal worker snapshot is a render-only mirror, not a physics continuation'
+  );
+  assert.equal(
+    schroederRenderContinuationRequiresSourceFamily({
+      residentExecution: {
+        schroederSimulation: true,
+        residentExecutionPolicy: { schroederSimulation: true }
+      },
+      uploads: genericUploads,
+      renderOnlyWorkerSnapshotAdmitted: false
+    }),
+    true,
+    'ordinary Schroeder uploads still require the worker-private successor family'
   );
   assert.equal(
     schroederRenderContinuationRequiresSourceFamily({

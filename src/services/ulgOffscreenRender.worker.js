@@ -1,3 +1,12 @@
+import {
+  createResidentRenderCandidateMailbox,
+  ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+  ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS
+} from '../visualization/residentRenderCandidateMailbox.js';
+import {
+  webGpuDeviceDescriptorForResidentSph
+} from '../runtime/webgpuDeviceLimits.js';
+
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
 const DISPLAY_HANDOFF = 'transferControlToOffscreen';
@@ -9,6 +18,12 @@ const RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0';
 const PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
+const PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA =
+  'peercompute.ulg.presentation-worker-resident-schedule-cancel.v0';
+const PRESENTATION_WORKER_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA =
+  'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0';
+const WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA =
+  'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0';
 const PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 const REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
@@ -42,6 +57,17 @@ let cssHeight = 0;
 let pixelRatio = 1;
 let frameCount = 0;
 let readyFrameCount = 0;
+// GPUCanvasContext.configure() recreates presentation resources. Repeating it
+// for every resident candidate needlessly churns the Dawn/Vulkan surface while
+// the same device queue is still carrying canonical compute work. Keep the
+// exact active configuration and reconfigure only when one of its inputs (or
+// the canvas backing size) actually changes.
+let canvasConfiguration = null;
+let canvasConfigureCount = 0;
+let canvasConfigureSkipCount = 0;
+let canvasUnconfigureCount = 0;
+let lastCanvasConfigureAction = 'unavailable';
+let lastCanvasConfigureReason = null;
 // Display arbitration: never present a state older than the newest one
 // already on screen. The presentation-worker retained-stage lane can lag
 // the authoritative main-thread chain; without this gate its late draws
@@ -96,6 +122,13 @@ let residentParticleStateProducerThermoRowsByteLength = 0;
 let residentParticleStateProducerColorRowsByteLength = 0;
 let residentStageRunnerModulePromise = null;
 let retainedCompactSnapshotStatus = null;
+// A terminal candidate is retained until the page proves that the exact
+// schedule crossed BOTH authority boundaries: the worker terminal queue fence
+// and the NodeKernel/ComputeManager/StateManager commit. Progress candidates
+// remain mailbox telemetry only and can never reach the draw loop.
+let pendingCommittedResidentSchedulePresentation = null;
+let residentScheduleCandidateStreamIdentity = null;
+let residentScheduleCandidateStreamEpoch = 0;
 
 function nowMs() {
   return typeof self.performance?.now === 'function' ? self.performance.now() : Date.now();
@@ -123,6 +156,12 @@ function publish(status) {
     pixelRatio,
     backingWidth: canvas?.width ?? null,
     backingHeight: canvas?.height ?? null,
+    canvasConfigureCount,
+    canvasConfigureSkipCount,
+    canvasUnconfigureCount,
+    canvasConfigured: canvasConfiguration !== null,
+    lastCanvasConfigureAction,
+    lastCanvasConfigureReason,
     workerOffscreenRenderRows: renderRowsStatus,
     updatedAtMs: nowMs(),
     scientificValidation: false,
@@ -170,7 +209,13 @@ function publishResidentStageStatus({
   startedAtMs = null,
   timeoutMs = null,
   result = null,
-  error = null
+  error = null,
+  // W4b: terminal truth of a batched resident schedule. The full W2 result
+  // envelope is structured-cloneable by construction (the mechanics worker
+  // posts it verbatim on its own message loop), so the scene adopts it from
+  // this status channel without a second transport.
+  residentScheduleResult = null,
+  residentScheduleError = null
 } = {}) {
   const residentStageStatus = {
     schema: PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA,
@@ -183,6 +228,15 @@ function publishResidentStageStatus({
     workerDeviceProvided,
     elapsedMs: Number.isFinite(startedAtMs) ? Math.max(0, nowMs() - startedAtMs) : null,
     timeoutMs: timeoutMs ?? null,
+    ...(residentScheduleResult
+      ? {
+          scheduleId: residentScheduleResult.scheduleId ?? null,
+          residentScheduleResult
+        }
+      : {}),
+    ...(residentScheduleError
+      ? { residentScheduleError }
+      : {}),
     ...(result
       ? {
           residentStageSummary: result?.summary || null,
@@ -291,22 +345,96 @@ function configureCanvas({
   height = canvas?.height ?? 1,
   nextCssWidth = cssWidth,
   nextCssHeight = cssHeight,
-  nextPixelRatio = pixelRatio
+  nextPixelRatio = pixelRatio,
+  reason = 'configure-canvas'
 } = {}) {
-  if (!canvas || !context || !device || !format) return;
-  canvas.width = Math.max(1, Math.floor(Number(width) || 1));
-  canvas.height = Math.max(1, Math.floor(Number(height) || 1));
+  if (!canvas || !context || !device || !format) {
+    lastCanvasConfigureAction = 'unavailable';
+    lastCanvasConfigureReason = String(reason || 'configure-canvas');
+    return { configured: false, reason: 'canvas-configuration-unavailable' };
+  }
+  const backingWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const backingHeight = Math.max(1, Math.floor(Number(height) || 1));
+  const usage = self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT;
+  const alphaMode = 'premultiplied';
   cssWidth = Number.isFinite(Number(nextCssWidth)) ? Number(nextCssWidth) : cssWidth;
   cssHeight = Number.isFinite(Number(nextCssHeight)) ? Number(nextCssHeight) : cssHeight;
   pixelRatio = Number.isFinite(Number(nextPixelRatio)) && Number(nextPixelRatio) > 0
     ? Number(nextPixelRatio)
     : pixelRatio;
-  context.configure({
+
+  const configurationMatches = Boolean(
+    canvasConfiguration
+    && canvasConfiguration.canvas === canvas
+    && canvasConfiguration.context === context
+    && canvasConfiguration.device === device
+    && canvasConfiguration.format === format
+    && canvasConfiguration.usage === usage
+    && canvasConfiguration.alphaMode === alphaMode
+    && canvasConfiguration.width === backingWidth
+    && canvasConfiguration.height === backingHeight
+    && Number(canvas.width) === backingWidth
+    && Number(canvas.height) === backingHeight
+  );
+  lastCanvasConfigureReason = String(reason || 'configure-canvas');
+  if (configurationMatches) {
+    canvasConfigureSkipCount += 1;
+    lastCanvasConfigureAction = 'reused';
+    return {
+      configured: false,
+      reason: 'canvas-configuration-unchanged',
+      configureCount: canvasConfigureCount,
+      skipCount: canvasConfigureSkipCount
+    };
+  }
+
+  if (Number(canvas.width) !== backingWidth) canvas.width = backingWidth;
+  if (Number(canvas.height) !== backingHeight) canvas.height = backingHeight;
+  try {
+    context.configure({
+      device,
+      format,
+      usage,
+      alphaMode
+    });
+  } catch (error) {
+    lastCanvasConfigureAction = 'configure-failed';
+    throw error;
+  }
+  canvasConfiguration = {
+    canvas,
+    context,
     device,
     format,
-    usage: self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT,
-    alphaMode: 'premultiplied'
-  });
+    usage,
+    alphaMode,
+    width: backingWidth,
+    height: backingHeight
+  };
+  canvasConfigureCount += 1;
+  lastCanvasConfigureAction = 'configured';
+  return {
+    configured: true,
+    reason: lastCanvasConfigureReason,
+    configureCount: canvasConfigureCount,
+    skipCount: canvasConfigureSkipCount
+  };
+}
+
+function unconfigureCanvas({ reason = 'dispose' } = {}) {
+  lastCanvasConfigureReason = String(reason || 'dispose');
+  if (!canvasConfiguration) {
+    lastCanvasConfigureAction = 'unconfigured';
+    return false;
+  }
+  try {
+    context?.unconfigure?.();
+    canvasUnconfigureCount += 1;
+    return true;
+  } finally {
+    canvasConfiguration = null;
+    lastCanvasConfigureAction = 'unconfigured';
+  }
 }
 
 function destroyRenderRowsResources() {
@@ -657,6 +785,828 @@ async function runResidentStageOnPresentationDevice(data = {}) {
   }
 }
 
+// --- W3: batched resident schedule on the presentation device ---
+//
+// Worker-local single-slot mailbox for the render candidates this worker's
+// schedule runs produce. The bridge keeps its own mirror (fed by the
+// 'resident-schedule-candidate' messages below); this instance is the
+// worker-side arbitration point for future worker-local draw consumers.
+// Exported for direct-invocation tests (this module is otherwise a plain
+// worker script).
+export const presentationResidentScheduleCandidateMailbox =
+  createResidentRenderCandidateMailbox();
+
+function resetResidentScheduleCandidateMailbox() {
+  presentationResidentScheduleCandidateMailbox.reset();
+  pendingCommittedResidentSchedulePresentation = null;
+  residentScheduleCandidateStreamIdentity = null;
+  residentScheduleCandidateStreamEpoch = 0;
+}
+
+function prepareResidentScheduleCandidateStream({ laneId = null, stateKey = null } = {}) {
+  const nextLaneId = nonEmptyString(laneId);
+  const nextStateKey = nonEmptyString(stateKey);
+  if (!nextLaneId || !nextStateKey) return null;
+  const changed = Boolean(
+    residentScheduleCandidateStreamIdentity
+    && (
+      residentScheduleCandidateStreamIdentity.laneId !== nextLaneId
+      || residentScheduleCandidateStreamIdentity.stateKey !== nextStateKey
+    )
+  );
+  if (changed) {
+    presentationResidentScheduleCandidateMailbox.reset();
+    resetPresentedSphStep();
+  }
+  if (!residentScheduleCandidateStreamIdentity || changed) {
+    residentScheduleCandidateStreamEpoch += 1;
+  }
+  residentScheduleCandidateStreamIdentity = Object.freeze({
+    epoch: residentScheduleCandidateStreamEpoch,
+    laneId: nextLaneId,
+    stateKey: nextStateKey
+  });
+  return residentScheduleCandidateStreamIdentity;
+}
+
+function residentScheduleCandidateStreamIsCurrent(stream = null) {
+  return Boolean(
+    stream
+    && residentScheduleCandidateStreamIdentity
+    && Number(stream.epoch) === Number(residentScheduleCandidateStreamIdentity.epoch)
+    && stream.laneId === residentScheduleCandidateStreamIdentity.laneId
+    && stream.stateKey === residentScheduleCandidateStreamIdentity.stateKey
+  );
+}
+
+function nonEmptyString(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || null;
+}
+
+function sameResidentScheduleCandidateVersion(left = null, right = null) {
+  return Boolean(
+    left
+    && right
+    && Number.isSafeInteger(Number(left.residentExecutionGeneration))
+    && Number(left.residentExecutionGeneration)
+      === Number(right.residentExecutionGeneration)
+    && Number.isSafeInteger(Number(left.nextStep))
+    && Number(left.nextStep) === Number(right.nextStep)
+    && nonEmptyString(left.scheduleId) === nonEmptyString(right.scheduleId)
+    && Number.isSafeInteger(Number(left.stepOrdinal))
+    && Number(left.stepOrdinal) === Number(right.stepOrdinal)
+  );
+}
+
+function committedResidentSchedulePresentationReceiptFields(
+  admission = null,
+  candidate = null
+) {
+  return {
+    residentScheduleCandidatePresentation: true,
+    stateManagerCommittedPresentation: true,
+    committedPresentationSchema: admission?.schema ?? null,
+    committedPresentationStatus: admission?.status ?? null,
+    scheduleId: admission?.scheduleId ?? null,
+    laneId: admission?.laneId ?? null,
+    stateKey: admission?.stateKey ?? null,
+    presentationLaneEpoch:
+      candidate?.presentationLaneEpoch ?? null,
+    residentExecutionGeneration:
+      admission?.candidateVersion?.residentExecutionGeneration ?? null,
+    sphStep: admission?.candidateVersion?.nextStep ?? null,
+    stepOrdinal: admission?.candidateVersion?.stepOrdinal ?? null,
+    authorityStatus: admission?.authority?.status ?? null,
+    computeManagerCompletionSchema:
+      admission?.authority?.computeManagerCompletionSchema ?? null,
+    computeManagerLeaseId:
+      admission?.authority?.computeManagerLeaseId ?? null,
+    computeManagerLeaseStatus:
+      admission?.authority?.computeManagerLeaseStatus ?? null,
+    computeManagerFenceSatisfied:
+      admission?.authority?.computeManagerFenceSatisfied === true,
+    stateManagerCommitStatus:
+      admission?.authority?.stateManagerCommitStatus ?? null,
+    stateManagerCommitAccepted:
+      admission?.authority?.stateManagerCommitAccepted === true,
+    terminalScheduleFence:
+      admission?.terminalFence?.terminalScheduleFence === true,
+    terminalFenceScope: admission?.terminalFence?.scope ?? null,
+    terminalFenceSatisfied:
+      admission?.terminalFence?.fenceSatisfied === true,
+    terminalFenceAuthorityAdmissionReady:
+      admission?.terminalFence?.authorityAdmissionReady === true
+  };
+}
+
+function committedResidentSchedulePresentationRenderReceiptFields(data = {}) {
+  if (data?.stateManagerCommittedPresentation !== true) return {};
+  return {
+    residentScheduleCandidatePresentation:
+      data.residentScheduleCandidatePresentation === true,
+    stateManagerCommittedPresentation: true,
+    committedPresentationSchema: data.committedPresentationSchema ?? null,
+    committedPresentationStatus: data.committedPresentationStatus ?? null,
+    scheduleId: data.scheduleId ?? null,
+    laneId: data.laneId ?? null,
+    stateKey: data.stateKey ?? null,
+    presentationLaneEpoch: data.presentationLaneEpoch ?? null,
+    residentExecutionGeneration: data.residentExecutionGeneration ?? null,
+    sphStep: data.sphStep ?? null,
+    stepOrdinal: data.stepOrdinal ?? null,
+    authorityStatus: data.authorityStatus ?? null,
+    computeManagerCompletionSchema:
+      data.computeManagerCompletionSchema ?? null,
+    computeManagerLeaseId: data.computeManagerLeaseId ?? null,
+    computeManagerLeaseStatus: data.computeManagerLeaseStatus ?? null,
+    computeManagerFenceSatisfied:
+      data.computeManagerFenceSatisfied === true,
+    stateManagerCommitStatus: data.stateManagerCommitStatus ?? null,
+    stateManagerCommitAccepted: data.stateManagerCommitAccepted === true,
+    terminalScheduleFence: data.terminalScheduleFence === true,
+    terminalFenceScope: data.terminalFenceScope ?? null,
+    terminalFenceSatisfied: data.terminalFenceSatisfied === true,
+    terminalFenceAuthorityAdmissionReady:
+      data.terminalFenceAuthorityAdmissionReady === true
+  };
+}
+
+// Version mapping (documented decision for W3):
+//
+// The de-facto version token for render candidates is the scene's
+// resident-render-source metadata (peercompute.ulg.sph-resident-render-source
+// .v0, src/visualization/sphPhaseScene.js), ordered by
+// (residentExecutionGeneration, nextStep). The presentation worker has no
+// access to the scene's counters, so it derives the same ordering from the
+// lane's own sealed epoch identity words carried by every W2 schedule
+// progress envelope and terminal result:
+//
+//   version.residentExecutionGeneration := epochIdentity.storageGeneration
+//     The lane's generationId lineage word: it only changes when the lane's
+//     storage generation re-materializes, which strictly supersedes every
+//     candidate of the prior generation (the scene-side analogue is the
+//     per-execution residentExecutionGeneration counter).
+//
+//   version.nextStep := epochIdentity.physicsTick
+//     The W2 schedule driver's 'epoch-identity-regressed' seal guarantees
+//     physicsTick (and positionEpoch) strictly advance per step, and a
+//     continuation schedule on the retained lane keeps advancing from the
+//     retained words — so within one storage generation versions strictly
+//     increase across steps AND across schedules.
+//
+//   version.scheduleId / version.stepOrdinal are carried verbatim for
+//     observability only; they do not participate in ordering.
+//
+// Together (storageGeneration, physicsTick) is strictly increasing over every
+// candidate one lane emits, which is exactly the mailbox's ordering contract.
+// The terminal-result candidate of a schedule whose last step already emitted
+// a progress candidate carries the SAME version; the mailbox truthfully drops
+// it as a duplicate (droppedStaleCount) rather than reordering.
+//
+// Fail-closed: when the epoch identity or either version word is missing or
+// non-finite (e.g. a schedule cancelled before step 1 has a null
+// finalEpochIdentity) the builder returns null — a candidate is skipped, never
+// fabricated.
+export function buildPresentationResidentScheduleRenderCandidate({
+  scheduleId = null,
+  laneId = null,
+  stateKey = null,
+  presentationLaneEpoch = null,
+  stepOrdinal = null,
+  epochIdentity = null,
+  retainedBufferRefs = null,
+  summary = null
+} = {}) {
+  if (!epochIdentity || typeof epochIdentity !== 'object') return null;
+  for (const field of ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS) {
+    if (!Number.isFinite(Number(epochIdentity[field]))) return null;
+  }
+  const residentExecutionGeneration = Number(epochIdentity.storageGeneration);
+  const nextStep = Number(epochIdentity.physicsTick);
+  return {
+    schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    laneId: nonEmptyString(laneId),
+    stateKey: nonEmptyString(stateKey),
+    presentationLaneEpoch: Number.isSafeInteger(Number(presentationLaneEpoch))
+      && Number(presentationLaneEpoch) > 0
+      ? Number(presentationLaneEpoch)
+      : null,
+    version: {
+      residentExecutionGeneration,
+      nextStep,
+      scheduleId: typeof scheduleId === 'string' ? scheduleId : null,
+      stepOrdinal: Number.isFinite(Number(stepOrdinal))
+        ? Number(stepOrdinal)
+        : null
+    },
+    epochIdentity: Object.fromEntries(
+      ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS.map(
+        (field) => [field, Number(epochIdentity[field])]
+      )
+    ),
+    ...(Array.isArray(retainedBufferRefs)
+      ? { retainedBufferRefs: [...retainedBufferRefs] }
+      : {}),
+    ...(summary && typeof summary === 'object' ? { summary } : {})
+  };
+}
+
+// (a) publish into the worker-local mailbox, (b) post the bridge message.
+// Stale/duplicate versions are dropped by the mailbox but the bridge message
+// is still posted — the bridge-side mailbox applies the identical ordering
+// gate and counts its own drops. Returns the candidate or null when the
+// source had no publishable identity.
+function postResidentScheduleCandidate(source) {
+  const candidate = buildPresentationResidentScheduleRenderCandidate(source);
+  if (!candidate) return null;
+  // Telemetry is best-effort and cannot own presentation. The exact terminal
+  // candidate returned here is retained separately for post-commit admission,
+  // even when the mailbox drops its duplicate version or postMessage fails.
+  try {
+    presentationResidentScheduleCandidateMailbox.publish(candidate);
+  } catch {
+    // Candidate telemetry rejection never destroys the direct terminal value.
+  }
+  try {
+    self.postMessage({
+      type: 'resident-schedule-candidate',
+      laneId: candidate.laneId,
+      stateKey: candidate.stateKey,
+      candidate
+    });
+  } catch {
+    // The terminal presentation path is independent of telemetry delivery.
+  }
+  return candidate;
+}
+
+// W4b: worker-local terminal candidate consumer. The schedule loop publishes
+// every progress candidate to the mailbox for telemetry, but NEVER invokes
+// this consumer. Only the page's exact post-StateManager-commit admission can
+// call notify(admission), at which point the single terminal candidate is
+// drawn once from worker-retained post-step buffers.
+function createResidentScheduleCandidateDrawLoop({
+  runner = null,
+  schedulePayload = {},
+  reason = 'run-resident-schedule-on-presentation-device'
+} = {}) {
+  const request = retainedStageOutputRenderRequest(schedulePayload);
+  const laneId = schedulePayload.lease?.laneId || schedulePayload.lane?.laneId || null;
+  const stateKey = schedulePayload.lease?.stateKey || schedulePayload.lane?.stateKey || null;
+  const resolverAvailable =
+    typeof runner?.resolveUlgMechanicsResidentStageWorkerRetainedParticleState === 'function';
+  if (
+    !request
+    || request.sourceStageId !== 'schroederSameLevelMechanics'
+    || !resolverAvailable
+  ) {
+    return {
+      active: false,
+      requested: Boolean(request),
+      inactiveReason: !request
+        ? 'no-retained-stage-output-render-request'
+        : (!resolverAvailable
+          ? 'retained-particle-state-resolver-unavailable'
+          : 'render-request-not-schroeder-same-level-mechanics'),
+      notify() {}
+    };
+  }
+  let drawing = false;
+  const drawCandidate = (admission, candidate) => {
+    if (drawing) return null;
+    drawing = true;
+    try {
+        if (!candidate) return null;
+        const retained = runner.resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+          laneId,
+          stateKey,
+          sourceStageId: 'schroederSameLevelMechanics'
+        });
+        const candidateParticleCount = Number(candidate?.summary?.particleCount);
+        const retainedParticleCount = Number(retained?.particleCount);
+        const retainedStateStrideFloats = Number(retained?.stateStrideFloats);
+        const retainedThermoStrideFloats = Number(retained?.thermoStrideFloats);
+        const retainedStateByteLength = Number(retained?.stateBufferByteLength);
+        const retainedThermoByteLength = Number(retained?.thermoBufferByteLength);
+        const retainedShapeReady = Boolean(
+          Number.isSafeInteger(candidateParticleCount)
+          && candidateParticleCount > 0
+          && candidateParticleCount === retainedParticleCount
+          && Number.isSafeInteger(retainedStateStrideFloats)
+          && retainedStateStrideFloats > 0
+          && Number.isSafeInteger(retainedThermoStrideFloats)
+          && retainedThermoStrideFloats >= 12
+          && Number.isSafeInteger(retainedStateByteLength)
+          && retainedStateByteLength
+            >= retainedParticleCount * retainedStateStrideFloats * 4
+          && Number.isSafeInteger(retainedThermoByteLength)
+          && retainedThermoByteLength
+            >= retainedParticleCount * retainedThermoStrideFloats * 4
+        );
+        if (
+          retained?.status !== 'worker-retained-particle-state-ready'
+          || !isGpuBufferLike(retained.sourceStateBuffer)
+          || !isGpuBufferLike(retained.sourceThermoBuffer)
+          || !retainedShapeReady
+        ) {
+          return publishRenderRowsStatus({
+            schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+            renderRowsSchema: RENDER_ROWS_SCHEMA,
+            status: 'worker-offscreen-resident-schedule-candidate-render-blocked-source-unavailable',
+            reason: retained?.status !== 'worker-retained-particle-state-ready'
+              ? (retained?.status || reason)
+              : 'worker-retained-particle-state-terminal-shape-mismatch',
+            inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+            producerSourceKind: 'worker-retained-resident-stage-output',
+            producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+            sourceStageId: 'schroederSameLevelMechanics',
+            retainedParticleStateStatus: retained?.status || null,
+            particleCount: retained?.particleCount ?? 0,
+            sourceTransferBytes: 0,
+            sourceStateTransferBytes: 0,
+            workerLocalRenderRowsProduced: false,
+            ...committedResidentSchedulePresentationReceiptFields(
+              admission,
+              candidate
+            )
+          });
+        }
+        return drawResidentParticleStateProducer({
+          ...request,
+          inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+          producerSourceKind: 'worker-retained-resident-stage-output',
+          producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+          sourceCacheStatus: 'worker-retained-resident-schedule-candidate-bound',
+          sourceStageId: 'schroederSameLevelMechanics',
+          retainedParticleStateStatus: retained.status,
+          sourceStateBuffer: retained.sourceStateBuffer,
+          sourceThermoBuffer: retained.sourceThermoBuffer,
+          particleCount: retained.particleCount,
+          stateStrideFloats: retained.stateStrideFloats,
+          thermoStrideFloats: retained.thermoStrideFloats,
+          stateByteLength: retained.stateBufferByteLength,
+          thermoByteLength: retained.thermoBufferByteLength,
+          // Presentation ordering rides the candidate's own strictly
+          // advancing version word (physicsTick), so a stale draw can never
+          // supersede a newer presented step.
+          sphStep: candidate.version.nextStep,
+          residentScheduleCandidatePresentation: true,
+          ...committedResidentSchedulePresentationReceiptFields(
+            admission,
+            candidate
+          ),
+          width: request.width ?? canvas?.width ?? 1,
+          height: request.height ?? canvas?.height ?? 1,
+          cssWidth: request.cssWidth ?? cssWidth,
+          cssHeight: request.cssHeight ?? cssHeight,
+          pixelRatio: request.pixelRatio ?? pixelRatio,
+          backgroundColor: request.backgroundColor || backgroundColor,
+          clearAlpha: Number.isFinite(Number(request.clearAlpha))
+            ? Number(request.clearAlpha)
+            : clearAlpha,
+          reason: `${reason}:resident-schedule-candidate`
+        });
+    } finally {
+      drawing = false;
+    }
+  };
+  return {
+    active: true,
+    requested: true,
+    inactiveReason: null,
+    notify(admission = null, candidate = null) {
+      try {
+        return drawCandidate(admission, candidate);
+      } catch (error) {
+        // Candidate presentation must never abort the batch; surface the
+        // failure on the render-rows status channel instead.
+        try {
+          return publishRenderRowsStatus({
+            schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+            renderRowsSchema: RENDER_ROWS_SCHEMA,
+            status: 'worker-offscreen-resident-schedule-candidate-render-failed',
+            reason: error instanceof Error ? error.message : String(error),
+            inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+            producerSourceKind: 'worker-retained-resident-stage-output',
+            producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+            sourceStageId: 'schroederSameLevelMechanics',
+            workerLocalRenderRowsProduced: false,
+            ...committedResidentSchedulePresentationReceiptFields(
+              admission,
+              candidate
+            ),
+            ...compactError(error)
+          });
+        } catch {
+          // Even status publication failures stay out of the step loop.
+        }
+        return null;
+      }
+    }
+  };
+}
+
+function committedResidentSchedulePresentationBlocked(data = {}, reason) {
+  return publishRenderRowsStatus({
+    schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+    renderRowsSchema: RENDER_ROWS_SCHEMA,
+    status:
+      'worker-offscreen-committed-resident-schedule-presentation-blocked',
+    reason,
+    inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+    sourceStageId: 'schroederSameLevelMechanics',
+    residentScheduleCandidatePresentation: true,
+    stateManagerCommittedPresentation: false,
+    scheduleId: data?.scheduleId ?? null,
+    laneId: data?.laneId ?? null,
+    stateKey: data?.stateKey ?? null,
+    residentExecutionGeneration:
+      data?.candidateVersion?.residentExecutionGeneration ?? null,
+    sphStep: data?.candidateVersion?.nextStep ?? null,
+    stepOrdinal: data?.candidateVersion?.stepOrdinal ?? null,
+    workerLocalRenderRowsProduced: false
+  });
+}
+
+// Page -> presentation-worker admission for exactly one terminal candidate.
+// This is intentionally exported as a direct test seam; the message loop is
+// the only production caller. Any missing/mismatched authority word leaves the
+// candidate undrawn and consumes no worker-retained source.
+export function presentCommittedResidentScheduleCandidate(data = {}) {
+  const pending = pendingCommittedResidentSchedulePresentation;
+  if (!pending) {
+    return committedResidentSchedulePresentationBlocked(
+      data,
+      'no pending terminal resident-schedule candidate exists'
+    );
+  }
+  const scheduleId = nonEmptyString(data.scheduleId);
+  const laneId = nonEmptyString(data.laneId);
+  const stateKey = nonEmptyString(data.stateKey);
+  const terminalFence = data.terminalFence;
+  const authority = data.authority;
+  const candidateVersion = data.candidateVersion;
+  const identityReady = Boolean(
+    data.schema
+      === PRESENTATION_WORKER_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+    && data.status
+      === 'state-manager-committed-resident-schedule-presentation-admission'
+    && scheduleId === pending.scheduleId
+    && laneId === pending.laneId
+    && stateKey === pending.stateKey
+    && sameResidentScheduleCandidateVersion(
+      candidateVersion,
+      pending.terminalCandidate?.version
+    )
+  );
+  const terminalFenceReady = Boolean(
+    terminalFence
+    && terminalFence.required === true
+    && terminalFence.scope === 'resident-schedule-terminal'
+    && terminalFence.terminalScheduleFence === true
+    && terminalFence.fenceSatisfied === true
+    && terminalFence.authorityAdmissionReady === true
+    && terminalFence.queueCompletionStatus === 'queue-work-completed'
+    && [
+      'queue.onSubmittedWorkDone',
+      'worker-device.queue.onSubmittedWorkDone'
+    ].includes(terminalFence.queueCompletionMethod)
+    && terminalFence.scheduleId === scheduleId
+    && terminalFence.laneId === laneId
+    && terminalFence.stateKey === stateKey
+    && Number(terminalFence.completedStepCount)
+      === Number(candidateVersion?.stepOrdinal)
+    && terminalFence.scheduleId === pending.terminalFence?.scheduleId
+    && Number(terminalFence.completedStepCount)
+      === Number(pending.terminalFence?.completedStepCount)
+  );
+  const authorityReady = Boolean(
+    authority
+    && authority.status === 'state-manager-committed-worker-schedule'
+    && authority.computeManagerCompletionSchema
+      === WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+    && nonEmptyString(authority.computeManagerLeaseId)
+    && authority.computeManagerLeaseStatus === 'completed'
+    && authority.computeManagerFenceSatisfied === true
+    && authority.stateManagerCommitStatus === 'committed'
+    && authority.stateManagerCommitAccepted === true
+  );
+  if (!identityReady || !terminalFenceReady || !authorityReady) {
+    return committedResidentSchedulePresentationBlocked(
+      data,
+      !identityReady
+        ? 'committed presentation identity does not match the pending terminal candidate'
+        : (!terminalFenceReady
+          ? 'committed presentation lacks the exact terminal schedule fence'
+          : 'committed presentation lacks ComputeManager/StateManager authority')
+    );
+  }
+  // Consume before drawing so a duplicate/replayed admission cannot submit a
+  // second frame even when draw setup throws.
+  pendingCommittedResidentSchedulePresentation = null;
+  return pending.candidateDrawLoop.notify(data, pending.terminalCandidate);
+}
+
+// Mirrors runResidentStageOnPresentationDevice exactly (same device-injection
+// pattern through context.ulgMechanicsResidentStageWorker.common.deviceResult
+// with sameWorkerQueueFenceFallback, same dynamic module import) but drives
+// the W2 batched schedule entry runUlgMechanicsResidentStageWorkerSchedule-
+// Payload. `runnerModuleOverride` is a test-only seam so node tests can inject
+// a fake mechanics module; the message path never sets it. Exported for
+// direct-invocation tests.
+export async function runResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  const payload = data.payload && typeof data.payload === 'object' ? data.payload : {};
+  if (!device || !context) {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-webgpu-unavailable',
+      reason: 'presentation worker WebGPU device/context is unavailable',
+      stagePayload: payload,
+      workerDeviceSource: null,
+      workerDeviceProvided: false,
+      workerReady: false
+    });
+    return;
+  }
+  if (pendingCommittedResidentSchedulePresentation) {
+    publishResidentStageStatus({
+      status:
+        'worker-offscreen-resident-schedule-on-presentation-device-blocked-pending-committed-presentation',
+      reason:
+        'the prior terminal candidate has not received its StateManager-commit presentation admission',
+      stagePayload: payload,
+      workerReady: true
+    });
+    return;
+  }
+  const startedAtMs = nowMs();
+  const timeoutMs = residentStageTimeoutMs(data);
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publishResidentStageStatus({
+        status: 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+        reason: 'mechanics resident stage runner import failed',
+        stagePayload: payload,
+        workerReady: true,
+        startedAtMs,
+        timeoutMs,
+        error
+      });
+      return;
+    }
+  }
+  if (typeof runner.runUlgMechanicsResidentStageWorkerSchedulePayload !== 'function') {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule runner is unavailable in presentation worker',
+      stagePayload: payload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs
+    });
+    return;
+  }
+  const previousContext = payload.context && typeof payload.context === 'object'
+    ? payload.context
+    : {};
+  const previousWorkerContext = previousContext.ulgMechanicsResidentStageWorker
+    || previousContext.mechanicsResidentStageWorker
+    || {};
+  const previousCommon = previousWorkerContext.common && typeof previousWorkerContext.common === 'object'
+    ? previousWorkerContext.common
+    : {};
+  const schedulePayload = {
+    ...payload,
+    context: {
+      ...previousContext,
+      ulgMechanicsResidentStageWorker: {
+        ...previousWorkerContext,
+        preferWebGpu: true,
+        common: {
+          ...previousCommon,
+          sameWorkerQueueFenceFallback: true,
+          deviceResult: {
+            status: 'webgpu-ready-presentation-worker-device',
+            reason: 'resident schedule is executing inside the offscreen presentation worker',
+            device,
+            workerDeviceSource: 'offscreen-presentation-worker-device',
+            workerDeviceProvided: true
+          },
+          navigatorRef: self.navigator
+        }
+      }
+    }
+  };
+  const scheduleLaneId =
+    schedulePayload.lease?.laneId || schedulePayload.lane?.laneId || null;
+  const scheduleStateKey =
+    schedulePayload.lease?.stateKey || schedulePayload.lane?.stateKey || null;
+  const scheduleCandidateStream = prepareResidentScheduleCandidateStream({
+    laneId: scheduleLaneId,
+    stateKey: scheduleStateKey
+  });
+  // W4b: a scheduleStepOptionsProvider is a FUNCTION and can never cross
+  // postMessage, so the presentation worker injects the worker-local lane
+  // continuation classifier here — the W2 driver consults it for steps 2+
+  // (and for step 1 of a continuation schedule on a retained lane). An
+  // explicitly provided provider (direct in-worker callers, tests) always
+  // wins; without the factory the schedule keeps its original fail-closed
+  // behavior.
+  try {
+    const injectedWorkerContext =
+      schedulePayload.context.ulgMechanicsResidentStageWorker;
+    const scheduleStageOptions = injectedWorkerContext.stageOptions
+      && typeof injectedWorkerContext.stageOptions === 'object'
+      ? injectedWorkerContext.stageOptions
+      : null;
+    const epochStageOptions = scheduleStageOptions?.schroederSpatialEpoch
+      && typeof scheduleStageOptions.schroederSpatialEpoch === 'object'
+      ? scheduleStageOptions.schroederSpatialEpoch
+      : null;
+    if (
+      epochStageOptions
+      && typeof epochStageOptions.scheduleStepOptionsProvider !== 'function'
+      && typeof runner.createWorkerSchroederLaneLevelAssignmentProvider === 'function'
+    ) {
+      injectedWorkerContext.stageOptions = {
+        ...scheduleStageOptions,
+        schroederSpatialEpoch: {
+          ...epochStageOptions,
+          scheduleStepOptionsProvider:
+            runner.createWorkerSchroederLaneLevelAssignmentProvider({
+              laneId: schedulePayload.lease?.laneId
+                ?? schedulePayload.lane?.laneId
+                ?? null,
+              stateKey: schedulePayload.lease?.stateKey
+                ?? schedulePayload.lane?.stateKey
+                ?? null,
+              classifierOptions:
+                epochStageOptions.laneContinuationClassifierOptions || null
+            })
+        }
+      };
+    }
+  } catch {
+    // Provider injection is an enabler, never a gate: without it the W2
+    // driver fails closed exactly as before.
+  }
+  publishResidentStageStatus({
+    status: 'worker-offscreen-resident-schedule-on-presentation-device-started',
+    reason: data.reason || 'run-resident-schedule-on-presentation-device',
+    stagePayload: schedulePayload,
+    workerReady: true,
+    startedAtMs,
+    timeoutMs
+  });
+  // W4b: progress candidates are telemetry-only. The draw loop is retained
+  // with the terminal candidate and can be notified only by an exact
+  // post-StateManager-commit admission from the page.
+  const candidateDrawLoop = createResidentScheduleCandidateDrawLoop({
+    runner,
+    schedulePayload,
+    reason: data.reason || 'run-resident-schedule-on-presentation-device'
+  });
+  try {
+    const result = await timeoutResidentStage(
+      runner.runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload, {
+        id: data.id ?? null,
+        postProgress: (progress) => {
+          try {
+            if (!residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
+              return;
+            }
+            postResidentScheduleCandidate({
+              scheduleId: progress?.scheduleId ?? null,
+              laneId: scheduleLaneId,
+              stateKey: scheduleStateKey,
+              presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
+              stepOrdinal: progress?.stepOrdinal ?? null,
+              epochIdentity: progress?.epochIdentity ?? null,
+              retainedBufferRefs:
+                progress?.stepSummary?.retainedBufferRefs ?? null,
+              summary: progress?.stepSummary ?? null
+            });
+          } catch {
+            // Candidate delivery must never abort the batch (mirrors the W2
+            // driver's own fire-and-forget progress contract).
+          }
+        }
+      }),
+      timeoutMs
+    );
+    try {
+      const terminalCandidate = residentScheduleCandidateStreamIsCurrent(
+        scheduleCandidateStream
+      )
+        ? postResidentScheduleCandidate({
+            scheduleId: result?.scheduleId ?? null,
+            laneId: result?.laneId ?? scheduleLaneId,
+            stateKey: result?.stateKey ?? scheduleStateKey,
+            presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
+            stepOrdinal: result?.completedStepCount ?? null,
+            epochIdentity: result?.finalEpochIdentity ?? null,
+            retainedBufferRefs: result?.retainedBufferRefs ?? null,
+            summary: result?.perStepSummaries?.lastStep ?? null
+          })
+        : null;
+      if (terminalCandidate && candidateDrawLoop.active) {
+        if (pendingCommittedResidentSchedulePresentation) {
+          throw new Error(
+            'worker resident schedule terminal candidate cannot overwrite a pending committed presentation'
+          );
+        }
+        pendingCommittedResidentSchedulePresentation = {
+          scheduleId: result?.scheduleId ?? null,
+          laneId: result?.laneId ?? schedulePayload.lease?.laneId ?? null,
+          stateKey: result?.stateKey ?? schedulePayload.lease?.stateKey ?? null,
+          terminalCandidate,
+          terminalFence: result?.gpuFence ?? null,
+          candidateDrawLoop
+        };
+      }
+    } catch {
+      // Terminal candidate failures must not mask the completed result.
+    }
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-completed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      result,
+      // The full W2 terminal envelope, forwarded verbatim: the page-side
+      // scene adopts its truthful words (completedStepCount, per-step epoch
+      // seals, lane identity, gpuFence, retained refs, cancellation).
+      residentScheduleResult: result ?? null
+    });
+  } catch (error) {
+    publishResidentStageStatus({
+      status: error?.message?.includes('timed out')
+        ? 'worker-offscreen-resident-schedule-on-presentation-device-timeout'
+        : 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      error,
+      residentScheduleError: error?.residentScheduleError ?? null
+    });
+  }
+}
+
+// Forwards to the W2 cancel entry (a pure between-steps flag; no device is
+// required, so cancellation works even while init is still pending). The
+// terminal 'resident-schedule-...-completed' status with result.cancelled:
+// true remains the acknowledgement, exactly as on the mechanics worker's own
+// message loop. Exported for direct-invocation tests.
+export async function cancelResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publish({
+        status: 'worker-offscreen-resident-schedule-cancel-failed',
+        reason: 'mechanics resident stage runner import failed',
+        workerReady: Boolean(device && context),
+        ...compactError(error)
+      });
+      return null;
+    }
+  }
+  if (typeof runner.cancelUlgMechanicsResidentStageWorkerSchedule !== 'function') {
+    publish({
+      status: 'worker-offscreen-resident-schedule-cancel-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule cancel entry is unavailable in presentation worker',
+      workerReady: Boolean(device && context)
+    });
+    return null;
+  }
+  const outcome = runner.cancelUlgMechanicsResidentStageWorkerSchedule(data.id);
+  publish({
+    status: 'worker-offscreen-resident-schedule-cancel-forwarded',
+    reason: data.reason || 'cancel-resident-schedule-on-presentation-device',
+    workerReady: Boolean(device && context),
+    workerOffscreenResidentScheduleCancel: {
+      schema: PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA,
+      id: data.id ?? null,
+      ...(outcome && typeof outcome === 'object' ? outcome : {})
+    }
+  });
+  return outcome;
+}
+
 async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
   if (!device || !context) {
     return publishRetainedCompactSnapshotStatus({
@@ -799,7 +1749,11 @@ fn vsMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) inst
   let particle = particles[instanceIndex];
   let clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
   var out: VertexOut;
-  if (clip.w <= 0.0001) {
+  if (
+    clip.w <= 0.0001
+    || particle.positionRadius.w <= 0.0
+    || particle.color.a <= 0.0
+  ) {
     out.position = vec4<f32>(2.0, 2.0, 1.0, 1.0);
     out.color = vec4<f32>(0.0);
     return out;
@@ -1084,6 +2038,20 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let smoothingLengthM = thermoRows[thermoOffset + 8u];
   let visualRadiusM = thermoRows[thermoOffset + 11u];
   let massKg = stateRows[stateOffset + 3u];
+  // Phase-carrier topology preallocates dormant product/companion rows with
+  // zero mass. They are capacity, not visible particles. Rendering them with
+  // the fallback radius overlays every live carrier with a white square and
+  // makes truthful motion/reaction frames look frozen.
+  if (!(massKg > 0.0)) {
+    outputParticles[index].positionRadius = vec4<f32>(
+      stateRows[stateOffset + 0u],
+      stateRows[stateOffset + 1u],
+      stateRows[stateOffset + 2u],
+      0.0
+    );
+    outputParticles[index].color = vec4<f32>(0.0);
+    return;
+  }
   let fallbackRadiusM = max(params.values.x, 0.000001);
   let densityRadiusM = radiusFromMassDensity(massKg, restDensityKgPerM3, fallbackRadiusM);
   var radiusM = select(densityRadiusM, visualRadiusM, visualRadiusM > 0.0);
@@ -1222,12 +2190,15 @@ function normalizeMatrix(value) {
 function drawRenderRows(data) {
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
+      schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-presentation-superseded-stale-step',
       reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
       sphStep: Number(data.sphStep),
       lastPresentedSphStep: Number(lastPresentedSphStep),
       particleCount: data.particleCount ?? 0,
-      inputTransferBytes: 0
+      inputTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   if (!device || !context || !format) {
@@ -1243,7 +2214,8 @@ function drawRenderRows(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-render-rows'
   });
   const particleRows = data.particleRows instanceof Float32Array
     ? data.particleRows
@@ -1344,7 +2316,8 @@ function drawResidentRenderProducer(data) {
       status: 'worker-offscreen-resident-render-producer-blocked-webgpu-unavailable',
       reason: 'WebGPU device/context is unavailable',
       inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
-      workerReady: false
+      workerReady: false,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
     return;
   }
@@ -1353,7 +2326,8 @@ function drawResidentRenderProducer(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-resident-render-producer'
   });
   const sourceRows = data.sourceParticleRows instanceof Float32Array
     ? data.sourceParticleRows
@@ -1520,12 +2494,15 @@ function drawResidentRenderProducer(data) {
 function drawResidentParticleStateProducer(data) {
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
+      schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-presentation-superseded-stale-step',
       reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
       sphStep: Number(data.sphStep),
       lastPresentedSphStep: Number(lastPresentedSphStep),
       particleCount: data.particleCount ?? 0,
-      inputTransferBytes: 0
+      inputTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   if (!device || !context || !format) {
@@ -1535,7 +2512,8 @@ function drawResidentParticleStateProducer(data) {
       status: 'worker-offscreen-resident-particle-state-producer-blocked-webgpu-unavailable',
       reason: 'WebGPU device/context is unavailable',
       inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
-      workerReady: false
+      workerReady: false,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
     return;
   }
@@ -1544,7 +2522,8 @@ function drawResidentParticleStateProducer(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-resident-particle-state-producer'
   });
   const particleCount = Math.max(0, Math.floor(Number(data.particleCount) || 0));
   const stateStrideFloats = Math.max(1, Math.floor(Number(data.stateStrideFloats) || 8));
@@ -1616,7 +2595,8 @@ function drawResidentParticleStateProducer(data) {
       sourceCacheHit: false,
       sourceRowsPacked: false,
       sourceTransferBytes: 0,
-      sourceStateTransferBytes: 0
+      sourceStateTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   backgroundColor = data.backgroundColor || backgroundColor;
@@ -1762,6 +2742,49 @@ function drawResidentParticleStateProducer(data) {
     displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
       ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
       : null,
+    // W4b: candidate-driven presentations are ordered by the candidate's own
+    // strictly advancing version (presentationStepAccepts above), not by the
+    // page display-owner epoch — the bridge reveals them on this marker.
+    ...(data.residentScheduleCandidatePresentation === true
+      ? { residentScheduleCandidatePresentation: true }
+      : {}),
+    ...(data.stateManagerCommittedPresentation === true
+      ? {
+          stateManagerCommittedPresentation: true,
+          committedPresentationSchema:
+            data.committedPresentationSchema ?? null,
+          committedPresentationStatus:
+            data.committedPresentationStatus ?? null,
+          scheduleId: data.scheduleId ?? null,
+          laneId: data.laneId ?? null,
+          stateKey: data.stateKey ?? null,
+          presentationLaneEpoch:
+            data.presentationLaneEpoch ?? null,
+          residentExecutionGeneration:
+            data.residentExecutionGeneration ?? null,
+          stepOrdinal: data.stepOrdinal ?? null,
+          authorityStatus: data.authorityStatus ?? null,
+          computeManagerCompletionSchema:
+            data.computeManagerCompletionSchema ?? null,
+          computeManagerLeaseId:
+            data.computeManagerLeaseId ?? null,
+          computeManagerLeaseStatus:
+            data.computeManagerLeaseStatus ?? null,
+          computeManagerFenceSatisfied:
+            data.computeManagerFenceSatisfied === true,
+          stateManagerCommitStatus:
+            data.stateManagerCommitStatus ?? null,
+          stateManagerCommitAccepted:
+            data.stateManagerCommitAccepted === true,
+          terminalScheduleFence:
+            data.terminalScheduleFence === true,
+          terminalFenceScope: data.terminalFenceScope ?? null,
+          terminalFenceSatisfied:
+            data.terminalFenceSatisfied === true,
+          terminalFenceAuthorityAdmissionReady:
+            data.terminalFenceAuthorityAdmissionReady === true
+        }
+      : {}),
     sphStep: Number.isFinite(Number(data.sphStep)) ? Number(data.sphStep) : null,
     particleCount,
     inputTransferBytes,
@@ -1814,6 +2837,7 @@ function drawResidentParticleStateProducer(data) {
 
 async function initPresentation(data) {
   canvas = data.canvas || null;
+  canvasConfiguration = null;
   backgroundColor = data.backgroundColor || backgroundColor;
   clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
   cssWidth = Number(data.cssWidth) || 0;
@@ -1854,14 +2878,17 @@ async function initPresentation(data) {
     });
     return;
   }
-  device = await adapter.requestDevice();
+  device = await adapter.requestDevice(
+    webGpuDeviceDescriptorForResidentSph(adapter)
+  );
   format = gpu.getPreferredCanvasFormat();
   configureCanvas({
     width: data.width,
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'init-offscreen-presentation'
   });
   device.lost?.then?.((info) => {
     publish({
@@ -1886,6 +2913,7 @@ self.onmessage = (event) => {
   Promise.resolve().then(async () => {
     if (data.type === 'init-offscreen-presentation') {
       resetPresentedSphStep();
+      resetResidentScheduleCandidateMailbox();
       await initPresentation(data);
       return;
     }
@@ -1895,13 +2923,17 @@ self.onmessage = (event) => {
         height: data.height,
         nextCssWidth: data.cssWidth,
         nextCssHeight: data.cssHeight,
-        nextPixelRatio: data.pixelRatio
+        nextPixelRatio: data.pixelRatio,
+        reason: data.reason || 'resize'
       });
       clearPresentation({ reason: data.reason || 'resize' });
       return;
     }
     if (data.type === 'clear') {
       resetPresentedSphStep();
+      if (data.resetResidentScheduleCandidateMailbox !== false) {
+        resetResidentScheduleCandidateMailbox();
+      }
       backgroundColor = data.backgroundColor || backgroundColor;
       clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
       clearPresentation({ reason: data.reason || 'clear' });
@@ -1923,14 +2955,28 @@ self.onmessage = (event) => {
       await runResidentStageOnPresentationDevice(data);
       return;
     }
+    if (data.type === 'run-resident-schedule-on-presentation-device') {
+      await runResidentScheduleOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'present-committed-resident-schedule-candidate') {
+      presentCommittedResidentScheduleCandidate(data);
+      return;
+    }
+    if (data.type === 'cancel-resident-schedule-on-presentation-device') {
+      await cancelResidentScheduleOnPresentationDevice(data);
+      return;
+    }
     if (data.type === 'export-retained-compact-snapshot') {
       await exportRetainedCompactSnapshotFromPresentationDevice(data);
       return;
     }
     if (data.type === 'dispose') {
+      if (disposed) return;
       disposed = true;
+      pendingCommittedResidentSchedulePresentation = null;
       destroyRenderRowsResources();
-      context?.unconfigure?.();
+      unconfigureCanvas({ reason: data.reason || 'dispose' });
       device?.destroy?.();
       publish({
         status: 'worker-offscreen-presentation-disposed',

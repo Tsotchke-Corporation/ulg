@@ -5,6 +5,7 @@ const GPU_SHADER_STAGE = {
 const DEVICE_COMPUTE_PIPELINE_CACHE = new WeakMap();
 const DEVICE_SHADER_MODULE_CACHE = new WeakMap();
 const DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE = new WeakMap();
+const DEVICE_PIPELINE_PREWARM_INFLIGHT = new WeakMap();
 
 export function computeBufferBinding(
   binding,
@@ -205,6 +206,96 @@ export function createCachedExplicitComputePipeline(device, {
     explicitLayoutCacheStatus:
       explicitLayout?.cacheStatus ?? 'explicit-layout-not-cached'
   };
+}
+
+function pipelinePrewarmInflightForDevice(device) {
+  let inflight = DEVICE_PIPELINE_PREWARM_INFLIGHT.get(device);
+  if (!inflight) {
+    inflight = new Map();
+    DEVICE_PIPELINE_PREWARM_INFLIGHT.set(device, inflight);
+  }
+  return inflight;
+}
+
+/**
+ * Compile one cached pipeline ahead of its first submission site, off the
+ * interactive path, populating the same per-device cache with the same entry
+ * shape as createCachedExplicitComputePipeline so every existing synchronous
+ * call site becomes a guaranteed hit. Prewarm is deliberately fail-open: a
+ * compilation failure leaves the cache untouched and is only reported here,
+ * so the synchronous path still surfaces the real error at its own site with
+ * unchanged fail-closed semantics. Concurrent prewarms of one key share a
+ * single in-flight compilation; a synchronous create racing a prewarm wins
+ * the cache and the prewarm result defers to it.
+ */
+export async function prewarmCachedExplicitComputePipeline(device, {
+  cacheKey,
+  label,
+  code,
+  entryPoint = 'main',
+  bindings = []
+} = {}) {
+  if (!cacheKey) {
+    throw new TypeError(
+      'pipeline prewarm requires a cacheKey; an uncached prewarm can never be consumed'
+    );
+  }
+  const key = [
+    cacheKey,
+    label || '',
+    entryPoint,
+    bindingSignature(bindings)
+  ].join('|');
+  const cache = computePipelineCacheForDevice(device);
+  if (cache.has(key)) {
+    return { ...cache.get(key), cacheStatus: 'pipeline-cache-hit', prewarmed: false };
+  }
+  const inflight = pipelinePrewarmInflightForDevice(device);
+  const pending = inflight.get(key);
+  if (pending) return pending;
+  const run = (async () => {
+    try {
+      const { module } = cachedShaderModule(device, { label, code });
+      const explicitLayout = cachedExplicitComputeLayout(device, {
+        label,
+        entryPoint,
+        bindings
+      });
+      const descriptor = {
+        label,
+        layout: explicitLayout?.pipelineLayout || 'auto',
+        compute: { module, entryPoint }
+      };
+      const pipeline = typeof device.createComputePipelineAsync === 'function'
+        ? await device.createComputePipelineAsync(descriptor)
+        : device.createComputePipeline(descriptor);
+      const entry = {
+        pipeline,
+        bindGroupLayout:
+          explicitLayout?.bindGroupLayout || pipeline.getBindGroupLayout(0),
+        pipelineLayout: explicitLayout?.pipelineLayout ?? null
+      };
+      if (!cache.has(key)) cache.set(key, entry);
+      return {
+        ...cache.get(key),
+        cacheStatus: 'pipeline-prewarmed',
+        prewarmed: true
+      };
+    } catch (error) {
+      return {
+        pipeline: null,
+        bindGroupLayout: null,
+        pipelineLayout: null,
+        cacheStatus: 'pipeline-prewarm-failed',
+        prewarmed: false,
+        error
+      };
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, run);
+  return run;
 }
 
 // One fence per registered cleanup, measured at 161 per batch in a production

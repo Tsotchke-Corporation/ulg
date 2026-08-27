@@ -33,8 +33,11 @@ import {
 } from '../src/visualization/sphPhaseDemoMount.js';
 import {
   analyzeTimeline,
+  awaitBrowserProbeFinalization,
   browserFrameValidationFromVisualFrame,
+  createBrowserProbeFatalSignal,
   createBrowserConsoleCapture,
+  raceBrowserProbeOperationWithFatalSignal,
   summarizeResidentRenderSourceStaleRecovery
 } from '../scripts/sph-long-horizon-probe.mjs';
 import {
@@ -47,6 +50,31 @@ import {
 function readRepoFile(relativePath) {
   return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 }
+
+test('interactive controls stay disabled until runtime admission, handlers, and initial state are ready', () => {
+  const source = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const shellStart = source.indexOf('function buildOverlayShell()');
+  const shellEnd = source.indexOf('\n  return overlay;', shellStart);
+  assert.ok(shellStart >= 0 && shellEnd > shellStart);
+  const shell = source.slice(shellStart, shellEnd);
+  for (const id of ['sph-play', 'sph-step', 'sph-reset']) {
+    assert.match(
+      shell,
+      new RegExp(`<button id="${id}" type="button" disabled>`),
+      `${id} must not accept a mobile tap before async runtime admission attaches its handler`
+    );
+  }
+  assert.match(
+    source,
+    /let interactiveControlHandlersBound = false;[\s\S]*?syncSphInteractiveControlAvailability = \(\) => \{[\s\S]*?simulationRuntimeAdmission\.ready[\s\S]*?interactiveControlHandlersBound[\s\S]*?const stateReady = interactiveSimulationStateReady;/,
+    'runtime admission must not expose interactive controls before their handlers and initial state exist'
+  );
+  assert.match(
+    source,
+    /scheduleInitialMlsMpmResidentSteps\(\{ generation: particleSyncGeneration \}\);\s*interactiveSimulationStateReady = true;\s*syncSphInteractiveControlAvailability\(\);/,
+    'Play and Step must become available only after the initial state owns a concrete presentation generation'
+  );
+});
 
 test('iron native failure evidence preserves device-loss detail without adding a GPU wait', () => {
   const source = readRepoFile(
@@ -247,6 +275,186 @@ test('render-source staleness only clears after exact zero-geometry retention re
   ]);
   assert.equal(unapproved.status, 'unrecovered-stale-source');
   assert.equal(unapproved.unrecoveredSampleCount, 1);
+});
+
+test('worker terminal display and snapshot authority supersede the rejected legacy page draw fail-closed', () => {
+  const zeroGeometryReason =
+    'a zero-geometry render-field handoff has no native consumer; '
+    + 'retain the runtime-admitted prior presentation until a real replacement is ready';
+  const metric = {
+    phase: 'resident-batch',
+    surfaceDraw: {
+      sourceResidentExecutionGenerationMatchesCurrent: false,
+      sourceResidentRetainedPrevious: true,
+      residentRenderSourceStaleAfterPublish: true,
+      sourceResidentRetentionReason: zeroGeometryReason
+    },
+    peerComputeRenderOwnershipPolicy: {
+      effectiveMode: 'worker-owned-resident-render-producer'
+    },
+    residentSteps: {
+      residentComputeManagerMode: 'worker-owned-resident-lane',
+      workerLaneFallback: null,
+      workerOwnedResidentLane: {
+        schema:
+          'peercompute.ulg.sph-scene-worker-owned-resident-lane-execution.v0',
+        laneId: 'lane:worker-render-source',
+        stateKey: 'state:worker-render-source',
+        presentationLaneEpoch: 1,
+        scheduleId: 'schedule:worker-render-source:1',
+        residentScheduleStatus: 'worker-resident-schedule-completed',
+        terminalStatus:
+          'worker-offscreen-resident-schedule-on-presentation-device-completed',
+        requestedStepCount: 128,
+        completedStepCount: 128,
+        cancelled: false,
+        laneCompletedStepTotal: 128,
+        laneSimTimeS: 0.064,
+        finalEpochIdentity: {
+          storageGeneration: 194,
+          physicsTick: 127
+        },
+        gpuFence: {
+          scope: 'resident-schedule-terminal',
+          terminalScheduleFence: true,
+          fenceSatisfied: true,
+          queueCompletionStatus: 'queue-work-completed',
+          queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+          authorityAdmissionReady: true
+        },
+        authority: {
+          status: 'state-manager-committed-worker-schedule',
+          computeManagerLeaseStatus: 'completed',
+          computeManagerFenceSatisfied: true,
+          stateManagerCommitStatus: 'committed'
+        },
+        committedPresentation: {
+          status: 'worker-offscreen-resident-particle-state-producer-rendered',
+          scheduleId: 'schedule:worker-render-source:1',
+          laneId: 'lane:worker-render-source',
+          stateKey: 'state:worker-render-source',
+          presentationLaneEpoch: 1,
+          sphStep: 127,
+          stateManagerCommittedPresentation: true
+        }
+      }
+    },
+    workerOffscreenPresentation: {
+      transport: 'worker-owned-presented-canvas',
+      displayHandoff: 'transferControlToOffscreen',
+      frameCopyBackRejected: true,
+      canvasTransferred: true,
+      workerReady: true,
+      contextStatus: 'webgpu-context-ready',
+      frameCount: 133,
+      readyFrameCount: 133,
+      displayOwner: 'worker',
+      displayOwnerContentReady: true,
+      displayOwnerContentFrameSerial: 129,
+      displayOwnerPresentedSphStep: 127,
+      displayCanvasVisible: true,
+      displayOwnerLastRenderedContent: {
+        schema:
+          'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0',
+        renderRowsSchema: 'peercompute.ulg.worker-offscreen-render-rows.v0',
+        status: 'worker-offscreen-resident-particle-state-producer-rendered',
+        sphStep: 127,
+        particleCount: 608,
+        frameCount: 133,
+        readyFrameCount: 133,
+        residentScheduleCandidatePresentation: true,
+        stateManagerCommittedPresentation: true,
+        committedPresentationSchema:
+          'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+        committedPresentationStatus:
+          'state-manager-committed-resident-schedule-presentation-admission',
+        scheduleId: 'schedule:worker-render-source:1',
+        laneId: 'lane:worker-render-source',
+        stateKey: 'state:worker-render-source',
+        presentationLaneEpoch: 1,
+        residentExecutionGeneration: 194,
+        stepOrdinal: 128,
+        authorityStatus: 'state-manager-committed-worker-schedule',
+        computeManagerCompletionSchema:
+          'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+        computeManagerLeaseId: 'lease:worker-render-source:1',
+        computeManagerLeaseStatus: 'completed',
+        computeManagerFenceSatisfied: true,
+        stateManagerCommitStatus: 'committed',
+        stateManagerCommitAccepted: true,
+        terminalScheduleFence: true,
+        terminalFenceScope: 'resident-schedule-terminal',
+        terminalFenceSatisfied: true,
+        terminalFenceAuthorityAdmissionReady: true,
+        producerSourceKind: 'worker-retained-resident-stage-output',
+        producerSourceTransport: 'worker-retained-resident-stage-output',
+        sourceStageId: 'schroederSameLevelMechanics',
+        retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      }
+    },
+    authoritativeGpuCheckpoint: {
+      status: 'captured',
+      source: 'worker-retained-terminal-compact-snapshot',
+      authority: 'worker-terminal-fence-and-state-manager-commit',
+      sourceStep: 128,
+      sourceTimeS: 0.06400000000000004,
+      uploadPairCoherenceStatus: 'ready',
+      uploadPairMetadataCoherent: true,
+      uploadPairSharedSlotIdentityVerified: true,
+      uploadPairCoherenceLevel: 'shared-slot-and-metadata',
+      workerSnapshotProvenance: {
+        status: 'presentation-worker-retained-compact-snapshot-exported',
+        cacheKey:
+          'schedule:worker-render-source:1:authoritative-checkpoint:1:1',
+        laneId: 'lane:worker-render-source',
+        stateKey: 'state:worker-render-source',
+        sourceStageId: 'schroederSameLevelMechanics',
+        workerLineageMetadata: {
+          status:
+            'worker-retained-compact-snapshot-lineage-metadata-ready',
+          sharedSlotIdentityVerified: true
+        }
+      }
+    }
+  };
+  const analyze = (sample) => analyzeTimeline({
+    status: 'complete',
+    probeMode: 'direct-resident',
+    metrics: [sample]
+  }, { visualOnly: true });
+  const accepted = analyze(metric);
+  assert.equal(accepted.residentRenderSourceCurrentSampleCount, 1);
+  assert.deepEqual(accepted.residentRenderSourceNextStepSeries, [128]);
+  assert.deepEqual(accepted.residentRenderSourceNextTimeSeries, [0.064]);
+  assert.equal(
+    accepted.issues.includes('resident-render-source-stale'),
+    false
+  );
+
+  const mutations = [
+    ['terminal status', (row) => { row.residentSteps.workerOwnedResidentLane.terminalStatus = 'failed'; }],
+    ['terminal fence', (row) => { row.residentSteps.workerOwnedResidentLane.gpuFence.fenceSatisfied = false; }],
+    ['StateManager commit', (row) => { row.residentSteps.workerOwnedResidentLane.authority.stateManagerCommitStatus = 'rejected'; }],
+    ['displayed step', (row) => { row.workerOffscreenPresentation.displayOwnerLastRenderedContent.sphStep = 126; }],
+    ['snapshot step', (row) => { row.authoritativeGpuCheckpoint.sourceStep = 127; }],
+    ['snapshot lineage', (row) => { row.authoritativeGpuCheckpoint.workerSnapshotProvenance.workerLineageMetadata.sharedSlotIdentityVerified = false; }],
+    ['worker readiness', (row) => { row.workerOffscreenPresentation.workerReady = false; }],
+    ['canvas transfer', (row) => { row.workerOffscreenPresentation.canvasTransferred = false; }],
+    ['ready frame count', (row) => { row.workerOffscreenPresentation.readyFrameCount = 0; }],
+    ['snapshot cache binding', (row) => { row.authoritativeGpuCheckpoint.workerSnapshotProvenance.cacheKey = 'wrong'; }],
+    ['lane identity', (row) => {
+      row.residentSteps.workerOwnedResidentLane.laneId = null;
+      row.authoritativeGpuCheckpoint.workerSnapshotProvenance.laneId = null;
+    }]
+  ];
+  for (const [label, mutate] of mutations) {
+    const changed = structuredClone(metric);
+    mutate(changed);
+    assert.ok(
+      analyze(changed).issues.includes('resident-render-source-stale'),
+      label
+    );
+  }
 });
 
 test('interactive cache lifecycle refreshes the reset execution before its initial sample', () => {
@@ -1170,6 +1378,16 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(workerSource, /worker-resident-source-cache/);
   assert.match(workerSource, /createComputePipeline/);
   assert.match(workerSource, /createRenderPipeline/);
+  assert.match(
+    workerSource,
+    /if \(!\(massKg > 0\.0\)\) \{[\s\S]*?positionRadius = vec4<f32>\([\s\S]*?0\.0[\s\S]*?color = vec4<f32>\(0\.0\);[\s\S]*?return;/,
+    'dormant zero-mass phase/product rows must be culled before render-row publication'
+  );
+  assert.match(
+    workerSource,
+    /particle\.positionRadius\.w <= 0\.0[\s\S]*?particle\.color\.a <= 0\.0/,
+    'the shared quad renderer must reject zero-radius or transparent particle rows'
+  );
   assert.match(bridgeSource, /main-thread-compact-render-row-transfer/);
   assert.match(bridgeSource, /reuseSourceCache/);
   assert.match(bridgeSource, /source-cache-reused/);
@@ -1600,27 +1818,64 @@ test('transparent native WebGPU compositor capture is unsupported after a render
   assert.match(validation.reason, /capture as unsupported rather than a failed render/);
 });
 
-test('standard material matrix pins production native WebGPU visual evidence', () => {
+test('standard material matrix pins worker-owned SS with authenticated native surface evidence', () => {
   const matrixSource = readRepoFile('scripts/sph-visual-sanity-matrix.mjs');
+  const presetSource = readRepoFile('src/runtime/sphPhaseScenarioPresets.js');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const standardSource = matrixSource.slice(
+    matrixSource.indexOf('function standardScenarioFromPreset'),
+    matrixSource.indexOf('const LEGACY_SCENARIOS')
+  );
 
-  assert.match(matrixSource, /renderer: 'native-webgpu'/);
-  assert.match(matrixSource, /renderOwnership: 'main-thread-renderer'/);
-  assert.match(matrixSource, /surfaceDraw: 'native-webgpu-surface-consumer'/);
-  assert.match(matrixSource, /ss: '1'/);
+  assert.match(presetSource, /renderer: 'native-webgpu'/);
+  assert.match(
+    presetSource,
+    /surfaceDraw: 'native-webgpu-surface-consumer'/
+  );
+  assert.match(
+    presetSource,
+    /renderOwnership: 'worker-owned-resident-render-producer'/
+  );
+  assert.match(
+    matrixSource,
+    /STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE[\s\S]*?'worker-owned-resident-render-producer'/
+  );
+  assert.match(
+    matrixSource,
+    /STANDARD_VISUAL_MATRIX_RENDERER_MODE[\s\S]*?'native-webgpu-surface-consumer'/
+  );
+  assert.match(
+    standardSource,
+    /url: sphPhaseScenarioPresetUrl\(entry\.id, \{ residentAuto: '0' \}\)/,
+    'standard canned scenarios must consume their preset runtime rather than rebuilding it in the matrix'
+  );
+  assert.match(
+    standardSource,
+    /visualRendererMode: entry\.runtime\?\.surfaceDraw \?\? null/,
+    'worker-owned physics must hand its authenticated terminal snapshot to the native surface presenter'
+  );
+  assert.match(
+    standardSource,
+    /residentAuto: '0'/,
+    'the mounted visual probe must own an exact deterministic schedule cadence'
+  );
+  assert.match(presetSource, /ss: '1'/);
   for (const flag of [
     'schroederPhaseVolumeMigration',
     'schroederLawQueue',
     'schroederLawNeighborCandidates'
   ]) {
     assert.match(
-      matrixSource,
+      presetSource,
       new RegExp(`${flag}: '1'`),
       `${flag} must be enabled in the standard matrix scenarios`
     );
   }
   assert.match(matrixSource, /params\.set\('renderer', 'native-webgpu'\)/);
-  assert.match(matrixSource, /params\.set\('renderOwnership', 'main-thread-renderer'\)/);
-  assert.match(matrixSource, /params\.set\('surfaceDraw', 'native-webgpu-surface-consumer'\)/);
+  assert.match(
+    matrixSource,
+    /params\.set\('renderOwnership', STANDARD_VISUAL_MATRIX_RENDER_OWNERSHIP_MODE\)/
+  );
   assert.match(matrixSource, /params\.set\('ss', '1'\)/);
   assert.match(matrixSource, /params\.set\('schroederLevel', '0'\)/);
   assert.match(matrixSource, /params\.set\('schroederMinLevel', '0'\)/);
@@ -1641,6 +1896,10 @@ test('standard material matrix pins production native WebGPU visual evidence', (
       `${flag} must be enabled for the random-pair matrix scenarios`
     );
   }
+  assert.match(
+    probeSource,
+    /const residentAuthorityHost = globalThis\.__ulgResidentAuthorityHost[\s\S]*?computeManager: residentAuthorityHost\?\.computeManager \?\? null,[\s\S]*?residentStateManager: residentAuthorityHost\?\.stateManager \?\? null,[\s\S]*?residentAuthorityHost,/
+  );
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_WIDTH[\s\S]*?'1280'/);
   assert.match(matrixSource, /ULG_PROBE_VIEWPORT_HEIGHT[\s\S]*?'800'/);
   // The visual gate is desktop AND mobile. Keep the mobile preset reachable so
@@ -2623,7 +2882,12 @@ test('native successor validation starts every LIFO scope pop before awaiting an
 });
 
 test('probe preserves first critical GPU faults after console and issue caps', () => {
-  const capture = createBrowserConsoleCapture();
+  const criticalGpuMessages = [];
+  const capture = createBrowserConsoleCapture({
+    onCriticalGpuMessage(message) {
+      criticalGpuMessages.push(message);
+    }
+  });
   for (let index = 0; index < 510; index += 1) {
     capture.recordConsole({
       type: () => 'warning',
@@ -2647,6 +2911,10 @@ test('probe preserves first critical GPU faults after console and issue caps', (
     type: () => 'error',
     text: () => '[ulg-gpu-uncaptured-error:GPUValidationError] injected invalid command'
   });
+  capture.recordConsole({
+    type: () => 'warning',
+    text: () => 'A valid external Instance reference no longer exists.'
+  });
 
   const summary = capture.summary();
   assert.equal(summary.retainedEntryCount, 500);
@@ -2662,6 +2930,168 @@ test('probe preserves first critical GPU faults after console and issue caps', (
   assert.match(
     summary.firstCriticalGpuMessagesByCategory['uncaptured-error'].text,
     /injected invalid command/
+  );
+  assert.equal(summary.issueCounts['webgpu-device-lost'], 2);
+  assert.ok(criticalGpuMessages.some((message) => (
+    message.category === 'device-lost'
+    && /external Instance reference/.test(message.text)
+  )));
+});
+
+test('probe fatal signal is one-shot and wins a never-settling operation race', async () => {
+  const signal = createBrowserProbeFatalSignal();
+  const neverSettles = new Promise(() => {});
+  const raced = raceBrowserProbeOperationWithFatalSignal(neverSettles, signal);
+  assert.equal(signal.trip({
+    source: 'test-device-loss',
+    category: 'device-lost',
+    message: 'first fatal cause',
+    receivedAtMs: 17
+  }), true);
+  assert.equal(signal.trip({
+    source: 'test-late-page-crash',
+    category: 'page-crash',
+    message: 'late cause must not replace the first'
+  }), false);
+  const fatalOutcome = await raced;
+  assert.equal(fatalOutcome.status, 'probe-fatal-termination');
+  assert.equal(fatalOutcome.fatalTermination.source, 'test-device-loss');
+  assert.equal(fatalOutcome.fatalTermination.message, 'first fatal cause');
+  assert.equal(fatalOutcome.fatalTermination.receivedAtMs, 17);
+  assert.equal(signal.current(), fatalOutcome.fatalTermination);
+
+  const completedSignal = createBrowserProbeFatalSignal();
+  const completed = await raceBrowserProbeOperationWithFatalSignal(
+    Promise.resolve('complete-before-loss'),
+    completedSignal
+  );
+  assert.deepEqual(completed, {
+    status: 'operation-completed',
+    value: 'complete-before-loss'
+  });
+  assert.equal(completedSignal.trip({
+    source: 'late-loss',
+    message: 'late loss after completed operation'
+  }), true);
+  assert.equal(completed.value, 'complete-before-loss');
+
+  const preTrippedSignal = createBrowserProbeFatalSignal();
+  preTrippedSignal.trip({
+    source: 'pre-tripped-loss',
+    category: 'device-lost',
+    message: 'fatal state existed before the operation race'
+  });
+  const preTripped = await raceBrowserProbeOperationWithFatalSignal(
+    Promise.resolve('must-not-win'),
+    preTrippedSignal
+  );
+  assert.equal(preTripped.status, 'probe-fatal-termination');
+  assert.equal(preTripped.fatalTermination.source, 'pre-tripped-loss');
+
+  const rejectingSignal = createBrowserProbeFatalSignal();
+  await assert.rejects(
+    raceBrowserProbeOperationWithFatalSignal(
+      Promise.reject(new Error('operation-rejected-before-loss')),
+      rejectingSignal
+    ),
+    /operation-rejected-before-loss/
+  );
+});
+
+test('probe finalization never starts after fatal state and is interrupted by a later loss', async () => {
+  const preTrippedSignal = createBrowserProbeFatalSignal();
+  preTrippedSignal.trip({
+    source: 'pre-finalization-loss',
+    message: 'fatal before finalization'
+  });
+  let preTrippedFinalizerCallCount = 0;
+  await assert.rejects(
+    awaitBrowserProbeFinalization(() => {
+      preTrippedFinalizerCallCount += 1;
+      return 'must-not-run';
+    }, preTrippedSignal),
+    /fatal before finalization/
+  );
+  assert.equal(preTrippedFinalizerCallCount, 0);
+
+  const runningSignal = createBrowserProbeFatalSignal();
+  let runningFinalizerCallCount = 0;
+  const neverSettles = new Promise(() => {});
+  const finalization = awaitBrowserProbeFinalization(() => {
+    runningFinalizerCallCount += 1;
+    return neverSettles;
+  }, runningSignal);
+  await Promise.resolve();
+  assert.equal(runningFinalizerCallCount, 1);
+  runningSignal.trip({
+    source: 'during-finalization-loss',
+    message: 'fatal during finalization'
+  });
+  await assert.rejects(finalization, /fatal during finalization/);
+});
+
+test('long-horizon probe races startup and in-page work against typed device loss', () => {
+  const source = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  assert.match(
+    source,
+    /A valid external Instance reference no longer exists/
+  );
+  assert.match(
+    source,
+    /createBrowserConsoleCapture\(\{[\s\S]*?onCriticalGpuMessage\(message\)[\s\S]*?fatalSignal\.trip/
+  );
+  assert.match(source, /page\.on\('crash',[\s\S]*?fatalSignal\.trip/);
+  assert.match(source, /browser\.on\('disconnected',[\s\S]*?fatalSignal\.trip/);
+  assert.match(
+    source,
+    /worker-offscreen-presentation-device-lost[\s\S]*?source: 'worker-offscreen-presentation-status'/
+  );
+  assert.match(
+    source,
+    /awaitBrowserProbeOperation\([\s\S]*?page\.goto\([\s\S]*?fatalSignal/
+  );
+  assert.match(
+    source,
+    /awaitBrowserProbeOperation\([\s\S]*?Promise\.race\(\[[\s\S]*?inPageProbe,[\s\S]*?timeoutProbe[\s\S]*?\]\),[\s\S]*?fatalSignal/
+  );
+  assert.match(
+    source,
+    /awaitBrowserProbeFinalization\(async \(\) => \{[\s\S]*?const shouldCaptureCompositedPage[\s\S]*?timeline\.fatalTermination == null[\s\S]*?return timeline;[\s\S]*?\}, fatalSignal\)/
+  );
+  assert.doesNotMatch(
+    source,
+    /fatalSignal\.promise\.then\([\s\S]{0,120}?buildFatalTimeline/
+  );
+  assert.match(
+    source,
+    /collectInPagePartialTimeline\(page, 1000\)[\s\S]*?metrics:\s*retainedMetrics/,
+    'fatal termination must preserve the already-retained in-page metrics instead of fabricating an empty run'
+  );
+  assert.match(
+    source,
+    /globalThis\.__ulgSphProbePartialTimeline\s*=\s*partialTimeline/,
+    'the in-page probe must publish its retained partial timeline while work is active'
+  );
+  const residentBatchErrorStart = source.indexOf(
+    "markProbeProgress('resident-batch-error'"
+  );
+  const residentBatchErrorEnd = source.indexOf(
+    '\n          break;',
+    residentBatchErrorStart
+  );
+  const residentBatchErrorSource = source.slice(
+    residentBatchErrorStart,
+    residentBatchErrorEnd
+  );
+  assert.match(
+    residentBatchErrorSource,
+    /metrics\.push\(retainProbeMetric\([\s\S]*?'resident-batch-error'/,
+    'a failed resident batch must retain a CPU-side metric'
+  );
+  assert.doesNotMatch(
+    residentBatchErrorSource,
+    /appendMetricWithValidationCapture|captureAuthoritativeGpuCheckpoint|captureFrame/,
+    'a failed resident batch must not launch another GPU checkpoint or frame capture'
   );
 });
 
@@ -3196,8 +3626,8 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     mountSource,
-    /resolveSphNativeSurfacePostStepPresentationGateSettlement\(\{[\s\S]*?boundedAttemptComplete:\s*true,[\s\S]*?if \(residentPostStepPresentationGate\?\.active\) \{[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
-    'only a still-pending post-step proof may hold continuations; a terminal fail-open receipt must preserve playback'
+    /resolveSphNativeSurfacePostStepPresentationGateSettlement\(\{[\s\S]*?boundedAttemptComplete:\s*true,[\s\S]*?residentPostStepPresentationGate\?\.active[\s\S]*?&& !workerLaneScheduleCompletionContinuation[\s\S]*?scheduleContinuation = false;[\s\S]*?restartPlaybackContinuation = false;/,
+    'only a still-pending post-step proof may hold continuations; a terminal fail-open receipt must preserve playback, and W4b worker-lane schedule issuance is never suppressed by the native presentation gate'
   );
   assert.match(
     mountSource,
@@ -4110,6 +4540,9 @@ test('scene resident batches forward an explicit surface-stress impulse cap', ()
 test('long-horizon SS batches keep diagnostics final-only and do not mirror stage debug traffic through CDP', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const offscreenWorkerSource = readRepoFile(
+    'src/services/ulgOffscreenRender.worker.js'
+  );
 
   assert.match(
     sceneSource,
@@ -4135,6 +4568,78 @@ test('long-horizon SS batches keep diagnostics final-only and do not mirror stag
     probeSource,
     /sceneApi\.refreshMlsMpmResidentSteps\(\s*residentRefreshOptions\(\{/,
     'the long-horizon browser probe must pass its no-CDP resident refresh options to the scene API'
+  );
+  assert.match(
+    sceneSource,
+    /async function refreshMlsMpmResidentSteps\(\{[\s\S]*?workerLaneProgressEverySteps = 1[\s\S]*?progressEverySteps: requestedWorkerLaneProgressEverySteps/,
+    'the scene must preserve per-step progress telemetry by default while forwarding an explicit worker cadence'
+  );
+  const scheduleRunStart = offscreenWorkerSource.indexOf(
+    'export async function runResidentScheduleOnPresentationDevice'
+  );
+  const scheduleRunEnd = offscreenWorkerSource.indexOf(
+    'export async function cancelResidentScheduleOnPresentationDevice',
+    scheduleRunStart
+  );
+  const scheduleRunSource = offscreenWorkerSource.slice(
+    scheduleRunStart,
+    scheduleRunEnd
+  );
+  assert.doesNotMatch(
+    scheduleRunSource,
+    /postProgress:[\s\S]*?candidateDrawLoop\.notify/,
+    'pre-terminal progress candidates must remain telemetry-only and never draw'
+  );
+  assert.match(
+    sceneSource,
+    /await runSchroederWorkerLaneScheduleWithAuthority\([\s\S]*?presentCommittedResidentScheduleCandidate\?\.\(\{[\s\S]*?waitForWorkerLaneCommittedPresentation/,
+    'worker presentation must be released only after the authority control plane returns and then awaited before continuation'
+  );
+  const workerScheduleCatchStart = sceneSource.indexOf(
+    '} catch (workerLaneError) {'
+  );
+  const workerScheduleCatchEnd = sceneSource.indexOf(
+    '} else if (workerLaneAdmission.requested) {',
+    workerScheduleCatchStart
+  );
+  const workerScheduleCatchSource = sceneSource.slice(
+    workerScheduleCatchStart,
+    workerScheduleCatchEnd
+  );
+  assert.match(
+    workerScheduleCatchSource,
+    /worker-lane-failed-closed-no-direct-fallback[\s\S]*?throw workerLaneError/,
+    'an admitted worker failure must preserve the original error and fail closed'
+  );
+  assert.doesNotMatch(
+    workerScheduleCatchSource,
+    /runSchroederSceneResidentSteps/,
+    'an admitted worker failure must not retry from stale page-owned rows'
+  );
+  assert.match(
+    readRepoFile('src/visualization/sphPhaseDemoMount.js'),
+    /resolveSphMountedWorkerLaneScheduleStepCount\([\s\S]*?residentStepsPerScheduleMax[\s\S]*?Math\.min\(requested, policyMax\)/,
+    'mounted SS autoplay must cap scenario batch overrides by the renderer policy maximum'
+  );
+  assert.match(
+    sceneSource,
+    /schroederSpatialEpoch:\s*\{[\s\S]*?hierarchyConfig:\s*workerHierarchyConfig,[\s\S]*?selectedLevel:\s*workerHierarchyConfig\.selectedLevel,[\s\S]*?workerHierarchyConfig\.baseGridSpacingM != null[\s\S]*?baseGridSpacingM:\s*workerHierarchyConfig\.baseGridSpacingM[\s\S]*?workerHierarchyConfig\.minLevel != null[\s\S]*?minLevel:\s*workerHierarchyConfig\.minLevel[\s\S]*?workerHierarchyConfig\.maxLevel != null[\s\S]*?maxLevel:\s*workerHierarchyConfig\.maxLevel/,
+    'the worker epoch must receive base/min/max geometry from the same frozen hierarchy config used by mechanics'
+  );
+  assert.match(
+    sceneSource,
+    /queueOrderedCleanupEligible:\s*!workerLaneRouteExecution\s*&&\s*resolveSchroederSceneHierarchyQueueOrderedTransfer/,
+    'page publication must not register cleanup claims for worker-private resident artifacts'
+  );
+  assert.match(
+    probeSource,
+    /workerLaneProgressEverySteps:\s*requestedWorkerLaneProgressEverySteps/,
+    'the in-page probe must thread its matrix-only worker presentation cadence to every resident refresh'
+  );
+  assert.match(
+    probeSource,
+    /ULG_PROBE_WORKER_PROGRESS_EVERY_STEPS/,
+    'the long-horizon probe must expose an explicit worker presentation cadence environment option'
   );
 });
 
@@ -4541,6 +5046,11 @@ test('SPH residency warnings require explicit classified results, not pending ev
     'all live residency fields must come from one completeness-coupled consensus'
   );
   assert.match(
+    evidenceSource,
+    /workerLanePageMirrorsSealed[\s\S]*?residentWorkerLaneContinuationReady\(residentSteps\)[\s\S]*?workerLaneSealedAbsentFields\?\.finalStep[\s\S]*?finalStep != null[\s\S]*?\|\| !workerLanePageMirrorsSealed[\s\S]*?residentStep != null && !workerLanePageMirrorsSealed/,
+    'only an admitted worker lane with an explicit sealed-absent finalStep may omit page-mirror telemetry participants'
+  );
+  assert.match(
     warningSource,
     /currentResidentReadbackTelemetryEvidence\(\{[\s\S]*?residentSteps,[\s\S]*?residentStep[\s\S]*?\}\)/
   );
@@ -4552,6 +5062,11 @@ test('SPH residency warnings require explicit classified results, not pending ev
     warningSource,
     /normalHotLoopReadbackFree[\s\S]*?\?\? false/,
     'startup/pending evidence must not be mislabeled as an observed residency failure'
+  );
+  assert.match(
+    warningSource,
+    /residentWorkerLaneNativeSurfacePresentationReady\(\{[\s\S]*?execution:\s*residentSteps,[\s\S]*?presentation:\s*workerLaneNativeSurfacePresentation,[\s\S]*?renderState,[\s\S]*?surfaceDraw[\s\S]*?motion\.status[\s\S]*?&& !workerLaneNativeSurfacePresentationCurrent/,
+    'missing compact motion is benign only after the exact current worker-native surface presentation is admitted'
   );
   assert.match(
     statusSource,

@@ -1,4 +1,14 @@
 const DEFAULT_GAS_PHASES = Object.freeze(['gas']);
+const AUTHORITATIVE_CHECKPOINT_SCHEMA =
+  'peercompute.ulg.sph-authoritative-gpu-material-phase-reduction.v1';
+const CLOSED_G2P_CLAMPED_BOUNDARY = 'closed-g2p-clamped';
+
+export const DEFAULT_MECHANICS_STATE_ADVANCE_OPTIONS = Object.freeze({
+  frozenWindowCheckpointCount: 3,
+  minimumPersistentAbsVyMPerS: 1e-3,
+  minimumExpectedVerticalTravelM: 1e-4,
+  requireAnyAdvance: true
+});
 
 export const DEFAULT_PHASE_VOLUME_RATIO_BOUNDS = Object.freeze({
   condensedMinJ: 0.2,
@@ -72,6 +82,7 @@ function selectedRows(checkpoint, selector) {
 function compactMechanicsRow(row, checkpoint, checkpointIndex) {
   return {
     checkpointIndex,
+    sourceStep: finiteOrNull(checkpoint?.sourceStep),
     timeS: checkpointTime(checkpoint, checkpointIndex),
     material: row?.material ?? null,
     phase: row?.phase ?? null,
@@ -196,6 +207,7 @@ function aggregateCenterSample(checkpoint, checkpointIndex, selector) {
   );
   return {
     checkpointIndex,
+    sourceStep: finiteOrNull(checkpoint?.sourceStep),
     timeS: checkpointTime(checkpoint, checkpointIndex),
     massKg,
     representedMassKg,
@@ -261,6 +273,24 @@ function frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector) {
     capture?.topologyEpoch,
     capture?.identityRevision
   ].join(':')).sort();
+  const checkpointSourceStep = finiteOrNull(checkpoint?.sourceStep);
+  const checkpointSourceTimeS = finiteOrNull(checkpoint?.sourceTimeS);
+  const frozenLineageAuthorityExact = Boolean(
+    capture?.schema
+      === 'peercompute.ulg.sph-authoritative-generated-gas-cohort-capture.v0'
+    && capture?.authority === 'gpu-resident-frozen-phase-lineage-bitmask'
+    && finiteOrNull(capture?.checkpointIndex) === checkpointIndex
+    && finiteOrNull(capture?.sourceStep) === checkpointSourceStep
+    && finiteOrNull(capture?.sourceTimeS) === checkpointSourceTimeS
+    && rows.every((row) => (
+      row?.schema
+        === 'peercompute.ulg.sph-authoritative-generated-gas-cohort.v0'
+      && row?.authority === 'gpu-resident-frozen-phase-lineage-bitmask'
+      && finiteOrNull(row?.checkpointIndex) === checkpointIndex
+      && finiteOrNull(row?.sourceStep) === checkpointSourceStep
+      && finiteOrNull(row?.sourceTimeS) === checkpointSourceTimeS
+    ))
+  );
   const sameCarrierLineageProven = Boolean(
     representedMassKg > 0
     && capture?.status === 'captured'
@@ -287,8 +317,14 @@ function frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector) {
   const yMaxSamples = rows
     .map((row) => finiteOrNull(row?.yMaxM))
     .filter(Number.isFinite);
+  const positionExtentCoverageComplete = (
+    representedRows.length === rows.length
+    && yMinSamples.length === rows.length
+    && yMaxSamples.length === rows.length
+  );
   return {
     checkpointIndex,
+    sourceStep: checkpointSourceStep,
     timeS: checkpointTime(checkpoint, checkpointIndex),
     massKg,
     representedMassKg,
@@ -321,8 +357,10 @@ function frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector) {
     ),
     frozenLineageIdentity: identityParts.join('|'),
     sameCarrierLineageProven,
+    frozenLineageAuthorityExact,
     vySampleMassKg,
     velocityMassCoverageComplete,
+    positionExtentCoverageComplete,
     meanVyMPerS: velocityMassCoverageComplete
       ? velocityRows.reduce((sum, row) => (
           sum + finiteOrNull(row.meanVyMPerS) * rowMass(row)
@@ -333,9 +371,22 @@ function frozenGeneratedGasCohortSample(checkpoint, checkpointIndex, selector) {
           sum + finiteOrNull(row.yCenterMassWeightedM) * rowMass(row)
         ), 0) / representedMassKg
       : null,
-    yMinM: yMinSamples.length ? Math.min(...yMinSamples) : null,
-    yMaxM: yMaxSamples.length ? Math.max(...yMaxSamples) : null
+    yMinM: positionExtentCoverageComplete ? Math.min(...yMinSamples) : null,
+    yMaxM: positionExtentCoverageComplete ? Math.max(...yMaxSamples) : null
   };
+}
+
+function authoritativeTrajectoryCheckpointReady(checkpoint) {
+  return Boolean(
+    checkpoint?.status === 'captured'
+    && checkpoint?.schema === AUTHORITATIVE_CHECKPOINT_SCHEMA
+    && checkpoint?.aggregationStatus === 'gpu-reduced'
+    && checkpoint?.backend === 'webgpu-compute'
+    && authoritativeMechanicsCheckpointPairReady(checkpoint)
+    && checkpoint?.uploadPairCoherenceStatus === 'ready'
+    && checkpoint?.uploadPairMetadataCoherent === true
+    && checkpoint?.uploadPairSharedSlotIdentityVerified === true
+  );
 }
 
 function interfaceHeight(checkpoint, selector) {
@@ -389,6 +440,8 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
       : null;
     return {
       ...sample,
+      checkpointAuthorityReady:
+        authoritativeTrajectoryCheckpointReady(checkpoint),
       interfaceYMaxM: interfaceY,
       interfaceSeparationM: Number.isFinite(interfaceY) ? sample.yCenterM - interfaceY : null
     };
@@ -411,6 +464,22 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     birth
     && samples.every((sample, sampleIndex) => (
       sample.checkpointIndex === birth.checkpointIndex + sampleIndex
+    ))
+  );
+  const authoritativeTrajectoryClockPassed = Boolean(
+    samples.length > 0
+    && samples.every((sample, sampleIndex) => (
+      Number.isSafeInteger(sample.sourceStep)
+      && sample.sourceStep >= 0
+      && Number.isFinite(sample.timeS)
+      && sample.timeS >= 0
+      && (
+        sampleIndex === 0
+        || (
+          sample.sourceStep > samples[sampleIndex - 1].sourceStep
+          && sample.timeS > samples[sampleIndex - 1].timeS
+        )
+      )
     ))
   );
   const liveCarrierContinuityPassed = Boolean(
@@ -440,6 +509,16 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     birth
     && samples.every((sample) => sample.velocityMassCoverageComplete === true)
   );
+  const frozenLineageIntegrityPassed = Boolean(
+    !frozenLineageAuthorityAvailable
+    || (
+      birth
+      && samples.every((sample) => (
+        Number(sample.invalidActiveCarrierCount) === 0
+        && Number(sample.phasePurityProblemCount) === 0
+      ))
+    )
+  );
   const sustainedRisePassed = Boolean(
     birth
     && enoughTailSamples
@@ -450,6 +529,190 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     && enoughTailSamples
     && tailUpwardVelocityPassCount >= requiredTailPassCount
   );
+  const requestedUpperWallTerminal = options.upperWallTerminal ?? null;
+  const upperWallTerminalConfigured = requestedUpperWallTerminal != null;
+  const upperWallBoundaryCondition = normalizedToken(
+    requestedUpperWallTerminal?.boundaryCondition
+  );
+  const upperWallBoxMaxYM = finiteOrNull(requestedUpperWallTerminal?.boxMaxYM);
+  const upperWallInsetM = finiteOrNull(requestedUpperWallTerminal?.wallInsetM);
+  const upperWallContactToleranceM = finiteOrNull(
+    requestedUpperWallTerminal?.contactToleranceM
+  );
+  const upperWallMaximumTailRetreatM = finiteOrNull(
+    requestedUpperWallTerminal?.maximumTailRetreatM
+  );
+  const upperWallConfigurationValid = Boolean(
+    upperWallTerminalConfigured
+    && upperWallBoundaryCondition === CLOSED_G2P_CLAMPED_BOUNDARY
+    && Number.isFinite(upperWallBoxMaxYM)
+    && upperWallBoxMaxYM > 0
+    && Number.isFinite(upperWallInsetM)
+    && upperWallInsetM >= 0
+    && upperWallInsetM < upperWallBoxMaxYM
+    && Number.isFinite(upperWallContactToleranceM)
+    && upperWallContactToleranceM >= 0
+    && Number.isFinite(upperWallMaximumTailRetreatM)
+    && upperWallMaximumTailRetreatM >= 0
+  );
+  const upperWallTerminalYM = upperWallConfigurationValid
+    ? upperWallBoxMaxYM - upperWallInsetM
+    : null;
+  const upperWallTail = tail.map((sample) => {
+    // yCenterM is accumulated with mass weighting while yMinM/yMaxM are f32
+    // extrema. Permit only the already-authorized wall-contact tolerance when
+    // checking their ordering; exact ordering can invert by one f32 rounding
+    // interval at the clamp even though all three reductions describe the same
+    // carrier position.
+    const extentOrderingToleranceM = upperWallConfigurationValid
+      ? upperWallContactToleranceM
+      : 0;
+    const orderedExtent = Boolean(
+      sample.positionExtentCoverageComplete === true
+      && Number.isFinite(sample.yMinM)
+      && Number.isFinite(sample.yCenterM)
+      && Number.isFinite(sample.yMaxM)
+      && sample.yMinM <= sample.yMaxM + extentOrderingToleranceM
+      && sample.yMinM <= sample.yCenterM + extentOrderingToleranceM
+      && sample.yCenterM <= sample.yMaxM + extentOrderingToleranceM
+    );
+    const yMaxContactErrorM = orderedExtent && Number.isFinite(upperWallTerminalYM)
+      ? Math.abs(sample.yMaxM - upperWallTerminalYM)
+      : null;
+    const passed = Boolean(
+      upperWallConfigurationValid
+      && orderedExtent
+      && yMaxContactErrorM <= upperWallContactToleranceM
+      && sample.yMaxM <= upperWallBoxMaxYM + upperWallContactToleranceM
+      && sample.yMinM
+        >= upperWallTerminalYM - upperWallMaximumTailRetreatM
+      && sample.yCenterM
+        >= upperWallTerminalYM - upperWallMaximumTailRetreatM
+    );
+    return {
+      checkpointIndex: sample.checkpointIndex,
+      timeS: sample.timeS,
+      yMinM: sample.yMinM,
+      yCenterM: sample.yCenterM,
+      yMaxM: sample.yMaxM,
+      positionExtentCoverageComplete:
+        sample.positionExtentCoverageComplete === true,
+      extentOrderingToleranceM,
+      orderedExtent,
+      yMaxContactErrorM,
+      passed
+    };
+  });
+  const upperWallTailPassCount = upperWallTail.filter(
+    (sample) => sample.passed
+  ).length;
+  const upperWallPreContactSamples = samples
+    .slice(0, Math.max(0, samples.length - tailSampleCount))
+    .filter((sample) => (
+      sample.velocityMassCoverageComplete === true
+      && Number.isFinite(sample.meanVyMPerS)
+      && sample.meanVyMPerS > minimumSustainedMeanVyMPerS
+      && Number.isFinite(sample.yMaxM)
+      && Number.isFinite(upperWallTerminalYM)
+      && sample.yMaxM
+        < upperWallTerminalYM - upperWallContactToleranceM
+    ));
+  const upperWallPreContactUpwardMotionPassed =
+    upperWallPreContactSamples.length > 0;
+  const upperWallAuthorityEligible = Boolean(
+    frozenLineageAuthorityAvailable
+    && sameCarrierLineageProven
+    && checkpointContinuityPassed
+    && authoritativeTrajectoryClockPassed
+    && liveCarrierContinuityPassed
+    && velocityMassCoverageComplete
+    && frozenLineageIntegrityPassed
+    && samples.every((sample) => (
+      sample.frozenLineageAuthorityExact === true
+      && sample.checkpointAuthorityReady === true
+    ))
+    && upperWallPreContactUpwardMotionPassed
+    && enoughTailSamples
+  );
+  const upperWallTerminalPassed = Boolean(
+    upperWallConfigurationValid
+    && upperWallAuthorityEligible
+    && upperWallTailPassCount >= requiredTailPassCount
+  );
+  const upperWallTerminal = {
+    status: !upperWallTerminalConfigured
+      ? 'not-requested'
+      : !upperWallConfigurationValid
+        ? 'invalid-configuration'
+        : !upperWallAuthorityEligible
+          ? 'ineligible'
+          : upperWallTerminalPassed
+            ? 'pass'
+            : 'fail',
+    configured: upperWallTerminalConfigured,
+    boundaryCondition: upperWallBoundaryCondition || null,
+    configurationValid: upperWallConfigurationValid,
+    frozenLineageAuthorityRequired: true,
+    authorityEligible: upperWallAuthorityEligible,
+    preContactUpwardMotionPassed: upperWallPreContactUpwardMotionPassed,
+    preContactUpwardSampleCount: upperWallPreContactSamples.length,
+    preContactUpwardSamples: upperWallPreContactSamples.map((sample) => ({
+      checkpointIndex: sample.checkpointIndex,
+      timeS: sample.timeS,
+      yMaxM: sample.yMaxM,
+      meanVyMPerS: sample.meanVyMPerS
+    })),
+    boxMaxYM: upperWallBoxMaxYM,
+    wallInsetM: upperWallInsetM,
+    terminalYM: upperWallTerminalYM,
+    contactToleranceM: upperWallContactToleranceM,
+    maximumTailRetreatM: upperWallMaximumTailRetreatM,
+    tailPassCount: upperWallTailPassCount,
+    requiredTailPassCount,
+    tail: upperWallTail
+  };
+  const terminalMotionTail = tail.map((sample, index) => {
+    const upwardVelocityPassed = Boolean(
+      sample.velocityMassCoverageComplete === true
+      && Number.isFinite(sample.meanVyMPerS)
+      && sample.meanVyMPerS > minimumSustainedMeanVyMPerS
+    );
+    const closedUpperWallContactPassed = Boolean(
+      upperWallAuthorityEligible
+      && upperWallTail[index]?.passed === true
+    );
+    return {
+      checkpointIndex: sample.checkpointIndex,
+      timeS: sample.timeS,
+      upwardVelocityPassed,
+      closedUpperWallContactPassed,
+      passed: upwardVelocityPassed || closedUpperWallContactPassed
+    };
+  });
+  const terminalMotionTailPassCount = terminalMotionTail.filter(
+    (sample) => sample.passed
+  ).length;
+  const finalTailWallContactPassed = Boolean(
+    terminalMotionTail.at(-1)?.closedUpperWallContactPassed === true
+  );
+  const mixedTerminalMotionPassed = Boolean(
+    birth
+    && enoughTailSamples
+    && terminalMotionTailPassCount >= requiredTailPassCount
+    && finalTailWallContactPassed
+  );
+  const terminalMotionPassed = Boolean(
+    sustainedUpwardVelocityPassed
+    || upperWallTerminalPassed
+    || mixedTerminalMotionPassed
+  );
+  const terminalMode = sustainedUpwardVelocityPassed
+    ? 'sustained-upward-velocity'
+    : upperWallTerminalPassed
+      ? 'closed-upper-wall-contact'
+      : mixedTerminalMotionPassed
+        ? 'mixed-upward-and-closed-upper-wall-contact'
+        : null;
   const interfaceTail = tail.filter((sample) => Number.isFinite(sample.interfaceSeparationM));
   const interfaceSeparationRequired = Number.isFinite(minimumSustainedInterfaceSeparationM);
   const sustainedInterfaceSeparationPassed = !interfaceSeparationRequired || (
@@ -464,7 +727,7 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
   const final = samples.at(-1) || null;
 
   return {
-    schema: 'peercompute.ulg.sph-generated-cohort-trajectory-evidence.v1',
+    schema: 'peercompute.ulg.sph-generated-cohort-trajectory-evidence.v2',
     status: !birth
       ? 'missing'
       : !enoughTailSamples
@@ -472,9 +735,10 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
         : checkpointContinuityPassed
           && liveCarrierContinuityPassed
           && (!frozenLineageAuthorityAvailable || sameCarrierLineageProven)
+          && frozenLineageIntegrityPassed
           && velocityMassCoverageComplete
           && sustainedRisePassed
-          && sustainedUpwardVelocityPassed
+          && terminalMotionPassed
           && sustainedInterfaceSeparationPassed
           ? 'pass'
           : 'fail',
@@ -502,14 +766,381 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
     tailUpwardVelocityPassCount,
     requiredTailPassCount,
     checkpointContinuityPassed,
+    authoritativeTrajectoryClockPassed,
     liveCarrierContinuityPassed,
     velocityMassCoverageComplete,
+    frozenLineageIntegrityPassed,
     sustainedRisePassed,
     sustainedUpwardVelocityPassed,
+    terminalMotionPassed,
+    terminalMotionTailPassCount,
+    terminalMotionTail,
+    finalTailWallContactPassed,
+    mixedTerminalMotionPassed,
+    terminalMode,
+    upperWallTerminalPassed,
+    upperWallTerminal,
     minimumSustainedInterfaceSeparationM,
     sustainedInterfaceSeparationPassed,
     tail,
     samples
+  };
+}
+
+function authoritativeMechanicsCheckpointPairReady(checkpoint) {
+  return Boolean(
+    (
+      checkpoint?.source === 'retained-resident-particle-buffers'
+      && checkpoint?.authority === 'gpu-resident-retained-state'
+    )
+    || (
+      checkpoint?.source === 'worker-retained-terminal-compact-snapshot'
+      && checkpoint?.authority
+        === 'worker-terminal-fence-and-state-manager-commit'
+    )
+  );
+}
+
+function exactMechanicsCheckpointRows(checkpoint) {
+  const blockers = [];
+  if (checkpoint?.status !== 'captured') blockers.push('checkpoint-not-captured');
+  if (checkpoint?.schema !== AUTHORITATIVE_CHECKPOINT_SCHEMA) {
+    blockers.push('checkpoint-schema-mismatch');
+  }
+  if (checkpoint?.aggregationStatus !== 'gpu-reduced') {
+    blockers.push('checkpoint-aggregation-unproven');
+  }
+  if (checkpoint?.backend !== 'webgpu-compute') {
+    blockers.push('checkpoint-backend-unproven');
+  }
+  if (!authoritativeMechanicsCheckpointPairReady(checkpoint)) {
+    blockers.push('checkpoint-authority-source-unproven');
+  }
+  if (
+    checkpoint?.uploadPairCoherenceStatus !== 'ready'
+    || checkpoint?.uploadPairMetadataCoherent !== true
+    || checkpoint?.uploadPairSharedSlotIdentityVerified !== true
+  ) {
+    blockers.push('checkpoint-upload-pair-unproven');
+  }
+  if (
+    checkpoint?.materialMappingStatus !== 'complete'
+    || checkpoint?.speedEvidenceStatus !== 'complete'
+    || checkpoint?.mechanicsEvidenceStatus !== 'complete'
+  ) {
+    blockers.push('checkpoint-reduction-incomplete');
+  }
+  if (
+    Number(checkpoint?.invalidMassParticleCount) !== 0
+    || Number(checkpoint?.invalidMechanicsParticleCount) !== 0
+    || Number(checkpoint?.overflowContributionCount) !== 0
+  ) {
+    blockers.push('checkpoint-invalid-or-overflow-contributions');
+  }
+  const liveParticleCount = finiteOrNull(checkpoint?.liveParticleCount);
+  const speedSampleCount = finiteOrNull(checkpoint?.speedSampleCount);
+  const mechanicsSampleCount = finiteOrNull(checkpoint?.mechanicsSampleCount);
+  if (
+    !Number.isSafeInteger(liveParticleCount)
+    || liveParticleCount <= 0
+    || speedSampleCount !== liveParticleCount
+    || mechanicsSampleCount !== liveParticleCount
+  ) {
+    blockers.push('checkpoint-live-sample-count-mismatch');
+  }
+
+  const rows = [];
+  const seenKeys = new Set();
+  for (const row of arrayOf(checkpoint?.materialPhases)) {
+    const materialId = finiteOrNull(row?.materialId);
+    const phaseId = finiteOrNull(row?.phaseId);
+    const rowLiveParticleCount = finiteOrNull(row?.liveParticleCount);
+    const rowSpeedSampleCount = finiteOrNull(row?.speedSampleCount);
+    const rowMechanicsSampleCount = finiteOrNull(row?.mechanicsSampleCount);
+    const mechanicsProblemParticleCount = finiteOrNull(
+      row?.mechanicsProblemParticleCount
+    );
+    const yMinM = finiteOrNull(row?.yMinM);
+    const yMaxM = finiteOrNull(row?.yMaxM);
+    const yCenterM = finiteOrNull(row?.yCenterMassWeightedM);
+    const massKg = finiteOrNull(row?.massKg);
+    const minVyMPerS = finiteOrNull(row?.minVyMPerS);
+    const maxVyMPerS = finiteOrNull(row?.maxVyMPerS);
+    const meanVyMPerS = finiteOrNull(row?.meanVyMPerS);
+    const vySampleMassKg = finiteOrNull(row?.vySampleMassKg);
+    const maxSpeedMPerS = finiteOrNull(row?.maxSpeedMPerS);
+    const keyReady = Number.isSafeInteger(materialId)
+      && materialId >= 0
+      && Number.isSafeInteger(phaseId)
+      && phaseId >= 0;
+    const key = keyReady ? `${materialId}:${phaseId}` : null;
+    const rowReady = Boolean(
+      keyReady
+      && !seenKeys.has(key)
+      && Number.isSafeInteger(rowLiveParticleCount)
+      && rowLiveParticleCount > 0
+      && rowSpeedSampleCount === rowLiveParticleCount
+      && rowMechanicsSampleCount === rowLiveParticleCount
+      && mechanicsProblemParticleCount === 0
+      && Number.isFinite(yMinM)
+      && Number.isFinite(yMaxM)
+      && yMinM <= yMaxM
+      && Number.isFinite(yCenterM)
+      && yCenterM >= yMinM
+      && yCenterM <= yMaxM
+      && Number.isFinite(massKg)
+      && massKg > 0
+      && Number.isFinite(minVyMPerS)
+      && Number.isFinite(maxVyMPerS)
+      && minVyMPerS <= maxVyMPerS
+      && Number.isFinite(meanVyMPerS)
+      && meanVyMPerS >= minVyMPerS
+      && meanVyMPerS <= maxVyMPerS
+      && Number.isFinite(vySampleMassKg)
+      && Math.abs(vySampleMassKg - massKg)
+        <= Math.max(1e-12, Math.abs(massKg) * 1e-6)
+      && Number.isFinite(maxSpeedMPerS)
+      && maxSpeedMPerS >= 0
+    );
+    if (!rowReady) {
+      blockers.push('checkpoint-material-phase-row-incomplete');
+      continue;
+    }
+    seenKeys.add(key);
+    rows.push({
+      key,
+      materialId,
+      phaseId,
+      material: row?.material ?? null,
+      phase: row?.phase ?? null,
+      massKg,
+      yCenterM,
+      meanVyMPerS,
+      vySampleMassKg,
+      signature: Object.freeze([
+        rowLiveParticleCount,
+        yMinM,
+        yMaxM,
+        minVyMPerS,
+        maxVyMPerS,
+        maxSpeedMPerS
+      ])
+    });
+  }
+  if (rows.length === 0) blockers.push('checkpoint-material-phase-rows-empty');
+  if (
+    rows.reduce((sum, row) => sum + row.signature[0], 0)
+      !== liveParticleCount
+  ) {
+    blockers.push('checkpoint-material-phase-live-count-mismatch');
+  }
+  return { blockers: [...new Set(blockers)], rows };
+}
+
+function mechanicsSignatureScalarEqual(left, right) {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  const scale = Math.max(1, Math.abs(left), Math.abs(right));
+  const tolerance = Math.max(1e-6, 8 * (2 ** -23) * scale);
+  return Math.abs(left - right) <= tolerance;
+}
+
+function signaturesEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && Object.is(left[0], right[0])
+    && left.slice(1).every((value, index) => (
+      mechanicsSignatureScalarEqual(value, right[index + 1])
+    ));
+}
+
+export function mechanicsStateAdvanceEvidence(checkpoints, options = {}) {
+  const frozenWindowCheckpointCount = normalizedPositiveInteger(
+    options.frozenWindowCheckpointCount,
+    DEFAULT_MECHANICS_STATE_ADVANCE_OPTIONS.frozenWindowCheckpointCount
+  );
+  const minimumPersistentAbsVyMPerS = Math.max(
+    0,
+    finiteOrNull(options.minimumPersistentAbsVyMPerS)
+      ?? DEFAULT_MECHANICS_STATE_ADVANCE_OPTIONS.minimumPersistentAbsVyMPerS
+  );
+  const minimumExpectedVerticalTravelM = Math.max(
+    0,
+    finiteOrNull(options.minimumExpectedVerticalTravelM)
+      ?? DEFAULT_MECHANICS_STATE_ADVANCE_OPTIONS.minimumExpectedVerticalTravelM
+  );
+  const requireAnyAdvance = options.requireAnyAdvance == null
+    ? DEFAULT_MECHANICS_STATE_ADVANCE_OPTIONS.requireAnyAdvance
+    : options.requireAnyAdvance === true;
+  const source = arrayOf(checkpoints);
+  const compactCheckpoints = [];
+  const coverageBlockers = [];
+  const clockFailures = [];
+  let previousStep = null;
+  let previousTimeS = null;
+  for (let checkpointIndex = 0; checkpointIndex < source.length; checkpointIndex += 1) {
+    const checkpoint = source[checkpointIndex];
+    const sourceStep = finiteOrNull(checkpoint?.sourceStep);
+    const sourceTimeS = finiteOrNull(checkpoint?.sourceTimeS);
+    const clockReady = Number.isSafeInteger(sourceStep)
+      && sourceStep >= 0
+      && Number.isFinite(sourceTimeS)
+      && sourceTimeS >= 0;
+    if (!clockReady) {
+      coverageBlockers.push({
+        checkpointIndex,
+        blockers: ['checkpoint-clock-unavailable']
+      });
+    } else if (
+      previousStep != null
+      && (sourceStep <= previousStep || sourceTimeS <= previousTimeS)
+    ) {
+      clockFailures.push({
+        checkpointIndex,
+        previousStep,
+        sourceStep,
+        previousTimeS,
+        sourceTimeS
+      });
+    }
+    if (clockReady) {
+      previousStep = sourceStep;
+      previousTimeS = sourceTimeS;
+    }
+    const decoded = exactMechanicsCheckpointRows(checkpoint);
+    if (decoded.blockers.length > 0) {
+      coverageBlockers.push({ checkpointIndex, blockers: decoded.blockers });
+    }
+    compactCheckpoints.push({
+      checkpointIndex,
+      sourceStep,
+      sourceTimeS,
+      rows: decoded.rows
+    });
+  }
+
+  const runsByKey = new Map();
+  const completedRuns = [];
+  let transitionCount = 0;
+  let previousRows = null;
+  for (const checkpoint of compactCheckpoints) {
+    const currentRows = new Map(checkpoint.rows.map((row) => [row.key, row]));
+    if (previousRows) {
+      const allKeys = new Set([...previousRows.keys(), ...currentRows.keys()]);
+      if ([...allKeys].some((key) => (
+        !previousRows.has(key)
+        || !currentRows.has(key)
+        || !signaturesEqual(
+          previousRows.get(key)?.signature,
+          currentRows.get(key)?.signature
+        )
+      ))) {
+        transitionCount += 1;
+      }
+    }
+    for (const [key, run] of runsByKey) {
+      if (!currentRows.has(key)) {
+        completedRuns.push(run);
+        runsByKey.delete(key);
+      }
+    }
+    for (const [key, row] of currentRows) {
+      const existing = runsByKey.get(key);
+      const sample = {
+        checkpointIndex: checkpoint.checkpointIndex,
+        sourceStep: checkpoint.sourceStep,
+        sourceTimeS: checkpoint.sourceTimeS
+      };
+      if (existing && signaturesEqual(existing.signature, row.signature)) {
+        existing.samples.push(sample);
+      } else {
+        if (existing) completedRuns.push(existing);
+        runsByKey.set(key, {
+          key,
+          materialId: row.materialId,
+          phaseId: row.phaseId,
+          material: row.material,
+          phase: row.phase,
+          signature: row.signature,
+          samples: [sample]
+        });
+      }
+    }
+    previousRows = currentRows;
+  }
+  completedRuns.push(...runsByKey.values());
+
+  const frozenActiveContent = completedRuns.flatMap((run) => {
+    if (run.samples.length < frozenWindowCheckpointCount) return [];
+    const first = run.samples[0];
+    const last = run.samples.at(-1);
+    const persistentAbsVyMPerS = Math.max(
+      Math.abs(run.signature[3]),
+      Math.abs(run.signature[4])
+    );
+    const elapsedTimeS = last.sourceTimeS - first.sourceTimeS;
+    const expectedVerticalTravelM = persistentAbsVyMPerS * elapsedTimeS;
+    if (
+      !(persistentAbsVyMPerS >= minimumPersistentAbsVyMPerS)
+      || !(expectedVerticalTravelM >= minimumExpectedVerticalTravelM)
+    ) return [];
+    return [{
+      key: run.key,
+      materialId: run.materialId,
+      phaseId: run.phaseId,
+      material: run.material,
+      phase: run.phase,
+      startCheckpointIndex: first.checkpointIndex,
+      endCheckpointIndex: last.checkpointIndex,
+      startSourceStep: first.sourceStep,
+      endSourceStep: last.sourceStep,
+      startSourceTimeS: first.sourceTimeS,
+      endSourceTimeS: last.sourceTimeS,
+      repeatCount: run.samples.length,
+      signature: [...run.signature],
+      persistentAbsVyMPerS,
+      elapsedTimeS,
+      expectedVerticalTravelM
+    }];
+  });
+  const enoughCheckpoints = source.length >= frozenWindowCheckpointCount;
+  const coverageComplete = coverageBlockers.length === 0;
+  const anyAdvance = transitionCount > 0;
+  const status = clockFailures.length > 0
+    ? 'fail'
+    : !enoughCheckpoints || !coverageComplete
+      ? 'inconclusive'
+      : frozenActiveContent.length > 0
+        ? 'fail'
+        : requireAnyAdvance && !anyAdvance
+          ? 'fail'
+          : 'pass';
+  return {
+    schema: 'peercompute.ulg.sph-mechanics-state-advance-evidence.v1',
+    status,
+    reason: clockFailures.length > 0
+      ? 'checkpoint-clock-not-strictly-increasing'
+      : !enoughCheckpoints
+        ? 'insufficient-checkpoints'
+        : !coverageComplete
+          ? 'authoritative-mechanics-coverage-incomplete'
+          : frozenActiveContent.length > 0
+            ? 'frozen-active-content'
+            : requireAnyAdvance && !anyAdvance
+              ? 'no-authoritative-mechanics-state-transition'
+              : 'authoritative-mechanics-state-advanced',
+    checkpointCount: source.length,
+    frozenWindowCheckpointCount,
+    minimumPersistentAbsVyMPerS,
+    minimumExpectedVerticalTravelM,
+    requireAnyAdvance,
+    coverageComplete,
+    coverageBlockers,
+    clockFailures,
+    transitionCount,
+    anyAdvance,
+    frozenActiveContentCount: frozenActiveContent.length,
+    frozenActiveContent
   };
 }
 

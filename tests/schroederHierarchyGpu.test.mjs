@@ -11643,6 +11643,7 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
       coarseLevel: options.fineLevel + 1,
       fineSubstepCount: options.fineSubstepCount,
       fineSubstepDt: options.dt / options.fineSubstepCount,
+      cflFactor: options.cflFactor,
       fineGridSpacingM: 0.25,
       coarseGridSpacingM: 0.5,
       conservation: { massResidualKg: 0 },
@@ -11659,6 +11660,7 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
     maxLevel: 6,
     enableTwoLevelMechanics: true,
     twoLevelFineSubstepCount: 2,
+    cflFactor: 0.8,
     twoLevelConservationSummaryReadback: true,
     twoLevelMechanicsRunner,
     residentStepRunner,
@@ -11675,6 +11677,7 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
   const call = twoLevelCalls[0];
   assert.equal(call.fineLevel, 2);
   assert.equal(call.fineSubstepCount, 2);
+  assert.equal(call.cflFactor, 0.8);
   assert.equal(call.internalPressureScale, 0.75);
   assert.equal(call.ambientPressurePa, 101325);
   assert.ok(call.levelAssignment.assignmentBuffer);
@@ -11696,6 +11699,7 @@ test('Schroeder same-level mechanics runs the two-level step in observation mode
   assert.equal(result.twoLevelMechanics.status, 'schroeder-two-level-mechanics-step-submitted');
   assert.equal(result.twoLevelMechanics.authority, 'observation-only-resident-step-remains-authoritative');
   assert.equal(result.twoLevelMechanics.fineSubstepCount, 2);
+  assert.equal(result.twoLevelMechanics.cflFactor, 0.8);
   assert.equal(result.twoLevelMechanics.coarseLevel, 3);
 });
 

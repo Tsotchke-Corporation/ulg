@@ -1,0 +1,121 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  body { margin:0; background:#131c24; font-family:"DejaVu Sans",system-ui,sans-serif; }
+  #fig { width:1400px; }
+  svg { display:block; }
+</style>
+<div id="fig">
+<svg viewBox="0 0 1400 920" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="920" fill="#131c24"/>
+  <text x="40" y="52" fill="#52d8c4" font-size="15" letter-spacing="4" font-family="monospace">ULG SS &middot; CURRENT STATE (post-merge main @ f92a41d)</text>
+  <text x="40" y="84" fill="#d9e5eb" font-size="28" font-weight="bold">Page-thread-owned orchestration</text>
+
+  <!-- ===== columns ===== -->
+  <!-- main thread (overloaded) -->
+  <rect x="40" y="120" width="560" height="640" rx="12" fill="#1b2733" stroke="#e6a44e" stroke-width="2"/>
+  <text x="60" y="152" fill="#e6a44e" font-size="14" font-family="monospace" letter-spacing="2">BROWSER MAIN THREAD &mdash; owns nearly everything</text>
+
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="60" y="172" width="245" height="52" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="194">UI input &middot; menus &middot; DOM</text>
+    <text x="74" y="213" fill="#8298a6" font-size="12.5">contends with physics for the thread</text>
+
+    <rect x="325" y="172" width="255" height="52" rx="6" fill="#223140" stroke="#e07a6a"/>
+    <text x="339" y="194">renderStatus() every step</text>
+    <text x="339" y="213" fill="#e07a6a" font-size="12.5">full scene traversal + DOM write</text>
+
+    <rect x="60" y="240" width="520" height="60" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="74" y="263">SS epoch construction &middot; hierarchy build &middot; bind groups</text>
+    <text x="74" y="284" fill="#8298a6" font-size="12.5">spatial epoch, level assignment, law queues &mdash; all authored on the page thread</text>
+
+    <rect x="60" y="316" width="250" height="60" rx="6" fill="#223140" stroke="#e07a6a"/>
+    <text x="74" y="339">Sync pipeline compile</text>
+    <text x="74" y="360" fill="#e07a6a" font-size="12.5">cold WGSL freezes page for minutes</text>
+
+    <rect x="330" y="316" width="250" height="60" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="344" y="339">Command encoding + submit</text>
+    <text x="344" y="360" fill="#8298a6" font-size="12.5">incl. contact cleanup &le; budget serial tail</text>
+
+    <rect x="60" y="392" width="520" height="60" rx="6" fill="#223140" stroke="#e07a6a"/>
+    <text x="74" y="415">Presentation gating: next step waits for visible frame</text>
+    <text x="74" y="436" fill="#e07a6a" font-size="12.5">physics cadence chained to rAF + native-presentation handoff proof</text>
+
+    <rect x="60" y="468" width="250" height="52" rx="6" fill="#223140" stroke="#e6a44e"/>
+    <text x="74" y="490">1 resident step / schedule</text>
+    <text x="74" y="509" fill="#e6a44e" font-size="12.5">sodium&rsquo;s 128-step batching defeated</text>
+
+    <rect x="330" y="468" width="250" height="52" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="344" y="490">Render field consume</text>
+    <text x="344" y="509" fill="#8298a6" font-size="12.5">splat &rarr; marching cubes &rarr; draw</text>
+
+    <rect x="60" y="544" width="520" height="52" rx="6" fill="#223140" stroke="#8298a6" stroke-dasharray="6 4"/>
+    <text x="74" y="566">GC starvation under load</text>
+    <text x="74" y="585" fill="#8298a6" font-size="12.5">saturated thread never yields idle time &rarr; dev-reload garbage ratchets to renderer OOM</text>
+  </g>
+  <text x="60" y="632" fill="#e07a6a" font-size="13" font-family="monospace">measured: GPU does ~51 steps/s of work while end-to-end</text>
+  <text x="60" y="652" fill="#e07a6a" font-size="13" font-family="monospace">delivery collapses to 3&ndash;80 steps/s through this serialization</text>
+
+  <!-- workers column -->
+  <rect x="660" y="120" width="330" height="640" rx="12" fill="#1b2733" stroke="#2c3d4c" stroke-width="2"/>
+  <text x="680" y="152" fill="#8298a6" font-size="14" font-family="monospace" letter-spacing="2">WORKERS &mdash; mostly idle</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="680" y="172" width="290" height="60" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="694" y="195">ulg-runtime worker</text>
+    <text x="694" y="216" fill="#8298a6" font-size="12.5">closure derivation, preflight, caches only</text>
+
+    <rect x="680" y="248" width="290" height="76" rx="6" fill="#223140" stroke="#e07a6a" stroke-dasharray="6 4"/>
+    <text x="694" y="271">ComputeManager route</text>
+    <text x="694" y="292" fill="#e07a6a" font-size="12.5">BYPASSED for SS execution:</text>
+    <text x="694" y="310" fill="#e07a6a" font-size="12.5" font-family="monospace">residentComputeManagerMode =</text>
+    <line x1="680" y1="248" x2="970" y2="324" stroke="#e07a6a" stroke-width="1.5"/>
+    <line x1="970" y1="248" x2="680" y2="324" stroke="#e07a6a" stroke-width="1.5"/>
+  </g>
+  <text x="694" y="341" fill="#e07a6a" font-size="12.5" font-family="monospace">'direct-schroeder-scene'</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="680" y="368" width="290" height="60" rx="6" fill="#223140" stroke="#2c3d4c"/>
+    <text x="694" y="391">33 service workers</text>
+    <text x="694" y="412" fill="#8298a6" font-size="12.5">registry / leases / artifacts &mdash; no physics</text>
+  </g>
+
+  <!-- GPU column -->
+  <rect x="1050" y="120" width="310" height="640" rx="12" fill="#1b2733" stroke="#6fce8f" stroke-width="2"/>
+  <text x="1070" y="152" fill="#6fce8f" font-size="14" font-family="monospace" letter-spacing="2">GPU &mdash; healthy, underfed</text>
+  <g font-size="15" fill="#d9e5eb">
+    <rect x="1070" y="172" width="270" height="60" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="195">Resident MLS-MPM step</text>
+    <text x="1084" y="216" fill="#8298a6" font-size="12.5">P2G &rarr; grid &rarr; G2P, fused sequence</text>
+    <rect x="1070" y="248" width="270" height="60" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="271">SS spatial kernels</text>
+    <text x="1084" y="292" fill="#8298a6" font-size="12.5">epoch &middot; levels &middot; law traversal</text>
+    <rect x="1070" y="324" width="270" height="60" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="347">Contact pair-graph solve</text>
+    <text x="1084" y="368" fill="#8298a6" font-size="12.5">Jacobi&times;16 + cleanup, budget-sealed</text>
+    <rect x="1070" y="400" width="270" height="60" rx="6" fill="#223140" stroke="#6fce8f"/>
+    <text x="1084" y="423">Render field + surfaces</text>
+    <text x="1084" y="444" fill="#8298a6" font-size="12.5">zero hot-loop readbacks (verified)</text>
+  </g>
+  <text x="1070" y="500" fill="#8298a6" font-size="12.5">law application: every law, every region,</text>
+  <text x="1070" y="518" fill="#8298a6" font-size="12.5">every step, worst-case budgets &mdash; no</text>
+  <text x="1070" y="536" fill="#8298a6" font-size="12.5">admission predicates yet</text>
+
+  <!-- ===== arrows ===== -->
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d9e5eb"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e07a6a"/></marker>
+  </defs>
+  <line x1="600" y1="356" x2="1050" y2="356" stroke="#d9e5eb" stroke-width="2" marker-end="url(#a)"/>
+  <text x="998" y="342" fill="#d9e5eb" font-size="13" font-family="monospace">submit: 1 step</text>
+  <path d="M 1050,430 C 900,430 760,422 604,422" stroke="#e07a6a" stroke-width="2.5" fill="none" marker-end="url(#ar)"/>
+  <text x="700" y="447" fill="#e07a6a" font-size="13" font-family="monospace">presentation proof gates next step</text>
+  <line x1="660" y1="200" x2="600" y2="200" stroke="#d9e5eb" stroke-width="2" marker-end="url(#a)"/>
+  <text x="608" y="188" fill="#8298a6" font-size="12" font-family="monospace">closures</text>
+
+  <!-- footer -->
+  <rect x="40" y="790" width="1320" height="90" rx="10" fill="#1b2733" stroke="#2c3d4c"/>
+  <text x="60" y="822" fill="#e6a44e" font-size="14" font-family="monospace">ACCEPTED CONTAINED-MERGE DEBT (plan/todo/ss-regression.md):</text>
+  <text x="60" y="848" fill="#d9e5eb" font-size="14">every physics step pays a full schedule/epoch lifecycle on the page thread; UI, GC, presentation, and physics all queue behind each other;</text>
+  <text x="60" y="868" fill="#d9e5eb" font-size="14">cold compile can freeze the page; low-N throughput and cached cadence carried as visible WARNs. Default-enable is blocked on fixing this.</text>
+</svg>
+</div>

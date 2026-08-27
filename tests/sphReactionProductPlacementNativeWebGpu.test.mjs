@@ -1185,7 +1185,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       };
       const createAuthenticPlacementAuthority = async ({
         productEventCapacity,
-        destination = makeDestinationFamily({ particleCount: 4 })
+        destination = makeDestinationFamily({ particleCount: 4 }),
+        transactionRollbackSource = destination
       }) => {
         const particleCount = destination.state.length / 8;
         if (
@@ -1193,12 +1194,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           || particleCount < 1
           || destination.thermo.length !== particleCount * 12
           || destination.mechanics.length !== particleCount * 32
+          || transactionRollbackSource.state.length !== particleCount * 8
+          || transactionRollbackSource.thermo.length !== particleCount * 12
+          || transactionRollbackSource.mechanics.length !== particleCount * 32
         ) {
           throw new TypeError('native placement destination family is misaligned');
         }
-        const state = destination.state;
-        const thermo = destination.thermo;
-        const mechanics = destination.mechanics;
+        const state = transactionRollbackSource.state;
+        const thermo = transactionRollbackSource.thermo;
+        const mechanics = transactionRollbackSource.mechanics;
         const identityValues = new Uint32Array(particleCount).fill(1);
         const sphParticleState = {
           schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -1343,6 +1347,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             device,
             ancestorGeneration: ancestor,
             reactionInputStateBuffer: sphParticleUpload.stateBuffer,
+            reactionInputThermoBuffer: sphParticleUpload.thermoBuffer,
+            reactionInputMechanicsBuffer:
+              mlsMpmParticleUpload.mechanicsBuffer,
+            transactionRollbackThermoBuffer:
+              sphParticleUpload.thermoBuffer,
+            transactionRollbackMechanicsBuffer:
+              mlsMpmParticleUpload.mechanicsBuffer,
             frozenResolvedStateBuffer: frozenState,
             particleCount
           });
@@ -1365,7 +1376,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             particleCount,
             productEventCapacity,
             sourceStateBuffer: sphParticleUpload.stateBuffer,
-            sourceThermoBuffer: sphParticleUpload.thermoBuffer
+            sourceThermoBuffer: sphParticleUpload.thermoBuffer,
+            sourceMechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer
           });
         return {
           authority,
@@ -1695,6 +1707,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               2.0e-5
             );
         } else if (spec.expectedRollback === true) {
+          const rollbackSource = spec.transactionRollbackSource
+            ?? spec.destination;
+          const zeroEvents = new Float32Array(events.length);
           const expectedDestinationMutationCount =
             spec.expectedSpeculativeDestinationMutationCount ?? 0;
           cpuOracleParity = cpuOracleParity
@@ -1712,14 +1727,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               )
             )
             && fnv1a(new Uint8Array(state.buffer))
-              === fnv1a(new Uint8Array(spec.destination.state.buffer))
+              === fnv1a(new Uint8Array(rollbackSource.state.buffer))
             && fnv1a(new Uint8Array(thermo.buffer))
-              === fnv1a(new Uint8Array(spec.destination.thermo.buffer))
+              === fnv1a(new Uint8Array(rollbackSource.thermo.buffer))
             && fnv1a(new Uint8Array(mechanics.buffer))
-              === fnv1a(new Uint8Array(spec.destination.mechanics.buffer))
-            && arraysByteEqual(events, spec.events);
-          conserved = near(finalMass, initialMass, 5.0e-6)
-            && referenceBirthVolumeConsistent;
+              === fnv1a(new Uint8Array(rollbackSource.mechanics.buffer))
+            && arraysByteEqual(events, zeroEvents);
+          conserved = near(
+            finalMass,
+            particleMass(rollbackSource.state),
+            5.0e-6
+          );
         } else if (spec.expectedSpareCount != null) {
           const dispositions = Array.from(
             { length: spec.eventCount },
@@ -1840,7 +1858,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         paddedDecisions.set(spec.decisions);
         const authentic = await createAuthenticPlacementAuthority({
           productEventCapacity: EVENT_CAPACITY,
-          destination: spec.destination
+          destination: spec.destination,
+          transactionRollbackSource:
+            spec.transactionRollbackSource ?? spec.destination
         });
         const arenaLabelsBefore = instrumentation.createdBufferLabels.filter(
           (label) => label.startsWith(ARENA_LABEL_PREFIX)
@@ -2483,28 +2503,50 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       const samplesMs = performanceOutputs.map((output) => output.timestampMs);
       const receipt = performanceOutputs.at(-1).receipt;
       const rollbackSpec = makeAllToOneCaptureSpec(1);
+      const rollbackSource = {
+        state: rollbackSpec.destination.state.slice(),
+        thermo: rollbackSpec.destination.thermo.slice(),
+        mechanics: rollbackSpec.destination.mechanics.slice()
+      };
+      rollbackSource.state[3] = f32Add(rollbackSource.state[3], 0.25);
+      rollbackSource.state[4] = f32Add(rollbackSource.state[4], 0.125);
+      rollbackSource.thermo[2] = f32Add(rollbackSource.thermo[2], -25);
+      rollbackSource.mechanics[18] = f32Add(
+        rollbackSource.mechanics[18],
+        0.125
+      );
+      const rollbackTransactionSpec = {
+        ...rollbackSpec,
+        transactionRollbackSource: rollbackSource
+      };
       const rollbackSummarySeed = Float32Array.from(
         { length: rollbackSpec.productTermCount * 32 },
         (_, index) => f32((index + 1) * 0.125)
       );
-      const rollbackOutput = await runManufacturedCase(rollbackSpec, {
+      const rollbackOutput = await runManufacturedCase(
+        rollbackTransactionSpec,
+        {
         publishedSummarySeed: rollbackSummarySeed,
         receiptPrivateLookupBuildCount: 1
-      });
+        }
+      );
       const rollbackReceipt = rollbackOutput.receipt;
       const rollback = {
         particleFamilyRestored:
-          arraysByteEqual(rollbackOutput.state, rollbackSpec.destination.state)
+          arraysByteEqual(rollbackOutput.state, rollbackSource.state)
           && arraysByteEqual(
             rollbackOutput.thermo,
-            rollbackSpec.destination.thermo
+            rollbackSource.thermo
           )
           && arraysByteEqual(
             rollbackOutput.mechanics,
-            rollbackSpec.destination.mechanics
+            rollbackSource.mechanics
           ),
-        eventLedgerRetained:
-          arraysByteEqual(rollbackOutput.events, rollbackSpec.events),
+        eventLedgerCleared:
+          arraysByteEqual(
+            rollbackOutput.events,
+            new Float32Array(rollbackSpec.events.length)
+          ),
         summaryLedgerRetained:
           arraysByteEqual(
             rollbackOutput.placementSummary,
@@ -2546,24 +2588,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         rollbackSummarySeed,
         (value) => f32(value + 0.03125)
       );
-      const lateUnsafeOutput = await runManufacturedCase(rollbackSpec, {
+      const lateUnsafeOutput = await runManufacturedCase(
+        rollbackTransactionSpec,
+        {
         publishedSummarySeed: lateUnsafeSummarySeed,
         transactionalCommittedParticleCountSeed: 1
-      });
+        }
+      );
       const lateUnsafeReceipt = lateUnsafeOutput.receipt;
       const lateUnsafe = {
         particleFamilyRestored:
-          arraysByteEqual(lateUnsafeOutput.state, rollbackSpec.destination.state)
+          arraysByteEqual(lateUnsafeOutput.state, rollbackSource.state)
           && arraysByteEqual(
             lateUnsafeOutput.thermo,
-            rollbackSpec.destination.thermo
+            rollbackSource.thermo
           )
           && arraysByteEqual(
             lateUnsafeOutput.mechanics,
-            rollbackSpec.destination.mechanics
+            rollbackSource.mechanics
           ),
-        eventLedgerRetained:
-          arraysByteEqual(lateUnsafeOutput.events, rollbackSpec.events),
+        eventLedgerCleared:
+          arraysByteEqual(
+            lateUnsafeOutput.events,
+            new Float32Array(rollbackSpec.events.length)
+          ),
         summaryLedgerRetained:
           arraysByteEqual(
             lateUnsafeOutput.placementSummary,
@@ -2783,7 +2831,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   assert.equal(native.diagnosticFailure.recoveryDiscarded, true);
   assert.equal(native.diagnosticFailure.recoveryDestroyed, true);
   assert.equal(native.rollback.particleFamilyRestored, true);
-  assert.equal(native.rollback.eventLedgerRetained, true);
+  assert.equal(native.rollback.eventLedgerCleared, true);
   assert.equal(native.rollback.summaryLedgerRetained, true);
   assert.equal(native.rollback.speculativeMutationObserved, true);
   assert.equal(
@@ -2805,7 +2853,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   assert.equal(native.rollback.summaryPublishPassCount, 1);
   assert.equal(native.rollback.terminalSealPassCount, 1);
   assert.equal(native.lateUnsafe.particleFamilyRestored, true);
-  assert.equal(native.lateUnsafe.eventLedgerRetained, true);
+  assert.equal(native.lateUnsafe.eventLedgerCleared, true);
   assert.equal(native.lateUnsafe.summaryLedgerRetained, true);
   assert.equal(native.lateUnsafe.speculativeMutationObserved, true);
   assert.equal(native.lateUnsafe.coreStatus, 1);

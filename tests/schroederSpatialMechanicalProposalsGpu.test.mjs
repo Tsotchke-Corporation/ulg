@@ -2970,16 +2970,26 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
-    1
+    32,
+    'each single-workgroup owner dispatch loops 32 logical passes in-shader'
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
-    1024
+    32
   );
   assert.equal(
-    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
-      * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
+    Math.ceil(
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+        / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+    ),
+    'the encoded owner dispatch count is derived: ceil(passes / chunk)'
+  );
+  assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES
+      % SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
+    0,
+    'the batch horizon divides into whole chunks so no encoded quantum is a host-truncated partial'
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_HEADER_WORDS,
@@ -2994,10 +3004,9 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     131072
   );
   assert.equal(
-    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
-      * SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_MAX_ACTIVE_CURSORS,
     131072,
-    'the one-pass owner must retain the explicit frontier incident-CSR admission cap'
+    'the owner must retain the explicit per-logical-pass frontier incident-CSR admission cap, independent of the passes-per-dispatch chunk'
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_TERMINAL_MAX_ACTIVE_CURSORS,
@@ -4252,7 +4261,15 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
     // The seal invariant that replaced "encoded == proven worst-case": the
     // encoded horizon IS the declared budget, exactly.
     assert.equal(preset.encodedPassBudget, preset.cleanupPassBudget);
-    assert.equal(preset.ownerDispatches, preset.cleanupPassBudget);
+    assert.equal(
+      preset.ownerPassesPerDispatch,
+      SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+    );
+    assert.equal(
+      preset.ownerDispatches,
+      Math.ceil(preset.cleanupPassBudget / preset.ownerPassesPerDispatch),
+      'the encoded owner dispatch count is derived: ceil(passes / chunk)'
+    );
     assert.equal(
       preset.matchingCleanupControlWords,
       12 + 7 * preset.cleanupPassBudget
@@ -4304,7 +4321,18 @@ test('the encoded cleanup horizon is a declared, sealed per-invocation solver pa
   assert.equal(proposal.solverIterationCount, 16);
   assert.equal(proposal.matchingCleanupLogicalPassCount, 512);
   assert.equal(proposal.matchingCleanupEncodedPassCount, 512);
-  assert.equal(proposal.matchingCleanupOwnerDispatchCount, 512);
+  assert.equal(
+    proposal.matchingCleanupOwnerPassesPerDispatch,
+    SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+  );
+  assert.equal(
+    proposal.matchingCleanupOwnerDispatchCount,
+    Math.ceil(
+      512
+        / SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH
+    ),
+    'chunked owner encoding: dispatches = ceil(logical passes / chunk)'
+  );
   assert.ok(Object.isFrozen(proposal.solverBudgetDeclared));
   assert.equal(proposal.solverBudgetDeclared.jacobiIterations, 16);
   assert.equal(proposal.solverBudgetDeclared.cleanupPassBudget, 512);

@@ -307,6 +307,23 @@ export function normalizeSphInitialBody(body) {
   return normalizeSphInitialBodies([body]).bodies[0];
 }
 
+/** Derive a frozen XYZ size while preserving a body's per-axis cell pitch. */
+export function deriveSphInitialBodySizeM(body, particlesPerEdge) {
+  const normalizedBody = normalizeSphInitialBody(body);
+  const resizedBody = normalizeSphInitialBody({
+    ...normalizedBody,
+    particlesPerEdge
+  });
+  return normalizeSphInitialBody({
+    ...resizedBody,
+    sizeM: normalizedBody.sizeM.map((size, axis) => (
+      size
+      / normalizedBody.particlesPerEdge[axis]
+      * resizedBody.particlesPerEdge[axis]
+    ))
+  }).sizeM;
+}
+
 /**
  * Return the next deterministic identity for an appended body.
  *

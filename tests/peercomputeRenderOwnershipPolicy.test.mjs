@@ -374,6 +374,25 @@ test('render ownership policy keeps retained presentation batch cadence configur
   assert.equal(overridePolicy.residentComputeManagerModeExplicit, true);
 });
 
+test('render ownership policy preserves an explicit worker-owned resident lane mode', () => {
+  const policy = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'worker-owned-resident-render-producer',
+    residentComputeManagerMode: 'worker-owned-resident-lane',
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(policy.workerOwnedResidentProducerReady, true);
+  assert.equal(policy.residentComputeManagerModeExplicit, true);
+  assert.equal(
+    policy.residentComputeManagerMode,
+    'worker-owned-resident-lane'
+  );
+  assert.equal(
+    policy.residentPlaybackCadencePolicy.computeManagerMode,
+    'worker-owned-resident-lane'
+  );
+});
+
 test('render ownership policy lets PeerCompute configure pipelined interface warmup frames', () => {
   const defaultPolicy = resolvePeerComputeRenderOwnershipPolicy({
     workerOffscreenPresentationRequested: true

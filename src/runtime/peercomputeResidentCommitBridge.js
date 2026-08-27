@@ -26,7 +26,8 @@ function completedGpuFenceStatus(status) {
   return [
     'gpu-fence-completed',
     'queue-work-completed',
-    'readback-map-completed'
+    'readback-map-completed',
+    'same-device-queue-ordering-established'
   ].includes(String(status || ''));
 }
 
@@ -139,6 +140,13 @@ export function validateResidentStepsCommitDelta(delta, {
         requireFenceSatisfied
         && gpuFence.status === 'queue-work-completed'
         && gpuFence.method !== 'queue.onSubmittedWorkDone'
+      ) {
+        issues.push('gpu-fence-completion-method-invalid');
+      }
+      if (
+        requireFenceSatisfied
+        && gpuFence.status === 'same-device-queue-ordering-established'
+        && gpuFence.method !== 'same-device-queue-submit-order'
       ) {
         issues.push('gpu-fence-completion-method-invalid');
       }

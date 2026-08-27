@@ -6453,6 +6453,98 @@ function exactOwnedSpatialEpochGeneration(generation) {
   throw error;
 }
 
+/**
+ * Authenticate a caller-supplied level assignment as the exact immutable
+ * source used to build one live spatial generation.  This is deliberately
+ * narrower than validating the public assignment shape: authoritative
+ * two-level mechanics may reuse a worker-built generation only when the
+ * assignment object, current particle-buffer family, device, and epoch/query
+ * identity all match the module-private generation lineage.
+ */
+export function validateSchroederSpatialEpochGenerationLevelAssignment(
+  generation,
+  {
+    device = null,
+    levelAssignment = null,
+    sphParticleUpload = null,
+    mlsMpmParticleUpload = null
+  } = {}
+) {
+  try {
+    const ownedGeneration = exactOwnedSpatialEpochGeneration(generation);
+    const lineage = spatialEpochGenerationLineages.get(ownedGeneration);
+    const assignmentBuffer = levelAssignment?.assignmentBuffer ?? null;
+    const execution = ownedGeneration?.execution ?? null;
+    const source = ownedGeneration?.source ?? null;
+    if (
+      ownedGeneration !== generation
+      || lineage?.device !== device
+      || lineage.levelAssignment !== levelAssignment
+      || lineage.directRuntimeEntry !== ownedGeneration.directRuntimeEntry
+      || lineage.generationId !== execution?.generationId
+      || ownedGeneration.ready !== true
+      || ownedGeneration.selected !== true
+      || ownedGeneration.releaseScheduled === true
+      || execution?.released === true
+      || !ownedGeneration.directRuntimeEntry?.liveGenerations?.includes(
+        ownedGeneration
+      )
+      || !assignmentBuffer
+      || !webGpuBufferMatchesDevice(assignmentBuffer, device)
+      || execution?.sourceBuffer !== assignmentBuffer
+      || source?.sourceBuffer !== assignmentBuffer
+      || levelAssignment.sourceStateBufferBorrowed !== true
+      || levelAssignment.sourceThermoBufferBorrowed !== true
+      || levelAssignment.sourceMechanicsBufferBorrowed !== true
+      || levelAssignment.sourceStateBuffer
+        !== sphParticleUpload?.stateBuffer
+      || levelAssignment.sourceThermoBuffer
+        !== sphParticleUpload?.thermoBuffer
+      || levelAssignment.sourceMechanicsBuffer
+        !== mlsMpmParticleUpload?.mechanicsBuffer
+      || source.sourceStateBuffer !== sphParticleUpload?.stateBuffer
+      || source.sourceMechanicsBuffer
+        !== mlsMpmParticleUpload?.mechanicsBuffer
+    ) return false;
+
+    for (const field of [
+      'storageGeneration',
+      'physicsTick',
+      'physicsSubstep',
+      'positionEpoch',
+      'topologyEpoch',
+      'chartEpoch',
+      'levelEpoch',
+      'supportEpoch'
+    ]) {
+      if (
+        !Object.is(levelAssignment[field], execution[field])
+        || !Object.is(levelAssignment[field], source[field])
+      ) return false;
+    }
+    return Boolean(
+      Object.is(
+        levelAssignment.chartId,
+        source.exactNearQueryProfile?.chartId
+      )
+      && Object.is(
+        levelAssignment.minLevel,
+        source.exactNearQueryProfile?.minLevel
+      )
+      && Object.is(
+        levelAssignment.maxLevel,
+        source.exactNearQueryProfile?.maxLevel
+      )
+      && Object.is(
+        Math.fround(Number(levelAssignment.baseGridSpacingM)),
+        source.exactNearQueryProfile?.baseGridSpacingM
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 function spatialEpochGenerationConsumerLeaseSet(generation) {
   let leases = spatialEpochGenerationConsumerLeases.get(generation);
   if (!leases) {

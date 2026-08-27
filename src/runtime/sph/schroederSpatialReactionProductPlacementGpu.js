@@ -1294,6 +1294,9 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   frozenSourceStateBuffer = authority?.frozenSourceStateBuffer,
   frozenSourceThermoBuffer = authority?.frozenSourceThermoBuffer,
   frozenSourceMechanicsBuffer = authority?.frozenSourceMechanicsBuffer,
+  transactionRollbackStateBuffer = authority?.sourceStateBuffer,
+  transactionRollbackThermoBuffer = authority?.sourceThermoBuffer,
+  transactionRollbackMechanicsBuffer = authority?.sourceMechanicsBuffer,
   compactCountBuffer = arenaLease?.arena?.buffers?.compactCount,
   placementDecisionBuffer = arenaLease?.arena?.buffers?.decisions,
   placementControlBuffer = arenaLease?.arena?.buffers?.control,
@@ -1355,6 +1358,21 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     frozenSourceMechanicsBuffer,
     'frozen placement mechanics'
   );
+  const rollbackState = requireBuffer(
+    device,
+    transactionRollbackStateBuffer,
+    'pre-reaction transaction rollback state'
+  );
+  const rollbackThermo = requireBuffer(
+    device,
+    transactionRollbackThermoBuffer,
+    'pre-reaction transaction rollback thermo'
+  );
+  const rollbackMechanics = requireBuffer(
+    device,
+    transactionRollbackMechanicsBuffer,
+    'pre-reaction transaction rollback mechanics'
+  );
   const compactCount = requireBuffer(device, compactCountBuffer, 'placement compact count');
   const decisions = requireBuffer(device, placementDecisionBuffer, 'placement decisions');
   const control = requireBuffer(device, placementControlBuffer, 'placement control');
@@ -1366,6 +1384,9 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     || frozenState !== authority.frozenSourceStateBuffer
     || frozenThermo !== authority.frozenSourceThermoBuffer
     || frozenMechanics !== authority.frozenSourceMechanicsBuffer
+    || rollbackState !== authority.sourceStateBuffer
+    || rollbackThermo !== authority.sourceThermoBuffer
+    || rollbackMechanics !== authority.sourceMechanicsBuffer
     || decisions !== buffers.decisions
     || control !== buffers.control
     || compactCount !== buffers.compactCount
@@ -1386,6 +1407,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     authority.frozenSourceMechanicsBuffer,
     authority.sourceStateBuffer,
     authority.sourceThermoBuffer,
+    authority.sourceMechanicsBuffer,
     authority.placedDestinationStateBuffer,
     authority.placedDestinationThermoBuffer,
     authority.placedDestinationMechanicsBuffer,
@@ -1795,9 +1817,9 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
       transactionalPublish,
       'placement-transactional-publish-bind-group',
       [
-        { binding: 0, resource: { buffer: frozenState } },
-        { binding: 1, resource: { buffer: frozenThermo } },
-        { binding: 2, resource: { buffer: frozenMechanics } },
+        { binding: 0, resource: { buffer: rollbackState } },
+        { binding: 1, resource: { buffer: rollbackThermo } },
+        { binding: 2, resource: { buffer: rollbackMechanics } },
         { binding: 3, resource: { buffer: state } },
         { binding: 4, resource: { buffer: thermo } },
         { binding: 5, resource: { buffer: mechanics } },
@@ -1851,9 +1873,9 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
       transactionalDestinationRecovery,
       'placement-transactional-destination-recovery-bind-group',
       [
-        { binding: 0, resource: { buffer: frozenState } },
-        { binding: 1, resource: { buffer: frozenThermo } },
-        { binding: 2, resource: { buffer: frozenMechanics } },
+        { binding: 0, resource: { buffer: rollbackState } },
+        { binding: 1, resource: { buffer: rollbackThermo } },
+        { binding: 2, resource: { buffer: rollbackMechanics } },
         { binding: 3, resource: { buffer: state } },
         { binding: 4, resource: { buffer: thermo } },
         { binding: 5, resource: { buffer: mechanics } },
@@ -1915,6 +1937,9 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     placementSummaryBuffer: publishedSummary,
     candidatePlacementSummaryBuffer: summary,
     completionReceiptBuffer: receipt,
+    transactionRollbackStateBuffer: rollbackState,
+    transactionRollbackThermoBuffer: rollbackThermo,
+    transactionRollbackMechanicsBuffer: rollbackMechanics,
     captureRadixExecution,
     directRadixExecution,
     summaryRadixExecution,
@@ -2124,7 +2149,8 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   particleCount = placementSourceFamily?.particleCount,
   productEventCapacity,
   sourceStateBuffer,
-  sourceThermoBuffer
+  sourceThermoBuffer,
+  sourceMechanicsBuffer
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('reaction product placement authority requires a WebGPU-like device');
@@ -2191,6 +2217,24 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     sourceThermoBuffer,
     'placement sourceThermoBuffer'
   );
+  const resolvedSourceMechanicsBuffer = requireBuffer(
+    device,
+    sourceMechanicsBuffer,
+    'placement sourceMechanicsBuffer'
+  );
+  if (
+    resolvedSourceStateBuffer
+      !== resolvedPlacementSourceFamily.transactionRollbackStateBuffer
+    || resolvedSourceThermoBuffer
+      !== resolvedPlacementSourceFamily.transactionRollbackThermoBuffer
+    || resolvedSourceMechanicsBuffer
+      !== resolvedPlacementSourceFamily.transactionRollbackMechanicsBuffer
+  ) {
+    throw placementError(
+      'placement rollback inputs must be the exact pre-reaction family authenticated by the placement epoch',
+      'IDENTITY'
+    );
+  }
   const frozenSourceThermoBuffer = requireBuffer(
     device,
     resolvedPlacementSourceFamily.frozenSourceThermoBuffer,
@@ -2222,6 +2266,11 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   requireMinimumBytes(frozenSourceStateBuffer, stateBytes, 'frozen placement source state');
   requireMinimumBytes(resolvedSourceStateBuffer, stateBytes, 'placement source state');
   requireMinimumBytes(resolvedSourceThermoBuffer, thermoBytes, 'placement source thermo');
+  requireMinimumBytes(
+    resolvedSourceMechanicsBuffer,
+    mechanicsBytes,
+    'placement source mechanics'
+  );
   requireMinimumBytes(frozenSourceThermoBuffer, thermoBytes, 'frozen placement source thermo');
   requireMinimumBytes(frozenSourceMechanicsBuffer, mechanicsBytes, 'frozen placement source mechanics');
   requireMinimumBytes(placedDestinationStateBuffer, stateBytes, 'placed destination state');
@@ -2236,6 +2285,11 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     frozenSourceThermoBuffer,
     frozenSourceMechanicsBuffer
   ]);
+  const transactionRollbackSources = [
+    resolvedSourceStateBuffer,
+    resolvedSourceThermoBuffer,
+    resolvedSourceMechanicsBuffer
+  ];
   const placedDestinations = [
     placedDestinationStateBuffer,
     placedDestinationThermoBuffer,
@@ -2243,10 +2297,16 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   ];
   if (
     placedDestinations.some((buffer) => frozenSources.has(buffer))
+    || placedDestinations.some((buffer) => (
+      transactionRollbackSources.includes(buffer)
+    ))
+    || transactionRollbackSources.some((buffer) => frozenSources.has(buffer))
+    || new Set(transactionRollbackSources).size
+      !== transactionRollbackSources.length
     || new Set(placedDestinations).size !== placedDestinations.length
   ) {
     throw placementError(
-      'frozen placement sources and mutable placement destinations must be distinct',
+      'frozen placement, pre-reaction rollback, and mutable destination families must be exact and non-aliasing',
       'SOURCE_DESTINATION_ALIAS'
     );
   }
@@ -2346,6 +2406,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     frozenSourceMechanicsBuffer,
     sourceStateBuffer: resolvedSourceStateBuffer,
     sourceThermoBuffer: resolvedSourceThermoBuffer,
+    sourceMechanicsBuffer: resolvedSourceMechanicsBuffer,
     placedDestinationStateBuffer,
     placedDestinationThermoBuffer,
     placedDestinationMechanicsBuffer,
@@ -2373,6 +2434,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
       frozenSourceMechanicsBuffer,
       sourceStateBuffer: resolvedSourceStateBuffer,
       sourceThermoBuffer: resolvedSourceThermoBuffer,
+      sourceMechanicsBuffer: resolvedSourceMechanicsBuffer,
       placedDestinationStateBuffer,
       placedDestinationThermoBuffer,
       placedDestinationMechanicsBuffer
@@ -2400,6 +2462,7 @@ export function resolveSchroederSpatialReactionProductPlacementAuthority(
     productEventCapacity,
     sourceStateBuffer,
     sourceThermoBuffer,
+    sourceMechanicsBuffer,
     placedDestinationStateBuffer,
     placedDestinationThermoBuffer,
     placedDestinationMechanicsBuffer
@@ -2455,6 +2518,7 @@ export function resolveSchroederSpatialReactionProductPlacementAuthority(
       !== record.placementSourceFamily.frozenSourceMechanicsBuffer
     || bindings.sourceStateBuffer !== sourceStateBuffer
     || bindings.sourceThermoBuffer !== sourceThermoBuffer
+    || bindings.sourceMechanicsBuffer !== sourceMechanicsBuffer
     || bindings.placedDestinationStateBuffer !== placedDestinationStateBuffer
     || bindings.placedDestinationThermoBuffer !== placedDestinationThermoBuffer
     || bindings.placedDestinationMechanicsBuffer !== placedDestinationMechanicsBuffer
@@ -2625,6 +2689,7 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
     record.bindings.frozenSourceMechanicsBuffer,
     record.bindings.sourceStateBuffer,
     record.bindings.sourceThermoBuffer,
+    record.bindings.sourceMechanicsBuffer,
     record.bindings.placedDestinationStateBuffer,
     record.bindings.placedDestinationThermoBuffer,
     record.bindings.placedDestinationMechanicsBuffer,
@@ -2707,6 +2772,12 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
     placementSummaryBuffer: publishedSummary,
     candidatePlacementSummaryBuffer: candidateSummary,
     completionReceiptBuffer: completionReceipt,
+    transactionRollbackStateBuffer:
+      genuine.transactionRollbackStateBuffer,
+    transactionRollbackThermoBuffer:
+      genuine.transactionRollbackThermoBuffer,
+    transactionRollbackMechanicsBuffer:
+      genuine.transactionRollbackMechanicsBuffer,
     completionReadbackBuffer: readback,
     diagnosticReadbackRequested: Boolean(readback),
     scratchBuffers: Object.freeze(exactScratchBuffers),
@@ -2847,6 +2918,10 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
     frozenSourceStateBuffer: record.bindings.frozenSourceStateBuffer,
     frozenSourceThermoBuffer: record.bindings.frozenSourceThermoBuffer,
     frozenSourceMechanicsBuffer: record.bindings.frozenSourceMechanicsBuffer,
+    transactionRollbackStateBuffer: record.bindings.sourceStateBuffer,
+    transactionRollbackThermoBuffer: record.bindings.sourceThermoBuffer,
+    transactionRollbackMechanicsBuffer:
+      record.bindings.sourceMechanicsBuffer,
     placedDestinationStateBuffer: record.bindings.placedDestinationStateBuffer,
     placedDestinationThermoBuffer: record.bindings.placedDestinationThermoBuffer,
     placedDestinationMechanicsBuffer: record.bindings.placedDestinationMechanicsBuffer,
@@ -2869,7 +2944,7 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
     transactionalAuxiliaryMaterializationEncoded:
       encoding.transactionalAuxiliaryMaterializationEncoded,
     destinationPublicationMode:
-      'gpu-terminal-safe-placed-or-exact-frozen-fallback',
+      'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback',
     deterministicApplyMode: encoding.deterministicApplyMode,
     queueFenceStatus: 'same-queue-submission-order',
     queueOrderedReleaseAuthorized: true,
@@ -2924,7 +2999,7 @@ export function isSubmittedSchroederSpatialReactionProductPlacementArtifact(
     && artifact.transactionalFailClosedRecoveryEncoded === true
     && artifact.transactionalAuxiliaryMaterializationEncoded === true
     && artifact.destinationPublicationMode
-      === 'gpu-terminal-safe-placed-or-exact-frozen-fallback'
+      === 'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback'
     && artifact.queueFenceStatus === 'same-queue-submission-order'
     && artifact.queueOrderedReleaseAuthorized === true
     && artifact.arenaReuseAllowed === true
@@ -2943,6 +3018,12 @@ export function isSubmittedSchroederSpatialReactionProductPlacementArtifact(
       === record.record.bindings.frozenSourceThermoBuffer
     && artifact.frozenSourceMechanicsBuffer
       === record.record.bindings.frozenSourceMechanicsBuffer
+    && artifact.transactionRollbackStateBuffer
+      === record.record.bindings.sourceStateBuffer
+    && artifact.transactionRollbackThermoBuffer
+      === record.record.bindings.sourceThermoBuffer
+    && artifact.transactionRollbackMechanicsBuffer
+      === record.record.bindings.sourceMechanicsBuffer
     && artifact.placedDestinationStateBuffer
       === record.record.bindings.placedDestinationStateBuffer
     && artifact.placedDestinationThermoBuffer
@@ -3136,6 +3217,33 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
   const eventLedgerRowCount = eventCapacity
     * segmentedEncoding.arena.eventStrideVec4;
   const summaryLedgerRowCount = segmentedEncoding.arena.productTermCapacity * 8;
+  const transactionalSafeFallback = Boolean(
+    magic === SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_MAGIC
+    && version === SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION
+    && generationId === authority.generationId
+    && supportProfileId === authority.supportProfileId
+    && eventCapacity === authority.productEventCapacity
+    && [
+      SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CANONICAL_DECISION_REJECTED,
+      SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_STATUS.CONTRACT_REJECTED
+    ].includes(status)
+    && transactionalPublishPassCount === 1
+    && transactionalVisitedParticleCount === authority.particleCount
+    && transactionalCommittedParticleCount === 0
+    && transactionalFallbackParticleCount === authority.particleCount
+    && transactionalEventPublishPassCount === 1
+    && transactionalVisitedEventRowCount === eventLedgerRowCount
+    && transactionalCommittedEventRowCount === 0
+    && transactionalFallbackEventRowCount === eventLedgerRowCount
+    && transactionalSummaryPublishPassCount === 1
+    && transactionalVisitedSummaryRowCount === summaryLedgerRowCount
+    && transactionalCommittedSummaryRowCount === 0
+    && transactionalFallbackSummaryRowCount === summaryLedgerRowCount
+    && transactionalTerminalSealPassCount === 1
+    && transactionalTerminalStatus
+      === SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_FROZEN_FALLBACK
+    && hostCompletionReadbackCount === 1
+  );
   const dispositionCount =
     directOnlyEventCount
     + sparePlacementEventCount
@@ -3145,7 +3253,7 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
     + noCarrierEventCount
     + rejectedEventCount
     + unknownDispositionCount;
-  if (
+  if (!transactionalSafeFallback && (
     magic !== SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_MAGIC
     || version !== SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION
     || generationId !== authority.generationId
@@ -3229,7 +3337,7 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
     || transactionalTerminalSealPassCount !== 1
     || transactionalTerminalStatus
       !== SPH_REACTION_PRODUCT_PLACEMENT_TRANSACTION_STATUS.SAFE_PLACED
-  ) {
+  )) {
     const error = placementError(
       'placement GPU completion receipt is missing, rejected, or internally inconsistent',
       'OBSERVATION'
@@ -3261,6 +3369,11 @@ export async function observeSchroederSpatialReactionProductPlacementCompletion(
     ...decoded,
     status: 'reaction-product-placement-gpu-completion-observed',
     receiptStatus: status,
+    placementAccepted: !transactionalSafeFallback,
+    fallbackObserved: transactionalSafeFallback,
+    transactionOutcome: transactionalSafeFallback
+      ? 'atomic-reaction-placement-pre-reaction-fallback'
+      : 'atomic-reaction-placement-committed',
     ready: true,
     gpuCompleted: true,
     generationId,
@@ -3451,8 +3564,10 @@ export function finalizeSchroederSpatialReactionProductPlacementAuthority(
       completionObservation.transactionalTerminalSealPassCount,
     transactionalTerminalStatus:
       completionObservation.transactionalTerminalStatus,
+    transactionalFallbackObserved:
+      completionObservation.fallbackObserved === true,
     destinationPublicationMode:
-      'gpu-terminal-safe-placed-or-exact-frozen-fallback',
+      'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback',
     canonicalDensePlacementScanCount: 0,
     deterministicApplyMode:
       SPH_REACTION_PRODUCT_PLACEMENT_LAW.mutationOrder
@@ -3464,7 +3579,9 @@ export function finalizeSchroederSpatialReactionProductPlacementAuthority(
   const artifact = Object.freeze({
     schema:
       ULG_SCHROEDER_SPATIAL_REACTION_PRODUCT_PLACEMENT_ARTIFACT_SCHEMA,
-    status: 'schroeder-spatial-reaction-product-placement-observed-complete',
+    status: completionObservation.fallbackObserved === true
+      ? 'schroeder-spatial-reaction-product-placement-observed-pre-reaction-fallback'
+      : 'schroeder-spatial-reaction-product-placement-observed-complete',
     ready: true,
     admitted: true,
     authenticated: true,
@@ -3490,6 +3607,7 @@ export function finalizeSchroederSpatialReactionProductPlacementAuthority(
     frozenSourceMechanicsBuffer: record.bindings.frozenSourceMechanicsBuffer,
     sourceStateBuffer: record.bindings.sourceStateBuffer,
     sourceThermoBuffer: record.bindings.sourceThermoBuffer,
+    sourceMechanicsBuffer: record.bindings.sourceMechanicsBuffer,
     placedDestinationStateBuffer:
       record.bindings.placedDestinationStateBuffer,
     placedDestinationThermoBuffer:
@@ -3518,9 +3636,11 @@ export function finalizeSchroederSpatialReactionProductPlacementAuthority(
       completionObservation.transactionalFallbackParticleCount,
     transactionalTerminalStatus:
       completionObservation.transactionalTerminalStatus,
+    placementAccepted: completionObservation.placementAccepted === true,
+    transactionOutcome: completionObservation.transactionOutcome,
     destinationPublicationMode:
-      'gpu-terminal-safe-placed-or-exact-frozen-fallback',
-    fallbackObserved: false,
+      'gpu-terminal-safe-placed-or-exact-pre-reaction-fallback',
+    fallbackObserved: completionObservation.fallbackObserved === true,
     fullReadbackPerformed: false
   });
   record.finalizedArtifact = artifact;

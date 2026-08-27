@@ -496,9 +496,18 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       ?? policy.presentationStepsPerSchedule,
     null
   );
-  const residentStepMaxDefault = interactivePresentationPlayback
-    ? 4
-    : (interactiveWorkerPresentationPlayback ? 1 : null);
+  // The interactive presentation caps below are DEFAULTS for playback with no
+  // stated batch size. An explicit residentStepsPerSchedule request (preset or
+  // URL) is a deliberate amortization choice: the worker lane batches legally
+  // (each step seals its own epoch) and publishes per-step progress render
+  // candidates, so clamping an explicit request to one step per schedule only
+  // reintroduces the per-step schedule-lifecycle overhead the worker-lane
+  // refactor removed. An explicit residentStepsPerScheduleMax still binds.
+  const residentStepMaxDefault = residentStepOverride != null
+    ? null
+    : (interactivePresentationPlayback
+      ? 4
+      : (interactiveWorkerPresentationPlayback ? 1 : null));
   const residentStepMax = normalizePositiveInteger(
     residentStepsPerScheduleMax
       ?? policy.residentStepsPerScheduleMax

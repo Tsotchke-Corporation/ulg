@@ -374,6 +374,34 @@ test('render ownership policy keeps retained presentation batch cadence configur
   assert.equal(overridePolicy.residentComputeManagerModeExplicit, true);
 });
 
+test('render ownership policy lifts the interactive default step cap for an explicit batch request', () => {
+  const workerPresentationBatch = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'worker-owned-resident-render-producer',
+    residentStepsPerScheduleOverride: 64,
+    workerOwnedResidentProducerReady: true
+  });
+  const retainedPresentationBatch = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'presentation-worker-retained-output-presentation-only',
+    residentStepsPerScheduleOverride: 16,
+    workerOwnedResidentProducerReady: true
+  });
+  const explicitMaxStillBinds = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'worker-owned-resident-render-producer',
+    residentStepsPerScheduleOverride: 64,
+    residentStepsPerScheduleMax: 8,
+    workerOwnedResidentProducerReady: true
+  });
+
+  // An explicit batch request replaces the one-step interactive default with
+  // the global cap so the worker lane can amortize its schedule lifecycle.
+  assert.equal(workerPresentationBatch.residentStepsPerScheduleOverride, 64);
+  assert.equal(workerPresentationBatch.residentStepsPerScheduleMax, null);
+  assert.equal(retainedPresentationBatch.residentStepsPerScheduleOverride, 16);
+  assert.equal(retainedPresentationBatch.residentStepsPerScheduleMax, null);
+  // An explicit policy max is never lifted by an override request.
+  assert.equal(explicitMaxStillBinds.residentStepsPerScheduleMax, 8);
+});
+
 test('render ownership policy preserves an explicit worker-owned resident lane mode', () => {
   const policy = resolvePeerComputeRenderOwnershipPolicy({
     requestedMode: 'worker-owned-resident-render-producer',

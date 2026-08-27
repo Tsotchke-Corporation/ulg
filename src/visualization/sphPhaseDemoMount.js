@@ -11782,11 +11782,15 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentResidentStepsPerSchedule() {
     if (initialSchroederSimulationConfig.enabled) {
-      // The scenario override is a requested batch size, not permission to
-      // bypass the resolved interactive presentation policy. Worker-owned
-      // committed-frame playback deliberately caps at one step (the retained
-      // presentation-only use case caps at four); throughput/science policies
-      // expose a null max and keep the normal global cap.
+      // The scenario override is a requested batch size resolved through the
+      // interactive presentation policy. With no explicit batch request,
+      // worker-owned committed-frame playback defaults to one step per
+      // schedule (the retained presentation-only use case to four). An
+      // explicit residentStepsPerSchedule request lifts those defaults so the
+      // worker lane can amortize the schedule lifecycle across the batch; an
+      // explicit residentStepsPerScheduleMax and the global bridge cap still
+      // bind, and per-step progress render candidates keep presentation live
+      // inside a batch.
       const playbackPolicy = currentPeerComputeRenderOwnershipPolicy();
       const workerLaneRequestedStepCount = positiveIntegerUrlParam(
         playbackPolicy?.residentStepsPerScheduleOverride

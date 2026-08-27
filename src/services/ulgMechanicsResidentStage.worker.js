@@ -1,4 +1,8 @@
 import {
+  createSphGpuTimestampProfiler,
+  encodeSphGpuTimestampMarkerPass
+} from '../runtime/sph/sphGpuTimestampProfiler.js';
+import {
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
   destroyMlsMpmResidentStepBuffers,
@@ -104,6 +108,9 @@ const ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA = 'peercompute.ulg.sph-phase-carrier-
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GAS_CELL_EOS_FINALIZER_STAGE_ID = 'gasCellEosFinalizer';
 const SCHROEDER_SPATIAL_EPOCH_STAGE_ID = 'schroederSpatialEpoch';
+// Diagnostic-only queue-fence recorder for the epoch generation stage; see
+// runWorkerSchroederSpatialEpochStage. Fences serialize the queue, so this
+// exists only under residentGpuTimestampProfile=1.
 const SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID = 'schroederSameLevelMechanics';
 const SCHROEDER_LANE_SEED_STAGE_ID = 'schroederLaneSeed';
 const WORKER_SCHROEDER_SCHEDULE_TRANSPORT_STAGE_IDS = Object.freeze(
@@ -4386,6 +4393,45 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     : (data.spatialEpochArenaCount == null
         ? null
         : Number(data.spatialEpochArenaCount));
+  // Diagnostic-only: fence-bracket the epoch generation so its device cost
+  // is attributable (the recorder goes ONLY to the generation runner; the
+  // mechanics kernel's canonical-cleanup exactness gate never sees it).
+  const epochProfilingRequested =
+    data?.residentStepOptions?.residentGpuTimestampProfilingRequested === true
+    || previousLane?.residentStepOptions
+      ?.residentGpuTimestampProfilingRequested === true;
+  // Diagnostic-only queue-interval bracket around the epoch generation: a
+  // start marker submitted before the runner and an end marker after it
+  // measure the ordered device interval the generation occupies (the
+  // runner submits its own encoder inside the awaited call).
+  let epochIntervalProfiler = null;
+  let epochIntervalBracket = null;
+  if (epochProfilingRequested) {
+    try {
+      epochIntervalProfiler = createSphGpuTimestampProfiler({
+        device,
+        enabled: true,
+        capacity: 2,
+        label: 'ulg-worker-schroeder-epoch-queue-interval'
+      });
+      epochIntervalBracket =
+        epochIntervalProfiler.passTimestamps('epochQueueInterval');
+      if (epochIntervalBracket) {
+        const markerEncoder = device.createCommandEncoder();
+        encodeSphGpuTimestampMarkerPass(markerEncoder, {
+          querySet: epochIntervalBracket.timestampWrites.querySet,
+          queryIndex:
+            epochIntervalBracket.timestampWrites.beginningOfPassWriteIndex,
+          boundary: 'start',
+          label: 'ulg-worker-schroeder-epoch-interval-start'
+        });
+        device.queue.submit([markerEncoder.finish()]);
+      }
+    } catch {
+      epochIntervalProfiler = null;
+      epochIntervalBracket = null;
+    }
+  }
   let generation;
   try {
     generation = await generationRunner({
@@ -4452,6 +4498,27 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
   } catch (error) {
     releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
     throw error;
+  }
+  let epochQueueIntervalMs = null;
+  if (epochIntervalBracket && epochIntervalProfiler) {
+    try {
+      const markerEncoder = device.createCommandEncoder();
+      encodeSphGpuTimestampMarkerPass(markerEncoder, {
+        querySet: epochIntervalBracket.timestampWrites.querySet,
+        queryIndex: epochIntervalBracket.timestampWrites.endOfPassWriteIndex,
+        boundary: 'end',
+        label: 'ulg-worker-schroeder-epoch-interval-end'
+      });
+      epochIntervalProfiler.resolve(markerEncoder);
+      device.queue.submit([markerEncoder.finish()]);
+      const intervalProfile = await epochIntervalProfiler.read();
+      epochQueueIntervalMs =
+        intervalProfile?.stageGpuMs?.epochQueueInterval ?? null;
+    } catch {
+      epochQueueIntervalMs = null;
+    } finally {
+      epochIntervalProfiler.destroy?.();
+    }
   }
   if (generation?.ready !== true) {
     releaseWorkerSchroederSuccessorLeaseQuietly(successorConsumption, device);
@@ -4549,6 +4616,9 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     status: 'worker-schroeder-spatial-epoch-retained',
     backend: 'webgpu',
     readbackMode: data.readbackMode || null,
+    // Diagnostic-only bracketed device interval of the epoch generation
+    // (null unless residentGpuTimestampProfile=1).
+    epochQueueIntervalMs,
     epochSeal,
     epochRetainedInLane: true,
     epochStepOrdinal: record.schroederLane.stepOrdinal,
@@ -7087,7 +7157,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         stepStartedAtMs,
         stepElapsedMs: lastStepSummary.stepElapsedMs,
         epochStageElapsedMs,
-        mechanicsStageElapsedMs
+        mechanicsStageElapsedMs,
+        epochQueueIntervalMs:
+          epochStageResult.value?.epochQueueIntervalMs ?? null
       });
       if (
         stepSummaryRing.length

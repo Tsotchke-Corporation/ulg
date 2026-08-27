@@ -400,4 +400,12 @@ REVERTED to the counts-only census. The right form: SAMPLE exactly one
 step per schedule (arm the marker context at one ring push, disarm at
 the next), which bounds the overhead to ~30 marker pairs per schedule.
 The scene mirror and probe already read submitCensusDeviceMs when a
-future worker emits it.
+future worker emits it. Second attempt (sampled one-step form) ALSO
+wedged schedule 2 (one commit in 60 s; schedule 1, unarmed, ran
+normally) — the wedge follows ARMING, not the always-on overhead.
+Suspect the marker-buffer injection interacting with a consumer of the
+intercepted submit's receipt (some callers inspect their own command
+buffers or rely on submit(buffers) identity), or an exception path
+swallowed by the fall-through. Debug worker-side with the page console
+captured (preset-rate-probe-shot pattern) before re-attempting; keep
+the counts-only census meanwhile (it is validated and fast).

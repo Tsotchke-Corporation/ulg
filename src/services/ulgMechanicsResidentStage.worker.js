@@ -16,7 +16,8 @@ import {
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmMechanicsP2gStageComputeTask,
   normalizePressureInterfaceGasCellFieldImport,
-  scheduleSphGasCellEosFinalConsumerRelease
+  scheduleSphGasCellEosFinalConsumerRelease,
+  observeResidentProductHistoryLiveRowBound
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -7358,6 +7359,31 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           terminalRefluxExpectations
         });
     const tailTerminalFenceDoneAtMs = workerResidentScheduleNowMs();
+    // The terminal fence just drained the queue, so the product-history
+    // GPU count is final for this schedule: one 4-byte fixed-size evidence
+    // read re-tightens the host-side live-row upper bound that otherwise
+    // only grows (and drags the gas-EOS compact arena, its v1 spatial
+    // epoch sort, and per-capacity pipeline families toward the full
+    // 262144-row arena capacity). Failure keeps the conservative bound.
+    let productHistoryLiveBoundObservation = null;
+    if (
+      terminalGpuFence?.fenceSatisfied === true
+      && state.workerDevice
+    ) {
+      const observedLaneRecord = getLaneRecord(payload);
+      const observedHandle =
+        previousWorkerResidentProductMass(observedLaneRecord)
+        ?? observedLaneRecord?.schroederLane?.residentStepOptions
+          ?.residentProductMass
+        ?? null;
+      if (observedHandle) {
+        productHistoryLiveBoundObservation =
+          await observeResidentProductHistoryLiveRowBound(
+            state.workerDevice,
+            observedHandle
+          );
+      }
+    }
     if (scheduleLoopError) {
       const terminalReceiptLoopFailure =
         scheduleLoopError.residentScheduleError?.reason
@@ -7602,6 +7628,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleFirstStepStartedAtMs,
       scheduleLastStepEndedAtMs,
       tailTerminalFenceDoneAtMs,
+      productHistoryLiveBoundObservation,
       submitCensus: submitCensus.size > 0
         ? Object.fromEntries(submitCensus)
         : null,

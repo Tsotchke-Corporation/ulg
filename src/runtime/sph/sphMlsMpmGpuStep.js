@@ -164,6 +164,7 @@ import {
   residentProductEventCountAuthorityRegistered,
   resolveResidentProductEventCountAuthority,
   revokeResidentProductEventCountAuthority,
+  SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_OFFSETS,
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES,
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_STATUS_FAILED
 } from './sphResidentProductHistoryGpu.js';
@@ -28362,6 +28363,99 @@ function retainedProductHistoryArenaRecord(handle, device = null) {
     : null;
 }
 
+const residentProductHistoryObservedBoundByDevice = new WeakMap();
+
+/**
+ * Observe the GPU-authored live row count of the retained product-history
+ * arena and tighten the host-side conservative upper bound with it. The
+ * host bound otherwise only grows (input bound + emitted rows every merge,
+ * never re-tightened without a readback), so the gas-EOS compact arena and
+ * the v1 spatial-epoch sort it feeds creep toward the full arena capacity.
+ * One four-byte fixed-size evidence read at a fenced schedule boundary
+ * (the caller awaits the terminal fence first, so the device is idle and
+ * the count is final for the schedule) re-anchors the bound exactly.
+ * Failure is fail-open to the CONSERVATIVE existing bound: the observation
+ * can only shrink it, never relax it.
+ */
+export async function observeResidentProductHistoryLiveRowBound(
+  device,
+  residentProductMass
+) {
+  const record = retainedProductHistoryArenaRecord(
+    residentProductMass,
+    device
+  );
+  const gpuCountRecord = record?.gpuCountRecord;
+  if (
+    !record
+    || !gpuCountRecord?.controlBuffer
+    || !Number.isInteger(gpuCountRecord.offsetBytes)
+  ) {
+    return null;
+  }
+  let readBuffer = null;
+  try {
+    readBuffer = device.createBuffer({
+      label: 'ulg-product-history-live-count-observation',
+      size: 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-product-history-live-count-observation'
+    });
+    encoder.copyBufferToBuffer(
+      gpuCountRecord.controlBuffer,
+      gpuCountRecord.offsetBytes
+        + SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_OFFSETS.LIVE_ROW_COUNT
+          * Uint32Array.BYTES_PER_ELEMENT,
+      readBuffer,
+      0,
+      4
+    );
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const observed = new Uint32Array(readBuffer.getMappedRange().slice(0))[0];
+    readBuffer.unmap();
+    if (!Number.isInteger(observed) || observed > record.logicalRowCount) {
+      return null;
+    }
+    const previousUpperBound = record.liveRowCountUpperBound;
+    const tightened = Math.min(
+      previousUpperBound,
+      Math.max(1, observed)
+    );
+    record.liveRowCountUpperBound = tightened;
+    residentProductHistoryObservedBoundByDevice.set(device, {
+      bound: Math.max(1, observed),
+      observedLiveRowCount: observed
+    });
+    if (
+      residentProductMass
+      && !Object.isFrozen(residentProductMass)
+      && Number.isInteger(
+        residentProductMass.productEventLiveRowCountUpperBound
+      )
+    ) {
+      residentProductMass.productEventLiveRowCountUpperBound = Math.min(
+        residentProductMass.productEventLiveRowCountUpperBound,
+        tightened
+      );
+    }
+    return {
+      schema: 'peercompute.ulg.sph-product-history-live-bound-observation.v0',
+      observedLiveRowCount: observed,
+      previousUpperBound,
+      tightenedUpperBound: tightened,
+      arenaRowCapacity: record.logicalRowCount,
+      readbackByteLength: 4
+    };
+  } catch {
+    return null;
+  } finally {
+    try { readBuffer?.destroy(); } catch { /* observation is advisory */ }
+  }
+}
+
 function requireRetainedProductHistoryArenaRecord(handle, device, role) {
   const knownRecord = residentProductHistoryArenaHandleRecords.get(handle) || null;
   if (!knownRecord) return null;
@@ -29287,8 +29381,25 @@ export async function mergeResidentProductMassBuffersWebGpu({
       'ERR_SPH_PRODUCT_HISTORY_GPU_COUNT_UPPER_BOUND_INVALID'
     );
   }
+  // A fenced 4-byte live-count observation (see
+  // observeResidentProductHistoryLiveRowBound) anchors a device-scoped
+  // bound that ages conservatively by the emitted rows of every merge
+  // after it. The chain bound otherwise never re-tightens (no readback),
+  // so the gas-EOS compact arena and its spatial-epoch sort creep toward
+  // the full arena capacity. min() keeps this strictly conservative; a
+  // wrong anchor can only surface as typed compaction-overflow evidence.
+  const observedBoundAging =
+    residentProductHistoryObservedBoundByDevice.get(device) || null;
+  if (observedBoundAging && inputGpuCountAuthority) {
+    observedBoundAging.bound += emittedSource.rowCount;
+  }
   const proposedLiveRowCountUpperBound =
-    inputLiveRowCountUpperBound + emittedSource.rowCount;
+    observedBoundAging && inputGpuCountAuthority
+      ? Math.min(
+          inputLiveRowCountUpperBound + emittedSource.rowCount,
+          observedBoundAging.bound
+        )
+      : inputLiveRowCountUpperBound + emittedSource.rowCount;
   if (!Number.isSafeInteger(proposedLiveRowCountUpperBound)) {
     throw new RangeError(
       'resident product-history live-row upper bound is not safely addressable'

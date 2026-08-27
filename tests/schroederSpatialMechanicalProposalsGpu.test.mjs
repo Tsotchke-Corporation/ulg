@@ -2970,12 +2970,13 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH,
-    32,
-    'each single-workgroup owner dispatch loops 32 logical passes in-shader'
+    512,
+    'each single-workgroup owner dispatch loops 512 logical passes in-shader '
+      + 'so the interactive preset pays one dispatch-start full sweep per step'
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,
-    32
+    2
   );
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES,

@@ -108,20 +108,25 @@ export const SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES = 1024
 // Chunked owner encoding: every single-workgroup owner dispatch runs this
 // many LOGICAL cleanup passes in an in-shader loop with workgroup/storage
 // barriers between passes, instead of one host-encoded dispatch per logical
-// pass. 32 is chosen because (a) it divides both production presets exactly
-// (batch 1024 -> 32 dispatches, interactive 512 -> 16), (b) it removes the
-// measured interactive-presentation starvation caused by >~640 serially
-// encoded single-workgroup dispatches per step, and (c) it keeps one
-// dispatch TDR-safe: each logical pass is a fixed number of particle-strided
-// scans plus frontier work bounded by the admission caps below, so 32
-// chunked passes remain orders of magnitude below watchdog horizons. The
-// pass clock stays fully logical: evidence rows, the terminal
+// pass. 512 divides both production presets exactly (batch 1024 -> 2
+// dispatches, interactive 512 -> 1) and stays TDR-safe: each logical pass
+// is a fixed number of workset-strided scans bounded by the admission caps
+// below (~0.3 ms measured at N=1216), so one dispatch stays well under
+// watchdog horizons. Fewer chunk boundaries also means fewer dispatch-start
+// full sweeps: every boundary resets the workgroup-resident mover lists and
+// forces one complete frontier expansion + wall claim + propagate, so the
+// interactive preset now pays 1 full sweep per step instead of 16 (32-pass
+// chunks were the pre-moved-set layout, chosen before the incremental
+// passes existed to amortize >~640 serially encoded dispatches per step).
+// The pass clock stays fully logical: evidence rows, the terminal
 // ITERATION_INCOMPLETE window, and convergence acceptance are all keyed by
 // the logical pass number; the in-loop latch re-check breaks out of the
 // chunk (workgroup-uniformly) exactly where the per-dispatch early return
-// used to fire.
+// used to fire. Chunk size only selects full-sweep vs incremental pass
+// boundaries, and both derive bit-identical state by the moved-set
+// soundness argument, so this constant is a pure performance knob.
 export const
-  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH = 32;
+  SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_PASSES_PER_DISPATCH = 512;
 export const
   SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES =
     Math.ceil(

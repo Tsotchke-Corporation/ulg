@@ -149,7 +149,10 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
-import { createSphGpuTimestampProfiler } from './sphGpuTimestampProfiler.js';
+import {
+  createSphGpuTimestampProfiler,
+  encodeSphGpuTimestampMarkerPass
+} from './sphGpuTimestampProfiler.js';
 import {
   createGpuReadbackTelemetry,
   createGpuReadbackTelemetryAccumulator,
@@ -11574,6 +11577,9 @@ function canUseFusedNoFullMechanicsPath({
 }
 
 async function runFusedNoFullMlsMpmMechanicsWebGpu({
+  // Diagnostic pass-level GPU bracket around this runner's whole encoder
+  // (empty marker passes; production pass descriptors untouched).
+  gpuPassTimestampProfilingRequested = false,
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -12444,6 +12450,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
+    const fusedPassProfiler = createSphGpuTimestampProfiler({
+      device,
+      enabled: gpuPassTimestampProfilingRequested === true,
+      capacity: 2,
+      label: 'ulg-mls-mpm-fused-mechanics-bracket'
+    });
+    const fusedBracket = fusedPassProfiler.passTimestamps('fusedMechanics');
+    if (fusedBracket) {
+      encodeSphGpuTimestampMarkerPass(encoder, {
+        querySet: fusedBracket.timestampWrites.querySet,
+        queryIndex: fusedBracket.timestampWrites.beginningOfPassWriteIndex,
+        boundary: 'start',
+        label: 'ulg-mls-mpm-fused-mechanics-bracket-start'
+      });
+    }
     if (compactMechanicsOwnedEvidenceEnabled) {
       encoder.clearBuffer(
         p2gAccumulatorBuffer,
@@ -12804,6 +12825,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       if (!mechanicsFieldPostG2pPass) g2pFinalizePass.end();
     }
     if (mechanicsFieldPostG2pPass) mechanicsFieldPostG2pPass.end();
+    if (fusedBracket) {
+      encodeSphGpuTimestampMarkerPass(encoder, {
+        querySet: fusedBracket.timestampWrites.querySet,
+        queryIndex: fusedBracket.timestampWrites.endOfPassWriteIndex,
+        boundary: 'end',
+        label: 'ulg-mls-mpm-fused-mechanics-bracket-end'
+      });
+      fusedPassProfiler.resolve(encoder);
+    }
     device.queue.submit([encoder.finish()]);
     mechanicsFieldQueueSubmitted = true;
     if (
@@ -13125,6 +13155,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schema: 'peercompute.ulg.mls-mpm-fused-mechanics-step.v0',
       backend: 'webgpu',
       status: 'fused-mechanics-webgpu-executed-no-full-readback',
+      // Diagnostic pass-level GPU bracket for this runner's whole encoder;
+      // one-shot, resolves after the submit completes (mapAsync waits).
+      async readGpuPassProfile() {
+        try {
+          return await fusedPassProfiler.read();
+        } finally {
+          fusedPassProfiler.destroy?.();
+        }
+      },
       activeGridDispatch,
       activeGridIndirectDispatch,
       mechanicsFieldIndirectDispatch,
@@ -31889,6 +31928,40 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       }
     });
     const resolvedDevice = device || resolvedDeviceResult?.device || null;
+    // Diagnostic queue-interval bracket for the WHOLE step: a start marker
+    // submitted before the first stage and an end marker submitted after the
+    // last measure the ordered GPU queue interval the step occupies. Inert
+    // without 'timestamp-query'; markers are empty passes in their own tiny
+    // command buffers.
+    let stepQueueIntervalProfiler = null;
+    let stepQueueIntervalBracket = null;
+    if (residentGpuTimestampProfilingRequested === true && resolvedDevice) {
+      try {
+        stepQueueIntervalProfiler = createSphGpuTimestampProfiler({
+          device: resolvedDevice,
+          enabled: true,
+          capacity: 2,
+          label: 'ulg-mls-mpm-step-queue-interval'
+        });
+        stepQueueIntervalBracket =
+          stepQueueIntervalProfiler.passTimestamps('stepQueueInterval');
+        if (stepQueueIntervalBracket) {
+          const markerEncoder = resolvedDevice.createCommandEncoder();
+          encodeSphGpuTimestampMarkerPass(markerEncoder, {
+            querySet: stepQueueIntervalBracket.timestampWrites.querySet,
+            queryIndex:
+              stepQueueIntervalBracket.timestampWrites
+                .beginningOfPassWriteIndex,
+            boundary: 'start',
+            label: 'ulg-mls-mpm-step-queue-interval-start'
+          });
+          resolvedDevice.queue.submit([markerEncoder.finish()]);
+        }
+      } catch {
+        stepQueueIntervalProfiler = null;
+        stepQueueIntervalBracket = null;
+      }
+    }
     const sharedDeviceResult = resolvedDevice
       ? { status: 'webgpu-device-ready', reason: device ? 'provided device' : (resolvedDeviceResult?.reason || 'resident step shared device'), device: resolvedDevice }
       : resolvedDeviceResult;
@@ -32377,6 +32450,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
       );
       fusedMechanics = await timedStage('fusedMechanics', () => runFusedNoFullMlsMpmMechanicsWebGpu({
+        gpuPassTimestampProfilingRequested:
+          residentGpuTimestampProfilingRequested === true,
         device: resolvedDevice,
         sphParticleState,
         mlsMpmParticleState,
@@ -33035,6 +33110,22 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const queueStageGpuSummary = summarizeGpuTimestampRecorderQueueStages(
     gpuTimestampRecorder
   );
+  if (stepQueueIntervalBracket && stepQueueIntervalProfiler) {
+    try {
+      const markerEncoder = resolvedDevice.createCommandEncoder();
+      encodeSphGpuTimestampMarkerPass(markerEncoder, {
+        querySet: stepQueueIntervalBracket.timestampWrites.querySet,
+        queryIndex:
+          stepQueueIntervalBracket.timestampWrites.endOfPassWriteIndex,
+        boundary: 'end',
+        label: 'ulg-mls-mpm-step-queue-interval-end'
+      });
+      stepQueueIntervalProfiler.resolve(markerEncoder);
+      resolvedDevice.queue.submit([markerEncoder.finish()]);
+    } catch {
+      stepQueueIntervalProfiler = null;
+    }
+  }
   let contactGpuPassProfile = null;
   if (
     residentGpuTimestampProfilingRequested === true
@@ -33048,6 +33139,43 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         await spatialMechanicalProposal.readContactGpuPassProfile();
     } catch {
       contactGpuPassProfile = null;
+    }
+  }
+  if (
+    residentGpuTimestampProfilingRequested === true
+    && typeof fusedMechanics?.readGpuPassProfile === 'function'
+  ) {
+    try {
+      const fusedGpuPassProfile = await fusedMechanics.readGpuPassProfile();
+      if (fusedGpuPassProfile?.stageGpuMs) {
+        contactGpuPassProfile = {
+          ...(contactGpuPassProfile ?? { status: fusedGpuPassProfile.status }),
+          stageGpuMs: {
+            ...(contactGpuPassProfile?.stageGpuMs ?? {}),
+            ...fusedGpuPassProfile.stageGpuMs
+          }
+        };
+      }
+    } catch {
+      // Fused bracket read is diagnostic-only; ignore failures.
+    }
+  }
+  if (stepQueueIntervalProfiler) {
+    try {
+      const intervalProfile = await stepQueueIntervalProfiler.read();
+      if (intervalProfile?.stageGpuMs) {
+        contactGpuPassProfile = {
+          ...(contactGpuPassProfile ?? { status: intervalProfile.status }),
+          stageGpuMs: {
+            ...(contactGpuPassProfile?.stageGpuMs ?? {}),
+            ...intervalProfile.stageGpuMs
+          }
+        };
+      }
+    } catch {
+      // Interval bracket is diagnostic-only; ignore failures.
+    } finally {
+      stepQueueIntervalProfiler.destroy?.();
     }
   }
   const stageTiming = {

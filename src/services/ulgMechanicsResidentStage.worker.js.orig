@@ -4443,9 +4443,6 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       // construction wedged the lane before this gate).
       phaseVolumeSidecarsEnabled:
         data.enablePhaseVolumeMigration === true || authoritativeTwoLevel,
-      // Field views are skipped only when the schedule proves no field-mode
-      // consumer exists (see epochOptionsForStep); default is to build.
-      mechanicsFieldViewsEnabled: data.mechanicsFieldViewsRequired !== false,
       device,
       ...(levelAssignment ? { levelAssignment } : { activeNodeList }),
       particleCount,
@@ -6497,34 +6494,6 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         stepZeroOptions.enablePhaseVolumeMigration === true
         || baseMechanicsOptions.enablePhaseVolumeMigration === true
         || baseMechanicsOptions.hierarchyConfig?.enablePhaseVolumeMigration === true;
-      // Mechanics field views may be skipped only when every field-mode
-      // consumer is provably absent for the whole schedule: no phase-volume
-      // migration, no two-level mechanics, no surface tension, no
-      // gas-pressure boundary or retained products, and an EXPLICIT vacuum
-      // ambient (a null ambient can still receive atmospheric pressure from
-      // wall-ledger feedback, which would demand buoyancy's field mode).
-      {
-        const laneResidentOptions =
-          record.schroederLane?.residentStepOptions
-          || baseMechanicsOptions.residentStepOptions
-          || {};
-        const explicitVacuumAmbient =
-          Number(laneResidentOptions.ambientPressurePa) === 0;
-        stepZeroOptions.mechanicsFieldViewsRequired =
-          stepZeroOptions.mechanicsFieldViewsRequired === true
-          || stepZeroOptions.enablePhaseVolumeMigration === true
-          || baseMechanicsOptions.enableTwoLevelMechanics === true
-          || laneResidentOptions.mechanicsMaterialTable?.surfaceTensionEnabled === true
-          // A gas-pressure summary only demands field mode when it is
-          // actionable: a retained product-event buffer or a gas cell
-          // field. An inert summary object proves nothing.
-          || Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
-          || laneResidentOptions.gasPressureSummary?.residentProductMass
-            ?.productEventBufferRetained === true
-          || laneResidentOptions.residentProductMass
-            ?.productEventBufferRetained === true
-          || !explicitVacuumAmbient;
-      }
       if (stepOrdinal === 1) {
         // W4b: a RETAINED lane starting a new schedule with no step-1 source
         // at all — seed already consumed, no committed successor family, no

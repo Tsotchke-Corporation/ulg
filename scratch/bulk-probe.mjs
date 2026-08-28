@@ -5,7 +5,7 @@ const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '
 const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 900 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e?.message || e).slice(0, 300)));
-page.on('console', (m) => { { const t = m.text(); if (m.type() === 'error' || t.includes('ulg-fused-diag') || t.includes('ulg-stage')) errors.push(t.slice(0, 300)); } });
+page.on('console', (m) => { { const t = m.text(); if (m.type() === 'error' || t.includes('ulg-fused-diag') || t.includes('ulg-stage') || t.includes('ulg-fv-diag')) errors.push(t.slice(0, 300)); } });
 try {
   await page.goto(`https://localhost:5173/?scenario=${scenario}${extra}&probeEpoch=${Date.now()}`, { waitUntil: 'load', timeout: 30000 });
   await page.waitForFunction(() => { const b = document.querySelector('#sph-play'); return b && !b.disabled; }, null, { timeout: Number(process.env.ULG_PROBE_STARTUP_MS || 300000) });

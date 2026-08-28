@@ -4085,6 +4085,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   // an immutable reader contract to omit the complete sidecar family when no
   // P2G/G2P consumer can observe it (for example the terminal public E*).
   phaseVolumeSidecarsEnabled = true,
+  mechanicsFieldViewsEnabled = true,
   // Native compatibility tests still execute the retained directory-v1
   // ActiveRank consumer. Production level-assignment generations always use
   // directory v2. The old public boolean is rejected; only a one-shot,
@@ -4110,6 +4111,11 @@ export function runSchroederSpatialEpochGenerationWebGpu({
   if (typeof phaseVolumeReceiptEnabled !== 'boolean') {
     throw new TypeError(
       'phaseVolumeReceiptEnabled must be a boolean when collecting diagnostic A/B evidence'
+    );
+  }
+  if (typeof mechanicsFieldViewsEnabled !== 'boolean') {
+    throw new TypeError(
+      'mechanicsFieldViewsEnabled must be a boolean derived from the field-consumer contract'
     );
   }
   if (typeof phaseVolumeSidecarsEnabled !== 'boolean') {
@@ -4854,7 +4860,13 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         levelView.mechanicsFieldView = child;
         levelView.mechanicsFieldViewRuntime = mechanicsFieldPairRuntime;
       }
-    } else if (particleIdentityBuffer) {
+    } else if (particleIdentityBuffer && mechanicsFieldViewsEnabled) {
+      // The mechanics field view (and its candidate sort - the largest
+      // pass in the whole generation at bulk capacities) exists to serve
+      // field-mode consumers: surface stress, gas-pressure boundary,
+      // ambient buoyancy, phase-volume sidecars, and two-level parent
+      // fields. When the caller proves none of those can run, the build
+      // is skipped; any consumer that disagrees fails closed downstream.
       for (const levelView of mechanicsLevelViews) {
         levelView.mechanicsFieldViewRuntime = directMechanicsFieldViewRuntime(
           device,

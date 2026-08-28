@@ -41947,3 +41947,115 @@ Validation and review:
   `1.0001372023x` (`0.0137202%` improvement). All arms and provenance gates
   pass with no blockers.
 - Final ICC closeout remains in progress before the one slice commit and push.
+
+## 2026-08-28 AKDT - Log catch-up marker
+
+- Entries between 2026-07-24 and 2026-08-27 were not written at slice time
+  (sessions ran without the log discipline). The entries below reconstruct the
+  span from commit history, plan records, and measured probe artifacts only;
+  no numbers are quoted that were not measured in-session.
+
+## 2026-08-27 AKDT - Owner parallelism and dispatch-cost campaign (Aug 21-27)
+
+- Worker-owned SS hierarchy integration merged (`33a6b07`/`223f15a`): SS epoch
+  build and same-level mechanics run inside the resident stage worker on a
+  worker-owned lane with versioned render candidates and a batched schedule
+  driver.
+- Matching-cleanup owner: chunked into 32 logical passes per dispatch,
+  frontier-list compaction of order-free phases, moved-set incremental
+  expansion, exact worksets for copy/wall/propagate; lane-grouping is
+  bit-identical and took the owner-bound scenario `4.9 -> 11.6` steps/s.
+- `residentGpuTimestampProfile=1` added for real GPU stage times; the
+  pre-existing `stageMs` numbers are enqueue-only and were measured ~30x off
+  true GPU cost.
+- GpuCount indirect dispatches replaced with element-guarded direct ceilings:
+  `dispatchWorkgroupsIndirect` measured ~0.25 ms GPU-process CPU each; the
+  swap took the target scenario `20 -> 37` steps/s against a 16 steps/s
+  budget. Product history re-tightened with fenced 4-byte evidence.
+
+## 2026-08-27 AKDT - Adaptive laws night 1: Tier-0 substrate + M4 burst
+
+- Design + night-1 plan recorded (`a9f93c3`); results recorded in
+  `plan/todo/scale-adaptive-law-activation-plan.md` (`007488a`).
+- M1-M3+M6 (`6323588`, `3953815`): consumer-gated mechanics field-view
+  constructions; bulk-water Tier-0 reached 104k live particles at
+  `55.9` steps/s (later found to be rolled-back mechanics; see next entry).
+- Per-schedule law-activation receipt published (`ed5b1fa`) as the Tier-1
+  activation seed; bulk-water preset made self-contained for menu runs.
+- M4 submit burst (`1a779dd`): queue-level deferred submission on the worker
+  lane, receipt-gated (all law families quiescent, no profiling, no reflux).
+  Wins at <=32k; `-7%` at 104k (encode-ahead loss); write-through variant
+  measured worse and left opt-in-off. Preset carries `submitBurstSteps=8`.
+
+## 2026-08-28 AKDT - Canonical mechanics freeze: V1->V2 consumer migration
+
+- Root cause of the "frozen liquid" on the canonical lane (`6bac50e`): three
+  seams of one unfinished V1->V2 spatial-directory consumer migration, each
+  alone sufficient — consumers pinned header version 1 vs producers stamping
+  2; V2 reverse map encodes cell-index-plus-one, consumers decoded raw; query
+  profile written at `particle_to_cell + capacity` but read at `+ live`
+  (now `word47 - 6` physical high water), plus the host exact-near profile
+  gate still excluding GPU-authored logical counts. Every rejection triggered
+  a silent whole-step rollback while commits/seals/sim-time advanced.
+- Consequence: every canonical rate measured before this fix (night-1 curve,
+  burst A/Bs) was rolled-back frozen mechanics. All canonical rates must be
+  re-measured. Post-fix canonical at 4k: ~126-150 steps/s.
+- `?observeSpatialAuthority=1` added as the permanent instrument: per-step
+  rejection counters (word 7 stage split), header dump, query-word read,
+  sampled output row. A fail-closed rollback is host-invisible without it.
+- Honest equal-physics route gap recorded: canonical ~85 vs ss=0 fused ~5.7k
+  completion steps/s at 32.8k (45-67x). Tier-0 routing onto the fused path is
+  the named next objective.
+
+## 2026-08-28 AKDT - Presentation truth chain and menu bulk-water
+
+- Seed-freeze fixed (`523f25d`): laws-quiescent scenes declare an explicit
+  single-lane phase-carrier plan; an ABSENT plan is unknown topology and the
+  native chain failed closed on `lineage-metadata-incomplete` while the scene
+  silently rendered the page-side seed upload at 60 fps.
+- Worker-canvas live preview (`407c855`): throttled (>=66 ms) uncommitted
+  draws of the lane's retained state; previews publish
+  `stateManagerCommittedPresentation:false`; the committed terminal
+  presentation remains the only authority draw.
+- Menu bulk-water self-contained (`6627791`): `contactSolver=0` admitted
+  end-to-end as explicit contact-free bulk (worker fails closed via the
+  activation receipt when a contact-owning law family activates);
+  `compactMechanicsView=0` forces the proven plain V1 route.
+
+## 2026-08-28 AKDT - User-reported slideshow: three stacked presentation bugs
+
+- Hash rewrite dropped runtime knobs (`5f9617f`): any control edit rewrote
+  the hash to `scenario=custom` and silently dropped every runtime-only
+  preset key (workerLivePreview, compactMechanicsView, submitBurstSteps,
+  ambientPressurePa, contact tuning), demoting the page to the per-schedule
+  slideshow on reload. Knobs now ride the canonical hash; preset resolution
+  falls back to the query scenario id; keys added to the URL whitelist and
+  preset-reset lists.
+- Rebuild epoch pinning (`7bf87fa`): after any control-edit rebuild the
+  presentation worker restarted its candidate-stream epoch at 1 while the
+  bridge kept the retired lane's stream identity, so every committed
+  presentation was rejected with no observable status and the page burned
+  its full 15 s committed-presentation wait per schedule (~4 steps/s at 4k
+  vs ~130 fresh). Worker epochs now stay monotonic across re-inits; the
+  bridge resets its stream mirror when a fresh worker attaches. New bounded
+  diagnostic ring `globalThis.__ulgCommittedPresentationReceiptTrace` records
+  every committed-claiming receipt evaluation with the failing conjunct.
+- Live preview was never visible (`b804989`, user-proven): preview draws
+  landed on a `visibility:hidden` worker canvas while the main-native
+  isosurface showed underneath. Three live-preview-unaware paths (render
+  display-owner selection, post-first-frame native handoff, resident-render
+  suppress branch) reset the bridge content-ready latch each commit; preview
+  draws are barred from revealing pixels, so every schedule painted a hidden
+  canvas. All three now pin worker display ownership while a live preview is
+  requested and the lane is live.
+- Measurement retraction: whole-screenshot distinct-frame hashing is INVALID
+  on this page (the HUD fps counter ticks every frame and faked a passing
+  verification). The standard is now `scratch/masked-motion-probe.mjs`
+  (fluid-region-only hashing + canvas visibility inventory).
+- PASS: masked fluid-region transitions `29/29` (was `9/29`), worker canvas
+  visible, contentReady latched; physics unchanged (~94 steps/s ewma at
+  32.8k); water-cycle (main-native, no preview) unaffected; 240 presentation/
+  burst/renderer/preset/mount tests pass.
+- User hardware exonerated: their machine runs the canonical route at
+  ~90-103 steps/s at 32.8k (recordings verified frame-by-frame) — parity
+  with the dev box. The visible-rate ceiling is the canonical route itself.

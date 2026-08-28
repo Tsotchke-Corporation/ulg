@@ -36393,7 +36393,8 @@ fn main(
     reactionParticleBinMetadataReadback = false,
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
-    g2pRunner = undefined
+    g2pRunner = undefined,
+    mechanicsSubmitBurstSteps = null
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -36666,6 +36667,7 @@ fn main(
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
           ambientPressurePa: effectiveAmbientPressurePa,
+          mechanicsSubmitBurstSteps,
           cflFactor,
           ...(requestedPhaseVolumeMaxImpulseFraction == null
             ? {}
@@ -36940,7 +36942,12 @@ fn main(
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
-    pressureInterfaceGasCellFieldAdmission = null
+    pressureInterfaceGasCellFieldAdmission = null,
+    // M4 submit burst: K worker-lane steps per queue.submit flush. The
+    // worker derives eligibility from its law-activation receipt and simply
+    // ignores the request (with a declared blocker) on any lane where a law
+    // family or diagnostic could observe submit boundaries.
+    mechanicsSubmitBurstSteps = null
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -37862,6 +37869,7 @@ fn main(
       internalPressureScale: effectiveInternalPressureScale,
       ambientPressurePa: effectiveAmbientPressurePa,
       ambientPressureEvidence: resolvedAmbientPressureEvidence,
+      mechanicsSubmitBurstSteps,
       wallTemperaturesK:
         resolvedSceneThermalStepOptions.wallTemperaturesK,
       wallReservoirAuthority:
@@ -38434,6 +38442,7 @@ fn main(
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
           ambientPressurePa: effectiveAmbientPressurePa,
+          mechanicsSubmitBurstSteps,
           cflFactor,
           ...(requestedPhaseVolumeMaxImpulseFraction == null
             ? {}
@@ -52937,6 +52946,7 @@ fn main(
         tailTerminalFenceDoneAtMs: result.tailTerminalFenceDoneAtMs ?? null,
         submitCensus: result.submitCensus ?? null,
         submitCensusDeviceMs: result.submitCensusDeviceMs ?? null,
+        submitBurstObservation: result.submitBurstObservation ?? null,
         productHistoryLiveBoundObservation:
           result.productHistoryLiveBoundObservation ?? null,
         lawActivationReceipt: result.lawActivationReceipt ?? null,

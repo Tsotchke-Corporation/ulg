@@ -317,3 +317,74 @@ at 104k incl. separation), and M4 burst encoding for the per-step floor
 (~9 ms at small N). Known gap: contactSolver=0 hangs worker admission —
 the canonical lane cannot yet run contact-free; Tier 0 ultimately wants
 that fixed rather than the floor-budget workaround.
+
+## M4 results (day 2, 2026-08-28): the submit burst
+
+M4 landed as **queue-ordered deferred submission**, not K-substep kernel
+fusion: `armWorkerQueueSubmitBurst` (webgpuComputeLayout.js) wraps the
+worker device's `queue.submit` / `queue.writeBuffer` /
+`queue.onSubmittedWorkDone` / `device.createBuffer` once, and an open
+burst holds finished command buffers and flushes them as one submit.
+Queue order is preserved **by construction**, not by call-site audits:
+
+- a `writeBuffer` whose target predates the last held submit (so a held
+  command buffer may reference it) forces a flush first; targets created
+  after it (the fresh-uniform pattern) pass through immediately;
+- any `onSubmittedWorkDone` flushes first, so every fence a caller takes
+  covers the work it believes was submitted (generation-retirement
+  fences, drain checkpoints, the terminal fence);
+- `destroy()` of a possibly-referenced buffer is parked until after the
+  flush's real submit (WebGPU rejects submits referencing destroyed
+  buffers); `deferSubmittedWorkCleanup` parks on the burst the same way.
+
+Eligibility is DERIVED from the schedule's law-activation receipt — the
+burst opens only when thermal, reaction, law-queue, neighbor candidates,
+phase-volume migration, two-level mechanics, surface tension, and
+actionable gas boundary are all quiescent, and never under timestamp
+profiling or reflux receipts. The lease-latency lesson in
+webgpuComputeLayout.js (thermal proposal arenas treat release latency as
+correctness) is why law activity blocks the burst rather than merely
+degrading it. The schedule result publishes
+`submitBurstObservation` (eligibility, blockers, flush stats) next to the
+law-activation receipt; sodium-water declares six blockers and never
+opens. Knob: `?submitBurstSteps=K` → lane option
+`mechanicsSubmitBurstSteps`; the bulk-water preset bakes K=8.
+
+Measured (bulk-water worker lane, this hardware, 2026-08-28):
+
+| live N | off ms/step | on (K=8) ms/step | delta |
+| --- | --- | --- | --- |
+| 1,008 | 8.56 | 8.00 | +7% |
+| 13,832 | 9.20 | 8.61 | +6.5% |
+| 32,776 | 12.11 | 11.72 | +3.3% (menu default; HUD later showed 94-117 steps/s) |
+| 103,831 | 17.18 | 18.53 | **-7%** |
+
+Findings, honestly:
+1. **The submit-count hypothesis for the small-N floor was only partly
+   right.** The census showed ~11 submits/step (epoch scaffolding 7,
+   mechanics 4); collapsing to ~2/step bought 6-7%, not the 2-3 ms/step
+   the 0.25 ms-per-indirect-dispatch figure suggested. Plain submits are
+   cheaper than indirect dispatches; the remaining floor is per-step JS
+   (generation build, stage payloads, seals) plus dispatch count.
+2. **Write-through measured worse and is opt-in-off.** Converting stale
+   writes into staging+copy held commands eliminated flushes (1.1/step)
+   but ~21 arena-params writes/step became 21 staging buffers + encoders:
+   11.4 ms/step vs 8.0 flushing at 1k. The code path stays (option
+   `writeThrough` on open) with the measurement recorded at the site.
+3. **At 104k the burst inverts**: the terminal fence lag flips from
+   ~300 ms (GPU running behind the encode loop — healthy pipelining) to
+   ~2 ms, and the loss moves into inter-schedule turnaround. Holding
+   submits at large N removes useful encode-ahead. Un-diagnosed beyond
+   that; raise `basen` past ~64k and turn the knob off.
+4. Flush cadence is bounded by the per-step generation-retirement fence
+   (~1/step) plus ~3.8 stale-write flushes/step from three persistent
+   arena params buffers (`active-node-params`,
+   `spatial-mechanical-expectation`, `active-source-view arena params`).
+   Making those fresh-per-step (or giving retirement a lazy fence pool
+   sized ≥ K+1 arenas) is what a true K-step-held burst needs — that and
+   the deeper Ocean-shape (K substeps inside one epoch, which the epoch
+   recon proved safe for plain canonical V1 geometry but which the
+   exactly-once epoch transaction, the single-use contact proposal, and
+   the strictly-advancing per-step seals all structurally forbid today)
+   remain the two candidate next rungs, to be re-ranked against the
+   contact-build and fused-kernel rocks by measured ceiling.

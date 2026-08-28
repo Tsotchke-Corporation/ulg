@@ -464,6 +464,13 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // Single material -> the reserve term multiplier is already zero;
       // declare the intent explicitly anyway.
       reactionProductReserveMinimumLiveFraction: '0',
+      // M4 submit burst: hold command buffers and flush one queue.submit
+      // per K steps. Worker-derived eligibility (law-activation receipt: all
+      // law families quiescent) gates it; measured 2026-08-28 on this lane:
+      // +7% steps/s at 1k-13.8k, +3% at 32.8k (this preset's default N),
+      // -7% at 104k (inter-schedule turnaround grows; documented in the
+      // plan). Raise basen past ~64k and this knob is worth turning off.
+      submitBurstSteps: '8',
       residentStepsPerSchedule: '64',
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',

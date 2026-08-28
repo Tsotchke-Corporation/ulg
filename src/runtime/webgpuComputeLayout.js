@@ -324,6 +324,19 @@ export async function prewarmCachedExplicitComputePipeline(device, {
 // it must never be used to turn this fallback into an optimistic cleanup path.
 export function deferSubmittedWorkCleanup(device, cleanup) {
   if (typeof cleanup !== 'function') return false;
+  // While a submit burst is open on this device, some of the work this
+  // cleanup covers may still be HELD (encoded but not yet on the queue), so
+  // an immediate onSubmittedWorkDone fence would not cover it and the
+  // cleanup could destroy buffers a held command buffer still references.
+  // Park the cleanup on the burst; the flush schedules it on a real fence,
+  // one fence per cleanup exactly as below (release latency stays a
+  // correctness property; see the coalescing lesson above).
+  const burst = workerQueueSubmitBurstRecords.get(device);
+  if (burst?.open) {
+    burst.deferredCleanups.push(cleanup);
+    burst.stats.deferredCleanupTotal += 1;
+    return true;
+  }
   if (!device?.queue?.onSubmittedWorkDone) {
     cleanup();
     return false;
@@ -334,6 +347,357 @@ export function deferSubmittedWorkCleanup(device, cleanup) {
       cleanup();
     });
   return true;
+}
+
+// --- Worker queue submit burst -------------------------------------------
+//
+// One queue.submit costs a fixed GPU-process CPU slice regardless of how
+// little work the command buffers hold; the resident worker lane makes ~11
+// submits per mechanics step, which IS the small-N step floor. The burst
+// holds finished command buffers at the device's queue boundary and flushes
+// them as one submit, preserving queue order BY CONSTRUCTION rather than by
+// auditing call sites:
+//
+// - queue.submit while open appends to the held list (order kept).
+// - queue.writeBuffer passes through only when the target buffer was created
+//   after the last held submit (a held command buffer cannot reference a
+//   buffer that did not exist when it was finished); otherwise the burst
+//   flushes first, so the write keeps its queue-order position.
+// - queue.onSubmittedWorkDone flushes first, so every fence a caller takes
+//   covers the work it believes was submitted.
+// - buffer.destroy on a buffer a held command buffer may reference is parked
+//   until after the flush's real submit (WebGPU rejects submits that
+//   reference destroyed buffers); destroys of provably-unreferenced buffers
+//   run immediately.
+//
+// The burst must only be opened on a lane whose law families are quiescent:
+// lease-style releases (thermal proposal arenas and kin) treat release
+// latency as a correctness property, and parking their cleanups behind a
+// flush would let the next substep's acquire outrun the release. The worker
+// derives that eligibility from the schedule's law-activation receipt.
+
+const workerQueueSubmitBurstRecords = new WeakMap();
+
+function workerQueueSubmitBurstError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function workerQueueSubmitBurstWriteThroughBytes(data, dataOffset, size) {
+  if (ArrayBuffer.isView(data)) {
+    const elementBytes = data.BYTES_PER_ELEMENT || 1;
+    const startElements = Number(dataOffset) || 0;
+    const lengthElements = size == null
+      ? data.length - startElements
+      : Number(size);
+    if (!(lengthElements >= 0)) return null;
+    return new Uint8Array(
+      data.buffer,
+      data.byteOffset + startElements * elementBytes,
+      lengthElements * elementBytes
+    );
+  }
+  if (data instanceof ArrayBuffer) {
+    const startBytes = Number(dataOffset) || 0;
+    const lengthBytes = size == null ? data.byteLength - startBytes : Number(size);
+    if (!(lengthBytes >= 0)) return null;
+    return new Uint8Array(data, startBytes, lengthBytes);
+  }
+  return null;
+}
+
+function workerQueueSubmitBurstWriteThrough(
+  device,
+  record,
+  buffer,
+  bufferOffset,
+  data,
+  dataOffset,
+  size
+) {
+  if (typeof device.createCommandEncoder !== 'function') return false;
+  let bytes;
+  try {
+    bytes = workerQueueSubmitBurstWriteThroughBytes(data, dataOffset, size);
+  } catch {
+    bytes = null;
+  }
+  if (!bytes || bytes.byteLength === 0 || bytes.byteLength % 4 !== 0) {
+    return false;
+  }
+  try {
+    const staging = device.createBuffer({
+      label: 'ulg-submit-burst-write-through-staging',
+      size: bytes.byteLength,
+      usage: (globalThis.GPUBufferUsage?.COPY_SRC ?? 0x0004),
+      mappedAtCreation: true
+    });
+    new Uint8Array(staging.getMappedRange()).set(bytes);
+    staging.unmap();
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-submit-burst-write-through'
+    });
+    encoder.copyBufferToBuffer(
+      staging,
+      0,
+      buffer,
+      Number(bufferOffset) || 0,
+      bytes.byteLength
+    );
+    record.heldCommandBuffers.push(encoder.finish());
+    record.heldSubmitStamp = record.createStamp;
+    if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
+      record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
+    }
+    record.deferredCleanups.push(() => {
+      staging.destroy?.();
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function armWorkerQueueSubmitBurst(device) {
+  if (!device?.queue?.submit || typeof device.createBuffer !== 'function') {
+    throw workerQueueSubmitBurstError(
+      'ERR_WORKER_QUEUE_SUBMIT_BURST_DEVICE',
+      'worker queue submit burst requires a WebGPU device with a queue'
+    );
+  }
+  let record = workerQueueSubmitBurstRecords.get(device);
+  if (record) return record;
+  const queue = device.queue;
+  record = {
+    open: false,
+    label: null,
+    writeThroughEnabled: false,
+    // Monotonic creation counter; a buffer stamped after the last held
+    // submit cannot be referenced by any held command buffer.
+    createStamp: 0,
+    heldSubmitStamp: 0,
+    heldCommandBuffers: [],
+    deferredCleanups: [],
+    bufferStamps: new WeakMap(),
+    realSubmit: queue.submit.bind(queue),
+    realWriteBuffer: typeof queue.writeBuffer === 'function'
+      ? queue.writeBuffer.bind(queue)
+      : null,
+    realWriteTexture: typeof queue.writeTexture === 'function'
+      ? queue.writeTexture.bind(queue)
+      : null,
+    realOnSubmittedWorkDone: typeof queue.onSubmittedWorkDone === 'function'
+      ? queue.onSubmittedWorkDone.bind(queue)
+      : null,
+    realCreateBuffer: device.createBuffer.bind(device),
+    stats: {
+      openCount: 0,
+      flushCount: 0,
+      flushSubmitCount: 0,
+      heldSubmitTotal: 0,
+      directSubmitTotal: 0,
+      maxHeldCommandBuffers: 0,
+      staleWriteFlushCount: 0,
+      staleWriteFlushLabels: {},
+      writeThroughCount: 0,
+      writeThroughLabels: {},
+      fenceFlushCount: 0,
+      cadenceFlushCount: 0,
+      closeFlushCount: 0,
+      deferredCleanupTotal: 0,
+      deferredDestroyTotal: 0,
+      immediateDestroyTotal: 0
+    }
+  };
+  workerQueueSubmitBurstRecords.set(device, record);
+  queue.submit = (commandBuffers) => {
+    if (record.open) {
+      for (const commandBuffer of commandBuffers) {
+        record.heldCommandBuffers.push(commandBuffer);
+      }
+      record.heldSubmitStamp = record.createStamp;
+      record.stats.heldSubmitTotal += 1;
+      if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
+        record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
+      }
+      return undefined;
+    }
+    record.stats.directSubmitTotal += 1;
+    return record.realSubmit(commandBuffers);
+  };
+  if (record.realWriteBuffer) {
+    queue.writeBuffer = (buffer, bufferOffset, data, dataOffset, size) => {
+      if (record.open && record.heldCommandBuffers.length > 0) {
+        const stamp = record.bufferStamps.get(buffer);
+        if (!(typeof stamp === 'number' && stamp > record.heldSubmitStamp)) {
+          // The target buffer may be referenced by a held command buffer, so
+          // an immediate write would land BEFORE commands that were encoded
+          // against the buffer's current contents. Two order-preserving
+          // responses exist: flush first (default), or copy the data into a
+          // fresh staging buffer and hold a copyBufferToBuffer at the
+          // write's queue position (any writeBuffer target already carries
+          // COPY_DST, and writeBuffer's 4-byte offset/size rules match the
+          // copy's). Write-through is opt-in because it MEASURED WORSE on
+          // the bulk lane: ~21 arena-params writes/step became 21 staging
+          // buffers + encoders per step (11.4 ms/step vs 8.0 flushing, 1k
+          // particles, 2026-08-28) — the flush it saves is cheaper than the
+          // churn it adds while a per-step retirement fence bounds held
+          // windows to one step anyway.
+          const writeThrough = record.writeThroughEnabled
+            && workerQueueSubmitBurstWriteThrough(
+              device,
+              record,
+              buffer,
+              bufferOffset,
+              data,
+              dataOffset,
+              size
+            );
+          if (writeThrough) {
+            const label = String(buffer?.label || 'unlabeled');
+            record.stats.writeThroughCount += 1;
+            record.stats.writeThroughLabels[label] =
+              (record.stats.writeThroughLabels[label] || 0) + 1;
+            return undefined;
+          }
+          record.stats.staleWriteFlushCount += 1;
+          const label = String(buffer?.label || 'unlabeled');
+          record.stats.staleWriteFlushLabels[label] =
+            (record.stats.staleWriteFlushLabels[label] || 0) + 1;
+          flushWorkerQueueSubmitBurst(device, 'stale-write-buffer');
+        }
+      }
+      return record.realWriteBuffer(buffer, bufferOffset, data, dataOffset, size);
+    };
+  }
+  if (record.realWriteTexture) {
+    queue.writeTexture = (...writeArgs) => {
+      if (record.open && record.heldCommandBuffers.length > 0) {
+        record.stats.staleWriteFlushCount += 1;
+        flushWorkerQueueSubmitBurst(device, 'write-texture');
+      }
+      return record.realWriteTexture(...writeArgs);
+    };
+  }
+  if (record.realOnSubmittedWorkDone) {
+    queue.onSubmittedWorkDone = () => {
+      if (record.open && record.heldCommandBuffers.length > 0) {
+        record.stats.fenceFlushCount += 1;
+        flushWorkerQueueSubmitBurst(device, 'fence-request');
+      }
+      return record.realOnSubmittedWorkDone();
+    };
+  }
+  device.createBuffer = (descriptor) => {
+    const buffer = record.realCreateBuffer(descriptor);
+    record.createStamp += 1;
+    record.bufferStamps.set(buffer, record.createStamp);
+    if (typeof buffer?.destroy === 'function') {
+      const realDestroy = buffer.destroy.bind(buffer);
+      let destroyed = false;
+      buffer.destroy = () => {
+        if (destroyed) return undefined;
+        destroyed = true;
+        const stamp = record.bufferStamps.get(buffer);
+        if (
+          record.open
+          && record.heldCommandBuffers.length > 0
+          && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
+        ) {
+          record.deferredCleanups.push(realDestroy);
+          record.stats.deferredDestroyTotal += 1;
+          return undefined;
+        }
+        record.stats.immediateDestroyTotal += 1;
+        return realDestroy();
+      };
+    }
+    return buffer;
+  };
+  return record;
+}
+
+export function openWorkerQueueSubmitBurst(device, {
+  label = null,
+  writeThrough = false
+} = {}) {
+  const record = armWorkerQueueSubmitBurst(device);
+  if (record.open) {
+    throw workerQueueSubmitBurstError(
+      'ERR_WORKER_QUEUE_SUBMIT_BURST_ALREADY_OPEN',
+      'worker queue submit burst is already open on this device'
+    );
+  }
+  record.open = true;
+  record.label = label;
+  record.writeThroughEnabled = writeThrough === true;
+  record.stats.openCount += 1;
+  return record;
+}
+
+export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
+  const record = workerQueueSubmitBurstRecords.get(device);
+  if (!record) return null;
+  const held = record.heldCommandBuffers;
+  const cleanups = record.deferredCleanups;
+  record.heldCommandBuffers = [];
+  record.deferredCleanups = [];
+  record.heldSubmitStamp = record.createStamp;
+  let submitError = null;
+  if (held.length > 0) {
+    record.stats.flushCount += 1;
+    record.stats.flushSubmitCount += held.length;
+    if (reason === 'step-cadence') record.stats.cadenceFlushCount += 1;
+    if (reason === 'burst-close') record.stats.closeFlushCount += 1;
+    try {
+      record.realSubmit(held);
+    } catch (error) {
+      submitError = error;
+    }
+  }
+  // One real fence per cleanup, matching deferSubmittedWorkCleanup's
+  // documented no-coalescing contract. If the submit failed or the fence API
+  // is unavailable the cleanups still run so buffers are not leaked on a
+  // poisoned lane.
+  for (const cleanup of cleanups) {
+    if (record.realOnSubmittedWorkDone && submitError == null) {
+      record.realOnSubmittedWorkDone()
+        .catch(() => null)
+        .finally(() => {
+          cleanup();
+        });
+    } else {
+      try {
+        cleanup();
+      } catch {
+        // Cleanup failures must not mask the submit error.
+      }
+    }
+  }
+  if (submitError) throw submitError;
+  return { flushed: held.length, reason };
+}
+
+export function closeWorkerQueueSubmitBurst(device, reason = 'burst-close') {
+  const record = workerQueueSubmitBurstRecords.get(device);
+  if (!record || !record.open) return null;
+  let flushError = null;
+  try {
+    flushWorkerQueueSubmitBurst(device, reason);
+  } catch (error) {
+    flushError = error;
+  }
+  record.open = false;
+  record.label = null;
+  const stats = { ...record.stats };
+  if (flushError) throw flushError;
+  return stats;
+}
+
+export function workerQueueSubmitBurstStats(device) {
+  const record = workerQueueSubmitBurstRecords.get(device);
+  return record ? { ...record.stats, open: record.open } : null;
 }
 
 export const QUEUE_ORDERED_SUBMITTED_WORK_CLEANUP_RECEIPT_SCHEMA =

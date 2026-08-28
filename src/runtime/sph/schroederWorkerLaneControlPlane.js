@@ -44,6 +44,7 @@ const COMMIT_SCOPE = 'ulg-sph-resident-pass-dag';
 const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'internalPressureScale',
   'ambientPressurePa',
+  'mechanicsSubmitBurstSteps',
   'phaseVolumeMaxImpulseFraction',
   'pressureFeedback',
   'gasPressureSummary',

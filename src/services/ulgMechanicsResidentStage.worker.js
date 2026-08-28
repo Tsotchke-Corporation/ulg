@@ -86,6 +86,10 @@ import {
   uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import {
+  armWorkerQueueSubmitBurst,
+  closeWorkerQueueSubmitBurst,
+  flushWorkerQueueSubmitBurst,
+  openWorkerQueueSubmitBurst,
   prewarmCachedExplicitComputePipeline
 } from '../runtime/webgpuComputeLayout.js';
 import {
@@ -6766,6 +6770,62 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       }
       queue.__ulgSubmitCensusSink = submitCensus;
     };
+    // M4 submit burst: hold each step's command buffers at the queue
+    // boundary and flush them as one queue.submit per K steps. Queue order
+    // is preserved by construction (stale writeBuffer targets, fence
+    // requests, and possibly-referenced destroys all force a flush first).
+    // Eligibility is DERIVED from the schedule's law-activation receipt:
+    // lease-style law sidecar releases treat release latency as a
+    // correctness property, so the burst only opens when every law family
+    // that could hold such a lease is provably quiescent this schedule.
+    const submitBurstStepsRequested = Number(
+      record.schroederLane?.residentStepOptions?.mechanicsSubmitBurstSteps
+    );
+    // Lazy like resolveScheduleLawActivation: terminalRefluxReceiptRequired
+    // is assigned below, and the first use happens inside the step loop.
+    let submitBurstEligibilityCache = null;
+    const resolveSubmitBurstEligibility = () => {
+      if (submitBurstEligibilityCache) return submitBurstEligibilityCache;
+      const activation = resolveScheduleLawActivation();
+      const blockers = [];
+      if (
+        !Number.isInteger(submitBurstStepsRequested)
+        || submitBurstStepsRequested < 2
+        || submitBurstStepsRequested > 256
+      ) {
+        blockers.push('burst-not-requested');
+      }
+      if (activation.thermal) blockers.push('thermal-active');
+      if (activation.reaction) blockers.push('reaction-active');
+      if (activation.lawQueue) blockers.push('law-queue-active');
+      if (activation.lawNeighborCandidates) {
+        blockers.push('law-neighbor-candidates-active');
+      }
+      if (activation.phaseVolumeMigration) {
+        blockers.push('phase-volume-migration-active');
+      }
+      if (activation.twoLevelMechanics) blockers.push('two-level-mechanics-active');
+      if (activation.surfaceTension) blockers.push('surface-tension-active');
+      if (activation.gasBoundaryActionable) {
+        blockers.push('gas-boundary-actionable');
+      }
+      if (terminalRefluxReceiptRequired) {
+        blockers.push('terminal-reflux-receipts-required');
+      }
+      // Timestamp profiling reads mapAsync results per stage; a held submit
+      // would let those reads resolve before the work they measure reaches
+      // the queue, so diagnostics and the burst are mutually exclusive.
+      if (scheduleProfilingRequested) blockers.push('gpu-timestamp-profiling');
+      submitBurstEligibilityCache = Object.freeze({
+        schema: 'peercompute.ulg.worker-schedule-submit-burst-observation.v0',
+        eligible: blockers.length === 0,
+        blockers,
+        stepsPerFlush: blockers.length === 0 ? submitBurstStepsRequested : null
+      });
+      return submitBurstEligibilityCache;
+    };
+    let submitBurstOpened = false;
+    let submitBurstCloseStats = null;
     // Worker-clock schedule phase stamps for inter-cycle diagnosis: the gap
     // between one schedule's result assembly and the next schedule's first
     // step start is main-thread turnaround (commit, verify, re-request).
@@ -6911,6 +6971,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               stageId: SCHROEDER_SPATIAL_EPOCH_STAGE_ID
             }
           );
+        }
+        if (
+          !submitBurstOpened
+          && resolveSubmitBurstEligibility().eligible
+          && state.workerDevice
+        ) {
+          // Opened after the first epoch stage proves the device, so seed
+          // uploads and the lane's first generation go direct.
+          openWorkerQueueSubmitBurst(state.workerDevice, {
+            label: `ulg-worker-schedule-${scheduleId}`
+          });
+          submitBurstOpened = true;
         }
         if (state.workerDevice && state.workerDevice !== record.workerDevice) {
           throw workerResidentScheduleError(
@@ -7337,6 +7409,14 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       armSubmitCensus();
       if (
+        submitBurstOpened
+        && stepOrdinal % resolveSubmitBurstEligibility().stepsPerFlush === 0
+      ) {
+        // Cadence bound: even if no fence request forced a flush this
+        // window, held work never spans more than K steps.
+        flushWorkerQueueSubmitBurst(state.workerDevice, 'step-cadence');
+      }
+      if (
         stepSummaryRing.length
           > ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY
       ) {
@@ -7428,6 +7508,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       }
     } catch (error) {
       scheduleLoopError = error;
+    }
+    if (submitBurstOpened) {
+      // Close before any terminal fence so the last window's held work is
+      // on the queue and later submits (terminal snapshots, next schedule
+      // seeds) go direct. A failed close-flush is a poisoned schedule.
+      try {
+        submitBurstCloseStats =
+          closeWorkerQueueSubmitBurst(state.workerDevice, 'burst-close');
+      } catch (error) {
+        if (!scheduleLoopError) {
+          scheduleLoopError = workerResidentScheduleError(
+            'schedule-submit-burst-close-failed',
+            error instanceof Error ? error.message : String(error),
+            { scheduleId }
+          );
+        }
+      }
+      submitBurstOpened = false;
     }
     // Once an intermediate queue completion reports a dead/invalid device,
     // do not issue a second blind queue callback. Convert that exact failure
@@ -7723,6 +7821,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       tailTerminalFenceDoneAtMs,
       productHistoryLiveBoundObservation,
       lawActivationReceipt: resolveScheduleLawActivation(),
+      submitBurstObservation: {
+        ...resolveSubmitBurstEligibility(),
+        opened: submitBurstCloseStats != null,
+        stats: submitBurstCloseStats
+      },
       submitCensus: submitCensus.size > 0
         ? Object.fromEntries(submitCensus)
         : null,
@@ -8950,6 +9053,18 @@ export async function runUlgMechanicsResidentStageWorkerPayload(
     data.deviceResult = workerDeviceResult;
     data.navigatorRef = globalThis.navigator;
     record.workerDevice = workerDeviceResult.device || null;
+    if (record.workerDevice?.queue?.submit) {
+      // Arm the submit-burst wrappers the moment the worker device exists,
+      // BEFORE any lane buffer is created: arming is passthrough until a
+      // schedule opens a burst, but only buffers created after arming carry
+      // the creation stamps that let held-submit-safe destroys and
+      // writeBuffer calls be distinguished from ones that must flush first.
+      try {
+        armWorkerQueueSubmitBurst(record.workerDevice);
+      } catch {
+        // A device without the full queue surface simply never bursts.
+      }
+    }
   }
   if (
     data.cpuSeededGasPressureAuthority

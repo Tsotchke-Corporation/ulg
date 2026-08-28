@@ -1163,6 +1163,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'contactCleanupPasses',
   'contactInnerRounds',
   'ambientPressurePa',
+  'submitBurstSteps',
   'bg',
   'bgimg',
   'lighting',
@@ -6686,6 +6687,7 @@ export async function mountSphPhaseDemoOverlay({
     'contactCleanupPasses',
     'contactInnerRounds',
     'ambientPressurePa',
+    'submitBurstSteps',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);
@@ -7202,6 +7204,14 @@ export async function mountSphPhaseDemoOverlay({
     const value = Number(raw);
     return Number.isFinite(value) && value >= 0 ? value : null;
   })();
+  // M4 submit burst: K worker-lane steps per queue.submit flush. The worker
+  // derives eligibility from its law-activation receipt; on ineligible lanes
+  // the request is declared-and-ignored, never silently applied.
+  const initialSubmitBurstSteps = clampedContactUrlOption(
+    'submitBurstSteps',
+    2,
+    256
+  );
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -13278,6 +13288,7 @@ export async function mountSphPhaseDemoOverlay({
       traceResidentSchedule('refresh-invoked');
       const refreshPromise = scheduledScene.refreshMlsMpmResidentSteps?.({
       ambientPressurePa: initialAmbientPressurePaOverride,
+      mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
       preferWebGpu: true,
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,

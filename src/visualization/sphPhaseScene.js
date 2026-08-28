@@ -29813,7 +29813,14 @@ fn main(
             const workerLaneOwnsPresentation = Boolean(
               workerSchroederLaneState?.seeded === true
               && workerSchroederLaneState.poisoned !== true
-              && !exactWorkerLaneNativeSurfaceSnapshot
+              && (
+                // Live preview pins the display to the worker canvas even
+                // when an exact committed snapshot is available on the
+                // native path — see the owner selection in
+                // refreshSphResidentRenderState.
+                scene.userData.sphWorkerLaneLivePreviewRequested === true
+                || !exactWorkerLaneNativeSurfaceSnapshot
+              )
             );
             const workerDisplayOwnerCommit = workerLaneOwnsPresentation
               ? null
@@ -36978,6 +36985,14 @@ fn main(
       clearMlsMpmResidentExecutionArtifacts();
       return null;
     }
+    // Recorded scene-wide because display ownership is also selected from
+    // refresh paths that never see this refresh's arguments (the render-state
+    // owner selection and the post-first-frame native handoff). Those setters
+    // must not steal the display back from the worker canvas between
+    // schedules while a live preview is requested, or every mid-schedule
+    // preview draws onto a hidden canvas.
+    scene.userData.sphWorkerLaneLivePreviewRequested =
+      workerLiveParticlePreview === true;
     const lawGroups = normalizePhysicalLawGroups(currentPhysicalLawGroups);
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
@@ -46243,9 +46258,20 @@ fn main(
       && !committedNativeSurfacePresentationAvailable
       && !admittedWorkerLaneNativeSurfaceSource
     );
+    // While a live preview is requested and the worker lane is live, the
+    // worker canvas keeps the display across schedule boundaries: handing
+    // ownership to main-native after each committed snapshot resets the
+    // bridge's content-ready latch, and preview draws (deliberately barred
+    // from revealing pixels) would then paint a hidden canvas all schedule.
+    const workerLaneLivePreviewHoldsDisplay = Boolean(
+      scene.userData.sphWorkerLaneLivePreviewRequested === true
+      && workerSchroederLaneState?.seeded === true
+      && workerSchroederLaneState.poisoned !== true
+    );
     const effectivePresentationDisplayOwner =
       mainThreadSurfaceDrawDisplayOwnershipRequested
       && !mainNativeDisplayOwnershipDeferred
+      && !workerLaneLivePreviewHoldsDisplay
         ? 'main-native'
         : 'worker';
     const effectivePresentationDisplayOwnerEpoch = Math.max(
@@ -49697,8 +49723,16 @@ fn main(
             decoded,
             sphParticleState: nextSphParticleState,
             reason: 'resident-render-state-assembly',
+            // The suppression clears AND hides the worker canvas until the
+            // next committed receipt; while a live preview holds the display
+            // that would blank every mid-schedule preview draw.
             suppressWorkerDrawForExplicitMainThreadBridge:
               mainThreadSurfaceDrawDisplayOwnershipRequested
+              && !(
+                scene.userData.sphWorkerLaneLivePreviewRequested === true
+                && workerSchroederLaneState?.seeded === true
+                && workerSchroederLaneState.poisoned !== true
+              )
           });
       const workerOffscreenRetainedGpuBufferHandoffStatus = refreshWorkerOffscreenRetainedGpuBufferHandoff({
         renderRowsExecution,

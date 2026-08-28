@@ -268,3 +268,52 @@ and re-enabled on triggered ones, physics acceptance arm still green.
 Scoped per-region invocation (Phase C), the online closure factory (Phase D)
 beyond the M6 schema, multi-level tree work, and any physics-claim changes.
 Strict/async/frozen policies land as schema fields tonight, machinery day 2+.
+
+## Night-1 results (2026-08-28, commits 6323588..ed5b1fa)
+
+Milestones landed: M1 (bulk-water at 103,831 live particles committing),
+M2 (census at bulk N), M3 (fused mechanics on the canonical route via the
+explicit `ambientPressurePa` vacuum boundary condition), M5 (curve below),
+M6 (`closureRegimeStore` + 9 tests), M7 first increment (the per-schedule
+law activation receipt, shared with the epoch's sidecar/field-view gating).
+M4 (K-steps-per-submit burst encoding) carries to day 2 unstarted.
+
+Measured N-vs-rate curve (bulk-water, worker lane, laws quiescent, full
+authority/receipt machinery):
+
+| live N | steps/s | ms/step |
+| --- | --- | --- |
+| 1,008 | 109.9 | 9.1 |
+| 13,832 | 104.6 | 9.6 |
+| 32,776 | 83.9 | 11.9 |
+| 64,008 | 69.4 | 14.4 |
+| 103,831 | 55.9 | 17.9 |
+
+60 Hz holds to ~90k live. Same-machine reference: the user's modified
+WebGPU-Ocean (pure MLS-MPM, 2 substeps/frame) runs 100k at 120 fps
+(~4.2 ms/substep) and 1M at 20-30 fps — ULG's equal-N gap is now ~4.3x
+(was ~10^4 at the start of the night) while still rebuilding the spatial
+epoch/directory/exact-near tree per step and running contact admissible
+traversal, separation, and receipts.
+
+The two structural lessons, now enforced in code:
+1. **Capacity-tier constructions must be consumer-gated.** The
+   phase-volume sidecars (multi-GB field-scale arenas) wedged the lane at
+   the 262144 tier; the mechanics field view's candidate sort was 34.2
+   ms/step at the 131072 tier with zero consumers in bulk. Both now build
+   only when a consumer exists; any consumer that disagrees fails closed.
+2. **Boundary conditions are explicit inputs.** Ambient pressure was an
+   implicit atmosphere via wall-ledger feedback; it is now a declared
+   knob, and "explicit vacuum" is the provable condition that admits the
+   fused path and releases buoyancy's field-mode demand. (A first attempt
+   to skip buoyancy by phase-reachability was rejected by the suite —
+   mechanics-only continuations can already hold gas carriers — and
+   reverted.)
+
+Remaining to the plan's Phase A acceptance (100k at 60 Hz): the contact
+graph build (~15 ms/step at 104k proving zero contacts — needs either the
+envelope-watch sweep bound or Tier-2 scoping), fused-kernel cost (~10 ms
+at 104k incl. separation), and M4 burst encoding for the per-step floor
+(~9 ms at small N). Known gap: contactSolver=0 hangs worker admission —
+the canonical lane cannot yet run contact-free; Tier 0 ultimately wants
+that fixed rather than the floor-budget workaround.

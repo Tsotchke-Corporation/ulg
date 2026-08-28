@@ -2201,6 +2201,25 @@ function firstReservedProductContinuityDomainId(
   return maxDomainId + 1;
 }
 
+
+// Phase-companion lanes exist so a carrier can change phase (thermal
+// closure) or host a reaction product companion. With the thermal law
+// group off and no possible reaction pair (reactions off or a single
+// distinct material), no mutation path into another phase exists, so the
+// 4x companion topology would be permanently dormant capacity. Null law
+// groups keep the historical conservative behavior (lanes appended).
+function phaseCompanionLanesRequired(physicalLawGroups, materialKeys) {
+  if (!physicalLawGroups) return true;
+  if (physicalLawGroups.thermal !== false) return true;
+  if (physicalLawGroups.reactions === false) return false;
+  const distinct = new Set(
+    (materialKeys || [])
+      .map((key) => String(key ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return distinct.size > 1;
+}
+
 function appendPhaseCarrierLanes(particles) {
   const lineageCapacity = particles.length;
   const phaseLaneCount = 4;
@@ -2269,6 +2288,7 @@ function appendPhaseCarrierLanes(particles) {
 
 function buildSphInitialBodiesDemoState({
   scenario,
+  physicalLawGroups = null,
   closures,
   allowFixtureMaterialProperties,
   allowReducedProductProperties,
@@ -2413,6 +2433,10 @@ function buildSphInitialBodiesDemoState({
     });
   }
   const phaseCarrierPlan = gpuResidentMechanics
+    && phaseCompanionLanesRequired(
+      physicalLawGroups,
+      normalizedInitialBodies.bodies.map((body) => body.material)
+    )
     ? appendPhaseCarrierLanes(all)
     : null;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
@@ -2568,6 +2592,7 @@ function buildSphInitialBodiesDemoState({
  */
 export function buildSphPhaseDemoState({
   scenario = createSphPhaseScenario(),
+  physicalLawGroups = null,
   closures = null,
   allowFixtureMaterialProperties = false,
   // Interactive runs may seed closures from a cache/view-state that contains
@@ -2595,6 +2620,7 @@ export function buildSphPhaseDemoState({
   if (initialBodies != null) {
     return buildSphInitialBodiesDemoState({
       scenario,
+      physicalLawGroups,
       closures,
       allowFixtureMaterialProperties,
       allowReducedProductProperties,
@@ -2924,6 +2950,10 @@ export function buildSphPhaseDemoState({
     });
   }
   const phaseCarrierPlan = gpuResidentMechanics
+    && phaseCompanionLanesRequired(
+      physicalLawGroups,
+      [dropMaterial, baseMaterial]
+    )
     ? appendPhaseCarrierLanes(all)
     : null;
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;

@@ -1162,6 +1162,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'contactJacobiIterations',
   'contactCleanupPasses',
   'contactInnerRounds',
+  'ambientPressurePa',
   'bg',
   'bgimg',
   'lighting',
@@ -6684,6 +6685,7 @@ export async function mountSphPhaseDemoOverlay({
     'contactJacobiIterations',
     'contactCleanupPasses',
     'contactInnerRounds',
+    'ambientPressurePa',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);
@@ -7188,6 +7190,18 @@ export async function mountSphPhaseDemoOverlay({
     1,
     16
   );
+  // Ambient (external) pressure is a physics boundary condition; it must be
+  // an explicit input, never an implicit atmosphere. When present it takes
+  // the explicit-ambient branch of resolveMlsMpmAmbientPressureEvidence and
+  // wins over wall-ledger pressure feedback. '0' declares vacuum ambient.
+  const initialAmbientPressurePaOverride = (() => {
+    const raw = initialHash.get('ambientPressurePa')
+      ?? initialQuery.get('ambientPressurePa')
+      ?? initialScenarioRuntime.ambientPressurePa;
+    if (raw == null || raw === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  })();
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -13263,6 +13277,7 @@ export async function mountSphPhaseDemoOverlay({
       if (!residentScheduleIsCurrent()) return null;
       traceResidentSchedule('refresh-invoked');
       const refreshPromise = scheduledScene.refreshMlsMpmResidentSteps?.({
+      ambientPressurePa: initialAmbientPressurePaOverride,
       preferWebGpu: true,
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,

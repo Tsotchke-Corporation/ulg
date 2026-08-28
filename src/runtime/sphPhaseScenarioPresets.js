@@ -400,6 +400,79 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'bounded-terminal', expectation: 'two terminal reflux receipts commit and present advancing state' }
       ]
     }
+  }),
+  preset({
+    id: 'bulk-water',
+    label: 'Bulk water - adaptive-laws Tier 0 substrate',
+    controls: {
+      drop: 'h2o',
+      base: 'h2o',
+      dropt: '293.15',
+      baset: '293.15',
+      // Live particle count scales as dropn^3 + basen^3 at the fixed body
+      // pitch; basen=32 seeds 32,769+8 live particles and the phase-carrier
+      // lane topology multiplies capacity by 4. Raise basen (and the box)
+      // for the 100k-live acceptance runs: basen=47 -> 103,824 live.
+      dropn: '2',
+      basen: '32',
+      // Box must contain the base cube: edge = 0.2 m x basen (9.4 m at
+      // basen=47), plus headroom for the settle splash.
+      boxx: '12',
+      boxy: '12',
+      boxz: '12',
+      // Adaptive-laws Tier 0: the bulk substrate runs mechanics, gravity,
+      // EOS, and viscosity only. No thermal table, no reactions (single
+      // material also makes the reaction set empty), no surface tension.
+      lawt: '0',
+      lawr: '0',
+      lawst: '0'
+    },
+    runtime: {
+      sdt: '0.001',
+      cfl: '0.6',
+      cflSafety: '0.4',
+      avAlpha: '0',
+      // Vacuum ambient: with ambient pressure zero, ambient gas buoyancy is
+      // legitimately zero force, which also admits the fused mechanics path.
+      ambientPressurePa: '0',
+      ss: '1',
+      // KNOWN GAP (2026-08-28): contactSolver=0 hangs worker admission at
+      // "submitting initial material state" — the canonical lane cannot yet
+      // run contact-free. Tier 0 wants the solver off; until that gap is
+      // fixed, run it at the floor budget and let the convergence latch
+      // idle it (bulk same-material water resolves proximity via the MPM
+      // grid and the binned separation passes).
+      contactSolver: '1',
+      contactCleanupPasses: '16',
+      // Single material -> the reserve term multiplier is already zero;
+      // declare the intent explicitly anyway.
+      reactionProductReserveMinimumLiveFraction: '0',
+      residentStepsPerSchedule: '64',
+      residentComputeManagerMode: 'worker-owned-resident-lane',
+      residentInterfaceRefreshMode: 'pipelined',
+      // Tier-0 sparsity: no law consumes neighbor candidates in bulk water
+      // (reaction table empty, contact latch idle, no thermal), and no phase
+      // change exists without a thermal table, so the law-queue/neighbor
+      // expander (measured 101.8 ms/step at 55k carriers - the
+      // quadratic-in-active-nodes bucket-miss fallback) and phase-volume
+      // migration (9.5 ms/step) encode nothing but waste here.
+      schroederLawQueue: '0',
+      schroederLawNeighborCandidates: '0',
+      schroederPhaseVolumeMigration: '0',
+      cameraPositionNormalized: '0.80,0.45,1.60',
+      cameraTargetNormalized: '0.50,0.30,0.50'
+    },
+    validation: {
+      batches: 2,
+      batchSteps: 128,
+      timeoutMs: 300000,
+      expectedMechanics: 'mlsmpm',
+      initialMaxTemperatureK: 294,
+      checkpoints: [
+        { id: 'settle', expectation: 'the water block settles under gravity without instability' },
+        { id: 'bounded-terminal', expectation: 'terminal reflux receipts commit and present advancing state' }
+      ]
+    }
   })
 ]);
 

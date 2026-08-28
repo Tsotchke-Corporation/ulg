@@ -11561,20 +11561,23 @@ function canUseFusedNoFullMechanicsPath({
   ambientBuoyancyRequired,
   residentProductMass
 }) {
-  return requestedReadbackMode === NO_FULL_READBACK_MODE
-    && preferWebGpu
-    && Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)
-    && sphParticleUpload?.status === 'webgpu-uploaded'
-    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
-    && !p2gRunner
-    && !gridUpdateRunner
-    && !g2pRunner
-    && !pressureInterfaceForceRowsBuffer
-    && !pressureInterfaceForceSolver
-    && !pressureInterfaceGridForceAdmission
-    && mechanicsMaterialTable?.surfaceTensionEnabled !== true
-    && ambientBuoyancyRequired !== true
-    && !residentProductMass;
+  const verdict = {
+    readback: requestedReadbackMode === NO_FULL_READBACK_MODE,
+    preferWebGpu: Boolean(preferWebGpu),
+    device: Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer),
+    sphUpload: sphParticleUpload?.status === 'webgpu-uploaded',
+    mlsUpload: mlsMpmParticleUpload?.status === 'webgpu-uploaded',
+    noP2gRunner: !p2gRunner,
+    noGridRunner: !gridUpdateRunner,
+    noG2pRunner: !g2pRunner,
+    noPifRows: !pressureInterfaceForceRowsBuffer,
+    noPifSolver: !pressureInterfaceForceSolver,
+    noPifAdmission: !pressureInterfaceGridForceAdmission,
+    noSurfaceTension: mechanicsMaterialTable?.surfaceTensionEnabled !== true,
+    noBuoyancy: ambientBuoyancyRequired !== true,
+    noProductMass: !residentProductMass
+  };
+  return Object.values(verdict).every(Boolean);
 }
 
 async function runFusedNoFullMlsMpmMechanicsWebGpu({

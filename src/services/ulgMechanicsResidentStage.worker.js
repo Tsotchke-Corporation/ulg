@@ -4436,6 +4436,13 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
   let generation;
   try {
     generation = await generationRunner({
+      // Phase-volume moment/receipt sidecars exist to serve phase-volume
+      // migration/transport. With migration disabled they have no consumer,
+      // and at bulk capacities their field-scale arenas are the largest
+      // allocations in the whole generation (their first 262144-capacity
+      // construction wedged the lane before this gate).
+      phaseVolumeSidecarsEnabled:
+        data.enablePhaseVolumeMigration === true || authoritativeTwoLevel,
       device,
       ...(levelAssignment ? { levelAssignment } : { activeNodeList }),
       particleCount,
@@ -6478,6 +6485,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scheduleStepOptionsProvider: ignoredProvider,
         ...stepZeroOptions
       } = baseEpochOptions;
+      // The epoch stage gates the phase-volume moment/receipt sidecars on
+      // their consumer (migration). The enable lives in the mechanics
+      // stage's options, so mirror it into every epoch payload; without
+      // this, a migration-enabled lane loses its sidecars and the
+      // migration stage fails closed.
+      stepZeroOptions.enablePhaseVolumeMigration =
+        stepZeroOptions.enablePhaseVolumeMigration === true
+        || baseMechanicsOptions.enablePhaseVolumeMigration === true
+        || baseMechanicsOptions.hierarchyConfig?.enablePhaseVolumeMigration === true;
       if (stepOrdinal === 1) {
         // W4b: a RETAINED lane starting a new schedule with no step-1 source
         // at all — seed already consumed, no committed successor family, no

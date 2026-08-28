@@ -438,7 +438,11 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // material also makes the reaction set empty), no surface tension.
       lawt: '0',
       lawr: '0',
-      lawst: '0'
+      lawst: '0',
+      // The pressure-interface law's force rows would block the fused
+      // mechanics path; bulk water's free surface is owned by the MPM
+      // grid + EOS + separation.
+      lawp: '0'
     },
     runtime: {
       sdt: '0.001',
@@ -472,6 +476,9 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       schroederLawQueue: '0',
       schroederLawNeighborCandidates: '0',
       schroederPhaseVolumeMigration: '0',
+      // With the neighbor expander off, the sorted-radix active-node index
+      // has no consumer (10+ ms/step of pure build cost at bulk N).
+      schroederActiveNodeSortedIndex: '0',
       cameraPositionNormalized: '0.80,0.45,1.60',
       cameraTargetNormalized: '0.50,0.30,0.50'
     },

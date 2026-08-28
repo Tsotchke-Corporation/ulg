@@ -98,13 +98,15 @@ function preset({
   controls,
   runtime,
   validation,
-  frameworkValidation = null
+  frameworkValidation = null,
+  standardMatrixEnabled = true
 }) {
   const frozenValidation = freezeValidation(validation);
   return Object.freeze({
     schema: SPH_PHASE_SCENARIO_PRESET_SCHEMA,
     id,
     label,
+    standardMatrixEnabled: standardMatrixEnabled !== false,
     controls: Object.freeze({ ...COMMON_CONTROLS, ...controls }),
     runtime: Object.freeze({ ...COMMON_RUNTIME, ...(runtime || {}) }),
     validation: frozenValidation,
@@ -404,6 +406,13 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
   preset({
     id: 'bulk-water',
     label: 'Bulk water - adaptive-laws Tier 0 substrate',
+    // The bulk substrate's acceptance gate is the Phase-A performance
+    // criterion (plan/todo/scale-adaptive-law-activation-plan.md): N-vs-
+    // steps/s on the worker lane. It is a laws-quiescent scenario, so the
+    // standard visual-liveness contract (resident diagnostics, thermal/
+    // reaction milestones) does not apply and it stays out of the
+    // standard matrix and the release receipt until that gate exists.
+    standardMatrixEnabled: false,
     controls: {
       drop: 'h2o',
       base: 'h2o',
@@ -415,6 +424,10 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // for the 100k-live acceptance runs: basen=47 -> 103,824 live.
       dropn: '2',
       basen: '32',
+      // The drop bottom rides the ironh height control; 9.6 m clears the
+      // base cube's top at every supported basen (9.4 m at basen=47), so
+      // the initial-geometry preflight never sees an overlap.
+      ironh: '9.6',
       // Box must contain the base cube: edge = 0.2 m x basen (9.4 m at
       // basen=47), plus headroom for the settle splash.
       boxx: '12',

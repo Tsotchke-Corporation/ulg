@@ -317,13 +317,15 @@ function standardScenarioFromPreset(
   };
 }
 
-export const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => (
-  standardScenarioFromPreset(entry, {
-    validation: entry.frameworkValidation ?? entry.validation,
-    acceptanceTrack:
-      entry.frameworkValidation?.acceptanceTrack ?? 'framework-liveness'
-  })
-));
+export const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS
+  .filter((entry) => entry.standardMatrixEnabled !== false)
+  .map((entry) => (
+    standardScenarioFromPreset(entry, {
+      validation: entry.frameworkValidation ?? entry.validation,
+      acceptanceTrack:
+        entry.frameworkValidation?.acceptanceTrack ?? 'framework-liveness'
+    })
+  ));
 
 // A framework arm may deliberately end after it has exercised every intended
 // authority and presentation component. Preserve its original longer horizon

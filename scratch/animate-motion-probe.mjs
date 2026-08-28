@@ -7,7 +7,7 @@ const browser = await chromium.launch({
   args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer'],
 });
 const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 900 } });
-await page.goto(`https://localhost:5173/?scenario=sodium-water&contactCleanupPasses=48&contactInnerRounds=2&probeEpoch=${Date.now()}`, { waitUntil: 'load', timeout: 30000 });
+await page.goto(`https://localhost:5173/?scenario=${process.env.ULG_SHOT_SCENARIO || 'sodium-water'}${process.env.ULG_SHOT_EXTRA || ''}&probeEpoch=${Date.now()}`, { waitUntil: 'load', timeout: 30000 });
 await page.waitForFunction(() => {
   const b = document.querySelector('#sph-play');
   return b && !b.disabled;

@@ -1263,6 +1263,19 @@ export function createUlgWorkerOffscreenPresentationBridge({
         displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
       });
     },
+    updatePreviewViewProjection(matrix, { reason = 'preview-camera-update' } = {}) {
+      // Fire-and-forget camera stream for the live preview; deliberately no
+      // status publication (it runs per animation frame during drags).
+      if (this.disposed || !this.worker || !matrix || Number(matrix.length) !== 16) {
+        return null;
+      }
+      this.worker.postMessage?.({
+        type: 'update-preview-view-projection',
+        viewProjectionMatrix: matrix,
+        reason
+      });
+      return { status: 'worker-offscreen-preview-view-projection-posted', reason };
+    },
     setBackgroundColor(color, { reason = 'background-color' } = {}) {
       if (this.disposed) return disposedMutationStatus('setBackgroundColor');
       currentBackgroundColor = color || currentBackgroundColor;

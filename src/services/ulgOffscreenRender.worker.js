@@ -130,6 +130,13 @@ let retainedCompactSnapshotStatus = null;
 // and the NodeKernel/ComputeManager/StateManager commit. Progress candidates
 // remain mailbox telemetry only and can never reach the draw loop.
 let pendingCommittedResidentSchedulePresentation = null;
+// Live-preview camera channel: the page streams the current view-projection
+// while the worker canvas owns the display; candidate draws prefer it over
+// the matrix frozen into the schedule's render request, and camera updates
+// redraw the freshest candidate without waiting for new physics.
+let previewViewProjectionOverride = null;
+let previewCameraRedraw = null;
+let previewCameraRedrawLastMs = 0;
 let residentScheduleCandidateStreamIdentity = null;
 let residentScheduleCandidateStreamEpoch = 0;
 
@@ -1161,8 +1168,19 @@ function createResidentScheduleCandidateDrawLoop({
             ...candidateReceiptFields(admission, candidate)
           });
         }
+        const livePreviewMode = request.residentScheduleLivePreview === true;
+        if (livePreviewMode) {
+          // Camera responsiveness: the page streams the current
+          // view-projection while the preview owns the display; redraw the
+          // freshest candidate on camera updates instead of waiting for the
+          // next physics candidate.
+          previewCameraRedraw = () => drawCandidate({ livePreview: true }, candidate);
+        }
         return drawResidentParticleStateProducer({
           ...request,
+          ...(livePreviewMode && previewViewProjectionOverride
+            ? { viewProjectionMatrix: previewViewProjectionOverride }
+            : {}),
           inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
           producerSourceKind: 'worker-retained-resident-stage-output',
           producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
@@ -1188,9 +1206,15 @@ function createResidentScheduleCandidateDrawLoop({
           cssHeight: request.cssHeight ?? cssHeight,
           pixelRatio: request.pixelRatio ?? pixelRatio,
           backgroundColor: request.backgroundColor || backgroundColor,
-          clearAlpha: Number.isFinite(Number(request.clearAlpha))
-            ? Number(request.clearAlpha)
-            : clearAlpha,
+          // Preview mode clears opaque: the worker canvas sits above the
+          // main canvas whose committed isosurface only updates per
+          // schedule; a transparent clear composites live particles over
+          // that stale surface ("ghost surface that never clears").
+          clearAlpha: livePreviewMode
+            ? 1
+            : (Number.isFinite(Number(request.clearAlpha))
+              ? Number(request.clearAlpha)
+              : clearAlpha),
           reason: `${reason}:resident-schedule-candidate`
         });
     } finally {
@@ -2975,6 +2999,8 @@ self.onmessage = (event) => {
     if (data.type === 'init-offscreen-presentation') {
       resetPresentedSphStep();
       resetResidentScheduleCandidateMailbox();
+      previewViewProjectionOverride = null;
+      previewCameraRedraw = null;
       await initPresentation(data);
       return;
     }
@@ -2992,6 +3018,9 @@ self.onmessage = (event) => {
     }
     if (data.type === 'clear') {
       resetPresentedSphStep();
+      // A deliberate clear invalidates the redraw closure (its content is
+      // being wiped); the camera override itself stays current.
+      previewCameraRedraw = null;
       if (data.resetResidentScheduleCandidateMailbox !== false) {
         resetResidentScheduleCandidateMailbox();
       }
@@ -3018,6 +3047,26 @@ self.onmessage = (event) => {
     }
     if (data.type === 'run-resident-schedule-on-presentation-device') {
       await runResidentScheduleOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'update-preview-view-projection') {
+      const matrix = data.viewProjectionMatrix;
+      if (matrix && Number(matrix.length) === 16) {
+        previewViewProjectionOverride = matrix instanceof Float32Array
+          ? matrix
+          : new Float32Array(matrix);
+        const now = nowMs();
+        if (previewCameraRedraw && now - previewCameraRedrawLastMs >= 33) {
+          previewCameraRedrawLastMs = now;
+          try {
+            previewCameraRedraw();
+          } catch {
+            // A redraw against torn-down retained state just disarms the
+            // camera channel until the next candidate rearms it.
+            previewCameraRedraw = null;
+          }
+        }
+      }
       return;
     }
     if (data.type === 'present-committed-resident-schedule-candidate') {

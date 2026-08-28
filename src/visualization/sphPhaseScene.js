@@ -51185,9 +51185,37 @@ fn main(
       return false;
     }
   }
+  let lastPostedPreviewViewProjection = null;
+  function streamPreviewCameraIfLivePreviewOwnsDisplay() {
+    const bridge = workerOffscreenPresentationBridge;
+    if (
+      scene.userData.sphWorkerLaneLivePreviewRequested !== true
+      || workerSchroederLaneState?.seeded !== true
+      || bridge?.displayOwner !== 'worker'
+      || typeof bridge.updatePreviewViewProjection !== 'function'
+    ) {
+      return;
+    }
+    const matrix = workerOffscreenViewProjectionMatrix();
+    if (lastPostedPreviewViewProjection) {
+      let changed = false;
+      for (let i = 0; i < 16; i += 1) {
+        if (matrix[i] !== lastPostedPreviewViewProjection[i]) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return;
+    }
+    lastPostedPreviewViewProjection = matrix;
+    bridge.updatePreviewViewProjection(matrix);
+  }
   function animate() {
     if (!running) return;
     const controlsChanged = controls.update() === true;
+    // The preview draws with the schedule-time matrix otherwise; without
+    // this stream a camera drag lags presentation by up to a schedule.
+    streamPreviewCameraIfLivePreviewOwnsDisplay();
     const nativeBridge = sphResidentSurfaceDrawRenderBridge?.rendererBridge
       === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
     const nativeContinuousRedraw = Boolean(

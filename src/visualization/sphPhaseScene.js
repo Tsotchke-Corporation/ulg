@@ -52937,6 +52937,9 @@ fn main(
         tailTerminalFenceDoneAtMs: result.tailTerminalFenceDoneAtMs ?? null,
         submitCensus: result.submitCensus ?? null,
         submitCensusDeviceMs: result.submitCensusDeviceMs ?? null,
+        productHistoryLiveBoundObservation:
+          result.productHistoryLiveBoundObservation ?? null,
+        lawActivationReceipt: result.lawActivationReceipt ?? null,
         resultAssembledAtMs: result.resultAssembledAtMs ?? null,
         progressEverySteps: result.progressEverySteps ?? null,
         finalEpochIdentity: result.finalEpochIdentity ?? null,

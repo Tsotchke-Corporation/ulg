@@ -6483,48 +6483,94 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         }
       }
     });
+    // Adaptive-laws Tier-1 seed: one schedule-scoped record of which law
+    // families and epoch structures this schedule will encode, and why.
+    // The epoch payload consumes it (sidecars / field views), and the
+    // schedule result publishes it as the law activation receipt so
+    // activation is DECLARED evidence, never an implicit side effect of
+    // option plumbing. The day-2 validation layer consumes the receipt;
+    // the GPU envelope-watch trigger will extend `reasons` with
+    // per-schedule envelope-exit evidence.
+    let scheduleLawActivationCache = null;
+    const resolveScheduleLawActivation = () => {
+      if (scheduleLawActivationCache) return scheduleLawActivationCache;
+      const laneResidentOptions =
+        record.schroederLane?.residentStepOptions
+        || baseMechanicsOptions.residentStepOptions
+        || {};
+      const phaseVolumeMigration =
+        baseEpochOptions.enablePhaseVolumeMigration === true
+        || baseMechanicsOptions.enablePhaseVolumeMigration === true
+        || baseMechanicsOptions.hierarchyConfig?.enablePhaseVolumeMigration === true;
+      const twoLevelMechanics =
+        baseMechanicsOptions.enableTwoLevelMechanics === true;
+      const surfaceTension =
+        laneResidentOptions.mechanicsMaterialTable?.surfaceTensionEnabled === true;
+      // A gas-pressure summary only demands field mode when it is
+      // actionable: a retained product-event buffer or a gas cell field.
+      // An inert summary object proves nothing.
+      const gasBoundaryActionable =
+        Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
+        || laneResidentOptions.gasPressureSummary?.residentProductMass
+          ?.productEventBufferRetained === true
+        || laneResidentOptions.residentProductMass
+          ?.productEventBufferRetained === true;
+      const explicitVacuumAmbient =
+        Number(laneResidentOptions.ambientPressurePa) === 0;
+      // Mechanics field views may be skipped only when every field-mode
+      // consumer is provably absent for the whole schedule; a null ambient
+      // can still receive atmospheric pressure from wall-ledger feedback,
+      // which would demand buoyancy's field mode.
+      const mechanicsFieldViews =
+        baseEpochOptions.mechanicsFieldViewsRequired === true
+        || phaseVolumeMigration
+        || twoLevelMechanics
+        || surfaceTension
+        || gasBoundaryActionable
+        || !explicitVacuumAmbient;
+      const receipt = Object.freeze({
+        schema: 'peercompute.ulg.worker-schedule-law-activation-receipt.v0',
+        thermal: Boolean(laneResidentOptions.thermalMaterialTable),
+        reaction:
+          (Number(laneResidentOptions.reactionTable?.reactionCount) || 0) > 0,
+        contactSolver:
+          record.schroederLane?.residentStepOptions?.contactSolverEnabled
+            !== false,
+        lawQueue:
+          baseMechanicsOptions.enableLawQueue === true
+          || baseMechanicsOptions.hierarchyConfig?.enableLawQueue === true,
+        lawNeighborCandidates:
+          baseMechanicsOptions.enableLawNeighborCandidates === true
+          || baseMechanicsOptions.hierarchyConfig
+            ?.enableLawNeighborCandidates === true,
+        phaseVolumeMigration,
+        twoLevelMechanics,
+        surfaceTension,
+        gasBoundaryActionable,
+        explicitVacuumAmbient,
+        phaseVolumeSidecars: phaseVolumeMigration || twoLevelMechanics,
+        mechanicsFieldViews,
+        activationAuthority:
+          'schedule-config-static-declaration-no-readback'
+      });
+      scheduleLawActivationCache = receipt;
+      return receipt;
+    };
     const epochOptionsForStep = async (stepOrdinal, previousEpochSeal) => {
       const {
         scheduleStepOptionsProvider: ignoredProvider,
         ...stepZeroOptions
       } = baseEpochOptions;
-      // The epoch stage gates the phase-volume moment/receipt sidecars on
-      // their consumer (migration). The enable lives in the mechanics
-      // stage's options, so mirror it into every epoch payload; without
-      // this, a migration-enabled lane loses its sidecars and the
-      // migration stage fails closed.
+      // The epoch stage gates the phase-volume moment/receipt sidecars and
+      // mechanics field views on their consumers; the schedule-scoped
+      // activation record is the single source of that derivation.
+      const scheduleLawActivation = resolveScheduleLawActivation();
       stepZeroOptions.enablePhaseVolumeMigration =
         stepZeroOptions.enablePhaseVolumeMigration === true
-        || baseMechanicsOptions.enablePhaseVolumeMigration === true
-        || baseMechanicsOptions.hierarchyConfig?.enablePhaseVolumeMigration === true;
-      // Mechanics field views may be skipped only when every field-mode
-      // consumer is provably absent for the whole schedule: no phase-volume
-      // migration, no two-level mechanics, no surface tension, no
-      // gas-pressure boundary or retained products, and an EXPLICIT vacuum
-      // ambient (a null ambient can still receive atmospheric pressure from
-      // wall-ledger feedback, which would demand buoyancy's field mode).
-      {
-        const laneResidentOptions =
-          record.schroederLane?.residentStepOptions
-          || baseMechanicsOptions.residentStepOptions
-          || {};
-        const explicitVacuumAmbient =
-          Number(laneResidentOptions.ambientPressurePa) === 0;
-        stepZeroOptions.mechanicsFieldViewsRequired =
-          stepZeroOptions.mechanicsFieldViewsRequired === true
-          || stepZeroOptions.enablePhaseVolumeMigration === true
-          || baseMechanicsOptions.enableTwoLevelMechanics === true
-          || laneResidentOptions.mechanicsMaterialTable?.surfaceTensionEnabled === true
-          // A gas-pressure summary only demands field mode when it is
-          // actionable: a retained product-event buffer or a gas cell
-          // field. An inert summary object proves nothing.
-          || Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
-          || laneResidentOptions.gasPressureSummary?.residentProductMass
-            ?.productEventBufferRetained === true
-          || laneResidentOptions.residentProductMass
-            ?.productEventBufferRetained === true
-          || !explicitVacuumAmbient;
-      }
+        || scheduleLawActivation.phaseVolumeMigration;
+      stepZeroOptions.mechanicsFieldViewsRequired =
+        stepZeroOptions.mechanicsFieldViewsRequired === true
+        || scheduleLawActivation.mechanicsFieldViews;
       if (stepOrdinal === 1) {
         // W4b: a RETAINED lane starting a new schedule with no step-1 source
         // at all — seed already consumed, no committed successor family, no
@@ -7676,6 +7722,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleLastStepEndedAtMs,
       tailTerminalFenceDoneAtMs,
       productHistoryLiveBoundObservation,
+      lawActivationReceipt: resolveScheduleLawActivation(),
       submitCensus: submitCensus.size > 0
         ? Object.fromEntries(submitCensus)
         : null,

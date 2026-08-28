@@ -32,6 +32,7 @@ while (Date.now() - t0 < Number(process.env.ULG_PROBE_WINDOW_MS || 90000)) {
       committed: lane?.laneCompletedStepTotal ?? 0,
       n: lane?.perStepSummaries?.lastStep?.particleCount ?? null,
       live: steps?.liveParticleCount ?? null,
+      lawReceipt: lane?.lawActivationReceipt ?? null,
     };
   });
   if (c.committed !== prev) { commits.push({ t: Date.now() - t0, ...c }); prev = c.committed; }

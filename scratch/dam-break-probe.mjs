@@ -6,7 +6,7 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer'],
 });
-const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: 1200, height: 700 } });
+const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: Number(process.env.ULG_DAM_W || 1200), height: Number(process.env.ULG_DAM_H || 700) } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e?.message || e).slice(0, 200)));
 await page.goto(`https://localhost:5173/?scenario=${process.env.ULG_DAM_SCENARIO || 'bulk-water'}${process.env.ULG_DAM_EXTRA || ''}&probeEpoch=${Date.now()}`, { waitUntil: 'load', timeout: 30000 });

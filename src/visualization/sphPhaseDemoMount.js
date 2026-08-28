@@ -1166,6 +1166,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'ambientPressurePa',
   'submitBurstSteps',
   'workerLivePreview',
+  'compactMechanicsView',
+  'observeSpatialAuthority',
   'bg',
   'bgimg',
   'lighting',
@@ -6565,7 +6567,10 @@ export async function mountSphPhaseDemoOverlay({
   function applyUrlToControls() {
     const query = new URLSearchParams(window.location.search);
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    const requestedPreset = sphPhaseScenarioPresetById(hash.get('scenario') ?? query.get('scenario'));
+    // Same fallback as the mount-time preset: a `custom` hash (written by a
+    // control edit) shadows the query's preset id but is not itself a preset.
+    const requestedPreset = sphPhaseScenarioPresetById(hash.get('scenario'))
+      ?? sphPhaseScenarioPresetById(query.get('scenario'));
     if (requestedPreset) {
       scenarioPresetSelect.value = requestedPreset.id;
       for (const [key, value] of Object.entries(requestedPreset.controls)) {
@@ -6725,6 +6730,8 @@ export async function mountSphPhaseDemoOverlay({
     'ambientPressurePa',
     'submitBurstSteps',
     'workerLivePreview',
+    'compactMechanicsView',
+    'observeSpatialAuthority',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);
@@ -6993,9 +7000,13 @@ export async function mountSphPhaseDemoOverlay({
   }
   const initialQuery = new URLSearchParams(window.location.search);
   const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const initialScenarioPreset = sphPhaseScenarioPresetById(
-    initialHash.get('scenario') ?? initialQuery.get('scenario')
-  );
+  // The hash's scenario wins, but a control edit rewrites it to `custom`
+  // (not a preset id). The query still names the preset the page was opened
+  // with, so fall back to it — otherwise "Preset defaults" on an edited
+  // `?scenario=X#scenario=custom` tab has no preset runtime to restore.
+  const initialScenarioPreset =
+    sphPhaseScenarioPresetById(initialHash.get('scenario'))
+    ?? sphPhaseScenarioPresetById(initialQuery.get('scenario'));
   const initialScenarioRuntime = initialScenarioPreset?.runtime || {};
   const initialHashScenarioId = initialHash.get('scenario');
   const initialQueryScenarioId = initialQuery.get('scenario');
@@ -8322,6 +8333,29 @@ export async function mountSphPhaseDemoOverlay({
     if (initialHydrostaticInitialization != null) {
       q.set('hydroInit', initialHydrostaticInitialization ? '1' : '0');
     }
+    // Same contract for the runtime-only mechanics/presentation knobs: they
+    // arrive via a preset's `runtime` (or an explicit URL) and have no
+    // controls, so a control edit that turns the scenario `custom` must not
+    // silently revert them. Losing workerLivePreview/compactMechanicsView
+    // demotes a live preset to the per-schedule slideshow on reload.
+    if (initialAmbientPressurePaOverride != null) {
+      q.set('ambientPressurePa', String(initialAmbientPressurePaOverride));
+    }
+    if (initialSubmitBurstSteps != null) {
+      q.set('submitBurstSteps', String(initialSubmitBurstSteps));
+    }
+    if (initialContactJacobiIterations != null) {
+      q.set('contactJacobiIterations', String(initialContactJacobiIterations));
+    }
+    if (initialContactCleanupPasses != null) {
+      q.set('contactCleanupPasses', String(initialContactCleanupPasses));
+    }
+    if (initialContactInnerRounds != null) {
+      q.set('contactInnerRounds', String(initialContactInnerRounds));
+    }
+    if (initialObserveSpatialAuthority) q.set('observeSpatialAuthority', '1');
+    if (!initialConsumeCompactMechanicsView) q.set('compactMechanicsView', '0');
+    if (initialWorkerLivePreview) q.set('workerLivePreview', '1');
     if (residentStepsPerScheduleOverride != null) {
       q.set('residentStepsPerSchedule', String(residentStepsPerScheduleOverride));
     }

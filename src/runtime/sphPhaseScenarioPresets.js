@@ -471,6 +471,13 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // -7% at 104k (inter-schedule turnaround grows; documented in the
       // plan). Raise basen past ~64k and this knob is worth turning off.
       submitBurstSteps: '8',
+      // Worker-canvas live preview: mid-schedule uncommitted draws of the
+      // lane's retained state every ~66ms, so visible motion is decoupled
+      // from schedule commits (the per-schedule isosurface path updates at
+      // only ~1-4 images/s and its readback sags the main-thread render
+      // loop). The committed terminal presentation remains the only
+      // authority-bearing draw.
+      workerLivePreview: '1',
       residentStepsPerSchedule: '64',
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',

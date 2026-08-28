@@ -36967,7 +36967,12 @@ fn main(
     observeCanonicalSpatialAuthority = false,
     // Explicit consumer gate for the compact mechanics view on the fused
     // canonical route; false selects the plain V1 full-grid variant.
-    consumeCompactMechanicsView = true
+    consumeCompactMechanicsView = true,
+    // Explicit worker-canvas live preview: mid-schedule uncommitted draws
+    // of the lane's retained state at a throttled cadence, with the worker
+    // canvas owning the display. The committed terminal presentation stays
+    // the only authority-bearing draw.
+    workerLiveParticlePreview = false
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -40485,6 +40490,7 @@ fn main(
             configurationSignature: signature,
             stepCount: normalizedStepCount,
             progressEverySteps: requestedWorkerLaneProgressEverySteps,
+            workerLiveParticlePreview: workerLiveParticlePreview === true,
             sphParticleState: sourceSphParticleState,
             mlsMpmParticleState: sourceMlsMpmParticleState,
             sphParticleUpload: resolvedSphUpload,
@@ -52260,6 +52266,7 @@ fn main(
     configurationSignature = null,
     stepCount,
     progressEverySteps = 1,
+    workerLiveParticlePreview = false,
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload,
@@ -52524,7 +52531,8 @@ fn main(
         .trim()
         .toLowerCase() === 'authoritative'
     );
-    const renderRequest = workerOffscreenRetainedStageOutputRenderRequest({
+    const workerLivePreviewRequested = workerLiveParticlePreview === true;
+    const renderRequestBase = workerOffscreenRetainedStageOutputRenderRequest({
       stageId: 'schroederSameLevelMechanics',
       laneId,
       stateKey,
@@ -52532,6 +52540,16 @@ fn main(
       mlsMpmParticleState,
       reason: 'worker-lane-resident-schedule-candidate-render'
     });
+    const renderRequest = renderRequestBase
+      ? {
+          ...renderRequestBase,
+          // Mid-schedule uncommitted preview draws on the worker canvas.
+          // The presentation worker throttles them and every preview
+          // publishes stateManagerCommittedPresentation: false.
+          residentScheduleLivePreview: workerLivePreviewRequested,
+          livePreviewMinIntervalMs: 66
+        }
+      : null;
     const workerLaneAuthority =
       await runSchroederWorkerLaneScheduleWithAuthority({
         computeManager,
@@ -52558,15 +52576,21 @@ fn main(
           // Particle/debug modes still let the worker canvas own display.
           // The native path exports the exact committed worker snapshot after
           // this schedule and only then swaps the surface generation.
+          // The explicit live-preview request also hands the worker canvas
+          // the display: mid-schedule preview draws are its whole point,
+          // and they are invisible under main-native ownership.
           const requestedScheduleDisplayOwner =
             workerLaneNativeSurfacePresentationRequested
+            && !workerLivePreviewRequested
               ? 'main-native'
               : 'worker';
           const workerDisplayOwnerAdmission = bridge.setDisplayOwner?.({
             owner: requestedScheduleDisplayOwner,
-            reason: workerLaneNativeSurfacePresentationRequested
+            reason: requestedScheduleDisplayOwner === 'main-native'
               ? 'worker-lane-native-surface-snapshot-presentation-admission'
-              : 'worker-lane-resident-schedule-admission',
+              : (workerLivePreviewRequested
+                ? 'worker-lane-live-preview-admission'
+                : 'worker-lane-resident-schedule-admission'),
             revealWhenContentReady: requestedScheduleDisplayOwner === 'worker'
           }) || null;
           if (bridge.displayOwner !== requestedScheduleDisplayOwner) {

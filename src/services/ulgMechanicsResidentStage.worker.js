@@ -284,6 +284,20 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
     const companionCapacity = Number(plan?.companionCapacity);
     const particleCapacity = Number(plan?.particleCapacity);
     const stableLaneAddressPresent = plan.stableLaneAddress !== undefined;
+    // Two declared topologies exist: the four-lane phase-companion layout
+    // and the laws-quiescent single-lane declaration (no companion lanes;
+    // the plan's presence still asserts the topology explicitly).
+    const laneShapeAccepted =
+      (
+        phaseLaneCount === 4
+        && companionCapacity === 3 * lineageCapacity
+        && particleCapacity === 4 * lineageCapacity
+      )
+      || (
+        phaseLaneCount === 1
+        && companionCapacity === 0
+        && particleCapacity === lineageCapacity
+      );
     const accepted = countAccepted
       && plan?.status === 'phase-lane-capacity-ready'
       && Number.isSafeInteger(plan.lineageCapacity)
@@ -295,11 +309,9 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
       && Number.isSafeInteger(plan.particleCapacity)
       && lineageCapacity > 0
       && primaryCapacity === lineageCapacity
-      && phaseLaneCount === 4
       && phaseLaneStride === lineageCapacity
       && companionStart === lineageCapacity
-      && companionCapacity === 3 * lineageCapacity
-      && particleCapacity === 4 * lineageCapacity
+      && laneShapeAccepted
       && particleCapacity === count
       && (!stableLaneAddressPresent || typeof plan.stableLaneAddress === 'string');
     if (accepted) {

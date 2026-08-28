@@ -1165,6 +1165,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'contactInnerRounds',
   'ambientPressurePa',
   'submitBurstSteps',
+  'workerLivePreview',
   'bg',
   'bgimg',
   'lighting',
@@ -6723,6 +6724,7 @@ export async function mountSphPhaseDemoOverlay({
     'contactInnerRounds',
     'ambientPressurePa',
     'submitBurstSteps',
+    'workerLivePreview',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);
@@ -7262,6 +7264,14 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialScenarioRuntime.compactMechanicsView;
     if (raw == null || raw === '') return true;
     return String(raw) !== '0' && String(raw) !== 'false';
+  })();
+  // Worker-canvas live preview: mid-schedule uncommitted draws of the
+  // lane's retained state (worker canvas owns the display while on).
+  const initialWorkerLivePreview = (() => {
+    const raw = initialHash.get('workerLivePreview')
+      ?? initialQuery.get('workerLivePreview')
+      ?? initialScenarioRuntime.workerLivePreview;
+    return String(raw ?? '') === '1';
   })();
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
@@ -13342,6 +13352,7 @@ export async function mountSphPhaseDemoOverlay({
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
       observeCanonicalSpatialAuthority: initialObserveSpatialAuthority,
       consumeCompactMechanicsView: initialConsumeCompactMechanicsView,
+      workerLiveParticlePreview: initialWorkerLivePreview,
       preferWebGpu: true,
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,

@@ -6,6 +6,9 @@ import {
 import {
   webGpuDeviceDescriptorForResidentSph
 } from '../runtime/webgpuDeviceLimits.js';
+import {
+  flushWorkerQueueSubmitBurst
+} from '../runtime/webgpuComputeLayout.js';
 
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
@@ -1073,6 +1076,29 @@ function createResidentScheduleCandidateDrawLoop({
     };
   }
   let drawing = false;
+  // A live-preview draw presents the lane's CURRENT retained state
+  // mid-schedule. It must never claim StateManager commitment: the
+  // committed receipt helper hardcodes stateManagerCommittedPresentation
+  // true, so previews carry their own honest uncommitted marker (which
+  // also keeps the page's committed-presentation matcher from ever
+  // admitting one).
+  const candidateReceiptFields = (admission, candidate) => (
+    admission?.livePreview === true
+      ? {
+          residentScheduleCandidatePresentation: true,
+          stateManagerCommittedPresentation: false,
+          residentSchedulePresentationMode: 'uncommitted-live-preview',
+          scheduleId: candidate?.scheduleId ?? null,
+          laneId: candidate?.laneId ?? laneId,
+          stateKey: candidate?.stateKey ?? stateKey,
+          presentationLaneEpoch: candidate?.presentationLaneEpoch ?? null,
+          stepOrdinal: candidate?.version?.stepOrdinal ?? null
+        }
+      : committedResidentSchedulePresentationReceiptFields(
+          admission,
+          candidate
+        )
+  );
   const drawCandidate = (admission, candidate) => {
     if (drawing) return null;
     drawing = true;
@@ -1126,10 +1152,7 @@ function createResidentScheduleCandidateDrawLoop({
             sourceTransferBytes: 0,
             sourceStateTransferBytes: 0,
             workerLocalRenderRowsProduced: false,
-            ...committedResidentSchedulePresentationReceiptFields(
-              admission,
-              candidate
-            )
+            ...candidateReceiptFields(admission, candidate)
           });
         }
         return drawResidentParticleStateProducer({
@@ -1152,10 +1175,7 @@ function createResidentScheduleCandidateDrawLoop({
           // supersede a newer presented step.
           sphStep: candidate.version.nextStep,
           residentScheduleCandidatePresentation: true,
-          ...committedResidentSchedulePresentationReceiptFields(
-            admission,
-            candidate
-          ),
+          ...candidateReceiptFields(admission, candidate),
           width: request.width ?? canvas?.width ?? 1,
           height: request.height ?? canvas?.height ?? 1,
           cssWidth: request.cssWidth ?? cssWidth,
@@ -1192,10 +1212,7 @@ function createResidentScheduleCandidateDrawLoop({
             producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
             sourceStageId: 'schroederSameLevelMechanics',
             workerLocalRenderRowsProduced: false,
-            ...committedResidentSchedulePresentationReceiptFields(
-              admission,
-              candidate
-            ),
+            ...candidateReceiptFields(admission, candidate),
             ...compactError(error)
           });
         } catch {
@@ -1473,6 +1490,23 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
     schedulePayload,
     reason: data.reason || 'run-resident-schedule-on-presentation-device'
   });
+  // Explicit page opt-in: mid-schedule LIVE PREVIEW draws of the lane's
+  // current retained state on the worker canvas. Every preview publishes
+  // with an uncommitted marker; the committed terminal presentation stays
+  // the only authority-bearing draw. Throttled so per-step progress posts
+  // do not swamp the canvas, and the submit burst is flushed around each
+  // draw (a held canvas present would outlive its swapchain texture).
+  const livePreviewRequest = retainedStageOutputRenderRequest(schedulePayload);
+  const livePreviewEnabled = Boolean(
+    candidateDrawLoop.active
+    && livePreviewRequest?.residentScheduleLivePreview === true
+  );
+  const livePreviewMinIntervalMs = Math.max(
+    33,
+    Math.round(Number(livePreviewRequest?.livePreviewMinIntervalMs) || 66)
+  );
+  let livePreviewLastDrawMs = 0;
+  let livePreviewDrawCount = 0;
   try {
     const result = await timeoutResidentStage(
       runner.runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload, {
@@ -1482,7 +1516,7 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
             if (!residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
               return;
             }
-            postResidentScheduleCandidate({
+            const candidate = postResidentScheduleCandidate({
               scheduleId: progress?.scheduleId ?? null,
               laneId: scheduleLaneId,
               stateKey: scheduleStateKey,
@@ -1493,6 +1527,21 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
                 progress?.stepSummary?.retainedBufferRefs ?? null,
               summary: progress?.stepSummary ?? null
             });
+            if (
+              livePreviewEnabled
+              && candidate
+              && nowMs() - livePreviewLastDrawMs >= livePreviewMinIntervalMs
+            ) {
+              livePreviewLastDrawMs = nowMs();
+              livePreviewDrawCount += 1;
+              try {
+                flushWorkerQueueSubmitBurst(device);
+              } catch {}
+              candidateDrawLoop.notify({ livePreview: true }, candidate);
+              try {
+                flushWorkerQueueSubmitBurst(device);
+              } catch {}
+            }
           } catch {
             // Candidate delivery must never abort the batch (mirrors the W2
             // driver's own fire-and-forget progress contract).

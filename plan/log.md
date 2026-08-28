@@ -42059,3 +42059,25 @@ Validation and review:
 - User hardware exonerated: their machine runs the canonical route at
   ~90-103 steps/s at 32.8k (recordings verified frame-by-frame) — parity
   with the dev box. The visible-rate ceiling is the canonical route itself.
+
+## 2026-08-28 AKDT - Preview ghost surface and camera latency (user video triage)
+
+- User video (`buggy.mp4`, frame-by-frame): throughput healthy
+  (`completion ~94-104` steps/s at 32.8k, sim t to 1.6 s) but two visual
+  populations on screen at once — the live particle mass on the worker
+  canvas over shaded droplet remnants of the STALE committed isosurface
+  showing through the transparent clear ("debug particles never cleared"),
+  plus camera drags lagging presentation by up to a schedule.
+- Fix (`f59c38e`): preview-mode draws clear opaque (stale surface can no
+  longer bleed through; committed-only and main-native modes keep the
+  transparent overlay); new fire-and-forget camera channel — the page
+  streams the current view-projection per animation frame while the preview
+  owns the display, the worker prefers it over the schedule-frozen request
+  matrix and redraws the freshest candidate on camera updates (33 ms
+  throttle).
+- PASS: paused-sim drag changes the fluid region `10/10` samples (was
+  structurally impossible); mid-run frame shows one coherent silhouette,
+  no bleed-through; 240 presentation/renderer/preset/mount/burst tests.
+- Known trade in preview mode: the worker canvas covers the main canvas's
+  wireframe box/background furniture; particle sprites at 32.8k merge into
+  a flat silhouette (shaded impostors are the open cosmetic follow-up).

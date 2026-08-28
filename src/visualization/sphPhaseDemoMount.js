@@ -3499,6 +3499,18 @@ export async function materializeSphWorkerLaneNativeSurfacePresentationSource({
   while (performance.now() - startedAtMs < timeoutMs) {
     const current =
       sceneApi.getWorkerOffscreenRetainedCompactSnapshotStatus?.() || null;
+    try {
+      // Diagnostic mirror of the poll's live view (payload presence is the
+      // load-bearing bit the compacted mirrors cannot show).
+      globalThis.__ulgWorkerLaneSnapshotPoll = {
+        status: current?.status ?? null,
+        cacheKey: current?.cacheKey ?? null,
+        wantCacheKey: cacheKey,
+        hasPayload: Boolean(current?.compactBufferSnapshot),
+        stale: current?.stale === true,
+        updatedAtMs: current?.updatedAtMs ?? null
+      };
+    } catch {}
     const requestMatches = Boolean(
       current?.cacheKey === cacheKey
       && current?.laneId === lane.laneId
@@ -3533,10 +3545,32 @@ export async function materializeSphWorkerLaneNativeSurfacePresentationSource({
       === 'worker-retained-compact-snapshot-lineage-metadata-ready'
   );
   if (!snapshotReady) {
+    // Name the exact failing readiness terms; every compacted mirror in
+    // this chain hides a different subset of them.
+    const why = {
+      status: snapshotStatus?.status ?? null,
+      portable: snapshotStatus?.portableSnapshotAvailable === true,
+      hasSnapshot: Boolean(snapshot),
+      snapshotSchemaOk: snapshot?.schema
+        === 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0',
+      cacheKeyOk: snapshot?.cacheKey === cacheKey,
+      laneOk: snapshot?.laneId === lane.laneId
+        && snapshot?.stateKey === lane.stateKey,
+      stageOk: snapshot?.sourceStageId === sourceStageId,
+      particleCountOk: Number(snapshot?.particleCount) === particleCount,
+      stepOk: Number(snapshot?.step) === sourceStep,
+      snapshotStep: snapshot?.step ?? null,
+      wantStep: sourceStep,
+      timeOk: Math.abs(Number(snapshot?.time) - sourceTimeS) <= 1e-9,
+      snapshotTime: snapshot?.time ?? null,
+      wantTime: sourceTimeS,
+      slotOk: snapshot?.sharedSlotIdentityVerified === true,
+      lineageOk: snapshot?.workerLineageMetadata?.status
+        === 'worker-retained-compact-snapshot-lineage-metadata-ready',
+      lineageStatus: snapshot?.workerLineageMetadata?.status ?? null
+    };
     throw new Error(
-      snapshotStatus?.reason
-      || snapshotStatus?.errorMessage
-      || 'worker terminal compact snapshot did not become ready'
+      `worker terminal compact snapshot not ready: ${JSON.stringify(why)}`
     );
   }
   if (

@@ -2220,6 +2220,37 @@ function phaseCompanionLanesRequired(physicalLawGroups, materialKeys) {
   return distinct.size > 1;
 }
 
+// Laws-quiescent scenes append no companion lanes, but downstream lineage
+// consumers (the worker-retained compact-snapshot export that feeds the
+// terminal native-surface presentation) require an EXPLICIT carrier plan:
+// an absent plan reads as unknown topology and fails their metadata
+// closed, which presented as the on-screen surface never leaving the seed
+// state. Declare the single-lane topology instead of omitting it.
+function declarePhaseCarrierSingleLanePlan(particles) {
+  const lineageCapacity = particles.length;
+  for (let lineageIndex = 0; lineageIndex < lineageCapacity; lineageIndex += 1) {
+    particles[lineageIndex].phaseCarrierPrimaryIndex = lineageIndex;
+    particles[lineageIndex].phaseCarrierCompanionIndex = lineageIndex;
+    particles[lineageIndex].phaseCarrierLineageIndex = lineageIndex;
+    particles[lineageIndex].phaseCarrierLane = 0;
+    particles[lineageIndex].phaseCarrierTargetPhaseId = 1;
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity,
+    primaryCapacity: lineageCapacity,
+    phaseLaneCount: 1,
+    phaseLaneStride: lineageCapacity,
+    companionStart: lineageCapacity,
+    companionCapacity: 0,
+    particleCapacity: particles.length,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    phaseCompanionLanesRequired: false,
+    reason: 'laws-quiescent-no-phase-mutation-path'
+  });
+}
+
 function appendPhaseCarrierLanes(particles) {
   const lineageCapacity = particles.length;
   const phaseLaneCount = 4;
@@ -2432,13 +2463,14 @@ function buildSphInitialBodiesDemoState({
       spareProductSlot: true
     });
   }
-  const phaseCarrierPlan = gpuResidentMechanics
-    && phaseCompanionLanesRequired(
-      physicalLawGroups,
-      normalizedInitialBodies.bodies.map((body) => body.material)
-    )
-    ? appendPhaseCarrierLanes(all)
-    : null;
+  const phaseCarrierPlan = !gpuResidentMechanics
+    ? null
+    : phaseCompanionLanesRequired(
+        physicalLawGroups,
+        normalizedInitialBodies.bodies.map((body) => body.material)
+      )
+      ? appendPhaseCarrierLanes(all)
+      : declarePhaseCarrierSingleLanePlan(all);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   state.phaseCarrierPlan = phaseCarrierPlan;
   copyInitialParticleMetadataIntoState(state, all);
@@ -2949,13 +2981,14 @@ export function buildSphPhaseDemoState({
       spareProductSlot: true
     });
   }
-  const phaseCarrierPlan = gpuResidentMechanics
-    && phaseCompanionLanesRequired(
-      physicalLawGroups,
-      [dropMaterial, baseMaterial]
-    )
-    ? appendPhaseCarrierLanes(all)
-    : null;
+  const phaseCarrierPlan = !gpuResidentMechanics
+    ? null
+    : phaseCompanionLanesRequired(
+        physicalLawGroups,
+        [dropMaterial, baseMaterial]
+      )
+      ? appendPhaseCarrierLanes(all)
+      : declarePhaseCarrierSingleLanePlan(all);
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   state.phaseCarrierPlan = phaseCarrierPlan;

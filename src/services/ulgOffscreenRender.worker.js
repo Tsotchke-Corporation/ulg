@@ -803,7 +803,13 @@ function resetResidentScheduleCandidateMailbox() {
   presentationResidentScheduleCandidateMailbox.reset();
   pendingCommittedResidentSchedulePresentation = null;
   residentScheduleCandidateStreamIdentity = null;
-  residentScheduleCandidateStreamEpoch = 0;
+  // The stream epoch is deliberately NOT zeroed: the bridge-side mailbox
+  // orders candidates by (epoch, laneId, stateKey) across this worker's whole
+  // lifetime. A page rebuild re-inits the presentation and seeds a NEW lane;
+  // restarting the epoch at 1 would tie the new lane with the retired lane's
+  // epoch and the bridge would reject every committed receipt of the rebuilt
+  // lane as belonging to an inactive stream (observed as a silent 15s
+  // committed-presentation timeout per schedule).
 }
 
 function prepareResidentScheduleCandidateStream({ laneId = null, stateKey = null } = {}) {

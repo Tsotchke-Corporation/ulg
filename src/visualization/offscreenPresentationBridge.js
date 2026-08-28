@@ -2049,6 +2049,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
       { type: 'module', name: 'ulg-offscreen-render' }
     );
     bridge.worker = worker;
+    // A fresh worker starts a fresh candidate-stream epoch namespace. The
+    // bridge object outlives workers across page rebuilds, so its stream
+    // identity/mailbox from the prior worker must not remain pinned — a
+    // rebuilt lane re-entering at epoch 1 would otherwise fail the committed
+    // receipt identity forever.
+    bridge.residentRenderCandidateMailbox?.reset?.();
+    bridge.residentRenderCandidateStreamIdentity = null;
+    bridge.committedResidentSchedulePresentationStatus = null;
     const workerLifecycleGeneration = bridge.lifecycleGeneration;
     const handleWorkerMessage = (event) => {
       if (
@@ -2278,6 +2286,43 @@ export function createUlgWorkerOffscreenPresentationBridge({
         bridge.committedResidentSchedulePresentationStatus = Object.freeze({
           ...contentReceipt
         });
+      }
+      // Diagnostic ring: a committed-presentation receipt that fails one of
+      // the conjunctions above is otherwise invisible (the page's wait sees
+      // nothing and burns its full timeout). Record every evaluation of a
+      // receipt that CLAIMS committed presentation so a probe can name the
+      // failing term.
+      if (
+        contentReceipt?.stateManagerCommittedPresentation === true
+        || /committed-resident-schedule-presentation/.test(
+          String(contentReceipt?.status || '')
+        )
+      ) {
+        const ring = (globalThis.__ulgCommittedPresentationReceiptTrace ||= []);
+        ring.push({
+          atMs: Math.round(
+            (globalThis.performance?.now?.() ?? Date.now())
+          ),
+          status: contentReceipt?.status ?? null,
+          reason: contentReceipt?.reason ?? null,
+          sphStep: contentReceipt?.sphStep ?? null,
+          stepOrdinal: contentReceipt?.stepOrdinal ?? null,
+          scheduleId: contentReceipt?.scheduleId ?? null,
+          laneId: contentReceipt?.laneId ?? null,
+          presentationLaneEpoch: contentReceipt?.presentationLaneEpoch ?? null,
+          streamLaneEpoch:
+            bridge.residentRenderCandidateStreamIdentity
+              ?.presentationLaneEpoch ?? null,
+          streamLaneId:
+            bridge.residentRenderCandidateStreamIdentity?.laneId ?? null,
+          residentExecutionGeneration:
+            contentReceipt?.residentExecutionGeneration ?? null,
+          exactFramebufferReceipt,
+          committedReceiptAuthorityReady,
+          candidateReceiptReady,
+          committedPresentationTerminalReceipt
+        });
+        if (ring.length > 32) ring.splice(0, ring.length - 32);
       }
       const compactContentReceipt = exactFramebufferReceipt
         ? Object.freeze({

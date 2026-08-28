@@ -9094,7 +9094,12 @@ fn p2g_spatial_directory_admitted() -> bool {
     return false;
   }
   return schroeder_spatial_directory[0u] == SCHROEDER_SPATIAL_MAGIC
-    && schroeder_spatial_directory[1u] == SCHROEDER_SPATIAL_VERSION
+    // v1 and v2 directory ABIs share this gate's header invariants; see the
+    // authority-module version note. Pinning v1 froze all v2 mechanics.
+    && (
+      schroeder_spatial_directory[1u] == SCHROEDER_SPATIAL_VERSION
+      || schroeder_spatial_directory[1u] == SCHROEDER_SPATIAL_VERSION + 1u
+    )
     && (flags & (SCHROEDER_SPATIAL_STATUS_READY | SCHROEDER_SPATIAL_STATUS_ADMITTED))
       == (SCHROEDER_SPATIAL_STATUS_READY | SCHROEDER_SPATIAL_STATUS_ADMITTED)
     && (flags & rejected_flags) == 0u
@@ -9171,7 +9176,14 @@ fn p2g_spatial_particle_level(particle_index: u32) -> i32 {
   let cell_count = schroeder_spatial_directory[18u];
   let cell_keys_offset_words = schroeder_spatial_directory[29u];
   let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
-  let cell_index = schroeder_spatial_directory[particle_to_cell_offset_words + particle_index];
+  // Reverse map is cell-index-plus-one ('cell-index-plus-one-zero-dormant');
+  // zero = dormant/missing sentinel. A raw decode silently rejected the
+  // final cell's occupants and shifted every other lookup by one cell.
+  let reverse_entry = schroeder_spatial_directory[particle_to_cell_offset_words + particle_index];
+  if (reverse_entry == 0u) {
+    return bitcast<i32>(0x80000000u);
+  }
+  let cell_index = reverse_entry - 1u;
   if (cell_index >= cell_count) {
     return bitcast<i32>(0x80000000u);
   }

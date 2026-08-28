@@ -14693,13 +14693,26 @@ export function resolveSphSchroederHierarchyContactAdmission({
     });
   }
   if (!contactSolverRequested) {
+    // Explicit contact-free bulk mode: the MPM grid + EOS own liquid
+    // volume (the WebGPU-Ocean shape) and no pair-contact projection
+    // runs. Admission here is only the DECLARATION; the worker lane
+    // enforces eligibility against its law-activation receipt and fails
+    // closed with a typed reason when any law family that owns contact
+    // consequences (thermal, reactions, migration, two-level, surface
+    // tension, actionable gas boundary) is active for the schedule.
+    // Rationale: the canonical contact stack's rest-distance projection
+    // cancels the densification a lattice-seeded liquid needs to develop
+    // its hydrostatic gradient — measured 2026-08-28, it holds a water
+    // cube rigid at sim t=8s while the contact-free route collapses it
+    // correctly (plan/todo/scale-adaptive-law-activation-plan.md).
     return Object.freeze({
       schema: 'peercompute.ulg.sph-schroeder-hierarchy-contact-admission.v0',
-      status: 'schroeder-hierarchy-contact-requirement-rejected',
+      status: 'schroeder-hierarchy-contact-free-admitted',
       hierarchyRequested: true,
       contactSolverRequested: false,
-      admitted: false,
-      reason: 'worker-ss-requires-contact-solver'
+      admitted: true,
+      mode: 'explicit-contact-free-bulk',
+      reason: null
     });
   }
   return Object.freeze({
@@ -36947,7 +36960,14 @@ fn main(
     // worker derives eligibility from its law-activation receipt and simply
     // ignores the request (with a declared blocker) on any lane where a law
     // family or diagnostic could observe submit boundaries.
-    mechanicsSubmitBurstSteps = null
+    mechanicsSubmitBurstSteps = null,
+    // Diagnostic: per-step canonical spatial-authority evidence readback
+    // (rejection counters). Production runs never read this; a fail-closed
+    // GPU rollback is host-invisible without it.
+    observeCanonicalSpatialAuthority = false,
+    // Explicit consumer gate for the compact mechanics view on the fused
+    // canonical route; false selects the plain V1 full-grid variant.
+    consumeCompactMechanicsView = true
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -37893,6 +37913,7 @@ fn main(
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells,
       schroederSimulation: requestedSchroederSimulation,
+      contactSolverEnabled: requestedSchroederContactSolverEnabled,
       contactJacobiIterations: requestedContactJacobiIterations,
       contactCleanupPassBudget: requestedContactCleanupPassBudget,
       contactInnerRounds: requestedContactInnerRounds,
@@ -38465,7 +38486,14 @@ fn main(
             requestedContactKinematicsParticleBinMetadataReadback,
           // Interactive contact-solver preset (clamped): the demo route
           // declares its own sealed budget instead of inheriting the
-          // batch/native default.
+          // batch/native default. contactSolverEnabled=false declares the
+          // explicit contact-free bulk profile (worker enforces
+          // eligibility against its law-activation receipt).
+          contactSolverEnabled: requestedSchroederContactSolverEnabled,
+          consumeCompactMechanicsView:
+            consumeCompactMechanicsView !== false,
+          observeCanonicalSpatialAuthority:
+            observeCanonicalSpatialAuthority === true,
           contactJacobiIterations: requestedContactJacobiIterations,
           contactCleanupPassBudget: requestedContactCleanupPassBudget,
           contactInnerRounds: requestedContactInnerRounds,

@@ -446,3 +446,53 @@ Phase-A queue, re-ranked by this finding:
    activation receipt (the 45-67x).
 3. The M4 burst next rungs and the 104k turnaround regression, re-measured
    AFTER 1-2, since flowing water changes every cost profile.
+
+## The freeze root cause (day 2, second leg): the unfinished V1→V2
+## directory-consumer migration
+
+The per-stage falsification overturned the contact hypothesis: removing
+the contact stage entirely (the new explicit contact-free mode) left the
+cube rigid at +50% rate. The observe instrument (per-step authority
+evidence readback + directory header dump, now permanent under
+`?observeSpatialAuthority=1`) then walked the whole chain down:
+
+1. **The canonical mechanics authority gate rejected EVERY step and the
+   global fail-closed finalize rolled all mechanics back** — silently
+   (production reads no evidence), with commits, seals, and sim-time all
+   advancing. Every canonical-lane scene ever measured ran rolled-back
+   (frozen) mechanics on the plain/compact routes; only the field-view
+   path (sodium) escaped, because its ActiveSource validation replaces
+   this gate entirely.
+2. Three seams of one unfinished V1→V2 directory ABI migration caused the
+   rejection, each individually sufficient:
+   - **Version pin**: the consumer gates required header version 1;
+     every live directory stamps version 2 (both producers). Any v2
+     directory failed word 1 outright.
+   - **Reverse-map encoding**: v2 writes `cell_index + 1` (zero =
+     dormant sentinel); the consumers decoded raw — rejecting the whole
+     final cell's occupants and silently shifting every other lookup by
+     one cell (masked in single-level runs).
+   - **Query-geometry offset**: the builder writes the 6-word query
+     profile at `particle_to_cell + capacity`; the consumers read at
+     `+ live count` — a zeroed gap whenever live != capacity. Fixed by
+     locating it from the physical high-water word (47) minus its size,
+     which is correct for both layouts.
+   - Feeding (3): the host's exact-near query-profile gate still had the
+     migration's old `no GPU-authored logical count` exclusion, so every
+     product-carrying lane built directories with mode GENERIC and no
+     query words at all. The WGSL side of that exclusion had already been
+     removed by the v2 assembly — the host half was forgotten.
+3. After the four fixes: zero rejection counters, header + geometry
+   admitted, and a sampled output row shows textbook free-fall with
+   velocity accumulating across chained steps — canonical mechanics
+   integrates and chains correctly for the first time on v2 directories.
+
+Consequence for the tiers: the night-1 curve measured rolled-back
+mechanics; every canonical rate must be re-measured against live physics.
+The contact-solver and compact-view questions are now REACHABLE (they
+were unfalsifiable while the rollback masked everything): the post-fix
+canonical run with contact ON still holds the lattice rigid, so the
+contact rest-distance projection question is back on the table as the
+next per-stage falsification, together with the compact path's own
+zero-evidence admission failure (bulk selects compact by default; the
+explicit `compactMechanicsView=0` knob now exists to force plain V1).

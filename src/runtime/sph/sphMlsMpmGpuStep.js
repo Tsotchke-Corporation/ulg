@@ -10215,6 +10215,12 @@ export function createFusedSchroederActiveNodeBinding({
   particleStateBuffer = null,
   particleIdentityBuffer = null,
   canonicalParticleContinuation = null,
+  // Explicit consumer gate for the compact mechanics view. When false the
+  // binding presents the plain canonical V1 directory route (full-grid
+  // geometry, generation-owned evidence buffer) even when the generation
+  // published a compact view; the field/active-source sub-modes derive
+  // from the view and turn off with it.
+  consumeCompactMechanicsView = true,
   labelPrefix = 'ulg-mls-mpm-fused'
 } = {}) {
   const execution = schroederSpatialEpochGeneration?.execution || null;
@@ -10677,7 +10683,8 @@ export function createFusedSchroederActiveNodeBinding({
       status: rejectionStatus
     };
   }
-  const mechanicsViewEnabled = mechanicsViewPublished
+  const mechanicsViewEnabled = consumeCompactMechanicsView !== false
+    && mechanicsViewPublished
     && mechanicsViewAdmission?.admitted === true
     && mechanicsViewOwnerAdmitted
     && mechanicsViewShapeAdmitted
@@ -10919,8 +10926,10 @@ function decodeCanonicalSpatialAuthorityEvidence(words, {
   const expectedGenerationId = Math.max(0, Math.round(finiteNumber(generationId, 0)));
   const identityMatches = value('magic') === SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_MAGIC
     && value('generationId') === expectedGenerationId;
+  // The observed P2G authenticator writes stage flags into word 7: +1 for
+  // the directory header check, +2 for the query-geometry check.
   const p2gAdmitted = value('p2gAttempted') === expectedParticleCount
-    && value('p2gDirectoryAdmitted') === expectedParticleCount
+    && value('p2gDirectoryAdmitted') === 3
     && value('p2gReverseAdmitted') === expectedParticleCount
     && value('p2gHeaderRejected') === 0
     && value('p2gReverseRejected') === 0
@@ -11607,6 +11616,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   schroederSpatialEpochGeneration = null,
   schroederSpatialMechanicalProposal = null,
   canonicalSpatialRequired = false,
+  // Explicit contact-free bulk mode: the canonical route runs the generic
+  // binned separation instead of the contact proposal's encodeApply. Only
+  // valid when the caller declared contact-free AND built no proposal.
+  canonicalContactFreeExplicit = false,
+  consumeCompactMechanicsView = true,
   observeCanonicalSpatialAuthority = false
 }) {
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -11641,6 +11655,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     selectedLevel: schroederSelectedLevel,
     particleStateBuffer: sphParticleUpload.stateBuffer,
     particleIdentityBuffer: sphParticleUpload.identityBuffer,
+    consumeCompactMechanicsView,
     labelPrefix: 'ulg-mls-mpm-fused'
   });
   const canonicalSpatialAuthority = schroederActiveNodeFilter.enabled === true;
@@ -11991,7 +12006,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
               : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl)
           : mlsMpmP2gGridProjectionWgsl)));
     const p2gVariant = canonicalSpatialAuthority
-      ? `canonical-spatial.${observeCanonicalSpatialAuthority === true
+      ? `canonical-spatial.rev-plus-one.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}${mechanicsFieldViewEnabled
             ? `.mechanics-field.single-level-deterministic-reduction-finalize-heat-clear${
@@ -12376,7 +12391,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
               : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl))
       : mlsMpmG2pReconstructWgsl;
     const g2pVariant = canonicalSpatialAuthority
-      ? `canonical-spatial.${observeCanonicalSpatialAuthority === true
+      ? `canonical-spatial.rev-plus-one.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}${mechanicsFieldViewEnabled
             ? `.mechanics-field${activeSourceV2P2gEnabled
@@ -12712,10 +12727,14 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
     if (!mechanicsFieldProductionPass) g2pPass.end();
     if (mechanicsFieldProductionPass) mechanicsFieldProductionPass.end();
+    let directoryHeaderReadbackBuffer = null;
     if (spatialAuthorityEvidenceReadbackBuffer) {
       if (typeof encoder.copyBufferToBuffer !== 'function') {
         throw new Error('Canonical spatial authority evidence requires GPUCommandEncoder.copyBufferToBuffer');
       }
+      // Both sources hold the same absolute word layout: words 0-3 are the
+      // epoch prefix, evidence proper at words 4-19 (the per-call clear
+      // above targets exactly those words), so the copy reads from 0.
       encoder.copyBufferToBuffer(
         compactMechanicsG2pEvidenceBuffer
           ?? schroederLevelFilter.assignmentBuffer,
@@ -12724,9 +12743,73 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         0,
         SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
       );
+      // Observe mode also samples one output-state row (position/mass) so
+      // "mechanics admitted but state never moves" is directly visible.
+      const observeSampleParticleIndex = 0;
+      const observeStateSampleReadback = device.createBuffer({
+        label: 'ulg-mls-mpm-fused-state-sample-readback',
+        size: 32,
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      });
+      encoder.copyBufferToBuffer(
+        outStateBuffer,
+        observeSampleParticleIndex * SPH_GPU_PARTICLE_STATE_FLOATS
+          * Float32Array.BYTES_PER_ELEMENT,
+        observeStateSampleReadback,
+        0,
+        32
+      );
+      spatialAuthorityEvidenceReadbackBuffer.__ulgStateSample = {
+        buffer: observeStateSampleReadback,
+        particleIndex: observeSampleParticleIndex
+      };
+      // Observe mode also reads the directory header so a header
+      // authentication failure names its failing terms instead of
+      // presenting as a bare rejected flag.
+      if (canonicalSpatialAuthority && schroederActiveNodeFilter.activeNodeBuffer) {
+        directoryHeaderReadbackBuffer = device.createBuffer({
+          label: 'ulg-mls-mpm-fused-directory-header-readback',
+          size: 64 * Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+        });
+        encoder.copyBufferToBuffer(
+          schroederActiveNodeFilter.activeNodeBuffer,
+          0,
+          directoryHeaderReadbackBuffer,
+          0,
+          64 * Uint32Array.BYTES_PER_ELEMENT
+        );
+      }
     }
     let separation;
-    if (canonicalSpatialAuthority) {
+    if (canonicalSpatialAuthority && canonicalContactFreeExplicit) {
+      if (schroederSpatialMechanicalProposal != null) {
+        throw new Error(
+          'Explicit contact-free bulk mode must not be combined with a mechanical contact proposal'
+        );
+      }
+      // Contact-free canonical route: the MPM grid + EOS own liquid volume
+      // and the generic binned separation (the same passes the
+      // pre-Schroeder route runs) provides anti-overlap, replacing the
+      // contact proposal's encodeApply.
+      separation = {
+        ...encodeMlsMpmParticleSeparationPasses(device, encoder, {
+          stateBuffer: outStateBuffer,
+          mechanicsBuffer: outMechanicsBuffer,
+          particleCount,
+          boxDimsM: dims,
+          relaxation: mlsMpmParticleState?.particleSeparationRelaxation
+            ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+          normalVelocityDamping:
+            mlsMpmParticleState?.particleSeparationVelocityDamping
+            ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
+          maxPairRestDistanceM:
+            maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
+          gridSpacingM: gridSpec.gridSpacingM
+        }),
+        canonicalContactFreeExplicit: true
+      };
+    } else if (canonicalSpatialAuthority) {
       if (
         !schroederSpatialMechanicalProposalMatchesContract(
           schroederSpatialMechanicalProposal,
@@ -12861,6 +12944,159 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schroederActiveNodeFilter.gpuAdmissionObserved = true;
       schroederActiveNodeFilter.gpuAdmissionStatus = spatialAuthorityEvidence.status;
       schroederActiveNodeFilter.gpuFallbackObserved = !spatialAuthorityEvidence.admitted;
+      // Observe mode is an explicit diagnostic: surface the decoded
+      // rejection counters where a headless probe can capture them. A
+      // fail-closed rollback is otherwise host-invisible in production
+      // (the step silently becomes a mechanics no-op).
+      let observedStateSample = null;
+      const stateSampleRef =
+        spatialAuthorityEvidenceReadbackBuffer.__ulgStateSample ?? null;
+      if (stateSampleRef) {
+        await stateSampleRef.buffer.mapAsync(GPU_MAP_MODE.READ);
+        const sampleFloats = new Float32Array(
+          stateSampleRef.buffer.getMappedRange()
+        ).slice();
+        stateSampleRef.buffer.unmap();
+        stateSampleRef.buffer.destroy();
+        observedStateSample = {
+          particleIndex: stateSampleRef.particleIndex,
+          row: Array.from(sampleFloats)
+        };
+      }
+      let directoryHeaderMismatches = null;
+      if (directoryHeaderReadbackBuffer) {
+        await directoryHeaderReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+        const header = new Uint32Array(
+          directoryHeaderReadbackBuffer.getMappedRange()
+        ).slice();
+        directoryHeaderReadbackBuffer.unmap();
+        directoryHeaderReadbackBuffer.destroy();
+        const expect = {
+          'word3-generationId':
+            [header[3], schroederActiveNodeFilter.generationId >>> 0],
+          'word4-deviceOrdinal':
+            [header[4], schroederActiveNodeFilter.deviceOrdinal >>> 0],
+          'word5-laneOrdinal':
+            [header[5], schroederActiveNodeFilter.laneOrdinal >>> 0],
+          'word6-leaseToken':
+            [header[6], schroederActiveNodeFilter.leaseToken >>> 0],
+          'word7-sourceFamilyId':
+            [header[7], schroederActiveNodeFilter.sourceFamilyId >>> 0],
+          'word8-storageGeneration':
+            [header[8], schroederActiveNodeFilter.storageGeneration >>> 0],
+          'word9-physicsTick':
+            [header[9], schroederActiveNodeFilter.physicsTick >>> 0],
+          'word10-physicsSubstep':
+            [header[10], schroederActiveNodeFilter.physicsSubstep >>> 0],
+          'word11-positionEpoch':
+            [header[11], schroederActiveNodeFilter.positionEpoch >>> 0],
+          'word12-topologyEpoch':
+            [header[12], schroederActiveNodeFilter.topologyEpoch >>> 0],
+          'word13-chartEpoch':
+            [header[13], schroederActiveNodeFilter.chartEpoch >>> 0],
+          'word14-levelEpoch':
+            [header[14], schroederActiveNodeFilter.levelEpoch >>> 0],
+          'word15-supportEpoch':
+            [header[15], schroederActiveNodeFilter.supportEpoch >>> 0],
+          'word16-sourceCount-vs-particleCount':
+            [header[16], particleCount >>> 0],
+          'word23-invalidSourceCount': [header[23], 0],
+          'word24-overflowCount': [header[24], 0],
+          'word40-primitiveOverflow': [header[40], 0]
+        };
+        directoryHeaderMismatches = Object.fromEntries(
+          Object.entries(expect).filter(([, [got, want]]) => got !== want)
+        );
+        directoryHeaderMismatches.flagsWord2 = header[2];
+        directoryHeaderMismatches.sortMode27 = header[27];
+        directoryHeaderMismatches.sortKeyWords26 = header[26];
+        directoryHeaderMismatches.primitiveStatus41 = header[41];
+        directoryHeaderMismatches.primitiveAdmitted39 = header[39];
+        directoryHeaderMismatches.sourceAdapter46 = header[46];
+        directoryHeaderMismatches.cellCount18 = header[18];
+        directoryHeaderMismatches.buildOrdinal33 = header[33];
+        directoryHeaderMismatches.word34 = header[34];
+        directoryHeaderMismatches.word35 = header[35];
+        directoryHeaderMismatches.word36 = header[36];
+        // Second hop: the query-geometry words live at
+        // particle_to_cell_offset + source_count, known only after the
+        // header read. Observe-only extra submit.
+        directoryHeaderMismatches.headerWords = Array.from(header.slice(0, 48));
+        directoryHeaderMismatches.word47upperBound = header[47];
+        directoryHeaderMismatches.word32reverseOffset = header[32];
+        directoryHeaderMismatches.word16sourceCount = header[16];
+        directoryHeaderMismatches.word17sourceCapacity = header[17];
+        directoryHeaderMismatches.word45 = header[45];
+        try {
+          const tailWords = 48;
+          const queryOffsetWords = Math.max(0, (header[47] >>> 0) - tailWords + 6);
+          const queryReadback = device.createBuffer({
+            label: 'ulg-mls-mpm-fused-query-geometry-readback',
+            size: tailWords * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+          });
+          const queryEncoder = device.createCommandEncoder();
+          queryEncoder.copyBufferToBuffer(
+            schroederActiveNodeFilter.activeNodeBuffer,
+            queryOffsetWords * Uint32Array.BYTES_PER_ELEMENT,
+            queryReadback,
+            0,
+            tailWords * Uint32Array.BYTES_PER_ELEMENT
+          );
+          device.queue.submit([queryEncoder.finish()]);
+          await queryReadback.mapAsync(GPU_MAP_MODE.READ);
+          const queryWords = new Uint32Array(queryReadback.getMappedRange()).slice();
+          queryReadback.unmap();
+          queryReadback.destroy();
+          const queryFloats = new Float32Array(queryWords.buffer);
+          directoryHeaderMismatches.queryWords = Array.from(queryWords);
+          directoryHeaderMismatches.queryMinLevel = queryWords[1] | 0;
+          directoryHeaderMismatches.queryMaxLevel = queryWords[2] | 0;
+          directoryHeaderMismatches.queryBaseSpacingM = queryFloats[3];
+          directoryHeaderMismatches.mechanicsSpacingF32 =
+            Math.fround(gridSpec.gridSpacingM);
+          directoryHeaderMismatches.spacingBitEqual =
+            Math.fround(queryFloats[3]) === Math.fround(gridSpec.gridSpacingM);
+        } catch (error) {
+          directoryHeaderMismatches.queryReadError = String(error).slice(0, 120);
+        }
+      }
+      console.warn(
+        'ulg-authority-evidence',
+        JSON.stringify({
+          observedStateSample,
+          fusedDtSeconds: dtSeconds,
+          fusedGravity: gravity,
+          fusedInternalPressureScale: internalPressureScale,
+          canonicalSpatialAuthority,
+          authorityBindingMode: schroederLevelFilter.authorityBindingMode,
+          levelFilterEnabled: schroederLevelFilter.enabled === true,
+          selectedLevel: schroederLevelFilter.selectedLevel ?? null,
+          spatialEvidenceEnabled:
+            schroederLevelFilter.spatialEvidenceEnabled === true,
+          mechanicsFieldViewEnabled,
+          compactMechanicsViewEnabled,
+          activeSourceV2P2gEnabled,
+          directoryHeaderMismatches,
+          queryGeometry: (() => {
+            const execution =
+              schroederSpatialEpochGeneration?.execution ?? null;
+            const evidence = execution?.queryGeometryEvidence ?? null;
+            return {
+              executionQueryGeometryMode:
+                execution?.queryGeometryMode ?? null,
+              evidenceMode: evidence?.mode ?? null,
+              evidenceModeName: evidence?.modeName ?? null,
+              evidenceChartId: evidence?.chartId ?? null,
+              evidenceBaseGridSpacingM: evidence?.baseGridSpacingM ?? null,
+              evidenceSourceAdapterId: evidence?.sourceAdapterId ?? null,
+              selectedLevel: schroederSelectedLevel,
+              mechanicsGridSpacingF32: Math.fround(gridSpec.gridSpacingM)
+            };
+          })(),
+          evidence: spatialAuthorityEvidence
+        })
+      );
     }
     attachMechanicsFieldIndirectDispatchTopology(
       dispatchTopology,
@@ -31799,6 +32035,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   // batch/native/diagnostic call context, so it declares the batch preset
   // explicitly (the proposals module itself has no cleanup budget default);
   // the interactive demo route overrides these with its own preset.
+  // Explicit contact-free bulk mode: false skips the canonical mechanical
+  // contact proposal entirely and runs the generic binned separation
+  // instead (MPM grid + EOS own liquid volume). The caller declares it;
+  // the worker lane enforces eligibility against its law-activation
+  // receipt. Rationale: the contact stack's rest-distance projection
+  // cancels the densification a lattice-seeded liquid needs to develop a
+  // hydrostatic gradient (2026-08-28, see the adaptive-laws plan).
+  contactSolverEnabled = true,
+  // Explicit consumer gate for the compact mechanics view (see
+  // createFusedSchroederActiveNodeBinding); false presents the plain
+  // canonical V1 full-grid route.
+  consumeCompactMechanicsView = true,
   contactJacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   contactCleanupPassBudget =
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES,
@@ -32295,10 +32543,28 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         || enabledSpatialEpochConsumerReaders.size > 0
       )
     );
+    const canonicalContactFreeExplicit = Boolean(
+      canonicalSpatialProposalMode && contactSolverEnabled === false
+    );
+    if (canonicalContactFreeExplicit) {
+      // Contact-free is a bulk-substrate mode: any law family that consumes
+      // the contact interface receipt makes the request incoherent, and
+      // this route fails closed rather than fabricating a receipt.
+      if (thermalMaterialTable) {
+        throw new Error(
+          'Explicit contact-free bulk mode cannot run thermal laws: the thermal proposal consumes the mechanical contact interface receipt'
+        );
+      }
+      if ((Number(reactionTable?.reactionCount) || 0) > 0) {
+        throw new Error(
+          'Explicit contact-free bulk mode cannot run reactions: reaction discovery consumes the mechanical contact stage'
+        );
+      }
+    }
     stageMs.spatialMechanicalProposal = 0;
     stageMs.spatialReactionDiscoveryProposal = 0;
     stageMs.spatialThermalProposal = 0;
-    if (canonicalSpatialProposalMode) {
+    if (canonicalSpatialProposalMode && !canonicalContactFreeExplicit) {
       assertCanonicalSpatialMechanicalProposalGeneration({
         device: resolvedDevice,
         generation: schroederSpatialEpochGeneration,
@@ -32602,6 +32868,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       ambientBuoyancyRequired,
       residentProductMass
     });
+    if (canonicalContactFreeExplicit && !useFusedNoFullMechanics) {
+      // The unfused canonical route substitutes the contact proposal's
+      // encodeApply for its separation stage; without a proposal it has no
+      // separation authority. Contact-free is admitted on the fused route
+      // only, and this fails closed instead of running proposal-less
+      // unfused mechanics.
+      throw new Error(
+        'Explicit contact-free bulk mode requires the fused no-full mechanics path'
+      );
+    }
     if (useFusedNoFullMechanics) {
       // The fused call encodes P2G and G2P in one submission. Authenticate
       // both readers before invoking it; recording either after the call
@@ -32640,6 +32916,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         schroederSpatialEpochGeneration,
         schroederSpatialMechanicalProposal: spatialMechanicalProposal,
         canonicalSpatialRequired,
+        canonicalContactFreeExplicit,
+        consumeCompactMechanicsView,
         observeCanonicalSpatialAuthority
       }));
       markStageProgress('resident-stage-dispatch-topology', {

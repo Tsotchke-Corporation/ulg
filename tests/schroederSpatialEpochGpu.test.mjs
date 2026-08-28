@@ -3877,7 +3877,12 @@ test('direct spatial generation copies an exact GPU logical count while retainin
   assert.equal(resolved.ready, true, resolved.reason);
   assert.equal(resolved.logicalSourceCountAuthority, logicalSourceCountAuthority);
   assert.equal(resolved.logicalSourceCountGpuAuthored, true);
-  assert.equal(resolved.exactNearQueryProfile.ready, false);
+  // The exact-near query profile is geometry-only (chart, level range,
+  // base spacing) and deliberately count-independent: a GPU-authored
+  // logical count no longer disqualifies it. (Its old exclusion left every
+  // product-carrying lane's directory without query geometry, which the
+  // canonical mechanics header authentication then rejected fail-closed.)
+  assert.equal(resolved.exactNearQueryProfile.ready, true);
 
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device,

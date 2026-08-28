@@ -64,13 +64,13 @@ test('authoritative worker profile normalizes dependent controls and fine subste
   );
   assert.equal(state.authoritativeFineSubstepMinimum, 2);
   assert.equal(state.contactSolver, true);
-  assert.equal(state.disabled.contactSolver, true);
-  assert.equal(state.contactSolverMode, 'required-canonical-spatial-contact');
+  assert.equal(state.disabled.contactSolver, false);
+  assert.equal(state.contactSolverMode, 'canonical-spatial-contact');
   assert.equal(state.profile, 'ss-two-authoritative-worker');
   assert.deepEqual(state.dependencyIssues, []);
 });
 
-test('worker SS treats contact as required and never normalizes it into SS-off', () => {
+test('worker SS admits explicit contact-off as the contact-free bulk profile', () => {
   const raw = resolveSphMountedArchitectureControlState({
     mechanicsMode: 'mlsmpm',
     ss: true,
@@ -79,9 +79,13 @@ test('worker SS treats contact as required and never normalizes it into SS-off',
   assert.equal(raw.ss, true);
   assert.equal(raw.contactSolver, false);
   assert.equal(raw.disabled.contactSolver, false);
-  assert.deepEqual(raw.dependencyIssues, ['worker-ss-requires-contact-solver']);
+  assert.deepEqual(raw.dependencyIssues, []);
+  assert.equal(raw.contactSolverMode, 'explicit-contact-free-bulk');
   assert.equal(raw.profile, 'custom');
 
+  // Normalization preserves the explicit choice: contact-off never turns
+  // SS off and is never silently forced back on (the worker lane enforces
+  // eligibility against its law-activation receipt instead).
   const normalized = resolveSphMountedArchitectureControlState({
     mechanicsMode: 'mlsmpm',
     ss: true,
@@ -89,8 +93,9 @@ test('worker SS treats contact as required and never normalizes it into SS-off',
     normalizeDependencies: true
   });
   assert.equal(normalized.ss, true);
-  assert.equal(normalized.contactSolver, true);
-  assert.equal(normalized.disabled.contactSolver, true);
+  assert.equal(normalized.contactSolver, false);
+  assert.equal(normalized.disabled.contactSolver, false);
+  assert.equal(normalized.contactSolverMode, 'explicit-contact-free-bulk');
   assert.deepEqual(normalized.dependencyIssues, []);
 });
 

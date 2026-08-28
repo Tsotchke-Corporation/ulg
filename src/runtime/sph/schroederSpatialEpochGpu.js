@@ -539,9 +539,16 @@ export function resolveSchroederSpatialDirectoryActiveNodeSource(
   const exactNearLevelCount = exactNearMinLevel == null || exactNearMaxLevel == null
     ? null
     : exactNearMaxLevel - exactNearMinLevel + 1;
+  // The query profile is geometry-only (chart, level range, base spacing)
+  // and is deliberately count-independent: the v2 builder writes it at the
+  // capacity offset and consumers locate it from the physical high-water
+  // word, so a GPU-authored logical count no longer disqualifies it. The
+  // old `admittedLogicalCountAuthority == null` requirement here was the
+  // unfinished half of that migration: it forced mode GENERIC on every
+  // product-carrying lane, the directory then carried no query geometry,
+  // and canonical mechanics' header authentication failed closed on all of
+  // them - presenting as silently frozen (rolled-back) bulk physics.
   const exactNearQueryProfileReady = Boolean(
-    admittedLogicalCountAuthority == null
-    &&
     source.spatialEpochSourceSchema
       === 'peercompute.ulg.schroeder-spatial-active-node-source.v1'
     && source.spatialEpochSourceReady === true

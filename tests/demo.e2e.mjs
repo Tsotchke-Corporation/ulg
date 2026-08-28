@@ -6017,7 +6017,7 @@ test('SPH preset changes reload the matching runtime tuning instead of retaining
   });
 });
 
-test('SPH worker SS rejects contact-off instead of switching to a direct hierarchy route', async ({ page }) => {
+test('SPH worker SS admits explicit contact-off as the contact-free bulk mode', async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto('/?scenario=water-cycle&residentAuto=0&contactSolver=0');
   await ensureSphPhaseOverlayVisible(page, { timeout: 60_000 });
@@ -6025,39 +6025,31 @@ test('SPH worker SS rejects contact-off instead of switching to a direct hierarc
   await expect.poll(() => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     return {
-      admissionStatus: overlay?.__sphSimulationRuntimeAdmission?.status ?? null,
-      admissionReady: overlay?.__sphSimulationRuntimeAdmission?.ready ?? null,
-      admissionSource: overlay?.__sphSimulationRuntimeAdmission?.source ?? null,
-      admissionErrorCode:
-        overlay?.__sphSimulationRuntimeAdmission?.errorCode ?? null,
+      admissionBlocked:
+        overlay?.__sphSimulationRuntimeAdmission?.status
+          === 'blocked-sph-simulation-runtime',
       hierarchyContact:
         overlay?.__sphSchroederHierarchyContactAdmission ?? null,
       hierarchyEnabled:
         overlay?.__sphSchroederSimulationConfig?.enabled ?? null,
       contactSolverEnabled:
-        overlay?.__sphSchroederSimulationConfig?.contactSolverEnabled ?? null,
-      residentExecutionPresent: Boolean(overlay?.__mlsMpmResidentSteps),
-      playDisabled: overlay?.querySelector('#sph-play')?.disabled ?? null,
-      stepDisabled: overlay?.querySelector('#sph-step')?.disabled ?? null
+        overlay?.__sphSchroederSimulationConfig?.contactSolverEnabled ?? null
     };
   }), { timeout: 60_000 }).toEqual({
-    admissionStatus: 'blocked-sph-simulation-runtime',
-    admissionReady: false,
-    admissionSource: 'schroeder-hierarchy-contact-admission',
-    admissionErrorCode: 'worker-ss-requires-contact-solver',
+    // The declaration is admitted at the mount; eligibility (quiescent
+    // law-activation receipt) is enforced by the worker lane per schedule.
+    admissionBlocked: false,
     hierarchyContact: {
       schema: 'peercompute.ulg.sph-schroeder-hierarchy-contact-admission.v0',
-      status: 'schroeder-hierarchy-contact-requirement-rejected',
+      status: 'schroeder-hierarchy-contact-free-admitted',
       hierarchyRequested: true,
       contactSolverRequested: false,
-      admitted: false,
-      reason: 'worker-ss-requires-contact-solver'
+      admitted: true,
+      mode: 'explicit-contact-free-bulk',
+      reason: null
     },
     hierarchyEnabled: true,
-    contactSolverEnabled: false,
-    residentExecutionPresent: false,
-    playDisabled: true,
-    stepDisabled: true
+    contactSolverEnabled: false
   });
 });
 

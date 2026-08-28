@@ -166,20 +166,21 @@ import {
   submitQueueOrderedWork
 } from '../src/runtime/webgpuComputeLayout.js';
 
-test('SS contact admission rejects contact-off without changing the requested architecture', () => {
-  const rejected = resolveSphSchroederHierarchyContactAdmission({
+test('SS contact admission declares contact-off as the explicit contact-free bulk mode', () => {
+  const contactFree = resolveSphSchroederHierarchyContactAdmission({
     schroederSimulation: true,
     contactSolver: false
   });
-  assert.deepEqual(rejected, {
+  assert.deepEqual(contactFree, {
     schema: 'peercompute.ulg.sph-schroeder-hierarchy-contact-admission.v0',
-    status: 'schroeder-hierarchy-contact-requirement-rejected',
+    status: 'schroeder-hierarchy-contact-free-admitted',
     hierarchyRequested: true,
     contactSolverRequested: false,
-    admitted: false,
-    reason: 'worker-ss-requires-contact-solver'
+    admitted: true,
+    mode: 'explicit-contact-free-bulk',
+    reason: null
   });
-  assert.equal(Object.isFrozen(rejected), true);
+  assert.equal(Object.isFrozen(contactFree), true);
   assert.equal(resolveSphSchroederHierarchyContactAdmission({
     schroederSimulation: true,
     contactSolver: true

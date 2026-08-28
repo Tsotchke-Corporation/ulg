@@ -93,7 +93,16 @@ fn p2g_canonical_query_geometry_admitted() -> bool {
   let source_count = schroeder_spatial_directory[16u];
   let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
   let physical_upper_bound_words = schroeder_spatial_directory[47u];
-  let query_offset_words = particle_to_cell_offset_words + source_count;
+  // The builder writes the 6-word query profile at particle_to_cell +
+  // physical_radix_count (the radix CAPACITY, not the live source count),
+  // and word 47's physical high water lands exactly at its end. Deriving
+  // the offset from the live count read a zeroed gap whenever live !=
+  // capacity, which failed base_spacing > 0 and froze mechanics via the
+  // global fail-closed rollback.
+  if (physical_upper_bound_words < 6u) {
+    return false;
+  }
+  let query_offset_words = physical_upper_bound_words - 6u;
   if (
     schroeder_spatial_directory[46u]
       != SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
@@ -147,13 +156,23 @@ fn p2g_authenticate_spatial_header(particle_index: u32) {
   }
   p2g_spatial_evidence_identity(particle_index);
   p2g_spatial_evidence_add(6u, params.particle_count);
-  var directory_admitted = p2g_spatial_directory_admitted();
-  if (directory_admitted) {
-    directory_admitted = p2g_canonical_query_geometry_admitted();
+  // Observed diagnostics split the two admission stages: word 7 gains +1
+  // for the directory header check and +2 for the query-geometry check, so
+  // a rejection names its stage (1 = header only, 2 = geometry only,
+  // particle_count-scaled legacy semantics preserved when both pass).
+  let header_admitted = p2g_spatial_directory_admitted();
+  if (header_admitted) {
+    p2g_spatial_evidence_add(7u, 1u);
   }
+  var directory_admitted = header_admitted;
   if (directory_admitted) {
-    p2g_spatial_evidence_add(7u, params.particle_count);
-  } else {
+    let geometry_admitted = p2g_canonical_query_geometry_admitted();
+    if (geometry_admitted) {
+      p2g_spatial_evidence_add(7u, 2u);
+    }
+    directory_admitted = geometry_admitted;
+  }
+  if (!directory_admitted) {
     p2g_spatial_reject(14u);
   }
 }
@@ -183,14 +202,31 @@ fn p2g_particle_enabled(particle_index: u32) -> bool {
     p2g_spatial_reject(15u);
     return false;
   }
-  let query_offset_words = particle_to_cell_offset_words + source_count;
+  // Query profile sits at the end of the physical region (word 47 high
+  // water minus its 6 words); see p2g_canonical_query_geometry_admitted.
+  let physical_upper_bound_words = schroeder_spatial_directory[47u];
+  if (physical_upper_bound_words < 6u) {
+    p2g_spatial_reject(15u);
+    return false;
+  }
+  let query_offset_words = physical_upper_bound_words - 6u;
   if (!p2g_spatial_range_within(query_offset_words, 6u, bound_words)) {
     p2g_spatial_reject(15u);
     return false;
   }
-  let cell_index = schroeder_spatial_directory[
+  // Every live directory encodes the physical reverse map as
+  // cell-index-plus-one with zero as the dormant/missing sentinel
+  // ('cell-index-plus-one-zero-dormant'); decoding it raw silently
+  // rejected the whole final cell's particles, and the global fail-closed
+  // finalize then rolled back every step's mechanics.
+  let reverse_entry = schroeder_spatial_directory[
     particle_to_cell_offset_words + particle_index
   ];
+  if (reverse_entry == 0u) {
+    p2g_spatial_reject(15u);
+    return false;
+  }
+  let cell_index = reverse_entry - 1u;
   if (cell_index >= cell_count) {
     p2g_spatial_reject(15u);
     return false;
@@ -311,7 +347,17 @@ fn g2p_spatial_directory_admitted() -> bool {
     return false;
   }
   return schroeder_spatial_directory[0u] == G2P_SCHROEDER_SPATIAL_MAGIC
-    && schroeder_spatial_directory[1u] == G2P_SCHROEDER_SPATIAL_VERSION
+    // The v2 directory ABI deliberately preserves every v1 consumer
+    // invariant this gate checks (same header word layout; reverse map is
+    // plus-one-encoded, decoded above; query geometry at the capacity
+    // offset, located from the high-water word). Pinning version 1 here
+    // rejected every v2 directory outright, and the global fail-closed
+    // finalize then silently rolled back all mechanics on the plain
+    // canonical route.
+    && (
+      schroeder_spatial_directory[1u] == G2P_SCHROEDER_SPATIAL_VERSION
+      || schroeder_spatial_directory[1u] == G2P_SCHROEDER_SPATIAL_VERSION + 1u
+    )
     && (flags & (
       G2P_SCHROEDER_SPATIAL_STATUS_READY | G2P_SCHROEDER_SPATIAL_STATUS_ADMITTED
     )) == (
@@ -391,7 +437,12 @@ fn g2p_spatial_particle_level(particle_index: u32) -> i32 {
   let cell_count = schroeder_spatial_directory[18u];
   let cell_keys_offset_words = schroeder_spatial_directory[29u];
   let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
-  let cell_index = schroeder_spatial_directory[particle_to_cell_offset_words + particle_index];
+  // Reverse map is cell-index-plus-one; zero = dormant/missing sentinel.
+  let reverse_entry = schroeder_spatial_directory[particle_to_cell_offset_words + particle_index];
+  if (reverse_entry == 0u) {
+    return bitcast<i32>(0x80000000u);
+  }
+  let cell_index = reverse_entry - 1u;
   if (cell_index >= cell_count) {
     return bitcast<i32>(0x80000000u);
   }
@@ -414,7 +465,12 @@ fn g2p_canonical_query_geometry_admitted() -> bool {
   let source_count = schroeder_spatial_directory[16u];
   let particle_to_cell_offset_words = schroeder_spatial_directory[32u];
   let physical_upper_bound_words = schroeder_spatial_directory[47u];
-  let query_offset_words = particle_to_cell_offset_words + source_count;
+  // Query profile sits at the end of the physical region (word 47 high
+  // water minus its 6 words); see p2g_canonical_query_geometry_admitted.
+  if (physical_upper_bound_words < 6u) {
+    return false;
+  }
+  let query_offset_words = physical_upper_bound_words - 6u;
   if (
     schroeder_spatial_directory[46u]
       != G2P_SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY
@@ -550,14 +606,27 @@ fn g2p_particle_enabled(particle_index: u32) -> bool {
     g2p_spatial_reject(17u);
     return false;
   }
-  let query_offset_words = particle_to_cell_offset_words + source_count;
+  // Query profile sits at the end of the physical region (word 47 high
+  // water minus its 6 words); see p2g_canonical_query_geometry_admitted.
+  let physical_upper_bound_words = schroeder_spatial_directory[47u];
+  if (physical_upper_bound_words < 6u) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  let query_offset_words = physical_upper_bound_words - 6u;
   if (!g2p_spatial_range_within(query_offset_words, 6u, bound_words)) {
     g2p_spatial_reject(17u);
     return false;
   }
-  let cell_index = schroeder_spatial_directory[
+  // Reverse map is cell-index-plus-one; zero = dormant/missing sentinel.
+  let reverse_entry = schroeder_spatial_directory[
     particle_to_cell_offset_words + particle_index
   ];
+  if (reverse_entry == 0u) {
+    g2p_spatial_reject(17u);
+    return false;
+  }
+  let cell_index = reverse_entry - 1u;
   if (cell_index >= cell_count) {
     g2p_spatial_reject(17u);
     return false;

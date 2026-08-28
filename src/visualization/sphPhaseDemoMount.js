@@ -465,10 +465,11 @@ export function resolveSphMountedArchitectureControlState({
     // hierarchy. Selecting it is an explicit architecture opt-out, so clear
     // the parent switch together with all of its dependent controls.
     if (state.mechanicsMode !== 'mlsmpm') state.ss = false;
-    // Canonical SS mechanics owns the pair-contact solve. Treat contact as a
-    // required law for every worker-SS profile: a disabled contact toggle must
-    // never silently turn the entire hierarchy into the legacy direct route.
-    if (workerSs) state.contactSolver = true;
+    // Contact under worker SS is an explicit choice, not a forced law:
+    // unchecked declares the contact-free bulk profile (grid + EOS own
+    // liquid volume; the worker lane fails closed unless its
+    // law-activation receipt is quiescent). It never silently turns the
+    // hierarchy into the legacy direct route.
     if (!workerSs) {
       for (const key of [
         'twoLevel',
@@ -530,9 +531,8 @@ export function resolveSphMountedArchitectureControlState({
   if (state.workerParticleOverlay && !normalizedWorkerSs) {
     dependencyIssues.push('worker-particle-overlay-requires-worker-ss');
   }
-  if (normalizedWorkerSs && !state.contactSolver) {
-    dependencyIssues.push('worker-ss-requires-contact-solver');
-  }
+  // Contact-off under worker SS is the declared contact-free bulk profile,
+  // not a dependency violation; the worker lane enforces its eligibility.
   if (
     normalizedTwoLevel
     && state.twoLevelAuthority === 'authoritative'
@@ -551,10 +551,9 @@ export function resolveSphMountedArchitectureControlState({
       !normalizedTwoLevel || state.twoLevelAuthority === 'authoritative',
     phaseVolumeMigration: !normalizedWorkerSs,
     mechanicsFieldPairV2: !normalizedTwoLevel,
-    // While valid SS is active contact is a required, read-only law. Keep an
-    // invalid unchecked control enabled so a dirty URL can be repaired in the
-    // UI instead of trapping the user in an uneditable state.
-    contactSolver: normalizedWorkerSs && state.contactSolver,
+    // Contact under worker SS is an explicit, editable choice: checked runs
+    // the canonical pair-contact solve, unchecked declares contact-free bulk.
+    contactSolver: false,
     workerParticleOverlay: !normalizedWorkerSs,
     twoLevelAuthority: !normalizedTwoLevel,
     fineSubsteps: !normalizedTwoLevel
@@ -630,7 +629,9 @@ export function resolveSphMountedArchitectureControlState({
     authoritativeFineSubstepMinimum:
       normalizedTwoLevel && state.twoLevelAuthority === 'authoritative' ? 2 : 1,
     contactSolverMode: normalizedWorkerSs
-      ? 'required-canonical-spatial-contact'
+      ? (state.contactSolver
+        ? 'canonical-spatial-contact'
+        : 'explicit-contact-free-bulk')
       : 'diagnostic-inactive-without-worker-ss',
     dependencyIssues: Object.freeze(dependencyIssues),
     disabled,
@@ -5753,7 +5754,7 @@ export async function mountSphPhaseDemoOverlay({
   );
   appendArchitectureToggle('schroederPhaseVolumeMigration', 'Phase-volume migration proposals', true);
   appendArchitectureToggle('schroederMechanicsFieldPairV2', 'Paired two-level mechanics fields', false);
-  appendArchitectureToggle('contactSolver', 'Contact solver (required for SS)', true);
+  appendArchitectureToggle('contactSolver', 'Contact solver (off = contact-free bulk)', true);
   appendArchitectureToggle('surfaceOverlay', 'Show native surface/debug overlay', false);
   appendArchitectureToggle('workerParticleOverlay', 'Show worker particle/debug overlay', false);
 
@@ -7212,6 +7213,22 @@ export async function mountSphPhaseDemoOverlay({
     2,
     256
   );
+  // Diagnostic: per-step canonical spatial-authority evidence readback.
+  const initialObserveSpatialAuthority = (() => {
+    const raw = initialHash.get('observeSpatialAuthority')
+      ?? initialQuery.get('observeSpatialAuthority')
+      ?? initialScenarioRuntime.observeSpatialAuthority;
+    return String(raw ?? '') === '1';
+  })();
+  // Explicit consumer gate for the compact mechanics view (0 selects the
+  // plain canonical V1 full-grid route).
+  const initialConsumeCompactMechanicsView = (() => {
+    const raw = initialHash.get('compactMechanicsView')
+      ?? initialQuery.get('compactMechanicsView')
+      ?? initialScenarioRuntime.compactMechanicsView;
+    if (raw == null || raw === '') return true;
+    return String(raw) !== '0' && String(raw) !== 'false';
+  })();
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -13289,6 +13306,8 @@ export async function mountSphPhaseDemoOverlay({
       const refreshPromise = scheduledScene.refreshMlsMpmResidentSteps?.({
       ambientPressurePa: initialAmbientPressurePaOverride,
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
+      observeCanonicalSpatialAuthority: initialObserveSpatialAuthority,
+      consumeCompactMechanicsView: initialConsumeCompactMechanicsView,
       preferWebGpu: true,
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,

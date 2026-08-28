@@ -16788,7 +16788,13 @@ function schroederSameLevelMechanicsTransactionReaderPlan({
   residentStepOptions = null,
   residentRunnerExactNearConsumerAware = true
 } = {}) {
-  const enabledConsumerReaderIds = twoLevelAuthoritative
+  // Explicit contact-free bulk mode: every consumer reader below is
+  // authenticated by a receipt the mechanical contact proposal issues, and
+  // contact-free schedules build no proposal. An empty consumer-reader plan
+  // is already a valid transaction shape (authoritative two-level uses it).
+  const contactFreeExplicit =
+    residentStepOptions?.contactSolverEnabled === false;
+  const enabledConsumerReaderIds = (twoLevelAuthoritative || contactFreeExplicit)
     ? []
     : (residentRunnerExactNearConsumerAware ? [
         SCHROEDER_SPATIAL_EPOCH_READER.PRESSURE_CONTACT_INTERFACE,

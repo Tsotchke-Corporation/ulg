@@ -6816,6 +6816,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // would let those reads resolve before the work they measure reaches
       // the queue, so diagnostics and the burst are mutually exclusive.
       if (scheduleProfilingRequested) blockers.push('gpu-timestamp-profiling');
+      // Authority-evidence observation awaits a per-step mapAsync whose
+      // source copy would be HELD by the burst — a deadlock, not merely a
+      // stale read. Mutually exclusive.
+      if (
+        record.schroederLane?.residentStepOptions
+          ?.observeCanonicalSpatialAuthority === true
+      ) {
+        blockers.push('spatial-authority-evidence-observation');
+      }
       submitBurstEligibilityCache = Object.freeze({
         schema: 'peercompute.ulg.worker-schedule-submit-burst-observation.v0',
         eligible: blockers.length === 0,
@@ -6826,6 +6835,42 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     };
     let submitBurstOpened = false;
     let submitBurstCloseStats = null;
+    // Explicit contact-free bulk mode: admitted only while every law family
+    // that owns contact consequences is quiescent for the schedule. The
+    // check is lazy (the activation receipt derives from lane options that
+    // a fresh lane adopts at seed time) and fails closed with a typed
+    // reason — never a silent hang.
+    let contactFreeEligibilityChecked = false;
+    const requireContactFreeScheduleEligibility = () => {
+      if (contactFreeEligibilityChecked) return;
+      contactFreeEligibilityChecked = true;
+      const activation = resolveScheduleLawActivation();
+      if (activation.contactSolver !== false) return;
+      const blockers = [];
+      if (activation.thermal) blockers.push('thermal-active');
+      if (activation.reaction) blockers.push('reaction-active');
+      if (activation.lawQueue) blockers.push('law-queue-active');
+      if (activation.lawNeighborCandidates) {
+        blockers.push('law-neighbor-candidates-active');
+      }
+      if (activation.phaseVolumeMigration) {
+        blockers.push('phase-volume-migration-active');
+      }
+      if (activation.twoLevelMechanics) {
+        blockers.push('two-level-mechanics-active');
+      }
+      if (activation.surfaceTension) blockers.push('surface-tension-active');
+      if (activation.gasBoundaryActionable) {
+        blockers.push('gas-boundary-actionable');
+      }
+      if (blockers.length > 0) {
+        throw workerResidentScheduleError(
+          'schedule-contact-free-requires-quiescent-laws',
+          `explicit contact-free bulk mode is blocked by: ${blockers.join(', ')}`,
+          { scheduleId, contactFreeBlockers: blockers }
+        );
+      }
+    };
     // Worker-clock schedule phase stamps for inter-cycle diagnosis: the gap
     // between one schedule's result assembly and the next schedule's first
     // step start is main-thread turnaround (commit, verify, re-request).
@@ -6930,6 +6975,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           cancelled = true;
           break;
         }
+        requireContactFreeScheduleEligibility();
         let currentStepSeal = null;
         let epochStageResult = null;
         let mechanicsStageResult = null;

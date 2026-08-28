@@ -500,6 +500,68 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
         { id: 'bounded-terminal', expectation: 'terminal reflux receipts commit and present advancing state' }
       ]
     }
+  }),
+  preset({
+    id: 'water-realtime',
+    label: 'Water - real-time dam break (fused bulk path)',
+    // The VISIBLE bulk-fluid demo. Same laws-quiescent water as bulk-water
+    // but on the pre-Schroeder fused sequence path (ss=0), where the block
+    // actually collapses and sloshes: measured 2026-08-28 on this hardware,
+    // ~1.7-2.1k physics steps/s at 32.8k particles (~2x faster than real
+    // time at sdt=1ms) and ~3.8k steps/s at 4k. The canonical SS lane
+    // freezes bulk liquid rigid (contact rest-distance projection cancels
+    // the EOS densification a lattice-seeded block needs to develop its
+    // hydrostatic gradient) - recorded as the top Phase-A gap in
+    // plan/todo/scale-adaptive-law-activation-plan.md; when Tier-0 routing
+    // drops laws-quiescent bulk onto the fused path INSIDE the canonical
+    // lane, this preset flips back to ss=1 and becomes its acceptance arm.
+    standardMatrixEnabled: false,
+    controls: {
+      drop: 'h2o',
+      base: 'h2o',
+      dropt: '293.15',
+      baset: '293.15',
+      // 16^3 = 4,096-particle drop splashing into the collapsing
+      // 32^3 = 32,768-particle block: motion from the first frame (block
+      // collapse), then a visible impact event.
+      dropn: '16',
+      basen: '32',
+      // Drop cube edge is 3.2 m; bottom at 8.6 m puts the top at 11.8 m,
+      // inside the 12 m box and clear of the base cube's 6.4 m top.
+      ironh: '8.6',
+      boxx: '12',
+      boxy: '12',
+      boxz: '12',
+      lawt: '0',
+      lawr: '0',
+      lawst: '0',
+      lawp: '0'
+    },
+    runtime: {
+      sdt: '0.001',
+      cfl: '0.6',
+      cflSafety: '0.4',
+      avAlpha: '0',
+      ambientPressurePa: '0',
+      ss: '0',
+      reactionProductReserveMinimumLiveFraction: '0',
+      residentStepsPerSchedule: '64',
+      residentComputeManagerMode: 'worker-owned-resident-lane',
+      residentInterfaceRefreshMode: 'pipelined',
+      cameraPositionNormalized: '0.80,0.45,1.60',
+      cameraTargetNormalized: '0.50,0.30,0.50'
+    },
+    validation: {
+      batches: 2,
+      batchSteps: 128,
+      timeoutMs: 300000,
+      expectedMechanics: 'mlsmpm',
+      initialMaxTemperatureK: 294,
+      checkpoints: [
+        { id: 'collapse', expectation: 'the water block collapses into a pool instead of standing rigid' },
+        { id: 'splash', expectation: 'the falling drop visibly disturbs the pool surface' }
+      ]
+    }
   })
 ]);
 

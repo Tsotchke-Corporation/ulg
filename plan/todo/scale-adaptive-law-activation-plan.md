@@ -388,3 +388,61 @@ Findings, honestly:
    the strictly-advancing per-step seals all structurally forbid today)
    remain the two candidate next rungs, to be re-ranked against the
    contact-build and fused-kernel rocks by measured ceiling.
+
+## THE Phase-A finding (day 2): the canonical lane freezes bulk liquid
+
+Dam-break test, 2026-08-28: the same laws-quiescent water block run on
+both routes at identical knobs (sdt=1ms, EOS+viscosity on, vacuum
+ambient).
+
+| route | 4,096 particles | 32,768 particles | physics |
+| --- | --- | --- | --- |
+| canonical SS worker lane (ss=1) | ~135 steps/s | ~85 steps/s | **rigid — still a pristine cube at sim t = 8 s** |
+| pre-Schroeder fused sequence (ss=0) | ~3,800 steps/s (completion ewma 9.1k) | ~1,700–2,100 steps/s (ewma 5.7–6.0k) | **collapses into a rippling pool; ~2–4x FASTER than real time** |
+
+Two facts follow:
+
+1. **The canonical lane's water is not fluid.** A lattice-seeded block
+   never develops the hydrostatic pressure gradient that drives collapse:
+   the load path goes straight down the particle columns, and the
+   canonical contact machinery's repel-only rest-distance projection
+   (16 cleanup passes/step) undoes densification every step, so density
+   stays at rest, EOS pressure stays ~0, and nothing ever pushes
+   sideways. The ss=0 route — whose generic separation passes are also
+   repel-only but far weaker — collapses correctly, which localizes the
+   freeze to the canonical contact/cleanup stack (mechanism hypothesis;
+   per-stage falsification is the next diagnostic). Consequence: every
+   night-1 rate above was measured on rigid water, and the honest
+   equal-physics gap is not 4.3x to WebGPU-Ocean — it is **~45–67x
+   between ULG's own two routes** (85 vs 5,700 at 32.8k).
+2. **Ocean-class bulk speed already exists in-tree** (the v8 fused
+   sequence runner: K steps, one encoder, ping-pong, no per-step epoch
+   rebuild, no contact graph, no receipts). Tier 0's real meaning is now
+   concrete: the adaptive-laws router should DROP laws-quiescent bulk
+   onto this path inside the canonical lane — activation receipt as the
+   admission evidence, envelope-watch triggers lifting back into the
+   full epoch/contact machinery when laws or genuine contact demand it.
+   That is the architecture the plan's tiers described, and the two
+   routes' measured spread is the prize.
+
+Landed with this finding: the `water-realtime` menu preset (36,864
+particles, dam break + 16^3 drop, ss=0) — the VISIBLE demo: block
+collapses from the first frames, ~1.7–2.1k steps/s (~2x real time),
+~30 render fps. `bulk-water` stays the canonical-lane Tier-0 acceptance
+arm (rates, receipts — not visuals) until the router exists, then
+water-realtime flips back to ss=1 as its acceptance arm. Preset suite
+repaired: the night-1 bulk-water addition had silently broken
+tests/sphPhaseScenarioPresets.test.mjs (never run that night); the suite
+now asserts the standard-matrix subset separately and pins both
+adaptive-laws presets' declared deviations.
+
+Phase-A queue, re-ranked by this finding:
+1. Falsify/confirm the freeze mechanism per-stage (contact proposal off
+   vs cleanup passes vs canonical separation substitution), then make
+   bulk liquid flow on the canonical lane — either contact-exempting
+   homogeneous-liquid pairs (grid+EOS owns liquid volume, as Ocean) or
+   fixing contactSolver=0 admission (the KNOWN GAP).
+2. Tier-0 routing: canonical lane drops to the fused sequence under the
+   activation receipt (the 45-67x).
+3. The M4 burst next rungs and the 104k turnaround regression, re-measured
+   AFTER 1-2, since flowing water changes every cost profile.

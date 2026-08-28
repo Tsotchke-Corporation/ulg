@@ -36,10 +36,23 @@ function selectKeys(value, keys) {
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
 }
 
+// The four standard scenes share the worker-owned single-source SS runtime
+// and the framework-liveness acceptance track. The two adaptive-laws
+// performance presets deliberately deviate and are asserted explicitly
+// below: bulk-water keeps ss=1 but turns law structures off (Tier-0
+// substrate), water-realtime runs the pre-Schroeder fused path (ss=0)
+// because the canonical lane still freezes bulk liquid rigid (the Phase-A
+// gap recorded in plan/todo/scale-adaptive-law-activation-plan.md).
+const STANDARD_MATRIX_PRESETS = SPH_PHASE_SCENARIO_PRESETS.filter(
+  (entry) => entry.standardMatrixEnabled !== false
+);
+
 test('standard presets share one worker-owned single-source SS runtime', () => {
   const sharedKeys = Object.keys(SHARED_WORKER_OWNED_SS_RUNTIME);
   for (const entry of SPH_PHASE_SCENARIO_PRESETS) {
     assert.equal(Object.isFrozen(entry.runtime), true, entry.id);
+  }
+  for (const entry of STANDARD_MATRIX_PRESETS) {
     assert.deepEqual(
       selectKeys(entry.runtime, sharedKeys),
       SHARED_WORKER_OWNED_SS_RUNTIME,
@@ -73,10 +86,12 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
       'water-cycle': '16',
       'iron-ice-quench': '16',
       'sodium-water': '64',
-      'cesium-fluorine': '16'
+      'cesium-fluorine': '16',
+      'bulk-water': '64',
+      'water-realtime': '64'
     }
   );
-  for (const entry of SPH_PHASE_SCENARIO_PRESETS) {
+  for (const entry of STANDARD_MATRIX_PRESETS) {
     assert.equal(
       entry.frameworkValidation?.acceptanceTrack,
       'framework-liveness',
@@ -98,9 +113,57 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
   }
 });
 
+test('adaptive-laws presets declare their runtime deviations explicitly', () => {
+  const bulk = sphPhaseScenarioPresetById('bulk-water');
+  assert.equal(bulk.standardMatrixEnabled, false);
+  assert.deepEqual(selectKeys(bulk.runtime, [
+    'ss',
+    'ambientPressurePa',
+    'contactSolver',
+    'schroederLawQueue',
+    'schroederLawNeighborCandidates',
+    'schroederPhaseVolumeMigration',
+    'schroederActiveNodeSortedIndex',
+    'submitBurstSteps'
+  ]), {
+    ss: '1',
+    ambientPressurePa: '0',
+    contactSolver: '1',
+    schroederLawQueue: '0',
+    schroederLawNeighborCandidates: '0',
+    schroederPhaseVolumeMigration: '0',
+    schroederActiveNodeSortedIndex: '0',
+    submitBurstSteps: '8'
+  });
+  const realtime = sphPhaseScenarioPresetById('water-realtime');
+  assert.equal(realtime.standardMatrixEnabled, false);
+  assert.equal(realtime.runtime.ss, '0');
+  assert.equal(realtime.runtime.ambientPressurePa, '0');
+  assert.equal(realtime.controls.dropn, '16');
+  assert.equal(realtime.controls.basen, '32');
+  // Drop cube top (ironh + 0.2 * dropn) must stay inside the box and its
+  // bottom above the base cube top so geometry preflight admits the scene.
+  const dropBottom = Number(realtime.controls.ironh);
+  const dropTop = dropBottom + 0.2 * Number(realtime.controls.dropn);
+  const baseTop = 0.2 * Number(realtime.controls.basen);
+  assert.ok(dropBottom > baseTop);
+  assert.ok(dropTop < Number(realtime.controls.boxy));
+});
+
 test('standard SPH scenario presets encode the four requested scenes', () => {
   assert.deepEqual(
     SPH_PHASE_SCENARIO_PRESETS.map((entry) => entry.id),
+    [
+      'water-cycle',
+      'iron-ice-quench',
+      'sodium-water',
+      'cesium-fluorine',
+      'bulk-water',
+      'water-realtime'
+    ]
+  );
+  assert.deepEqual(
+    STANDARD_MATRIX_PRESETS.map((entry) => entry.id),
     ['water-cycle', 'iron-ice-quench', 'sodium-water', 'cesium-fluorine']
   );
 
@@ -159,7 +222,9 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
     [
       ['water-cycle', '0'],
       ['sodium-water', '0'],
-      ['cesium-fluorine', '0']
+      ['cesium-fluorine', '0'],
+      ['bulk-water', '0'],
+      ['water-realtime', '0']
     ]
   );
 

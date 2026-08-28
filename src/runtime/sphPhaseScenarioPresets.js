@@ -453,14 +453,22 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // legitimately zero force, which also admits the fused mechanics path.
       ambientPressurePa: '0',
       ss: '1',
-      // KNOWN GAP (2026-08-28): contactSolver=0 hangs worker admission at
-      // "submitting initial material state" — the canonical lane cannot yet
-      // run contact-free. Tier 0 wants the solver off; until that gap is
-      // fixed, run it at the floor budget and let the convergence latch
-      // idle it (bulk same-material water resolves proximity via the MPM
-      // grid and the binned separation passes).
-      contactSolver: '1',
+      // Explicit contact-free bulk mode (first-class since 2026-08-28):
+      // same-material liquid volume is owned by the MPM grid + EOS + the
+      // generic binned separation, exactly the WebGPU-Ocean shape. The
+      // worker admits it against the quiescent law-activation receipt and
+      // fails closed if any law family that owns contact consequences
+      // activates. (The canonical contact proposal also still requires the
+      // four-lane phase-carrier lineage plan, which laws-quiescent scenes
+      // deliberately no longer append.)
+      contactSolver: '0',
       contactCleanupPasses: '16',
+      // The compact-mechanics view's admission has its own unresolved
+      // zero-evidence failure (its kernels never write authority evidence
+      // and the fail-closed finalize rolls the step back); the plain V1
+      // full-grid route is the one proven live end to end. Force it until
+      // the compact path is repaired.
+      compactMechanicsView: '0',
       // Single material -> the reserve term multiplier is already zero;
       // declare the intent explicitly anyway.
       reactionProductReserveMinimumLiveFraction: '0',

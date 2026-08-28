@@ -120,6 +120,8 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
     'ss',
     'ambientPressurePa',
     'contactSolver',
+    'compactMechanicsView',
+    'workerLivePreview',
     'schroederLawQueue',
     'schroederLawNeighborCandidates',
     'schroederPhaseVolumeMigration',
@@ -128,7 +130,13 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
   ]), {
     ss: '1',
     ambientPressurePa: '0',
-    contactSolver: '1',
+    // Explicit contact-free bulk mode: grid + EOS own same-material liquid
+    // volume; the worker admits it against the quiescent activation receipt.
+    contactSolver: '0',
+    // The compact-mechanics view's admission is still broken (zero-evidence
+    // rollback); the plain V1 route is the proven-live one.
+    compactMechanicsView: '0',
+    workerLivePreview: '1',
     schroederLawQueue: '0',
     schroederLawNeighborCandidates: '0',
     schroederPhaseVolumeMigration: '0',

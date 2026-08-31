@@ -2,8 +2,14 @@
 
 Date: 2026-07-13 AKDT
 Branch: `ss-spatial-authority-refactor`
-Status: active execution plan
+Status: completed execution record; archived 2026-08-31 AKDT
 Integration base: recovery checkpoint `bdd3eee`
+
+Slices 0-8 and their source-family closeout are complete. The embedded
+phase-volume/gas-interface and coherent-solid follow-ons remain useful design
+evidence, but their active ownership is now
+`plan/todo/surface-contact-transport-phase-closure-plan.md` and
+`plan/todo/sol-critic.md`; they do not keep this refactor record active.
 
 ## Decision
 
@@ -20,7 +26,7 @@ This plan supersedes:
 - the CPU-first adaptive MLS-MPM execution track, while retaining its numeric
   transfer and conservation gates;
 - the independent-neighbor-structure routing in the Ocean plan;
-- Priority 2 and Priority 3 spatial routing in `../sol-critic.md`; and
+- Priority 2 and Priority 3 spatial routing in `../../todo/sol-critic.md`; and
 - the recovery plan's open-ended review of the abandoned refactor branch.
 
 It does **not** supersede the Schroeder architecture, dense MLS-MPM/Ocean
@@ -1841,10 +1847,9 @@ The whole phase-volume/gas-interface transport slice remains in progress in the
 dirty `ss-spatial-authority-refactor` worktree. The exact implemented boundary,
 pressure-sidecar ABI, current focused verification, known risks, and ordered
 remaining work are recorded in
-`plan/todo/SS/slice9-continuation-handoff-2026-07-24.md`. That handoff is the
-required entry point for the next model. It does not mark any of the nine ICC
-Slice 9 gates complete and it is not authorization for an intermediate slice
-commit.
+`plan/moot/SS/slice9-continuation-handoff-2026-07-24.md`. That handoff is now
+historical evidence only; active continuation routes through the transport and
+SOL plans named at the top of this completed record.
 
 ## Slice 9D shared exact-near traversal view - planned 2026-07-23
 

@@ -157,4 +157,5 @@ production-consumer migrations remain ahead of this work.
 - `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
 - `plan/todo/material-property-json-bank-plan.md`
-- `plan/todo/cubic-barrier-contact-integration-plan.md`
+- `plan/todo/selective-contact-law-application-plan.md` (the landed historical
+  cubic-barrier integration record is under `plan/moot/`)

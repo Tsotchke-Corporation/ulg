@@ -1,5 +1,30 @@
 # Implementation Status
 
+## Planning archive and current diagram packet - 2026-08-31 AKDT
+
+The obsolete Slice 9 continuation handoff, July SS routing matrix, and legacy
+cubic-barrier integration campaign now live under `plan/moot`. Superseded SS
+queue text and session/bootstrap checklist items were extracted from active
+routing into bounded moot records. Completed SS refactor and merge-readiness
+records remain under `plan/done`; rejected experiments stay inside those
+completed decision records as evidence. Dependency-gated sedenion, transport,
+SOL, additional-level, spectra, and material-bank work remains active.
+
+The checked-in ULG Triad PDF now preserves the clean original 68-page v0.5
+body and replaces its stale June status pages with a seven-page landscape
+current-plan packet generated from
+`plan/ULG_Triad_Current_Plan_Addendum.html`. The packet distinguishes landed
+worker/SS/reaction authority from the seven ordered immediate goals: all-preset
+real-time throughput; physically derived steam/smoke/aerosol transport;
+coherent solids; generalized per-node activation; distributed multi-consumer
+reservations; online closure derivation/cache; and an external fuzzy scientific
+release audit over versioned database snapshots cached on shitbox. The audit is
+an offline, nonblocking drift signal rather than runtime authority. Every
+replacement page was rasterized and visually inspected after the final render.
+
+This is a planning/documentation update only. It makes no new runtime or
+scientific-validation claim.
+
 ## Room-temperature reaction spot check - 2026-08-30 AKDT
 
 A seeded non-canned sample (`0x20260830`) selected Na/F, K/F, and Rb/F at
@@ -41,9 +66,9 @@ non-lithium fluoride energetics and zero activation barriers remain explicitly
 provisional (`scientificValidation:false`). Chlorine pairs were excluded from
 the room-temperature-contact sample because the current policy gives them the
 same zero barrier as fluorine despite initiation/passivation dependence; that
-policy needs a later kinetics/activation refinement. The validation framework
-may still begin next using these receipts without treating provisional
-thermochemistry as calibrated truth.
+policy needs a later kinetics/activation refinement. A later external release
+audit may consume exported observables without treating provisional
+thermochemistry as calibrated truth or becoming a runtime blocker.
 
 ## Current Focus - 2026-08-30 AKDT (authenticated reaction routing enabled)
 
@@ -104,15 +129,13 @@ policy rerun reports `failedCount:0`. These checks used visible desktop Chrome,
 not terminal-browser or headless acceptance, and every agent-owned browser and
 temporary server was closed afterward.
 
-The validation framework may start next. Its first job is to consume these
-exact schedule, activation, topology, retained-gas, presentation, and visual
-liveness receipts without weakening them. This enablement is intentionally
-scoped to reaction activation on the serialized scene/worker lane; general
-per-node activation for every law family, distributed multi-consumer token
-reservation, and the online closure factory remain later architecture work.
-Restoring the earlier high water-demo frame rate is a post-refactor performance
-priority, not a validation-framework prerequisite. Periodic configured-preset
-desktop visual sweeps remain mandatory while that work proceeds.
+The immediate program now starts by restoring real-time cadence across every
+canned preset, followed by physically coupled steam/smoke/aerosol transport and
+coherent solids. General per-node activation, distributed multi-consumer token
+reservation, and the online closure factory follow in dependency order. The
+scientific release audit comes last and stays external, fuzzy, cached, and
+nonblocking. Periodic configured-preset desktop visual sweeps remain mandatory
+throughout that work.
 
 ## Current Focus - 2026-08-29 AKDT (watch numeric and canonical-dormant hardening)
 

@@ -1,5 +1,11 @@
 # Slice 9 continuation handoff — 2026-07-24
 
+Status: superseded historical handoff; moved to `plan/moot` on 2026-08-31
+AKDT. Do not resume its branch, worktree, server, ICC task, or delivery
+commands. The landed SS refactor is recorded under `plan/done/SS/`; remaining
+transport and coherent-solid work is owned by the active transport and SOL
+plans.
+
 This is the authoritative continuation note for the unfinished whole Slice 9
 phase-volume/gas-interface transport task. It was written at a deliberate
 stopping point so another, cheaper model can resume without reconstructing the

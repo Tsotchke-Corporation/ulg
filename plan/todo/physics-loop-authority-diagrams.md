@@ -6,12 +6,20 @@ These diagrams capture the intended direction after the WebGPU-resident refactor
 bugs. They are planning diagrams, not proof that the runtime already behaves
 this way.
 
+Current-plan update, 2026-08-31 AKDT: the checked-in
+`plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` now appends a diagram-led packet whose
+source is `plan/ULG_Triad_Current_Plan_Addendum.html`. It distinguishes landed
+worker/SS/dynamic-reaction authority from the validation framework that starts
+next, the active transport/SOL/performance lanes, and later generalized law
+activation. The older Mermaid blocks below remain compact architecture source,
+not the current status claim by themselves.
+
 Routing update, 2026-07-13 AKDT: the target loop now has one explicit
 SS-spatial-epoch producer after authoritative state admission and before
 mechanics/law dispatch. Mechanics, exact-near, cross-level, aggregate-far, and
 render views consume that immutable generation; position/topology commit occurs
 once at the declared epoch boundary. See
-`SS/shared-spatial-authority-refactor-plan.md`.
+`plan/done/SS/shared-spatial-authority-refactor-plan.md`.
 
 ## Target Distributed Main Loop
 

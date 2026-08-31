@@ -1,11 +1,12 @@
 # SS Todo Routing
 
 Date: 2026-07-01 AKDT
-Updated: 2026-07-18 AKDT
-Active branch: `ss-spatial-authority-refactor`
+Updated: 2026-08-31 AKDT
+Current branch: `performance`
 
-`SS` means Schroeder Simulation. This folder is now the active routing layer for
-new architecture work in ULG.
+`SS` means Schroeder Simulation. This folder retains the architecture contract
+and routes remaining SS-dependent transport and coherent-solid work. The
+completed refactor execution record is under `plan/done/SS/`.
 
 Primary plan:
 
@@ -21,21 +22,22 @@ Required coherent-solid correction:
 
 Completed refactor execution record (2026-07-21):
 
-- `shared-spatial-authority-refactor-plan.md` — build one canonical
+- `plan/done/SS/shared-spatial-authority-refactor-plan.md` — build one canonical
   GPU-resident cell/hierarchy generation per immutable spatial epoch and derive
   mechanics, exact-near, cross-level, aggregate-far, solid-proxy, and render
   views without independent law grids or maximal pair storage. Slices 0–8 are
   implemented; follow-on transport and coherent-solid work retain separate
   ownership below.
 
-Historical July 2 Fable handoff/queue documents are preserved under
-`plan/moot/SS/`; their landed checkpoints remain evidence, not active order.
+Historical July Fable handoffs, the superseded routing matrix, and retired
+implementation queues are preserved under `plan/moot/SS/`; their landed
+checkpoints remain evidence, not active order.
 
-Supporting routing:
+## Completed Refactor Shape And Active Follow-Ons
 
-- `todo-routing.md`
-
-## Active Priority
+Items 1–6 and the refactor-owned portion of item 8 landed in the completed SS
+record. Item 7 remains active under `../sol-critic.md`; the third level in item
+6 remains explicitly held.
 
 1. One exact GPU particle-to-cell key emission and canonical sort/unique per
    immutable spatial epoch.
@@ -312,30 +314,15 @@ Landed checkpoints:
     unvalidated, and the scene pressure refresh injects promoted SS imports
     into next-frame same-level pressure feedback.
 
-Historical implementation queue (superseded 2026-07-13 by
-`shared-spatial-authority-refactor-plan.md`):
-
-1. Continue Slice 7 by adding a worker-owned retained gas-cell import/admission
-   path for dedicated mounted worker lanes. Keep the boundary descriptor-only
-   across PeerCompute and consume only worker-local retained refs.
-2. Keep pressure/interface exact-near-field work separate from far-aggregate
-   traversal.
-3. Keep radiation, plasma/electromagnetic approximation, and gas-summary
-   adapters behind explicit law admissibility, compact diagnostics, and
-   StateManager admission.
-
 Current implementation queue:
 
-1. Close the Slice 8 transport receipt: run the frozen-source paired reaction
-   and non-target performance gates, refresh ICC, make the one full-slice
-   commit, build Pages, and non-force push the branch/Pages refs.
-2. Continue phase-resolved represented-current-volume and volume-gradient
+1. Continue phase-resolved represented-current-volume and volume-gradient
    moments, shared local/reflux pressure and drag, hydrostatic ambient or
    resolved air, and conserved phase/reaction birth volume in the explicit
    gas-interface/phase-volume follow-on. Steam rise/condensation and hydrogen
    rise remain failed expectations until that work is verified.
-3. Re-derive long-liquid viscosity, contact, and heat-transfer behavior under
+2. Re-derive long-liquid viscosity, contact, and heat-transfer behavior under
    `../surface-contact-transport-phase-closure-plan.md`; do not hide inherited
    failures by relaxing the long-horizon or standard visual gates.
-4. Continue coherent-solid body/material frame, member, inertia, connectivity,
+3. Continue coherent-solid body/material frame, member, inertia, connectivity,
    contact-proxy, and rest/material-space work under `../sol-critic.md`.

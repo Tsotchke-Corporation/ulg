@@ -1,7 +1,10 @@
 # ULG Triad Demo
 
-Browser-native ULG integration scaffold for the PeerCompute + Eshkol + MoonLab plan in
-`plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`.
+Browser-native ULG integration scaffold for the PeerCompute + Eshkol + MoonLab
+plan in `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`. The PDF preserves the
+original v0.5 reference body and appends the current seven-goal plan;
+the reproducible packet source is
+`plan/ULG_Triad_Current_Plan_Addendum.html`.
 
 This repo currently implements the first executable slice:
 

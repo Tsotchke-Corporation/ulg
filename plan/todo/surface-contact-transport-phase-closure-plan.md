@@ -350,7 +350,7 @@ transport closure.
 
 ## Dependencies And Related Plans
 
-- `plan/todo/SS/shared-spatial-authority-refactor-plan.md`
+- `plan/done/SS/shared-spatial-authority-refactor-plan.md`
 - `plan/todo/algorithm-derived-material-properties-plan.md`
 - `plan/todo/phase-resolved-steam-optics-plan.md`
 - `plan/todo/dynamic-initial-material-bodies-plan.md`

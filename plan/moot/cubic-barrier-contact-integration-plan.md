@@ -1,5 +1,11 @@
 # Cubic Barrier Contact Integration Plan
 
+Status: superseded integration record; moved to `plan/moot` on 2026-08-31
+AKDT. Its landed wall/pair/kinematics work remains historical evidence. Active
+contact-law allocation now belongs to
+`plan/todo/selective-contact-law-application-plan.md`, using canonical SS
+exact-near/contact authority rather than reopening the old private-bin queue.
+
 Date: 2026-06-18 AKDT
 
 Status update, 2026-06-20 AKDT: the first tiled/neighbor producer slice for

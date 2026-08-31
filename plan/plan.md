@@ -52,7 +52,7 @@ work that belongs before it, but must not resume that level.
 ## Clean-Break Routing - Adaptive MLS-MPM
 
 Adaptive support and coarsening now route through
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` as derived views and
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` as derived views and
 conservative SS level/topology changes. The former CPU-first execution queue is
 preserved in `plan/moot/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`;
 its partition-of-unity, first-moment, and split/merge conservation tests remain
@@ -2704,7 +2704,7 @@ physics work:
   skip no-op reaction output buffers, and avoid zeroing post-reset continuation
   substeps. Post-reset browser evidence showed continued substeps with active
   grid nodes and visible displacement instead of substep 1+ collapsing to zero.
-- [ ] Implement `plan/todo/physics-behavior-regression-plan.md`: treat current
+- [x] Implement `plan/done/physics-behavior-regression-plan.md`: treat current
   severely broken visible/local physics behavior as the P0 gate. Restore
   coherent reset/playback continuity, stage order, pressure/interface force
   application, reaction/product/gas carry-forward, thermal/phase continuity,
@@ -2953,7 +2953,7 @@ physics work:
   - 2026-06-12 slice: ULG now has that scheduled lane task shape for the
     resident MLS-MPM/SPH step. Scene/NodeKernel integration and behavior
     remediation remain open.
-- [ ] Implement `plan/todo/reaction-stoichiometry-energetics-plan.md`: strict
+- [x] Implement `plan/done/reaction-stoichiometry-energetics-plan.md`: strict
   first-principles reaction energetics, balanced multi-product CPU/WebGPU
   reaction execution, gas byproduct routing, sealed-box pressure coupling, and
   reaction-closure cache reuse. Current slice complete: packed reactant,
@@ -2998,9 +2998,10 @@ physics work:
   product-event rows now carry closure-derived product velocity, support volume,
   bulk/shear/Lame constants, sound speed, EOS model id, solid flag, and mechanics
   status, and P2G consumes those fields for product-event momentum and local EOS
-  pressure when support volume is present. Remaining: validated gas-cell or
-  pressure-gradient force coupling and GPU append/compaction for multiple
-  generations of unplaced resident products.
+  pressure when support volume is present. The completed plan record is
+  archived; validated gas-cell/pressure-gradient force coupling and general
+  multi-product execution continue under the active transport and reaction
+  validation work rather than keeping this historical checkbox open.
 - [ ] Implement `plan/todo/sedenion-reaction-scoping-plan.md`: use the sedenion
   periodic-table reference as a symbolic reaction-channel prefilter and
   candidate-priority signal while keeping stoichiometry, energetics, kinetics,
@@ -3029,11 +3030,6 @@ physics work:
   `src/runtime/material/materialResolverManifest.js` scaffold now enumerates
   the resolver family inventory, CPU anchors/status, WebGPU residency targets,
   cache key ingredients, status labels, and explicit false validation flags.
-- [ ] Follow `plan/todo/README.md` and `plan/todo/overarching-completion-plan.md`
-  as the active ordering
-  plan for the remaining ULG, SPH, material resolver, performance, reaction,
-  steam/gas, nuclear/radiation, PeerCompute, Eshkol, MoonLab, and tooling todo
-  items.
 - [ ] Implement `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`: build a
   WebGPU-Ocean-style high-performance MLS-MPM simulator path with
   fixed-point/tiled P2G where appropriate, GPU cell/neighbor structures,
@@ -3045,7 +3041,6 @@ physics work:
 - [ ] Replace provisional candidate energetics and heavy product-closure
   derivations with cached worker/WebGPU-resident lower-level solvers for the
   full element/compound reaction space.
-- [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
 
@@ -3112,8 +3107,6 @@ physics work:
   scientific gates.
 - [x] Add Eshkol tensor-runtime candidate probes in PeerCompute and reverify
   browser plus relay-dispatch ULG handoffs against the latest staged artifacts.
-- [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
-  NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
@@ -3127,8 +3120,6 @@ physics work:
 - [x] Add ABI-level WGSL/table strategy descriptor emission after descriptor
   conformance stabilized.
 - [x] Fold in the Eshkol sidecar report.
-- [ ] Start from `eshkol-run` CLI `--wasm`/target/export paths, `llvm_backend.h`,
-  `llvm_codegen.cpp`, GPU memory/VM dispatch APIs, and existing web/GPU scripts.
 - [x] Add closure artifact JSON emission and named WASM reference export/import
   discovery for the current AOT WASM path.
 - [x] Add manual closure-bundle export/deploy helper support to the ULG
@@ -3163,7 +3154,8 @@ physics work:
   full-physics blocker.
 - [x] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.
-- [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.
+JIT service paths remain prohibited until the observed derivative/JIT hang is
+profiled.
 
 ### MoonLab
 
@@ -3240,7 +3232,6 @@ physics work:
 - [x] Add a user Codex `icc` skill at `/home/cos/.codex/skills/icc/SKILL.md`
   so future sessions can trigger the ICC workflow from skill metadata.
 - [x] Write the 2026-06-12 repo-root todo handoff at `todo-handoff-6-12.md`.
-- [ ] Use swarm lightly for status/context until a ULG-specific profile exists.
 
 ### Current SPH/P0 Status - 2026-06-13 20:31 AKDT
 
@@ -3283,10 +3274,6 @@ physics work:
 - [ ] Continue water visual quality separately: the sphere diagnostic is still
   visually particle-like/blue, so transparency/refraction, merged liquid-surface
   quality, and surface-tension behavior remain open follow-up work.
-- [ ] Keep true adaptive MLS-MPM out of this bugfix track. The per-particle
-  support radius, normalized variable-support P2G/G2P, and conservation-safe
-  split/merge work lives in
-  `plan/todo/SS/shared-spatial-authority-refactor-plan.md`.
 
 ### Current Worker-Render Status - 2026-06-28 AKDT
 
@@ -3316,11 +3303,12 @@ physics work:
   `presentation-worker-retained-output-presentation-only` policy now admits the
   worker-private retained refs and consumes the admitted hot-buffer on the same
   presentation-worker lane with `applied-worker-retained-g2p-input`.
-- [ ] Keep portable cross-peer replay separate from same-worker continuation:
-  worker-private GPU refs are not portable state. The current retained access
-  contract exposes the blocker explicitly; remote replay still needs compact
-  snapshot export or a peer-local materialization protocol.
-- [ ] Do not revive ImageBitmap/readPixels/frame-copy-back as a display path.
+Portable cross-peer replay remains separate from same-worker continuation:
+worker-private GPU refs are not portable state. The current retained access
+contract exposes the blocker explicitly; remote replay still needs compact
+snapshot export or a peer-local materialization protocol.
+
+Do not revive ImageBitmap/readPixels/frame-copy-back as a display path.
 
 ## Integration Rule
 

@@ -1,11 +1,15 @@
 # SS Todo Routing Matrix
 
+Status: superseded historical routing matrix; moved to `plan/moot` on
+2026-08-31 AKDT. It records the July feature-branch routing decision and is not
+current implementation order.
+
 Date: 2026-07-01 AKDT
 
 This matrix reorganizes the existing flat `plan/todo` backlog around Schroeder
 Simulation.
 
-`shared-spatial-authority-refactor-plan.md` records completed refactor Slices
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` records completed refactor Slices
 0–8. The original Schroeder plan remains the architecture contract; this matrix
 records how adjacent plans constrain or consume the shared substrate and routes
 follow-on transport and coherent-solid work to their active owners.

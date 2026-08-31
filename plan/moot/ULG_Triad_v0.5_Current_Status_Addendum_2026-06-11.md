@@ -6,6 +6,10 @@ geometry: margin=0.8in
 fontsize: 10pt
 ---
 
+> Superseded historical status packet. It generated the former PDF pages
+> 69–71 and moved to `plan/moot` on 2026-08-31 AKDT when the current-plan
+> diagram packet replaced it.
+
 # Purpose
 
 This addendum updates the checked-in `ULG_Triad_v0.5_Pretty_Diagrams.pdf` with

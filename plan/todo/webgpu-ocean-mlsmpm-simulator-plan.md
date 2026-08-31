@@ -4,7 +4,7 @@ Date: 2026-06-12 AKDT
 
 Routing update, 2026-07-13 AKDT: dense MLS-MPM/Ocean kernels remain the local
 mechanics backend. Independent neighbor/bin authority is superseded by
-`SS/shared-spatial-authority-refactor-plan.md`; mechanics consumes a derived
+`plan/done/SS/shared-spatial-authority-refactor-plan.md`; mechanics consumes a derived
 compact node/stencil view of the SS spatial epoch.
 
 ## References

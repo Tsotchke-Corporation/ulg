@@ -6,7 +6,7 @@ Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
 
 Routing update, 2026-07-13 AKDT: Priority 2/3 shared-neighborhood and sparse-SS
 execution now routes through
-`SS/shared-spatial-authority-refactor-plan.md`. This document remains the
+`plan/done/SS/shared-spatial-authority-refactor-plan.md`. This document remains the
 active coherent-solid, cross-level numerical, scientific-validation, and
 third-level-hold contract.
 

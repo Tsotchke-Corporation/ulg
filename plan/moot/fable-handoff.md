@@ -2,7 +2,7 @@
 
 Status: moot historical session handoff. The third-level hold and relevant
 spatial/numerical gates are carried forward by
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md`; coherent-solid work
+`plan/done/SS/shared-spatial-authority-refactor-plan.md`; coherent-solid work
 remains active in `plan/todo/sol-critic.md`.
 
 Branch `SS`, tip `6f4bb82` (all work merged locally; nothing pushed to a

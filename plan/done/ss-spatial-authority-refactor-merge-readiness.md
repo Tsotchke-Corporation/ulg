@@ -1,5 +1,12 @@
 # `ss-spatial-authority-refactor` merge readiness
 
+Status: completed historical merge-readiness campaign; archived 2026-08-31
+AKDT after the SS hierarchy integration landed on the shared branch line.
+
+The dated decisions, blockers, and `Open` sections below are checkpoint
+evidence from the pre-merge campaign. They are not the current implementation
+order; later plans and `plan/implementation-status.md` supersede them.
+
 Working record for the effort to get this branch merge-ready. Started
 2026-07-25/26. Update in place; do not append a narrative log.
 

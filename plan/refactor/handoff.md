@@ -1,6 +1,6 @@
 # SS worker-lane refactor — handoff
 
-Branch: `performance`. Updated 2026-08-30. This document describes
+Branch: `performance`. Updated 2026-08-31. This document describes
 the current working tree; update it in place rather than appending a narrative
 log.
 
@@ -13,6 +13,24 @@ Companion material:
 - ICC task `ss-dynamic-law-routing-enablement-20260830` (current closeout);
   the watch, carrier, target-authority, lifecycle, and retained-product
   predecessor tasks are complete.
+- ICC task `seven-immediate-goals-20260831` (current delivery program).
+
+## Superseding immediate program
+
+The completed reaction-activation refactor is now substrate, not the next work
+queue. Execute these goals in order: (1) restore at least real-time cadence
+across all six canned presets; (2) finish physically coupled gas/phase
+transport so conserved condensate produces truthful steam, mist, smoke, and
+aerosol; (3) deliver coherent solids from SOL-0/SOL-1 onward; (4) generalize
+per-node dynamic-law activation; (5) add epoch-fenced distributed
+multi-consumer reservations; (6) wire online regime-keyed closure derivation
+and cache adoption; and (7) add an external fuzzy scientific release audit.
+
+Goal 7 is deliberately outside runtime authority. It compares exported
+observables against immutable, versioned scientific-database snapshots cached
+on shitbox after major changes and releases. Drift is a nonblocking signal for
+human review, not a scheduler, admission gate, or claim that theory and
+experiment must agree exactly.
 
 ## Current continuation
 
@@ -43,13 +61,14 @@ materialization with zero map/readback; an already provisioned source must
 prove `4 -> 4` with no materialization receipt. The configured reactive
 presets exercise the latter and the isolated native test exercises the former.
 
-Visual gates now reject the control-body-preview stall. They require correlated
+Visual gates reject the control-body-preview stall. They require correlated
 physics/presentation progress, changing nonblank frames, schedule-1 dormant
 watch-only evidence, a later exact activation receipt, persistent activation
-lineage, and retained product/gas or authoritative two-level evidence. The
-validation framework may start next as a consumer of these receipts. General
-per-node routing for other law families and distributed multi-consumer
-reservation remain later work; do not broaden this exact enablement claim.
+lineage, and retained product/gas or authoritative two-level evidence. Reprove
+that gate for every canned preset while restoring throughput. General per-node
+routing for other law families and distributed multi-consumer reservation are
+goals 4 and 5; do not broaden the current exact reaction-only enablement claim
+before their own authority contracts land.
 
 ## Superseded construction context
 
@@ -385,21 +404,18 @@ temporary port-5174 server with `ULG_VITE_VPN_HOST=127.0.0.1` and
 
 ## Remaining work
 
-The validation framework can begin now. Its first slice should consume the
-exact schedule, activation, topology, retained-product/gas, StateManager,
-presentation, and visible-liveness receipts without reinterpreting or
-weakening them. The >350-schedule Cesium nonfinite rollback belongs in the
-scientific/long-horizon validation queue: preserve fail-closed admission,
-surface `firstRejectedDiagnostic`, trace the first upstream producer, and add
-the regression, but it is not a prerequisite for framework scaffolding.
+Execute the seven goals in the superseding order above. The current slice is
+the all-six throughput matrix and bounded removal of duplicate serialized
+presentation work; it must finish with real-desktop configured-preset checks.
+The next slice unifies gas occupancy/free-volume pressure and conserved
+condensate transport so steam, mist, smoke, and aerosol are physically derived.
+Never use terminal-browser/tmux panes as visual proof.
 
-After refactor closure, restore the earlier water-demo throughput and remeasure
-the canonical/Tier0 curves with live physics. Keep periodic configured-preset
-checks in visible desktop Chrome during framework and performance work. Never
-use terminal-browser/tmux panes as visual proof. Per-node routing for other law
-families, the online closure factory, additional SS levels, and an atomic
-StateManager reservation protocol for any broader-than-serialized consumer set
-remain separate follow-on architecture.
+The >350-schedule Cesium nonfinite rollback remains a long-horizon numeric debt:
+preserve fail-closed admission, surface `firstRejectedDiagnostic`, trace the
+first upstream producer, and add the regression. It can inform the later fuzzy
+release audit, but that audit is not a prerequisite for throughput, transport,
+solids, activation, reservations, or closure-cache implementation.
 
 ### Superseded pre-enablement queue
 
@@ -889,9 +905,9 @@ weaken terminal admission.
 The later enablement audit is complete. The configured reaction route is now
 exactly `shadowOnly:false`, `routingAuthority:true`, under
 `enabled-on-serialized-scene-worker-lane-after-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
-The validation framework is the next priority. If authority ever expands
-beyond the serialized scene lane, add atomic StateManager issued ->
-reserved-by-exact-consumer -> consumed semantics first.
+The next priority is all-preset throughput. Before authority expands beyond the
+serialized scene lane in goal 5, add atomic StateManager issued ->
+reserved-by-exact-consumer -> consumed semantics.
 
 ## 2026-08-30 closure: persistent preset entry now presents physics, not control envelopes
 
@@ -926,8 +942,7 @@ and reported zero console/page issues. Every final 160-step PNG was opened and
 visually inspected; all contain filled simulation surfaces and none contain
 the labeled control-body preview.
 
-Start the validation framework next. Keep visual-throughput restoration as a
-separate follow-on performance slice: recover and generalize the earlier
-`water - real time dam break` throughput improvements across the canned
-presets without weakening the source-correlation, presentation-admission, or
-dynamic-law authority gates established here.
+This historical closure is superseded by the seven-goal program above. Start
+with visual-throughput restoration: recover and generalize the earlier
+`water - real time dam break` improvements across all canned presets without
+weakening source correlation, presentation admission, or dynamic-law authority.

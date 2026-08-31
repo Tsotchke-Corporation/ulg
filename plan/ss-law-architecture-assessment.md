@@ -15,7 +15,7 @@ lived in that gap.
 
 ## What exists
 
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` (2176 lines) is a
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` (2176 lines) is a
 genuine architecture of the spatial side, and a good one:
 
 - one canonical spatial epoch per step, immutable while it is read;

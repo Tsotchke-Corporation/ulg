@@ -2,7 +2,7 @@
 
 Status: completed validated recovery decision, 2026-07-12 AKDT. Moved to
 `plan/done` after recovery checkpoint `bdd3eee`; bounded continuation now
-routes through `plan/todo/SS/shared-spatial-authority-refactor-plan.md`.
+routes through `plan/done/SS/shared-spatial-authority-refactor-plan.md`.
 
 ## Decision
 

@@ -130,7 +130,8 @@ recurring class of defect (see `plan/ss-law-architecture-assessment.md`).
 | Document | What it is |
 | --- | --- |
 | `peercompute/plan/refs/ulg/ULG_PeerCompute_Star_Spec_v0.4.md` | The reference design, 2397 lines. Foundational — read first. |
-| `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` | The checked-in reference design PDF |
+| `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` | Original v0.5 reference design plus the current seven-goal diagram packet |
+| `plan/ULG_Triad_Current_Plan_Addendum.html` | Reproducible source for the PDF's current-plan packet |
 | `plan/todo/SS/schroeder-tree-and-algorithm-plan.md` | SS tree + algorithm, law adapter contract, slices |
 | `plan/todo/sol-critic.md` | Active architecture correction: coherent solids, measured performance critique, Priority 0A-6 ordering |
 | `plan/solver-law-inventory.md` | What is actually executable, by backend and maturity |

@@ -4,7 +4,7 @@ Branch `ss-spatial-authority-refactor`, 66 commits since `60c4598`, 25 files,
 +4,953 / −116. Suite **2029 pass / 0 fail**. Visual matrix **3 of 7 failing —
 the same three scenarios with the same checks as the pre-session baseline.**
 
-Read `plan/todo/SS/branch-merge-readiness.md` alongside this. That file carries
+Read `plan/done/ss-spatial-authority-refactor-merge-readiness.md` alongside this. That file carries
 the measurements; this one carries the narrative and the state.
 
 ---
@@ -47,7 +47,7 @@ the scenario the 78 m/s blowup was measured on, peaks at 6.5 m/s.
 Build cost 24.3 → 3.8 ms, flat to 52,488 particles. A 49 MB per-frame host
 allocation and upload was replaced with a pooled buffer plus
 `encoder.clearBuffer`. Two mistakes the parity gate caught are recorded in
-`branch-merge-readiness.md`: the production arm rendered nothing for a while
+`plan/done/ss-spatial-authority-refactor-merge-readiness.md`: the production arm rendered nothing for a while
 (its timings were void), and a velocity smear came from assuming
 `queue.writeBuffer` is encoder-ordered — it is not.
 

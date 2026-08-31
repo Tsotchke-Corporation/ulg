@@ -3,10 +3,46 @@
 Date: 2026-06-14 AKDT
 
 Use this file as the active routing layer for `plan/todo/`. The detailed todo
-files remain valid, but implementation order now starts with the screenshot-
-backed P0 physics behavior regression. Authority and distributed law execution
-remain the long-term shape, but they do not count as done while the visible
-physics loop is incoherent.
+files remain valid, while the superseding seven-goal order below controls
+implementation sequencing. Authority and distributed law execution do not
+count as done while the visible physics loop or measured cadence is incoherent.
+
+## Superseding Immediate Goal Order - 2026-08-31 AKDT
+
+1. Restore at least real-time simulation cadence across all six canned presets,
+   with periodic real-desktop animation checks.
+2. Finish gas/phase transport and conserved condensate optics for physically
+   derived steam, mist, smoke, and aerosol.
+3. Deliver coherent solids from SOL-0/SOL-1 through the dependency-gated later
+   milestones.
+4. Generalize per-node dynamic-law activation beyond the reaction seed.
+5. Add epoch-fenced distributed multi-consumer reservations.
+6. Wire online regime-keyed closure derivation, cache, and schedule-boundary
+   adoption.
+7. Add an external fuzzy scientific release audit over immutable, versioned
+   database snapshots cached on shitbox. This audit is offline and nonblocking;
+   it never becomes runtime authority.
+
+## Archive Cleanup - 2026-08-31 AKDT
+
+- The completed shared-spatial-authority execution record moved to
+  `plan/done/SS/shared-spatial-authority-refactor-plan.md`. Its embedded
+  phase-volume/gas-interface and coherent-solid follow-ons remain evidence;
+  active ownership stays in this directory under the transport and SOL plans.
+- The completed historical branch-readiness campaign moved to
+  `plan/done/ss-spatial-authority-refactor-merge-readiness.md`. Its dated
+  `Open` queue is not current implementation order.
+- Plans with an implemented first slice but relevant unmet acceptance work stay
+  in `plan/todo`; completion of one checkpoint is not enough to archive the
+  whole plan.
+- The obsolete Slice 9 continuation handoff, July SS routing matrix, and
+  historical cubic-barrier integration campaign moved to `plan/moot`; stale SS
+  queue text and non-actionable operating checkboxes were extracted into small
+  moot records rather than left in active routing.
+- The old June PDF status source moved to `plan/moot`. The reproducible current
+  seven-goal diagram packet is now
+  `plan/ULG_Triad_Current_Plan_Addendum.html` and replaces the old appended
+  pages in `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`.
 
 ## Non-Negotiable Direction
 
@@ -78,7 +114,7 @@ lower priority than making the SS-owned GPU spatial hierarchy/octree reliable
 and migrating production spatial consumers onto it.
 
 Completed-refactor routing note, 2026-07-21 AKDT:
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` records Slices 0–8 of
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` records Slices 0–8 of
 the one SS-owned GPU spatial generation and its mechanics, exact-near,
 cross-level, aggregate-far, source-family, and render views. Follow-on
 phase-volume/gas-interface and long-liquid transport remain with their
@@ -286,7 +322,7 @@ quality is still open: the sphere diagnostic is visible and uses
 closure-derived PBR, but it remains particle-like rather than a refractive
 merged liquid surface. CPU and GPU P2G/G2P still use a fixed global quadratic
 support stencil. Follow
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` for the admitted SS
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` for the admitted SS
 support/coarsening track. The older CPU-first queue is retained under
 `plan/moot/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`; its
 partition-of-unity, first-moment, split/merge, mass, momentum, volume, and

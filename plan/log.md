@@ -42785,3 +42785,54 @@ Validation and review:
   violation or rollback risk. ICC's broader reaction-closure oracle remains
   blocked on general multi-product/gas-coupling and scientific-readiness work,
   which this narrow spot check does not claim to complete.
+
+## 2026-08-31 AKDT - Completed plan archive cleanup
+
+- Moved the completed SS shared-spatial-authority execution record to
+  `plan/done/SS/shared-spatial-authority-refactor-plan.md`. Its still-useful
+  phase-volume/gas-interface and coherent-solid follow-ons remain routed to the
+  active transport and SOL plans rather than keeping the refactor record open.
+- Moved the completed historical SS branch-readiness campaign to
+  `plan/done/ss-spatial-authority-refactor-merge-readiness.md` and labeled its
+  dated blockers and `Open` queue as checkpoint evidence, not current order.
+- Updated live planning references and closed the stale top-level
+  physics-behavior and reaction-plan checkboxes whose plan records were already
+  under `plan/done`.
+- Kept the sedenion scoping plan active: its runtime resolver, discovery
+  integration, cache fingerprint, strict validation flags, and focused tests
+  exist, but source/extraction hashes and an explicit UI/debug explanation are
+  still absent from its own acceptance contract.
+- PASS: destination/old-path checks, moved-file content comparison,
+  `git diff --check`, the production Vite build, refreshed ICC index/memory/Git
+  history, and the rename-aware scoped ICC guard diff.
+
+## 2026-08-31 AKDT - Superseded plan archive and current Triad diagrams
+
+- Moved the obsolete Slice 9 continuation handoff, July SS routing matrix, and
+  historical cubic-barrier integration campaign from `plan/todo` to
+  `plan/moot`, with explicit supersession headers and updated live references.
+- Extracted the retired SS implementation/delivery queue and non-actionable
+  session/bootstrap checklist lines into bounded moot records. Kept the JIT
+  hold, portable replay boundary, no-frame-copy-back rule, sedenion gates,
+  transport/SOL work, and dependency-gated future work active.
+- Moved the stale June 11 PDF status source to `plan/moot` and added the
+  print-native, self-contained
+  `plan/ULG_Triad_Current_Plan_Addendum.html` source.
+- Recovered the clean original 68-page v0.5 PDF from Git commit `3b59e8e`,
+  printed a seven-page landscape packet with system Chrome, and joined them
+  with `pdfunite`. The checked-in PDF now has 75 pages: portrait reference
+  pages 1–68 followed by current-plan pages 69–75.
+- The current packet shows the landed worker/SS authority loop, scoped dynamic
+  reaction state machine, the seven dependency-ordered immediate goals, active
+  throughput/transport/SOL/law-scale lanes, long-horizon Tier 0–3 closure
+  economy, and explicit done/moot/held boundaries. The seventh goal is an
+  external fuzzy release audit over versioned database snapshots cached on
+  shitbox, never runtime authority or a hard scientific gate.
+- Rasterized and directly inspected all seven replacement pages. Corrected a
+  crowded dynamic-law label, missing Tier transition arrows, and the active-map
+  footer spacing; regenerated and rechecked the affected pages. No terminal
+  browser or terminal-pane split was used.
+- PASS: PDF page/orientation inspection, text extraction for every packet
+  heading, exact old/new path checks, `git diff --check`, and production
+  `npm run build`. Final PDF SHA-256:
+  `7547a878f6c1fb1ab888de1d41f3ec7098720281b7ce16ff6d2fbed6a289fcf2`.

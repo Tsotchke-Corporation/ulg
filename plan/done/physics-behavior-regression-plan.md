@@ -24,7 +24,7 @@ state that moves on screen is the state the laws actually mutated.
   not live physics-motion evidence.
 - 2026-06-18 AKDT update: the local reference paper
   `plan/cubic-barrier.pdf` was read and routed into
-  `plan/todo/cubic-barrier-contact-integration-plan.md`. The PPF/Cubic
+  `plan/moot/cubic-barrier-contact-integration-plan.md`. The PPF/Cubic
   Barrier contact solver is relevant to ULG, but not as a full solver
   replacement before the MLS-MPM migration lands. The near-term useful piece is
   elasticity-inclusive dynamic contact stiffness:

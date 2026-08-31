@@ -454,7 +454,7 @@ Residual risk:
 
 ## Pending Gate - True Adaptive MLS-MPM
 
-`plan/todo/SS/shared-spatial-authority-refactor-plan.md` now owns the adaptive
+`plan/done/SS/shared-spatial-authority-refactor-plan.md` now owns the adaptive
 support and SS spatial-authority test target. The superseded CPU-first queue is
 preserved under `plan/moot`. Required gates remain:
 

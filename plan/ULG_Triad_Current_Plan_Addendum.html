@@ -1,0 +1,585 @@
+<!doctype html>
+<!--
+  Reproducible current-plan packet source.
+  Print with system Chrome in headless mode using Letter landscape and
+  --no-pdf-header-footer, then join it after the clean 68-page v0.5 PDF from
+  Git commit 3b59e8e with pdfunite. See plan/log.md for the exact command
+  receipt and final PDF hash.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ULG Triad — Current Seven-Goal Plan</title>
+  <style>
+    @page { size: Letter landscape; margin: 0; }
+    :root {
+      --ink: #eef8ff;
+      --muted: #9fb2c5;
+      --bg: #07111c;
+      --panel: #0d1b2a;
+      --panel2: #11263a;
+      --line: #24445f;
+      --cyan: #5cd6ff;
+      --green: #55e6a5;
+      --amber: #ffca6a;
+      --magenta: #d38cff;
+      --red: #ff7e8a;
+      --blue: #78a9ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.35;
+      print-color-adjust: exact;
+      -webkit-print-color-adjust: exact;
+    }
+    .page {
+      position: relative;
+      width: 11in;
+      height: 8.5in;
+      overflow: hidden;
+      break-after: page;
+      page-break-after: always;
+      padding: 38px 48px 34px;
+      background:
+        radial-gradient(circle at 92% 10%, rgba(92,214,255,.12), transparent 28%),
+        radial-gradient(circle at 5% 95%, rgba(211,140,255,.10), transparent 30%),
+        linear-gradient(145deg, #07111c 0%, #091826 58%, #07111c 100%);
+    }
+    .page:last-child { break-after: auto; page-break-after: auto; }
+    .eyebrow {
+      color: var(--cyan);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 16px; font-size: 48px; line-height: 1.02; letter-spacing: -.035em; }
+    h2 { margin-bottom: 6px; font-size: 28px; line-height: 1.1; letter-spacing: -.02em; }
+    h3 { margin-bottom: 7px; font-size: 17px; line-height: 1.15; }
+    p { color: var(--muted); }
+    .lede { max-width: 760px; color: #cfdeeb; font-size: 20px; line-height: 1.45; }
+    .rule { width: 100%; height: 1px; margin: 15px 0 18px; background: linear-gradient(90deg, var(--cyan), transparent); }
+    .header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; }
+    .header .meta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .footer {
+      position: absolute;
+      left: 48px;
+      right: 48px;
+      bottom: 13px;
+      display: flex;
+      justify-content: space-between;
+      color: #668097;
+      font-size: 10px;
+      letter-spacing: .04em;
+    }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      background: linear-gradient(150deg, rgba(17,38,58,.94), rgba(10,26,40,.94));
+      box-shadow: 0 14px 32px rgba(0,0,0,.18);
+    }
+    .card p { margin-bottom: 0; font-size: 13px; }
+    .card ul { margin: 8px 0 0; padding-left: 18px; color: #c7d7e5; font-size: 13px; }
+    .card li { margin: 4px 0; }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .done { color: var(--green); }
+    .now { color: var(--amber); }
+    .later { color: var(--magenta); }
+    .hold { color: var(--muted); }
+    .bad { color: var(--red); }
+    .metric { font-size: 28px; font-weight: 800; line-height: 1; }
+    .metric-label { margin-top: 6px; color: var(--muted); font-size: 11px; }
+    .status-row { display: grid; grid-template-columns: 1.15fr 1.2fr 1fr; gap: 14px; margin-top: 24px; }
+    .status-row .card { min-height: 155px; }
+    .hero-band {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 22px 0 0;
+      padding: 15px 18px;
+      border: 1px solid rgba(255,202,106,.55);
+      border-radius: 14px;
+      background: linear-gradient(90deg, rgba(255,202,106,.13), rgba(92,214,255,.05));
+      color: #ffe6ad;
+      font-size: 18px;
+      font-weight: 760;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; box-shadow: 0 0 14px currentColor; }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(4,13,22,.62);
+    }
+    svg { display: block; width: 100%; height: auto; }
+    .svg-title { fill: var(--ink); font-size: 17px; font-weight: 750; }
+    .svg-text { fill: #c8d8e6; font-size: 13px; }
+    .svg-small { fill: #94a9bc; font-size: 11px; }
+    .svg-mono { fill: #bdd4e6; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .node { fill: #10263a; stroke: #315571; stroke-width: 1.5; }
+    .node-done { fill: #0d302b; stroke: var(--green); stroke-width: 1.8; }
+    .node-now { fill: #352b16; stroke: var(--amber); stroke-width: 1.8; }
+    .node-later { fill: #2b1c37; stroke: var(--magenta); stroke-width: 1.6; }
+    .node-bad { fill: #351b25; stroke: var(--red); stroke-width: 1.6; }
+    .arrow { fill: none; stroke: #58809e; stroke-width: 2; marker-end: url(#arrow); }
+    .arrow-green { fill: none; stroke: var(--green); stroke-width: 2.2; marker-end: url(#arrowGreen); }
+    .arrow-amber { fill: none; stroke: var(--amber); stroke-width: 2.2; marker-end: url(#arrowAmber); }
+    .arrow-dash { fill: none; stroke: var(--magenta); stroke-width: 1.8; stroke-dasharray: 7 6; marker-end: url(#arrowMagenta); }
+    .no-arrow { fill: none; stroke: var(--red); stroke-width: 2; stroke-dasharray: 5 5; }
+    .legend { display: flex; gap: 15px; color: var(--muted); font-size: 11px; margin: 9px 2px 0; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .lane { display: grid; grid-template-columns: 155px 1fr 1fr 1fr; gap: 9px; align-items: stretch; margin: 8px 0; }
+    .lane > div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; background: rgba(13,27,42,.9); font-size: 12px; }
+    .lane .name { font-weight: 800; display: flex; align-items: center; }
+    .lane .landed { border-color: rgba(85,230,165,.55); }
+    .lane .active { border-color: rgba(255,202,106,.65); }
+    .lane .future { border-color: rgba(211,140,255,.5); }
+    .source-list { columns: 2; column-gap: 24px; margin: 10px 0 0; padding-left: 18px; color: #c9d9e6; font-size: 12px; }
+    .source-list li { margin: 5px 0; break-inside: avoid; }
+    code { color: #b9eaff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+  </style>
+</head>
+<body>
+
+<section class="page">
+  <div class="eyebrow">ULG Triad · Current Plan Packet</div>
+  <div style="height:55px"></div>
+  <h1>From dynamic-law refactor<br>to real-time physical breadth</h1>
+  <p class="lede">The worker-owned SS lane, authenticated reaction activation, and truthful native presentation are the foundation. The immediate program now restores real-time cadence, makes steam and aerosol transport physically visible, and then broadens solids, law activation, reservations, and online closures.</p>
+  <div class="hero-band"><span class="dot"></span> Immediate priority: restore at least 1× simulation time across every canned preset without weakening exact physics or presentation authority.</div>
+
+  <div class="status-row">
+    <div class="card">
+      <span class="tag done"><span class="dot"></span> Foundation landed</span>
+      <h3 style="margin-top:13px">One canonical execution spine</h3>
+      <p>SS spatial authority → worker-resident lane → exact schedule/fence → StateManager commit → versioned native presentation.</p>
+    </div>
+    <div class="card">
+      <span class="tag now"><span class="dot"></span> Goal 1 in progress</span>
+      <h3 style="margin-top:13px">Throughput + real presentation</h3>
+      <p>Measure all six presets honestly, remove serialized presentation stalls, and retain periodic real-desktop animation checks.</p>
+    </div>
+    <div class="card">
+      <span class="tag later"><span class="dot"></span> Goals 2–7 queued</span>
+      <h3 style="margin-top:13px">Physical breadth + scale</h3>
+      <p>Visible steam/aerosol transport, coherent solids, general per-node laws, distributed reservations, online closures, then an external fuzzy release audit.</p>
+    </div>
+  </div>
+
+  <div class="grid4" style="margin-top:16px">
+    <div class="card"><div class="metric now">6</div><div class="metric-label">canned presets in the controlled throughput and desktop-visual matrix</div></div>
+    <div class="card"><div class="metric now">≥ 1×</div><div class="metric-label">simulation-time / wall-time target for every preset</div></div>
+    <div class="card"><div class="metric later">7</div><div class="metric-label">ordered immediate goals with explicit dependency boundaries</div></div>
+    <div class="card"><div class="metric hold">offline</div><div class="metric-label">scientific database audit; fuzzy release signal, never runtime authority</div></div>
+  </div>
+
+  <div class="footer"><span>Updated 2026-08-31 AKDT · software-path status through 2026-08-30</span><span>69 / current-plan packet 1</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">01 · Authority Today</div><h2>The authoritative runtime loop is landed</h2></div><div class="meta">renderer observes · StateManager admits · worker lane executes</div></div>
+  <div class="diagram">
+    <svg viewBox="0 0 960 500" role="img" aria-label="Current authoritative runtime loop">
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#58809e"/></marker>
+        <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#55e6a5"/></marker>
+        <marker id="arrowAmber" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#ffca6a"/></marker>
+        <marker id="arrowMagenta" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#d38cff"/></marker>
+      </defs>
+
+      <rect x="25" y="48" width="140" height="78" rx="12" class="node-done"/>
+      <text x="95" y="78" text-anchor="middle" class="svg-title">Scenario + policy</text>
+      <text x="95" y="100" text-anchor="middle" class="svg-small">preset, laws, topology</text>
+
+      <rect x="200" y="48" width="155" height="78" rx="12" class="node-done"/>
+      <text x="277" y="76" text-anchor="middle" class="svg-title">Schedule seal</text>
+      <text x="277" y="98" text-anchor="middle" class="svg-small">identity + authority</text>
+
+      <rect x="390" y="48" width="165" height="78" rx="12" class="node-done"/>
+      <text x="472" y="76" text-anchor="middle" class="svg-title">ComputeManager</text>
+      <text x="472" y="98" text-anchor="middle" class="svg-small">lease + route admission</text>
+
+      <rect x="590" y="48" width="155" height="78" rx="12" class="node-done"/>
+      <text x="667" y="76" text-anchor="middle" class="svg-title">Worker lane</text>
+      <text x="667" y="98" text-anchor="middle" class="svg-small">single owner · no full map</text>
+
+      <rect x="780" y="48" width="155" height="78" rx="12" class="node-done"/>
+      <text x="857" y="76" text-anchor="middle" class="svg-title">SS epoch</text>
+      <text x="857" y="98" text-anchor="middle" class="svg-small">one immutable generation</text>
+
+      <path d="M165 87 H198" class="arrow-green"/><path d="M355 87 H388" class="arrow-green"/><path d="M555 87 H588" class="arrow-green"/><path d="M745 87 H778" class="arrow-green"/>
+
+      <rect x="780" y="190" width="155" height="82" rx="12" class="node-done"/>
+      <text x="857" y="218" text-anchor="middle" class="svg-title">Mechanics + laws</text>
+      <text x="857" y="240" text-anchor="middle" class="svg-small">Tier0 / canonical route</text>
+      <text x="857" y="256" text-anchor="middle" class="svg-small">declared state families only</text>
+
+      <rect x="590" y="190" width="155" height="82" rx="12" class="node-done"/>
+      <text x="667" y="218" text-anchor="middle" class="svg-title">Terminal fence</text>
+      <text x="667" y="240" text-anchor="middle" class="svg-small">compact exact receipts</text>
+
+      <rect x="390" y="190" width="165" height="82" rx="12" class="node-done"/>
+      <text x="472" y="218" text-anchor="middle" class="svg-title">StateManager</text>
+      <text x="472" y="240" text-anchor="middle" class="svg-small">exactly-once admission</text>
+
+      <rect x="200" y="190" width="155" height="82" rx="12" class="node-done"/>
+      <text x="277" y="218" text-anchor="middle" class="svg-title">Render mailbox</text>
+      <text x="277" y="240" text-anchor="middle" class="svg-small">versioned newest-wins</text>
+
+      <rect x="25" y="190" width="140" height="82" rx="12" class="node-done"/>
+      <text x="95" y="218" text-anchor="middle" class="svg-title">Native canvas</text>
+      <text x="95" y="240" text-anchor="middle" class="svg-small">admitted state only</text>
+
+      <path d="M857 126 V188" class="arrow-green"/><path d="M780 231 H747" class="arrow-green"/><path d="M590 231 H557" class="arrow-green"/><path d="M390 231 H357" class="arrow-green"/><path d="M200 231 H167" class="arrow-green"/>
+
+      <rect x="105" y="335" width="750" height="105" rx="16" class="node-now"/>
+      <text x="480" y="365" text-anchor="middle" class="svg-title">Seven-goal delivery program preserves this chain</text>
+      <text x="480" y="391" text-anchor="middle" class="svg-text">Throughput · transport · solids · activation · reservations · closures · external audit</text>
+      <text x="480" y="418" text-anchor="middle" class="svg-small">Optimizations may remove duplicate work; they may not weaken exact admission, fencing, or source identity.</text>
+      <path d="M472 272 V333" class="arrow-amber"/>
+
+      <path d="M95 272 C95 315 235 314 235 285" class="no-arrow"/>
+      <text x="108" y="312" class="svg-small" fill="#ff7e8a">prohibited: presentation drives physics</text>
+      <line x1="168" y1="286" x2="183" y2="301" stroke="#ff7e8a" stroke-width="3"/><line x1="183" y1="286" x2="168" y2="301" stroke="#ff7e8a" stroke-width="3"/>
+    </svg>
+  </div>
+  <div class="legend"><span class="done"><span class="dot"></span>landed and receipt-gated</span><span class="now"><span class="dot"></span>next implementation boundary</span><span class="bad"><span class="dot"></span>prohibited authority edge</span></div>
+  <div class="grid3" style="margin-top:13px">
+    <div class="card"><h3>Physics cadence is independent</h3><p>Rendering consumes admitted outputs; it cannot be required to produce pressure, mechanics, or law state.</p></div>
+    <div class="card"><h3>One spatial authority</h3><p>Mechanics, exact-near, cross-level, aggregate, and render views consume the same immutable SS generation.</p></div>
+    <div class="card"><h3>Fail closed, visibly</h3><p>Foreign, torn, replayed, ambiguous, unfenced, or uncommitted results never mint successor authority.</p></div>
+  </div>
+  <div class="footer"><span>Current worker/SS/presentation architecture</span><span>70 / current-plan packet 2</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">02 · Dynamic Law Activation</div><h2>Reaction routing is authoritative—within an exact scope</h2></div><div class="meta">serialized scene/worker lane · reaction family only</div></div>
+  <div class="diagram">
+    <svg viewBox="0 0 960 490" role="img" aria-label="Dynamic reaction activation state machine">
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#58809e"/></marker>
+        <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#55e6a5"/></marker>
+        <marker id="arrowAmber" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#ffca6a"/></marker>
+        <marker id="arrowMagenta" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#d38cff"/></marker>
+      </defs>
+
+      <rect x="30" y="50" width="145" height="75" rx="13" class="node"/>
+      <text x="102" y="79" text-anchor="middle" class="svg-title">disabled</text>
+      <text x="102" y="101" text-anchor="middle" class="svg-small">hard user-off</text>
+
+      <rect x="30" y="185" width="145" height="75" rx="13" class="node"/>
+      <text x="102" y="214" text-anchor="middle" class="svg-title">shadow</text>
+      <text x="102" y="236" text-anchor="middle" class="svg-small">default · observe only</text>
+
+      <rect x="225" y="185" width="175" height="75" rx="13" class="node-done"/>
+      <text x="312" y="212" text-anchor="middle" class="svg-title">dormant watch</text>
+      <text x="312" y="235" text-anchor="middle" class="svg-small">watch table · no reaction stage</text>
+
+      <rect x="450" y="55" width="180" height="82" rx="13" class="node-done"/>
+      <text x="540" y="82" text-anchor="middle" class="svg-title">trustworthy zero</text>
+      <text x="540" y="105" text-anchor="middle" class="svg-small">exact watch receipt</text>
+      <text x="540" y="121" text-anchor="middle" class="svg-small">remain dormant</text>
+
+      <rect x="450" y="185" width="180" height="82" rx="13" class="node-now"/>
+      <text x="540" y="212" text-anchor="middle" class="svg-title">trigger / uncertain</text>
+      <text x="540" y="235" text-anchor="middle" class="svg-small">pre-seal one successor</text>
+      <text x="540" y="251" text-anchor="middle" class="svg-small">conservative activation</text>
+
+      <rect x="680" y="185" width="245" height="82" rx="13" class="node-done"/>
+      <text x="802" y="211" text-anchor="middle" class="svg-title">authenticate route</text>
+      <text x="802" y="234" text-anchor="middle" class="svg-small">main · StateManager · outer authority · worker</text>
+      <text x="802" y="251" text-anchor="middle" class="svg-mono">N→4N or preexisting 4→4</text>
+
+      <rect x="680" y="330" width="245" height="90" rx="13" class="node-done"/>
+      <text x="802" y="358" text-anchor="middle" class="svg-title">persistent active</text>
+      <text x="802" y="381" text-anchor="middle" class="svg-small">reaction executes · terminal fence</text>
+      <text x="802" y="398" text-anchor="middle" class="svg-small">StateManager commit · retained gas lineage</text>
+
+      <rect x="225" y="330" width="405" height="90" rx="13" class="node-bad"/>
+      <text x="427" y="357" text-anchor="middle" class="svg-title">fail closed</text>
+      <text x="427" y="380" text-anchor="middle" class="svg-small">malformed · foreign · replayed · cancelled · torn · ambiguous</text>
+      <text x="427" y="398" text-anchor="middle" class="svg-small">no route, no successor token, poison after ambiguous dispatch</text>
+
+      <path d="M175 222 H223" class="arrow"/>
+      <path d="M400 211 C425 175 430 98 448 97" class="arrow-green"/>
+      <path d="M450 116 C405 145 383 168 360 184" class="arrow-green"/>
+      <text x="382" y="142" class="svg-small">loop</text>
+      <path d="M400 227 H448" class="arrow-amber"/>
+      <path d="M630 226 H678" class="arrow-green"/>
+      <path d="M802 267 V328" class="arrow-green"/>
+      <path d="M540 267 C540 300 500 315 470 328" class="arrow"/>
+      <path d="M802 267 C760 300 650 313 600 330" class="arrow"/>
+      <path d="M225 227 C205 280 252 309 300 329" class="arrow"/>
+
+      <text x="102" y="292" text-anchor="middle" class="svg-small">Sodium/water + Cesium/fluorine</text>
+      <text x="102" y="309" text-anchor="middle" class="svg-small">explicitly opt in</text>
+    </svg>
+  </div>
+  <div class="grid3" style="margin-top:14px">
+    <div class="card"><span class="tag done">Implemented</span><h3 style="margin-top:10px">Exact enablement</h3><p>Activation becomes persistent only after canonical execution, fence completion, exact consumption witnesses, and StateManager commit.</p></div>
+    <div class="card"><span class="tag hold">Scope boundary</span><h3 style="margin-top:10px">Not a general router yet</h3><p>No claim yet for every law family, arbitrary SS nodes, distributed multi-consumer reservation, or online closure derivation.</p></div>
+    <div class="card"><span class="tag now">Delivery invariant</span><h3 style="margin-top:10px">Preserve the exact tuple</h3><p>Throughput and later generalization consume the full route and lineage—not raw watch words or visually inferred activation.</p></div>
+  </div>
+  <div class="footer"><span>Dynamic-law implementation status and boundary</span><span>71 / current-plan packet 3</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">03 · Immediate Program</div><h2>Seven ordered goals restore speed, physical breadth, and scale</h2></div><div class="meta">runtime work first · external audit last</div></div>
+  <div class="diagram">
+    <svg viewBox="0 0 960 430" role="img" aria-label="Seven immediate goals in delivery order">
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#58809e"/></marker>
+        <marker id="arrowAmber" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#ffca6a"/></marker>
+        <marker id="arrowMagenta" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#d38cff"/></marker>
+      </defs>
+      <rect x="35" y="45" width="270" height="98" rx="14" class="node-now"/>
+      <text x="170" y="75" text-anchor="middle" class="svg-title">1 · Real-time throughput</text>
+      <text x="170" y="100" text-anchor="middle" class="svg-small">all six canned presets · ≥1× sim/wall</text>
+      <text x="170" y="120" text-anchor="middle" class="svg-small">exact authority + real desktop motion</text>
+
+      <rect x="345" y="45" width="270" height="98" rx="14" class="node-now"/>
+      <text x="480" y="75" text-anchor="middle" class="svg-title">2 · Transport + phase</text>
+      <text x="480" y="100" text-anchor="middle" class="svg-small">unified gas pressure + conserved condensate</text>
+      <text x="480" y="120" text-anchor="middle" class="svg-small">visible steam · smoke · aerosol</text>
+
+      <rect x="655" y="45" width="270" height="98" rx="14" class="node-later"/>
+      <text x="790" y="75" text-anchor="middle" class="svg-title">3 · Coherent solids</text>
+      <text x="790" y="100" text-anchor="middle" class="svg-small">SOL-0 schemas + SOL-1 rigid body</text>
+      <text x="790" y="120" text-anchor="middle" class="svg-small">then contact, coupling, topology</text>
+
+      <rect x="655" y="205" width="270" height="98" rx="14" class="node-later"/>
+      <text x="790" y="235" text-anchor="middle" class="svg-title">4 · Per-node laws</text>
+      <text x="790" y="260" text-anchor="middle" class="svg-small">generic conservative predicates</text>
+      <text x="790" y="280" text-anchor="middle" class="svg-small">scoped queues + zero-work receipts</text>
+
+      <rect x="345" y="205" width="270" height="98" rx="14" class="node-later"/>
+      <text x="480" y="235" text-anchor="middle" class="svg-title">5 · Distributed reservations</text>
+      <text x="480" y="260" text-anchor="middle" class="svg-small">epoch-fenced single winner</text>
+      <text x="480" y="280" text-anchor="middle" class="svg-small">multi-peer / multi-consumer safety</text>
+
+      <rect x="35" y="205" width="270" height="98" rx="14" class="node-later"/>
+      <text x="170" y="235" text-anchor="middle" class="svg-title">6 · Online closures</text>
+      <text x="170" y="260" text-anchor="middle" class="svg-small">regime-keyed hot / warm / cold cache</text>
+      <text x="170" y="280" text-anchor="middle" class="svg-small">schedule-boundary derivation + adoption</text>
+
+      <rect x="190" y="350" width="580" height="62" rx="14" class="node"/>
+      <text x="480" y="376" text-anchor="middle" class="svg-title">7 · External fuzzy scientific release audit</text>
+      <text x="480" y="398" text-anchor="middle" class="svg-small">versioned database snapshots cached on shitbox · offline comparisons · nonblocking drift signal</text>
+
+      <path d="M305 94 H343" class="arrow-amber"/><path d="M615 94 H653" class="arrow-amber"/>
+      <path d="M790 143 V203" class="arrow"/><path d="M655 254 H617" class="arrow"/><path d="M345 254 H307" class="arrow"/>
+      <path d="M170 303 C170 330 235 340 300 348" class="arrow-dash"/>
+      <path d="M480 303 V348" class="arrow-dash"/>
+      <path d="M790 303 C790 330 725 340 660 348" class="arrow-dash"/>
+    </svg>
+  </div>
+  <div class="grid3" style="margin-top:14px">
+    <div class="card"><h3>Current gate</h3><p>Goal 1 closes only when every preset sustains real time and a real-desktop browser sweep confirms visible animation.</p></div>
+    <div class="card"><h3>Physical payoff next</h3><p>Goal 2 makes steam and aerosol visible by conserved phase transport—not presentation-only color or an invented plume force.</p></div>
+    <div class="card"><h3>Audit is a sidecar</h3><p>Goal 7 runs around major changes and releases. Scientific drift informs judgment; it never schedules runtime work or blocks admission.</p></div>
+  </div>
+  <div class="footer"><span>Seven immediate goals · ordered by runtime dependency</span><span>72 / current-plan packet 4</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">04 · Active Work Map</div><h2>Runtime delivery is serial where dependencies are real</h2></div><div class="meta">measure → restore physics → broaden authority</div></div>
+
+  <div class="lane">
+    <div class="name"><span class="now">1 · Throughput</span></div>
+    <div class="landed"><b>Substrate</b><br>Atomic Tier-0 worker schedules, zero full readback, exact commit/fence, worker-owned native presentation.</div>
+    <div class="active"><b>Now</b><br>All-six matrix, route telemetry, duplicate-presentation removal, and ≥1× simulation-time / wall-time gates.</div>
+    <div class="future"><b>Acceptance</b><br>Every canned preset passes measured cadence plus a sequential, visible real-desktop animation inspection.</div>
+  </div>
+  <div class="lane">
+    <div class="name"><span class="now">2 · Transport + phase</span></div>
+    <div class="landed"><b>Landed</b><br>Sparse mechanics fields, four phase-pure carrier lanes, conservative transfer, monotonic phase-volume rendering.</div>
+    <div class="active"><b>Next</b><br>Unify live gas occupancy/free-volume pressure, repair product P2G pressure, and conserve condensed aerosol mass.</div>
+    <div class="future"><b>Acceptance</b><br>Pressure-aware boiling/condensation and physically derived visible steam, mist, and aerosol; H₂ stays optically thin.</div>
+  </div>
+  <div class="lane">
+    <div class="name"><span class="later">3 · Coherent solids</span></div>
+    <div class="landed"><b>Prerequisite</b><br>Canonical SS exact-near and sparse mechanics substrate. Existing body IDs are not coherent-body authority.</div>
+    <div class="active"><b>Then SOL-0 / SOL-1</b><br>Body/frame/member schemas, GPU invariants, inertia/wrench state, pose integration, direct resident mesh transform.</div>
+    <div class="future"><b>SOL-2…6</b><br>Contact, solid-liquid coupling, deformable shape, phase/fracture topology, then multilevel/planetary bodies.</div>
+  </div>
+  <div class="lane">
+    <div class="name"><span class="later">4–6 · Law scale</span></div>
+    <div class="landed"><b>Seeds</b><br>Per-node queue rows, exact reaction watch, schedule admission, and a regime-keyed closure store.</div>
+    <div class="active"><b>Generalize locally</b><br>Per-node predicates and scoped invocation; preserve conservative activation and zero-work receipts.</div>
+    <div class="future"><b>Then distribute</b><br>Epoch-fenced multi-consumer reservation before remote work; wire hot/warm/cold online closure derivation.</div>
+  </div>
+
+  <div class="grid3" style="margin-top:18px">
+    <div class="card"><span class="tag hold">Held</span><h3 style="margin-top:10px">Third SS level</h3><p>Do not resume until two-level sparsity, conservation, and coherent-solid prerequisites justify it.</p></div>
+    <div class="card"><span class="tag hold">Goal 7 sidecar</span><h3 style="margin-top:10px">External fuzzy audit</h3><p>Compare exported observables with immutable scientific-database snapshots cached on shitbox; report drift without runtime coupling.</p></div>
+    <div class="card"><span class="tag now">Operating cadence</span><h3 style="margin-top:10px">Real desktop evidence</h3><p>Keep periodic configured-preset checks in visible system Chrome throughout runtime work; close only the owned browser session.</p></div>
+  </div>
+
+  <div class="hero-band" style="margin-top:9px;padding:10px 14px;font-size:15px"><span class="dot"></span>Order: throughput → transport/steam-smoke → solids → per-node laws → distributed reservations → online closures → external fuzzy release audit.</div>
+  <div class="footer"><span>Current roadmap and dependency boundaries</span><span>73 / current-plan packet 5</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">05 · Long-Horizon Architecture</div><h2>The closure economy scales laws without making them disappear</h2></div><div class="meta">cache miss = trigger · scale descent = scoped sparsity</div></div>
+  <div class="diagram">
+    <svg viewBox="0 0 960 455" role="img" aria-label="Tier zero through tier three closure economy">
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#58809e"/></marker>
+        <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#55e6a5"/></marker>
+        <marker id="arrowMagenta" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#d38cff"/></marker>
+      </defs>
+      <rect x="35" y="55" width="180" height="315" rx="17" class="node-done"/>
+      <text x="125" y="89" text-anchor="middle" class="svg-title">Tier 0</text>
+      <text x="125" y="112" text-anchor="middle" class="svg-small">always-on bulk substrate</text>
+      <line x1="64" y1="130" x2="186" y2="130" stroke="#2e765e"/>
+      <text x="125" y="163" text-anchor="middle" class="svg-text">fused MPM core</text>
+      <text x="125" y="190" text-anchor="middle" class="svg-text">uniform fields</text>
+      <text x="125" y="217" text-anchor="middle" class="svg-text">wall handling</text>
+      <text x="125" y="244" text-anchor="middle" class="svg-text">closure lookups</text>
+      <text x="125" y="288" text-anchor="middle" class="svg-small">goal: near pure-MLS-MPM</text>
+      <text x="125" y="306" text-anchor="middle" class="svg-small">cost while laws quiescent</text>
+      <text x="125" y="343" text-anchor="middle" class="svg-mono">runtime · partial</text>
+
+      <rect x="270" y="55" width="180" height="315" rx="17" class="node-later"/>
+      <text x="360" y="89" text-anchor="middle" class="svg-title">Tier 1</text>
+      <text x="360" y="112" text-anchor="middle" class="svg-small">validity-envelope watch</text>
+      <line x1="299" y1="130" x2="421" y2="130" stroke="#6f4382"/>
+      <text x="360" y="163" text-anchor="middle" class="svg-text">O(active SS nodes)</text>
+      <text x="360" y="190" text-anchor="middle" class="svg-text">conservative predicates</text>
+      <text x="360" y="217" text-anchor="middle" class="svg-text">activation masks</text>
+      <text x="360" y="244" text-anchor="middle" class="svg-text">zero-work receipts</text>
+      <text x="360" y="288" text-anchor="middle" class="svg-small">reaction watch is the</text>
+      <text x="360" y="306" text-anchor="middle" class="svg-small">first exact family seed</text>
+      <text x="360" y="343" text-anchor="middle" class="svg-mono">reaction seed landed</text>
+
+      <rect x="505" y="55" width="180" height="315" rx="17" class="node-later"/>
+      <text x="595" y="89" text-anchor="middle" class="svg-title">Tier 2</text>
+      <text x="595" y="112" text-anchor="middle" class="svg-small">scoped invocation</text>
+      <line x1="534" y1="130" x2="656" y2="130" stroke="#6f4382"/>
+      <text x="595" y="163" text-anchor="middle" class="svg-text">triggered node regions</text>
+      <text x="595" y="190" text-anchor="middle" class="svg-text">exact-near members</text>
+      <text x="595" y="217" text-anchor="middle" class="svg-text">bounded local work</text>
+      <text x="595" y="244" text-anchor="middle" class="svg-text">overflow fails closed</text>
+      <text x="595" y="288" text-anchor="middle" class="svg-small">law locality becomes</text>
+      <text x="595" y="306" text-anchor="middle" class="svg-small">semantics, not a limit</text>
+      <text x="595" y="343" text-anchor="middle" class="svg-mono">future</text>
+
+      <rect x="740" y="55" width="185" height="315" rx="17" class="node-later"/>
+      <text x="832" y="89" text-anchor="middle" class="svg-title">Tier 3</text>
+      <text x="832" y="112" text-anchor="middle" class="svg-small">online closure factory</text>
+      <line x1="769" y1="130" x2="896" y2="130" stroke="#6f4382"/>
+      <text x="832" y="163" text-anchor="middle" class="svg-text">sample / derive / fit</text>
+      <text x="832" y="190" text-anchor="middle" class="svg-text">regime-keyed envelope</text>
+      <text x="832" y="217" text-anchor="middle" class="svg-text">strict / async / frozen</text>
+      <text x="832" y="244" text-anchor="middle" class="svg-text">debt + adoption receipts</text>
+      <text x="832" y="288" text-anchor="middle" class="svg-small">PeerCompute-leased</text>
+      <text x="832" y="306" text-anchor="middle" class="svg-small">Eshkol / MoonLab providers</text>
+      <text x="832" y="343" text-anchor="middle" class="svg-mono">future</text>
+
+      <path d="M215 210 H268" class="arrow-dash"/><text x="241" y="198" text-anchor="middle" class="svg-small">exit</text>
+      <path d="M450 210 H503" class="arrow-dash"/><text x="476" y="198" text-anchor="middle" class="svg-small">trigger</text>
+      <path d="M685 210 H738" class="arrow-dash"/><text x="711" y="198" text-anchor="middle" class="svg-small">miss</text>
+      <path d="M832 370 C832 430 125 430 125 372" class="arrow-green"/>
+      <text x="480" y="407" text-anchor="middle" class="svg-small">validated closure + envelope returns to the store and future Tier-0 lookups</text>
+    </svg>
+  </div>
+  <div class="grid3" style="margin-top:14px">
+    <div class="card"><h3>Do not remove laws</h3><p>Inactive laws become cheap through conservative watches, scoped execution, and cached closures—not by deleting their physics.</p></div>
+    <div class="card"><h3>Do not block the world</h3><p>Async derivation may continue on declared extrapolation debt, adopting only at schedule boundaries with replayable receipts.</p></div>
+    <div class="card"><h3>Do not overclaim</h3><p>A closure carries provenance, validity domain, method/runtime fingerprints, uncertainty, and scientific validation state.</p></div>
+  </div>
+  <div class="footer"><span>Scale-adaptive law activation target</span><span>74 / current-plan packet 6</span></div>
+</section>
+
+<section class="page">
+  <div class="header"><div><div class="eyebrow">06 · Disposition + Guardrails</div><h2>Done, moot, held, and still open are different states</h2></div><div class="meta">honest claims are part of the architecture</div></div>
+  <div class="grid3">
+    <div class="card" style="min-height:210px;border-color:rgba(85,230,165,.55)">
+      <span class="tag done">Done</span>
+      <h3 style="margin-top:11px">Do not reopen</h3>
+      <ul>
+        <li>canonical SS spatial authority refactor</li>
+        <li>worker-owned serialized lane</li>
+        <li>reaction activation authority seed</li>
+        <li>truthful control-preview labeling and fail-closed startup hold</li>
+        <li>native source/presentation correlation</li>
+      </ul>
+    </div>
+    <div class="card" style="min-height:210px;border-color:rgba(159,178,197,.45)">
+      <span class="tag hold">Moot / superseded</span>
+      <h3 style="margin-top:11px">Keep as evidence only</h3>
+      <ul>
+        <li>old Slice 9 worktree/server handoff</li>
+        <li>July SS routing and delivery queues</li>
+        <li>private-bin cubic-barrier follow-ups</li>
+        <li>session-operation checkboxes</li>
+        <li>June PDF status packet</li>
+      </ul>
+    </div>
+    <div class="card" style="min-height:210px;border-color:rgba(211,140,255,.5)">
+      <span class="tag later">Immediate queue</span>
+      <h3 style="margin-top:11px">Dependency-ordered, not discarded</h3>
+      <ul>
+        <li>all-preset real-time throughput</li>
+        <li>steam/smoke/aerosol transport closure</li>
+        <li>coherent solids SOL-0 through SOL-6</li>
+        <li>general per-node law routing</li>
+        <li>distributed reservations and online closures</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:16px">
+    <div class="card">
+      <h3>Non-negotiable delivery rules</h3>
+      <ul>
+        <li>GPU MLS-MPM / worker-resident route is the primary integration target.</li>
+        <li>Normal hot execution stays free of full particle/thermo readback.</li>
+        <li>Every runtime acceptance claim names its authority, source, generation, and tolerance.</li>
+        <li>Periodic configured presets and random reaction families run in visible desktop Chrome with sequential visual inspection.</li>
+        <li>Throughput work cannot weaken physics source correlation, presentation admission, or fail-closed dynamic-law authority.</li>
+        <li>Scientific comparison is offline, versioned, fuzzy, and nonblocking; database results never become runtime authority.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Current source-of-truth documents</h3>
+      <ul class="source-list">
+        <li><code>plan/refactor/handoff.md</code></li>
+        <li><code>plan/implementation-status.md</code></li>
+        <li><code>plan/todo/ss-regression.md</code></li>
+        <li><code>plan/todo/scale-adaptive-law-activation-plan.md</code></li>
+        <li><code>plan/todo/surface-contact-transport-phase-closure-plan.md</code></li>
+        <li><code>plan/todo/sol-critic.md</code></li>
+        <li><code>plan/solver-law-inventory.md</code></li>
+        <li><code>plan/todo/README.md</code></li>
+      </ul>
+      <p style="margin:13px 0 0;font-size:12px">This packet updates planning status; it does not convert provisional thermochemistry or architecture liveness into calibrated science.</p>
+    </div>
+  </div>
+
+  <div class="hero-band"><span class="dot"></span>Next action: finish the all-six real-time throughput gate, run the real-desktop visual sweep, then restore physically derived steam and aerosol transport.</div>
+  <div class="footer"><span>Source: plan/ULG_Triad_Current_Plan_Addendum.html</span><span>75 / current-plan packet 7</span></div>
+</section>
+
+</body>
+</html>

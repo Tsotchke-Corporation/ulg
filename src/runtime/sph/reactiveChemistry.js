@@ -423,6 +423,7 @@ function applyStoichiometricExtentProducts({ state, particles, indices, reaction
     }
   }
 
+  const assignedReusableProductSlots = new Set();
   for (let productIndex = 0; productIndex < productRecords.length; productIndex += 1) {
     const product = productRecords[productIndex];
     const slot = reusableProductSlots[productIndex] ?? null;
@@ -452,7 +453,43 @@ function applyStoichiometricExtentProducts({ state, particles, indices, reaction
     };
     const rho0 = productRestDensityKgPerM3(target, materialProperties, restDensityOf);
     if (rho0) resetMechanicalReferenceState(target, rho0);
-    if (slot == null) particles.push(target);
+    if (slot == null) {
+      particles.push(target);
+    } else {
+      assignedReusableProductSlots.add(slot);
+    }
+  }
+
+  // A balanced two-reactant synthesis can collapse into one product term
+  // (for example 2 Na + F2 -> 2 NaF). Both fully consumed parent slots are
+  // reusable, but only one is needed for the aggregate product particle.
+  // Retire every surplus parent in place so the current spatial-index walk
+  // keeps stable indices without leaving a zero-extent reactant ghost whose
+  // original mass would be counted again or participate in a later reaction.
+  for (const slot of reusableProductSlots) {
+    if (assignedReusableProductSlots.has(slot)) continue;
+    const target = particles[slot];
+    const product = productRecords[0];
+    target.material = product.term.material;
+    target.massKg = 0;
+    target.x = [...consumedCenter];
+    target.v = [...productVelocity];
+    target.specificInternalEnergyJPerKg = productSpecificEnergy;
+    target.reactionProductTerm = {
+      formula: product.term.formula,
+      coefficient: 0,
+      massFraction: 0,
+      moles: 0,
+      routing: product.routing,
+      sourceEquation: reaction.stoichiometry?.equation || null,
+      retiredSurplusConsumedSlot: true
+    };
+    const rho0 = productRestDensityKgPerM3(
+      target,
+      materialProperties,
+      restDensityOf
+    );
+    if (rho0) resetMechanicalReferenceState(target, rho0);
   }
 
   appendReactionLedger(state, {

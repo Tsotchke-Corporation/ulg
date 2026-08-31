@@ -336,6 +336,69 @@ test('stoichiometric extent writes mass, heat, and gas-product reaction ledger',
   assert.equal(state.reactionLedger.events[0].extentMol, 1);
 });
 
+test('binary single-product extent retires a surplus consumed slot and conserves global mass', () => {
+  const state = {
+    particles: [
+      { x: [0, 0, 0], v: [0, 0, 0], massKg: 2, material: 'Na', specificInternalEnergyJPerKg: 0 },
+      { x: [0.01, 0, 0], v: [0, 0, 0], massKg: 2, material: 'F', specificInternalEnergyJPerKg: 0 }
+    ]
+  };
+  const reactions = [{
+    a: 'Na',
+    b: 'F',
+    product: 'naf',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: '2 Na + F2 -> 2 NaF',
+      reactants: [
+        { coefficient: 2, formula: 'Na', material: 'Na' },
+        { coefficient: 1, formula: 'F2', material: 'F' }
+      ],
+      products: [
+        { coefficient: 2, formula: 'NaF', material: 'naf' }
+      ]
+    }
+  }];
+  const materialProperties = {
+    Na: { molarMassKgPerMol: 1, phases: [{ name: 'solid', densityKgPerM3: 1 }] },
+    F: { molarMassKgPerMol: 2, phases: [{ name: 'gas', densityKgPerM3: 1 }] },
+    naf: { molarMassKgPerMol: 2, phases: [{ name: 'solid', densityKgPerM3: 1 }] }
+  };
+  const totalMassKg = () => state.particles.reduce(
+    (sum, particle) => sum + particle.massKg,
+    0
+  );
+  const initialMassKg = totalMassKg();
+
+  const events = reactiveStep(state, {
+    reactions,
+    materialProperties,
+    contactRadiusM: 0.05,
+    temperatureOf: () => 293.15
+  });
+
+  assert.equal(events, 1);
+  assert.equal(totalMassKg(), initialMassKg);
+  assert.equal(state.reactionLedger.massResidualKg, 0);
+  assert.equal(state.reactionLedger.maxAbsAtomResidualMol, 0);
+  assert.equal(state.reactionLedger.chargeResidualMol, 0);
+  assert.deepEqual(
+    state.particles.map((particle) => [particle.material, particle.massKg]),
+    [['naf', initialMassKg], ['naf', 0]]
+  );
+  assert.equal(
+    state.particles[1].reactionProductTerm.retiredSurplusConsumedSlot,
+    true
+  );
+  assert.equal(reactiveStep(state, {
+    reactions,
+    materialProperties,
+    contactRadiusM: 0.05,
+    temperatureOf: () => 293.15
+  }), 0, 'the retired slot must not remain available as a fluorine reactant');
+});
+
 test('active metal does not react with solid ice just because the metal is hot', () => {
   const parts = [
     { x: [0, 0, 0], v: [0, 0, 0], massKg: 1, material: 'Na', specificInternalEnergyJPerKg: 0 },

@@ -70,6 +70,87 @@ test('timeline analysis separates native presentation admission from foreground 
   assert.equal(foregroundProved.residentSurfaceVisibleGpuConsumerAccepted, true);
 });
 
+test('timeline analysis accepts browser-proved native surfaces without demanding H2O from non-water scenarios', () => {
+  const nativeBrowserProof = {
+    probeMode: 'scene',
+    surfaceDrawDiagnosticMode: 'native-webgpu-surface-consumer',
+    renderReadbackMode: 'auto',
+    renderFieldSurfaceSummaryMode: 'auto',
+    nativeSurfaceBrowserFrameValidation: {
+      status: 'passed',
+      publishStatus: {
+        status: 'browser-frame-validation-passed',
+        source: 'playwright-canvas-center-crop',
+        nonzeroPixelCount: 128,
+        resourceGeneration: 7
+      }
+    },
+    metrics: [{
+      surfaceDraw: {
+        surfaceDrawVisibleGpuConsumerNativeActiveResourceGeneration: 7
+      }
+    }]
+  };
+  const scenarioUrl = '/?drop=Na&base=F&dropt=293.15&baset=293.15';
+  const analysis = analyzeTimeline(nativeBrowserProof, {
+    scenarioUrl,
+    visualOnly: true
+  });
+
+  assert.equal(analysis.nativeBrowserFramePixelValidated, true);
+  assert.equal(analysis.issues.includes('no-visible-surface-samples'), false);
+  assert.equal(analysis.issues.includes('no-visible-h2o-surface-samples'), false);
+
+  const nonWaterWithoutProof = analyzeTimeline({
+    probeMode: 'scene',
+    metrics: []
+  }, {
+    scenarioUrl,
+    visualOnly: true
+  });
+  assert.equal(nonWaterWithoutProof.issues.includes('no-visible-surface-samples'), true);
+  assert.equal(nonWaterWithoutProof.issues.includes('no-visible-h2o-surface-samples'), false);
+
+  const waterWithoutProof = analyzeTimeline({
+    probeMode: 'scene',
+    metrics: []
+  }, {
+    scenarioUrl: '/?drop=h2o&base=h2o&dropt=293.15&baset=293.15',
+    visualOnly: true
+  });
+  assert.equal(waterWithoutProof.issues.includes('no-visible-h2o-surface-samples'), true);
+
+  const mixedColdWaterWithoutProof = analyzeTimeline({
+    probeMode: 'scene',
+    metrics: []
+  }, {
+    scenarioUrl: '/?drop=fe&base=h2o&baset=233.15',
+    visualOnly: true
+  });
+  assert.equal(
+    mixedColdWaterWithoutProof.issues.includes('no-visible-h2o-surface-samples'),
+    true
+  );
+
+  const canonicalNonWaterBodiesWithoutProof = analyzeTimeline({
+    probeMode: 'scene',
+    metrics: []
+  }, {
+    scenarioUrl: `/?bodies=${encodeURIComponent(JSON.stringify({
+      schema: 'peercompute.ulg.sph-initial-bodies.v0',
+      bodies: [
+        { id: 'base', material: 'F' },
+        { id: 'drop', material: 'Na' }
+      ]
+    }))}`,
+    visualOnly: true
+  });
+  assert.equal(
+    canonicalNonWaterBodiesWithoutProof.issues.includes('no-visible-h2o-surface-samples'),
+    false
+  );
+});
+
 test('timeline analysis derives authoritative global motion across material phase changes', () => {
   const checkpoint = ({ sourceTimeS, rows }) => ({
     status: 'captured',

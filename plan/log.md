@@ -42742,3 +42742,46 @@ Validation and review:
   multi-consumer authority: those remain later phases. The previously measured
   high water-demo frame rate should be restored after refactor closure; it is a
   performance backlog item, not a reason to delay validation-framework work.
+
+## 2026-08-30 AKDT - Seeded room-temperature element-pair validation
+
+- Used seed `0x20260830` over the supported non-canned alkali/fluorine pool and
+  selected Na/F, K/F, and Rb/F at 293.15 K. Each resolved through the ordinary
+  material and reaction discovery stack as `2 M + F2 -> 2 MF`, with one
+  balanced product closure and an exothermic contact policy.
+- Excluded chlorine from this room-temperature-contact run. Chloride products
+  are chemically valid, but initiation and passivation make unqualified
+  ambient contact a poor control; the current model still assigns chlorine
+  the same provisional zero barrier as fluorine. Quantitative energetics,
+  kinetics, and `scientificValidation` remain false for all three sampled
+  non-lithium reactions.
+- Found and fixed a legacy CPU `reactiveStep` conservation bug. Both parents
+  could be fully consumed by a binary single-product synthesis, but only the
+  first reusable slot became product; the second retained its reactant mass.
+  Surplus consumed slots now become zero-mass retired product carriers so the
+  active spatial walk keeps stable indices without retaining a ghost reactant.
+  A regression proves exact global mass/atom/charge closure and that a second
+  step cannot react the retired slot.
+- Rechecked the real derived Na/F, K/F, and Rb/F closures through the corrected
+  CPU path. Every pair emitted one event; residual global mass was zero for Na
+  and `-3.47e-18 kg` for K and Rb.
+- Ran each pair in visible desktop Chrome on the mounted worker-owned native
+  WebGPU route, two 128-step batches each, and inspected all initial, midpoint,
+  terminal, and composited captures. NaF grew to 3.491 kg, KF to 4.830 kg, and
+  RbF to 8.686 kg. Every run had three authoritative checkpoints, current
+  render-source samples, no stale samples, passing generation-matched native
+  pixel proof, nonblank frames, and zero console/page/critical-GPU errors. The
+  images show contact, motion, and a heated product surface rather than the
+  control-body preview. Owned Chrome and temporary ports 5317-5319 closed.
+- Fixed the long-horizon receipt evaluator exposed by these non-water runs.
+  Native browser proof now satisfies generic visibility only when its published
+  resource generation matches the active native generation. H2O-specific
+  visibility is required only when canonical bodies or legacy selectors
+  actually include H2O; mixed/cold-water regression coverage remains active.
+  All three saved raw timelines reanalyze as `good` with no issues.
+- PASS: focused post-review tests `16/16`; full Node `3131` total (`3080`
+  passed, `51` expected opt-in skips, zero failures); production Vite build;
+  `git diff --check`; refreshed full ICC stores; and scoped guard-diff with no
+  violation or rollback risk. ICC's broader reaction-closure oracle remains
+  blocked on general multi-product/gas-coupling and scientific-readiness work,
+  which this narrow spot check does not claim to complete.

@@ -801,6 +801,26 @@ function isExpectedLiquidH2oSameMaterialScenario(url) {
   return [dropTempK, baseTempK, ...wallTempsK].every((tempK) => tempK >= 273.15 && tempK < 373.15);
 }
 
+function scenarioIncludesH2oMaterial(url) {
+  const params = scenarioParams(url);
+  if (params.has('bodies')) {
+    try {
+      const parsed = JSON.parse(params.get('bodies'));
+      if (Array.isArray(parsed?.bodies) && parsed.bodies.length > 0) {
+        return parsed.bodies.some((body) => (
+          String(body?.material || '').trim().toLowerCase() === 'h2o'
+        ));
+      }
+    } catch {
+      // Fall through to the legacy drop/base selectors when bodies is invalid;
+      // scenario preflight owns the malformed-body failure itself.
+    }
+  }
+  const drop = String(params.get('drop') || 'fe').trim().toLowerCase();
+  const base = String(params.get('base') || 'h2o').trim().toLowerCase();
+  return drop === 'h2o' || base === 'h2o';
+}
+
 function normalizedProbeMode(value) {
   const mode = String(value || '').trim().toLowerCase();
   if (mode === 'direct' || mode === 'direct-resident' || process.env.ULG_PROBE_DIRECT_RESIDENT === '1') {
@@ -15142,6 +15162,7 @@ export function analyzeTimeline(timeline, {
   const metrics = Array.isArray(timeline?.metrics) ? timeline.metrics : [];
   const directResident = timeline?.probeMode === 'direct-resident';
   const expectedLiquidH2oSameMaterial = isExpectedLiquidH2oSameMaterialScenario(scenarioUrl);
+  const h2oMaterialExpected = scenarioIncludesH2oMaterial(scenarioUrl);
   const initialPreflight = metrics.find((metric) => metric.initial?.preflight)?.initial?.preflight ?? null;
   const initialPreflightBlockers = Array.isArray(initialPreflight?.blockers)
     ? initialPreflight.blockers
@@ -15390,6 +15411,10 @@ export function analyzeTimeline(timeline, {
     && nativeBrowserFrameActiveGeneration !== null
     && nativeBrowserFramePublishedGeneration
       === nativeBrowserFrameActiveGeneration
+  );
+  const nativeBrowserSurfaceProofAccepted = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeBrowserFramePixelValidated
   );
   const visibleGpuConsumerBrowserPixelValidated =
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
@@ -17473,10 +17498,21 @@ export function analyzeTimeline(timeline, {
   ) {
     issues.push('visual-canvas-frames-all-blank');
   }
-  if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
+  if (
+    !directResident
+    && !residentSurfaceBufferHandoffAccepted
+    && !nativeBrowserSurfaceProofAccepted
+    && visibleSurfaceSampleCount === 0
+  ) {
     issues.push('no-visible-surface-samples');
   }
-  if (!directResident && !residentSurfaceBufferHandoffAccepted && h2oVisibleSurfaceSampleCount === 0) {
+  if (
+    !directResident
+    && h2oMaterialExpected
+    && !residentSurfaceBufferHandoffAccepted
+    && !nativeBrowserSurfaceProofAccepted
+    && h2oVisibleSurfaceSampleCount === 0
+  ) {
     issues.push('no-visible-h2o-surface-samples');
   }
   if (visualSurfaceIssues.some((item) => item.issue === 'visible-surface-outside-box')) issues.push('visible-surface-outside-box');

@@ -1,5 +1,50 @@
 # Implementation Status
 
+## Room-temperature reaction spot check - 2026-08-30 AKDT
+
+A seeded non-canned sample (`0x20260830`) selected Na/F, K/F, and Rb/F at
+293.15 K. Discovery produced the balanced single-product reactions
+`2 Na + F2 -> 2 NaF`, `2 K + F2 -> 2 KF`, and
+`2 Rb + F2 -> 2 RbF`. Each pair completed a visible desktop-Chrome run on
+the mounted worker-owned native WebGPU route for two 128-step batches. The
+authoritative checkpoints recorded product-mass growth from zero to 3.491 kg
+NaF, 4.830 kg KF, and 8.686 kg RbF; render sources stayed current, native
+browser-frame pixel validation passed, and there were no console, page, or
+critical GPU errors. Direct review of every captured sequence showed the
+falling metal contacting the fluorine body and a bright heated product region,
+not a control-body preview.
+
+The spot check uncovered one real CPU-oracle defect. A two-reactant,
+one-product extent reused one fully consumed parent for the aggregate product
+but left the other parent live with its original mass. Surplus consumed slots
+are now retired in place as zero-mass product carriers, keeping particle
+indices stable while preventing duplicated mass or a repeat reaction. The
+actual Na/F, K/F, and Rb/F closures now conserve global mass exactly or within
+`3.5e-18 kg` on that legacy reference path.
+
+The generic long-horizon evaluator also produced two false failures: it
+demanded H2O evidence from non-water scenarios and ignored a
+generation-matched native browser-frame proof when readback policy remained
+`auto`. The evaluator now recognizes only the exact native proof for that
+bypass and determines H2O presence from canonical initial bodies or legacy
+drop/base selectors, preserving mixed and cold-water coverage. Reanalysis of
+all three raw browser timelines is `good` with zero issues.
+
+Verification is green on the cumulative tree: full Node suite `3131` total,
+`3080` passed, `51` expected opt-in skips, zero failures; production Vite
+build and `git diff --check` passed; scoped ICC guard-diff reports no
+violations or rollback risks. All owned desktop browsers and temporary Vite
+servers were closed.
+
+This is software-path validation, not scientific validation. The three
+non-lithium fluoride energetics and zero activation barriers remain explicitly
+provisional (`scientificValidation:false`). Chlorine pairs were excluded from
+the room-temperature-contact sample because the current policy gives them the
+same zero barrier as fluorine despite initiation/passivation dependence; that
+policy needs a later kinetics/activation refinement. The validation framework
+may still begin next using these receipts without treating provisional
+thermochemistry as calibrated truth.
+
 ## Current Focus - 2026-08-30 AKDT (authenticated reaction routing enabled)
 
 The reaction-activation arm of the scale-adaptive law router is enabled for

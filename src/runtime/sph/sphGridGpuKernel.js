@@ -118,7 +118,7 @@ const P2G_ACCUMULATOR_COMPONENTS = 4;
 const P2G_PARAMS_BYTES = 144;
 const ACTIVE_SOURCE_V2_DENSE_P2G_PARAMS_BYTES = 224;
 const MECHANICS_FIELD_P2G_PARAMS_BYTES = 160;
-const ACTIVE_SOURCE_V2_MECHANICS_FIELD_P2G_PARAMS_BYTES = 192;
+const ACTIVE_SOURCE_V2_MECHANICS_FIELD_P2G_PARAMS_BYTES = 208;
 const MECHANICS_FIELD_PRODUCT_ROUTE_CERTIFICATE_PARAMS_BYTES = 32;
 const MECHANICS_FIELD_PRODUCT_ROUTE_CERTIFICATE_WORKGROUP_SIZE = 64;
 const SPH_PARTICLE_STATE_STRIDE_BYTES =
@@ -1995,6 +1995,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   // transaction of its own: the coarse predictor projection is consumed by the
   // parent workspace before the coarse local grid update ever runs.
   pressureCrossLevelConsumerRequired = false,
+  mechanicsFieldTemporalCoarsePredictor = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -2028,6 +2029,27 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   }
   const fusedFineSubstep = fusedFineSubstepTransaction != null;
   const fusedCoarseTerminal = fusedCoarseTerminalTransaction != null;
+  const temporalCoarseEnabled =
+    mechanicsFieldTemporalCoarsePredictor?.enabled === true;
+  const temporalCoarseSuccessorDt = temporalCoarseEnabled
+    ? Math.fround(Number(
+        mechanicsFieldTemporalCoarsePredictor?.successorThetaDt
+      ))
+    : 0;
+  if (temporalCoarseEnabled && (
+    mechanicsFieldTemporalCoarsePredictor?.role
+      !== 'immediate-successor-coarse-predictor'
+    || !Number.isFinite(temporalCoarseSuccessorDt)
+    || !(temporalCoarseSuccessorDt > Math.fround(Number(dt)))
+    || mechanicsFieldMode !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    || fusedFineSubstep
+    || fusedCoarseTerminal
+    || readbackMode !== NO_FULL_READBACK_MODE
+  )) {
+    throw new TypeError(
+      'temporal coarse P2G requires one unfused, no-readback, cross-level mechanics-field projection and an exact immediate successor theta'
+    );
+  }
   const fusedTransaction = fusedFineSubstepTransaction
     ?? fusedCoarseTerminalTransaction;
   const fusedTransactionMode = fusedFineSubstep
@@ -2406,6 +2428,11 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   mechanicsFieldCleanupExecution = mechanicsFieldExecution;
   const activeSourceV2P2gEnabled = mechanicsFieldViewEnabled
     && mechanicsFieldBinding?.activeSourceP2gEnabled === true;
+  if (temporalCoarseEnabled && !activeSourceV2P2gEnabled) {
+    throw new TypeError(
+      'temporal coarse P2G requires the authenticated ActiveSource-v2 mechanics-field route'
+    );
+  }
   const activeSourceV2DenseP2gEnabled = canonicalSpatialV2
     && !mechanicsFieldRequested
     && mechanicsFieldBinding?.activeSourceV2Enabled === true
@@ -2943,7 +2970,13 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
             externalGaugePressurePa,
             externalGaugePressureEnabled,
             mechanicsFieldMutationToken,
-            mechanicsFieldPressureRequiredConsumerMask
+            mechanicsFieldPressureRequiredConsumerMask,
+            temporalCoarseEnabled
+              ? {
+                  enabled: true,
+                  successorThetaDt: temporalCoarseSuccessorDt
+                }
+              : null
           )
         : (activeSourceV2DenseP2gEnabled
             ? createActiveSourceV2DenseProjectionParamsArray(
@@ -3020,7 +3053,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
               : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl))
       : mlsMpmP2gGridProjectionWgsl;
     const p2gVariant = mechanicsFieldViewEnabled
-      ? `canonical-spatial-mechanics-field-deterministic-reduction.v4.${
+      ? `canonical-spatial-mechanics-field-deterministic-reduction.v5.${
         observeCanonicalSpatialAuthority === true ? 'observed' : 'unobserved'}${
         activeSourceV2P2gEnabled ? '.active-source-v2' : ''}`
       : canonicalSpatialAuthority
@@ -3607,6 +3640,22 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       mechanicsFieldViewEnabled
         ? mechanicsFieldPressureRequiredConsumerMask
         : null;
+    projection.mechanicsFieldTemporalCoarsePredictorEnabled =
+      mechanicsFieldViewEnabled && temporalCoarseEnabled;
+    projection.mechanicsFieldTemporalCoarsePredictorRole =
+      temporalCoarseEnabled
+        ? 'immediate-successor-coarse-predictor'
+        : 'disabled';
+    projection.mechanicsFieldTemporalCoarsePredictorCurrentDt =
+      mechanicsFieldViewEnabled ? Math.fround(Number(dt)) : null;
+    projection.mechanicsFieldTemporalCoarsePredictorSuccessorDt =
+      temporalCoarseEnabled ? temporalCoarseSuccessorDt : null;
+    projection.mechanicsFieldTemporalCoarsePredictorStorage =
+      temporalCoarseEnabled
+        ? 'field-accumulator-xyz-p2g-finalized-only'
+        : null;
+    projection.mechanicsFieldTemporalCoarsePredictorReceiptWords =
+      temporalCoarseEnabled ? Object.freeze([13, 14, 15]) : null;
     projection.gridStateAuthority = mechanicsFieldViewEnabled
       ? 'schroeder-spatial-mechanics-field-view-v1'
       : (activeSourceV2DenseP2gEnabled
@@ -4059,6 +4108,18 @@ function executionFromProjection(projection, {
       projection?.mechanicsFieldMutationOutputStateEncoding ?? null,
     mechanicsFieldPressureRequiredConsumerMask:
       projection?.mechanicsFieldPressureRequiredConsumerMask ?? null,
+    mechanicsFieldTemporalCoarsePredictorEnabled:
+      projection?.mechanicsFieldTemporalCoarsePredictorEnabled === true,
+    mechanicsFieldTemporalCoarsePredictorRole:
+      projection?.mechanicsFieldTemporalCoarsePredictorRole ?? 'disabled',
+    mechanicsFieldTemporalCoarsePredictorCurrentDt:
+      projection?.mechanicsFieldTemporalCoarsePredictorCurrentDt ?? null,
+    mechanicsFieldTemporalCoarsePredictorSuccessorDt:
+      projection?.mechanicsFieldTemporalCoarsePredictorSuccessorDt ?? null,
+    mechanicsFieldTemporalCoarsePredictorStorage:
+      projection?.mechanicsFieldTemporalCoarsePredictorStorage ?? null,
+    mechanicsFieldTemporalCoarsePredictorReceiptWords:
+      projection?.mechanicsFieldTemporalCoarsePredictorReceiptWords ?? null,
     gridStateAuthority:
       projection?.gridStateAuthority ?? 'dense-mls-mpm-grid-state',
     denseGridAuthoritative:

@@ -247,6 +247,59 @@ test('fixed four-phase-lane plan validation rejects every malformed topology fie
   assert.equal(validateSphPhaseCarrierPlan(plan, Number.NaN).accepted, false);
 });
 
+test('laws-quiescent one-lane plans require an explicit canonical-mechanics admission', () => {
+  const plan = {
+    schema: ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA,
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 5,
+    primaryCapacity: 5,
+    phaseLaneCount: 1,
+    phaseLaneStride: 5,
+    companionStart: 5,
+    companionCapacity: 0,
+    particleCapacity: 5,
+    phaseCompanionLanesRequired: false
+  };
+
+  assert.equal(
+    validateSphPhaseCarrierPlan(plan, 5).accepted,
+    false,
+    'phase-changing transfer keeps the four-lane contract by default'
+  );
+  assert.deepEqual(
+    validateSphPhaseCarrierPlan(plan, 5, {
+      allowLawsQuiescentSingleLane: true
+    }),
+    {
+      accepted: true,
+      status: 'phase-carrier-plan-admitted',
+      lineageCapacity: 5,
+      primaryCapacity: 5,
+      phaseLaneCount: 1,
+      phaseLaneStride: 5,
+      companionStart: 5,
+      companionCapacity: 0,
+      particleCapacity: 5
+    }
+  );
+
+  for (const candidate of [
+    { ...plan, phaseCompanionLanesRequired: true },
+    { ...plan, phaseCompanionLanesRequired: undefined },
+    { ...plan, companionCapacity: 1 },
+    { ...plan, phaseLaneStride: 4 },
+    { ...plan, particleCapacity: 6 },
+    { ...plan, lineageCapacity: 4, primaryCapacity: 4 }
+  ]) {
+    assert.equal(
+      validateSphPhaseCarrierPlan(candidate, 5, {
+        allowLawsQuiescentSingleLane: true
+      }).accepted,
+      false
+    );
+  }
+});
+
 test('encoder stage binds one immutable source set and orders global preflight before transfer', () => {
   const device = createFakeDevice();
   const fixture = fakeStageFixture(device, 65);

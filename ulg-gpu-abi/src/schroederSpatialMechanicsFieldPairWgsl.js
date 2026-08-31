@@ -697,6 +697,19 @@ fn pair_grid_index(
   return (u32(si) * ny + u32(sj)) * nz + u32(sk);
 }
 
+fn pair_quadratic_weight_at(fraction: f32, offset: i32) -> f32 {
+  if (offset == 0) {
+    let value = 1.5 - fraction;
+    return 0.5 * value * value;
+  }
+  if (offset == 1) {
+    let value = fraction - 1.0;
+    return 0.75 - value * value;
+  }
+  let value = fraction - 0.5;
+  return 0.5 * value * value;
+}
+
 fn pair_write_invalid_candidate(candidate_index: u32) {
   let base = candidate_index * FIELD_RADIX_KEY_WORDS;
   candidate_keys[base] = FIELD_INVALID_KEY;
@@ -786,13 +799,27 @@ fn pair_emit_level(
     source_rows[row + 13u],
     source_rows[row + 14u]
   );
-  let base = vec3<i32>(floor(position * inv_spacing - vec3<f32>(0.5)));
+  let grid_position = position * inv_spacing;
+  let base = vec3<i32>(floor(grid_position - vec3<f32>(0.5)));
+  let fraction = grid_position - vec3<f32>(base);
   var ordinal = 0u;
   for (var ox = 0i; ox < 3i; ox = ox + 1i) {
     for (var oy = 0i; oy < 3i; oy = oy + 1i) {
       for (var oz = 0i; oz < 3i; oz = oz + 1i) {
         let candidate_index = candidate_begin + ordinal;
         ordinal = ordinal + 1u;
+        // Match canonical P2G's exact-zero support omission. Keeping such a
+        // key creates a field with no published mass/volume contribution,
+        // which cannot own a pressure or phase-volume receipt. Cull before
+        // grid clipping because a zero-support node is not physical support.
+        let support_weight =
+          pair_quadratic_weight_at(fraction.x, ox)
+          * pair_quadratic_weight_at(fraction.y, oy)
+          * pair_quadratic_weight_at(fraction.z, oz);
+        if (support_weight == 0.0) {
+          pair_write_invalid_candidate(candidate_index);
+          continue;
+        }
         let node = pair_grid_index(
           level_ordinal,
           base.x + ox,

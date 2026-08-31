@@ -7,8 +7,9 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS = 1
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS = 16;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS = 16;
+export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS = 1;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_WORKGROUP_SIZE = 64;
-export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES = 288;
+export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES = 304;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ATOMIC_SCALE = 65536;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS =
   64;
@@ -269,6 +270,16 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
   const parentToCoarseOrdinalPaddingWords =
     parentToCoarseOrdinalOffsetWords
     - unalignedParentToCoarseOrdinalOffsetWords;
+  if (
+    parentToCoarseOrdinalPaddingWords
+      < SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS
+  ) {
+    throw new RangeError(
+      'parent mechanics workspace alignment padding cannot hold the CFL interval reduction'
+    );
+  }
+  const cflIntervalOffsetWords =
+    unalignedParentToCoarseOrdinalOffsetWords;
   const wordLength = checkedAdd(
     parentToCoarseOrdinalOffsetWords,
     capacity,
@@ -292,6 +303,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     fineImpulseWords,
     fineImpulseRowWords:
       SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
+    cflIntervalOffsetWords,
+    cflIntervalWords:
+      SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS,
     parentToCoarseOrdinalOffsetWords,
     parentToCoarseOrdinalPaddingWords,
     parentToCoarseOrdinalWords: capacity,

@@ -10,6 +10,10 @@ import {
   SPH_INITIAL_BODIES_SCHEMA,
   parseSphInitialBodies
 } from '../src/runtime/sphInitialBodies.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
 
 const SHARED_WORKER_OWNED_SS_RUNTIME = Object.freeze({
   renderer: 'native-webgpu',
@@ -156,6 +160,43 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
   const baseTop = 0.2 * Number(realtime.controls.basen);
   assert.ok(dropBottom > baseTop);
   assert.ok(dropTop < Number(realtime.controls.boxy));
+});
+
+test('canned presets explicitly separate requested reactions from dynamic activation policy', () => {
+  assert.deepEqual(
+    Object.fromEntries(SPH_PHASE_SCENARIO_PRESETS.map((entry) => [
+      entry.id,
+      entry.runtime.reactionActivationPolicy
+    ])),
+    {
+      'water-cycle': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      'iron-ice-quench': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      'sodium-water': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+      'cesium-fluorine': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+      'bulk-water': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      'water-realtime': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
+    }
+  );
+  for (const id of ['water-cycle', 'iron-ice-quench']) {
+    const entry = sphPhaseScenarioPresetById(id);
+    // These presets leave the ordinary reaction law checkbox available while
+    // explicitly opting out of the adaptive selector.
+    assert.equal(entry.controls.lawr, '1', id);
+    assert.equal(
+      entry.runtime.reactionActivationPolicy,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      id
+    );
+  }
+  for (const id of ['sodium-water', 'cesium-fluorine']) {
+    const entry = sphPhaseScenarioPresetById(id);
+    assert.equal(entry.controls.lawr, '1', id);
+    assert.equal(
+      entry.runtime.reactionActivationPolicy,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+      id
+    );
+  }
 });
 
 test('standard SPH scenario presets encode the four requested scenes', () => {
@@ -365,6 +406,11 @@ test('SPH preset URLs round-trip the preset id and all control values', () => {
     for (const [key, value] of Object.entries(entry.runtime)) {
       assert.equal(parsed.searchParams.get(key), value, `${entry.id}:${key}`);
     }
+    assert.equal(
+      parsed.searchParams.get('reactionActivationPolicy'),
+      entry.runtime.reactionActivationPolicy,
+      `${entry.id}:reactionActivationPolicy`
+    );
   }
   assert.equal(sphPhaseScenarioPresetUrl('missing'), null);
 });

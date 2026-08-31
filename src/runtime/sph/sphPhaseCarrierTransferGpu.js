@@ -64,7 +64,9 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-export function validateSphPhaseCarrierPlan(plan, particleCount) {
+export function validateSphPhaseCarrierPlan(plan, particleCount, {
+  allowLawsQuiescentSingleLane = false
+} = {}) {
   const rawParticleCount = Number(particleCount);
   const particleCountValid = Number.isSafeInteger(rawParticleCount)
     && rawParticleCount > 0;
@@ -76,6 +78,18 @@ export function validateSphPhaseCarrierPlan(plan, particleCount) {
   const companionStart = Number(plan?.companionStart);
   const companionCapacity = Number(plan?.companionCapacity);
   const particleCapacity = Number(plan?.particleCapacity);
+  const fixedFourLanePlan = phaseLaneCount === 4
+    && phaseLaneStride === lineageCapacity
+    && companionStart === lineageCapacity
+    && companionCapacity === lineageCapacity * (phaseLaneCount - 1)
+    && lineageCapacity * phaseLaneCount === count;
+  const lawsQuiescentSingleLanePlan = allowLawsQuiescentSingleLane === true
+    && phaseLaneCount === 1
+    && phaseLaneStride === lineageCapacity
+    && companionStart === lineageCapacity
+    && companionCapacity === 0
+    && lineageCapacity === count
+    && plan?.phaseCompanionLanesRequired === false;
   const accepted = plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA
     && particleCountValid
     && plan?.status === 'phase-lane-capacity-ready'
@@ -84,16 +98,12 @@ export function validateSphPhaseCarrierPlan(plan, particleCount) {
     && Number.isSafeInteger(primaryCapacity)
     && primaryCapacity === lineageCapacity
     && Number.isSafeInteger(phaseLaneCount)
-    && phaseLaneCount === 4
     && Number.isSafeInteger(phaseLaneStride)
-    && phaseLaneStride === lineageCapacity
     && Number.isSafeInteger(companionStart)
-    && companionStart === lineageCapacity
     && Number.isSafeInteger(companionCapacity)
-    && companionCapacity === lineageCapacity * (phaseLaneCount - 1)
     && Number.isSafeInteger(particleCapacity)
     && particleCapacity === count
-    && lineageCapacity * phaseLaneCount === count;
+    && (fixedFourLanePlan || lawsQuiescentSingleLanePlan);
   if (!accepted) {
     return {
       accepted: false,

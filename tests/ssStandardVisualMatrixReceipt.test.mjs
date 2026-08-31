@@ -46,6 +46,11 @@ import {
   evaluateStandardScenarioBehavior,
   synthesizeStandardScenarioIssues
 } from '../scripts/sph-visual-sanity-matrix.mjs';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
 
 const productionRepoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -845,7 +850,62 @@ function syntheticPassingTimeline(scenario) {
     };
 
     const twoLevel = scenario.label === 'standard-cesium-fluorine';
-    const reaction = scenario.label === 'standard-sodium-water' || twoLevel;
+    const dynamicReactionScenario =
+      scenario.label === 'standard-sodium-water' || twoLevel;
+    const reaction = dynamicReactionScenario && scheduleOrdinal > 1;
+    if (dynamicReactionScenario) {
+      const activationScheduleId = `schedule:${scenario.label}:2`;
+      const transitionFingerprint =
+        `transition:${scenario.label}:dormant-to-active`;
+      lane.dynamicReactionActivation = reaction
+        ? {
+            state: 'active',
+            transitionFingerprint,
+            committedScheduleId: activationScheduleId
+          }
+        : {
+            state: 'dormant',
+            transitionFingerprint: null,
+            committedScheduleId: null
+          };
+      lane.dynamicReactionActivationReceipt = reaction
+        ? {
+            schema:
+              'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0',
+            status:
+              'dynamic-reaction-activation-consumed-and-admitted',
+            predecessorScheduleId: `schedule:${scenario.label}:1`,
+            consumerScheduleId: activationScheduleId,
+            targetScheduleRequestId: activationScheduleId,
+            configurationContinuityMode:
+              'prospective-reaction-dormant-to-executing',
+            transitionKind:
+              'reaction-dormant-watch-to-executing-reaction',
+            transitionFingerprint,
+            route: 'canonical-schroeder',
+            routeTransition: 'fresh-or-canonical-continuation',
+            reactionExecution: true,
+            sourceParticleCount: 760,
+            terminalParticleCount: 760,
+            sourcePhaseLaneCount: 4,
+            terminalPhaseLaneCount: 4,
+            phaseCarrierTopologyAuthority:
+              'preexisting-four-carrier-plan',
+            phaseCarrierTrigger: null,
+            phaseCarrierMapAsyncCount: 0,
+            phaseCarrierReadbackBytes: 0,
+            terminalGpuFenceSatisfied: true,
+            stateManagerCommitted: true,
+            consumedBeforeLeaseAcquisition: true,
+            consumedBeforeRouteSelection: true,
+            consumedBeforeGpuWork: true,
+            shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+            routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+            executionGating:
+              SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+          }
+        : null;
+    }
     lane.hierarchyStageSummary = {
       schema: 'peercompute.ulg.worker-schroeder-hierarchy-stage-summary.v0',
       status: 'worker-schroeder-hierarchy-stage-summary-ready',
@@ -879,13 +939,20 @@ function syntheticPassingTimeline(scenario) {
         schema: 'peercompute.ulg.mls-mpm-post-mechanics-closure.v1',
         status: 'post-mechanics-closure-complete',
         backend: 'webgpu',
-        executedStageOrder: [
-          'thermal-phase',
-          'reaction-discovery',
-          'reaction-product',
-          'phase-carrier-transfer-v2',
-          'mechanics-constitutive-refresh'
-        ],
+        executedStageOrder: reaction
+          ? [
+              'thermal-phase',
+              'reaction-discovery',
+              'reaction-product',
+              'phase-carrier-transfer-v2',
+              'mechanics-constitutive-refresh'
+            ]
+          : [
+              'thermal-phase',
+              'phase-carrier-transfer-v2',
+              'mechanics-constitutive-refresh'
+            ],
+        reactionStatus: reaction ? 'reaction-step-executed' : null,
         fullParticleReadbackFree: true,
         residentContinuationReady: true
       } : null,

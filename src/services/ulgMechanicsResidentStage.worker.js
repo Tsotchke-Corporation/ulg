@@ -6,7 +6,9 @@ import {
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
   destroyMlsMpmResidentStepBuffers,
+  destroyMlsMpmResidentStepsBuffers,
   retainedContinuationBuffersFromUploads,
+  runMlsMpmResidentStepsWithOptionalWebGpu,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
@@ -15,9 +17,11 @@ import {
   runMlsMpmMechanicsG2pStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmMechanicsP2gStageComputeTask,
+  describeResidentProductHistoryArenaIdentity,
   normalizePressureInterfaceGasCellFieldImport,
   scheduleSphGasCellEosFinalConsumerRelease,
-  observeResidentProductHistoryLiveRowBound
+  observeResidentProductHistoryLiveRowBound,
+  isExactQuiescentSphReactionTable
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -32,6 +36,9 @@ import {
   SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
   decodeSchroederCrossLevelRefluxTerminalHeader
 } from '../../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
+import {
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA
+} from '../../ulg-gpu-abi/src/index.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 import {
   ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA,
@@ -77,6 +84,52 @@ import {
   enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors
 } from '../runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
 import {
+  SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION,
+  ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
+  observeSchroederSpatialReactionDiscoveryActivation
+} from '../runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  SPH_REACTION_ACTIVATION_OBSERVATION_PUBLIC_FAILURE_WORD,
+  SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT,
+  SPH_REACTION_MOTION_ENVELOPE_PREDICATE,
+  ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE,
+  createSphReactionMotionEnvelope
+} from '../runtime/sph/sphReactionMotionEnvelope.js';
+import {
+  createSchroederTargetScheduleProviderAuthority,
+  createSchroederTargetScheduleTableFingerprints,
+  createSchroederTargetScheduleWriterSet,
+  exactSchroederTargetScheduleAuthority,
+  schroederTargetScheduleSuccessorGasBoundaryActionable,
+  schroederTargetScheduleWriterSetMatchesActivation,
+  validateSchroederTargetScheduleAuthorityForExecution,
+  validateSchroederTargetScheduleConfigurationContinuity
+} from '../runtime/sph/schroederTargetScheduleAuthority.js';
+import {
+  ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA as ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_ROUTE_SCHEMA,
+  ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA as ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_ROUTE_SCHEMA,
+  ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
+  WORKER_DYNAMIC_LAW_OBSERVATION_FAILURE_POLICY,
+  exactWorkerDynamicLawObservationSelf,
+  workerRouteValuesEqual
+} from '../runtime/sph/schroederWorkerScheduleRouteEvidence.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../runtime/sph/schroederDynamicLawRoutingContract.js';
+import {
+  runSphPhaseCarrierOneToFourMaterializationWebGpu,
+  validateSphPhaseCarrierOneToFourExecution
+} from '../runtime/sph/sphPhaseCarrierMaterializationGpu.js';
+import {
+  ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA,
+  ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_DEVICE_LOST_ERROR_CODE,
+  markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted,
+  observeSphReactionMotionEnvelopeWatch,
+  sphReactionMotionEnvelopeWatchMatchesTerminalStorageFamily
+} from '../runtime/sph/sphReactionMotionEnvelopeWatchGpu.js';
+import {
   destroySphThermalResponseGraphBuffers,
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
@@ -118,10 +171,13 @@ const SCHROEDER_SPATIAL_EPOCH_STAGE_ID = 'schroederSpatialEpoch';
 // exists only under residentGpuTimestampProfile=1.
 const SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID = 'schroederSameLevelMechanics';
 const SCHROEDER_LANE_SEED_STAGE_ID = 'schroederLaneSeed';
+const TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID =
+  'tier0FusedResidentSequence';
 const WORKER_SCHROEDER_SCHEDULE_TRANSPORT_STAGE_IDS = Object.freeze(
   new Set([
     SCHROEDER_SPATIAL_EPOCH_STAGE_ID,
-    SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+    SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID,
+    TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID
   ])
 );
 // The W1 adopted-storage rematerialization is a named capability, not a
@@ -152,6 +208,16 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA =
   'peercompute.ulg.worker-resident-schedule-step-summary.v0';
 export const ULG_WORKER_RESIDENT_SCHEDULE_TERMINAL_REFLUX_RECEIPT_SCHEMA =
   'peercompute.ulg.worker-resident-schedule-terminal-reflux-receipt.v0';
+export const ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA =
+  'peercompute.ulg.worker-schedule-execution-route-receipt.v6';
+export const ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA =
+  'peercompute.ulg.worker-schedule-law-activation-receipt.v0';
+export const ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA =
+  ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_ROUTE_SCHEMA;
+export const ULG_WORKER_TIER0_TOPOLOGY_ATTESTATION_SCHEMA =
+  'peercompute.ulg.worker-tier0-topology-attestation.v0';
+export const ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA =
+  ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_ROUTE_SCHEMA;
 // Keep explicit diagnostic schedules compatible with the historical
 // 128-step sodium batch. The interactive preset uses 64-step admitted chunks;
 // the schedule driver bounds the amount of unfenced work inside either shape.
@@ -176,6 +242,135 @@ const GPU_BUFFER_USAGE = {
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
+
+function exactReactionActivationCount(value, minimum = 0, maximum = 0xffff_ffff) {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && !Object.is(value, -0)
+    && value >= minimum
+    && value <= maximum;
+}
+
+const REACTION_ACTIVATION_GPU_OBSERVATION_KEYS = Object.freeze([
+  'schema',
+  'status',
+  'predicateRevision',
+  'producerRoute',
+  'sampleStage',
+  'nodeDomain',
+  'motionEnvelope',
+  'shadowOnly',
+  'routingAuthority',
+  'observationSucceeded',
+  'triggered',
+  'triggeredSourceCount',
+  'uncertainty',
+  'rawEvidenceWord',
+  'particleCount',
+  'reactionCount',
+  'reactionTableFingerprint',
+  'mapAsyncCount',
+  'readbackByteLength',
+  'fullParticleReadbackPerformed'
+]);
+
+function exactReactionActivationGpuObservationShape(value) {
+  try {
+    if (
+      !value
+      || typeof value !== 'object'
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || !Object.isFrozen(value)
+    ) return false;
+    const keys = Object.keys(value);
+    return keys.length === REACTION_ACTIVATION_GPU_OBSERVATION_KEYS.length
+      && REACTION_ACTIVATION_GPU_OBSERVATION_KEYS.every(
+        (key) => Object.hasOwn(value, key)
+      );
+  } catch {
+    return false;
+  }
+}
+
+function exactReactionActivationGpuObservation(value, {
+  particleCount,
+  reactionCount,
+  reactionTableFingerprint,
+  producerRoute,
+  sampleStage,
+  motionEnvelope
+} = {}) {
+  if (
+    !exactReactionActivationGpuObservationShape(value)
+    || value.schema
+      !== ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA
+    || value.predicateRevision
+      !== SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION
+    || value.producerRoute !== producerRoute
+    || value.sampleStage !== sampleStage
+    || value.nodeDomain !== 'fixed-phase-carrier-slot'
+    || value.motionEnvelope !== motionEnvelope
+    || value.shadowOnly !== true
+    || value.routingAuthority !== false
+    || !exactReactionActivationCount(
+      value.particleCount,
+      1,
+      SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+    )
+    || value.particleCount !== particleCount
+    || !exactReactionActivationCount(
+      value.reactionCount,
+      1,
+      SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+    )
+    || value.reactionCount !== reactionCount
+    || typeof value.reactionTableFingerprint !== 'string'
+    || value.reactionTableFingerprint.length < 1
+    || value.reactionTableFingerprint !== reactionTableFingerprint
+    || value.mapAsyncCount !== 1
+    || value.readbackByteLength !== Uint32Array.BYTES_PER_ELEMENT
+    || value.fullParticleReadbackPerformed !== false
+  ) return null;
+  if (value.observationSucceeded === true) {
+    return value.status === 'reaction-activation-observation-ready'
+      && value.uncertainty === false
+      && exactReactionActivationCount(
+        value.triggeredSourceCount,
+        0,
+        value.particleCount
+      )
+      && exactReactionActivationCount(
+        value.rawEvidenceWord,
+        0,
+        value.particleCount
+      )
+      && value.rawEvidenceWord === value.triggeredSourceCount
+      && value.triggered === (value.triggeredSourceCount > 0)
+      && (
+        value.motionEnvelope?.thermalPhaseEvolutionEnabled !== true
+        || value.triggeredSourceCount === value.particleCount
+      )
+        ? value
+        : null;
+  }
+  return value.status === 'reaction-activation-observation-uncertain'
+    && value.observationSucceeded === false
+    && value.uncertainty === true
+    && value.triggered === true
+    && value.triggeredSourceCount === null
+    && value.rawEvidenceWord
+      === SPH_REACTION_ACTIVATION_OBSERVATION_PUBLIC_FAILURE_WORD
+      ? value
+      : null;
+}
+
+function malformedReactionActivationObservationError(message) {
+  const error = new Error(message);
+  error.code = ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE;
+  error.reactionActivationObservationFatal = true;
+  return error;
+}
+
 const EXACT_GAS_PRESSURE_TRANSPORT_RAW_ALIAS_KEYS = new Set([
   'gasPressureCellsBuffer',
   'retainedGasPressureCellsBuffer',
@@ -261,6 +456,8 @@ const STAGE_RUNNERS = {
 };
 
 const retainedLanes = new Map();
+const workerLaneAssignmentOnlyScheduleProviders = new WeakSet();
+const workerLaneScheduleProviderAuthority = new WeakMap();
 const exactGasPressureTransportGraphByStageData = new WeakMap();
 const exactPressureGridHandoffByStageData = new WeakMap();
 const workerResidentScheduleFenceDeferredStageData = new WeakSet();
@@ -269,6 +466,18 @@ let workerDeviceResultPromise = null;
 function normalizeString(value, fallback = null) {
   const text = String(value ?? '').trim();
   return text || fallback;
+}
+
+function cloneAndDeepFreezeWorkerScheduleValue(value) {
+  const clone = structuredClone(value);
+  const freeze = (entry) => {
+    if (!entry || typeof entry !== 'object' || Object.isFrozen(entry)) {
+      return entry;
+    }
+    for (const nested of Object.values(entry)) freeze(nested);
+    return Object.freeze(entry);
+  };
+  return freeze(clone);
 }
 
 function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'phase carrier plan') {
@@ -284,6 +493,9 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
     const companionCapacity = Number(plan?.companionCapacity);
     const particleCapacity = Number(plan?.particleCapacity);
     const stableLaneAddressPresent = plan.stableLaneAddress !== undefined;
+    const phaseCompanionLanesRequiredPresent =
+      plan.phaseCompanionLanesRequired !== undefined;
+    const reasonPresent = typeof plan.reason === 'string' && plan.reason.trim();
     // Two declared topologies exist: the four-lane phase-companion layout
     // and the laws-quiescent single-lane declaration (no companion lanes;
     // the plan's presence still asserts the topology explicitly).
@@ -327,7 +539,14 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
         particleCapacity,
         ...(stableLaneAddressPresent
           ? { stableLaneAddress: plan.stableLaneAddress }
-          : {})
+          : {}),
+        ...(phaseCompanionLanesRequiredPresent
+          ? {
+              phaseCompanionLanesRequired:
+                plan.phaseCompanionLanesRequired === true
+            }
+          : {}),
+        ...(reasonPresent ? { reason: plan.reason.trim() } : {})
       };
     }
   }
@@ -375,7 +594,9 @@ function phaseCarrierPlansEqual(left, right) {
       && left.companionStart === right.companionStart
       && left.companionCapacity === right.companionCapacity
       && left.particleCapacity === right.particleCapacity
-      && left.stableLaneAddress === right.stableLaneAddress;
+      && left.stableLaneAddress === right.stableLaneAddress
+      && (left.phaseCompanionLanesRequired === true)
+        === (right.phaseCompanionLanesRequired === true);
   }
   return left.primaryCapacity === right.primaryCapacity
     && left.companionStart === right.companionStart
@@ -563,6 +784,45 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       // The lane is being retired regardless; the owned-buffer walk below is
       // the final best-effort safety net for device resources.
     }
+  }
+  if (record.poisonedCanonicalResidentStep) {
+    try {
+      destroyMlsMpmResidentStepBuffers(
+        record.poisonedCanonicalResidentStep,
+        { destroyInputResidentProductMass: true }
+      );
+    } catch {
+      // The poisoned successor remains reachable through the record until
+      // the owned-buffer walk below finishes every remaining resource.
+    }
+  }
+  if (record.poisonedTier0Execution?.finalStep) {
+    try {
+      destroyMlsMpmResidentStepBuffers(
+        record.poisonedTier0Execution.finalStep,
+        { destroyInputResidentProductMass: true }
+      );
+    } catch {
+      // The owned-buffer walk below remains the final teardown safety net.
+    }
+  }
+  for (const cleanupRecord of (
+    record.poisonedTier0SubmittedCleanupRecords || []
+  )) {
+    if (cleanupRecord?.released === true) continue;
+    try {
+      cleanupRecord.cleanup?.();
+      cleanupRecord.released = true;
+    } catch {
+      // Best-effort poisoned-lane teardown continues with the buffer walk.
+    }
+  }
+  try {
+    record.pendingPhaseCarrierOneToFourTransition?.execution
+      ?.cleanupSubmittedWork?.();
+  } catch {
+    // The owned-buffer walk below still retires the retained particle
+    // families. This callback owns only the materializer's uniform buffer.
   }
   destroySphThermalResponseGraphBuffers(
     staticGpuResources?.thermalResponseGraphUpload
@@ -3878,7 +4138,7 @@ export function createWorkerSchroederLaneLevelAssignmentProvider({
       filteredClassifierOptions[field] = classifierOptions[field];
     }
   }
-  return async function workerSchroederLaneLevelAssignmentProvider() {
+  const provider = async function workerSchroederLaneLevelAssignmentProvider() {
     const record = retainedLanes.get(laneKey);
     const lane = record?.schroederLane || null;
     if (!lane) {
@@ -3916,6 +4176,19 @@ export function createWorkerSchroederLaneLevelAssignmentProvider({
     }
     return { levelAssignment: execution };
   };
+  // Only this factory can mint the assignment-only capability. The function
+  // never crosses postMessage, and its return shape is reduced here to one
+  // levelAssignment field, so skipping it on Tier0 cannot suppress a law or
+  // topology activation request.
+  workerLaneAssignmentOnlyScheduleProviders.add(provider);
+  workerLaneScheduleProviderAuthority.set(
+    provider,
+    createSchroederTargetScheduleProviderAuthority({
+      kind: 'worker-lane-assignment-only',
+      classifierOptions: filteredClassifierOptions
+    })
+  );
+  return provider;
 }
 
 async function runWorkerSchroederLaneSeedStage(data = {}) {
@@ -4164,6 +4437,11 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     successorConsumption: null,
     successorLeaseReleasePromise: null,
     successorSourceFamily: null,
+    executionMode: 'worker-lane-seeded',
+    tier0ContinuationIdentity: null,
+    nextScheduleTargetAuthority: null,
+    nextScheduleLawActivationObservation: null,
+    lastConsumedDynamicLawTargetScheduleRequestId: null,
     laneSeed,
     sphParticleUpload: seededSphUpload,
     mlsMpmParticleUpload: seededMlsUpload,
@@ -4597,6 +4875,15 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     // The retained family (if any) was just consumed into this epoch; the
     // next family arrives from the following mechanics step.
     successorSourceFamily: null,
+    executionMode: previousLane?.executionMode ?? 'canonical-schroeder',
+    tier0ContinuationIdentity:
+      previousLane?.tier0ContinuationIdentity ?? null,
+    nextScheduleTargetAuthority:
+      previousLane?.nextScheduleTargetAuthority ?? null,
+    nextScheduleLawActivationObservation:
+      previousLane?.nextScheduleLawActivationObservation ?? null,
+    lastConsumedDynamicLawTargetScheduleRequestId:
+      previousLane?.lastConsumedDynamicLawTargetScheduleRequestId ?? null,
     // A seeded assignment feeds exactly one epoch; the consumed marker stays
     // on the lane so double-seeding remains detectable and the W2 driver can
     // keep the seed lineage as its monotonicity baseline.
@@ -4719,6 +5006,48 @@ function compactWorkerPhaseVolumeSurfaceStressSubmission(step = null) {
       submission.surfaceTensionCoefficientStatus ?? null,
     authority: submission.authority ?? null,
     verification: submission.verification ?? null
+  };
+}
+
+function compactWorkerResidentProductHistoryEvidence(step = null) {
+  const residentProductMass = step?.nextParticleUploads?.residentProductMass
+    ?? step?.residentProductMass
+    ?? null;
+  if (!residentProductMass) return null;
+  const countAuthority = residentProductMass.productEventLiveCountAuthority
+    ?? null;
+  return {
+    schema:
+      'peercompute.ulg.worker-resident-product-history-evidence.v0',
+    status: 'worker-resident-product-history-evidence-ready',
+    residentProductMassStatus:
+      step?.residentProductMassStatus
+      ?? residentProductMass.status
+      ?? null,
+    productEventBufferRetained:
+      residentProductMass.productEventBufferRetained === true,
+    productEventBufferByteLength:
+      residentProductMass.productEventBufferByteLength ?? null,
+    productEventRowCount:
+      residentProductMass.productEventRowCount ?? null,
+    compactionStatus:
+      residentProductMass.productEventCompactionStatus ?? null,
+    gpuCommitStatus:
+      residentProductMass.productEventGpuCommitStatus ?? null,
+    arenaStatus:
+      residentProductMass.productEventHistoryArenaStatus ?? null,
+    generation: countAuthority?.generation ?? null,
+    seal: countAuthority?.seal ?? null,
+    gridCouplingStatus:
+      step?.residentProductMassGridCouplingStatus ?? null,
+    countAuthority:
+      step?.residentProductMassInputProductEventCountAuthority ?? null,
+    rowCapacity:
+      step?.residentProductMassInputProductEventRowCapacity ?? null,
+    countHostKnown:
+      step?.residentProductMassInputProductEventCountHostKnown ?? null,
+    dispatchMode:
+      step?.residentProductMassProductEventDispatchMode ?? null
   };
 }
 
@@ -5236,6 +5565,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // Exact W2 may not admit a real canonical step whose hierarchy cleanup
     // authority failed to seal. Preserve the previously committed lane
     // inputs while conservatively tearing down only this unadopted result.
+    restoreWorkerContinuationSidecarOwnership({
+      sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
+      unadoptedUploads: nextUploads
+    });
     destroyMlsMpmResidentStepBuffers(residentStep, {
       preserveResidentProductMass:
         previousCarriedResidentProductMassHandles[0] ?? null,
@@ -5264,6 +5597,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // transfer claims queue-ordered. Tear down the unadopted result through
     // the conservative path, then fail the schedule closed; its terminal
     // fence remains the admission boundary for all submitted cleanup.
+    restoreWorkerContinuationSidecarOwnership({
+      sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
+      unadoptedUploads: nextUploads
+    });
     destroyMlsMpmResidentStepBuffers(residentStep, {
       preserveResidentProductMass:
         previousCarriedResidentProductMassHandles[0] ?? null,
@@ -5279,18 +5616,38 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     );
   }
   if (previousResidentStep) {
-    destroyMlsMpmResidentStepBuffers(previousResidentStep, {
-      preserveResidentProductMass: carriedResidentProductMass,
-      preserveResidentProductMassHandles: [
-        residentStep.emittedResidentProductMass,
-        carriedResidentProductMass
-      ].filter(Boolean),
-      destroyInputResidentProductMass: true,
-      preserveBuffers: retainedContinuationBuffersFromUploads(nextUploads),
-      queueOrderedFinalConsumer: currentHierarchyFinalConsumer
-    });
+    // buildNextParticleUploads has already transferred identity and immutable
+    // material-bank sidecar ownership to `residentStep`. If predecessor
+    // cleanup fails, retain that uncommitted successor on the poisoned record
+    // rather than dropping its only owner or partially advancing the lane.
+    try {
+      destroyMlsMpmResidentStepBuffers(previousResidentStep, {
+        preserveResidentProductMass: carriedResidentProductMass,
+        preserveResidentProductMassHandles: [
+          residentStep.emittedResidentProductMass,
+          carriedResidentProductMass
+        ].filter(Boolean),
+        destroyInputResidentProductMass: true,
+        preserveBuffers: retainedContinuationBuffersFromUploads(nextUploads),
+        queueOrderedFinalConsumer: currentHierarchyFinalConsumer
+      });
+    } catch (error) {
+      record.poisonedCanonicalResidentStep = residentStep;
+      poisonWorkerResidentScheduleLane(record, {
+        reason: 'previous-resident-step-cleanup-failed'
+      });
+      throw workerSchroederStageError(
+        stageId,
+        'previous-resident-step-cleanup-failed',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
+  // Commit every owner-bearing continuation pointer as one non-throwing
+  // adoption step after predecessor cleanup succeeds.
   lane.residentStep = residentStep;
+  lane.sphParticleUpload = nextSphUpload;
+  lane.mlsMpmParticleUpload = nextMlsUpload;
   // A batched schedule has one host-visible fence at its terminal boundary.
   // Its normal success path can retire this generation synchronously because
   // every final consumer has already been submitted to the same ordered queue;
@@ -5344,9 +5701,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   lane.successorConsumption = null;
   lane.levelAssignment = null;
   lane.activeNodeList = null;
-  lane.sphParticleUpload = nextSphUpload;
-  lane.mlsMpmParticleUpload = nextMlsUpload;
   lane.successorSourceFamily = nextSuccessorSourceFamily;
+  lane.executionMode = 'canonical-schroeder';
+  lane.tier0ContinuationIdentity = null;
   lane.particleCount = nextSphUpload?.particleCount ?? lane.particleCount ?? null;
   // The canonical SS closure can replace thermo storage during reaction and
   // phase-carrier transfer. Keep the lane's explicit diagnostic source on the
@@ -5625,6 +5982,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           selectedLevel: kernelResult.selectedLevel ?? data.selectedLevel ?? 0
         }
       ),
+    // Fixed-size, clone-safe proof of the worker-private retained product
+    // owner. The page never receives its GPUBuffer handles; this receipt is
+    // sufficient for visual/runtime gates to correlate P2G consumption with
+    // the independently authenticated resident render candidate.
+    residentProductHistory:
+      compactWorkerResidentProductHistoryEvidence(residentStep),
     // Diagnostic-only, cloneable fixed-size receipts. These are null on the
     // normal readback-free route and are retained only for the terminal step
     // when stageMechanicsTraceEnabled was explicitly requested.
@@ -5829,7 +6192,586 @@ function workerResidentScheduleLaneStateSnapshot(record, {
     postStepUploadsRetained: Boolean(lane?.sphParticleUpload?.stateBuffer),
     successorSourceFamilyRetained: Boolean(lane?.successorSourceFamily),
     laneSeedRetained: Boolean(lane?.laneSeed),
-    laneSeedConsumed: lane?.laneSeed?.consumed === true
+    laneSeedConsumed: lane?.laneSeed?.consumed === true,
+    executionMode: lane?.executionMode ?? null,
+    tier0ContinuationIdentity: lane?.tier0ContinuationIdentity
+      ? { ...lane.tier0ContinuationIdentity }
+      : null,
+    nextScheduleTargetAuthoritySourceScheduleId:
+      lane?.nextScheduleTargetAuthority?.sourceScheduleId ?? null,
+    nextScheduleTargetAuthorityRequestId:
+      lane?.nextScheduleTargetAuthority?.targetScheduleRequestId ?? null,
+    nextScheduleTargetAuthorityFingerprint:
+      lane?.nextScheduleTargetAuthority?.requestFingerprint ?? null,
+    nextScheduleLawActivationObservationStatus:
+      lane?.nextScheduleLawActivationObservation?.status ?? null,
+    nextScheduleLawActivationObservationTriggered:
+      lane?.nextScheduleLawActivationObservation?.triggered ?? null,
+    nextScheduleLawActivationObservationSourceScheduleId:
+      lane?.nextScheduleLawActivationObservation?.sourceScheduleId ?? null,
+    nextScheduleLawActivationObservationTargetScheduleRequestId:
+      lane?.nextScheduleLawActivationObservation
+        ?.targetScheduleRequestId ?? null,
+    lastConsumedDynamicLawTargetScheduleRequestId:
+      lane?.lastConsumedDynamicLawTargetScheduleRequestId ?? null
+  };
+}
+
+function exactWorkerScheduleLineageIdentity(upload = null) {
+  if (!upload || typeof upload !== 'object') return null;
+  const identity = {};
+  for (const field of SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS) {
+    const value = upload[field];
+    if (
+      !Number.isSafeInteger(value)
+      || value < 0
+      || value > 0xffff_ffff
+    ) return null;
+    identity[field] = value;
+  }
+  if (
+    identity.storageGeneration < 1
+    || (
+      upload.bufferFamilyGeneration != null
+      && upload.bufferFamilyGeneration !== identity.storageGeneration
+    )
+  ) return null;
+  return identity;
+}
+
+function exactWorkerScheduleParticleFamilyLineage({
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null
+} = {}) {
+  const sph = exactWorkerScheduleLineageIdentity(sphParticleUpload);
+  const mlsMpm = exactWorkerScheduleLineageIdentity(mlsMpmParticleUpload);
+  if (!sph || !mlsMpm) return null;
+  return SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.every(
+    (field) => sph[field] === mlsMpm[field]
+  ) ? sph : null;
+}
+
+function expectedWorkerTier0TerminalLineage(source, stepCount) {
+  if (!source) return null;
+  const count = Number(stepCount);
+  if (
+    !Number.isSafeInteger(count)
+    || count < 2
+    || source.storageGeneration > 0xffff_fffe
+    || source.positionEpoch > 0xffff_fffe
+    || source.physicsTick > 0xffff_ffff - count
+  ) return null;
+  return Object.freeze({
+    storageGeneration: source.storageGeneration + 1,
+    physicsTick: source.physicsTick + count,
+    physicsSubstep: 0,
+    positionEpoch: source.positionEpoch + 1,
+    topologyEpoch: source.topologyEpoch,
+    chartEpoch: source.chartEpoch,
+    levelEpoch: source.levelEpoch,
+    supportEpoch: source.supportEpoch
+  });
+}
+
+function workerScheduleLineageMismatchFields(actual, expected) {
+  if (!actual || !expected) return [...SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS];
+  return SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.filter(
+    (field) => actual[field] !== expected[field]
+  );
+}
+
+function workerTier0LawsQuiescentPhaseCarrierPlan(plan = null) {
+  if (!plan || typeof plan !== 'object') return false;
+  const lineageCapacity = Number(plan.lineageCapacity);
+  return Boolean(
+    plan.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA
+    && plan.status === 'phase-lane-capacity-ready'
+    && Number.isSafeInteger(lineageCapacity)
+    && lineageCapacity > 0
+    && Number(plan.primaryCapacity) === lineageCapacity
+    && Number(plan.phaseLaneCount) === 1
+    && Number(plan.phaseLaneStride) === lineageCapacity
+    && Number(plan.companionStart) === lineageCapacity
+    && Number(plan.companionCapacity) === 0
+    && Number(plan.particleCapacity) === lineageCapacity
+    && plan.phaseCompanionLanesRequired === false
+  );
+}
+
+export function workerScheduleRequiresPhaseCarrierOneToFourMaterialization({
+  phaseCarrierPlan = null,
+  scheduleLawActivation = null,
+  canonicalRouteSelected = false,
+  tier0ContinuationIdentityPresent = false
+} = {}) {
+  return Boolean(
+    canonicalRouteSelected === true
+    && tier0ContinuationIdentityPresent === true
+    && workerTier0LawsQuiescentPhaseCarrierPlan(phaseCarrierPlan)
+    && scheduleLawActivation?.schema
+      === ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA
+    && scheduleLawActivation.activationAuthority
+      === 'schedule-config-static-declaration-no-readback'
+    && (
+      scheduleLawActivation.thermal === true
+      || scheduleLawActivation.reaction === true
+    )
+  );
+}
+
+function workerTier0PhaseCarrierPlanMatchesParticleFamily(
+  plan,
+  sphParticleUpload,
+  mlsMpmParticleUpload
+) {
+  const sphParticleCount = Number(sphParticleUpload?.particleCount);
+  const mlsMpmParticleCount = Number(mlsMpmParticleUpload?.particleCount);
+  return Boolean(
+    workerTier0LawsQuiescentPhaseCarrierPlan(plan)
+    && sphParticleUpload?.schema
+      === ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+    && sphParticleUpload?.destroyed !== true
+    && mlsMpmParticleUpload?.schema
+      === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    && mlsMpmParticleUpload?.destroyed !== true
+    && Number.isSafeInteger(sphParticleCount)
+    && sphParticleCount > 0
+    && mlsMpmParticleCount === sphParticleCount
+    && Number(plan.lineageCapacity) === sphParticleCount
+    && Number(plan.primaryCapacity) === sphParticleCount
+    && Number(plan.particleCapacity) === sphParticleCount
+  );
+}
+
+function workerTier0TopologyAttestation({
+  phaseCarrierPlan = null,
+  sourceSphUpload = null,
+  sourceMlsUpload = null,
+  device = null
+} = {}) {
+  if (!workerTier0LawsQuiescentPhaseCarrierPlan(phaseCarrierPlan)) return null;
+  const identityBufferPresent = Boolean(sourceSphUpload?.identityBuffer);
+  const sourceBuffers = [
+    sourceSphUpload?.stateBuffer,
+    sourceSphUpload?.thermoBuffer,
+    sourceSphUpload?.identityBuffer,
+    sourceMlsUpload?.mechanicsBuffer
+  ].filter(Boolean);
+  const exactFourBufferFamily = sourceBuffers.length === 4
+    && new Set(sourceBuffers).size === 4;
+  const exactFourBufferDeviceFamily = Boolean(
+    device
+    && exactFourBufferFamily
+    && sourceBuffers.every((buffer) => webGpuBufferDevice(buffer) === device)
+  );
+  const planMatchesParticleFamily =
+    workerTier0PhaseCarrierPlanMatchesParticleFamily(
+      phaseCarrierPlan,
+      sourceSphUpload,
+      sourceMlsUpload
+    );
+  const sourceParticleCount = Number(sourceSphUpload?.particleCount);
+  const identityStrideBytes = Number(sourceSphUpload?.identityStrideBytes);
+  const identityBufferByteLength = Number(
+    sourceSphUpload?.identityBufferByteLength
+  );
+  const identityBufferSize = Number(sourceSphUpload?.identityBuffer?.size);
+  const identityUsage = Number(sourceSphUpload?.identityBuffer?.usage);
+  const identityRevision = String(
+    sourceSphUpload?.identityRevision ?? ''
+  ).trim();
+  const expectedIdentityByteLength = Number.isSafeInteger(sourceParticleCount)
+    && sourceParticleCount > 0
+    ? sourceParticleCount
+      * SPH_GPU_PARTICLE_IDENTITY_UINTS
+      * Uint32Array.BYTES_PER_ELEMENT
+    : null;
+  const identityStorageUsage = Boolean(
+    Number.isSafeInteger(identityUsage)
+    && (identityUsage & GPU_BUFFER_USAGE.STORAGE) === GPU_BUFFER_USAGE.STORAGE
+  );
+  const identityDeviceMatched = Boolean(
+    identityBufferPresent
+    && device
+    && webGpuBufferDevice(sourceSphUpload.identityBuffer) === device
+  );
+  const identityAuthorityComplete = Boolean(
+    identityBufferPresent
+    && sourceSphUpload?.identitySchema
+      === ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+    && identityStrideBytes
+      === SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT
+    && identityRevision
+    && identityBufferByteLength === expectedIdentityByteLength
+    && Number.isSafeInteger(identityBufferSize)
+    && identityBufferSize >= expectedIdentityByteLength
+    && identityStorageUsage
+    && identityDeviceMatched
+  );
+  return Object.freeze({
+    schema: ULG_WORKER_TIER0_TOPOLOGY_ATTESTATION_SCHEMA,
+    status: exactFourBufferFamily
+      && exactFourBufferDeviceFamily
+      && planMatchesParticleFamily
+      && identityAuthorityComplete
+      ? 'tier0-topology-quiescence-attested'
+      : 'tier0-topology-quiescence-incomplete',
+    phaseCarrierPlanSchema: phaseCarrierPlan.schema,
+    phaseCarrierPlanStatus: phaseCarrierPlan.status,
+    lineageCapacity: Number(phaseCarrierPlan.lineageCapacity),
+    primaryCapacity: Number(phaseCarrierPlan.primaryCapacity),
+    phaseLaneCount: Number(phaseCarrierPlan.phaseLaneCount),
+    phaseLaneStride: Number(phaseCarrierPlan.phaseLaneStride),
+    companionStart: Number(phaseCarrierPlan.companionStart),
+    companionCapacity: Number(phaseCarrierPlan.companionCapacity),
+    particleCapacity: Number(phaseCarrierPlan.particleCapacity),
+    sourceParticleCount,
+    phaseCompanionLanesRequired:
+      phaseCarrierPlan.phaseCompanionLanesRequired === true,
+    identityBufferRequired: true,
+    identityBufferPresent,
+    identitySchema: sourceSphUpload?.identitySchema ?? null,
+    identityStrideBytes,
+    identityRevision: identityRevision || null,
+    identityBufferByteLength,
+    identityBufferSize,
+    identityStorageUsage,
+    identityDeviceMatched,
+    identityAuthorityComplete,
+    exactFourBufferFamily,
+    exactFourBufferDeviceFamily,
+    planMatchesParticleFamily
+  });
+}
+
+function transferPhaseCarrierAuxiliaryBufferOwnership({
+  sourceUploads = null,
+  terminalUploads = null
+} = {}) {
+  const pairs = [
+    [sourceUploads?.sphParticleUpload, terminalUploads?.sphParticleUpload],
+    [sourceUploads?.mlsMpmParticleUpload, terminalUploads?.mlsMpmParticleUpload]
+  ];
+  const fields = [
+    [
+      'materialPropertyBankWarmInputBuffer',
+      'ownsMaterialPropertyBankWarmInputBuffer'
+    ],
+    [
+      'materialPropertyBankParticleSizeBuffer',
+      'ownsMaterialPropertyBankParticleSizeBuffer'
+    ]
+  ];
+  const transfers = [];
+  const uniquelyOwned = new Set();
+  const aliased = new Set();
+  for (const [source, terminal] of pairs) {
+    if (!source || !terminal) {
+      throw new TypeError(
+        'Phase-carrier auxiliary ownership transfer requires both particle upload descriptors'
+      );
+    }
+    for (const [bufferField, ownershipField] of fields) {
+      const sourceBuffer = source[bufferField] ?? null;
+      const terminalBuffer = terminal[bufferField] ?? null;
+      if (terminalBuffer !== sourceBuffer) {
+        throw new RangeError(
+          `Phase-carrier auxiliary ownership transfer rejected ${bufferField} alias drift`
+        );
+      }
+      const owned = Boolean(
+        sourceBuffer && source[ownershipField] !== false
+      );
+      if (sourceBuffer) aliased.add(sourceBuffer);
+      if (owned && uniquelyOwned.has(sourceBuffer)) {
+        throw new RangeError(
+          'Phase-carrier auxiliary ownership transfer rejected duplicate source ownership'
+        );
+      }
+      if (owned) uniquelyOwned.add(sourceBuffer);
+      transfers.push({ source, terminal, ownershipField, sourceBuffer, owned });
+    }
+  }
+  if (transfers.some(
+    ({ source, terminal }) => Object.isFrozen(source) || Object.isFrozen(terminal)
+  )) {
+    throw new TypeError(
+      'Phase-carrier auxiliary ownership transfer requires mutable upload ownership descriptors'
+    );
+  }
+  const previous = transfers.map(({ source, terminal, ownershipField }) => ({
+    source,
+    terminal,
+    ownershipField,
+    sourceOwned: source[ownershipField],
+    terminalOwned: terminal[ownershipField]
+  }));
+  let rolledBack = false;
+  const rollback = () => {
+    if (rolledBack) return true;
+    for (const mutation of [...previous].reverse()) {
+      mutation.source[mutation.ownershipField] = mutation.sourceOwned;
+      mutation.terminal[mutation.ownershipField] = mutation.terminalOwned;
+    }
+    rolledBack = true;
+    return true;
+  };
+  try {
+    for (const {
+      source,
+      terminal,
+      ownershipField,
+      sourceBuffer,
+      owned
+    } of transfers) {
+      source[ownershipField] = false;
+      terminal[ownershipField] = Boolean(sourceBuffer && owned);
+    }
+  } catch (error) {
+    try { rollback(); } catch {}
+    throw error;
+  }
+  const receipt = {
+    schema:
+      'peercompute.ulg.worker-phase-carrier-auxiliary-ownership-transfer.v0',
+    status: 'phase-carrier-auxiliary-ownership-transferred',
+    aliasedAuxiliaryBufferCount: aliased.size,
+    transferredOwnedBufferCount: uniquelyOwned.size,
+    borrowedAuxiliaryBufferCount: Math.max(
+      0,
+      aliased.size - uniquelyOwned.size
+    ),
+    sourceOwnershipCleared: true,
+    terminalOwnershipAdopted: true
+  };
+  Object.defineProperty(receipt, 'rollbackOwnershipTransfer', {
+    value: rollback,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return Object.freeze(receipt);
+}
+
+function restoreWorkerContinuationSidecarOwnership({
+  sourceUploads = null,
+  unadoptedUploads = null
+} = {}) {
+  const sourceSph = sourceUploads?.sphParticleUpload ?? null;
+  const unadoptedSph = unadoptedUploads?.sphParticleUpload ?? null;
+  let auxiliaryOwnershipTransfer = null;
+  const sourceIdentitySnapshot = {
+    ownsIdentityBuffer: sourceSph?.ownsIdentityBuffer,
+    identityOwnership: sourceSph?.identityOwnership
+  };
+  const unadoptedIdentitySnapshot = {
+    ownsIdentityBuffer: unadoptedSph?.ownsIdentityBuffer,
+    identityOwnership: unadoptedSph?.identityOwnership
+  };
+  try {
+    auxiliaryOwnershipTransfer =
+      transferPhaseCarrierAuxiliaryBufferOwnership({
+        sourceUploads: unadoptedUploads,
+        terminalUploads: sourceUploads
+      });
+    if (
+      unadoptedSph?.identityBuffer
+      && unadoptedSph.identityBuffer === sourceSph?.identityBuffer
+      && unadoptedSph.ownsIdentityBuffer === true
+    ) {
+      unadoptedSph.ownsIdentityBuffer = false;
+      unadoptedSph.identityOwnership =
+        'rolled-back-unadopted-resident-continuation';
+      sourceSph.ownsIdentityBuffer = true;
+      sourceSph.identityOwnership =
+        'restored-after-unadopted-resident-continuation';
+    }
+  } catch (error) {
+    try {
+      sourceSph.ownsIdentityBuffer =
+        sourceIdentitySnapshot.ownsIdentityBuffer;
+      sourceSph.identityOwnership =
+        sourceIdentitySnapshot.identityOwnership;
+      unadoptedSph.ownsIdentityBuffer =
+        unadoptedIdentitySnapshot.ownsIdentityBuffer;
+      unadoptedSph.identityOwnership =
+        unadoptedIdentitySnapshot.identityOwnership;
+    } catch {}
+    try {
+      auxiliaryOwnershipTransfer?.rollbackOwnershipTransfer?.();
+    } catch {}
+    throw error;
+  }
+  return true;
+}
+
+function persistWorkerScheduleResidentStepOptions(lane, requested = null) {
+  if (!lane || !requested || typeof requested !== 'object') return;
+  const previous = lane.residentStepOptions || {};
+  const carriedResidentProductMass = previous.residentProductMass ?? null;
+  lane.residentStepOptions = {
+    ...previous,
+    ...requested,
+    thermalStepOptions: {
+      ...(previous.thermalStepOptions || {}),
+      ...(requested.thermalStepOptions || {})
+    },
+    reactionStepOptions: {
+      ...(previous.reactionStepOptions || {}),
+      ...(requested.reactionStepOptions || {})
+    },
+    mechanicsRefreshOptions: {
+      ...(previous.mechanicsRefreshOptions || {}),
+      ...(requested.mechanicsRefreshOptions || {})
+    },
+    ...(carriedResidentProductMass
+      ? { residentProductMass: carriedResidentProductMass }
+      : {})
+  };
+}
+
+function validateWorkerTier0FusedExecution(execution, {
+  device,
+  stepCount,
+  sourceSphUpload,
+  sourceMlsUpload,
+  sourceLineage,
+  expectedLineage,
+  phaseCarrierPlan,
+  registeredSubmittedCleanupCount = 0,
+  rejectedSubmittedCleanupCount = 0
+} = {}) {
+  const failures = [];
+  const finalStep = execution?.finalStep ?? null;
+  const fused = execution?.fusedResidentSequence
+    ?? finalStep?.fusedResidentSequence
+    ?? null;
+  const preflight = execution?.fusedResidentSequencePreflight ?? null;
+  const nextUploads = execution?.nextParticleUploads
+    ?? finalStep?.nextParticleUploads
+    ?? null;
+  const nextSphUpload = nextUploads?.sphParticleUpload ?? null;
+  const nextMlsUpload = nextUploads?.mlsMpmParticleUpload ?? null;
+  const targetLineage = exactWorkerScheduleParticleFamilyLineage({
+    sphParticleUpload: nextSphUpload,
+    mlsMpmParticleUpload: nextMlsUpload
+  });
+  const exactBuffers = [
+    nextSphUpload?.stateBuffer,
+    nextSphUpload?.thermoBuffer,
+    nextSphUpload?.identityBuffer,
+    nextMlsUpload?.mechanicsBuffer
+  ].filter(Boolean);
+  if (execution?.schema !== ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA) {
+    failures.push('execution-schema');
+  }
+  if (execution?.status !== 'resident-steps-executed') {
+    failures.push('execution-status');
+  }
+  if (
+    execution?.stepCount !== stepCount
+    || execution?.completedStepCount !== stepCount
+  ) failures.push('execution-step-count');
+  if (
+    fused?.schema !== 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0'
+    || fused.status !== 'fused-resident-sequence-executed'
+    || fused.stepCount !== stepCount
+    || fused.commandSubmissionCount !== 1
+    || fused.internalPositionSubstepCount !== stepCount
+    || fused.storageGenerationDelta !== 1
+    || fused.committedPositionEpochDelta !== 1
+    || fused.physicsTickDelta !== stepCount
+  ) failures.push('fused-sequence-receipt');
+  if (
+    preflight?.status !== 'fused-resident-sequence-preflight-ready'
+    || preflight.sequenceRunnable !== true
+    || (preflight.blockers || []).length !== 0
+    || (preflight.sidecarBlockers || []).length !== 0
+  ) failures.push('fused-preflight');
+  if (
+    execution?.readbackMode !== NO_FULL_READBACK_MODE
+    || execution.fullParticleReadbackPerformed !== false
+    || execution.fullParticleReadbackFree !== true
+    || execution.residentContinuationReady !== true
+    || Number(execution.mapAsyncCount) !== 0
+    || Number(execution.readbackBytes) !== 0
+    || Number(execution.hostQueueFenceCount) !== 0
+  ) failures.push('readback-or-continuation');
+  if (
+    finalStep?.nextParticleUploads !== nextUploads
+    || finalStep?.residentContinuationReady !== true
+    || finalStep?.fullParticleReadbackFree !== true
+  ) failures.push('terminal-step-publication');
+  if (
+    workerScheduleLineageMismatchFields(targetLineage, expectedLineage)
+      .length > 0
+    || workerScheduleLineageMismatchFields(
+      fused?.terminalLineageIdentity,
+      expectedLineage
+    ).length > 0
+  ) failures.push('terminal-lineage');
+  if (
+    nextSphUpload?.stateBuffer === sourceSphUpload?.stateBuffer
+    || nextMlsUpload?.mechanicsBuffer === sourceMlsUpload?.mechanicsBuffer
+    || nextSphUpload?.thermoBuffer !== sourceSphUpload?.thermoBuffer
+    || nextSphUpload?.identityBuffer !== sourceSphUpload?.identityBuffer
+  ) failures.push('terminal-buffer-family');
+  if (
+    exactBuffers.length !== 4
+    || new Set(exactBuffers).size !== 4
+    || exactBuffers.some((buffer) => webGpuBufferDevice(buffer) !== device)
+  ) failures.push('terminal-buffer-device');
+  if (
+    !workerTier0LawsQuiescentPhaseCarrierPlan(phaseCarrierPlan)
+    || !workerTier0PhaseCarrierPlanMatchesParticleFamily(
+      phaseCarrierPlan,
+      nextSphUpload,
+      nextMlsUpload
+    )
+    || !workerTier0LawsQuiescentPhaseCarrierPlan(
+      nextSphUpload?.phaseCarrierPlan
+    )
+    || !workerTier0LawsQuiescentPhaseCarrierPlan(
+      nextMlsUpload?.phaseCarrierPlan
+    )
+    || !phaseCarrierPlansEqual(
+      phaseCarrierPlan,
+      nextSphUpload?.phaseCarrierPlan
+    )
+    || !phaseCarrierPlansEqual(
+      phaseCarrierPlan,
+      nextMlsUpload?.phaseCarrierPlan
+    )
+  ) failures.push('phase-carrier-plan');
+  if (
+    sourceSphUpload?.identityBuffer
+    && (
+      fused?.continuationOwnershipTransferDeferred !== true
+      || nextSphUpload?.ownsIdentityBuffer !== false
+      || nextSphUpload?.identityOwnership
+        !== 'deferred-source-to-continuation-transfer'
+    )
+  ) failures.push('identity-ownership-deferral');
+  if (
+    fused?.submittedCleanupOwnership !== 'caller-terminal-fence'
+    || fused?.submittedCleanupRegistrationCount !== 1
+    || registeredSubmittedCleanupCount !== 1
+    || rejectedSubmittedCleanupCount !== 0
+  ) failures.push('submitted-cleanup-ownership');
+  return {
+    valid: failures.length === 0,
+    failures,
+    finalStep,
+    fused,
+    preflight,
+    nextUploads,
+    nextSphUpload,
+    nextMlsUpload,
+    sourceLineage,
+    targetLineage,
+    exactBuffers
   };
 }
 
@@ -6042,9 +6984,83 @@ function failedQueueDrainCheckpointTerminalFence(checkpoint, {
   };
 }
 
-function terminalRefluxReceiptDiagnostic(decoded = null) {
-  return decoded
-    ? {
+function terminalCflIntervalRejectTrace(decoded = null, words = null) {
+  const tag = Number(decoded?.statusCaptureSentinel) >>> 0;
+  if (tag === 0xffff_fffe) {
+    return {
+      schema: 'peercompute.ulg.schroeder-cfl-interval-reject-trace.v0',
+      status: 'capture-interrupted-before-tag-publication',
+      tag,
+      headerEvidenceRepurposed: true,
+      rawPayloadWords: null
+    };
+  }
+  if ((tag >>> 24) !== 0xc7) return null;
+  const payloadWords = words instanceof Uint32Array && words.length >= 136
+    ? Array.from(words.slice(125, 136), (value) => value >>> 0)
+    : null;
+  const payloadFloats = payloadWords == null
+    ? null
+    : Array.from(new Float32Array(Uint32Array.from(payloadWords).buffer));
+  const stageCode = (tag >>> 22) & 0x3;
+  const stage = [
+    'fine-validator',
+    'coarse-validator',
+    'global-interval-seal',
+    'unknown'
+  ][stageCode];
+  const priorRegimeCode = (tag >>> 17) & 0x3;
+  const priorRegime = [
+    'inside-numeric-guard',
+    'inside-physical-audit-band',
+    'outside-physical-audit',
+    'invalid-or-not-applicable'
+  ][priorRegimeCode];
+  const base = {
+    schema: 'peercompute.ulg.schroeder-cfl-interval-reject-trace.v0',
+    status: payloadFloats == null
+      ? 'capture-tag-published-payload-unavailable'
+      : 'capture-complete',
+    tag,
+    stage,
+    stageCode,
+    phaseIntervalValid: ((tag >>> 21) & 1) === 1,
+    fullIntervalValid: ((tag >>> 20) & 1) === 1,
+    localIntervalOverlap: ((tag >>> 19) & 1) === 1,
+    priorRegime,
+    priorRegimeCode,
+    fieldOrdinalOverflow: ((tag >>> 16) & 1) === 1,
+    fieldOrdinal: stageCode === 2 ? null : tag & 0xffff,
+    headerEvidenceRepurposed: true,
+    rawPayloadWords: payloadWords
+  };
+  if (payloadFloats == null) return base;
+  if (stageCode === 2) {
+    return {
+      ...base,
+      globalAlphaInterval: {
+        lower: payloadFloats[0],
+        upper: payloadFloats[1]
+      }
+    };
+  }
+  return {
+    ...base,
+    priorVelocityMPerS: payloadFloats.slice(0, 3),
+    phaseDeltaVelocityMPerS: payloadFloats.slice(3, 6),
+    fullDeltaVelocityMPerS: payloadFloats.slice(6, 9),
+    maximumVelocityMPerS: payloadFloats[9],
+    correctionCeilingMPerS: payloadFloats[10]
+  };
+}
+
+function terminalRefluxReceiptDiagnostic(decoded = null, words = null) {
+  if (!decoded) return null;
+  const cflIntervalRejectTrace = terminalCflIntervalRejectTrace(
+    decoded,
+    words
+  );
+  return {
         structuralValid: decoded.structuralValid === true,
         admitted: decoded.admitted === true,
         terminalAdmitted: decoded.terminalAdmitted === true,
@@ -6097,15 +7113,25 @@ function terminalRefluxReceiptDiagnostic(decoded = null) {
         routeHeatStatus: decoded.heatSplit?.routeHeatStatus ?? null,
         statusCaptureSentinel: decoded.statusCaptureSentinel ?? null,
         statusCaptureMissingCount:
-          decoded.statusCaptureMissingCount ?? null,
+          cflIntervalRejectTrace == null
+            ? decoded.statusCaptureMissingCount ?? null
+            : null,
+        cflIntervalRejectTrace,
+        headerEvidenceRepurposed:
+          cflIntervalRejectTrace?.headerEvidenceRepurposed === true,
         maxFineCflRatio: decoded.maxFineCflRatio ?? null,
         maxCoarseCflRatio: decoded.maxCoarseCflRatio ?? null,
-        operatorSplitValid: decoded.operatorSplit?.valid === true,
+        operatorSplitValid: cflIntervalRejectTrace == null
+          ? decoded.operatorSplit?.valid === true
+          : null,
         phaseVolumeTransportValid:
-          decoded.phaseVolumeTransport?.valid === true,
-        ambientBoundaryValid: decoded.ambientBoundary?.valid === true
-      }
-    : null;
+          cflIntervalRejectTrace == null
+            ? decoded.phaseVolumeTransport?.valid === true
+            : null,
+        ambientBoundaryValid: cflIntervalRejectTrace == null
+          ? decoded.ambientBoundary?.valid === true
+          : null
+      };
 }
 
 async function readWorkerResidentScheduleTerminalRefluxReceipt({
@@ -6232,7 +7258,10 @@ async function readWorkerResidentScheduleTerminalRefluxReceipt({
       admittedStepCount += 1;
     } else if (firstRejectedStepOrdinal == null) {
       firstRejectedStepOrdinal = stepOrdinal;
-      firstRejectedDiagnostic = terminalRefluxReceiptDiagnostic(decoded);
+      firstRejectedDiagnostic = terminalRefluxReceiptDiagnostic(
+        decoded,
+        words
+      );
     }
   }
   const allStepsAdmitted = admittedStepCount === expectedStepCount
@@ -6376,11 +7405,44 @@ export function cancelUlgMechanicsResidentStageWorkerSchedule(id) {
 
 export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   payload = {},
-  { id = null, postProgress = null } = {}
+  {
+    id = null,
+    postProgress = null,
+    runTier0FusedResidentSequence =
+      runMlsMpmResidentStepsWithOptionalWebGpu
+  } = {}
 ) {
   const schedule = payload.schedule && typeof payload.schedule === 'object'
     ? payload.schedule
     : {};
+  const postedTargetScheduleAuthority =
+    schedule.targetScheduleAuthority ?? null;
+  let rawTargetScheduleAuthority = null;
+  if (postedTargetScheduleAuthority != null) {
+    try {
+      // Latch the complete posted authority before this async function can
+      // yield to a provider or mechanics runner. Validation, token burn,
+      // retained state, and the emitted receipt all consume this immutable
+      // worker-local copy, so callback-time mutation cannot authorize GPU
+      // work or poison the lane's successor evidence.
+      rawTargetScheduleAuthority =
+        cloneAndDeepFreezeWorkerScheduleValue(
+          postedTargetScheduleAuthority
+        );
+    } catch {
+      throw workerResidentScheduleError(
+        'target-schedule-authority-mismatch',
+        'the posted target schedule authority is not clone-safe',
+        {
+          scheduleId:
+            normalizeString(schedule.scheduleId, null)
+            || normalizeString(id, null),
+          stepOrdinal: 0,
+          stageId: 'target-schedule-authority-latch'
+        }
+      );
+    }
+  }
   const laneId = normalizeString(
     payload.lease?.laneId ?? payload.lane?.laneId,
     null
@@ -6464,6 +7526,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   const terminalRefluxExpectations = [];
   try {
     const baseContext = workerContext(payload);
+    const commonOptions = baseContext.common
+      && typeof baseContext.common === 'object'
+        ? baseContext.common
+        : {};
     const baseStageOptions =
       baseContext.stageOptions && typeof baseContext.stageOptions === 'object'
         ? baseContext.stageOptions
@@ -6519,20 +7585,40 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         || baseMechanicsOptions.enablePhaseVolumeMigration === true
         || baseMechanicsOptions.hierarchyConfig?.enablePhaseVolumeMigration === true;
       const twoLevelMechanics =
-        baseMechanicsOptions.enableTwoLevelMechanics === true;
+        baseMechanicsOptions.enableTwoLevelMechanics === true
+        || baseMechanicsOptions.hierarchyConfig?.enableTwoLevelMechanics
+          === true;
+      const thermal = Boolean(laneResidentOptions.thermalMaterialTable);
+      const reactionTable = laneResidentOptions.reactionTable ?? null;
+      const reaction = reactionTable != null
+        && !isExactQuiescentSphReactionTable(reactionTable);
+      const lawQueue =
+        baseMechanicsOptions.enableLawQueue === true
+        || baseMechanicsOptions.hierarchyConfig?.enableLawQueue === true;
+      const lawNeighborCandidates =
+        baseMechanicsOptions.enableLawNeighborCandidates === true
+        || baseMechanicsOptions.hierarchyConfig
+          ?.enableLawNeighborCandidates === true;
       const surfaceTension =
         laneResidentOptions.mechanicsMaterialTable?.surfaceTensionEnabled === true;
-      // A gas-pressure summary only demands field mode when it is
-      // actionable: a retained product-event buffer or a gas cell field.
-      // An inert summary object proves nothing.
+      // Worker-private product history becomes schedule-actionable only
+      // through the exact fenced predecessor observation. Mere buffer
+      // retention is not clone-safe authority; an authenticated zero-live
+      // arena is still a writer capability for products created by this step.
+      const retainedProductGasBoundaryActionable =
+        retainedPredecessorGasBoundaryActionable;
       const gasBoundaryActionable =
-        Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
-        || laneResidentOptions.gasPressureSummary?.residentProductMass
-          ?.productEventBufferRetained === true
-        || laneResidentOptions.residentProductMass
-          ?.productEventBufferRetained === true;
+        retainedProductGasBoundaryActionable
+        || Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
+        || Boolean(laneResidentOptions.pressureInterfaceForceRowsBuffer)
+        || Boolean(laneResidentOptions.pressureInterfaceForceSolver)
+        || Boolean(laneResidentOptions.pressureInterfaceGasCellFieldImport)
+        || Boolean(laneResidentOptions.pressureInterfaceGridForceAdmission)
+        || laneResidentOptions.externalGaugePressureEnabled === true;
       const explicitVacuumAmbient =
-        Number(laneResidentOptions.ambientPressurePa) === 0;
+        typeof laneResidentOptions.ambientPressurePa === 'number'
+        && Number.isFinite(laneResidentOptions.ambientPressurePa)
+        && laneResidentOptions.ambientPressurePa === 0;
       // Mechanics field views may be skipped only when every field-mode
       // consumer is provably absent for the whole schedule; a null ambient
       // can still receive atmospheric pressure from wall-ledger feedback,
@@ -6544,21 +7630,33 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         || surfaceTension
         || gasBoundaryActionable
         || !explicitVacuumAmbient;
+      const contactSolverRequested =
+        laneResidentOptions.contactSolverEnabled !== false;
+      const contactSolverEscalatedForDynamicLaws = Boolean(
+        !contactSolverRequested
+        && (
+          thermal
+          || reaction
+          || lawQueue
+          || lawNeighborCandidates
+          || phaseVolumeMigration
+          || twoLevelMechanics
+          || surfaceTension
+          || gasBoundaryActionable
+        )
+      );
+      const contactSolver = Boolean(
+        contactSolverRequested || contactSolverEscalatedForDynamicLaws
+      );
       const receipt = Object.freeze({
-        schema: 'peercompute.ulg.worker-schedule-law-activation-receipt.v0',
-        thermal: Boolean(laneResidentOptions.thermalMaterialTable),
-        reaction:
-          (Number(laneResidentOptions.reactionTable?.reactionCount) || 0) > 0,
-        contactSolver:
-          record.schroederLane?.residentStepOptions?.contactSolverEnabled
-            !== false,
-        lawQueue:
-          baseMechanicsOptions.enableLawQueue === true
-          || baseMechanicsOptions.hierarchyConfig?.enableLawQueue === true,
-        lawNeighborCandidates:
-          baseMechanicsOptions.enableLawNeighborCandidates === true
-          || baseMechanicsOptions.hierarchyConfig
-            ?.enableLawNeighborCandidates === true,
+        schema: ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA,
+        thermal,
+        reaction,
+        contactSolver,
+        contactSolverRequested,
+        contactSolverEscalatedForDynamicLaws,
+        lawQueue,
+        lawNeighborCandidates,
         phaseVolumeMigration,
         twoLevelMechanics,
         surfaceTension,
@@ -6661,6 +7759,22 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           ? requestedResidentStepOptions
           : {})
       };
+      const scheduleLawActivation = resolveScheduleLawActivation();
+      cleanResidentStepOptions.contactSolverEnabled =
+        scheduleLawActivation.contactSolver;
+      // Shadow-only Phase-B seed: only the terminal ordinal requests a compact
+      // watch. The resident route submits it after the exact published
+      // post-closure family exists; the worker's schedule-terminal fence then
+      // orders the single four-byte map.
+      cleanResidentStepOptions.captureReactionActivationObservation = Boolean(
+        scheduleReactionActivationWatchTable
+        && scheduleReactionActivationMotionEnvelope
+        && stepOrdinal === stepCount
+      );
+      cleanResidentStepOptions.reactionActivationMotionEnvelope =
+        cleanResidentStepOptions.captureReactionActivationObservation
+          ? scheduleReactionActivationMotionEnvelope
+          : null;
       delete cleanResidentStepOptions[
         SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
       ];
@@ -6724,6 +7838,31 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       };
     };
     const record = getLaneRecord(payload);
+    // The scene sends immutable material/law options only with a fresh seed.
+    // Persist that first schedule snapshot before route selection so Tier0
+    // does not bypass the canonical mechanics stage that historically stored
+    // it, and later schedules cannot silently re-enable default contact.
+    const scheduleLaneHadResidentStepOptions = Boolean(
+      record.schroederLane
+      && Object.prototype.hasOwnProperty.call(
+        record.schroederLane,
+        'residentStepOptions'
+      )
+    );
+    const scheduleLaneResidentStepOptionsBeforeRequest =
+      record.schroederLane?.residentStepOptions;
+    persistWorkerScheduleResidentStepOptions(
+      record.schroederLane,
+      baseMechanicsOptions.residentStepOptions
+    );
+    const restoreScheduleResidentStepOptions = () => {
+      if (scheduleLaneHadResidentStepOptions && record.schroederLane) {
+        record.schroederLane.residentStepOptions =
+          scheduleLaneResidentStepOptionsBeforeRequest;
+      } else if (record.schroederLane) {
+        delete record.schroederLane.residentStepOptions;
+      }
+    };
     // W4a: a seeded lane's epoch-identity monotonicity baseline is the SEED
     // lineage. The step that consumes the retained seeded assignment must
     // carry exactly the seeded identity words (the epoch it builds IS the
@@ -6731,6 +7870,39 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // including a schedule started after single-stage messages consumed the
     // seed — must strictly advance beyond the seeded words.
     const scheduleStartLane = record.schroederLane || null;
+    const retainedPredecessorTargetScheduleAuthorityRaw =
+      scheduleStartLane?.nextScheduleTargetAuthority ?? null;
+    const retainedPredecessorTargetScheduleAuthority =
+      retainedPredecessorTargetScheduleAuthorityRaw == null
+        ? null
+        : exactSchroederTargetScheduleAuthority(
+            retainedPredecessorTargetScheduleAuthorityRaw
+          );
+    const retainedPredecessorDynamicLawObservationRaw =
+      scheduleStartLane?.nextScheduleLawActivationObservation ?? null;
+    const retainedPredecessorDynamicLawObservation =
+      retainedPredecessorDynamicLawObservationRaw == null
+        ? null
+        : exactWorkerDynamicLawObservationSelf(
+            retainedPredecessorDynamicLawObservationRaw
+          );
+    const retainedPredecessorGasBoundaryActionable =
+      schroederTargetScheduleSuccessorGasBoundaryActionable({
+        predecessorTargetScheduleAuthority:
+          retainedPredecessorTargetScheduleAuthority,
+        predecessorDynamicLawObservation:
+          retainedPredecessorDynamicLawObservation
+      });
+    const scheduleStartParticleFamilyCounts = Object.freeze({
+      sphState: Number(scheduleStartLane?.sphParticleState?.particleCount),
+      sphUpload: Number(scheduleStartLane?.sphParticleUpload?.particleCount),
+      mlsMpmState: Number(
+        scheduleStartLane?.mlsMpmParticleState?.particleCount
+      ),
+      mlsMpmUpload: Number(
+        scheduleStartLane?.mlsMpmParticleUpload?.particleCount
+      )
+    });
     const scheduleStartLaneSeed = scheduleStartLane?.laneSeed || null;
     const seedConsumptionExpectedAtStepOne = Boolean(
       scheduleStartLaneSeed
@@ -6743,6 +7915,667 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           : workerResidentScheduleEpochIdentity(scheduleStartLane.epochSeal)
             || { ...scheduleStartLaneSeed.lineage })
       : null;
+    let scheduleStartTier0ContinuationIdentity =
+      scheduleStartLane?.tier0ContinuationIdentity
+        ? { ...scheduleStartLane.tier0ContinuationIdentity }
+        : null;
+    const tier0SourceLineage = exactWorkerScheduleParticleFamilyLineage({
+      sphParticleUpload: scheduleStartLane?.sphParticleUpload,
+      mlsMpmParticleUpload: scheduleStartLane?.mlsMpmParticleUpload
+    });
+    const tier0ExpectedLineage = expectedWorkerTier0TerminalLineage(
+      tier0SourceLineage,
+      stepCount
+    );
+    const tier0PhaseCarrierPlan =
+      scheduleStartLane?.sphParticleUpload?.phaseCarrierPlan
+      ?? scheduleStartLane?.sphParticleState?.phaseCarrierPlan
+      ?? null;
+    const tier0TopologyAttestation = workerTier0TopologyAttestation({
+      phaseCarrierPlan: tier0PhaseCarrierPlan,
+      sourceSphUpload: scheduleStartLane?.sphParticleUpload,
+      sourceMlsUpload: scheduleStartLane?.mlsMpmParticleUpload,
+      device: record.workerDevice
+    });
+    const scheduleLawActivation = resolveScheduleLawActivation();
+    const scheduleResidentStepOptions =
+      scheduleStartLane?.residentStepOptions
+      || baseMechanicsOptions.residentStepOptions
+      || {};
+    // A dormant table is observation input only. It must never participate in
+    // the static activation receipt or Tier0 blocker derivation. Canonical
+    // schedules watch their executing table; laws-quiescent Tier0 schedules
+    // may instead receive this separately named immutable descriptor.
+    const scheduleReactionActivationWatchTable = scheduleLawActivation.reaction
+      ? scheduleResidentStepOptions.reactionTable ?? null
+      : scheduleResidentStepOptions.reactionActivationWatchTable ?? null;
+    if (
+      scheduleReactionActivationWatchTable
+      && !rawTargetScheduleAuthority
+      && retainedPredecessorDynamicLawObservationRaw == null
+    ) {
+      restoreScheduleResidentStepOptions();
+      throw workerResidentScheduleError(
+        'target-schedule-authority-required',
+        'dynamic-law observation requires an independently authored schedule authority',
+        {
+          scheduleId,
+          stepOrdinal: 0,
+          stageId: 'target-schedule-authority-preflight',
+          laneState: workerResidentScheduleLaneStateSnapshot(record, {
+            laneId,
+            stateKey
+          })
+        }
+      );
+    }
+    const scheduleStepOptionsProviderAuthority = scheduleStepOptionsProvider
+      ? (
+          workerLaneScheduleProviderAuthority.get(scheduleStepOptionsProvider)
+          || createSchroederTargetScheduleProviderAuthority({
+            kind: 'general-unsealed'
+          })
+        )
+      : createSchroederTargetScheduleProviderAuthority({ kind: 'none' });
+    let scheduleTargetWriterSet = null;
+    let scheduleTargetTableFingerprints = null;
+    let scheduleReactionActivationMotionEnvelope = null;
+    let scheduleReactionActivationMotionEnvelopeFailure = null;
+    let admittedTargetScheduleAuthority = null;
+    let predecessorTargetTokenConsumption = null;
+    let predecessorConfigurationContinuity = null;
+    let authenticatedDynamicReactionSuccessor = false;
+    if (rawTargetScheduleAuthority || scheduleReactionActivationWatchTable) {
+      try {
+        scheduleTargetWriterSet = createSchroederTargetScheduleWriterSet({
+          residentStepOptions: scheduleResidentStepOptions,
+          epochOptions: baseEpochOptions,
+          mechanicsOptions: baseMechanicsOptions,
+          hierarchyConfig: baseMechanicsOptions.hierarchyConfig,
+          scheduleStepOptionsProvider: scheduleStepOptionsProviderAuthority,
+          retainedProductGasBoundaryActionable:
+            retainedPredecessorGasBoundaryActionable
+        });
+        scheduleTargetTableFingerprints =
+          createSchroederTargetScheduleTableFingerprints({
+            residentStepOptions: scheduleResidentStepOptions,
+            executingReactionActive: scheduleLawActivation.reaction
+          });
+        scheduleReactionActivationMotionEnvelope =
+          createSphReactionMotionEnvelope({
+            maxFutureSubsteps: stepCount,
+            dtS:
+              commonOptions.dt
+              ?? scheduleStartLane?.mlsMpmParticleState?.mechanicsDtS
+              ?? 0,
+            gridSpacingM:
+              commonOptions.gridSpacingM
+              ?? scheduleStartLane?.sphParticleState?.smoothingLengthM,
+            cflFactor:
+              commonOptions.cflFactor
+              ?? scheduleStartLane?.mlsMpmParticleState?.gridCflFactor
+              ?? 0.4,
+            boxDimsM: commonOptions.boxDimsM ?? [5, 5, 5],
+            separationDisplacementEnabled:
+              scheduleTargetWriterSet.contactSolver !== true,
+            contactCorrectionEnabled:
+              scheduleTargetWriterSet.contactSolver === true,
+            thermalPhaseEvolutionEnabled:
+              scheduleTargetWriterSet.thermalPhaseEvolutionEnabled
+          });
+      } catch (error) {
+        scheduleReactionActivationMotionEnvelopeFailure =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+    const postedPredecessorDynamicLawObservation =
+      rawTargetScheduleAuthority?.predecessorDynamicLawObservation ?? null;
+    const postedPredecessorTargetScheduleRequestId =
+      postedPredecessorDynamicLawObservation?.targetScheduleRequestId ?? null;
+    const lastConsumedDynamicLawTargetScheduleRequestId =
+      scheduleStartLane?.lastConsumedDynamicLawTargetScheduleRequestId ?? null;
+    let predecessorTargetTokenFailureReason = null;
+    let predecessorTargetTokenFailureDetail = null;
+    if (
+      postedPredecessorTargetScheduleRequestId != null
+      && postedPredecessorTargetScheduleRequestId
+        === lastConsumedDynamicLawTargetScheduleRequestId
+    ) {
+      predecessorTargetTokenFailureReason =
+        'predecessor-target-token-replayed';
+      predecessorTargetTokenFailureDetail =
+        'the predecessor target request was already consumed on this lane';
+    } else if (
+      retainedPredecessorDynamicLawObservationRaw != null
+      && (
+        !retainedPredecessorTargetScheduleAuthority
+        || retainedPredecessorDynamicLawObservationRaw.sourceScheduleId
+          !== retainedPredecessorTargetScheduleAuthority.sourceScheduleId
+        || retainedPredecessorDynamicLawObservationRaw
+          .targetScheduleRequestId
+          !== retainedPredecessorTargetScheduleAuthority
+            .targetScheduleRequestId
+        || retainedPredecessorDynamicLawObservationRaw
+          .targetScheduleAuthorityFingerprint
+          !== retainedPredecessorTargetScheduleAuthority.requestFingerprint
+        || retainedPredecessorDynamicLawObservationRaw.laneId
+          !== retainedPredecessorTargetScheduleAuthority.laneId
+        || retainedPredecessorDynamicLawObservationRaw.stateKey
+          !== retainedPredecessorTargetScheduleAuthority.stateKey
+      )
+    ) {
+      predecessorTargetTokenFailureReason =
+        'predecessor-target-token-state-unavailable';
+      predecessorTargetTokenFailureDetail =
+        'the worker-retained predecessor authority does not bind the retained observation';
+    } else if (
+      retainedPredecessorDynamicLawObservationRaw != null
+      && !retainedPredecessorDynamicLawObservation
+    ) {
+      predecessorTargetTokenFailureReason =
+        'predecessor-target-token-state-unavailable';
+      predecessorTargetTokenFailureDetail =
+        'the worker-retained predecessor observation is not exact';
+    } else if (retainedPredecessorDynamicLawObservation) {
+      const retainedWriterEvidence =
+        retainedPredecessorDynamicLawObservation.prospectiveWriterEvidence;
+      const retainedProductHistoryHandle =
+        previousWorkerResidentProductMass(record)
+        ?? scheduleStartLane?.residentStepOptions?.residentProductMass
+        ?? null;
+      const currentProductHistoryArenaIdentity =
+        describeResidentProductHistoryArenaIdentity(
+          state.workerDevice,
+          retainedProductHistoryHandle
+        );
+      if (
+        retainedWriterEvidence?.gasBoundaryActionable === true
+        && (
+          retainedProductHistoryHandle?.productEventBufferRetained !== true
+          || retainedProductHistoryHandle.productEventRowCount
+            !== retainedWriterEvidence.productEventRowCount
+          || !workerRouteValuesEqual(
+            currentProductHistoryArenaIdentity,
+            retainedWriterEvidence.productHistoryArenaIdentity
+          )
+        )
+      ) {
+        predecessorTargetTokenFailureReason =
+          'predecessor-target-token-mismatch';
+        predecessorTargetTokenFailureDetail =
+          'the retained product-history arena no longer matches its fenced predecessor identity';
+      } else if (postedPredecessorDynamicLawObservation == null) {
+        predecessorTargetTokenFailureReason =
+          'predecessor-target-token-missing';
+        predecessorTargetTokenFailureDetail =
+          'the next schedule omitted the worker-retained predecessor observation';
+      } else if (
+        !exactWorkerDynamicLawObservationSelf(
+          postedPredecessorDynamicLawObservation
+        )
+        || !workerRouteValuesEqual(
+          postedPredecessorDynamicLawObservation,
+          retainedPredecessorDynamicLawObservation
+        )
+      ) {
+        predecessorTargetTokenFailureReason =
+          'predecessor-target-token-mismatch';
+        predecessorTargetTokenFailureDetail =
+          'the posted predecessor observation does not exactly match worker-retained state';
+      }
+    } else if (postedPredecessorDynamicLawObservation != null) {
+      predecessorTargetTokenFailureReason =
+        'predecessor-target-token-state-unavailable';
+      predecessorTargetTokenFailureDetail =
+        'the posted predecessor observation has no worker-retained authority';
+    }
+    if (predecessorTargetTokenFailureReason) {
+      restoreScheduleResidentStepOptions();
+      throw workerResidentScheduleError(
+        predecessorTargetTokenFailureReason,
+        predecessorTargetTokenFailureDetail,
+        {
+          scheduleId,
+          stepOrdinal: 0,
+          stageId: 'predecessor-target-token-preflight',
+          laneState: workerResidentScheduleLaneStateSnapshot(record, {
+            laneId,
+            stateKey
+          })
+        }
+      );
+    }
+    if (rawTargetScheduleAuthority) {
+      let targetScheduleAuthorityAdmission = null;
+      if (
+        !scheduleReactionActivationMotionEnvelopeFailure
+        && schroederTargetScheduleWriterSetMatchesActivation(
+          scheduleTargetWriterSet,
+          scheduleLawActivation
+        )
+      ) {
+        targetScheduleAuthorityAdmission =
+          validateSchroederTargetScheduleAuthorityForExecution(
+            rawTargetScheduleAuthority,
+            {
+              sourceScheduleId: scheduleId,
+              laneId,
+              stateKey,
+              sourceLineage: tier0SourceLineage,
+              sourceParticleCount:
+                scheduleStartParticleFamilyCounts.sphUpload,
+              sourcePhaseLaneCount: Number(
+                tier0PhaseCarrierPlan?.phaseLaneCount
+              ),
+              motionEnvelope: scheduleReactionActivationMotionEnvelope,
+              writerSet: scheduleTargetWriterSet,
+              scheduleStepOptionsProvider:
+                scheduleStepOptionsProviderAuthority,
+              tableFingerprints: scheduleTargetTableFingerprints
+            }
+          );
+      }
+      if (targetScheduleAuthorityAdmission?.ready !== true) {
+        restoreScheduleResidentStepOptions();
+        throw workerResidentScheduleError(
+          'target-schedule-authority-mismatch',
+          scheduleReactionActivationMotionEnvelopeFailure
+            || targetScheduleAuthorityAdmission?.reason
+            || 'target-authority-activation',
+          {
+            scheduleId,
+            stepOrdinal: 0,
+            stageId: 'target-schedule-authority-preflight',
+            laneState: workerResidentScheduleLaneStateSnapshot(record, {
+              laneId,
+              stateKey
+            })
+          }
+        );
+      }
+      admittedTargetScheduleAuthority =
+        targetScheduleAuthorityAdmission.authority;
+      // Keep the worker-local sealed envelope after the independently posted
+      // clone has exactly matched it. structuredClone intentionally strips
+      // Object.freeze state, while the GPU watch requires the sealed brand.
+      if (retainedPredecessorDynamicLawObservation) {
+        predecessorConfigurationContinuity =
+          validateSchroederTargetScheduleConfigurationContinuity({
+            predecessorTargetScheduleAuthority:
+              retainedPredecessorTargetScheduleAuthority,
+            currentTargetScheduleAuthority: admittedTargetScheduleAuthority,
+            predecessorDynamicLawObservation:
+              retainedPredecessorDynamicLawObservation
+          });
+        if (predecessorConfigurationContinuity.ready !== true) {
+          restoreScheduleResidentStepOptions();
+          throw workerResidentScheduleError(
+            'predecessor-target-token-mismatch',
+            `the retained predecessor target authority does not admit the consuming schedule configuration: ${predecessorConfigurationContinuity.reason}`,
+            {
+              scheduleId,
+              stepOrdinal: 0,
+              stageId: 'predecessor-target-token-preflight',
+              laneState: workerResidentScheduleLaneStateSnapshot(record, {
+                laneId,
+                stateKey
+              })
+            }
+          );
+        }
+        authenticatedDynamicReactionSuccessor =
+          predecessorConfigurationContinuity.mode
+            === 'prospective-reaction-dormant-to-executing';
+        if (
+          authenticatedDynamicReactionSuccessor
+          && (
+            scheduleLawActivation.reaction !== true
+            || admittedTargetScheduleAuthority?.writerSet?.reaction !== true
+          )
+        ) {
+          restoreScheduleResidentStepOptions();
+          throw workerResidentScheduleError(
+            'dynamic-reaction-successor-not-executable',
+            'an authenticated dormant-to-executing successor must declare and recompute reaction execution before route selection',
+            {
+              scheduleId,
+              stepOrdinal: 0,
+              stageId: 'predecessor-target-token-preflight',
+              laneState: workerResidentScheduleLaneStateSnapshot(record, {
+                laneId,
+                stateKey
+              })
+            }
+          );
+        }
+        // The exact retained token is burned only after the complete current
+        // authority has been admitted, and still before route selection or
+        // any schedule GPU work. A later failure cannot replay it on this
+        // worker lane.
+        predecessorTargetTokenConsumption = Object.freeze({
+          schema:
+            'peercompute.ulg.worker-predecessor-target-token-consumption.v2',
+          status:
+            'predecessor-target-token-consumed-before-route-selection',
+          predecessorScheduleId:
+            retainedPredecessorDynamicLawObservation.sourceScheduleId,
+          targetScheduleRequestId:
+            retainedPredecessorDynamicLawObservation.targetScheduleRequestId,
+          targetScheduleAuthorityFingerprint:
+            retainedPredecessorDynamicLawObservation
+              .targetScheduleAuthorityFingerprint,
+          consumerScheduleId: scheduleId,
+          laneId,
+          stateKey,
+          terminalLineage: Object.freeze({
+            ...retainedPredecessorDynamicLawObservation.terminalLineage
+          }),
+          sourceParticleCount:
+            scheduleStartParticleFamilyCounts.sphUpload,
+          sourcePhaseLaneCount: Number(
+            tier0PhaseCarrierPlan?.phaseLaneCount
+          ),
+          conservativeActivationRequired:
+            predecessorConfigurationContinuity
+              .conservativeActivationRequired === true,
+          configurationContinuityMode:
+            predecessorConfigurationContinuity.mode,
+          predecessorConfigurationFingerprint:
+            predecessorConfigurationContinuity
+              .predecessorConfigurationFingerprint,
+          currentConfigurationFingerprint:
+            predecessorConfigurationContinuity.currentConfigurationFingerprint,
+          prospectiveDynamicLawTransitionFingerprint:
+            predecessorConfigurationContinuity
+              .prospectiveDynamicLawTransitionFingerprint,
+          consumedBeforeRouteSelection: true,
+          consumedBeforeGpuWork: true,
+          shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+          routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+          executionGating: SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+        });
+        scheduleStartLane.nextScheduleLawActivationObservation = null;
+        scheduleStartLane.nextScheduleTargetAuthority = null;
+        scheduleStartLane.lastConsumedDynamicLawTargetScheduleRequestId =
+          retainedPredecessorDynamicLawObservation
+            .targetScheduleRequestId;
+      }
+    }
+    const scheduleReactionActivationWatchRequested = Boolean(
+      scheduleReactionActivationWatchTable
+    );
+    const tier0RouteBlockers = [];
+    if (stepCount < 2) tier0RouteBlockers.push('step-count-not-greater-than-one');
+    if (
+      scheduleStepOptionsProvider
+      && !workerLaneAssignmentOnlyScheduleProviders.has(
+        scheduleStepOptionsProvider
+      )
+    ) {
+      // Provider output is resolved only while building canonical epochs. It
+      // may introduce a new assignment, migration/view request, or other law
+      // activation, so Tier0 cannot bypass it without first authenticating a
+      // schedule-boundary provider receipt.
+      tier0RouteBlockers.push('schedule-step-options-provider-present');
+    }
+    if (scheduleLawActivation.thermal) tier0RouteBlockers.push('thermal-active');
+    if (scheduleLawActivation.reaction) tier0RouteBlockers.push('reaction-active');
+    if (scheduleLawActivation.contactSolver) {
+      tier0RouteBlockers.push('contact-solver-active');
+    }
+    if (scheduleLawActivation.lawQueue) tier0RouteBlockers.push('law-queue-active');
+    if (scheduleLawActivation.lawNeighborCandidates) {
+      tier0RouteBlockers.push('law-neighbor-candidates-active');
+    }
+    if (scheduleLawActivation.phaseVolumeMigration) {
+      tier0RouteBlockers.push('phase-volume-migration-active');
+    }
+    if (scheduleLawActivation.twoLevelMechanics) {
+      tier0RouteBlockers.push('two-level-mechanics-active');
+    }
+    if (scheduleLawActivation.surfaceTension) {
+      tier0RouteBlockers.push('surface-tension-active');
+    }
+    if (scheduleLawActivation.gasBoundaryActionable) {
+      tier0RouteBlockers.push('gas-boundary-actionable');
+    }
+    if (scheduleLawActivation.mechanicsFieldViews) {
+      tier0RouteBlockers.push('mechanics-field-views-required');
+    }
+    const crossLevelCouplingActive =
+      baseMechanicsOptions.enableCrossLevelCoupling === true
+      || baseMechanicsOptions.hierarchyConfig?.enableCrossLevelCoupling
+        === true;
+    if (crossLevelCouplingActive) {
+      tier0RouteBlockers.push('cross-level-coupling-active');
+    }
+    if (!scheduleStartLane) tier0RouteBlockers.push('worker-lane-not-seeded');
+    if (!record.workerDevice || scheduleStartLane?.device !== record.workerDevice) {
+      tier0RouteBlockers.push('worker-lane-device-unavailable');
+    }
+    if (
+      !scheduleStartLane?.sphParticleState
+      || !scheduleStartLane?.mlsMpmParticleState
+      || !scheduleStartLane?.sphParticleUpload?.stateBuffer
+      || !scheduleStartLane?.sphParticleUpload?.thermoBuffer
+      || !scheduleStartLane?.sphParticleUpload?.identityBuffer
+      || !scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
+    ) tier0RouteBlockers.push('worker-lane-particle-family-incomplete');
+    if (!tier0SourceLineage) tier0RouteBlockers.push('source-lineage-invalid');
+    if (
+      tier0SourceLineage
+      && tier0SourceLineage.physicsSubstep !== 0
+    ) tier0RouteBlockers.push('source-physics-substep-not-terminal');
+    if (!tier0ExpectedLineage) tier0RouteBlockers.push('terminal-lineage-unavailable');
+    if (!workerTier0LawsQuiescentPhaseCarrierPlan(tier0PhaseCarrierPlan)) {
+      tier0RouteBlockers.push('phase-carrier-plan-not-single-lane-quiescent');
+    }
+    if (
+      tier0TopologyAttestation?.status
+        !== 'tier0-topology-quiescence-attested'
+    ) tier0RouteBlockers.push('tier0-topology-attestation-incomplete');
+    if (scheduleStartLane?.successorSourceFamily) {
+      tier0RouteBlockers.push('successor-source-family-retained');
+    }
+    if (
+      scheduleStartLane?.epochGeneration
+      && scheduleStartLane.epochConsumed !== true
+    ) tier0RouteBlockers.push('unconsumed-canonical-epoch-retained');
+    if (scheduleStartLane?.executionMode === 'canonical-schroeder') {
+      // The inverse transition owns hierarchy-transfer cleanup that this
+      // first slice deliberately does not pretend to retire.
+      tier0RouteBlockers.push('canonical-to-tier0-reentry-not-admitted');
+    }
+    if (
+      scheduleStartLane?.residentStepOptions?.residentProductMass
+    ) tier0RouteBlockers.push('resident-product-mass-active');
+    if (
+      baseMechanicsOptions.enableMechanicsFieldPairV2 === true
+      || baseMechanicsOptions.hierarchyConfig?.enableMechanicsFieldPairV2
+        === true
+    ) tier0RouteBlockers.push('mechanics-field-pair-v2-active');
+    if (
+      scheduleStartLane?.residentStepOptions?.pressureInterfaceForceRowsBuffer
+    ) tier0RouteBlockers.push('pressure-interface-force-rows-active');
+    if (
+      scheduleStartLane?.residentStepOptions?.pressureInterfaceForceSolver
+    ) tier0RouteBlockers.push('pressure-interface-force-solver-active');
+    if (
+      scheduleStartLane?.sphParticleUpload?.status !== 'webgpu-uploaded'
+    ) tier0RouteBlockers.push('sph-particle-upload-not-resident');
+    if (
+      scheduleStartLane?.mlsMpmParticleUpload?.status !== 'webgpu-uploaded'
+    ) tier0RouteBlockers.push('mls-mpm-upload-not-resident');
+    for (const [field, blocker] of [
+      ['p2gRunner', 'custom-p2g-runner'],
+      ['gridUpdateRunner', 'custom-grid-update-runner'],
+      ['g2pRunner', 'custom-g2p-runner'],
+      ['p2gStageRunner', 'custom-p2g-stage-runner'],
+      ['gridUpdateStageRunner', 'custom-grid-update-stage-runner'],
+      ['g2pStageRunner', 'custom-g2p-stage-runner']
+    ]) {
+      if (scheduleStartLane?.residentStepOptions?.[field]) {
+        tier0RouteBlockers.push(blocker);
+      }
+    }
+    if (
+      [
+        'residentGpuTimestampProfilingRequested',
+        'residentGpuTimestampProfiling',
+        'observeCanonicalSpatialAuthority',
+        'consumeCompactMechanicsView',
+        'contactKinematicsParticleBinMetadataReadback',
+        'contactCleanupProfileReadback',
+        'reactionParticleBinMetadataReadback'
+      ].some(
+        (field) => scheduleStartLane?.residentStepOptions?.[field] === true
+      )
+      || baseMechanicsOptions.stageMechanicsTraceEnabled === true
+    ) tier0RouteBlockers.push('diagnostic-readback-requested');
+    const declaredLawsQuiescent = !(
+      scheduleLawActivation.thermal
+      || scheduleLawActivation.reaction
+      || scheduleLawActivation.contactSolver
+      || scheduleLawActivation.lawQueue
+      || scheduleLawActivation.lawNeighborCandidates
+      || scheduleLawActivation.phaseVolumeMigration
+      || scheduleLawActivation.twoLevelMechanics
+      || scheduleLawActivation.surfaceTension
+      || scheduleLawActivation.gasBoundaryActionable
+      || scheduleLawActivation.mechanicsFieldViews
+      || crossLevelCouplingActive
+    );
+    const tier0RouteSelected = tier0RouteBlockers.length === 0;
+    if (authenticatedDynamicReactionSuccessor && tier0RouteSelected) {
+      restoreScheduleResidentStepOptions();
+      throw workerResidentScheduleError(
+        'dynamic-reaction-successor-tier0-route-rejected',
+        'an authenticated dormant-to-executing successor may only enter the canonical Schroeder route',
+        {
+          scheduleId,
+          stepOrdinal: 0,
+          stageId: 'schedule-route-selection',
+          laneState: workerResidentScheduleLaneStateSnapshot(record, {
+            laneId,
+            stateKey
+          })
+        }
+      );
+    }
+    const executionRouteDecision = Object.freeze({
+      schema: 'peercompute.ulg.worker-schedule-execution-route-decision.v0',
+      status: tier0RouteSelected
+        ? 'tier0-fused-resident-sequence-selected'
+        : 'canonical-schroeder-selected',
+      route: tier0RouteSelected
+        ? 'tier0-fused-resident-sequence'
+        : 'canonical-schroeder',
+      lawsQuiescent: declaredLawsQuiescent,
+      activationReceipt: scheduleLawActivation,
+      blockers: [...tier0RouteBlockers],
+      transition: tier0RouteSelected
+        ? (scheduleStartLane?.executionMode
+            === 'tier0-fused-resident-sequence'
+          ? 'tier0-continuation'
+          : 'fresh-to-tier0-schedule-boundary')
+        : (scheduleStartTier0ContinuationIdentity
+          ? 'tier0-to-canonical-schedule-boundary'
+          : 'fresh-or-canonical-continuation')
+    });
+    let executionRouteReceipt = null;
+    const phaseCarrierOneToFourMaterializationRequired =
+      workerScheduleRequiresPhaseCarrierOneToFourMaterialization({
+        phaseCarrierPlan: tier0PhaseCarrierPlan,
+        scheduleLawActivation,
+        canonicalRouteSelected: !tier0RouteSelected,
+        tier0ContinuationIdentityPresent: Boolean(
+          scheduleStartTier0ContinuationIdentity
+        )
+      });
+    let phaseCarrierOneToFourExecution = null;
+    let phaseCarrierOneToFourValidation = null;
+    let phaseCarrierOneToFourTransitionReceipt = null;
+    let phaseCarrierAuxiliaryOwnershipTransfer = null;
+    let phaseCarrierOneToFourAdopted = false;
+    let phaseCarrierOneToFourSourceResidentStep = null;
+    let phaseCarrierOneToFourSourceUploads = null;
+    let phaseCarrierOneToFourSourceRetirement = null;
+    let tier0ExecutionAttempted = false;
+    let tier0ExecutionResult = null;
+    let tier0ExecutionValidation = null;
+    let tier0SupersededResidentStep = null;
+    let tier0SupersededUploads = null;
+    let tier0RetainedBufferRefs = [];
+    let tier0SupersededFamilyRetirement = null;
+    const tier0SubmittedCleanupRecords = [];
+    let tier0RejectedSubmittedCleanupCount = 0;
+    let tier0SubmittedCleanupRelease = null;
+    const registerTier0SubmittedCleanup = (registration = null) => {
+      const accepted = Boolean(
+        registration?.schema
+          === 'peercompute.ulg.mls-mpm-fused-submitted-cleanup-registration.v0'
+        && registration.device === record.workerDevice
+        && registration.scope === 'fused-resident-sequence-temporaries'
+        && typeof registration.cleanup === 'function'
+      );
+      if (!accepted) {
+        tier0RejectedSubmittedCleanupCount += 1;
+        return false;
+      }
+      tier0SubmittedCleanupRecords.push({
+        cleanup: registration.cleanup,
+        released: false
+      });
+      return Object.freeze({ accepted: true });
+    };
+    const releaseTier0SubmittedCleanups = (terminalGpuFence) => {
+      if (tier0SubmittedCleanupRecords.length === 0) {
+        return Object.freeze({
+          schema:
+            'peercompute.ulg.worker-tier0-submitted-cleanup-release.v0',
+          status: 'tier0-submitted-cleanup-not-registered',
+          terminalFenceSatisfied:
+            terminalGpuFence?.fenceSatisfied === true,
+          registeredCount: 0,
+          releasedCount: 0,
+          failedCount: 0
+        });
+      }
+      if (terminalGpuFence?.fenceSatisfied !== true) {
+        return Object.freeze({
+          schema:
+            'peercompute.ulg.worker-tier0-submitted-cleanup-release.v0',
+          status: 'tier0-submitted-cleanup-held-fence-unsatisfied',
+          terminalFenceSatisfied: false,
+          registeredCount: tier0SubmittedCleanupRecords.length,
+          releasedCount: 0,
+          failedCount: 0
+        });
+      }
+      let releasedCount = 0;
+      let failedCount = 0;
+      for (const record of tier0SubmittedCleanupRecords) {
+        if (record.released) continue;
+        try {
+          record.cleanup();
+          record.released = true;
+          releasedCount += 1;
+        } catch {
+          failedCount += 1;
+        }
+      }
+      return Object.freeze({
+        schema:
+          'peercompute.ulg.worker-tier0-submitted-cleanup-release.v0',
+        status: failedCount === 0
+          ? 'tier0-submitted-cleanup-released-after-terminal-fence'
+          : 'tier0-submitted-cleanup-release-failed',
+        terminalFenceSatisfied: true,
+        registeredCount: tier0SubmittedCleanupRecords.length,
+        releasedCount,
+        failedCount
+      });
+    };
     let completedStepCount = 0;
     let cancelled = false;
     let previousEpochSeal = null;
@@ -6892,13 +8725,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // checkpoint (see the checkpoint block below). Seeded immediately so the
     // first checkpoint awaits a real fence (covering lane seed uploads)
     // rather than fully draining the newest submissions.
-    let pendingQueueDrainFencePromise = (() => {
-      try {
-        return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
-      } catch {
-        return null;
-      }
-    })();
+    // Tier0 is one atomic K-step submission followed by exactly one worker
+    // terminal fence. The lagged drain seed exists only for the canonical
+    // per-step loop; starting it for Tier0 would add an otherwise invisible
+    // host fence before the atomic submission and contradict the route receipt.
+    let pendingQueueDrainFencePromise = tier0RouteSelected
+      ? null
+      : (() => {
+          try {
+            return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
+          } catch {
+            return null;
+          }
+        })();
     if (pendingQueueDrainFencePromise?.catch) {
       pendingQueueDrainFencePromise.catch(() => {});
     }
@@ -6977,13 +8816,623 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let scheduleLoopError = null;
     let scheduleGpuWorkMayHaveBeenSubmitted = false;
     try {
+      if (tier0RouteSelected) {
+        tier0ExecutionAttempted = true;
+        scheduleGpuWorkMayHaveBeenSubmitted = true;
+        scheduleFirstStepStartedAtMs = workerResidentScheduleNowMs();
+        state.workerDevice = record.workerDevice;
+        const lane = record.schroederLane;
+        const residentStepOptions = lane.residentStepOptions || {};
+        // Seed descriptors may retain a stale CPU step while the uploaded
+        // family carries the authoritative scene tick. Tier0 starts from the
+        // exact upload identity and returns aligned worker-local metadata so
+        // a later canonical classifier cannot silently rebase to the CPU row.
+        const tier0SphParticleState = {
+          ...lane.sphParticleState,
+          ...tier0SourceLineage,
+          step: tier0SourceLineage.physicsTick,
+          phaseCarrierPlan:
+            lane.sphParticleState?.phaseCarrierPlan
+            ?? tier0PhaseCarrierPlan
+            ?? null
+        };
+        const tier0MlsMpmParticleState = {
+          ...lane.mlsMpmParticleState,
+          ...tier0SourceLineage,
+          step: tier0SourceLineage.physicsTick,
+          phaseCarrierPlan:
+            lane.mlsMpmParticleState?.phaseCarrierPlan
+            ?? tier0PhaseCarrierPlan
+            ?? null
+        };
+        const tier0Execution = await runTier0FusedResidentSequence({
+          ...residentStepOptions,
+          sphParticleState: tier0SphParticleState,
+          mlsMpmParticleState: tier0MlsMpmParticleState,
+          sphParticleUpload: lane.sphParticleUpload,
+          mlsMpmParticleUpload: lane.mlsMpmParticleUpload,
+          device: state.workerDevice,
+          preferWebGpu: true,
+          gridSpacingM:
+            commonOptions.gridSpacingM
+            ?? tier0SphParticleState.smoothingLengthM,
+          boxDimsM: commonOptions.boxDimsM ?? [5, 5, 5],
+          dt:
+            commonOptions.dt
+            ?? tier0MlsMpmParticleState.mechanicsDtS
+            ?? 0,
+          gravityMPerS2:
+            commonOptions.gravityMPerS2
+            ?? tier0MlsMpmParticleState.gravityMPerS2
+            ?? [0, -9.81, 0],
+          cflFactor:
+            commonOptions.cflFactor
+            ?? tier0MlsMpmParticleState.gridCflFactor
+            ?? 0.4,
+          stepCount,
+          readbackMode: NO_FULL_READBACK_MODE,
+          compactSummaryMode: 'none',
+          // Tier0's K substeps and terminal publication are one command
+          // submission. The next schedule can conservatively rebuild its
+          // active bounds from the carried terminal prediction; a second
+          // summary-plan submission here would break that atomic contract.
+          activeGridDispatchPlanRefreshMode: 'none',
+          summaryRunner: null,
+          fuseNoFullResidentMechanicsSequence: true,
+          // Until a compact terminal motion/separation envelope is available,
+          // an unread successor batch cannot safely reuse a bounded AABB.
+          // Tier0 remains one fused submission but dispatches the full grid.
+          fuseNoFullResidentMechanicsActiveGrid: false,
+          fuseNoFullResidentActiveGrid: false,
+          schroederLevelAssignment: null,
+          schroederSelectedLevel: null,
+          schroederActiveNodeList: null,
+          measureFusedSequenceQueueFence: false,
+          measureGpuQueueFence: false,
+          benchmarkQueueFence: false,
+          canonicalSpatialRequired: false,
+          requireLawsQuiescentSingleLanePhaseCarrierPlan: true,
+          schroederSpatialEpochGeneration: null,
+          residentProductMass: null,
+          reactionActivationWatchTable:
+            scheduleReactionActivationMotionEnvelope
+              ? scheduleReactionActivationWatchTable
+              : null,
+          reactionActivationMotionEnvelope:
+            scheduleReactionActivationMotionEnvelope,
+          deferContinuationOwnershipTransfer: true,
+          registerFusedSubmittedCleanup:
+            registerTier0SubmittedCleanup
+        });
+        tier0ExecutionResult = tier0Execution;
+        tier0ExecutionValidation = validateWorkerTier0FusedExecution(
+          tier0Execution,
+          {
+            device: state.workerDevice,
+            stepCount,
+            sourceSphUpload: lane.sphParticleUpload,
+            sourceMlsUpload: lane.mlsMpmParticleUpload,
+            sourceLineage: tier0SourceLineage,
+            expectedLineage: tier0ExpectedLineage,
+            phaseCarrierPlan: tier0PhaseCarrierPlan,
+            registeredSubmittedCleanupCount:
+              tier0SubmittedCleanupRecords.length,
+            rejectedSubmittedCleanupCount:
+              tier0RejectedSubmittedCleanupCount
+          }
+        );
+        if (tier0ExecutionValidation.valid !== true) {
+          const error = workerResidentScheduleError(
+            'tier0-fused-terminal-publication-invalid',
+            tier0ExecutionValidation.failures.join(', '),
+            {
+              scheduleId,
+              stepOrdinal: stepCount,
+              stageId: TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID,
+              laneState: workerResidentScheduleLaneStateSnapshot(record, {
+                laneId,
+                stateKey
+              })
+            }
+          );
+          error.residentScheduleError.tier0ValidationFailures = [
+            ...tier0ExecutionValidation.failures
+          ];
+          error.residentScheduleError.tier0Validation = {
+            executionSchema: tier0Execution?.schema ?? null,
+            executionStatus: tier0Execution?.status ?? null,
+            executionStepCount: tier0Execution?.stepCount ?? null,
+            completedStepCount: tier0Execution?.completedStepCount ?? null,
+            readbackMode: tier0Execution?.readbackMode ?? null,
+            fullParticleReadbackPerformed:
+              tier0Execution?.fullParticleReadbackPerformed ?? null,
+            fullParticleReadbackFree:
+              tier0Execution?.fullParticleReadbackFree ?? null,
+            residentContinuationReady:
+              tier0Execution?.residentContinuationReady ?? null,
+            mapAsyncCount: tier0Execution?.mapAsyncCount ?? null,
+            readbackBytes: tier0Execution?.readbackBytes ?? null,
+            hostQueueFenceCount:
+              tier0Execution?.hostQueueFenceCount ?? null,
+            readbackTelemetrySourceBreakdown:
+              tier0Execution?.readbackTelemetrySourceBreakdown ?? null,
+            fusedQueueFenceRequested:
+              tier0ExecutionValidation.fused?.queueFenceRequested ?? null,
+            fusedQueueFenceStatus:
+              tier0ExecutionValidation.fused?.queueFenceStatus ?? null,
+            preflightStatus:
+              tier0ExecutionValidation.preflight?.status ?? null,
+            preflightBlockers: [
+              ...(tier0ExecutionValidation.preflight?.blockers || [])
+            ],
+            fusedStatus: tier0ExecutionValidation.fused?.status ?? null,
+            finalStepStatus:
+              tier0ExecutionValidation.finalStep?.status ?? null,
+            finalStepResidentBuffersRetained:
+              tier0ExecutionValidation.finalStep?.residentBuffersRetained
+              ?? null,
+            finalStepReadbackDowngradeReasons: [
+              ...(tier0ExecutionValidation.finalStep
+                ?.readbackDowngradeReasons || [])
+            ],
+            finalStepNextParticleBufferMode:
+              tier0ExecutionValidation.finalStep?.nextParticleBufferMode
+              ?? null,
+            targetLineage: tier0ExecutionValidation.targetLineage,
+            expectedLineage: tier0ExpectedLineage,
+            nextParticleUploadsPresent:
+              Boolean(tier0ExecutionValidation.nextUploads),
+            nextStateBufferPresent:
+              Boolean(tier0ExecutionValidation.nextSphUpload?.stateBuffer),
+            nextThermoBufferPresent:
+              Boolean(tier0ExecutionValidation.nextSphUpload?.thermoBuffer),
+            nextIdentityBufferPresent:
+              Boolean(tier0ExecutionValidation.nextSphUpload?.identityBuffer),
+            nextMechanicsBufferPresent:
+              Boolean(tier0ExecutionValidation.nextMlsUpload?.mechanicsBuffer)
+          };
+          throw error;
+        }
+        const {
+          finalStep,
+          nextUploads,
+          nextSphUpload,
+          nextMlsUpload,
+          targetLineage
+        } = tier0ExecutionValidation;
+        tier0SupersededResidentStep = lane.residentStep || null;
+        tier0SupersededUploads = {
+          sphParticleUpload: lane.sphParticleUpload,
+          mlsMpmParticleUpload: lane.mlsMpmParticleUpload
+        };
+        // The terminal family becomes the one lane owner atomically. State
+        // and mechanics are fresh buffers; quiescent thermo/identity aliases
+        // and immutable material sidecars transfer only now, after every
+        // receipt and lineage check passed.
+        const sourceOwnershipSnapshot = {
+          ownsThermoBuffer: lane.sphParticleUpload.ownsThermoBuffer,
+          ownsIdentityBuffer: lane.sphParticleUpload.ownsIdentityBuffer,
+          identityOwnership: lane.sphParticleUpload.identityOwnership
+        };
+        const targetOwnershipSnapshot = {
+          ownsThermoBuffer: nextSphUpload.ownsThermoBuffer,
+          ownsIdentityBuffer: nextSphUpload.ownsIdentityBuffer,
+          identityOwnership: nextSphUpload.identityOwnership
+        };
+        let tier0AuxiliaryOwnershipTransfer = null;
+        try {
+          tier0AuxiliaryOwnershipTransfer =
+            transferPhaseCarrierAuxiliaryBufferOwnership({
+              sourceUploads: {
+                sphParticleUpload: lane.sphParticleUpload,
+                mlsMpmParticleUpload: lane.mlsMpmParticleUpload
+              },
+              terminalUploads: nextUploads
+            });
+          if (
+            nextSphUpload.thermoBuffer
+              === lane.sphParticleUpload.thermoBuffer
+          ) {
+            lane.sphParticleUpload.ownsThermoBuffer = false;
+            nextSphUpload.ownsThermoBuffer = true;
+          }
+          if (
+            nextSphUpload.identityBuffer
+            && nextSphUpload.identityBuffer
+              === lane.sphParticleUpload.identityBuffer
+          ) {
+            lane.sphParticleUpload.ownsIdentityBuffer = false;
+            lane.sphParticleUpload.identityOwnership =
+              'transferred-to-tier0-terminal-family';
+            nextSphUpload.ownsIdentityBuffer = true;
+            nextSphUpload.identityOwnership =
+              'owned-tier0-terminal-family-transfer';
+          }
+        } catch (error) {
+          try {
+            lane.sphParticleUpload.ownsThermoBuffer =
+              sourceOwnershipSnapshot.ownsThermoBuffer;
+            lane.sphParticleUpload.ownsIdentityBuffer =
+              sourceOwnershipSnapshot.ownsIdentityBuffer;
+            lane.sphParticleUpload.identityOwnership =
+              sourceOwnershipSnapshot.identityOwnership;
+            nextSphUpload.ownsThermoBuffer =
+              targetOwnershipSnapshot.ownsThermoBuffer;
+            nextSphUpload.ownsIdentityBuffer =
+              targetOwnershipSnapshot.ownsIdentityBuffer;
+            nextSphUpload.identityOwnership =
+              targetOwnershipSnapshot.identityOwnership;
+          } catch {}
+          try {
+            tier0AuxiliaryOwnershipTransfer
+              ?.rollbackOwnershipTransfer?.();
+          } catch {}
+          throw error;
+        }
+        lane.residentStep = finalStep;
+        lane.sphParticleUpload = nextSphUpload;
+        lane.mlsMpmParticleUpload = nextMlsUpload;
+        lane.sphParticleState = {
+          ...(tier0Execution.nextSphParticleState || tier0SphParticleState),
+          ...targetLineage,
+          step: targetLineage.physicsTick
+        };
+        lane.mlsMpmParticleState = {
+          ...(tier0Execution.nextMlsMpmParticleState
+            || tier0MlsMpmParticleState),
+          ...targetLineage,
+          step: targetLineage.physicsTick
+        };
+        lane.particleCount = nextSphUpload.particleCount;
+        lane.successorSourceFamily = null;
+        lane.successorConsumption = null;
+        lane.levelAssignment = null;
+        lane.activeNodeList = null;
+        lane.epochGeneration = null;
+        lane.epochSeal = null;
+        lane.epochConsumed = true;
+        lane.epochReleaseScheduled = false;
+        lane.epochReleasePromise = null;
+        lane.executionMode = 'tier0-fused-resident-sequence';
+        lane.tier0ContinuationIdentity = { ...targetLineage };
+        if (lane.laneSeed) {
+          lane.laneSeed = {
+            ...lane.laneSeed,
+            consumed: true,
+            consumedByTier0ScheduleId: scheduleId
+          };
+        }
+        record.retainedThermoBuffer = nextSphUpload.thermoBuffer;
+        record.retainedThermoBufferByteLength = positiveByteLength(
+          nextSphUpload.thermoBufferByteLength,
+          nextSphUpload.thermoBuffer?.size,
+          (nextSphUpload.particleCount ?? lane.particleCount ?? 0)
+            * SPH_GPU_PARTICLE_THERMO_FLOATS
+            * Float32Array.BYTES_PER_ELEMENT
+        );
+        record.retainedThermoBufferSourceStage =
+          TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID;
+        record.retainedThermoBufferSeededFromCpu = false;
+        record.retainedThermoBufferCopySrc = Boolean(
+          (Number(nextSphUpload.thermoBuffer?.usage)
+            & GPU_BUFFER_USAGE.COPY_SRC) === GPU_BUFFER_USAGE.COPY_SRC
+        );
+        record.retainedThermoSnapshotRows = null;
+        const tier0Refs = [];
+        for (const [path, buffer] of [
+          ['nextParticleUploads.sphParticleUpload.stateBuffer', nextSphUpload.stateBuffer],
+          ['nextParticleUploads.sphParticleUpload.thermoBuffer', nextSphUpload.thermoBuffer],
+          ['nextParticleUploads.sphParticleUpload.identityBuffer', nextSphUpload.identityBuffer],
+          ['nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer', nextMlsUpload.mechanicsBuffer]
+        ]) {
+          if (!buffer) continue;
+          tier0Refs.push(retainGpuBuffer(
+            record,
+            TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID,
+            path,
+            buffer
+          ).ref);
+        }
+        tier0RetainedBufferRefs = tier0Refs;
+        completedStepCount = stepCount;
+        scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
+        lastMechanicsStageResult = {
+          retainedBufferRefs: [...tier0RetainedBufferRefs]
+        };
+        lastStepSummary = {
+          schema: ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
+          scheduleId,
+          stepOrdinal: stepCount,
+          epochStepOrdinal: null,
+          epochStatus: 'canonical-spatial-epoch-not-generated',
+          levelAssignmentSource: null,
+          epochSeal: null,
+          epochIdentity: { ...targetLineage },
+          mechanicsStatus: 'tier0-fused-resident-sequence-executed',
+          residentStepStatus: finalStep.status ?? null,
+          nextParticleStateRetained: true,
+          nextParticleStateStep: targetLineage.physicsTick,
+          epochConsumed: false,
+          epochReleaseScheduled: false,
+          particleCount: nextSphUpload.particleCount,
+          successorSourceFamilyRetained: false,
+          retainedBufferRefs: [...tier0RetainedBufferRefs],
+          gpuFenceSatisfied: false,
+          gpuFenceStatus: 'covered-by-resident-schedule-terminal',
+          sameWorkerQueueOrdered: true,
+          terminalScheduleFenceSatisfied: false,
+          authorityAdmissionReady: false,
+          tier0FusedResidentSequence: true,
+          internalStepSummariesOmitted: Math.max(0, stepCount - 1),
+          hierarchyStageSummary: null
+        };
+        stepSummaryRing.push({
+          stepOrdinal: stepCount,
+          generationId: null,
+          ...targetLineage,
+          mechanicsStatus: 'tier0-fused-resident-sequence-executed',
+          internalStepSummariesOmitted: Math.max(0, stepCount - 1)
+        });
+        droppedStepSummaryCount += Math.max(0, stepCount - 1);
+      } else {
+      if (phaseCarrierOneToFourMaterializationRequired) {
+        const lane = record.schroederLane;
+        phaseCarrierOneToFourSourceResidentStep = lane.residentStep || null;
+        phaseCarrierOneToFourSourceUploads = {
+          sphParticleUpload: lane.sphParticleUpload,
+          mlsMpmParticleUpload: lane.mlsMpmParticleUpload
+        };
+        const sourceCoreOwners = [
+          [
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.ownsStateBuffer,
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.stateBuffer
+          ],
+          [
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.ownsThermoBuffer,
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.thermoBuffer
+          ],
+          [
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.ownsIdentityBuffer,
+            phaseCarrierOneToFourSourceUploads.sphParticleUpload
+              ?.identityBuffer
+          ],
+          [
+            phaseCarrierOneToFourSourceUploads.mlsMpmParticleUpload
+              ?.ownsMechanicsBuffer,
+            phaseCarrierOneToFourSourceUploads.mlsMpmParticleUpload
+              ?.mechanicsBuffer
+          ]
+        ];
+        if (
+          sourceCoreOwners.some(([owned, buffer]) => owned !== true || !buffer)
+          || new Set(sourceCoreOwners.map(([, buffer]) => buffer)).size !== 4
+        ) {
+          throw workerResidentScheduleError(
+            'phase-carrier-one-to-four-source-ownership-incomplete',
+            'phase-carrier materialization requires one exact owned source state/thermo/mechanics/identity family',
+            {
+              scheduleId,
+              stepOrdinal: 0,
+              stageId: 'phaseCarrierOneToFourMaterialization'
+            }
+          );
+        }
+        scheduleGpuWorkMayHaveBeenSubmitted = true;
+        phaseCarrierOneToFourExecution =
+          await runSphPhaseCarrierOneToFourMaterializationWebGpu({
+            device: record.workerDevice,
+            sphParticleState: lane.sphParticleState,
+            mlsMpmParticleState: lane.mlsMpmParticleState,
+            sphParticleUpload: lane.sphParticleUpload,
+            mlsMpmParticleUpload: lane.mlsMpmParticleUpload,
+            phaseCarrierPlan: tier0PhaseCarrierPlan,
+            submittedWorkCleanup: 'caller-terminal-fence'
+          });
+        // Retain every owner before validating the submitted publication. A
+        // malformed result is still GPU work and cannot be dropped before the
+        // schedule terminal fence or explicit poisoned-lane teardown.
+        record.pendingPhaseCarrierOneToFourTransition = {
+          sourceResidentStep: phaseCarrierOneToFourSourceResidentStep,
+          sourceUploads: phaseCarrierOneToFourSourceUploads,
+          execution: phaseCarrierOneToFourExecution
+        };
+        phaseCarrierOneToFourValidation =
+          validateSphPhaseCarrierOneToFourExecution(
+            phaseCarrierOneToFourExecution,
+            {
+              device: record.workerDevice,
+              sourceParticleCount:
+                phaseCarrierOneToFourSourceUploads.sphParticleUpload
+                  ?.particleCount,
+              sourceLineage: scheduleStartTier0ContinuationIdentity
+            }
+          );
+        if (phaseCarrierOneToFourValidation.valid !== true) {
+          const error = workerResidentScheduleError(
+            'phase-carrier-one-to-four-publication-invalid',
+            phaseCarrierOneToFourValidation.failures.join(', '),
+            {
+              scheduleId,
+              stepOrdinal: 0,
+              stageId: 'phaseCarrierOneToFourMaterialization',
+              laneState: workerResidentScheduleLaneStateSnapshot(record, {
+                laneId,
+                stateKey
+              })
+            }
+          );
+          error.residentScheduleError.phaseCarrierOneToFourValidation = {
+            status: phaseCarrierOneToFourValidation.status,
+            failures: [...phaseCarrierOneToFourValidation.failures]
+          };
+          throw error;
+        }
+        const targetLineage = phaseCarrierOneToFourValidation.targetLineage;
+        const materializedUploads =
+          phaseCarrierOneToFourExecution.nextParticleUploads;
+        phaseCarrierAuxiliaryOwnershipTransfer =
+          transferPhaseCarrierAuxiliaryBufferOwnership({
+            sourceUploads: phaseCarrierOneToFourSourceUploads,
+            terminalUploads: materializedUploads
+          });
+        phaseCarrierOneToFourAdopted = true;
+        // Model the 4N publication as the canonical step's immediate
+        // predecessor. Existing resident-step cleanup then retires it only
+        // after the first canonical step has submitted every read, while the
+        // older Tier0 N-family remains separately pinned to the terminal
+        // schedule fence below.
+        lane.residentStep = {
+          schema:
+            'peercompute.ulg.phase-carrier-one-to-four-predecessor-step.v0',
+          status: 'phase-carrier-one-to-four-predecessor-retained',
+          backend: 'webgpu',
+          readbackMode: NO_FULL_READBACK_MODE,
+          nextParticleUploads: materializedUploads,
+          phaseCarrierOneToFourMaterialization:
+            phaseCarrierOneToFourExecution
+        };
+        lane.sphParticleUpload =
+          phaseCarrierOneToFourExecution.nextSphParticleUpload;
+        lane.mlsMpmParticleUpload =
+          phaseCarrierOneToFourExecution.nextMlsMpmParticleUpload;
+        lane.sphParticleState =
+          phaseCarrierOneToFourExecution.nextSphParticleState;
+        lane.mlsMpmParticleState =
+          phaseCarrierOneToFourExecution.nextMlsMpmParticleState;
+        lane.particleCount =
+          phaseCarrierOneToFourExecution.terminalParticleCount;
+        lane.phaseCarrierPlan = {
+          ...phaseCarrierOneToFourExecution.phaseCarrierPlan
+        };
+        lane.successorSourceFamily = null;
+        lane.successorConsumption = null;
+        lane.levelAssignment = null;
+        lane.activeNodeList = null;
+        lane.epochGeneration = null;
+        lane.epochSeal = null;
+        lane.epochConsumed = true;
+        lane.epochReleaseScheduled = false;
+        lane.epochReleasePromise = null;
+        lane.executionMode =
+          'tier0-to-canonical-phase-carrier-one-to-four';
+        lane.tier0ContinuationIdentity = { ...targetLineage };
+        scheduleStartTier0ContinuationIdentity = { ...targetLineage };
+        record.phaseCarrierPlan = {
+          ...phaseCarrierOneToFourExecution.phaseCarrierPlan
+        };
+        record.retainedThermoBuffer =
+          phaseCarrierOneToFourExecution.thermoBuffer;
+        record.retainedThermoBufferByteLength =
+          phaseCarrierOneToFourExecution.thermoBufferByteLength;
+        record.retainedThermoBufferSourceStage =
+          'phaseCarrierOneToFourMaterialization';
+        record.retainedThermoBufferSeededFromCpu = false;
+        record.retainedThermoBufferCopySrc = true;
+        record.retainedThermoSnapshotRows = null;
+        phaseCarrierOneToFourTransitionReceipt = Object.freeze({
+          schema:
+            ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA,
+          status:
+            'phase-carrier-one-to-four-adopted-pending-terminal-fence',
+          scheduleId,
+          sourceParticleCount:
+            phaseCarrierOneToFourExecution.sourceParticleCount,
+          terminalParticleCount:
+            phaseCarrierOneToFourExecution.terminalParticleCount,
+          companionParticleCount:
+            phaseCarrierOneToFourExecution.companionParticleCount,
+          countSummary:
+            phaseCarrierOneToFourExecution.countSummary,
+          sourcePhaseCarrierPlan:
+            phaseCarrierOneToFourExecution.sourcePhaseCarrierPlan,
+          terminalPhaseCarrierPlan:
+            phaseCarrierOneToFourExecution.phaseCarrierPlan,
+          sourceLineage:
+            phaseCarrierOneToFourExecution.lineage.source,
+          terminalLineage:
+            phaseCarrierOneToFourExecution.lineage.target,
+          identityCorrespondence:
+            phaseCarrierOneToFourExecution.identityCorrespondence,
+          identityCorrespondenceRevision:
+            phaseCarrierOneToFourExecution.identityCorrespondenceRevision,
+          materializationKernelRevision:
+            phaseCarrierOneToFourExecution.materializationKernelRevision,
+          sourceIdentitySchema:
+            phaseCarrierOneToFourExecution.identitySchema,
+          terminalIdentitySchema:
+            phaseCarrierOneToFourExecution.nextSphParticleUpload
+              .identitySchema,
+          sourceIdentityStrideBytes:
+            phaseCarrierOneToFourExecution.identityStrideBytes,
+          terminalIdentityStrideBytes:
+            phaseCarrierOneToFourExecution.nextSphParticleUpload
+              .identityStrideBytes,
+          sourceIdentityRevision:
+            phaseCarrierOneToFourExecution.sourceIdentityRevision,
+          terminalIdentityRevision:
+            phaseCarrierOneToFourExecution.identityRevision,
+          sourceStateBufferByteLength:
+            phaseCarrierOneToFourExecution.sourceStateBufferByteLength,
+          sourceThermoBufferByteLength:
+            phaseCarrierOneToFourExecution.sourceThermoBufferByteLength,
+          sourceMechanicsBufferByteLength:
+            phaseCarrierOneToFourExecution.sourceMechanicsBufferByteLength,
+          sourceIdentityBufferByteLength:
+            phaseCarrierOneToFourExecution.sourceIdentityBufferByteLength,
+          terminalStateBufferByteLength:
+            phaseCarrierOneToFourExecution.stateBufferByteLength,
+          terminalThermoBufferByteLength:
+            phaseCarrierOneToFourExecution.thermoBufferByteLength,
+          terminalMechanicsBufferByteLength:
+            phaseCarrierOneToFourExecution.mechanicsBufferByteLength,
+          terminalIdentityBufferByteLength:
+            phaseCarrierOneToFourExecution.identityBufferByteLength,
+          validationStatus: phaseCarrierOneToFourValidation.status,
+          validationErrorScopeStatus:
+            phaseCarrierOneToFourExecution.validationErrorScopeStatus,
+          validationErrorScopeCount:
+            phaseCarrierOneToFourExecution.validationErrorScopeCount,
+          validationErrorObserved:
+            phaseCarrierOneToFourExecution.validationErrorObserved,
+          auxiliaryBufferOwnershipTransfer:
+            phaseCarrierAuxiliaryOwnershipTransfer,
+          publicationFamilies: [
+            ...phaseCarrierOneToFourExecution.publicationFamilies
+          ],
+          commandSubmissionCount:
+            phaseCarrierOneToFourExecution.commandSubmissionCount,
+          fullParticleReadbackPerformed: false,
+          mapAsyncCount: 0,
+          readbackBytes: 0,
+          activationAuthority:
+            scheduleLawActivation.activationAuthority,
+          trigger: authenticatedDynamicReactionSuccessor
+            ? 'authenticated-dynamic-reaction-successor'
+            : scheduleLawActivation.thermal
+              ? 'static-thermal-law-active'
+              : 'static-reaction-law-active',
+          routingAuthority: authenticatedDynamicReactionSuccessor,
+          dynamicLawRoutingAuthority:
+            authenticatedDynamicReactionSuccessor,
+          terminalFenceSatisfied: false,
+          supersededSourceRetired: false
+        });
+      }
       for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
         if (stepOrdinal > 1) {
           await yieldWorkerResidentScheduleControlPlane();
         }
-        if (state.cancelRequested) {
+        if (
+          state.cancelRequested
+          && !(phaseCarrierOneToFourAdopted && completedStepCount === 0)
+        ) {
           cancelled = true;
           break;
         }
@@ -7085,6 +9534,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               'epoch-identity-regressed',
               `step ${stepOrdinal} rebuilt the spatial epoch without advancing: ${
                 regressedWords.join(', ')
+              }`,
+              { scheduleId, stepOrdinal }
+            );
+          }
+        } else if (scheduleStartTier0ContinuationIdentity) {
+          // A law activated at this schedule boundary. The classifier rebuilt
+          // one fresh canonical generation against the exact Tier0 terminal
+          // particle family; the generation must describe that family, not
+          // advance or rebase it before mechanics consumes it.
+          const driftedWords = SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.filter(
+            (field) => Number(currentStepSeal[field])
+              !== Number(scheduleStartTier0ContinuationIdentity[field])
+          );
+          if (driftedWords.length > 0) {
+            throw workerResidentScheduleError(
+              'tier0-canonical-transition-identity-mismatch',
+              `step ${stepOrdinal} rebuilt canonical spatial authority against a different Tier0 terminal family on: ${
+                driftedWords.join(', ')
               }`,
               { scheduleId, stepOrdinal }
             );
@@ -7564,6 +10031,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         }
       }
       }
+      }
     } catch (error) {
       scheduleLoopError = error;
     }
@@ -7608,6 +10076,462 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           terminalRefluxExpectations
         });
     const tailTerminalFenceDoneAtMs = workerResidentScheduleNowMs();
+    if (tier0ExecutionAttempted) {
+      tier0SubmittedCleanupRelease =
+        releaseTier0SubmittedCleanups(terminalGpuFence);
+      if (terminalGpuFence?.fenceSatisfied !== true) {
+        record.poisonedTier0Execution = tier0ExecutionResult;
+        record.poisonedTier0SubmittedCleanupRecords =
+          tier0SubmittedCleanupRecords;
+      }
+      if (
+        tier0SubmittedCleanupRelease.status
+          === 'tier0-submitted-cleanup-release-failed'
+      ) {
+        record.poisonedTier0SubmittedCleanupRecords =
+          tier0SubmittedCleanupRecords.filter(
+            (cleanupRecord) => cleanupRecord.released !== true
+          );
+        if (!scheduleLoopError) {
+          scheduleLoopError = workerResidentScheduleError(
+            'tier0-submitted-cleanup-release-failed',
+            'one or more fused sequence temporaries failed to release after the terminal fence',
+            {
+              scheduleId,
+              stepOrdinal: completedStepCount || stepCount,
+              stageId: TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID
+            }
+          );
+        }
+      }
+    }
+    if (phaseCarrierOneToFourExecution) {
+      if (terminalGpuFence?.fenceSatisfied === true) {
+        const terminalBuffers = retainedContinuationBuffersFromUploads({
+          sphParticleUpload:
+            record.schroederLane?.sphParticleUpload,
+          mlsMpmParticleUpload:
+            record.schroederLane?.mlsMpmParticleUpload
+        });
+        const retiredBuffers = new Set();
+        try {
+          phaseCarrierOneToFourExecution.cleanupSubmittedWork?.();
+          if (!phaseCarrierOneToFourAdopted) {
+            phaseCarrierOneToFourExecution.destroyOutputParticleBuffers?.();
+          } else if (phaseCarrierOneToFourSourceResidentStep) {
+            const sourceStepUploads =
+              phaseCarrierOneToFourSourceResidentStep.nextParticleUploads;
+            const supersededBuffers = [
+              sourceStepUploads?.sphParticleUpload?.stateBuffer,
+              sourceStepUploads?.sphParticleUpload?.thermoBuffer,
+              sourceStepUploads?.sphParticleUpload?.identityBuffer,
+              sourceStepUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+            ].filter(
+              (buffer) => buffer && !terminalBuffers.includes(buffer)
+            );
+            if (
+              supersededBuffers.length !== 4
+              || new Set(supersededBuffers).size !== 4
+            ) {
+              throw new Error(
+                'Phase-carrier source retirement requires four distinct superseded core buffers'
+              );
+            }
+            const retirementEvidence = destroyMlsMpmResidentStepBuffers(
+              phaseCarrierOneToFourSourceResidentStep,
+              {
+                preserveBuffers: terminalBuffers,
+                destroyInputResidentProductMass: true
+              }
+            );
+            if (
+              phaseCarrierOneToFourSourceResidentStep
+                .residentCleanupCompletion?.then
+            ) {
+              const cleanupReceipt = await phaseCarrierOneToFourSourceResidentStep
+                .residentCleanupCompletion;
+              if (cleanupReceipt?.status !== 'resident-cleanup-complete') {
+                throw new Error(
+                  'Phase-carrier source retirement owner cleanup did not complete'
+                );
+              }
+            }
+            if (
+              !(retirementEvidence?.retiredBuffers instanceof Set)
+              || supersededBuffers.some(
+                (buffer) => !retirementEvidence.retiredBuffers.has(buffer)
+              )
+            ) {
+              throw new Error(
+                'Phase-carrier source retirement did not confirm all four core buffers'
+              );
+            }
+            for (const buffer of supersededBuffers) {
+              retiredBuffers.add(buffer);
+            }
+          } else if (phaseCarrierOneToFourSourceUploads) {
+            const sourceSph =
+              phaseCarrierOneToFourSourceUploads.sphParticleUpload;
+            const sourceMls =
+              phaseCarrierOneToFourSourceUploads.mlsMpmParticleUpload;
+            for (const [owned, buffer] of [
+              [sourceSph?.ownsStateBuffer !== false, sourceSph?.stateBuffer],
+              [sourceSph?.ownsThermoBuffer !== false, sourceSph?.thermoBuffer],
+              [sourceSph?.ownsIdentityBuffer !== false, sourceSph?.identityBuffer],
+              [sourceMls?.ownsMechanicsBuffer !== false, sourceMls?.mechanicsBuffer]
+            ]) {
+              if (!owned || !buffer || terminalBuffers.includes(buffer)) {
+                continue;
+              }
+              buffer.destroy?.();
+              retiredBuffers.add(buffer);
+            }
+          }
+          if (
+            phaseCarrierOneToFourAdopted
+            && retiredBuffers.size !== 4
+          ) {
+            throw new Error(
+              'Phase-carrier source retirement did not confirm exactly four core buffers'
+            );
+          }
+          for (const [ref, buffer] of record.retainedBuffers) {
+            if (retiredBuffers.has(buffer)) record.retainedBuffers.delete(ref);
+          }
+          phaseCarrierOneToFourSourceRetirement = Object.freeze({
+            schema:
+              'peercompute.ulg.worker-phase-carrier-one-to-four-source-retirement.v0',
+            status: phaseCarrierOneToFourAdopted
+              ? 'phase-carrier-one-to-four-source-retired-after-terminal-fence'
+              : 'phase-carrier-one-to-four-rejected-output-retired-after-terminal-fence',
+            terminalFenceSatisfied: true,
+            sourceFamilyAdopted: phaseCarrierOneToFourAdopted,
+            retiredSourceBufferCount: retiredBuffers.size,
+            rejectedOutputRetired: !phaseCarrierOneToFourAdopted,
+            submittedWorkCleanupReleased: true
+          });
+          if (phaseCarrierOneToFourTransitionReceipt) {
+            phaseCarrierOneToFourTransitionReceipt = Object.freeze({
+              ...phaseCarrierOneToFourTransitionReceipt,
+              status:
+                'phase-carrier-one-to-four-adopted-terminal-fence-satisfied',
+              terminalFenceSatisfied: true,
+              supersededSourceRetired: true,
+              sourceRetirement: phaseCarrierOneToFourSourceRetirement
+            });
+          }
+          record.pendingPhaseCarrierOneToFourTransition = null;
+        } catch (error) {
+          poisonWorkerResidentScheduleLane(record, {
+            reason: 'phase-carrier-one-to-four-retirement-failed',
+            scheduleId,
+            stepOrdinal: completedStepCount || 0,
+            terminalGpuFence
+          });
+          if (!scheduleLoopError) {
+            scheduleLoopError = workerResidentScheduleError(
+              'phase-carrier-one-to-four-retirement-failed',
+              error instanceof Error ? error.message : String(error),
+              {
+                scheduleId,
+                stepOrdinal: completedStepCount || 0,
+                stageId: 'phaseCarrierOneToFourMaterialization'
+              }
+            );
+          }
+        }
+      } else {
+        record.pendingPhaseCarrierOneToFourTransition = {
+          sourceResidentStep: phaseCarrierOneToFourSourceResidentStep,
+          sourceUploads: phaseCarrierOneToFourSourceUploads,
+          execution: phaseCarrierOneToFourExecution
+        };
+      }
+    }
+    const reactionActivationObservationExpected = Boolean(
+      scheduleReactionActivationWatchRequested
+      && completedStepCount > 0
+    );
+    const reactionActivationObservationCaptureAllowed = Boolean(
+      reactionActivationObservationExpected
+      && cancelled === false
+      && completedStepCount === stepCount
+    );
+    const expectedReactionActivationProducerRoute = tier0RouteSelected
+      ? 'tier0-fused-resident-sequence'
+      : 'canonical-schroeder';
+    const expectedReactionActivationSampleStage = tier0RouteSelected
+      ? 'tier0-terminal-post-separation-motion-envelope'
+      : 'canonical-terminal-published-carrier-family-motion-envelope';
+    const expectedReactionActivationParticleCount = Number(
+      lastStepSummary?.particleCount
+    );
+    const expectedReactionActivationCount =
+      admittedTargetScheduleAuthority?.tableFingerprints
+        ?.watchReactionCount ?? null;
+    const expectedReactionActivationTableFingerprint =
+      admittedTargetScheduleAuthority?.tableFingerprints
+        ?.watchReactionTableFingerprint ?? null;
+    const terminalReactionActivationProposal =
+      record.schroederLane?.residentStep
+        ?.reactionActivationObservationProposal ?? null;
+    // These expectations come from the terminal schedule summary and the
+    // independently admitted target authority, never from the proposal that
+    // is about to be authenticated. A miswired private capability therefore
+    // cannot define the contract against which its own observation is judged.
+    const reactionActivationObservationDescriptor = {
+      particleCount: expectedReactionActivationParticleCount,
+      reactionCount: expectedReactionActivationCount,
+      reactionTableFingerprint:
+        expectedReactionActivationTableFingerprint,
+      producerRoute: expectedReactionActivationProducerRoute,
+      sampleStage: expectedReactionActivationSampleStage,
+      nodeDomain: 'fixed-phase-carrier-slot',
+      motionEnvelope: scheduleReactionActivationMotionEnvelope
+    };
+    for (const countField of ['particleCount', 'reactionCount']) {
+      if (
+        !Number.isSafeInteger(
+          reactionActivationObservationDescriptor[countField]
+        )
+        || Object.is(
+          reactionActivationObservationDescriptor[countField],
+          -0
+        )
+        || reactionActivationObservationDescriptor[countField] < 1
+        || reactionActivationObservationDescriptor[countField]
+          > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+      ) {
+        reactionActivationObservationDescriptor[countField] = null;
+      }
+    }
+    let reactionActivationGpuObservation = null;
+    let reactionActivationObservationFailureReason = null;
+    let reactionActivationObservationMapAsyncCount = 0;
+    const currentTerminalReactionActivationStorageFamily = () => {
+      const lane = record.schroederLane ?? null;
+      const nextUploads = lane?.residentStep?.nextParticleUploads ?? null;
+      const sphUpload = nextUploads?.sphParticleUpload ?? null;
+      const mlsMpmUpload = nextUploads?.mlsMpmParticleUpload ?? null;
+      if (
+        lane?.sphParticleUpload !== sphUpload
+        || lane?.mlsMpmParticleUpload !== mlsMpmUpload
+        || !sphUpload?.stateBuffer
+        || !sphUpload?.thermoBuffer
+        || !mlsMpmUpload?.mechanicsBuffer
+        || sphUpload.particleCount
+          !== expectedReactionActivationParticleCount
+        || mlsMpmUpload.particleCount
+          !== expectedReactionActivationParticleCount
+      ) return null;
+      return {
+        device: state.workerDevice,
+        terminalStateBuffer: sphUpload.stateBuffer,
+        terminalThermoBuffer: sphUpload.thermoBuffer,
+        terminalMechanicsBuffer: mlsMpmUpload.mechanicsBuffer,
+        particleCount: expectedReactionActivationParticleCount
+      };
+    };
+    if (
+      reactionActivationObservationCaptureAllowed
+      && terminalGpuFence?.fenceSatisfied === true
+      && !scheduleLoopError
+      && state.workerDevice
+    ) {
+      if (!terminalReactionActivationProposal) {
+        reactionActivationObservationFailureReason =
+          scheduleReactionActivationMotionEnvelopeFailure
+          || 'terminal-reaction-activation-proposal-missing';
+      } else {
+        const compactMotionWatch =
+          terminalReactionActivationProposal.schema
+            === ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA;
+        try {
+          const preMapTerminalStorageFamily =
+            currentTerminalReactionActivationStorageFamily();
+          if (
+            compactMotionWatch
+            && (
+              !preMapTerminalStorageFamily
+              || !sphReactionMotionEnvelopeWatchMatchesTerminalStorageFamily(
+                terminalReactionActivationProposal,
+                preMapTerminalStorageFamily
+              )
+            )
+          ) {
+            throw malformedReactionActivationObservationError(
+              'reaction motion watch does not match the exact terminal particle storage family'
+            );
+          }
+          if (
+            compactMotionWatch
+            && markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted(
+              terminalReactionActivationProposal,
+              { device: state.workerDevice }
+            ) !== true
+          ) {
+            throw malformedReactionActivationObservationError(
+              'Tier0 reaction motion watch rejected the satisfied terminal fence'
+            );
+          }
+          reactionActivationGpuObservation =
+            compactMotionWatch
+              ? await observeSphReactionMotionEnvelopeWatch(
+                  terminalReactionActivationProposal,
+                  { device: state.workerDevice }
+                )
+              : await observeSchroederSpatialReactionDiscoveryActivation(
+                  terminalReactionActivationProposal,
+                  { device: state.workerDevice }
+                );
+          const postMapTerminalStorageFamily =
+            currentTerminalReactionActivationStorageFamily();
+          if (
+            compactMotionWatch
+            && (
+              !postMapTerminalStorageFamily
+              || !sphReactionMotionEnvelopeWatchMatchesTerminalStorageFamily(
+                terminalReactionActivationProposal,
+                postMapTerminalStorageFamily
+              )
+            )
+          ) {
+            throw malformedReactionActivationObservationError(
+              'reaction motion watch terminal particle storage family changed while evidence was pending'
+            );
+          }
+          if (!exactReactionActivationGpuObservation(
+            reactionActivationGpuObservation,
+            {
+              particleCount:
+                reactionActivationObservationDescriptor.particleCount,
+              reactionCount:
+                reactionActivationObservationDescriptor.reactionCount,
+              reactionTableFingerprint:
+                expectedReactionActivationTableFingerprint,
+              producerRoute:
+                expectedReactionActivationProducerRoute,
+              sampleStage:
+                expectedReactionActivationSampleStage,
+              motionEnvelope:
+                scheduleReactionActivationMotionEnvelope
+            }
+          )) {
+            throw malformedReactionActivationObservationError(
+              'reaction activation observer returned malformed evidence'
+            );
+          }
+        } catch (error) {
+          reactionActivationObservationFailureReason =
+            error instanceof Error ? error.message : String(error);
+          const failureMapAsyncCount = Number(
+            error?.reactionActivationObservationMapAsyncCount
+          );
+          reactionActivationObservationMapAsyncCount =
+            Number.isSafeInteger(failureMapAsyncCount)
+            && !Object.is(failureMapAsyncCount, -0)
+            && failureMapAsyncCount >= 0
+            && failureMapAsyncCount <= 1
+              ? failureMapAsyncCount
+              : 0;
+          const fatalReactionActivationObservation = Boolean(
+            error?.reactionActivationObservationFatal === true
+            || error?.code
+              === ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE
+          );
+          const reactionActivationObservationDeviceLost = Boolean(
+            error?.reactionActivationObservationDeviceLost === true
+            || error?.code
+              === ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_DEVICE_LOST_ERROR_CODE
+          );
+          if (reactionActivationObservationDeviceLost) {
+            poisonWorkerResidentScheduleLane(record, {
+              reason: 'reaction-activation-observation-device-lost',
+              scheduleId,
+              stepOrdinal: completedStepCount || null,
+              terminalGpuFence
+            });
+            if (!scheduleLoopError) {
+              scheduleLoopError = workerResidentScheduleError(
+                'reaction-activation-observation-device-lost',
+                reactionActivationObservationFailureReason,
+                {
+                  scheduleId,
+                  stepOrdinal: completedStepCount || null,
+                  stageId: 'reactionActivationObservation'
+                }
+              );
+            }
+          } else if (fatalReactionActivationObservation) {
+            poisonWorkerResidentScheduleLane(record, {
+              reason: 'reaction-activation-observation-malformed-evidence',
+              scheduleId,
+              stepOrdinal: completedStepCount || null,
+              terminalGpuFence
+            });
+            if (!scheduleLoopError) {
+              scheduleLoopError = workerResidentScheduleError(
+                'reaction-activation-observation-malformed-evidence',
+                reactionActivationObservationFailureReason,
+                {
+                  scheduleId,
+                  stepOrdinal: completedStepCount || null,
+                  stageId: 'reactionActivationObservation'
+                }
+              );
+            }
+          }
+        } finally {
+          terminalReactionActivationProposal.destroy?.();
+        }
+      }
+    } else if (
+      terminalReactionActivationProposal
+      && terminalGpuFence?.fenceSatisfied === true
+    ) {
+      // A schedule failure, cancellation before its requested terminal
+      // ordinal, or an unexpected capture must never strand the arena lease.
+      // The already-satisfied schedule fence is explicit destruction authority
+      // for Tier0's compact buffers. A failed fence leaves either producer
+      // family pinned on the poisoned lane for explicit teardown.
+      if (
+        terminalReactionActivationProposal.schema
+          === ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA
+      ) {
+        markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted(
+          terminalReactionActivationProposal,
+          { device: state.workerDevice }
+        );
+      }
+      terminalReactionActivationProposal.destroy?.();
+      if (
+        reactionActivationObservationExpected
+        && reactionActivationObservationCaptureAllowed !== true
+        && !scheduleLoopError
+      ) {
+        poisonWorkerResidentScheduleLane(record, {
+          reason: 'reaction-activation-observation-unexpected-partial-capture',
+          scheduleId,
+          stepOrdinal: completedStepCount || null,
+          terminalGpuFence
+        });
+        scheduleLoopError = workerResidentScheduleError(
+          'reaction-activation-observation-unexpected-partial-capture',
+          'a partial or cancelled schedule returned a terminal watch proposal',
+          {
+            scheduleId,
+            stepOrdinal: completedStepCount || null,
+            stageId: 'reactionActivationObservation'
+          }
+        );
+      }
+    } else if (
+      reactionActivationObservationExpected
+      && reactionActivationObservationCaptureAllowed !== true
+    ) {
+      reactionActivationObservationFailureReason =
+        'reaction-activation-observation-not-sampled-after-partial-cancellation';
+    }
     // The terminal fence just drained the queue, so the product-history
     // GPU count is final for this schedule: one 4-byte fixed-size evidence
     // read re-tightens the host-side live-row upper bound that otherwise
@@ -7615,40 +10539,110 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // epoch sort, and per-capacity pipeline families toward the full
     // 262144-row arena capacity). Failure keeps the conservative bound.
     let productHistoryLiveBoundObservation = null;
+    let observedProductHistoryHandle = null;
+    let observedProductHistoryArenaIdentity = null;
     if (
       terminalGpuFence?.fenceSatisfied === true
       && state.workerDevice
     ) {
       const observedLaneRecord = getLaneRecord(payload);
-      const observedHandle =
+      observedProductHistoryHandle =
         previousWorkerResidentProductMass(observedLaneRecord)
         ?? observedLaneRecord?.schroederLane?.residentStepOptions
           ?.residentProductMass
         ?? null;
-      if (observedHandle) {
+      if (observedProductHistoryHandle) {
+        observedProductHistoryArenaIdentity =
+          describeResidentProductHistoryArenaIdentity(
+            state.workerDevice,
+            observedProductHistoryHandle
+          );
         productHistoryLiveBoundObservation =
           await observeResidentProductHistoryLiveRowBound(
             state.workerDevice,
-            observedHandle
+            observedProductHistoryHandle
           );
       }
     }
     if (scheduleLoopError) {
+      if (
+        tier0ExecutionAttempted
+        && tier0ExecutionResult
+        && tier0ExecutionValidation?.valid !== true
+      ) {
+        if (terminalGpuFence?.fenceSatisfied === true) {
+          try {
+            destroyMlsMpmResidentStepsBuffers(
+              tier0ExecutionResult,
+              {
+                preserveBuffers: [
+                  tier0SupersededUploads?.sphParticleUpload?.stateBuffer,
+                  tier0SupersededUploads?.sphParticleUpload?.thermoBuffer,
+                  tier0SupersededUploads?.sphParticleUpload?.identityBuffer,
+                  tier0SupersededUploads?.mlsMpmParticleUpload
+                    ?.mechanicsBuffer,
+                  scheduleStartLane?.sphParticleUpload?.stateBuffer,
+                  scheduleStartLane?.sphParticleUpload?.thermoBuffer,
+                  scheduleStartLane?.sphParticleUpload?.identityBuffer,
+                  scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
+                ].filter(Boolean)
+              }
+            );
+            if (
+              !tier0ExecutionResult.finalStep
+              || tier0ExecutionResult.finalStep.nextParticleUploads
+                !== tier0ExecutionValidation?.nextUploads
+            ) {
+              const preserved = new Set([
+                scheduleStartLane?.sphParticleUpload?.stateBuffer,
+                scheduleStartLane?.sphParticleUpload?.thermoBuffer,
+                scheduleStartLane?.sphParticleUpload?.identityBuffer,
+                scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
+              ].filter(Boolean));
+              for (const buffer of retainedContinuationBuffersFromUploads(
+                tier0ExecutionValidation?.nextUploads
+              )) {
+                if (!preserved.has(buffer)) buffer.destroy?.();
+              }
+            }
+          } catch {
+            // Preserve the typed validation failure. The poisoned lane's final
+            // owned-buffer walk remains the best-effort safety net.
+            record.poisonedTier0Execution = tier0ExecutionResult;
+          }
+        } else {
+          // No satisfied fence means destruction is not yet safe. Retain the
+          // rejected family and cleanup closures on the poisoned record so
+          // explicit lane/device teardown can retire them instead of dropping
+          // the only owning references.
+          record.poisonedTier0Execution = tier0ExecutionResult;
+          record.poisonedTier0SubmittedCleanupRecords =
+            tier0SubmittedCleanupRecords;
+        }
+      }
       const terminalReceiptLoopFailure =
         scheduleLoopError.residentScheduleError?.reason
           === 'schedule-terminal-reflux-copy-receipt-invalid';
       if (
         scheduleGpuWorkMayHaveBeenSubmitted
+        && !record.residentSchedulePoison
         && (
+          tier0ExecutionAttempted
+          || Boolean(phaseCarrierOneToFourExecution)
+          ||
           terminalGpuFence?.fenceSatisfied !== true
           || terminalGpuFence?.authorityAdmissionReady !== true
           || terminalReceiptLoopFailure
         )
       ) {
         poisonWorkerResidentScheduleLane(record, {
-          reason: terminalGpuFence?.fenceSatisfied !== true
+          reason: tier0ExecutionAttempted
+            ? 'tier0-fused-terminal-publication-rejected-after-submit'
+            : (phaseCarrierOneToFourExecution
+              ? 'phase-carrier-one-to-four-schedule-rejected-after-submit'
+            : (terminalGpuFence?.fenceSatisfied !== true
             ? 'schedule-terminal-gpu-fence-unsatisfied'
-            : 'schedule-terminal-reflux-receipt-rejected',
+            : 'schedule-terminal-reflux-receipt-rejected')),
           scheduleId,
           stepOrdinal:
             scheduleLoopError.residentScheduleError?.stepOrdinal ?? null,
@@ -7660,6 +10654,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           terminalGpuFence;
         scheduleLoopError.residentScheduleError.terminalGpuFenceSatisfied =
           terminalGpuFence?.fenceSatisfied === true;
+        if (tier0ExecutionValidation) {
+          scheduleLoopError.residentScheduleError.tier0ValidationFailures = [
+            ...(tier0ExecutionValidation.failures || [])
+          ];
+        }
       }
       throw scheduleLoopError;
     }
@@ -7743,6 +10742,84 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         };
       }
       throw error;
+    }
+    if (tier0RouteSelected) {
+      const terminalBuffers = retainedContinuationBuffersFromUploads(
+        tier0ExecutionValidation?.nextUploads
+      );
+      const retiredBuffers = new Set();
+      try {
+        if (tier0SupersededResidentStep) {
+          const supersededBuffers = retainedContinuationBuffersFromUploads(
+            tier0SupersededResidentStep.nextParticleUploads
+          ).filter((buffer) => !terminalBuffers.includes(buffer));
+          destroyMlsMpmResidentStepBuffers(tier0SupersededResidentStep, {
+            preserveBuffers: terminalBuffers,
+            destroyInputResidentProductMass: true
+          });
+          for (const buffer of supersededBuffers) retiredBuffers.add(buffer);
+        } else if (tier0SupersededUploads) {
+          const sourceSph = tier0SupersededUploads.sphParticleUpload;
+          const sourceMls = tier0SupersededUploads.mlsMpmParticleUpload;
+          for (const [owned, buffer] of [
+            [sourceSph?.ownsStateBuffer !== false, sourceSph?.stateBuffer],
+            [sourceSph?.ownsThermoBuffer !== false, sourceSph?.thermoBuffer],
+            [sourceSph?.ownsIdentityBuffer !== false, sourceSph?.identityBuffer],
+            [sourceMls?.ownsMechanicsBuffer !== false, sourceMls?.mechanicsBuffer]
+          ]) {
+            if (!owned || !buffer || terminalBuffers.includes(buffer)) continue;
+            buffer.destroy?.();
+            retiredBuffers.add(buffer);
+          }
+        }
+        const lane = record.schroederLane;
+        const seedAssignmentBuffer =
+          lane?.laneSeed?.levelAssignment?.assignmentBuffer ?? null;
+        if (seedAssignmentBuffer && !terminalBuffers.includes(seedAssignmentBuffer)) {
+          seedAssignmentBuffer.destroy?.();
+          retiredBuffers.add(seedAssignmentBuffer);
+          lane.laneSeed = {
+            ...lane.laneSeed,
+            levelAssignment: null,
+            assignmentRetiredAfterTier0TerminalFence: true
+          };
+        }
+        for (const [ref, buffer] of record.retainedBuffers) {
+          if (retiredBuffers.has(buffer)) record.retainedBuffers.delete(ref);
+        }
+        tier0SupersededFamilyRetirement = Object.freeze({
+          schema:
+            'peercompute.ulg.worker-tier0-superseded-family-retirement.v0',
+          status: 'tier0-superseded-family-retired-after-terminal-fence',
+          terminalFenceSatisfied: true,
+          retiredBufferCount: retiredBuffers.size,
+          seedAssignmentRetired:
+            lane?.laneSeed?.assignmentRetiredAfterTier0TerminalFence === true
+        });
+      } catch (error) {
+        poisonWorkerResidentScheduleLane(record, {
+          reason: 'tier0-superseded-family-retirement-failed',
+          scheduleId,
+          stepOrdinal: completedStepCount,
+          terminalGpuFence
+        });
+        const scheduleError = workerResidentScheduleError(
+          'tier0-superseded-family-retirement-failed',
+          error instanceof Error ? error.message : String(error),
+          {
+            scheduleId,
+            stepOrdinal: completedStepCount,
+            stageId: TIER0_FUSED_RESIDENT_SEQUENCE_STAGE_ID,
+            laneState: workerResidentScheduleLaneStateSnapshot(record, {
+              laneId,
+              stateKey
+            })
+          }
+        );
+        scheduleError.residentScheduleError.terminalGpuFence =
+          terminalGpuFence;
+        throw scheduleError;
+      }
     }
     const terminalLastStepSummary = lastStepSummary
       ? {
@@ -7860,6 +10937,358 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         twoLevelMechanicsEvidence;
       throw error;
     }
+    const terminalLane = record.schroederLane || null;
+    const finalParticleLineage = exactWorkerScheduleParticleFamilyLineage({
+      sphParticleUpload: terminalLane?.sphParticleUpload,
+      mlsMpmParticleUpload: terminalLane?.mlsMpmParticleUpload
+    });
+    const terminalParticleFamilyCounts = Object.freeze({
+      sphState: Number(terminalLane?.sphParticleState?.particleCount),
+      sphUpload: Number(terminalLane?.sphParticleUpload?.particleCount),
+      mlsMpmState: Number(terminalLane?.mlsMpmParticleState?.particleCount),
+      mlsMpmUpload: Number(
+        terminalLane?.mlsMpmParticleUpload?.particleCount
+      )
+    });
+    const sourceParticleCount = scheduleStartParticleFamilyCounts.sphUpload;
+    const targetParticleCount = terminalParticleFamilyCounts.sphUpload;
+    const exactSourceParticleFamily = Boolean(
+      Number.isSafeInteger(sourceParticleCount)
+      && sourceParticleCount > 0
+      && Object.values(scheduleStartParticleFamilyCounts).every(
+        (count) => count === sourceParticleCount
+      )
+    );
+    const terminalStepParticleCount = Number(
+      terminalLastStepSummary?.particleCount
+    );
+    const exactTargetParticleFamily = Boolean(
+      Number.isSafeInteger(targetParticleCount)
+      && targetParticleCount > 0
+      && Object.values(terminalParticleFamilyCounts).every(
+        (count) => count === targetParticleCount
+      )
+      && terminalStepParticleCount === targetParticleCount
+    );
+    const particleCardinality = Object.freeze({
+      schema: 'peercompute.ulg.worker-schedule-particle-cardinality.v0',
+      status: exactSourceParticleFamily && exactTargetParticleFamily
+        ? 'worker-schedule-particle-cardinality-exact'
+        : 'worker-schedule-particle-cardinality-incomplete',
+      sourceParticleCount,
+      targetParticleCount,
+      sourceSphStateParticleCount:
+        scheduleStartParticleFamilyCounts.sphState,
+      sourceSphUploadParticleCount:
+        scheduleStartParticleFamilyCounts.sphUpload,
+      sourceMlsMpmStateParticleCount:
+        scheduleStartParticleFamilyCounts.mlsMpmState,
+      sourceMlsMpmUploadParticleCount:
+        scheduleStartParticleFamilyCounts.mlsMpmUpload,
+      targetSphStateParticleCount: terminalParticleFamilyCounts.sphState,
+      targetSphUploadParticleCount: terminalParticleFamilyCounts.sphUpload,
+      targetMlsMpmStateParticleCount:
+        terminalParticleFamilyCounts.mlsMpmState,
+      targetMlsMpmUploadParticleCount:
+        terminalParticleFamilyCounts.mlsMpmUpload,
+      terminalStepParticleCount,
+      exactSourceParticleFamily,
+      exactTargetParticleFamily
+    });
+    const productEventBufferRetained = Boolean(
+      observedProductHistoryHandle?.productEventBufferRetained === true
+    );
+    const productEventRowCount = Number(
+      observedProductHistoryHandle?.productEventRowCount
+    );
+    const exactProductEventRowCount = Number.isSafeInteger(
+      productEventRowCount
+    )
+      && productEventRowCount > 0
+      && productEventRowCount
+        <= SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT;
+    const exactProductHistoryLiveBound = Boolean(
+      productHistoryLiveBoundObservation?.schema
+        === 'peercompute.ulg.sph-product-history-live-bound-observation.v0'
+      && Number.isSafeInteger(
+        productHistoryLiveBoundObservation.observedLiveRowCount
+      )
+      && productHistoryLiveBoundObservation.observedLiveRowCount > 0
+      && productHistoryLiveBoundObservation.arenaRowCapacity
+        === productEventRowCount
+      && productHistoryLiveBoundObservation.readbackByteLength
+        === Uint32Array.BYTES_PER_ELEMENT
+      && productHistoryLiveBoundObservation.arenaIdentity?.schema
+        === 'peercompute.ulg.sph-resident-product-history-arena-identity.v0'
+      && productHistoryLiveBoundObservation.arenaIdentity?.status
+        === 'retained-product-history-arena-authenticated'
+      && productHistoryLiveBoundObservation.arenaIdentity?.rowCapacity
+        === productEventRowCount
+    );
+    const exactProductHistoryArenaIdentity = Boolean(
+      observedProductHistoryArenaIdentity?.schema
+        === 'peercompute.ulg.sph-resident-product-history-arena-identity.v0'
+      && observedProductHistoryArenaIdentity?.status
+        === 'retained-product-history-arena-authenticated'
+      && observedProductHistoryArenaIdentity?.rowCapacity
+        === productEventRowCount
+    );
+    const retainedProductGasBoundaryActionable = Boolean(
+      productEventBufferRetained
+      && exactProductEventRowCount
+      && exactProductHistoryArenaIdentity
+      && terminalGpuFence?.fenceSatisfied === true
+      && cancelled === false
+    );
+    const prospectiveWriterEvidence = Object.freeze({
+      schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
+      status: retainedProductGasBoundaryActionable
+        ? 'worker-retained-product-gas-boundary-actionable'
+        : productEventBufferRetained && exactProductEventRowCount
+          ? 'worker-retained-product-gas-boundary-uncertain'
+          : 'worker-retained-product-gas-boundary-inactive',
+      gasBoundaryActionable: retainedProductGasBoundaryActionable,
+      source: productEventBufferRetained && exactProductEventRowCount
+        ? 'worker-retained-product-event-buffer'
+        : null,
+      productEventBufferRetained: Boolean(
+        productEventBufferRetained && exactProductEventRowCount
+      ),
+      productEventRowCount: exactProductEventRowCount
+        ? productEventRowCount
+        : 0,
+      productHistoryArenaIdentity:
+        observedProductHistoryArenaIdentity == null
+          ? null
+          : Object.freeze({ ...observedProductHistoryArenaIdentity }),
+      productHistoryLiveBoundObservation:
+        !exactProductHistoryLiveBound
+          ? null
+          : Object.freeze({ ...productHistoryLiveBoundObservation }),
+      terminalGpuFenceSatisfied: terminalGpuFence?.fenceSatisfied === true,
+      scheduleCancelled: cancelled === true
+    });
+    let nextScheduleLawActivationObservation = null;
+    if (reactionActivationObservationExpected) {
+      const gpuObservation = reactionActivationGpuObservation;
+      const observationContractMatches = Boolean(
+        gpuObservation
+        && gpuObservation.predicateRevision
+          === SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION
+        && gpuObservation.producerRoute
+          === expectedReactionActivationProducerRoute
+        && gpuObservation.sampleStage
+          === expectedReactionActivationSampleStage
+        && gpuObservation.nodeDomain === 'fixed-phase-carrier-slot'
+        && gpuObservation.motionEnvelope
+          === scheduleReactionActivationMotionEnvelope
+      );
+      if (gpuObservation && !observationContractMatches) {
+        reactionActivationObservationFailureReason =
+          'reaction-activation-motion-envelope-contract-mismatch';
+      }
+      const observationSucceeded = Boolean(
+        gpuObservation?.schema
+          === ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA
+        && gpuObservation.observationSucceeded === true
+        && gpuObservation.uncertainty === false
+        && Number.isSafeInteger(gpuObservation.triggeredSourceCount)
+        && gpuObservation.triggeredSourceCount >= 0
+        && (
+          gpuObservation.motionEnvelope
+            ?.thermalPhaseEvolutionEnabled !== true
+          || gpuObservation.triggeredSourceCount
+            === gpuObservation.particleCount
+        )
+        && observationContractMatches
+      );
+      const uncertainty = !observationSucceeded;
+      const triggeredSourceCount = observationSucceeded
+        ? gpuObservation.triggeredSourceCount
+        : null;
+      nextScheduleLawActivationObservation = Object.freeze({
+        schema: ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA,
+        status: observationSucceeded
+          ? 'dynamic-law-routing-observation-ready'
+          : 'dynamic-law-routing-observation-uncertain',
+        sourceScheduleId: scheduleId,
+        targetScheduleRequestId:
+          admittedTargetScheduleAuthority?.targetScheduleRequestId ?? null,
+        targetScheduleAuthorityFingerprint:
+          admittedTargetScheduleAuthority?.requestFingerprint ?? null,
+        laneId,
+        stateKey,
+        lawFamily: 'reaction',
+        predicateRevision:
+          gpuObservation?.predicateRevision
+          ?? SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION,
+        predicate:
+          SPH_REACTION_MOTION_ENVELOPE_PREDICATE,
+        producerRoute:
+          expectedReactionActivationProducerRoute,
+        sampleStage:
+          expectedReactionActivationSampleStage,
+        nodeDomain: 'fixed-phase-carrier-slot',
+        motionEnvelope:
+          scheduleReactionActivationMotionEnvelope,
+        shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+        routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+        executionGating: SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+        observationSucceeded,
+        triggered: uncertainty || triggeredSourceCount > 0,
+        triggeredSourceCount,
+        uncertainty,
+        rawEvidenceWord: observationSucceeded
+          ? gpuObservation.rawEvidenceWord
+          : (gpuObservation ? 0xffff_ffff : null),
+        particleCount:
+          gpuObservation?.particleCount
+          ?? reactionActivationObservationDescriptor.particleCount,
+        reactionCount:
+          gpuObservation?.reactionCount
+          ?? reactionActivationObservationDescriptor.reactionCount,
+        reactionTableFingerprint:
+          gpuObservation?.reactionTableFingerprint
+          ?? reactionActivationObservationDescriptor.reactionTableFingerprint
+          ?? admittedTargetScheduleAuthority?.tableFingerprints
+            ?.watchReactionTableFingerprint
+          ?? null,
+        prospectiveWriterEvidence,
+        mapAsyncCount: gpuObservation?.mapAsyncCount
+          ?? reactionActivationObservationMapAsyncCount,
+        readbackByteLength: gpuObservation
+          ? Uint32Array.BYTES_PER_ELEMENT
+          : 0,
+        fullParticleReadbackPerformed: false,
+        terminalLineage: finalParticleLineage
+          ? Object.freeze({ ...finalParticleLineage })
+          : null,
+        failureReason: observationSucceeded
+          ? null
+          : (
+              reactionActivationObservationFailureReason
+              || (gpuObservation?.uncertainty === true
+                ? 'gpu-reaction-activation-evidence-fail-closed'
+                : 'reaction-activation-observation-unavailable')
+            ),
+        failurePolicy: WORKER_DYNAMIC_LAW_OBSERVATION_FAILURE_POLICY
+      });
+    }
+    if (terminalLane) {
+      terminalLane.nextScheduleTargetAuthority =
+        admittedTargetScheduleAuthority;
+      terminalLane.nextScheduleLawActivationObservation =
+        nextScheduleLawActivationObservation;
+    }
+    const finalRetainedBufferRefs = tier0RouteSelected
+      ? [...tier0RetainedBufferRefs]
+      : [...(lastMechanicsStageResult?.retainedBufferRefs || [])];
+    executionRouteReceipt = Object.freeze({
+      schema: ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA,
+      status: tier0RouteSelected
+        ? 'tier0-fused-resident-sequence-admitted'
+        : 'canonical-schroeder-admitted',
+      scheduleId,
+      laneId,
+      stateKey,
+      route: executionRouteDecision.route,
+      routeDecisionStatus: executionRouteDecision.status,
+      activationReceipt: scheduleLawActivation,
+      targetScheduleAuthority: admittedTargetScheduleAuthority,
+      predecessorTargetTokenConsumption,
+      nextScheduleLawActivationObservation,
+      topologyAttestation: (
+        tier0RouteSelected || phaseCarrierOneToFourExecution
+      )
+        ? tier0TopologyAttestation
+        : null,
+      phaseCarrierOneToFourTransition:
+        phaseCarrierOneToFourTransitionReceipt,
+      particleCardinality,
+      blockers: [...executionRouteDecision.blockers],
+      transition: phaseCarrierOneToFourExecution
+        ? 'tier0-one-to-four-to-canonical-schedule-boundary'
+        : executionRouteDecision.transition,
+      execution: Object.freeze({
+        requestedStepCount: stepCount,
+        completedStepCount,
+        atomicSchedule: tier0RouteSelected,
+        progressMode: tier0RouteSelected
+          ? 'terminal-only'
+          : 'per-canonical-step',
+        cancellationMode: tier0RouteSelected
+          ? 'terminal-only-after-atomic-submit'
+          : 'between-canonical-steps',
+        preflightSchema:
+          tier0ExecutionValidation?.preflight?.schema ?? null,
+        preflightStatus:
+          tier0ExecutionValidation?.preflight?.status ?? null,
+        fusedSequenceSchema:
+          tier0ExecutionValidation?.fused?.schema ?? null,
+        fusedSequenceStatus:
+          tier0ExecutionValidation?.fused?.status ?? null,
+        commandSubmissionCount:
+          tier0ExecutionValidation?.fused?.commandSubmissionCount ?? null,
+        internalPositionSubstepCount:
+          tier0ExecutionValidation?.fused?.internalPositionSubstepCount
+          ?? null,
+        fullParticleReadbackPerformed: tier0RouteSelected ? false : null,
+        fullParticleReadbackFree: tier0RouteSelected ? true : null,
+        mapAsyncCount: tier0RouteSelected ? 0 : null,
+        readbackBytes: tier0RouteSelected ? 0 : null,
+        residentContinuationReady: tier0RouteSelected ? true : null,
+        canonicalSpatialEpochGenerated: !tier0RouteSelected,
+        canonicalSpatialGenerationId:
+          tier0RouteSelected ? null : previousEpochSeal?.generationId ?? null,
+        finalEpochSealRequired: !tier0RouteSelected,
+        terminalFenceSatisfied: true,
+        sameWorkerDevice: true,
+        submittedCleanupOwnership:
+          tier0ExecutionValidation?.fused?.submittedCleanupOwnership ?? null,
+        submittedCleanupRegistrationCount:
+          tier0ExecutionValidation?.fused
+            ?.submittedCleanupRegistrationCount ?? null,
+        submittedCleanupRelease: tier0SubmittedCleanupRelease,
+        phaseCarrierOneToFourMaterialized:
+          phaseCarrierOneToFourAdopted,
+        phaseCarrierOneToFourCommandSubmissionCount:
+          phaseCarrierOneToFourExecution?.commandSubmissionCount ?? 0,
+        phaseCarrierOneToFourFullParticleReadbackPerformed:
+          phaseCarrierOneToFourExecution
+            ?.fullParticleReadbackPerformed ?? false,
+        phaseCarrierOneToFourSourceRetirement
+      }),
+      lineage: Object.freeze({
+        source: tier0RouteSelected
+          ? { ...tier0SourceLineage }
+          : (phaseCarrierOneToFourExecution?.lineage?.source
+            ? { ...phaseCarrierOneToFourExecution.lineage.source }
+            : (scheduleStartTier0ContinuationIdentity
+            ? { ...scheduleStartTier0ContinuationIdentity }
+            : (tier0SourceLineage ? { ...tier0SourceLineage } : null))),
+        target: finalParticleLineage
+          ? { ...finalParticleLineage }
+          : null,
+        storageGenerationDelta: tier0RouteSelected ? 1 : null,
+        physicsTickDelta: tier0RouteSelected ? stepCount : null,
+        committedPositionEpochDelta: tier0RouteSelected ? 1 : null,
+        topologyChanged: tier0RouteSelected
+          ? false
+          : (phaseCarrierOneToFourExecution ? true : null),
+        hierarchyIdentityChanged: tier0RouteSelected
+          ? false
+          : (phaseCarrierOneToFourExecution ? false : null),
+        exactParticleFamily: Boolean(finalParticleLineage)
+      }),
+      retainedBufferRefs: finalRetainedBufferRefs,
+      supersededFamilyRetirement: tier0SupersededFamilyRetirement,
+      authority: Object.freeze({
+        workerTerminalFence: 'satisfied',
+        computeManager: 'pending',
+        stateManager: 'pending',
+        presentation: 'pending'
+      })
+    });
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       status: cancelled
@@ -7878,7 +11307,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleLastStepEndedAtMs,
       tailTerminalFenceDoneAtMs,
       productHistoryLiveBoundObservation,
-      lawActivationReceipt: resolveScheduleLawActivation(),
+      lawActivationReceipt: scheduleLawActivation,
+      predecessorTargetTokenConsumption,
+      nextScheduleLawActivationObservation,
+      executionRouteReceipt,
+      phaseCarrierOneToFourTransition:
+        phaseCarrierOneToFourTransitionReceipt,
+      particleCardinality,
       submitBurstObservation: {
         ...resolveSubmitBurstEligibility(),
         opened: submitBurstCloseStats != null,
@@ -7893,11 +11328,14 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS,
       queueDrainCheckpointCount: queueDrainCheckpoints.length,
       queueDrainCheckpoints,
-      retainedBufferRefs: [
-        ...(lastMechanicsStageResult?.retainedBufferRefs || [])
-      ],
-      finalEpochIdentity: workerResidentScheduleEpochIdentity(previousEpochSeal),
-      finalEpochSeal: previousEpochSeal,
+      retainedBufferRefs: finalRetainedBufferRefs,
+      finalMechanicsLineage: finalParticleLineage
+        ? { ...finalParticleLineage }
+        : null,
+      finalEpochIdentity: tier0RouteSelected
+        ? { ...tier0ExpectedLineage }
+        : workerResidentScheduleEpochIdentity(previousEpochSeal),
+      finalEpochSeal: tier0RouteSelected ? null : previousEpochSeal,
       perStepSummaries: {
         schema: 'peercompute.ulg.worker-resident-schedule-step-summaries.v0',
         ringCapacity: ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY,

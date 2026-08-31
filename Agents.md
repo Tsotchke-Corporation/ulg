@@ -67,6 +67,14 @@ remove or demote a law to make the runtime simpler.
   (current focus, in-flight, last-green, next) and a development `log.md`
   narrative. Keep them short enough to actually read.
 - Keep a live Vite demo running so progress is visible.
+- Never use `terminal-browser`, tmux browser panes, or any split-terminal
+  browser workflow in this repository. The user works from mobile and those
+  panes make the session unusable.
+- A requested "real browser" check means visible desktop Chrome on the actual
+  display, not headless Chromium and not a terminal pane. Run the configured
+  preset matrix periodically during substantive runtime work, inspect motion
+  and rendering rather than only DOM metrics, and close only the browser and
+  temporary server processes started for the check.
 - Tools are available, not mandatory — use them when they help: infinite-context
   coder for cross-project memory, the `swarm` project and the `old-donkey`
   server for parallelism/compute, sibling repos (`peercompute`, `eshkol`,

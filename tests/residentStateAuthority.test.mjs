@@ -206,6 +206,88 @@ test('MLS-MPM resident authority ledger warns when thermal state advances withou
   assert.ok(ledger.warnings.includes('mechanics-constitutive-refresh-pending-after-thermal-state'));
 });
 
+test('MLS-MPM resident authority ledger separates terminal phase carriers from refreshed mechanics', () => {
+  const ledger = buildMlsMpmResidentStepAuthorityLedger({
+    step: 5,
+    time: 0.5,
+    readbackMode: 'no-full-readback',
+    backend: 'webgpu',
+    stageStatus: {
+      p2g: 'webgpu-executed-no-full-readback',
+      gridUpdate: 'webgpu-executed-no-full-readback',
+      g2p: 'webgpu-executed-no-full-readback',
+      phaseCarrierTransfer: 'phase-carrier-transfer-executed',
+      mechanicsRefresh: 'mechanics-constitutive-refresh-executed'
+    },
+    stageBackends: {
+      p2g: 'webgpu',
+      gridUpdate: 'webgpu',
+      g2p: 'webgpu',
+      phaseCarrierTransfer: 'webgpu',
+      mechanicsRefresh: 'webgpu'
+    },
+    nextUsesPhaseCarrierTransfer: true,
+    nextUsesMechanicsRefresh: true,
+    residentBuffersRetained: true
+  });
+
+  assert.equal(ledger.status, 'resident-authority-ledger-ready');
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage,
+    'phase-carrier-transfer-v2'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.THERMO_PHASE].ownerStage,
+    'phase-carrier-transfer-v2'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage,
+    'mechanics-constitutive-refresh'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].status,
+    'mechanics-constitutive-refresh-drives-next-particles'
+  );
+});
+
+test('MLS-MPM resident authority ledger assigns unrefreshed phase mechanics to phase transfer', () => {
+  const ledger = buildMlsMpmResidentStepAuthorityLedger({
+    step: 6,
+    time: 0.6,
+    readbackMode: 'no-full-readback',
+    backend: 'webgpu',
+    stageStatus: {
+      p2g: 'webgpu-executed-no-full-readback',
+      gridUpdate: 'webgpu-executed-no-full-readback',
+      g2p: 'webgpu-executed-no-full-readback',
+      phaseCarrierTransfer: 'phase-carrier-transfer-executed'
+    },
+    stageBackends: {
+      p2g: 'webgpu',
+      gridUpdate: 'webgpu',
+      g2p: 'webgpu',
+      phaseCarrierTransfer: 'webgpu'
+    },
+    nextUsesPhaseCarrierTransfer: true,
+    nextUsesMechanicsRefresh: false,
+    residentBuffersRetained: true
+  });
+
+  assert.equal(ledger.status, 'resident-authority-ledger-ready');
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage,
+    'phase-carrier-transfer-v2'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].status,
+    'phase-carrier-transfer-mechanics-drives-next-particles'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].backend,
+    'webgpu'
+  );
+});
+
 test('MLS-MPM resident authority ledger records resident product mass and gas pressure ownership', () => {
   const ledger = buildMlsMpmResidentStepAuthorityLedger({
     step: 2,

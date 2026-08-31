@@ -547,6 +547,31 @@ test('packed mechanics-field scratch keys preserve public x4 order and fail clos
   );
 });
 
+test('directory-v2 mechanics fields omit exact-zero quadratic support before clipping', () => {
+  assert.match(
+    schroederSpatialMechanicsFieldViewV2Wgsl,
+    /fn emit_field_candidates_v2\([\s\S]*let support_weight =[\s\S]*if \(support_weight == 0\.0\) \{[\s\S]*field_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let node_index = field_grid_index/,
+    'directory-v2 must cull mathematical zero support before clipping'
+  );
+
+  const axisWeightsAtHalfCell = [0.5, 0.5, 0];
+  let positiveSupportCount = 0;
+  let zeroSupportCount = 0;
+  for (const wx of axisWeightsAtHalfCell) {
+    for (const wy of axisWeightsAtHalfCell) {
+      for (const wz of axisWeightsAtHalfCell) {
+        if (Math.fround(Math.fround(wx * wy) * wz) === 0) {
+          zeroSupportCount += 1;
+        } else {
+          positiveSupportCount += 1;
+        }
+      }
+    }
+  }
+  assert.equal(positiveSupportCount, 8);
+  assert.equal(zeroSupportCount, 19);
+});
+
 test('mechanics-field direct kernels flatten authenticated two-dimensional dispatches', () => {
   assert.equal(
     ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,

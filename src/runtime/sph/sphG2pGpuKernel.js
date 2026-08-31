@@ -82,6 +82,9 @@ import {
   releasePostSeparationThermalBinAuthorityAfterQueue
 } from './sphPostSeparationThermalBinAuthority.js';
 import {
+  SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+} from './sphReactionMotionEnvelope.js';
+import {
   MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
 } from './sphGridGpuKernel.js';
@@ -157,6 +160,8 @@ const G2P_CANONICAL_PARAMS_BYTES = 144;
 const G2P_ACTIVE_SOURCE_V2_PARAMS_BYTES = 176;
 const SEPARATION_PARAMS_BYTES = 48;
 const SEPARATION_BIN_MAX_CELLS = 262144;
+const MOTION_WATCH_F32 = new Float32Array(1);
+const MOTION_WATCH_U32 = new Uint32Array(MOTION_WATCH_F32.buffer);
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
@@ -172,6 +177,7 @@ const refluxDummyBuffers = new WeakMap();
 const g2pPipelineBundles = new WeakMap();
 const fusedG2pClaims = new WeakMap();
 const fusedG2pOrigins = new WeakMap();
+const postSeparationMotionWatchBinCandidateRecords = new WeakMap();
 const g2pSubmittedTemporaryCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
     producerFamily: 'mls-mpm-g2p-submitted-temporaries'
@@ -2549,7 +2555,11 @@ function separationBinPlan({ boxDimsM, maxPairRestDistanceM, minCellSizeM = 0 })
   // volume drift while keeping the 3x3x3 scan complete. minCellSizeM lets a
   // sharing consumer (thermal conduction, support 2h with scan radius <= 3)
   // demand cells large enough that its clamped scan still covers its support.
-  let cellSizeM = Math.max(1.25 * restDistance, finiteNumber(minCellSizeM, 0));
+  let cellSizeM = Math.max(
+    1.25 * restDistance,
+    finiteNumber(minCellSizeM, 0),
+    1e-9
+  );
   const dims = boxDimsM;
   const cellsFor = (size) => [0, 1, 2].map((axis) => Math.max(1, Math.ceil(dims[axis] / size)));
   let counts = cellsFor(cellSizeM);
@@ -2560,6 +2570,459 @@ function separationBinPlan({ boxDimsM, maxPairRestDistanceM, minCellSizeM = 0 })
     total = counts[0] * counts[1] * counts[2];
   }
   return { cellSizeM, nx: counts[0], ny: counts[1], nz: counts[2], cellCount: total };
+}
+
+function exactTerminalMotionWatchDeviceLimit(device, name) {
+  const value = device?.limits?.[name];
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < 1
+  ) {
+    throw new RangeError(
+      `terminal motion-watch bins require exact device.limits.${name}`
+    );
+  }
+  return value;
+}
+
+function exactTerminalMotionWatchProduct(
+  factors,
+  label,
+  maximum = Number.MAX_SAFE_INTEGER
+) {
+  let product = 1;
+  for (const factor of factors) {
+    if (!Number.isSafeInteger(factor) || factor < 1) {
+      throw new RangeError(`${label} factors must be positive safe integers`);
+    }
+    if (product > Math.floor(maximum / factor)) {
+      throw new RangeError(`${label} exceeds its exact integer domain`);
+    }
+    product *= factor;
+  }
+  return product;
+}
+
+function exactTerminalMotionWatchPositiveF32(value, label) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${label} must be a positive finite number`);
+  }
+  MOTION_WATCH_F32[0] = value;
+  const rounded = MOTION_WATCH_F32[0];
+  const absoluteBits = MOTION_WATCH_U32[0] & 0x7fff_ffff;
+  if (
+    !Number.isFinite(rounded)
+    || rounded <= 0
+    || absoluteBits >= 0x7f7f_ffff
+  ) {
+    throw new RangeError(`${label} is outside the admitted finite f32 domain`);
+  }
+  return rounded;
+}
+
+function exactTerminalMotionWatchVector3(value, label) {
+  if (
+    (!Array.isArray(value) && !ArrayBuffer.isView(value))
+    || value.length !== 3
+  ) {
+    throw new TypeError(`${label} must contain exactly three dimensions`);
+  }
+  return [0, 1, 2].map((axis) => exactTerminalMotionWatchPositiveF32(
+    value[axis],
+    `${label}[${axis}]`
+  ));
+}
+
+function terminalMotionWatchBinDevicePlan({
+  device,
+  particleCount,
+  stateBuffer,
+  mechanicsBuffer,
+  binPlan
+}) {
+  const limits = Object.freeze({
+    maxBufferSize: exactTerminalMotionWatchDeviceLimit(
+      device,
+      'maxBufferSize'
+    ),
+    maxStorageBufferBindingSize: exactTerminalMotionWatchDeviceLimit(
+      device,
+      'maxStorageBufferBindingSize'
+    ),
+    maxUniformBufferBindingSize: exactTerminalMotionWatchDeviceLimit(
+      device,
+      'maxUniformBufferBindingSize'
+    ),
+    maxStorageBuffersPerShaderStage: exactTerminalMotionWatchDeviceLimit(
+      device,
+      'maxStorageBuffersPerShaderStage'
+    ),
+    maxComputeWorkgroupsPerDimension: exactTerminalMotionWatchDeviceLimit(
+      device,
+      'maxComputeWorkgroupsPerDimension'
+    )
+  });
+  if (limits.maxStorageBuffersPerShaderStage < 3) {
+    throw new RangeError(
+      'terminal motion-watch bins require three storage buffers per shader stage'
+    );
+  }
+  if (
+    SEPARATION_PARAMS_BYTES > limits.maxBufferSize
+    || SEPARATION_PARAMS_BYTES > limits.maxUniformBufferBindingSize
+  ) {
+    throw new RangeError(
+      'terminal motion-watch bin params exceed the exact uniform device limit'
+    );
+  }
+  const stateByteLength = exactTerminalMotionWatchProduct(
+    [particleCount, 2, 4, Float32Array.BYTES_PER_ELEMENT],
+    'terminal motion-watch state byte length'
+  );
+  const mechanicsByteLength = exactTerminalMotionWatchProduct(
+    [particleCount, 8, 4, Float32Array.BYTES_PER_ELEMENT],
+    'terminal motion-watch mechanics byte length'
+  );
+  const binWordLength = exactTerminalMotionWatchProduct(
+    [binPlan.cellCount, 1 + SEPARATION_BIN_CAPACITY],
+    'terminal motion-watch bin word length',
+    0xffff_ffff
+  );
+  const binByteLength = exactTerminalMotionWatchProduct(
+    [binWordLength, Uint32Array.BYTES_PER_ELEMENT],
+    'terminal motion-watch bin byte length'
+  );
+  for (const [label, byteLength] of [
+    ['stateBuffer', stateByteLength],
+    ['mechanicsBuffer', mechanicsByteLength],
+    ['binsBuffer', binByteLength]
+  ]) {
+    if (
+      byteLength > limits.maxBufferSize
+      || byteLength > limits.maxStorageBufferBindingSize
+    ) {
+      throw new RangeError(
+        `terminal motion-watch ${label} exceeds the exact storage device limit`
+      );
+    }
+  }
+  for (const [label, buffer, minimumBytes] of [
+    ['stateBuffer', stateBuffer, stateByteLength],
+    ['mechanicsBuffer', mechanicsBuffer, mechanicsByteLength]
+  ]) {
+    if (
+      typeof buffer?.size !== 'number'
+      || !Number.isSafeInteger(buffer.size)
+      || buffer.size < minimumBytes
+      || buffer.size > limits.maxBufferSize
+    ) {
+      throw new RangeError(
+        `terminal motion-watch ${label} has an invalid exact byte length`
+      );
+    }
+  }
+  const dispatchWorkgroups = Math.max(1, Math.ceil(particleCount / 64));
+  if (
+    !Number.isSafeInteger(dispatchWorkgroups)
+    || dispatchWorkgroups > limits.maxComputeWorkgroupsPerDimension
+  ) {
+    throw new RangeError(
+      'terminal motion-watch bin fill exceeds the exact compute-dispatch limit'
+    );
+  }
+  return Object.freeze({
+    ...limits,
+    stateByteLength,
+    mechanicsByteLength,
+    binWordLength,
+    binByteLength,
+    dispatchWorkgroups
+  });
+}
+
+/**
+ * Resolve the private same-encoder brand minted only by the post-separation
+ * refill below. A structurally identical object, a stale candidate from a
+ * different encoder, or bins for a different state/mechanics family cannot
+ * satisfy this lookup.
+ */
+export function resolvePostSeparationMotionWatchBinCandidate(candidate, {
+  device,
+  encoder,
+  stateBuffer,
+  mechanicsBuffer,
+  particleCount
+} = {}) {
+  const record = postSeparationMotionWatchBinCandidateRecords.get(candidate);
+  if (
+    !record
+    || record.candidate !== candidate
+    || !Object.isFrozen(candidate)
+    || record.device !== device
+    || record.encoder !== encoder
+    || record.stateBuffer !== stateBuffer
+    || record.mechanicsBuffer !== mechanicsBuffer
+    || record.particleCount !== particleCount
+    || candidate.stateBuffer !== record.stateBuffer
+    || candidate.binsBuffer !== record.binsBuffer
+    || candidate.particleCount !== record.particleCount
+    || candidate.capacity !== record.capacity
+    || candidate.nx !== record.nx
+    || candidate.ny !== record.ny
+    || candidate.nz !== record.nz
+    || candidate.cellCount !== record.cellCount
+    || candidate.cellSizeM !== record.cellSizeM
+    || record.cellSizeM < 1e-9
+    || !webGpuBufferMatchesDevice(record.stateBuffer, device)
+    || !webGpuBufferMatchesDevice(record.mechanicsBuffer, device)
+    || !webGpuBufferMatchesDevice(record.binsBuffer, device)
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+/**
+ * Encode only the terminal massive-particle bin fill used by the compact
+ * reaction motion watch. Unlike the separation runner below, this performs no
+ * correction or state mutation. The candidate is privately branded to the
+ * exact device, encoder, state/mechanics family, and fixed carrier-slot count;
+ * its two transient buffers must remain live through the caller's submission.
+ */
+export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
+  stateBuffer,
+  mechanicsBuffer,
+  particleCount,
+  boxDimsM = DEFAULT_BOX_DIMS_M,
+  cellSizeFloorM = 0
+} = {}) {
+  if (
+    !device?.createBuffer
+    || !device.queue?.writeBuffer
+    || !encoder?.beginComputePass
+    || typeof encoder.clearBuffer !== 'function'
+  ) {
+    throw new TypeError(
+      'terminal motion-watch bins require a WebGPU-like device and encoder'
+    );
+  }
+  if (
+    !Number.isSafeInteger(particleCount)
+    || particleCount < 1
+    || particleCount > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+  ) {
+    throw new RangeError(
+      'terminal motion-watch particleCount must be an exact positive f32 integer'
+    );
+  }
+  if (
+    !webGpuBufferMatchesDevice(stateBuffer, device)
+    || !webGpuBufferMatchesDevice(mechanicsBuffer, device)
+  ) {
+    throw new TypeError(
+      'terminal motion-watch bins require exact same-device state and mechanics buffers'
+    );
+  }
+  const minimumCellSizeM = exactTerminalMotionWatchPositiveF32(
+    cellSizeFloorM,
+    'terminal motion-watch cellSizeFloorM'
+  );
+  const dims = exactTerminalMotionWatchVector3(
+    boxDimsM,
+    'terminal motion-watch boxDimsM'
+  );
+  const rawBinPlan = separationBinPlan({
+    boxDimsM: dims,
+    // separationBinPlan requires a positive rest-distance seed. The floor is
+    // the real contract here; the watch itself expands its scan radius for
+    // rule, CFL, store-rounding, and separation reach and seals a sentinel if
+    // that bounded scan cannot fit.
+    maxPairRestDistanceM: Math.max(minimumCellSizeM / 1.25, 1e-9),
+    minCellSizeM: minimumCellSizeM
+  });
+  if (!rawBinPlan) {
+    throw new Error('terminal motion-watch bin plan was unavailable');
+  }
+  const binPlan = Object.freeze({
+    ...rawBinPlan,
+    cellSizeM: exactTerminalMotionWatchPositiveF32(
+      rawBinPlan.cellSizeM,
+      'terminal motion-watch bin cellSizeM'
+    )
+  });
+  const exactCellCount = exactTerminalMotionWatchProduct(
+    [binPlan.nx, binPlan.ny, binPlan.nz],
+    'terminal motion-watch bin cell-count product',
+    0xffff_ffff
+  );
+  if (
+    ![binPlan.nx, binPlan.ny, binPlan.nz].every(
+      (axis) => Number.isSafeInteger(axis) && axis >= 1 && axis <= 0x7fff_ffff
+    )
+    || !Number.isSafeInteger(binPlan.cellCount)
+    || binPlan.cellCount !== exactCellCount
+  ) {
+    throw new RangeError(
+      'terminal motion-watch bin layout is outside the exact u32/i32 domain'
+    );
+  }
+  const devicePlan = terminalMotionWatchBinDevicePlan({
+    device,
+    particleCount,
+    stateBuffer,
+    mechanicsBuffer,
+    binPlan
+  });
+
+  const ownedBuffers = [];
+  try {
+    const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-mls-mpm-terminal-motion-watch-bin-params',
+      size: SEPARATION_PARAMS_BYTES,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+    ownedBuffers.push(paramsBuffer);
+    if (paramsBuffer.size !== SEPARATION_PARAMS_BYTES) {
+      throw new RangeError(
+        'terminal motion-watch bin params allocation has a torn byte length'
+      );
+    }
+    const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
+    const view = new DataView(paramsData);
+    view.setUint32(0, particleCount, true);
+    // Bin fill only checks that at least one separation control is positive;
+    // this value enables the fill without authorizing a correction pass.
+    view.setFloat32(4, 1, true);
+    view.setFloat32(8, dims[0], true);
+    view.setFloat32(12, dims[1], true);
+    view.setFloat32(16, dims[2], true);
+    view.setFloat32(20, 0, true);
+    view.setUint32(24, binPlan.nx, true);
+    view.setUint32(28, binPlan.ny, true);
+    view.setUint32(32, binPlan.nz, true);
+    view.setUint32(36, SEPARATION_BIN_CAPACITY, true);
+    view.setFloat32(40, binPlan.cellSizeM, true);
+    view.setFloat32(44, minimumCellSizeM, true);
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const binsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-mls-mpm-terminal-motion-watch-bins',
+      size: devicePlan.binByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+    ownedBuffers.push(binsBuffer);
+    if (binsBuffer.size !== devicePlan.binByteLength) {
+      throw new RangeError(
+        'terminal motion-watch bin allocation has a torn byte length'
+      );
+    }
+    const pipelineInfo = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-terminal-motion-watch-bin-fill.v1',
+      label: 'ulg-mls-mpm-terminal-motion-watch-bin-fill',
+      code: mlsMpmParticleSeparationBinFillWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform')
+      ]
+    });
+    const bindGroup = device.createBindGroup({
+      label: 'ulg-mls-mpm-terminal-motion-watch-bin-fill-bindings',
+      layout: pipelineInfo.bindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: stateBuffer,
+            offset: 0,
+            size: devicePlan.stateByteLength
+          }
+        },
+        {
+          binding: 1,
+          resource: {
+            buffer: mechanicsBuffer,
+            offset: 0,
+            size: devicePlan.mechanicsByteLength
+          }
+        },
+        {
+          binding: 2,
+          resource: {
+            buffer: binsBuffer,
+            offset: 0,
+            size: devicePlan.binByteLength
+          }
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: paramsBuffer,
+            offset: 0,
+            size: SEPARATION_PARAMS_BYTES
+          }
+        }
+      ]
+    });
+    encoder.clearBuffer(
+      binsBuffer,
+      0,
+      Math.max(
+        4,
+        binPlan.cellCount * Uint32Array.BYTES_PER_ELEMENT
+      )
+    );
+    const pass = encoder.beginComputePass({
+      label: 'ulg-mls-mpm-terminal-motion-watch-bin-fill'
+    });
+    pass.setPipeline(pipelineInfo.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(devicePlan.dispatchWorkgroups);
+    pass.end();
+
+    const candidate = Object.freeze({
+      stateBuffer,
+      binsBuffer,
+      particleCount,
+      capacity: SEPARATION_BIN_CAPACITY,
+      nx: binPlan.nx,
+      ny: binPlan.ny,
+      nz: binPlan.nz,
+      cellCount: binPlan.cellCount,
+      cellSizeM: binPlan.cellSizeM
+    });
+    postSeparationMotionWatchBinCandidateRecords.set(candidate, {
+      candidate,
+      device,
+      encoder,
+      stateBuffer,
+      mechanicsBuffer,
+      binsBuffer,
+      particleCount,
+      capacity: SEPARATION_BIN_CAPACITY,
+      nx: binPlan.nx,
+      ny: binPlan.ny,
+      nz: binPlan.nz,
+      cellCount: binPlan.cellCount,
+      cellSizeM: binPlan.cellSizeM
+    });
+    return Object.freeze({
+      enabled: true,
+      motionWatchOnly: true,
+      fixedCarrierSlotCount: particleCount,
+      transientBuffers: Object.freeze([...ownedBuffers]),
+      postSeparationThermalBinCandidate: candidate,
+      neighborBinsRefreshedAfterSeparation: true
+    });
+  } catch (error) {
+    for (const buffer of ownedBuffers) {
+      try { buffer.destroy?.(); } catch {}
+    }
+    throw error;
+  }
 }
 
 /**
@@ -2663,11 +3126,11 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     // Combined layout: counts prefix [0, cellCount), then entry slots. One
     // buffer keeps every consumer within the default 10-storage-buffer
     // per-stage device limit.
-    const binsBuffer = device.createBuffer({
+    const binsBuffer = tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-mls-mpm-separation-bins',
       size: Math.max(4, binPlan.cellCount * (1 + SEPARATION_BIN_CAPACITY) * 4),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    });
+    }), device);
     activeScratch = {
       particleCount,
       cellCount: binPlan.cellCount,
@@ -2835,6 +3298,24 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     cellCount: activeScratch.cellCount,
     cellSizeM: activeScratch.cellSizeM
   });
+  postSeparationMotionWatchBinCandidateRecords.set(
+    postSeparationThermalBinCandidate,
+    {
+      candidate: postSeparationThermalBinCandidate,
+      device,
+      encoder,
+      stateBuffer,
+      mechanicsBuffer,
+      binsBuffer: activeScratch.binsBuffer,
+      particleCount,
+      capacity: activeScratch.capacity,
+      nx: activeScratch.nx,
+      ny: activeScratch.ny,
+      nz: activeScratch.nz,
+      cellCount: activeScratch.cellCount,
+      cellSizeM: activeScratch.cellSizeM
+    }
+  );
   return {
     enabled: true,
     transientBuffers: activeScratch.transientBuffers,

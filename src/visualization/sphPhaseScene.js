@@ -76,6 +76,9 @@ import {
 } from '../runtime/sph/sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.js';
 import {
+  SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+} from '../runtime/sph/sphReactionMotionEnvelope.js';
+import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
@@ -89,6 +92,7 @@ import {
   createSchroederAdoptedParticleStorageDescriptorFromStep,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  isExactQuiescentSphReactionTable,
   normalizePressureInterfaceGasCellFieldImport,
   normalizeMlsMpmActiveGridPlanRefreshMode,
   normalizeMlsMpmResidentCompactSummaryMode,
@@ -100,11 +104,27 @@ import {
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   ULG_SCHROEDER_WORKER_LANE_AUTHORITY_SCHEMA,
+  createSchroederTargetScheduleAuthority,
+  createSchroederTargetScheduleConfiguration,
+  createSchroederTargetScheduleProviderAuthority,
   createSchroederWorkerHierarchyConfig,
   createSchroederWorkerResidentStepOptions,
   estimateSchroederWorkerLaneSeedUploadBytes,
   runSchroederWorkerLaneScheduleWithAuthority
 } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
+import {
+  SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND,
+  schroederTargetScheduleSuccessorGasBoundaryActionable,
+  schroederTargetScheduleSuccessorReactionExecutionRequired
+} from '../runtime/sph/schroederTargetScheduleAuthority.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+  SCHROEDER_REACTION_ACTIVATION_POLICY_AUTHORITATIVE,
+  SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW,
+  normalizeSchroederReactionActivationPolicy
+} from '../runtime/sph/schroederDynamicLawRoutingContract.js';
 import {
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_NO_FULL_READBACK_MODE,
@@ -15165,6 +15185,19 @@ export function createSphPhaseScene(container, {
   // failed/timed-out lane is poisoned and the next attempt seeds a fresh
   // lane id so the retained worker record can never be half-adopted).
   let workerSchroederLaneState = null;
+  let workerSchroederLaneBridgeReference = null;
+  const workerSchroederSceneIncarnation = (() => {
+    try {
+      const uuid = globalThis.crypto?.randomUUID?.();
+      if (typeof uuid === 'string' && uuid.length > 0) return uuid;
+    } catch {
+      // The time/random fallback still prevents counter-only warm-key reuse
+      // in browsers that expose Crypto without randomUUID permission.
+    }
+    return `${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 12)}`;
+  })();
   let workerSchroederLaneSequence = 0;
   let workerSchroederLaneScheduleSequence = 0;
   let workerOffscreenResidentStageChainAutoPromise = null;
@@ -17216,6 +17249,8 @@ export function createSphPhaseScene(container, {
   let currentRenderDomainCounts = null;
   let currentPhysicalLawGroups = null;
   let currentRequestedPhysicalLawGroups = null;
+  let currentReactionActivationPolicy =
+    SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW;
   let currentSurfaceTensionLawAdmission = null;
   let sphResidentMaterialInterfaceState = null;
   let sphResidentRenderState = null;
@@ -21904,6 +21939,8 @@ export function createSphPhaseScene(container, {
     compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
     schroederSimulation = false,
+    reactionActivationPolicy =
+      SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW,
     contactJacobiIterations = null,
     contactCleanupPassBudget = null,
     contactInnerRounds = null,
@@ -21951,6 +21988,10 @@ export function createSphPhaseScene(container, {
       normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
       residentSourceMode,
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
+      `reactionActivationPolicy=${normalizeSchroederReactionActivationPolicy(
+        reactionActivationPolicy,
+        SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW
+      )}`,
       `contactJacobi=${contactJacobiIterations ?? 'preset'}`,
       `contactCleanup=${contactCleanupPassBudget ?? 'preset'}`,
       `contactInnerRounds=${contactInnerRounds ?? 'preset'}`,
@@ -36456,7 +36497,12 @@ fn main(
     const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
     const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
-    const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
+    // Dynamic reaction routing is admitted only by the serialized multi-step
+    // SS worker lane below. This direct single-step path consumes the already
+    // resolved effective law groups and never provisions a dormant watcher.
+    const effectiveReactionTable = lawGroups.reactions
+      ? sphReactionTable
+      : null;
     const resolvedSceneThermalStepOptions =
       resolveSphSceneThermalStepOptions({
         wallTemperaturesK: currentWallTemperaturesK,
@@ -36495,6 +36541,7 @@ fn main(
       thermalEnvironmentAuthority:
         resolvedSceneThermalStepOptions.thermalEnvironmentAuthority,
       physicalLawGroups: lawGroups,
+      reactionActivationPolicy: currentReactionActivationPolicy,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
       contactCleanupProfileReadback:
@@ -37029,7 +37076,43 @@ fn main(
     const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
     const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
-    const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
+    let authoritativeDynamicReactionRouting = false;
+    let effectiveReactionActivationWatchTable = null;
+    if (
+      schroederSimulation === true
+      && currentReactionActivationPolicy
+        === SCHROEDER_REACTION_ACTIVATION_POLICY_AUTHORITATIVE
+      && currentRequestedPhysicalLawGroups?.reactions === true
+      && sphReactionTable != null
+    ) {
+      const dormantReactionCount = sphReactionTable.reactionCount;
+      if (
+        !Number.isSafeInteger(dormantReactionCount)
+        || Object.is(dormantReactionCount, -0)
+        || dormantReactionCount < 0
+        || dormantReactionCount
+          > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+      ) {
+        throw new RangeError(
+          'authoritative dormant reaction watch count is outside the exact f32/u32 domain'
+        );
+      }
+      if (dormantReactionCount === 0) {
+        if (!isExactQuiescentSphReactionTable(sphReactionTable)) {
+          throw new RangeError(
+            'zero-count authoritative dormant reaction watch table is not the exact empty artifact'
+          );
+        }
+      } else {
+        authoritativeDynamicReactionRouting = true;
+        effectiveReactionActivationWatchTable = sphReactionTable;
+      }
+    }
+    const effectiveReactionTable = authoritativeDynamicReactionRouting
+      ? null
+      : lawGroups.reactions
+        ? sphReactionTable
+        : null;
     const resolvedSceneThermalStepOptions =
       resolveSphSceneThermalStepOptions({
         wallTemperaturesK: currentWallTemperaturesK,
@@ -37038,6 +37121,23 @@ fn main(
         thermalEnvironmentAuthority: currentThermalEnvironmentAuthority,
         overrides: thermalStepOptionOverrides
       });
+    // Only an explicit authoritative policy provisions a dormant descriptor.
+    // The reactions checkbox remains hard user intent: unchecked means no
+    // executable table and no watcher. Shadow/default preserves static
+    // execution, while the authoritative SS lane starts dormant and may
+    // consume only its presealed active successor.
+    scene.userData.sphDynamicReactionRoutingPolicy = Object.freeze({
+      schema: 'peercompute.ulg.sph-scene-dynamic-reaction-routing-policy.v0',
+      status: authoritativeDynamicReactionRouting
+        ? 'authoritative-dormant-watch-ready'
+        : currentRequestedPhysicalLawGroups?.reactions === false
+          ? 'hard-user-off'
+          : 'static-or-shadow-policy',
+      policy: currentReactionActivationPolicy,
+      requestedReaction: currentRequestedPhysicalLawGroups?.reactions === true,
+      executableReaction: effectiveReactionTable != null,
+      dormantWatch: effectiveReactionActivationWatchTable != null
+    });
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
     const requestedWorkerLaneProgressEverySteps =
       normalizeResidentStepCount(workerLaneProgressEverySteps);
@@ -37919,6 +38019,7 @@ fn main(
       thermalEnvironmentAuthority:
         resolvedSceneThermalStepOptions.thermalEnvironmentAuthority,
       physicalLawGroups: lawGroups,
+      reactionActivationPolicy: currentReactionActivationPolicy,
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
@@ -40530,7 +40631,13 @@ fn main(
               requestedSchroederTwoLevelFineSubstepCount,
             hierarchyConfig: requestedSchroederWorkerHierarchyConfig,
             residentStepOptions:
-              createSchroederWorkerResidentStepOptions(residentStepsOptions),
+              createSchroederWorkerResidentStepOptions({
+                ...residentStepsOptions,
+                reactionActivationWatchTable:
+                  effectiveReactionActivationWatchTable
+              }),
+            dynamicReactionRoutingAllowed:
+              authoritativeDynamicReactionRouting,
             requestedReadbackMode,
             markResidentStepsProgress,
             computeManager,
@@ -40728,6 +40835,7 @@ fn main(
             ambientPressurePa: effectiveAmbientPressurePa,
             ambientPressureEvidence: resolvedAmbientPressureEvidence,
             physicalLawGroups: lawGroups,
+            reactionActivationPolicy: currentReactionActivationPolicy,
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
             fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
             measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
@@ -42756,6 +42864,7 @@ fn main(
     renderDomainCounts = null,
     physicalLawGroups = null,
     requestedPhysicalLawGroups = null,
+    reactionActivationPolicy = null,
     surfaceTensionLawAdmission = null,
     wallTemperaturesK = null,
     wallReservoirAuthority = null,
@@ -42814,6 +42923,11 @@ fn main(
     currentRequestedPhysicalLawGroups = normalizePhysicalLawGroups(
       requestedPhysicalLawGroups ?? physicalLawGroups
     );
+    currentReactionActivationPolicy =
+      normalizeSchroederReactionActivationPolicy(
+        reactionActivationPolicy,
+        SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW
+      );
     currentSurfaceTensionLawAdmission = surfaceTensionLawAdmission || null;
     currentPhysicalLawGroups.surfaceTension = Boolean(
       currentPhysicalLawGroups.surfaceTension
@@ -42851,6 +42965,8 @@ fn main(
     scene.userData.sphRequestedPhysicalLawGroups = {
       ...currentRequestedPhysicalLawGroups
     };
+    scene.userData.sphReactionActivationPolicy =
+      currentReactionActivationPolicy;
     scene.userData.sphSurfaceTensionLawAdmission =
       currentSurfaceTensionLawAdmission;
     scene.userData.sphThermalEnvironmentAuthority =
@@ -52349,6 +52465,7 @@ fn main(
     twoLevelFineSubstepCount = 1,
     hierarchyConfig = null,
     residentStepOptions = null,
+    dynamicReactionRoutingAllowed = false,
     requestedReadbackMode = 'no-full-readback',
     markResidentStepsProgress = () => {},
     computeManager = null,
@@ -52381,17 +52498,21 @@ fn main(
       1,
       Math.round(Number(progressEverySteps) || 1)
     );
+    const requestedDynamicReactionRoutingAllowed =
+      dynamicReactionRoutingAllowed === true;
     // Lane admission: one seed per lane; a poisoned or bridge-recycled lane
     // is abandoned and a FRESH lane id is seeded (the worker refuses reseeds
     // and re-entry on retained lanes by contract).
     if (
       !workerSchroederLaneState
       || workerSchroederLaneState.poisoned
+      || workerSchroederLaneBridgeReference !== bridge
       || workerSchroederLaneState.bridgeLifecycleGeneration !== bridge.lifecycleGeneration
       || workerSchroederLaneState.configurationSignature !== configurationSignature
     ) {
       const supersededLane = (
         workerSchroederLaneState
+        && workerSchroederLaneBridgeReference === bridge
         && workerSchroederLaneState.bridgeLifecycleGeneration
           === bridge.lifecycleGeneration
       )
@@ -52401,20 +52522,41 @@ fn main(
           }
         : null;
       workerSchroederLaneSequence += 1;
-      const laneId = `ulg:scene:ss-worker-lane:${workerSchroederLaneSequence}`;
+      const laneId =
+        `ulg:scene:ss-worker-lane:${workerSchroederSceneIncarnation}`
+        + `:${workerSchroederLaneSequence}`;
       workerSchroederLaneState = {
-        schema: 'peercompute.ulg.sph-scene-worker-schroeder-lane-state.v0',
+        schema: 'peercompute.ulg.sph-scene-worker-schroeder-lane-state.v1',
         laneId,
         stateKey: `${laneId}:state`,
         seeded: false,
         poisoned: false,
         seedLineage: null,
+        terminalLineage: null,
+        terminalParticleCount: null,
+        terminalPhaseLaneCount: null,
+        pendingTargetScheduleAuthority: null,
+        pendingDynamicLawObservation: null,
+        inFlightDynamicLawTargetScheduleRequestId: null,
+        lastConsumedDynamicLawTargetScheduleRequestId: null,
+        dynamicReactionRoutingAllowed:
+          requestedDynamicReactionRoutingAllowed,
+        dynamicReactionActivation:
+          Object.freeze({
+            state: 'dormant',
+            transitionFingerprint: null,
+            committedScheduleId: null
+          }),
+        dynamicReactionActivationReceipt: null,
+        retainedProductGasTransitionReceipt: null,
         simTimeS: 0,
         completedStepTotal: 0,
         supersededLane,
+        sceneIncarnation: workerSchroederSceneIncarnation,
         bridgeLifecycleGeneration: bridge.lifecycleGeneration,
         configurationSignature
       };
+      workerSchroederLaneBridgeReference = bridge;
     }
     const laneState = workerSchroederLaneState;
     const { laneId, stateKey } = laneState;
@@ -52576,6 +52718,12 @@ fn main(
       laneState.seeded = true;
       laneState.supersededLane = null;
       laneState.seedLineage = { ...lineage.words };
+      laneState.terminalLineage = { ...lineage.words };
+      laneState.terminalParticleCount = particleCount;
+      laneState.terminalPhaseLaneCount = Number(
+        sphParticleUpload?.phaseCarrierPlan?.phaseLaneCount
+        ?? sphParticleState?.phaseCarrierPlan?.phaseLaneCount
+      );
       laneState.simTimeS = Number(sphParticleState?.time) || 0;
       markResidentStepsProgress('resident-steps-worker-lane-seeded', {
         laneId,
@@ -52586,7 +52734,255 @@ fn main(
     }
     workerSchroederLaneScheduleSequence += 1;
     const scheduleId = `${laneId}:schedule:${workerSchroederLaneScheduleSequence}`;
+    const nextScheduleRequestId =
+      `${laneId}:schedule:${workerSchroederLaneScheduleSequence + 1}`;
+    const predecessorDynamicLawObservation =
+      laneState.pendingDynamicLawObservation ?? null;
+    const predecessorTargetScheduleAuthority =
+      predecessorDynamicLawObservation == null
+        ? null
+        : laneState.pendingTargetScheduleAuthority ?? null;
+    const predecessorTargetScheduleRequestId =
+      predecessorDynamicLawObservation?.targetScheduleRequestId ?? null;
+    if (
+      predecessorDynamicLawObservation != null
+      && predecessorTargetScheduleAuthority == null
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'predecessor-target-token-state-unavailable',
+        'the committed predecessor observation has no retained main authority'
+      );
+    }
+    if (laneState.inFlightDynamicLawTargetScheduleRequestId != null) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'predecessor-target-token-already-in-flight',
+        `target request ${laneState.inFlightDynamicLawTargetScheduleRequestId} is already being consumed`
+      );
+    }
+    if (
+      predecessorTargetScheduleRequestId != null
+      && predecessorTargetScheduleRequestId
+        === laneState.lastConsumedDynamicLawTargetScheduleRequestId
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'predecessor-target-token-replayed',
+        `target request ${predecessorTargetScheduleRequestId} was already consumed`
+      );
+    }
     const scheduleTimeoutMs = Math.max(60000, requestedStepCount * 4000);
+    const laneContinuationClassifierOptions = {
+      ...(workerHierarchyConfig.baseGridSpacingM != null
+        ? { baseGridSpacingM: workerHierarchyConfig.baseGridSpacingM }
+        : {}),
+      ...(workerHierarchyConfig.minLevel != null
+        ? { minLevel: workerHierarchyConfig.minLevel }
+        : {}),
+      ...(workerHierarchyConfig.maxLevel != null
+        ? { maxLevel: workerHierarchyConfig.maxLevel }
+        : {}),
+      chartId: 0
+    };
+    const targetScheduleProviderAuthority =
+      createSchroederTargetScheduleProviderAuthority({
+        kind: 'worker-lane-assignment-only',
+        classifierOptions: laneContinuationClassifierOptions
+      });
+    const targetScheduleEpochOptions = {
+      hierarchyConfig: workerHierarchyConfig,
+      enableMechanicsFieldPairV2:
+        workerHierarchyConfig.enableMechanicsFieldPairV2,
+      enableTwoLevelMechanics:
+        workerHierarchyConfig.enableTwoLevelMechanics,
+      enablePhaseVolumeMigration:
+        workerHierarchyConfig.enablePhaseVolumeMigration
+    };
+    const targetScheduleMechanicsOptions = {
+      hierarchyConfig: workerHierarchyConfig,
+      enableMechanicsFieldPairV2:
+        workerHierarchyConfig.enableMechanicsFieldPairV2,
+      enableTwoLevelMechanics:
+        workerHierarchyConfig.enableTwoLevelMechanics,
+      enableLawQueue: workerHierarchyConfig.enableLawQueue,
+      enableLawNeighborCandidates:
+        workerHierarchyConfig.enableLawNeighborCandidates,
+      enableCrossLevelCoupling:
+        workerHierarchyConfig.enableCrossLevelCoupling,
+      enablePhaseVolumeMigration:
+        workerHierarchyConfig.enablePhaseVolumeMigration
+    };
+    if (
+      laneState.dynamicReactionRoutingAllowed
+        !== requestedDynamicReactionRoutingAllowed
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'dynamic-reaction-routing-policy-drift',
+        'the retained lane dynamic-reaction policy differs from the current schedule request'
+      );
+    }
+    const dormantReactionCatalog = requestedDynamicReactionRoutingAllowed
+      ? residentStepOptions?.reactionActivationWatchTable ?? null
+      : null;
+    const dormantReactionCount = Number(
+      dormantReactionCatalog?.reactionCount
+    );
+    if (
+      requestedDynamicReactionRoutingAllowed
+      && (
+        !dormantReactionCatalog
+        || !Number.isSafeInteger(dormantReactionCount)
+        || Object.is(dormantReactionCount, -0)
+        || dormantReactionCount < 1
+        || dormantReactionCount
+          > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+        || (
+          residentStepOptions?.reactionTable != null
+          && !isExactQuiescentSphReactionTable(
+            residentStepOptions.reactionTable
+          )
+        )
+      )
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'dynamic-reaction-dormant-catalog-unavailable',
+        'authoritative routing requires one exact positive dormant reaction table and no executing reaction table at lane admission'
+      );
+    }
+    const dormantResidentStepOptions = requestedDynamicReactionRoutingAllowed
+      ? createSchroederWorkerResidentStepOptions({
+          ...residentStepOptions,
+          reactionTable: null,
+          reactionActivationWatchTable: dormantReactionCatalog
+        })
+      : residentStepOptions;
+    const activeResidentStepOptions = requestedDynamicReactionRoutingAllowed
+      ? createSchroederWorkerResidentStepOptions({
+          ...residentStepOptions,
+          reactionTable: dormantReactionCatalog,
+          reactionActivationWatchTable: null
+        })
+      : residentStepOptions;
+    const predecessorReactionExecutionRequired = Boolean(
+      requestedDynamicReactionRoutingAllowed
+      && schroederTargetScheduleSuccessorReactionExecutionRequired({
+        predecessorTargetScheduleAuthority,
+        predecessorDynamicLawObservation
+      })
+    );
+    const committedReactionExecution = Boolean(
+      requestedDynamicReactionRoutingAllowed
+      && laneState.dynamicReactionActivation?.state === 'active'
+    );
+    const dynamicReactionTransitionScheduled = Boolean(
+      predecessorReactionExecutionRequired
+      && !committedReactionExecution
+    );
+    const scheduleReactionExecutionRequired = Boolean(
+      committedReactionExecution
+      || dynamicReactionTransitionScheduled
+    );
+    if (
+      committedReactionExecution
+      && laneState.terminalPhaseLaneCount !== 4
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'dynamic-reaction-active-topology-unavailable',
+        'a committed dynamic reaction lane must retain the canonical four-carrier topology'
+      );
+    }
+    if (
+      dynamicReactionTransitionScheduled
+      && ![1, 4].includes(laneState.terminalPhaseLaneCount)
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'dynamic-reaction-transition-source-topology-invalid',
+        'the dormant-to-executing transition requires an exact single-carrier Tier0 source or an already provisioned four-carrier source'
+      );
+    }
+    const scheduleResidentStepOptions = scheduleReactionExecutionRequired
+      ? activeResidentStepOptions
+      : dormantResidentStepOptions;
+    const scheduleResidentStepOptionsRefreshRequired = Boolean(
+      laneSeededThisSchedule
+      || dynamicReactionTransitionScheduled
+    );
+    let targetScheduleAuthority;
+    try {
+      const targetConfigurationOptions = {
+        maxFutureSubsteps: requestedStepCount,
+        dtS: dt,
+        gridSpacingM,
+        cflFactor,
+        boxDimsM,
+        residentStepOptions: scheduleResidentStepOptions,
+        epochOptions: targetScheduleEpochOptions,
+        mechanicsOptions: targetScheduleMechanicsOptions,
+        hierarchyConfig: workerHierarchyConfig,
+        scheduleStepOptionsProvider: targetScheduleProviderAuthority
+      };
+      const staticTargetConfiguration =
+        createSchroederTargetScheduleConfiguration(
+          targetConfigurationOptions
+        );
+      const predecessorRetainedProductGasActionable =
+        schroederTargetScheduleSuccessorGasBoundaryActionable({
+          predecessorTargetScheduleAuthority,
+          predecessorDynamicLawObservation
+        });
+      let prospectiveTargetConfiguration = null;
+      if (
+        requestedDynamicReactionRoutingAllowed
+        && !scheduleReactionExecutionRequired
+        && staticTargetConfiguration.writerSet.reaction === false
+        && staticTargetConfiguration.tableFingerprints
+          .watchReactionTableSource
+            === 'reaction-activation-watch-table'
+      ) {
+        prospectiveTargetConfiguration =
+          createSchroederTargetScheduleConfiguration({
+            ...targetConfigurationOptions,
+            residentStepOptions: activeResidentStepOptions
+          });
+      } else if (
+        !predecessorRetainedProductGasActionable
+        && staticTargetConfiguration.writerSet.reaction === true
+        && staticTargetConfiguration.writerSet.gasBoundaryActionable === false
+      ) {
+        prospectiveTargetConfiguration =
+          createSchroederTargetScheduleConfiguration({
+            ...targetConfigurationOptions,
+            retainedProductGasBoundaryActionable: true
+          });
+      }
+      targetScheduleAuthority = createSchroederTargetScheduleAuthority({
+        sourceScheduleId: scheduleId,
+        targetScheduleRequestId: nextScheduleRequestId,
+        laneId,
+        stateKey,
+        sourceLineage: laneState.terminalLineage,
+        sourceParticleCount: laneState.terminalParticleCount,
+        sourcePhaseLaneCount: laneState.terminalPhaseLaneCount,
+        predecessorDynamicLawObservation,
+        predecessorTargetScheduleAuthority,
+        prospectiveTargetConfiguration,
+        ...targetConfigurationOptions
+      });
+    } catch (error) {
+      if (predecessorTargetScheduleRequestId != null) {
+        laneState.pendingDynamicLawObservation = null;
+        laneState.pendingTargetScheduleAuthority = null;
+        laneState.lastConsumedDynamicLawTargetScheduleRequestId =
+          predecessorTargetScheduleRequestId;
+        laneState.poisoned = true;
+      }
+      throw error;
+    }
     const twoLevelTerminalRefluxReceiptRequired = Boolean(
       workerHierarchyConfig.enableTwoLevelMechanics === true
       && String(workerHierarchyConfig.twoLevelMechanicsAuthority)
@@ -52612,8 +53008,22 @@ fn main(
           livePreviewMinIntervalMs: 66
         }
       : null;
-    const workerLaneAuthority =
-      await runSchroederWorkerLaneScheduleWithAuthority({
+    if (predecessorTargetScheduleRequestId != null) {
+      // Burn the main-held token at dispatch. If anything after this point
+      // fails, the lane is poisoned rather than retrying an authority token
+      // whose worker-side consumption may already have occurred.
+      laneState.pendingDynamicLawObservation = null;
+      laneState.pendingTargetScheduleAuthority = null;
+      laneState.inFlightDynamicLawTargetScheduleRequestId =
+        predecessorTargetScheduleRequestId;
+      laneState.lastConsumedDynamicLawTargetScheduleRequestId =
+        predecessorTargetScheduleRequestId;
+    }
+    let workerLaneAuthority;
+    let workerScheduleDispatched = false;
+    try {
+      workerLaneAuthority =
+        await runSchroederWorkerLaneScheduleWithAuthority({
         computeManager,
         stateManager: residentStateManager,
         laneId,
@@ -52621,6 +53031,9 @@ fn main(
         domainKey: computeTaskDomainKey,
         scheduleId,
         stepCount: requestedStepCount,
+        targetScheduleAuthority,
+        predecessorTargetScheduleAuthority,
+        predecessorDynamicLawObservation,
         twoLevelTerminalRefluxReceiptRequired,
         seedRequired: laneSeededThisSchedule,
         seedUploadBytes: estimateSchroederWorkerLaneSeedUploadBytes({
@@ -52673,6 +53086,11 @@ fn main(
               computeManagerLeaseId: lease.leaseId
             }
           );
+          // Treat the bridge call as a one-way dispatch boundary. If it throws,
+          // delivery is ambiguous; if any later outer admission fails, the
+          // worker may already own a newer retained GPU family. Either case
+          // must abandon this lane instead of attempting a delayed retry.
+          workerScheduleDispatched = true;
           bridge.runResidentScheduleOnPresentationDevice({
             id: scheduleId,
             reason: 'schroeder-worker-lane-schedule',
@@ -52682,6 +53100,8 @@ fn main(
                 scheduleId,
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
+                targetScheduleAuthority:
+                  structuredClone(targetScheduleAuthority),
                 authority: 'NodeKernel/ComputeManager/StateManager',
                 twoLevelTerminalRefluxReceiptRequired:
                   authorityTerminalRefluxReceiptRequired === true,
@@ -52765,19 +53185,7 @@ fn main(
                       // continuation provider. Later steps rebuild from the
                       // lane's retained post-step buffers.
                       laneContinuationClassifierOptions: {
-                        ...(workerHierarchyConfig.baseGridSpacingM != null
-                          ? {
-                              baseGridSpacingM:
-                                workerHierarchyConfig.baseGridSpacingM
-                            }
-                          : {}),
-                        ...(workerHierarchyConfig.minLevel != null
-                          ? { minLevel: workerHierarchyConfig.minLevel }
-                          : {}),
-                        ...(workerHierarchyConfig.maxLevel != null
-                          ? { maxLevel: workerHierarchyConfig.maxLevel }
-                          : {}),
-                        chartId: 0
+                        ...laneContinuationClassifierOptions
                       }
                     },
                     schroederSameLevelMechanics: {
@@ -52837,8 +53245,12 @@ fn main(
                         ? [...gravityMPerS2]
                         : gravityMPerS2,
                       cflFactor,
-                      ...(laneSeededThisSchedule && residentStepOptions
-                        ? { residentStepOptions }
+                      ...(scheduleResidentStepOptionsRefreshRequired
+                        && scheduleResidentStepOptions
+                        ? {
+                            residentStepOptions:
+                              scheduleResidentStepOptions
+                          }
                         : {})
                     }
                   }
@@ -52871,7 +53283,17 @@ fn main(
           }
           return scheduleResult;
         }
-      });
+        });
+    } catch (error) {
+      if (
+        predecessorTargetScheduleRequestId != null
+        || workerScheduleDispatched
+      ) {
+        laneState.inFlightDynamicLawTargetScheduleRequestId = null;
+        laneState.poisoned = true;
+      }
+      throw error;
+    }
     // Presentation is a consumer of committed state, never an admission
     // mechanism. The schedule result above has already crossed the worker
     // terminal queue fence, ComputeManager lease completion, and StateManager
@@ -52960,6 +53382,373 @@ fn main(
       );
     }
     const scheduleResult = workerLaneAuthority.scheduleResult;
+    const executionRouteAdmission =
+      workerLaneAuthority.executionRouteAdmission ?? null;
+    const admittedPredecessorConsumption =
+      executionRouteAdmission?.predecessorTargetTokenConsumption ?? null;
+    const dynamicReactionTransitionAdmitted =
+      admittedPredecessorConsumption?.configurationContinuityMode
+        === 'prospective-reaction-dormant-to-executing';
+    if (
+      dynamicReactionTransitionAdmitted
+        !== dynamicReactionTransitionScheduled
+    ) {
+      laneState.poisoned = true;
+      throw workerLaneFallbackError(
+        'dynamic-reaction-transition-admission-mismatch',
+        dynamicReactionTransitionScheduled
+          ? 'the scheduled dormant-to-executing successor was not admitted by the serialized worker route'
+          : 'the worker admitted an unrequested dormant-to-executing successor'
+      );
+    }
+    if (dynamicReactionTransitionAdmitted) {
+      const outerConsumption =
+        workerLaneAuthority.predecessorTargetTokenConsumption ?? null;
+      const stateManagerConsumption =
+        workerLaneAuthority.predecessorTargetTokenStateManagerConsumption
+          ?.warmEntry?.payload
+        ?? null;
+      const admittedTargetAuthority =
+        executionRouteAdmission?.targetScheduleAuthority ?? null;
+      const admittedReactionTransition =
+        admittedTargetAuthority?.predecessorDynamicLawTransition ?? null;
+      const phaseCarrierTransition =
+        executionRouteAdmission?.receipt
+          ?.phaseCarrierOneToFourTransition
+        ?? null;
+      const transitionFingerprint =
+        admittedPredecessorConsumption
+          .prospectiveDynamicLawTransitionFingerprint
+        ?? null;
+      const sourcePhaseLaneCount =
+        admittedPredecessorConsumption.sourcePhaseLaneCount;
+      const oneToFourCarrierTransitionRequired =
+        sourcePhaseLaneCount === 1;
+      const admittedParticleCardinality =
+        executionRouteAdmission?.particleCardinality ?? null;
+      const transitionAdmissionFailures = [];
+      if (
+        workerLaneAuthority.status
+          !== 'state-manager-committed-worker-schedule'
+      ) {
+        transitionAdmissionFailures.push('state-manager-commit');
+      }
+      if (executionRouteAdmission.route !== 'canonical-schroeder') {
+        transitionAdmissionFailures.push('canonical-route');
+      }
+      if (
+        admittedTargetAuthority?.writerSet?.reaction !== true
+        || executionRouteAdmission?.activationReceipt?.reaction !== true
+        || scheduleResult.lawActivationReceipt?.reaction !== true
+      ) {
+        transitionAdmissionFailures.push('reaction-execution');
+      }
+      if (
+        admittedReactionTransition?.kind
+          !== SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND
+        || admittedReactionTransition?.sourceConfiguration?.writerSet
+          ?.reaction !== false
+        || admittedReactionTransition?.targetConfiguration?.writerSet
+          ?.reaction !== true
+        || admittedReactionTransition?.transitionFingerprint
+          !== transitionFingerprint
+        || admittedReactionTransition?.shadowOnly
+          !== SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+        || admittedReactionTransition?.routingAuthority
+          !== SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+        || admittedReactionTransition?.executionGating
+          !== SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+      ) {
+        transitionAdmissionFailures.push('presealed-transition');
+      }
+      for (const [label, consumption] of [
+        ['worker-consumption', admittedPredecessorConsumption],
+        ['outer-consumption', outerConsumption],
+        ['state-manager-consumption', stateManagerConsumption]
+      ]) {
+        if (
+          consumption?.configurationContinuityMode
+            !== 'prospective-reaction-dormant-to-executing'
+          || consumption?.prospectiveDynamicLawTransitionFingerprint
+            !== transitionFingerprint
+          || consumption?.shadowOnly
+            !== SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+          || consumption?.routingAuthority
+            !== SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+          || consumption?.executionGating
+            !== SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+        ) {
+          transitionAdmissionFailures.push(label);
+        }
+      }
+      if (
+        stateManagerConsumption?.consumedBeforeLeaseAcquisition !== true
+        || stateManagerConsumption?.consumedBeforeGpuWork !== true
+        || admittedPredecessorConsumption.consumedBeforeRouteSelection
+          !== true
+        || admittedPredecessorConsumption.consumedBeforeGpuWork !== true
+      ) {
+        transitionAdmissionFailures.push('one-use-token-ordering');
+      }
+      if (oneToFourCarrierTransitionRequired) {
+        if (
+          phaseCarrierTransition?.status
+            !== 'phase-carrier-one-to-four-adopted-terminal-fence-satisfied'
+          || phaseCarrierTransition?.trigger
+            !== 'authenticated-dynamic-reaction-successor'
+          || phaseCarrierTransition?.routingAuthority !== true
+          || phaseCarrierTransition?.dynamicLawRoutingAuthority !== true
+          || phaseCarrierTransition?.sourcePhaseCarrierPlan?.phaseLaneCount
+            !== 1
+          || phaseCarrierTransition?.terminalPhaseCarrierPlan?.phaseLaneCount
+            !== 4
+          || phaseCarrierTransition?.terminalParticleCount
+            !== phaseCarrierTransition?.sourceParticleCount * 4
+          || phaseCarrierTransition?.fullParticleReadbackPerformed !== false
+          || phaseCarrierTransition?.mapAsyncCount !== 0
+          || phaseCarrierTransition?.readbackBytes !== 0
+          || phaseCarrierTransition?.terminalFenceSatisfied !== true
+          || phaseCarrierTransition?.supersededSourceRetired !== true
+        ) {
+          transitionAdmissionFailures.push(
+            'one-to-four-carrier-transition'
+          );
+        }
+      } else if (
+        sourcePhaseLaneCount !== 4
+        || phaseCarrierTransition != null
+        || admittedParticleCardinality?.sourceParticleCount
+          !== admittedParticleCardinality?.targetParticleCount
+        || laneState.terminalPhaseLaneCount !== 4
+      ) {
+        transitionAdmissionFailures.push(
+          'preexisting-four-carrier-topology'
+        );
+      }
+      if (transitionAdmissionFailures.length > 0) {
+        laneState.poisoned = true;
+        throw workerLaneFallbackError(
+          'dynamic-reaction-transition-incomplete-after-commit',
+          `the committed successor omitted exact authority: ${[
+            ...new Set(transitionAdmissionFailures)
+          ].join(', ')}`
+        );
+      }
+      laneState.dynamicReactionActivation = Object.freeze({
+        state: 'active',
+        transitionFingerprint,
+        committedScheduleId: scheduleId
+      });
+      laneState.dynamicReactionActivationReceipt = Object.freeze({
+        schema:
+          'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0',
+        status:
+          'dynamic-reaction-activation-consumed-and-admitted',
+        predecessorScheduleId:
+          admittedPredecessorConsumption.predecessorScheduleId ?? null,
+        consumerScheduleId: scheduleId,
+        targetScheduleRequestId:
+          admittedPredecessorConsumption.targetScheduleRequestId ?? null,
+        configurationContinuityMode:
+          admittedPredecessorConsumption.configurationContinuityMode,
+        transitionKind: admittedReactionTransition.kind,
+        transitionFingerprint,
+        route: executionRouteAdmission.route,
+        routeTransition:
+          executionRouteAdmission.receipt?.transition ?? null,
+        reactionExecution: true,
+        sourceParticleCount:
+          phaseCarrierTransition?.sourceParticleCount
+          ?? admittedParticleCardinality?.sourceParticleCount
+          ?? null,
+        terminalParticleCount:
+          phaseCarrierTransition?.terminalParticleCount
+          ?? admittedParticleCardinality?.targetParticleCount
+          ?? null,
+        sourcePhaseLaneCount,
+        terminalPhaseLaneCount: 4,
+        phaseCarrierTopologyAuthority: oneToFourCarrierTransitionRequired
+          ? 'authenticated-one-to-four-materialization'
+          : 'preexisting-four-carrier-plan',
+        phaseCarrierTrigger: phaseCarrierTransition?.trigger ?? null,
+        phaseCarrierMapAsyncCount:
+          phaseCarrierTransition?.mapAsyncCount ?? 0,
+        phaseCarrierReadbackBytes:
+          phaseCarrierTransition?.readbackBytes ?? 0,
+        terminalGpuFenceSatisfied:
+          scheduleResult.gpuFence?.fenceSatisfied === true,
+        stateManagerCommitted: true,
+        consumedBeforeLeaseAcquisition: true,
+        consumedBeforeRouteSelection: true,
+        consumedBeforeGpuWork: true,
+        shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+        routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+        executionGating: SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+      });
+    }
+    if (
+      admittedPredecessorConsumption?.configurationContinuityMode
+        === 'prospective-retained-product-gas-boundary-actionable'
+    ) {
+      const outerConsumption =
+        workerLaneAuthority.predecessorTargetTokenConsumption ?? null;
+      const stateManagerConsumption =
+        workerLaneAuthority.predecessorTargetTokenStateManagerConsumption
+          ?.warmEntry?.payload
+        ?? null;
+      const admittedProductTransition =
+        executionRouteAdmission?.targetScheduleAuthority
+          ?.predecessorDynamicLawTransition
+        ?? null;
+      const predecessorWriterEvidence =
+        executionRouteAdmission?.targetScheduleAuthority
+          ?.predecessorDynamicLawObservation?.prospectiveWriterEvidence
+        ?? null;
+      laneState.retainedProductGasTransitionReceipt = Object.freeze({
+        schema:
+          'peercompute.ulg.sph-scene-retained-product-gas-transition.v0',
+        status:
+          'retained-product-gas-transition-consumed-and-admitted',
+        predecessorScheduleId:
+          admittedPredecessorConsumption.predecessorScheduleId ?? null,
+        consumerScheduleId:
+          admittedPredecessorConsumption.consumerScheduleId ?? null,
+        targetScheduleRequestId:
+          admittedPredecessorConsumption.targetScheduleRequestId ?? null,
+        configurationContinuityMode:
+          admittedPredecessorConsumption.configurationContinuityMode,
+        prospectiveDynamicLawTransitionFingerprint:
+          admittedPredecessorConsumption
+            .prospectiveDynamicLawTransitionFingerprint ?? null,
+        transitionKind: admittedProductTransition?.kind ?? null,
+        transitionLawFamily: admittedProductTransition?.lawFamily ?? null,
+        transitionActivationPolicy:
+          admittedProductTransition?.activationPolicy ?? null,
+        transitionFingerprint:
+          admittedProductTransition?.transitionFingerprint ?? null,
+        transitionSourceReaction:
+          admittedProductTransition?.sourceConfiguration?.writerSet?.reaction
+            === true,
+        transitionTargetReaction:
+          admittedProductTransition?.targetConfiguration?.writerSet?.reaction
+            === true,
+        transitionSourceGasBoundaryActionable:
+          admittedProductTransition?.sourceConfiguration?.writerSet
+            ?.gasBoundaryActionable === true,
+        transitionTargetGasBoundaryActionable:
+          admittedProductTransition?.targetConfiguration?.writerSet
+            ?.gasBoundaryActionable === true,
+        transitionSourceMechanicsFieldViews:
+          admittedProductTransition?.sourceConfiguration?.writerSet
+            ?.mechanicsFieldViews === true,
+        transitionTargetMechanicsFieldViews:
+          admittedProductTransition?.targetConfiguration?.writerSet
+            ?.mechanicsFieldViews === true,
+        transitionSourceMaxFutureSubsteps:
+          admittedProductTransition?.sourceConfiguration?.motionEnvelope
+            ?.maxFutureSubsteps ?? null,
+        transitionTargetMaxFutureSubsteps:
+          admittedProductTransition?.targetConfiguration?.motionEnvelope
+            ?.maxFutureSubsteps ?? null,
+        transitionShadowOnly: admittedProductTransition?.shadowOnly === true,
+        transitionRoutingAuthority:
+          admittedProductTransition?.routingAuthority === true,
+        transitionExecutionGating:
+          admittedProductTransition?.executionGating ?? null,
+        predecessorWriterEvidenceStatus:
+          predecessorWriterEvidence?.status ?? null,
+        predecessorWriterGasBoundaryActionable:
+          predecessorWriterEvidence?.gasBoundaryActionable === true,
+        predecessorProductEventBufferRetained:
+          predecessorWriterEvidence?.productEventBufferRetained === true,
+        predecessorProductEventRowCount:
+          predecessorWriterEvidence?.productEventRowCount ?? null,
+        predecessorArenaIdentity:
+          predecessorWriterEvidence?.productHistoryArenaIdentity == null
+            ? null
+            : { ...predecessorWriterEvidence.productHistoryArenaIdentity },
+        predecessorTerminalGpuFenceSatisfied:
+          predecessorWriterEvidence?.terminalGpuFenceSatisfied === true,
+        predecessorScheduleCancelled:
+          predecessorWriterEvidence?.scheduleCancelled === true,
+        conservativeActivationRequired:
+          admittedPredecessorConsumption.conservativeActivationRequired
+            === true,
+        gasBoundaryActionable:
+          scheduleResult.lawActivationReceipt?.gasBoundaryActionable === true,
+        mechanicsFieldViews:
+          scheduleResult.lawActivationReceipt?.mechanicsFieldViews === true,
+        terminalGpuFenceSatisfied:
+          scheduleResult.gpuFence?.fenceSatisfied === true,
+        stateManagerConsumptionStatus:
+          stateManagerConsumption?.status ?? null,
+        outerConsumptionStatus: outerConsumption?.status ?? null,
+        consumedBeforeLeaseAcquisition:
+          stateManagerConsumption?.consumedBeforeLeaseAcquisition === true,
+        consumedBeforeRouteSelection:
+          admittedPredecessorConsumption.consumedBeforeRouteSelection === true,
+        consumedBeforeGpuWork: Boolean(
+          stateManagerConsumption?.consumedBeforeGpuWork === true
+          && admittedPredecessorConsumption.consumedBeforeGpuWork === true
+        ),
+        shadowOnly: admittedPredecessorConsumption.shadowOnly === true,
+        routingAuthority:
+          admittedPredecessorConsumption.routingAuthority === true,
+        executionGating:
+          admittedPredecessorConsumption.executionGating ?? null
+      });
+    }
+    laneState.inFlightDynamicLawTargetScheduleRequestId = null;
+    laneState.pendingTargetScheduleAuthority =
+      executionRouteAdmission?.targetScheduleAuthority ?? null;
+    laneState.pendingDynamicLawObservation =
+      executionRouteAdmission?.nextScheduleLawActivationObservation ?? null;
+    if (executionRouteAdmission?.targetLineage) {
+      laneState.terminalLineage = {
+        ...executionRouteAdmission.targetLineage
+      };
+    }
+    const admittedTargetParticleCount = Number(
+      executionRouteAdmission?.particleCardinality?.targetParticleCount
+    );
+    if (
+      Number.isSafeInteger(admittedTargetParticleCount)
+      && admittedTargetParticleCount > 0
+    ) {
+      laneState.terminalParticleCount = admittedTargetParticleCount;
+    }
+    const terminalPhaseLaneCount = Number(
+      executionRouteAdmission?.receipt?.phaseCarrierOneToFourTransition
+        ?.terminalPhaseCarrierPlan?.phaseLaneCount
+      ?? laneState.terminalPhaseLaneCount
+    );
+    if ([1, 4].includes(terminalPhaseLaneCount)) {
+      laneState.terminalPhaseLaneCount = terminalPhaseLaneCount;
+    }
+    scene.userData.sphDynamicReactionActivation = Object.freeze({
+      schema:
+        'peercompute.ulg.sph-scene-dynamic-reaction-activation-state.v0',
+      status: !laneState.dynamicReactionRoutingAllowed
+        ? 'dynamic-reaction-routing-not-requested'
+        : laneState.dynamicReactionActivation.state === 'active'
+          ? 'dynamic-reaction-execution-active-and-retained'
+          : 'dynamic-reaction-dormant-awaiting-authenticated-observation',
+      laneId,
+      stateKey,
+      scheduleId,
+      active: laneState.dynamicReactionActivation.state === 'active',
+      transitionFingerprint:
+        laneState.dynamicReactionActivation.transitionFingerprint,
+      committedScheduleId:
+        laneState.dynamicReactionActivation.committedScheduleId,
+      terminalParticleCount: laneState.terminalParticleCount,
+      terminalPhaseLaneCount: laneState.terminalPhaseLaneCount,
+      currentRoute: executionRouteAdmission?.route ?? null,
+      activationReceipt:
+        laneState.dynamicReactionActivationReceipt == null
+          ? null
+          : { ...laneState.dynamicReactionActivationReceipt }
+    });
     const completedStepCount = Math.max(
       0,
       Math.floor(Number(scheduleResult.completedStepCount) || 0)
@@ -52990,6 +53779,16 @@ fn main(
       laneSimTimeS: laneState.simTimeS,
       laneCompletedStepTotal: laneState.completedStepTotal,
       dtS,
+      retainedProductGasTransitionReceipt:
+        laneState.retainedProductGasTransitionReceipt == null
+          ? null
+          : { ...laneState.retainedProductGasTransitionReceipt },
+      dynamicReactionActivation:
+        { ...laneState.dynamicReactionActivation },
+      dynamicReactionActivationReceipt:
+        laneState.dynamicReactionActivationReceipt == null
+          ? null
+          : { ...laneState.dynamicReactionActivationReceipt },
       committedPresentation,
       workerLaneAuthority
     };
@@ -53064,6 +53863,12 @@ fn main(
         productHistoryLiveBoundObservation:
           result.productHistoryLiveBoundObservation ?? null,
         lawActivationReceipt: result.lawActivationReceipt ?? null,
+        dynamicReactionActivation:
+          lane.dynamicReactionActivation ?? null,
+        dynamicReactionActivationReceipt:
+          lane.dynamicReactionActivationReceipt ?? null,
+        retainedProductGasTransitionReceipt:
+          lane.retainedProductGasTransitionReceipt ?? null,
         resultAssembledAtMs: result.resultAssembledAtMs ?? null,
         progressEverySteps: result.progressEverySteps ?? null,
         finalEpochIdentity: result.finalEpochIdentity ?? null,

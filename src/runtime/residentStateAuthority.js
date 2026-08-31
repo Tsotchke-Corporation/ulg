@@ -213,6 +213,7 @@ export function buildMlsMpmResidentStepAuthorityLedger({
   schroederParticleStorageAdoption = null,
   nextUsesSchroederFarForceState = false,
   nextUsesSchroederParticleStorageMaterialization = false,
+  nextUsesPhaseCarrierTransfer = false,
   thermalStep = null,
   reactionStep = null,
   reactionOutputParticleMutation = false,
@@ -286,37 +287,49 @@ export function buildMlsMpmResidentStepAuthorityLedger({
 
   const particleOwner = nextUsesSchroederParticleStorageMaterialization
     ? 'schroeder-particle-storage-materialization'
+    : (nextUsesPhaseCarrierTransfer
+    ? 'phase-carrier-transfer-v2'
     : (nextUsesReactionState
     ? 'reaction-step'
     : (nextUsesThermalState
       ? 'thermal-phase-step'
-      : (nextUsesSchroederFarForceState ? 'schroeder-far-force-delta-fusion' : 'g2p')));
+      : (nextUsesSchroederFarForceState ? 'schroeder-far-force-delta-fusion' : 'g2p'))));
   add(RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS, particleOwner, {
     status: nextUsesSchroederParticleStorageMaterialization
       ? 'schroeder-particle-storage-materialized-state-drives-next-particles'
+      : (nextUsesPhaseCarrierTransfer
+      ? 'phase-carrier-transfer-state-drives-next-particles'
       : (nextUsesReactionState
       ? 'reaction-output-buffers-drive-next-particles'
       : (nextUsesThermalState
         ? 'thermal-state-buffer-drives-next-particles'
         : (nextUsesSchroederFarForceState
           ? 'schroeder-far-force-delta-fused-state-buffer-drives-next-particles'
-          : 'g2p-output-drives-next-particles'))),
+          : 'g2p-output-drives-next-particles')))),
     backend: nextUsesSchroederParticleStorageMaterialization
       ? (schroederParticleStorageAdoption?.backend || backend)
+      : (nextUsesPhaseCarrierTransfer
+      ? (stageBackends.phaseCarrierTransfer || backend)
       : (nextUsesReactionState
       ? (stageBackends.reaction || backend)
       : (nextUsesThermalState
         ? (stageBackends.thermal || backend)
         : (nextUsesSchroederFarForceState
           ? (stageBackends.schroederFarForceDeltaFusion || backend)
-          : (stageBackends.g2p || backend)))),
+          : (stageBackends.g2p || backend))))),
     reads: nextUsesSchroederParticleStorageMaterialization
       ? [RESIDENT_STATE_FAMILIES.SCHROEDER_PARTICLE_STORAGE]
+      : (nextUsesPhaseCarrierTransfer
+      ? [
+        RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        RESIDENT_STATE_FAMILIES.THERMO_PHASE,
+        RESIDENT_STATE_FAMILIES.MECHANICS
+      ]
       : (nextUsesReactionState
       ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS]
       : (nextUsesSchroederFarForceState
         ? [RESIDENT_STATE_FAMILIES.GRID_UPDATE, RESIDENT_STATE_FAMILIES.SCHROEDER_FAR_FORCE]
-        : [RESIDENT_STATE_FAMILIES.GRID_UPDATE])),
+        : [RESIDENT_STATE_FAMILIES.GRID_UPDATE]))),
     writes: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS],
     nextConsumers: ['next-resident-step']
   });
@@ -356,58 +369,83 @@ export function buildMlsMpmResidentStepAuthorityLedger({
 
   const mechanicsOwner = nextUsesSchroederParticleStorageMaterialization
     ? 'schroeder-particle-storage-materialization'
-    : (nextUsesReactionMechanics
-    ? 'reaction-step'
-    : (nextUsesMechanicsRefresh ? 'mechanics-constitutive-refresh' : 'g2p'));
+    : (nextUsesMechanicsRefresh
+    ? 'mechanics-constitutive-refresh'
+    : (nextUsesPhaseCarrierTransfer
+      ? 'phase-carrier-transfer-v2'
+      : (nextUsesReactionMechanics ? 'reaction-step' : 'g2p')));
   add(RESIDENT_STATE_FAMILIES.MECHANICS, mechanicsOwner, {
     status: nextUsesSchroederParticleStorageMaterialization
       ? 'schroeder-particle-storage-materialized-mechanics-drives-next-particles'
-      : (nextUsesReactionMechanics
-      ? 'reaction-mechanics-output-drives-next-particles'
       : (nextUsesMechanicsRefresh
         ? 'mechanics-constitutive-refresh-drives-next-particles'
-        : 'g2p-mechanics-output-drives-next-particles')),
+        : (nextUsesPhaseCarrierTransfer
+          ? 'phase-carrier-transfer-mechanics-drives-next-particles'
+          : (nextUsesReactionMechanics
+            ? 'reaction-mechanics-output-drives-next-particles'
+            : 'g2p-mechanics-output-drives-next-particles'))),
     backend: nextUsesSchroederParticleStorageMaterialization
       ? (schroederParticleStorageAdoption?.backend || backend)
-      : (nextUsesReactionMechanics
-      ? (stageBackends.reaction || backend)
-      : (nextUsesMechanicsRefresh ? (stageBackends.mechanicsRefresh || backend) : (stageBackends.g2p || backend))),
+      : (nextUsesMechanicsRefresh
+      ? (stageBackends.mechanicsRefresh || backend)
+      : (nextUsesPhaseCarrierTransfer
+        ? (stageBackends.phaseCarrierTransfer || backend)
+        : (nextUsesReactionMechanics
+          ? (stageBackends.reaction || backend)
+          : (stageBackends.g2p || backend)))),
     reads: nextUsesSchroederParticleStorageMaterialization
       ? [RESIDENT_STATE_FAMILIES.SCHROEDER_PARTICLE_STORAGE]
-      : (nextUsesReactionMechanics
-      ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS]
       : (nextUsesMechanicsRefresh
         ? [
           RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
           RESIDENT_STATE_FAMILIES.THERMO_PHASE,
           RESIDENT_STATE_FAMILIES.MECHANICS
         ]
-        : [RESIDENT_STATE_FAMILIES.GRID_UPDATE])),
+        : (nextUsesPhaseCarrierTransfer
+          ? [
+            RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+            RESIDENT_STATE_FAMILIES.THERMO_PHASE,
+            RESIDENT_STATE_FAMILIES.MECHANICS
+          ]
+          : (nextUsesReactionMechanics
+            ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS]
+            : [RESIDENT_STATE_FAMILIES.GRID_UPDATE]))),
     writes: [RESIDENT_STATE_FAMILIES.MECHANICS],
     nextConsumers: ['next-p2g', 'next-g2p']
   });
 
   const thermoOwner = nextUsesSchroederParticleStorageMaterialization
     ? 'schroeder-particle-storage-materialization'
+    : (nextUsesPhaseCarrierTransfer
+    ? 'phase-carrier-transfer-v2'
     : (nextUsesReactionThermo
     ? 'reaction-step'
-    : (nextUsesThermalThermo ? 'thermal-phase-step' : 'source-thermo-buffer'));
+    : (nextUsesThermalThermo ? 'thermal-phase-step' : 'source-thermo-buffer')));
   add(RESIDENT_STATE_FAMILIES.THERMO_PHASE, thermoOwner, {
     status: nextUsesSchroederParticleStorageMaterialization
       ? 'schroeder-particle-storage-materialized-thermo-drives-next-particles'
+      : (nextUsesPhaseCarrierTransfer
+      ? 'phase-carrier-transfer-thermo-drives-next-particles'
       : (nextUsesReactionThermo
       ? 'reaction-thermo-output-drives-next-particles'
-      : (nextUsesThermalThermo ? 'thermal-thermo-buffer-drives-next-particles' : 'source-thermo-buffer-retained')),
+      : (nextUsesThermalThermo ? 'thermal-thermo-buffer-drives-next-particles' : 'source-thermo-buffer-retained'))),
     backend: nextUsesSchroederParticleStorageMaterialization
       ? (schroederParticleStorageAdoption?.backend || backend)
+      : (nextUsesPhaseCarrierTransfer
+      ? (stageBackends.phaseCarrierTransfer || backend)
       : (nextUsesReactionThermo
       ? (stageBackends.reaction || backend)
-      : (nextUsesThermalThermo ? (stageBackends.thermal || backend) : backend)),
+      : (nextUsesThermalThermo ? (stageBackends.thermal || backend) : backend))),
     reads: nextUsesSchroederParticleStorageMaterialization
       ? [RESIDENT_STATE_FAMILIES.SCHROEDER_PARTICLE_STORAGE]
+      : (nextUsesPhaseCarrierTransfer
+      ? [
+        RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+        RESIDENT_STATE_FAMILIES.THERMO_PHASE
+      ]
       : (nextUsesReactionThermo
       ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS]
-      : [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS]),
+      : [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS])),
     writes: [RESIDENT_STATE_FAMILIES.THERMO_PHASE],
     nextConsumers: ['next-resident-step', 'reaction-step']
   });

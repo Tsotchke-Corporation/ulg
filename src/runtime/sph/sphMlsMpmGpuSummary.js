@@ -29,6 +29,10 @@ import {
 import {
   createGpuReadbackTelemetryAccumulator
 } from './sphGpuReadbackTelemetry.js';
+import {
+  isMlsMpmTerminalParticleFamily,
+  selectMlsMpmTerminalParticleFamily
+} from './sphMlsMpmPostMechanicsClosure.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -276,18 +280,6 @@ function activeGridDispatchPlanDescriptor(plan) {
   };
 }
 
-function outputBufferFromG2p(g2pReconstruction, key) {
-  return g2pReconstruction?.gpuResult?.[key] ?? g2pReconstruction?.[key] ?? null;
-}
-
-function outputBufferFromStage(stage, key) {
-  return stage?.result?.gpuResult?.[key]
-    ?? stage?.result?.[key]
-    ?? stage?.gpuResult?.[key]
-    ?? stage?.[key]
-    ?? null;
-}
-
 function updatedGridBufferFromGridUpdate(gridUpdate) {
   if (gridUpdate?.mechanicsFieldViewEnabled === true) {
     return gridUpdate.mechanicsFieldViewBuffer
@@ -509,6 +501,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
   mlsMpmParticleUpload = null,
   gridUpdate,
   g2pReconstruction,
+  terminalParticleFamily = null,
+  schroederFarForceDeltaFusion = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -541,6 +535,40 @@ export async function runMlsMpmResidentSummaryWebGpu({
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const particleCount = sphParticleState.particleCount;
+  const selectedTerminalParticleFamily = terminalParticleFamily
+    ?? selectMlsMpmTerminalParticleFamily({
+      sphParticleState,
+      sphParticleUpload,
+      g2pReconstruction,
+      schroederFarForceDeltaFusion,
+      thermalStep,
+      reactionStep,
+      mechanicsRefreshStep,
+      phaseCarrierTransferStep
+    });
+  if (!isMlsMpmTerminalParticleFamily(selectedTerminalParticleFamily)) {
+    throw new TypeError(
+      'MLS-MPM resident summary requires one authentic terminal particle family'
+    );
+  }
+  if (
+    selectedTerminalParticleFamily.ready !== true
+    || selectedTerminalParticleFamily.sourceParticleCount !== particleCount
+  ) {
+    throw new TypeError(
+      'MLS-MPM resident summary terminal particle family is incomplete or source-mismatched'
+    );
+  }
+  if (selectedTerminalParticleFamily.particleCount !== particleCount) {
+    throw new RangeError(
+      'MLS-MPM resident summary does not yet support distinct source and terminal particle counts'
+    );
+  }
+  if (selectedTerminalParticleFamily.schroederParticleStorageSelected) {
+    throw new Error(
+      'MLS-MPM resident summary requires stable particle-index correspondence after storage adoption'
+    );
+  }
   const gridNodeCount = gridUpdate?.gridNodeCount ?? g2pReconstruction?.gridNodeCount ?? 0;
   const resolvedSummaryScope = normalizeMlsMpmResidentSummaryScope(summaryScope);
   const mechanicsFieldViewEnabled = mechanicsFieldViewEnabledForSummary({
@@ -559,23 +587,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
       : 'active-grid-node-summary-not-requested');
   const partialCount = Math.max(1, Math.ceil(Math.max(particleCount, gridNodeScanCount) / SUMMARY_WORKGROUP_SIZE));
   const setupStartMs = nowMs();
-  const retainedPhaseStateBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'stateBuffer');
-  const retainedPhaseThermoBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'thermoBuffer');
-  const retainedPhaseMechanicsBuffer = outputBufferFromStage(phaseCarrierTransferStep, 'mechanicsBuffer');
-  const retainedReactionStateBuffer = outputBufferFromStage(reactionStep, 'stateBuffer');
-  const retainedReactionMechanicsBuffer = outputBufferFromStage(reactionStep, 'mechanicsBuffer');
-  const retainedThermalStateBuffer = outputBufferFromStage(thermalStep, 'stateBuffer');
-  const retainedRefreshMechanicsBuffer = outputBufferFromStage(mechanicsRefreshStep, 'mechanicsBuffer');
-  const nextStateBuffer = retainedPhaseStateBuffer
-    || retainedReactionStateBuffer
-    || retainedThermalStateBuffer
-    || outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
-  const nextMechanicsBuffer = retainedPhaseMechanicsBuffer
-    || retainedRefreshMechanicsBuffer
-    || retainedReactionMechanicsBuffer
-    || outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
-  const retainedReactionThermoBuffer = outputBufferFromStage(reactionStep, 'thermoBuffer');
-  const retainedThermalThermoBuffer = outputBufferFromStage(thermalStep, 'thermoBuffer');
+  const nextStateBuffer = selectedTerminalParticleFamily.stateBuffer;
+  const nextMechanicsBuffer = selectedTerminalParticleFamily.mechanicsBuffer;
   const updatedGridBuffer = updatedGridBufferFromGridUpdate(gridUpdate);
   if (!nextStateBuffer || !nextMechanicsBuffer || !updatedGridBuffer) {
     throw new TypeError('MLS-MPM resident summary requires retained G2P state/mechanics and updated-grid buffers');
@@ -585,18 +598,20 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const borrowedSourceMechanicsBuffer = optionalSourceMechanicsBuffer(mlsMpmParticleUpload);
   const sourceStateBuffer = borrowedSourceStateBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-state', sphParticleState.state);
-  let nextThermoBuffer = retainedPhaseThermoBuffer
-    || retainedReactionThermoBuffer
-    || retainedThermalThermoBuffer
-    || borrowedSourceThermoBuffer
-    || null;
-  let nextThermoBufferMode = retainedPhaseThermoBuffer
-    ? 'retained-phase-carrier-transfer-output'
-    : (retainedReactionThermoBuffer
-    ? 'retained-reaction-output'
-    : (retainedThermalThermoBuffer
-      ? 'retained-thermal-output'
-      : (borrowedSourceThermoBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload')));
+  let nextThermoBuffer = selectedTerminalParticleFamily.thermoBuffer;
+  let nextThermoBufferMode =
+    selectedTerminalParticleFamily.thermoSource === 'phase-carrier-transfer-v2'
+      ? 'retained-phase-carrier-transfer-output'
+      : (selectedTerminalParticleFamily.thermoSource
+          === 'schroeder-particle-storage-materialization'
+        ? 'retained-schroeder-particle-storage-adoption'
+        : (selectedTerminalParticleFamily.thermoSource === 'reaction-product'
+          ? 'retained-reaction-output'
+          : (selectedTerminalParticleFamily.thermoSource === 'thermal-phase'
+            ? 'retained-thermal-output'
+            : (borrowedSourceThermoBuffer
+              ? 'borrowed-webgpu-upload'
+              : 'temporary-source-upload'))));
   if (!nextThermoBuffer) {
     nextThermoBuffer = writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-thermo', sourceThermoArray(sphParticleState));
     nextThermoBufferMode = 'temporary-source-upload';

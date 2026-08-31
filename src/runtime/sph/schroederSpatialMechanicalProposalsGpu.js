@@ -64,6 +64,11 @@ import {
   resolveSchroederSpatialExactNearConsumerGeneration
 } from './schroederSpatialEpochGpu.js';
 import { validateSphPhaseCarrierPlan } from './sphPhaseCarrierTransferGpu.js';
+import {
+  SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M,
+  SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER,
+  SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
+} from './sphCanonicalContactMotionBound.js';
 
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-mechanical-proposal.v3';
@@ -226,7 +231,8 @@ export const
   SCHROEDER_SPATIAL_MECHANICAL_VELOCITY_RESIDUAL_TOLERANCE_M_PER_S = 1e-5;
 export const
   SCHROEDER_SPATIAL_MECHANICAL_RECIPROCAL_LAPLACIAN_BOUND_FACTOR = 2;
-export const SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS =
+  SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS;
 export const SCHROEDER_SPATIAL_MECHANICAL_POSITION_RESIDUAL_TOLERANCE_FRACTION =
   0.02;
 export const SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT = 1;
@@ -7622,8 +7628,9 @@ fn mechanical_allocate_energy_iteration(
       - mechanical_solver_epoch_position(self_index)
   );
   let position_trust_tolerance = max(
-    1.0e-6,
-    64.0 * 1.1920929e-7 * max(position_trust_capacity_m, 1.0)
+    ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M},
+    ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER}.0
+      * 1.1920929e-7 * max(position_trust_capacity_m, 1.0)
   );
   if (
     !mechanical_solver_finite(position_trust_capacity_m)
@@ -14166,8 +14173,9 @@ fn apply_matching_cleanup_edge_for_index(
         high_position - mechanical_solver_epoch_position(high_index)
       );
       let trust_tolerance_m = max(
-        1.0e-6,
-        64.0 * 1.1920929e-7 * max(max(low_scale.z, high_scale.z), 1.0)
+        ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M},
+        ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER}.0
+          * 1.1920929e-7 * max(max(low_scale.z, high_scale.z), 1.0)
       );
       if (
         !mechanical_solver_finite3(low_position)
@@ -15575,8 +15583,9 @@ fn project_matching_cleanup_walls_for_index(self_index: u32) {
     position - mechanical_solver_epoch_position(self_index)
   );
   let trust_tolerance_m = max(
-    1.0e-6,
-    64.0 * 1.1920929e-7 * max(scale.z, 1.0)
+    ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M},
+    ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER}.0
+      * 1.1920929e-7 * max(scale.z, 1.0)
   );
   if (
     !mechanical_solver_finite3(position)
@@ -19931,7 +19940,15 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     ?? null;
   const phaseCarrierPlan = validateSphPhaseCarrierPlan(
     rawPhaseCarrierPlan,
-    particleCount
+    particleCount,
+    {
+      // Tier0 retains a deliberately compact one-lane carrier family while
+      // laws are quiescent. A schedule-boundary activation can enter the
+      // canonical contact solver without inventing three absent companion
+      // lanes; phase-changing stages still use the strict four-lane transfer
+      // validator at their own boundary.
+      allowLawsQuiescentSingleLane: true
+    }
   );
   if (rawPhaseCarrierPlan && phaseCarrierPlan.accepted !== true) {
     throw new TypeError(

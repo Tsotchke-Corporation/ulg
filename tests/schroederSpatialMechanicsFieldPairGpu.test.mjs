@@ -852,6 +852,11 @@ test('paired WGSL keeps disjoint monotone levels, material, and solid domains in
     /active_count\s*\*\s*27u/,
     'canonical active ordinals are expanded once to the exact A×27 radix input'
   );
+  assert.match(
+    source,
+    /fn\s+pair_quadratic_weight_at\([\s\S]*fraction\s*-\s*0\.5[\s\S]*let\s+support_weight\s*=[\s\S]*if\s*\(support_weight\s*==\s*0\.0\)\s*\{[\s\S]*pair_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let\s+node\s*=\s*pair_grid_index/,
+    'exact-zero quadratic support is omitted before field keys or clipping evidence'
+  );
   assert.doesNotMatch(
     source,
     /active_count\s*\*\s*54u|candidate_count\s*\*\s*2u/,
@@ -924,6 +929,43 @@ test('paired WGSL keeps disjoint monotone levels, material, and solid domains in
     /active_count\s*<=\s*active_capacity/,
     'A+1 active rows fail closed before any paired field work is published'
   );
+});
+
+test('paired mechanics-field support omission matches the canonical half-cell zero', () => {
+  const f32 = Math.fround;
+  const quadraticWeight = (fraction, offset) => {
+    if (offset === 0) {
+      const value = f32(f32(1.5) - fraction);
+      return f32(f32(0.5) * f32(value * value));
+    }
+    if (offset === 1) {
+      const value = f32(fraction - f32(1));
+      return f32(f32(0.75) - f32(value * value));
+    }
+    const value = f32(fraction - f32(0.5));
+    return f32(f32(0.5) * f32(value * value));
+  };
+  const supportWeight = (fraction, offsets) => f32(
+    f32(
+      quadraticWeight(fraction[0], offsets[0])
+        * quadraticWeight(fraction[1], offsets[1])
+    ) * quadraticWeight(fraction[2], offsets[2])
+  );
+
+  assert.equal(supportWeight([0.5, 1, 1], [2, 1, 1]), 0);
+  assert.ok(supportWeight([0.5, 1, 1], [1, 1, 1]) > 0);
+  let positiveCount = 0;
+  for (let ox = 0; ox < 3; ox += 1) {
+    for (let oy = 0; oy < 3; oy += 1) {
+      for (let oz = 0; oz < 3; oz += 1) {
+        positiveCount += Number(
+          supportWeight([0.5, 0.5, 0.5], [ox, oy, oz]) > 0
+        );
+      }
+    }
+  }
+  assert.equal(positiveCount, 8);
+  assert.equal(27 - positiveCount, 19);
 });
 
 test('parallel paired projection is exact to the serial oracle for sparse, all-active, mixed, clipped, and A=0 domains', () => {

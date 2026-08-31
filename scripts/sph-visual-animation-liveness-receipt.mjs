@@ -18,6 +18,11 @@ import {
 } from './physicalPixelPngEvidence.mjs';
 import { createBrowserConsoleCapture } from './sph-long-horizon-probe.mjs';
 import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
+import {
   artifactMetadataMatches,
   assertArtifactPathsPairwiseDistinct,
   canonicalJson,
@@ -41,6 +46,26 @@ export const VISUAL_LIVENESS_EVENT_KIND = 'ulg_sph_probe';
 export const VISUAL_LIVENESS_EVENT_NAME = 'standard_visual_matrix_passed';
 export const VISUAL_LIVENESS_AUTOPLAY_START_MODE =
   'harness-click-after-quiescent-initial-presentation';
+export const VISUAL_LIVENESS_RUN_MODE_CONTROLLED =
+  'controlled-autoplay';
+export const VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY =
+  'configured-preset-entry-autoplay';
+export const PRESET_ENTRY_AUTOPLAY_RECEIPT_SCHEMA =
+  'peercompute.ulg.sph-configured-preset-entry-autoplay-receipt.v0';
+export const PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA =
+  'peercompute.ulg.sph-configured-preset-entry-autoplay-scenario.v0';
+export const PRESET_ENTRY_AUTOPLAY_POLICY_ID =
+  'standard-four-demo-exact-preset-entry-autoplay-compositor-liveness-v0';
+export const PRESET_ENTRY_AUTOPLAY_COVERAGE =
+  'bounded-configured-preset-entry-autoplay-liveness-not-deep-scientific-horizon';
+export const PRESET_ENTRY_AUTOPLAY_START_MODE =
+  'preset-configured-autoplay-observed-without-initial-play-click';
+export const PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO = Object.freeze({
+  'water-cycle': 16,
+  'iron-ice-quench': 16,
+  'sodium-water': 64,
+  'cesium-fluorine': 16
+});
 
 export const VISUAL_LIVENESS_LIMITS_MS = Object.freeze({
   overlay: 30_000,
@@ -51,6 +76,25 @@ export const VISUAL_LIVENESS_LIMITS_MS = Object.freeze({
   noProgress: 45_000,
   absolute: 480_000,
   cleanup: 10_000
+});
+
+const VISUAL_LIVENESS_CONTROLLED_POLICY = Object.freeze({
+  mode: VISUAL_LIVENESS_RUN_MODE_CONTROLLED,
+  receiptSchema: VISUAL_LIVENESS_RECEIPT_SCHEMA,
+  scenarioSchema: VISUAL_LIVENESS_SCENARIO_SCHEMA,
+  policyId: VISUAL_LIVENESS_POLICY_ID,
+  coverage: VISUAL_LIVENESS_COVERAGE,
+  autoplayStartMode: VISUAL_LIVENESS_AUTOPLAY_START_MODE,
+  performInitialPlayClick: true
+});
+const PRESET_ENTRY_AUTOPLAY_POLICY = Object.freeze({
+  mode: VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY,
+  receiptSchema: PRESET_ENTRY_AUTOPLAY_RECEIPT_SCHEMA,
+  scenarioSchema: PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA,
+  policyId: PRESET_ENTRY_AUTOPLAY_POLICY_ID,
+  coverage: PRESET_ENTRY_AUTOPLAY_COVERAGE,
+  autoplayStartMode: PRESET_ENTRY_AUTOPLAY_START_MODE,
+  performInitialPlayClick: false
 });
 
 const MIN_ADVANCEMENT_SAMPLE_COUNT = 3;
@@ -96,6 +140,41 @@ function parseBoolean(value, fallback = false) {
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+export function resolveVisualLivenessRunMode({
+  argv = process.argv.slice(2),
+  env = process.env
+} = {}) {
+  const modeArgument = argv.find((argument) => (
+    argument.startsWith('--visual-liveness-mode=')
+    || argument.startsWith('--mode=')
+  ));
+  const argumentValue = modeArgument == null
+    ? ''
+    : modeArgument.slice(modeArgument.indexOf('=') + 1).trim();
+  const environmentValue = String(
+    env?.ULG_VISUAL_LIVENESS_MODE || ''
+  ).trim();
+  const mode = argumentValue || environmentValue
+    || VISUAL_LIVENESS_RUN_MODE_CONTROLLED;
+  if (![
+    VISUAL_LIVENESS_RUN_MODE_CONTROLLED,
+    VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+  ].includes(mode)) {
+    throw new Error(`unknown visual liveness run mode: ${mode}`);
+  }
+  return mode;
+}
+
+export function visualLivenessPolicyForMode(mode) {
+  if (mode === VISUAL_LIVENESS_RUN_MODE_CONTROLLED) {
+    return VISUAL_LIVENESS_CONTROLLED_POLICY;
+  }
+  if (mode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY) {
+    return PRESET_ENTRY_AUTOPLAY_POLICY;
+  }
+  throw new Error(`unknown visual liveness run mode: ${mode}`);
 }
 
 function boundedDeadline(env, name, fallback, ceiling) {
@@ -225,6 +304,45 @@ export function standardVisualLivenessScenarios(selection = null) {
   return Object.freeze(scenarios);
 }
 
+export function configuredPresetEntryAutoplayScenarios(selection = null) {
+  const scenarios = standardVisualLivenessScenarios(selection).map((scenario) => {
+    const expectedConfiguredBatchStepCount =
+      PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[scenario.id];
+    if (!Number.isSafeInteger(expectedConfiguredBatchStepCount)) {
+      throw new Error(
+        `configured preset entry autoplay batch is missing for ${scenario.id}`
+      );
+    }
+    return Object.freeze({
+      id: scenario.id,
+      label: scenario.label,
+      // This mode audits the literal user-facing hash route produced by the
+      // preset menu. Do not inherit the controlled receipt's residentAuto,
+      // cadence, renderer, or visual-capture query overrides. The hash-only
+      // entry is intentional: query-only coverage missed preset-runtime URL
+      // provenance bugs in the persistent menu path.
+      url: `/#scenario=${encodeURIComponent(scenario.id)}`,
+      expectedRenderer: 'native-webgpu',
+      expectedSurfaceDraw: 'native-webgpu-surface-consumer',
+      expectedRenderOwnership: 'worker-owned-resident-render-producer',
+      expectedConfiguredBatchStepCount,
+      runMode: VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY,
+      scenarioSchema: PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA
+    });
+  });
+  return Object.freeze(scenarios);
+}
+
+export function visualLivenessScenariosForMode(mode, selection = null) {
+  if (mode === VISUAL_LIVENESS_RUN_MODE_CONTROLLED) {
+    return standardVisualLivenessScenarios(selection);
+  }
+  if (mode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY) {
+    return configuredPresetEntryAutoplayScenarios(selection);
+  }
+  throw new Error(`unknown visual liveness run mode: ${mode}`);
+}
+
 function increasing(current, previous, { allowZeroPrevious = false } = {}) {
   if (!Number.isFinite(current)) return false;
   if (!Number.isFinite(previous)) {
@@ -301,7 +419,9 @@ export function visualLivenessInitialPresentationReady(snapshot) {
   );
 }
 
-export function visualLivenessSnapshotReady(snapshot) {
+export function visualLivenessSnapshotReady(snapshot, {
+  allowResidentPending = false
+} = {}) {
   return Boolean(
     snapshot?.overlayPresent === true
     && snapshot?.scenePresent === true
@@ -310,7 +430,7 @@ export function visualLivenessSnapshotReady(snapshot) {
     && snapshot?.playbackActive === true
     && snapshot?.playText === 'Pause'
     && Number(snapshot?.residentSubmissions) > 0
-    && snapshot?.residentPending == null
+    && (allowResidentPending === true || snapshot?.residentPending == null)
     && Number(snapshot?.staleResidentSubmissions ?? 0) === 0
     && snapshotSourceCorrelated(snapshot)
     && exactZeroReadbackTelemetry(snapshot)
@@ -318,8 +438,80 @@ export function visualLivenessSnapshotReady(snapshot) {
   );
 }
 
-export function visualLivenessSnapshotAdvanced(previous, current) {
-  if (!visualLivenessSnapshotReady(current)) return false;
+export function visualLivenessPresetEntryAutoplayReady(scenario, snapshot) {
+  const expectedBatchStepCount = Number(
+    scenario?.expectedConfiguredBatchStepCount
+      ?? PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[scenario?.id]
+  );
+  const configuredAutoplay = snapshot?.configuredAutoplayStartup;
+  const startupGate = snapshot?.startupPresentationGate;
+  const startupHandoff = snapshot?.startupPresentationHandoff;
+  const pendingPresentation = snapshot?.pendingPresentation;
+  const stageEvent = snapshot?.residentStageOrderLastEvent;
+  return Boolean(
+    Number.isSafeInteger(expectedBatchStepCount)
+    && expectedBatchStepCount > 0
+    // Configured autoplay submits the next batch immediately after presenting
+    // the previous terminal surface. A truthful self-start sample can
+    // therefore have an in-flight `residentPending` for the successor while
+    // its correlated `nextStep`/bridge source already prove terminal motion.
+    && visualLivenessSnapshotReady(snapshot, { allowResidentPending: true })
+    && snapshot?.residentAuto === true
+    && snapshot?.residentAutoConfigured === true
+    && configuredAutoplay?.schema
+      === 'peercompute.ulg.sph-configured-autoplay-startup.v0'
+    && configuredAutoplay.status === 'configured-autoplay-worker-view-ready'
+    && configuredAutoplay.start === true
+    && configuredAutoplay.mode === 'worker-view'
+    && snapshot?.runtimeAdmission?.status
+      === 'sph-simulation-runtime-admitted'
+    && snapshot?.workerRebuild?.status === 'complete'
+    && startupGate?.schema
+      === 'peercompute.ulg.sph-native-surface-startup-presentation-gate.v0'
+    && startupGate.status
+      === 'native-surface-startup-initial-presentation-admitted'
+    && startupGate.active === false
+    && startupHandoff?.schema
+      === 'peercompute.ulg.sph-native-surface-startup-handoff.v0'
+    && startupHandoff.status
+      === 'native-surface-startup-handoff-initial-resident-schedule-submitted'
+    && startupHandoff.active === false
+    && pendingPresentation?.schema
+      === 'peercompute.ulg.sph-pending-body-envelope-preview.v0'
+    && pendingPresentation.status
+      === 'control-envelope-preview-retired-after-current-presentation'
+    && pendingPresentation.active === false
+    && snapshot?.postStepPresentationGateActive !== true
+    && Number(snapshot?.residentStepsPerSchedule)
+      === expectedBatchStepCount
+    && Number(stageEvent?.stepCount) === expectedBatchStepCount
+    && Number.isSafeInteger(snapshot?.nextStep)
+    && snapshot.nextStep >= expectedBatchStepCount
+  );
+}
+
+export function visualLivenessPresetEntryCheckpointUsesConfiguredBatch(
+  scenario,
+  checkpoint
+) {
+  const expectedBatchStepCount = Number(
+    scenario?.expectedConfiguredBatchStepCount
+      ?? PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[scenario?.id]
+  );
+  return Boolean(
+    Number.isSafeInteger(expectedBatchStepCount)
+    && expectedBatchStepCount > 0
+    && Number(checkpoint?.snapshot?.residentStepsPerSchedule)
+      === expectedBatchStepCount
+  );
+}
+
+export function visualLivenessSnapshotAdvanced(previous, current, {
+  allowResidentPending = false
+} = {}) {
+  if (!visualLivenessSnapshotReady(current, { allowResidentPending })) {
+    return false;
+  }
   const physicsAdvanced = Boolean(
     increasing(current.nextStep, previous?.nextStep, { allowZeroPrevious: true })
     && increasing(current.nextTimeS, previous?.nextTimeS, { allowZeroPrevious: true })
@@ -360,6 +552,34 @@ export function visualLivenessSnapshotAdvanced(previous, current) {
     )
   );
   return physicsAdvanced && presentationAdvanced;
+}
+
+export function visualLivenessSnapshotReadyForMode(
+  mode,
+  scenario,
+  snapshot
+) {
+  if (mode === VISUAL_LIVENESS_RUN_MODE_CONTROLLED) {
+    return visualLivenessSnapshotReady(snapshot);
+  }
+  if (mode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY) {
+    return visualLivenessPresetEntryAutoplayReady(scenario, snapshot);
+  }
+  throw new Error(`unknown visual liveness run mode: ${mode}`);
+}
+
+export function visualLivenessSnapshotAdvancedForMode(
+  mode,
+  scenario,
+  previous,
+  current
+) {
+  if (!visualLivenessSnapshotReadyForMode(mode, scenario, current)) {
+    return false;
+  }
+  return visualLivenessSnapshotAdvanced(previous, current, {
+    allowResidentPending: mode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+  });
 }
 
 export function visualLivenessQuiescentSnapshotAdvanced(previous, current) {
@@ -408,7 +628,8 @@ export function evaluateVisualLivenessSustainedProgress({
   firstAdvanceAtMs = null,
   currentAtMs = null,
   checkpointSnapshots = [],
-  milestonePassed = false
+  milestonePassed = false,
+  allowResidentPending = false
 } = {}) {
   const baselinePhysicsStep = Number(baselineSnapshot?.nextStep);
   const currentPhysicsStep = Number(currentSnapshot?.nextStep);
@@ -441,7 +662,7 @@ export function evaluateVisualLivenessSustainedProgress({
     ? currentPhysicsStep - currentPresentedStep
     : null;
   const passed = Boolean(
-    visualLivenessSnapshotReady(currentSnapshot)
+    visualLivenessSnapshotReady(currentSnapshot, { allowResidentPending })
     && milestonePassed === true
     && Number(physicsStepDelta) >= MIN_SUSTAINED_PRESENTED_STEP_COUNT
     && Number(presentedStepDelta) >= MIN_SUSTAINED_PRESENTED_STEP_COUNT
@@ -486,7 +707,16 @@ function exactProductHistoryGpuRenderCommit(productHistory) {
   const renderGeneration = Number(productHistory?.renderGeneration);
   const renderSeal = Number(productHistory?.renderSeal);
   return Boolean(
-    productHistory?.residentProductMassStatus
+    (
+      productHistory?.workerEvidenceSchema == null
+      || (
+        productHistory.workerEvidenceSchema
+          === 'peercompute.ulg.worker-resident-product-history-evidence.v0'
+        && productHistory.workerEvidenceStatus
+          === 'worker-resident-product-history-evidence-ready'
+      )
+    )
+    && productHistory?.residentProductMassStatus
       === 'resident-product-mass-merged-gpu-resident'
     && productHistory?.compactionStatus
       === 'product-event-filtered-append-gpu-count-resident'
@@ -517,8 +747,8 @@ function exactProductHistoryGpuRenderCommit(productHistory) {
   );
 }
 
-function exactProductHistoryGpuCommit(productHistory) {
-  const p2gRouteAccepted = Boolean(
+function exactProductHistoryP2gRoute(productHistory) {
+  return Boolean(
     (
       productHistory?.gridCouplingStatus
         === 'resident-product-mass-bound-to-p2g-grid'
@@ -532,13 +762,364 @@ function exactProductHistoryGpuCommit(productHistory) {
         === 'gpu-authenticated-gas-only-no-mechanics-scatter'
     )
   );
+}
+
+function exactProductHistoryGpuCommit(productHistory) {
   return Boolean(
     exactProductHistoryGpuRenderCommit(productHistory)
-    && p2gRouteAccepted
+    && exactProductHistoryP2gRoute(productHistory)
     && productHistory?.countAuthority
       === 'gpu-authored-filtered-live-prefix'
     && Number(productHistory?.rowCapacity) > 0
     && productHistory?.countHostKnown === false
+  );
+}
+
+const VISUAL_LIVENESS_WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
+  'thermal',
+  'reaction',
+  'contactSolver',
+  'contactSolverRequested',
+  'contactSolverEscalatedForDynamicLaws',
+  'lawQueue',
+  'lawNeighborCandidates',
+  'phaseVolumeMigration',
+  'twoLevelMechanics',
+  'surfaceTension',
+  'gasBoundaryActionable',
+  'explicitVacuumAmbient',
+  'phaseVolumeSidecars',
+  'mechanicsFieldViews'
+]);
+
+function exactInactiveGasBoundaryActivationReceipt(receipt) {
+  const exactKeys = [
+    'schema',
+    'activationAuthority',
+    ...VISUAL_LIVENESS_WORKER_ROUTE_ACTIVATION_FIELDS
+  ];
+  const dynamicLawActive = Boolean(
+    receipt?.thermal
+    || receipt?.reaction
+    || receipt?.lawQueue
+    || receipt?.lawNeighborCandidates
+    || receipt?.phaseVolumeMigration
+    || receipt?.twoLevelMechanics
+    || receipt?.surfaceTension
+    || receipt?.gasBoundaryActionable
+  );
+  const expectedEscalation = Boolean(
+    receipt?.contactSolverRequested === false && dynamicLawActive
+  );
+  if (
+    !receipt
+    || typeof receipt !== 'object'
+    || receipt.schema
+      !== 'peercompute.ulg.worker-schedule-law-activation-receipt.v0'
+    || receipt.activationAuthority
+      !== 'schedule-config-static-declaration-no-readback'
+    || Object.keys(receipt).length !== exactKeys.length
+    || !exactKeys.every((key) => Object.prototype.hasOwnProperty.call(
+      receipt,
+      key
+    ))
+    || !VISUAL_LIVENESS_WORKER_ROUTE_ACTIVATION_FIELDS.every(
+      (field) => typeof receipt[field] === 'boolean'
+    )
+    || receipt.phaseVolumeSidecars
+      !== (receipt.phaseVolumeMigration || receipt.twoLevelMechanics)
+    || receipt.contactSolverEscalatedForDynamicLaws !== expectedEscalation
+    || receipt.contactSolver
+      !== (receipt.contactSolverRequested || expectedEscalation)
+  ) return false;
+  return receipt.gasBoundaryActionable === false;
+}
+
+function exactRetainedProductGasTransition(
+  transition,
+  { expectedStepCount = null } = {}
+) {
+  const nonEmpty = (value) => (
+    typeof value === 'string' && value.trim().length > 0
+  );
+  const sourceStepCount = Number(
+    transition?.transitionSourceMaxFutureSubsteps
+  );
+  const targetStepCount = Number(
+    transition?.transitionTargetMaxFutureSubsteps
+  );
+  const requiredStepCount = expectedStepCount == null
+    ? sourceStepCount
+    : Number(expectedStepCount);
+  return Boolean(
+    transition?.schema
+      === 'peercompute.ulg.sph-scene-retained-product-gas-transition.v0'
+    && transition?.status
+      === 'retained-product-gas-transition-consumed-and-admitted'
+    && nonEmpty(transition.predecessorScheduleId)
+    && nonEmpty(transition.consumerScheduleId)
+    && nonEmpty(transition.targetScheduleRequestId)
+    && transition.targetScheduleRequestId === transition.consumerScheduleId
+    && transition.configurationContinuityMode
+      === 'prospective-retained-product-gas-boundary-actionable'
+    && nonEmpty(transition.prospectiveDynamicLawTransitionFingerprint)
+    && transition.transitionKind
+      === 'retained-product-gas-boundary-inactive-to-actionable'
+    && transition.transitionLawFamily === 'gas-pressure'
+    && transition.transitionActivationPolicy
+      === 'worker-retained-product-event-buffer-consumes-presealed-target'
+    && transition.transitionFingerprint
+      === transition.prospectiveDynamicLawTransitionFingerprint
+    && transition.transitionSourceReaction === true
+    && transition.transitionTargetReaction === true
+    && transition.transitionSourceGasBoundaryActionable === false
+    && transition.transitionTargetGasBoundaryActionable === true
+    && transition.transitionTargetMechanicsFieldViews === true
+    && Number.isSafeInteger(sourceStepCount)
+    && sourceStepCount > 0
+    && targetStepCount === sourceStepCount
+    && Number.isSafeInteger(requiredStepCount)
+    && requiredStepCount > 0
+    && sourceStepCount === requiredStepCount
+    && transition.transitionShadowOnly
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    && transition.transitionRoutingAuthority
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    && transition.transitionExecutionGating
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+    && transition.predecessorWriterEvidenceStatus
+      === 'worker-retained-product-gas-boundary-actionable'
+    && transition.predecessorWriterGasBoundaryActionable === true
+    && transition.predecessorProductEventBufferRetained === true
+    && Number.isSafeInteger(transition.predecessorProductEventRowCount)
+    && transition.predecessorProductEventRowCount > 0
+    && transition.predecessorArenaIdentity?.schema
+      === 'peercompute.ulg.sph-resident-product-history-arena-identity.v0'
+    && transition.predecessorArenaIdentity?.status
+      === 'retained-product-history-arena-authenticated'
+    && transition.predecessorArenaIdentity.rowCapacity
+      === transition.predecessorProductEventRowCount
+    && transition.predecessorTerminalGpuFenceSatisfied === true
+    && transition.predecessorScheduleCancelled === false
+    && transition.conservativeActivationRequired === true
+    && transition.gasBoundaryActionable === true
+    && transition.mechanicsFieldViews === true
+    && transition.terminalGpuFenceSatisfied === true
+    && transition.stateManagerConsumptionStatus
+      === 'predecessor-target-token-consumed-before-lease-acquisition'
+    && transition.outerConsumptionStatus
+      === 'predecessor-target-token-consumed-before-schedule-gpu-work'
+    && transition.consumedBeforeLeaseAcquisition === true
+    && transition.consumedBeforeRouteSelection === true
+    && transition.consumedBeforeGpuWork === true
+    && transition.shadowOnly === SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    && transition.routingAuthority === SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    && transition.executionGating
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+  );
+}
+
+function exactDynamicReactionActivation(
+  activation,
+  receipt,
+  { expectedSourcePhaseLaneCount = 4 } = {}
+) {
+  const nonEmpty = (value) => (
+    typeof value === 'string' && value.trim().length > 0
+  );
+  const sourceParticleCount = Number(receipt?.sourceParticleCount);
+  const terminalParticleCount = Number(receipt?.terminalParticleCount);
+  const canonicalRouteTransitions = new Set([
+    'fresh-or-canonical-continuation',
+    'tier0-to-canonical-schedule-boundary',
+    'tier0-one-to-four-to-canonical-schedule-boundary'
+  ]);
+  return Boolean(
+    activation?.state === 'active'
+    && nonEmpty(activation.transitionFingerprint)
+    && nonEmpty(activation.committedScheduleId)
+    && receipt?.schema
+      === 'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0'
+    && receipt?.status
+      === 'dynamic-reaction-activation-consumed-and-admitted'
+    && nonEmpty(receipt.predecessorScheduleId)
+    && nonEmpty(receipt.consumerScheduleId)
+    && nonEmpty(receipt.targetScheduleRequestId)
+    && receipt.targetScheduleRequestId === receipt.consumerScheduleId
+    && receipt.consumerScheduleId === activation.committedScheduleId
+    && receipt.configurationContinuityMode
+      === 'prospective-reaction-dormant-to-executing'
+    && receipt.transitionKind
+      === 'reaction-dormant-watch-to-executing-reaction'
+    && receipt.transitionFingerprint === activation.transitionFingerprint
+    && receipt.route === 'canonical-schroeder'
+    && canonicalRouteTransitions.has(receipt.routeTransition)
+    && receipt.reactionExecution === true
+    && Number.isSafeInteger(sourceParticleCount)
+    && sourceParticleCount > 0
+    && terminalParticleCount === sourceParticleCount
+    && receipt.sourcePhaseLaneCount === expectedSourcePhaseLaneCount
+    && receipt.terminalPhaseLaneCount === 4
+    && receipt.phaseCarrierTopologyAuthority
+      === 'preexisting-four-carrier-plan'
+    && receipt.phaseCarrierTrigger == null
+    && receipt.phaseCarrierMapAsyncCount === 0
+    && receipt.phaseCarrierReadbackBytes === 0
+    && receipt.terminalGpuFenceSatisfied === true
+    && receipt.stateManagerCommitted === true
+    && receipt.consumedBeforeLeaseAcquisition === true
+    && receipt.consumedBeforeRouteSelection === true
+    && receipt.consumedBeforeGpuWork === true
+    && receipt.shadowOnly === SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    && receipt.routingAuthority === SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    && receipt.executionGating
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+  );
+}
+
+function exactZeroLiveProductHistoryEvidence(
+  productHistory,
+  { requireP2gRoute = true } = {}
+) {
+  const liveBound = productHistory?.liveBoundObservation;
+  const arenaIdentity = liveBound?.arenaIdentity;
+  const generation = Number(productHistory?.generation);
+  const seal = Number(productHistory?.seal);
+  const arenaRowCapacity = Number(liveBound?.arenaRowCapacity);
+  const p2gRowCapacity = Number(productHistory?.rowCapacity);
+  const bufferByteLength = Number(productHistory?.productEventBufferByteLength);
+  const exactP2gEvidence = Boolean(
+    exactProductHistoryP2gRoute(productHistory)
+    && productHistory?.countAuthority
+      === 'gpu-authored-filtered-live-prefix'
+    && Number.isSafeInteger(p2gRowCapacity)
+    && p2gRowCapacity > 0
+    && p2gRowCapacity === arenaRowCapacity
+    && productHistory?.countHostKnown === false
+  );
+  const p2gEvidenceSealedAbsent = Boolean(
+    productHistory?.gridCouplingStatus == null
+    && productHistory?.countAuthority == null
+    && productHistory?.rowCapacity == null
+    && productHistory?.countHostKnown == null
+    && productHistory?.dispatchMode == null
+  );
+  return Boolean(
+    productHistory?.workerEvidenceSchema
+      === 'peercompute.ulg.worker-resident-product-history-evidence.v0'
+    && productHistory?.workerEvidenceStatus
+      === 'worker-resident-product-history-evidence-ready'
+    && productHistory?.residentProductMassStatus
+      === 'resident-product-mass-merged-gpu-resident'
+    && productHistory?.productEventBufferRetained === true
+    && bufferByteLength > 0
+    && productHistory?.compactionStatus
+      === 'product-event-filtered-append-gpu-count-resident'
+    && productHistory?.gpuCommitStatus
+      === 'gpu-conditioned-publication-commit-pending'
+    && productHistory?.arenaStatus
+      === 'resident-product-history-arena-gpu-commit-pending'
+    && (
+      requireP2gRoute === true
+        ? exactP2gEvidence
+        : (exactP2gEvidence || p2gEvidenceSealedAbsent)
+    )
+    && Number.isSafeInteger(arenaRowCapacity)
+    && arenaRowCapacity > 0
+    && Number.isSafeInteger(generation)
+    && generation > 0
+    && Number.isSafeInteger(seal)
+    && seal > 0
+    && liveBound?.schema
+      === 'peercompute.ulg.sph-product-history-live-bound-observation.v0'
+    && liveBound.observedLiveRowCount === 0
+    && Number.isSafeInteger(liveBound.previousUpperBound)
+    && liveBound.previousUpperBound >= 1
+    && liveBound.tightenedUpperBound === 1
+    && liveBound.readbackByteLength === Uint32Array.BYTES_PER_ELEMENT
+    && arenaIdentity?.schema
+      === 'peercompute.ulg.sph-resident-product-history-arena-identity.v0'
+    && arenaIdentity?.status
+      === 'retained-product-history-arena-authenticated'
+    && arenaIdentity.rowCapacity === arenaRowCapacity
+    && arenaIdentity.bufferByteLength === bufferByteLength
+    && arenaIdentity.countAuthorityGeneration === generation
+    && arenaIdentity.countAuthoritySeal === seal
+    && productHistory?.renderProductEventBufferBound === false
+    && productHistory?.renderProductEventBufferByteLength === 0
+  );
+}
+
+function exactZeroLiveProductHistoryGasTransition(
+  productHistory,
+  transition,
+  options = {}
+) {
+  return Boolean(
+    exactZeroLiveProductHistoryEvidence(productHistory, options)
+    && exactRetainedProductGasTransition(transition, options)
+  );
+}
+
+function exactMultiStepZeroLiveInactiveGasBoundary(
+  snapshot,
+  {
+    requireP2gRoute = true,
+    expectedStepCount = null
+  } = {}
+) {
+  const milestone = snapshot?.milestone || {};
+  const schedule = milestone.workerSchedule || {};
+  const scheduleKeys = [
+    'schema',
+    'status',
+    'requestedStepCount',
+    'completedStepCount',
+    'cancelled',
+    'lawActivationReceipt',
+    'retainedProductGasTransitionReceipt'
+  ];
+  const configuredStepCount = Number(snapshot?.residentStepsPerSchedule);
+  const requestedStepCount = Number(schedule.requestedStepCount);
+  const completedStepCount = Number(schedule.completedStepCount);
+  const exactExpectedStepCount = Number(expectedStepCount);
+  return Boolean(
+    schedule.schema
+      === 'peercompute.ulg.sph-scene-worker-owned-resident-lane-execution.v0'
+    && schedule.status === 'worker-resident-schedule-completed'
+    && Object.keys(schedule).length === scheduleKeys.length
+    && scheduleKeys.every((key) => Object.prototype.hasOwnProperty.call(
+      schedule,
+      key
+    ))
+    && Number.isSafeInteger(exactExpectedStepCount)
+    && exactExpectedStepCount > 1
+    && configuredStepCount === exactExpectedStepCount
+    && Number.isSafeInteger(requestedStepCount)
+    && requestedStepCount === exactExpectedStepCount
+    && Number.isSafeInteger(completedStepCount)
+    && completedStepCount === requestedStepCount
+    && schedule.cancelled === false
+    && schedule.retainedProductGasTransitionReceipt == null
+    && milestone.productGasTransition == null
+    && exactInactiveGasBoundaryActivationReceipt(
+      schedule.lawActivationReceipt
+    )
+    && exactInactiveGasBoundaryActivationReceipt(
+      milestone.lawActivationReceipt
+    )
+    && schedule.lawActivationReceipt.schema
+      === milestone.lawActivationReceipt.schema
+    && schedule.lawActivationReceipt.activationAuthority
+      === milestone.lawActivationReceipt.activationAuthority
+    && VISUAL_LIVENESS_WORKER_ROUTE_ACTIVATION_FIELDS.every(
+      (field) => schedule.lawActivationReceipt[field]
+        === milestone.lawActivationReceipt[field]
+    )
+    && exactZeroLiveProductHistoryEvidence(
+      milestone.productHistory,
+      { requireP2gRoute }
+    )
   );
 }
 
@@ -563,8 +1144,29 @@ export function evaluateVisualLivenessMilestone(scenarioId, snapshot) {
   }
   if (scenarioId === 'sodium-water') {
     return Object.freeze({
-      id: 'resident-product-history-gpu-commit',
-      passed: exactProductHistoryGpuCommit(milestone.productHistory),
+      id:
+        'dynamic-reaction-active-and-resident-product-history-or-zero-live-gas-authority',
+      passed: Boolean(
+        exactDynamicReactionActivation(
+          milestone.dynamicReactionActivation,
+          milestone.dynamicReactionActivationReceipt
+        )
+        && (
+          exactProductHistoryGpuCommit(milestone.productHistory)
+          || exactZeroLiveProductHistoryGasTransition(
+            milestone.productHistory,
+            milestone.productGasTransition,
+            {
+              expectedStepCount:
+                PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO['sodium-water']
+            }
+          )
+          || exactMultiStepZeroLiveInactiveGasBoundary(snapshot, {
+            expectedStepCount:
+              PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO['sodium-water']
+          })
+        )
+      ),
       observed: milestone
     });
   }
@@ -573,11 +1175,38 @@ export function evaluateVisualLivenessMilestone(scenarioId, snapshot) {
     return Object.freeze({
       id: 'authoritative-two-level-product-step',
       passed: Boolean(
-        ['authoritative', 'two-level-authoritative-resident-mechanics-replaced']
+        exactDynamicReactionActivation(
+          milestone.dynamicReactionActivation,
+          milestone.dynamicReactionActivationReceipt
+        )
+        && ['authoritative', 'two-level-authoritative-resident-mechanics-replaced']
           .includes(authority)
         && milestone.twoLevelCommitVerified === true
         && Number(milestone.twoLevelFineSubstepCount) === 2
-        && exactProductHistoryGpuRenderCommit(milestone.productHistory)
+        && (
+          exactProductHistoryGpuRenderCommit(milestone.productHistory)
+          || exactZeroLiveProductHistoryGasTransition(
+            milestone.productHistory,
+            milestone.productGasTransition,
+            {
+              requireP2gRoute: false,
+              expectedStepCount:
+                PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[
+                  'cesium-fluorine'
+                ]
+            }
+          )
+          || exactMultiStepZeroLiveInactiveGasBoundary(
+            snapshot,
+            {
+              requireP2gRoute: false,
+              expectedStepCount:
+                PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[
+                  'cesium-fluorine'
+                ]
+            }
+          )
+        )
       ),
       observed: milestone
     });
@@ -681,11 +1310,38 @@ function childArgument(name) {
   return value == null ? null : value.slice(prefix.length);
 }
 
-function serializeFailure(error, type = 'scenario-error') {
+export function visualLivenessChildArguments({
+  scenario,
+  port,
+  outputDirectory,
+  mode = VISUAL_LIVENESS_RUN_MODE_CONTROLLED
+}) {
+  visualLivenessPolicyForMode(mode);
+  const args = [
+    '--visual-liveness-child',
+    `--scenario=${scenario.id}`,
+    `--port=${port}`,
+    `--output-dir=${outputDirectory}`
+  ];
+  // The historical controlled child remains the implicit default. The exact
+  // preset-entry child must carry its explicit mode or it would reconstruct a
+  // residentAuto=0 controlled URL and invalidate the startup audit.
+  if (mode !== VISUAL_LIVENESS_RUN_MODE_CONTROLLED) {
+    args.push(`--visual-liveness-mode=${mode}`);
+  }
+  return Object.freeze(args);
+}
+
+function serializeFailure(
+  error,
+  type = 'scenario-error',
+  residentScheduleFailure = null
+) {
   return Object.freeze({
     type,
     message: compactError(error),
-    stack: error instanceof Error ? error.stack || null : null
+    stack: error instanceof Error ? error.stack || null : null,
+    residentScheduleFailure
   });
 }
 
@@ -817,6 +1473,12 @@ async function snapshotPage(page) {
       || overlay.__mlsMpmResidentSteps
       || null;
     const finalStep = execution?.finalStep || execution || null;
+    const workerLaneExecution = execution?.workerOwnedResidentLane || null;
+    const workerLastStep = workerLaneExecution?.perStepSummaries?.lastStep
+      || execution?.perStepSummaries?.lastStep
+      || null;
+    const workerHierarchyStageSummary =
+      workerLastStep?.hierarchyStageSummary || null;
     const surfaceDraw = sceneApi?.getSphResidentSurfaceDraw?.()
       || overlay.__sphResidentSurfaceDraw
       || null;
@@ -825,11 +1487,23 @@ async function snapshotPage(page) {
       || null;
     const bridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
     const schedule = overlay.__mlsMpmResidentAutoSchedule || null;
+    const configuredAutoplayStartup =
+      overlay.__sphConfiguredAutoplayStartup || null;
+    const startupPresentationGate =
+      overlay.__sphResidentStartupPresentationGate || null;
+    const startupPresentationHandoff =
+      overlay.__sphResidentStartupPresentationHandoff || null;
+    const residentStageOrderLastEvent =
+      overlay.__sphResidentStageOrderTrace?.lastEvent || null;
     const counters = overlay.__sphFrameCounters || {};
     const perf = overlay.__sphResidentPerf || {};
     const presentation = overlay.__sphResidentPresentationProof || null;
     const pendingPresentation = overlay.__sphPendingPresentation || null;
     const sceneUserData = sceneApi?.scene?.userData || null;
+    const workerResidentStage =
+      sceneApi?.getWorkerOffscreenResidentStageStatus?.()
+      || sceneUserData?.sphWorkerOffscreenResidentStage
+      || null;
     const renderRefreshScheduler =
       sceneUserData?.sphResidentRenderRefreshSerialization || null;
     const candidateValidationScheduler =
@@ -847,14 +1521,36 @@ async function snapshotPage(page) {
     const mlsParticleState = sceneApi?.getMlsMpmGpuParticleState?.()
       || overlay.__mlsMpmGpuParticleState
       || null;
-    const surfaceStress = finalStep?.phaseVolumeSurfaceStressSubmission
+    const surfaceStress = execution?.phaseVolumeSurfaceStressWorkerEvidence
+      ?.finalSubmission
+      || workerLaneExecution?.phaseVolumeSurfaceStress?.finalSubmission
+      || finalStep?.phaseVolumeSurfaceStressSubmission
       || finalStep?.gridUpdate?.phaseVolumeSurfaceStressSubmission
       || execution?.finalStepPhaseVolumeSurfaceStressSubmission
       || null;
     const thermal = finalStep?.thermalStep?.result
       || finalStep?.thermalStep
+      || (
+        (
+          workerHierarchyStageSummary?.postMechanicsClosure?.thermalStatus
+          || workerHierarchyStageSummary?.residentStageStatus?.thermal
+        )
+          ? {
+              status:
+                workerHierarchyStageSummary.postMechanicsClosure
+                  ?.thermalStatus
+                ?? workerHierarchyStageSummary.residentStageStatus?.thermal
+                ?? null,
+              backend:
+                workerHierarchyStageSummary.residentStageBackends?.thermal
+                ?? null
+            }
+          : null
+      )
       || null;
-    const twoLevel = execution?.finalSchroederResult?.twoLevelMechanics
+    const twoLevel = execution?.twoLevelMechanicsWorkerEvidence?.lastStep
+      || workerLaneExecution?.twoLevelMechanics?.lastStep
+      || execution?.finalSchroederResult?.twoLevelMechanics
       || execution?.schroederSameLevelMechanics?.twoLevelMechanics
       || null;
     const rendererBackend = sceneApi?.scene?.userData?.sphRendererBackend
@@ -905,14 +1601,28 @@ async function snapshotPage(page) {
       || finalStep?.reactionStep?.result?.residentProductMass
       || finalStep?.reactionStep?.residentProductMass
       || null;
+    const workerProductHistory =
+      workerHierarchyStageSummary?.residentProductHistory || null;
+    const productHistoryEvidence = residentProductMass
+      || workerProductHistory
+      || null;
     const playButton = overlay.querySelector('#sph-play');
     const playText = String(playButton?.textContent || '').trim();
-    const nextStepCandidate = execution?.nextSphParticleState?.step
+    // A worker-owned retained lane intentionally leaves the page's seed
+    // particle rows untouched. Its committed schedule total and simulation
+    // time are the physics coordinates that must correlate with the native
+    // presentation source; using the page seed would report step zero while
+    // the worker and compositor truthfully advance.
+    const nextStepCandidate = workerLaneExecution?.laneCompletedStepTotal
+      ?? execution?.workerLaneSimTime?.laneCompletedStepTotal
+      ?? execution?.nextSphParticleState?.step
       ?? execution?.nextStep
       ?? finalStep?.particlePingPong?.nextStep
       ?? mlsParticleState?.step
       ?? particleState?.step;
-    const nextTimeCandidate = execution?.nextSphParticleState?.time
+    const nextTimeCandidate = workerLaneExecution?.laneSimTimeS
+      ?? execution?.workerLaneSimTime?.timeS
+      ?? execution?.nextSphParticleState?.time
       ?? execution?.nextTime
       ?? finalStep?.particlePingPong?.nextTime
       ?? mlsParticleState?.time
@@ -932,6 +1642,83 @@ async function snapshotPage(page) {
     const presentedSourceStep = Number.isSafeInteger(presentedSourceCandidate)
       ? Number(presentedSourceCandidate)
       : (execution == null && nextStep === 0 ? 0 : null);
+    const residentScheduleError = workerResidentStage?.residentScheduleError
+      || null;
+    const terminalGpuFence = residentScheduleError?.terminalGpuFence || null;
+    const terminalRefluxReceipt = terminalGpuFence?.terminalRefluxReceipt
+      || null;
+    const firstRejectedDiagnostic =
+      terminalRefluxReceipt?.firstRejectedDiagnostic || null;
+    const authorityHierarchySummary =
+      residentScheduleError?.authorityDiagnostics?.hierarchyStageSummary
+      || null;
+    // The mount-facing error is intentionally a short string, but the worker
+    // bridge retains the typed fail-closed envelope in scene userData. Keep
+    // the already-compact first rejected terminal header and opt-in stage
+    // trace in visual artifacts so a late native failure remains actionable.
+    const residentScheduleFailure = residentScheduleError == null
+      ? null
+      : {
+          schema: residentScheduleError.schema ?? null,
+          reason: residentScheduleError.reason ?? null,
+          message: residentScheduleError.message ?? null,
+          scheduleId: residentScheduleError.scheduleId ?? null,
+          stepOrdinal: residentScheduleError.stepOrdinal ?? null,
+          stageId: residentScheduleError.stageId ?? null,
+          workerStatus: workerResidentStage?.status ?? null,
+          terminalGpuFence: terminalGpuFence == null ? null : {
+            schema: terminalGpuFence.schema ?? null,
+            status: terminalGpuFence.status ?? null,
+            reason: terminalGpuFence.reason ?? null,
+            fenceSatisfied: terminalGpuFence.fenceSatisfied ?? null,
+            authorityAdmissionReady:
+              terminalGpuFence.authorityAdmissionReady ?? null,
+            terminalRefluxReceipt:
+              terminalRefluxReceipt == null ? null : {
+                schema: terminalRefluxReceipt.schema ?? null,
+                status: terminalRefluxReceipt.status ?? null,
+                reason: terminalRefluxReceipt.reason ?? null,
+                expectedStepCount:
+                  terminalRefluxReceipt.expectedStepCount ?? null,
+                observedStepCount:
+                  terminalRefluxReceipt.observedStepCount ?? null,
+                admittedStepCount:
+                  terminalRefluxReceipt.admittedStepCount ?? null,
+                firstRejectedStepOrdinal:
+                  terminalRefluxReceipt.firstRejectedStepOrdinal ?? null,
+                firstRejectedDiagnostic:
+                  firstRejectedDiagnostic == null ? null : {
+                    ...firstRejectedDiagnostic,
+                    authorityRejectCount:
+                      firstRejectedDiagnostic.authorityRejectCount
+                        ? { ...firstRejectedDiagnostic.authorityRejectCount }
+                        : null,
+                    receiptRejectCount:
+                      firstRejectedDiagnostic.receiptRejectCount
+                        ? { ...firstRejectedDiagnostic.receiptRejectCount }
+                        : null
+                  }
+              }
+          },
+          authorityDiagnostics:
+            residentScheduleError.authorityDiagnostics == null
+              ? null
+              : {
+                  schema:
+                    residentScheduleError.authorityDiagnostics.schema ?? null,
+                  firstRejectedStepOrdinal:
+                    residentScheduleError.authorityDiagnostics
+                      .firstRejectedStepOrdinal ?? null,
+                  stageMechanicsTraceRequested:
+                    authorityHierarchySummary
+                      ?.stageMechanicsTraceRequested === true,
+                  stageMechanicsTrace:
+                    authorityHierarchySummary?.stageMechanicsTrace ?? null,
+                  canonicalSpatialAuthorityTrace:
+                    authorityHierarchySummary
+                      ?.canonicalSpatialAuthorityTrace ?? null
+                }
+        };
     return {
       capturedAtMs: performance.now(),
       documentUrl: location.href,
@@ -947,6 +1734,35 @@ async function snapshotPage(page) {
       autoScheduleGeneration: Number.isSafeInteger(schedule?.generation)
         ? schedule.generation
         : null,
+      configuredAutoplayStartup:
+        configuredAutoplayStartup == null ? null : {
+          schema: configuredAutoplayStartup.schema ?? null,
+          status: configuredAutoplayStartup.status ?? null,
+          start: configuredAutoplayStartup.start === true,
+          mode: configuredAutoplayStartup.mode ?? null
+        },
+      startupPresentationGate: compactObject(startupPresentationGate),
+      startupPresentationHandoff: compactObject(startupPresentationHandoff),
+      residentStepsPerSchedule: Number.isSafeInteger(
+        perf.residentStepsPerSchedule
+      ) ? perf.residentStepsPerSchedule : null,
+      residentStageOrderLastEvent:
+        residentStageOrderLastEvent == null ? null : {
+          schema: residentStageOrderLastEvent.schema ?? null,
+          eventSequence:
+            Number.isSafeInteger(residentStageOrderLastEvent.eventSequence)
+              ? residentStageOrderLastEvent.eventSequence
+              : null,
+          status: residentStageOrderLastEvent.status ?? null,
+          scheduleToken:
+            Number.isSafeInteger(residentStageOrderLastEvent.scheduleToken)
+              ? residentStageOrderLastEvent.scheduleToken
+              : null,
+          stepCount:
+            Number.isSafeInteger(residentStageOrderLastEvent.stepCount)
+              ? residentStageOrderLastEvent.stepCount
+              : null
+        },
       nextStep,
       nextTimeS,
       lastResidentCompletionAtMs: Number.isFinite(Number(
@@ -1020,6 +1836,7 @@ async function snapshotPage(page) {
       residentError: residentError == null
         ? null
         : String(residentError?.message || residentError).slice(0, 2_000),
+      residentScheduleFailure,
       renderError: renderError == null
         ? null
         : String(renderError?.message || renderError).slice(0, 2_000),
@@ -1060,47 +1877,75 @@ async function snapshotPage(page) {
         thermalBackend: thermal?.backend
           ?? finalStep?.stageBackends?.thermal
           ?? null,
-        productHistory: residentProductMass == null ? null : {
-          residentProductMassStatus: residentProductMass.status ?? null,
+        productHistory: productHistoryEvidence == null ? null : {
+          workerEvidenceSchema: workerProductHistory?.schema ?? null,
+          workerEvidenceStatus: workerProductHistory?.status ?? null,
+          liveBoundObservation:
+            workerLaneExecution?.productHistoryLiveBoundObservation ?? null,
+          productEventBufferRetained:
+            workerProductHistory?.productEventBufferRetained
+            ?? productHistoryEvidence.productEventBufferRetained
+            ?? null,
+          productEventBufferByteLength:
+            workerProductHistory?.productEventBufferByteLength
+            ?? productHistoryEvidence.productEventBufferByteLength
+            ?? null,
+          residentProductMassStatus:
+            productHistoryEvidence.residentProductMassStatus
+            ?? productHistoryEvidence.status
+            ?? null,
           compactionStatus:
-            residentProductMass.productEventCompactionStatus ?? null,
+            productHistoryEvidence.productEventCompactionStatus
+            ?? productHistoryEvidence.compactionStatus
+            ?? null,
           gpuCommitStatus:
-            residentProductMass.productEventGpuCommitStatus ?? null,
+            productHistoryEvidence.productEventGpuCommitStatus
+            ?? productHistoryEvidence.gpuCommitStatus
+            ?? null,
           arenaStatus:
-            residentProductMass.productEventHistoryArenaStatus ?? null,
+            productHistoryEvidence.productEventHistoryArenaStatus
+            ?? productHistoryEvidence.arenaStatus
+            ?? null,
           generation:
-            residentProductMass.productEventLiveCountAuthority?.generation
+            productHistoryEvidence.productEventLiveCountAuthority?.generation
+            ?? productHistoryEvidence.generation
             ?? null,
           seal:
-            residentProductMass.productEventLiveCountAuthority?.seal
+            productHistoryEvidence.productEventLiveCountAuthority?.seal
+            ?? productHistoryEvidence.seal
             ?? null,
           gridCouplingStatus:
             finalStep?.residentProductMassGridCouplingStatus
             ?? finalStep?.p2gGridProjection
               ?.residentProductMassGridCouplingStatus
+            ?? workerProductHistory?.gridCouplingStatus
             ?? null,
           countAuthority:
             finalStep?.residentProductMassInputProductEventCountAuthority
             ?? finalStep?.p2gGridProjection
               ?.residentProductMassInputProductEventCountAuthority
+            ?? workerProductHistory?.countAuthority
             ?? null,
           rowCapacity:
             finalStep?.residentProductMassInputProductEventRowCapacity
             ?? finalStep?.p2gGridProjection
               ?.residentProductMassInputProductEventRowCapacity
+            ?? workerProductHistory?.rowCapacity
             ?? null,
           countHostKnown:
             finalStep?.residentProductMassInputProductEventCountHostKnown
             ?? finalStep?.p2gGridProjection
               ?.residentProductMassInputProductEventCountHostKnown
+            ?? workerProductHistory?.countHostKnown
             ?? null,
           dispatchMode:
             finalStep?.residentProductMassProductEventDispatchMode
             ?? finalStep?.p2gGridProjection
               ?.residentProductMassProductEventDispatchMode
+            ?? workerProductHistory?.dispatchMode
             ?? null,
           renderProductEventBufferBound:
-            renderState?.productEventBufferBound === true,
+            renderState?.productEventBufferBound ?? null,
           renderProductEventBufferByteLength:
             renderState?.productEventBufferByteLength ?? null,
           renderResidentProductMassStatus:
@@ -1118,6 +1963,35 @@ async function snapshotPage(page) {
           renderSeal:
             renderState?.productEventCountAuthoritySeal ?? null
         },
+        productGasTransition:
+          workerLaneExecution?.retainedProductGasTransitionReceipt ?? null,
+        dynamicReactionActivation:
+          workerLaneExecution?.dynamicReactionActivation == null
+            ? null
+            : { ...workerLaneExecution.dynamicReactionActivation },
+        dynamicReactionActivationReceipt:
+          workerLaneExecution?.dynamicReactionActivationReceipt == null
+            ? null
+            : { ...workerLaneExecution.dynamicReactionActivationReceipt },
+        lawActivationReceipt:
+          workerLaneExecution?.lawActivationReceipt == null
+            ? null
+            : { ...workerLaneExecution.lawActivationReceipt },
+        workerSchedule: workerLaneExecution == null ? null : {
+          schema: workerLaneExecution.schema ?? null,
+          status: workerLaneExecution.residentScheduleStatus ?? null,
+          requestedStepCount:
+            workerLaneExecution.requestedStepCount ?? null,
+          completedStepCount:
+            workerLaneExecution.completedStepCount ?? null,
+          cancelled: workerLaneExecution.cancelled === true,
+          lawActivationReceipt:
+            workerLaneExecution.lawActivationReceipt == null
+              ? null
+              : { ...workerLaneExecution.lawActivationReceipt },
+          retainedProductGasTransitionReceipt:
+            workerLaneExecution.retainedProductGasTransitionReceipt ?? null
+        },
         surfaceStress: surfaceStress == null ? null : {
           schema: surfaceStress.schema ?? null,
           status: surfaceStress.status ?? null,
@@ -1126,13 +2000,21 @@ async function snapshotPage(page) {
           lifecycleDispatchCount: Number(surfaceStress.lifecycleDispatchCount) || 0,
           verification: surfaceStress.verification ?? null
         },
-        twoLevelAuthority: twoLevel?.authority
+        twoLevelAuthority: twoLevel?.twoLevelMechanicsAuthority
+          ?? twoLevel?.authority
+          ?? workerHierarchyStageSummary?.twoLevelMechanicsAuthority
           ?? finalStep?.twoLevelMechanicsAuthority
           ?? null,
         twoLevelCommitVerified:
-          finalStep?.twoLevelAuthoritativeCommitVerified === true,
+          twoLevel?.twoLevelAuthoritativeCommitVerified === true
+          || workerHierarchyStageSummary
+            ?.twoLevelAuthoritativeCommitVerified === true
+          || finalStep?.twoLevelAuthoritativeCommitVerified === true,
         twoLevelFineSubstepCount:
-          finalStep?.twoLevelFineSubstepCount ?? null
+          twoLevel?.twoLevelFineSubstepCount
+          ?? workerHierarchyStageSummary?.twoLevelFineSubstepCount
+          ?? finalStep?.twoLevelFineSubstepCount
+          ?? null
       }
     };
   });
@@ -1374,6 +2256,10 @@ export async function waitForQuiescentCaptureSnapshot(page, {
 }
 
 async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) {
+  const runMode = scenario?.runMode || VISUAL_LIVENESS_RUN_MODE_CONTROLLED;
+  const runPolicy = visualLivenessPolicyForMode(runMode);
+  const presetEntryAutoplayMode =
+    runMode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY;
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
   const consoleCapture = createBrowserConsoleCapture();
@@ -1392,6 +2278,11 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
   let browserLaunch = null;
   let result = null;
   let lastPartialEvidence = null;
+  let initialPresentationAtMs = null;
+  let initialPresentationSnapshot = null;
+  let autoplayStartedAtMs = null;
+  let configuredAutoplaySelfStartSnapshot = null;
+  let initialPlayClickPerformed = false;
   try {
     await mkdir(outputDirectory, { recursive: true });
     const borrowedBaseUrl = String(
@@ -1472,9 +2363,6 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
 
     let readyAtMs = null;
     let firstAdvanceAtMs = null;
-    let initialPresentationAtMs = null;
-    let initialPresentationSnapshot = null;
-    let autoplayStartedAtMs = null;
     let baselineSnapshot = null;
     let baselineFrame = null;
     let frameDelta = null;
@@ -1489,6 +2377,7 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
     const partialEvidence = () => ({
       schema: 'peercompute.ulg.sph-visual-animation-liveness-checkpoint.v1',
       scenarioId: scenario.id,
+      ...(presetEntryAutoplayMode ? { runMode } : {}),
       updatedAt: new Date().toISOString(),
       lastSnapshot,
       initialPresentation: initialPresentationSnapshot == null ? null : {
@@ -1496,8 +2385,14 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
         snapshot: initialPresentationSnapshot
       },
       autoplayStart: autoplayStartedAtMs == null ? null : {
-        mode: VISUAL_LIVENESS_AUTOPLAY_START_MODE,
-        startedAtMs: autoplayStartedAtMs - startedAtMs
+        mode: runPolicy.autoplayStartMode,
+        startedAtMs: autoplayStartedAtMs - startedAtMs,
+        ...(presetEntryAutoplayMode
+          ? {
+              initialPlayClickPerformed,
+              snapshot: configuredAutoplaySelfStartSnapshot
+            }
+          : {})
       },
       samples: acceptedSnapshots.slice(-8),
       checkpointSnapshots: checkpointSnapshots.map((entry) => ({
@@ -1598,7 +2493,8 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
       }
 
       if (
-        initialPresentationSnapshot == null
+        !presetEntryAutoplayMode
+        && initialPresentationSnapshot == null
         && visualLivenessInitialPresentationReady(lastSnapshot)
       ) {
         initialPresentationAtMs = Date.now();
@@ -1608,6 +2504,7 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
         );
         initialPresentationSnapshot = initialCapture.snapshot;
         baselineFrame = initialCapture.frame;
+        initialPlayClickPerformed = true;
         await setPlaybackActive(page, true);
         autoplayStartedAtMs = Date.now();
         await persistPartialEvidence();
@@ -1620,8 +2517,45 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
       }
 
       if (
+        presetEntryAutoplayMode
+        && configuredAutoplaySelfStartSnapshot == null
+        && visualLivenessPresetEntryAutoplayReady(scenario, lastSnapshot)
+      ) {
+        // Observe configured autoplay while the page is already running. The
+        // harness must not repair preset startup by making the initial Play
+        // click. It may pause only after this proof to obtain a stable native
+        // compositor baseline, then resume the already-started playback.
+        configuredAutoplaySelfStartSnapshot = lastSnapshot;
+        autoplayStartedAtMs = Date.now();
+        await persistPartialEvidence();
+        sendChildMessage({
+          type: 'phase',
+          phase: 'configured-preset-autoplay-self-start-observed',
+          atMs: autoplayStartedAtMs,
+          snapshot: configuredAutoplaySelfStartSnapshot
+        });
+        await setPlaybackActive(page, false);
+        const quiescentBefore = await waitForQuiescentCaptureSnapshot(page, {
+          onSnapshot: recordSnapshot
+        });
+        initialPresentationAtMs = Date.now();
+        const initialCapture = await captureAndRecordFrame(
+          'initial',
+          quiescentBefore
+        );
+        initialPresentationSnapshot = initialCapture.snapshot;
+        baselineFrame = initialCapture.frame;
+        await setPlaybackActive(page, true);
+        await persistPartialEvidence();
+      }
+
+      if (
         initialPresentationSnapshot != null
-        && visualLivenessSnapshotReady(lastSnapshot)
+        && (
+          presetEntryAutoplayMode
+            ? visualLivenessPresetEntryAutoplayReady(scenario, lastSnapshot)
+            : visualLivenessSnapshotReady(lastSnapshot)
+        )
       ) {
         if (readyAtMs == null) {
           readyAtMs = Date.now();
@@ -1638,7 +2572,9 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
             snapshot: baselineSnapshot
           });
         } else if (
-          visualLivenessSnapshotAdvanced(lastAcceptedSnapshot, lastSnapshot)
+          visualLivenessSnapshotAdvanced(lastAcceptedSnapshot, lastSnapshot, {
+            allowResidentPending: presetEntryAutoplayMode
+          })
         ) {
           acceptedSnapshots.push(lastSnapshot);
           lastAcceptedSnapshot = lastSnapshot;
@@ -1725,7 +2661,8 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
             firstAdvanceAtMs,
             currentAtMs: Date.now(),
             checkpointSnapshots,
-            milestonePassed: milestone.passed === true
+            milestonePassed: milestone.passed === true,
+            allowResidentPending: presetEntryAutoplayMode
           });
           await persistPartialEvidence();
           sendChildMessage({
@@ -1744,10 +2681,18 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
           && sustainedProgress.passed === true
         ) {
           result = {
-            schema: VISUAL_LIVENESS_SCENARIO_SCHEMA,
+            schema: runPolicy.scenarioSchema,
             id: scenario.id,
             label: scenario.label,
             url: targetUrl,
+            ...(presetEntryAutoplayMode
+              ? {
+                  runMode,
+                  initialPlayClickPerformed,
+                  expectedConfiguredBatchStepCount:
+                    scenario.expectedConfiguredBatchStepCount
+                }
+              : {}),
             status: 'complete',
             startedAt,
             completedAt: new Date().toISOString(),
@@ -1757,8 +2702,14 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
               snapshot: initialPresentationSnapshot
             },
             autoplayStart: {
-              mode: VISUAL_LIVENESS_AUTOPLAY_START_MODE,
-              startedAtMs: autoplayStartedAtMs - startedAtMs
+              mode: runPolicy.autoplayStartMode,
+              startedAtMs: autoplayStartedAtMs - startedAtMs,
+              ...(presetEntryAutoplayMode
+                ? {
+                    initialPlayClickPerformed,
+                    snapshot: configuredAutoplaySelfStartSnapshot
+                  }
+                : {})
             },
             readiness: {
               readyAtMs: readyAtMs - startedAtMs,
@@ -1809,10 +2760,18 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
     if (!result) throw new Error(`scenario exceeded ${deadlines.absolute} ms`);
   } catch (error) {
     result = {
-      schema: VISUAL_LIVENESS_SCENARIO_SCHEMA,
+      schema: runPolicy.scenarioSchema,
       id: scenario.id,
       label: scenario.label,
       url: scenario.url,
+      ...(presetEntryAutoplayMode
+        ? {
+            runMode,
+            initialPlayClickPerformed,
+            expectedConfiguredBatchStepCount:
+              scenario.expectedConfiguredBatchStepCount
+          }
+        : {}),
       status: 'failed',
       startedAt,
       completedAt: new Date().toISOString(),
@@ -1826,8 +2785,14 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
         }),
       autoplayStart: lastPartialEvidence?.autoplayStart
         || (autoplayStartedAtMs == null ? null : {
-          mode: VISUAL_LIVENESS_AUTOPLAY_START_MODE,
-          startedAtMs: autoplayStartedAtMs - startedAtMs
+          mode: runPolicy.autoplayStartMode,
+          startedAtMs: autoplayStartedAtMs - startedAtMs,
+          ...(presetEntryAutoplayMode
+            ? {
+                initialPlayClickPerformed,
+                snapshot: configuredAutoplaySelfStartSnapshot
+              }
+            : {})
         }),
       samples: lastPartialEvidence?.samples || [],
       checkpointSnapshots:
@@ -1844,7 +2809,13 @@ async function runScenarioChild({ scenario, outputDirectory, port, deadlines }) 
       pageCrashes,
       browserLaunch,
       ownedServer,
-      failure: serializeFailure(error)
+      failure: serializeFailure(
+        error,
+        'scenario-error',
+        lastSnapshot?.residentScheduleFailure
+          ?? lastPartialEvidence?.lastSnapshot?.residentScheduleFailure
+          ?? null
+      )
     };
   } finally {
     if (page) await page.close({ runBeforeUnload: false }).catch(() => {});
@@ -1875,7 +2846,8 @@ async function scenarioChildMain() {
   const scenarioId = childArgument('scenario');
   const outputDirectory = childArgument('output-dir');
   const port = Number(childArgument('port'));
-  const scenario = standardVisualLivenessScenarios(scenarioId)[0];
+  const runMode = resolveVisualLivenessRunMode();
+  const scenario = visualLivenessScenariosForMode(runMode, scenarioId)[0];
   if (!outputDirectory || !Number.isSafeInteger(port) || port <= 0) {
     throw new Error('visual liveness child arguments are incomplete');
   }
@@ -1900,10 +2872,18 @@ export function timeoutFailure({
   artifactDirectory = null
 }) {
   return {
-    schema: VISUAL_LIVENESS_SCENARIO_SCHEMA,
+    schema: scenario?.scenarioSchema || VISUAL_LIVENESS_SCENARIO_SCHEMA,
     id: scenario.id,
     label: scenario.label,
     url: scenario.url,
+    ...(scenario?.runMode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+      ? {
+          runMode: scenario.runMode,
+          initialPlayClickPerformed: false,
+          expectedConfiguredBatchStepCount:
+            scenario.expectedConfiguredBatchStepCount
+        }
+      : {}),
     status: 'failed',
     startedAt: new Date(startedAtMs).toISOString(),
     completedAt: new Date().toISOString(),
@@ -1934,7 +2914,14 @@ export function timeoutFailure({
     pageCrashes: Array.isArray(partialEvidence?.pageCrashes)
       ? partialEvidence.pageCrashes
       : [],
-    failure: { type, message },
+    failure: {
+      type,
+      message,
+      residentScheduleFailure:
+        lastSnapshot?.residentScheduleFailure
+        ?? partialEvidence?.lastSnapshot?.residentScheduleFailure
+        ?? null
+    },
     supervisorLogs: logs
   };
 }
@@ -1952,6 +2939,7 @@ async function superviseScenario({
   scenario,
   outputDirectory,
   deadlines,
+  mode = scenario?.runMode || VISUAL_LIVENESS_RUN_MODE_CONTROLLED,
   onProcessGroup = null
 }) {
   const port = await reserveLocalPort();
@@ -1962,19 +2950,23 @@ async function superviseScenario({
   );
   const temporaryDirectory = path.join(
     '/tmp',
-    `ulg-pw-liveness-${process.pid}-${scenario.id}-${randomUUID()}`
+    // Chrome creates an additional com.google.Chrome.*/SingletonSocket path
+    // under TMPDIR. Keep this owned root well below AF_UNIX's path limit even
+    // when the system Chrome executable (rather than bundled Chromium) is the
+    // audited headed compositor.
+    `ulg-vl-${process.pid}-${randomUUID().slice(0, 8)}`
   );
   await Promise.all([
     mkdir(scenarioDirectory, { recursive: true }),
     mkdir(temporaryDirectory, { recursive: true })
   ]);
   const startedAtMs = Date.now();
-  const child = fork(scriptPath, [
-    '--visual-liveness-child',
-    `--scenario=${scenario.id}`,
-    `--port=${port}`,
-    `--output-dir=${scenarioDirectory}`
-  ], {
+  const child = fork(scriptPath, visualLivenessChildArguments({
+    scenario,
+    port,
+    outputDirectory: scenarioDirectory,
+    mode
+  }), {
     cwd: repoDir,
     detached: true,
     env: {
@@ -2011,13 +3003,21 @@ async function superviseScenario({
       if (lastSnapshot.overlayPresent === true && overlayAtMs == null) {
         overlayAtMs = now;
       }
-      if (visualLivenessSnapshotReady(lastSnapshot) && readyAtMs == null) {
+      if (
+        visualLivenessSnapshotReadyForMode(mode, scenario, lastSnapshot)
+        && readyAtMs == null
+      ) {
         readyAtMs = now;
         lastProgressAtMs = now;
         lastAcceptedSnapshot = lastSnapshot;
       } else if (
         readyAtMs != null
-        && visualLivenessSnapshotAdvanced(lastAcceptedSnapshot, lastSnapshot)
+        && visualLivenessSnapshotAdvancedForMode(
+          mode,
+          scenario,
+          lastAcceptedSnapshot,
+          lastSnapshot
+        )
       ) {
         lastAcceptedSnapshot = lastSnapshot;
         lastProgressAtMs = now;
@@ -2173,14 +3173,19 @@ async function superviseScenario({
 }
 
 async function matrixMain() {
+  const runMode = resolveVisualLivenessRunMode();
+  const runPolicy = visualLivenessPolicyForMode(runMode);
+  const presetEntryAutoplayMode =
+    runMode === VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY;
   const deadlines = resolveVisualLivenessDeadlines(process.env);
   const scenarioSelection = String(
     process.env.ULG_VISUAL_LIVENESS_SCENARIOS || ''
   ).trim() || null;
-  const scenarios = standardVisualLivenessScenarios(
+  const scenarios = visualLivenessScenariosForMode(
+    runMode,
     scenarioSelection
   );
-  const standardScenarios = standardVisualLivenessScenarios();
+  const standardScenarios = visualLivenessScenariosForMode(runMode);
   const exactStandardScenarioInventory = Boolean(
     scenarios.length === standardScenarios.length
     && scenarios.every((scenario, index) => (
@@ -2201,9 +3206,10 @@ async function matrixMain() {
   const startedAtMs = Date.now();
   const sourceFingerprintBefore = await exactWorktreeFingerprint(repoDir);
   const receipt = {
-    schema: VISUAL_LIVENESS_RECEIPT_SCHEMA,
-    policyId: VISUAL_LIVENESS_POLICY_ID,
-    coverage: VISUAL_LIVENESS_COVERAGE,
+    schema: runPolicy.receiptSchema,
+    policyId: runPolicy.policyId,
+    coverage: runPolicy.coverage,
+    ...(presetEntryAutoplayMode ? { runMode } : {}),
     status: 'running',
     startedAt: new Date(startedAtMs).toISOString(),
     completedAt: null,
@@ -2212,7 +3218,7 @@ async function matrixMain() {
     outputDirectory,
     receiptPath,
     deadlines,
-    autoplayStartMode: VISUAL_LIVENESS_AUTOPLAY_START_MODE,
+    autoplayStartMode: runPolicy.autoplayStartMode,
     minimumAdvancementSampleCount: MIN_ADVANCEMENT_SAMPLE_COUNT,
     maximumCompositorFrameCount: MAX_COMPOSITOR_FRAME_COUNT,
     sourceFingerprintBefore,
@@ -2242,6 +3248,7 @@ async function matrixMain() {
       scenario,
       outputDirectory,
       deadlines,
+      mode: runMode,
       onProcessGroup: (processGroupId) => {
         activeProcessGroupId = processGroupId;
       }
@@ -2286,10 +3293,15 @@ async function matrixMain() {
         receipt,
         repoDir
       });
-      const formalEvaluation = evaluateVisualLivenessReceipt(receipt, {
-        currentFingerprint: receipt.sourceFingerprintAfter,
-        artifactEvidence
-      });
+      const formalEvaluation = presetEntryAutoplayMode
+        ? evaluatePresetEntryAutoplayReceipt(receipt, {
+            currentFingerprint: receipt.sourceFingerprintAfter,
+            artifactEvidence
+          })
+        : evaluateVisualLivenessReceipt(receipt, {
+            currentFingerprint: receipt.sourceFingerprintAfter,
+            artifactEvidence
+          });
       if (formalEvaluation.passed !== true) {
         receipt.failures.push({
           scenarioId: null,
@@ -2392,12 +3404,12 @@ function exactDefaultBrowserLaunch(browserLaunch) {
   );
 }
 
-function exactScenarioUrl(scenario, expected) {
+export function visualLivenessScenarioUrlMatchesExpected(scenario, expected) {
   try {
     const baseUrl = new URL(scenario?.ownedServer?.baseUrl);
     const observed = new URL(scenario?.url);
     const expectedUrl = new URL(expected.url, baseUrl);
-    return baseUrl.protocol === 'http:'
+    return ['http:', 'https:'].includes(baseUrl.protocol)
       && baseUrl.hostname === '127.0.0.1'
       && observed.href === expectedUrl.href;
   } catch {
@@ -2540,6 +3552,152 @@ export async function readVisualLivenessArtifactEvidence({
   return Object.freeze({ scenarios: Object.freeze(evidenceScenarios) });
 }
 
+export function evaluatePresetEntryAutoplayReceipt(receipt, {
+  currentFingerprint,
+  artifactEvidence
+} = {}) {
+  const failures = [];
+  const fail = (message) => failures.push(message);
+  const expectedScenarios = configuredPresetEntryAutoplayScenarios();
+  const scenarios = Array.isArray(receipt?.scenarios) ? receipt.scenarios : [];
+  if (receipt?.schema !== PRESET_ENTRY_AUTOPLAY_RECEIPT_SCHEMA) {
+    fail('preset entry autoplay receipt schema mismatch');
+  }
+  if (
+    receipt?.runMode !== VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+    || receipt?.policyId !== PRESET_ENTRY_AUTOPLAY_POLICY_ID
+    || receipt?.coverage !== PRESET_ENTRY_AUTOPLAY_COVERAGE
+    || receipt?.autoplayStartMode !== PRESET_ENTRY_AUTOPLAY_START_MODE
+  ) {
+    fail('preset entry autoplay policy mismatch');
+  }
+  if (receipt?.status !== 'complete') {
+    fail('preset entry autoplay receipt did not complete');
+  }
+  if (
+    receipt?.sourceStable !== true
+    || !exactWorktreeFingerprintsEqual(
+      receipt?.sourceFingerprintBefore,
+      receipt?.sourceFingerprintAfter,
+      currentFingerprint
+    )
+  ) {
+    fail('preset entry autoplay exact source binding mismatch');
+  }
+  if (
+    receipt?.scenarioCount !== expectedScenarios.length
+    || scenarios.length !== expectedScenarios.length
+    || !Array.isArray(receipt?.failures)
+    || receipt.failures.length !== 0
+  ) {
+    fail('preset entry autoplay receipt must contain the complete four-demo inventory');
+  }
+  const evidenceScenarios = Array.isArray(artifactEvidence?.scenarios)
+    ? artifactEvidence.scenarios
+    : [];
+  if (evidenceScenarios.length !== expectedScenarios.length) {
+    fail('preset entry autoplay compositor artifact evidence is incomplete');
+  }
+  for (let index = 0; index < expectedScenarios.length; index += 1) {
+    const expected = expectedScenarios[index];
+    const scenario = scenarios[index];
+    const evidence = evidenceScenarios[index];
+    const prefix = `preset entry autoplay scenario ${expected.id}`;
+    const autoplayStart = scenario?.autoplayStart;
+    const selfStartSnapshot = autoplayStart?.snapshot;
+    const initialPresentation = scenario?.initialPresentation;
+    const baseline = scenario?.readiness?.initialSnapshot;
+    const samples = Array.isArray(scenario?.samples) ? scenario.samples : [];
+    const finalSnapshot = samples.at(-1);
+    const checkpoints = Array.isArray(scenario?.checkpointSnapshots)
+      ? scenario.checkpointSnapshots
+      : [];
+    if (
+      scenario?.schema !== PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA
+      || scenario?.runMode !== VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+      || scenario?.id !== expected.id
+      || scenario?.label !== expected.label
+      || !visualLivenessScenarioUrlMatchesExpected(scenario, expected)
+      || evidence?.id !== expected.id
+      || scenario?.expectedConfiguredBatchStepCount
+        !== expected.expectedConfiguredBatchStepCount
+    ) {
+      fail(`${prefix} identity or exact entry URL mismatch`);
+      continue;
+    }
+    if (
+      scenario?.status !== 'complete'
+      || scenario?.failure != null
+      || scenario?.initialPlayClickPerformed !== false
+      || autoplayStart?.initialPlayClickPerformed !== false
+      || autoplayStart?.mode !== PRESET_ENTRY_AUTOPLAY_START_MODE
+    ) {
+      fail(`${prefix} initial no-click configured autoplay proof failed`);
+    }
+    if (
+      !visualLivenessPresetEntryAutoplayReady(expected, selfStartSnapshot)
+      || !quiescentSnapshotHasNoFault(initialPresentation?.snapshot)
+      || !visualLivenessPresetEntryAutoplayReady(expected, baseline)
+      || !visualLivenessPresetEntryAutoplayReady(expected, finalSnapshot)
+    ) {
+      fail(`${prefix} preview retirement, startup gate, batch, or native presentation proof failed`);
+    }
+    if (
+      !Number.isFinite(Number(autoplayStart?.startedAtMs))
+      || Number(autoplayStart.startedAtMs) < 0
+      || !Number.isFinite(Number(initialPresentation?.capturedAtMs))
+      || Number(initialPresentation.capturedAtMs)
+        < Number(autoplayStart.startedAtMs)
+      || !Number.isFinite(Number(scenario?.readiness?.readyAtMs))
+      || Number(scenario.readiness.readyAtMs)
+        < Number(initialPresentation.capturedAtMs)
+      || !Number.isFinite(Number(scenario?.readiness?.firstAdvanceAtMs))
+      || Number(scenario.readiness.firstAdvanceAtMs)
+        < Number(scenario.readiness.readyAtMs)
+    ) {
+      fail(`${prefix} configured autoplay observation ordering failed`);
+    }
+    const physicsStepDelta = Number(finalSnapshot?.nextStep)
+      - Number(baseline?.nextStep);
+    const presentedStepDelta = Number(
+      finalSnapshot?.renderBridgeSourceResidentNextStep
+    ) - Number(baseline?.renderBridgeSourceResidentNextStep);
+    if (
+      physicsStepDelta < MIN_SUSTAINED_PRESENTED_STEP_COUNT
+      || presentedStepDelta < MIN_SUSTAINED_PRESENTED_STEP_COUNT
+      || scenario?.sustainedProgress?.passed !== true
+      || checkpoints.length !== VISUAL_LIVENESS_CHECKPOINT_STEP_DELTAS.length
+      || checkpoints.some((checkpoint) => (
+        !visualLivenessPresetEntryCheckpointUsesConfiguredBatch(
+          expected,
+          checkpoint
+        )
+      ))
+    ) {
+      fail(`${prefix} did not sustain correlated configured-batch progress`);
+    }
+    const milestone = evaluateVisualLivenessMilestone(expected.id, finalSnapshot);
+    if (
+      milestone.passed !== true
+      || scenario?.milestone?.passed !== true
+      || scenario?.milestone?.id !== milestone.id
+    ) {
+      fail(`${prefix} route milestone failed`);
+    }
+    if (
+      evidence?.computedDelta?.visibleContentAdvanced !== true
+      || canonicalJson(scenario?.compositorDelta)
+        !== canonicalJson(evidence?.computedDelta)
+    ) {
+      fail(`${prefix} compositor pixels did not visibly advance`);
+    }
+  }
+  return Object.freeze({
+    passed: failures.length === 0,
+    failures: Object.freeze([...new Set(failures)])
+  });
+}
+
 export function evaluateVisualLivenessReceipt(receipt, {
   currentFingerprint,
   artifactEvidence
@@ -2612,7 +3770,7 @@ export function evaluateVisualLivenessReceipt(receipt, {
       scenario?.schema !== VISUAL_LIVENESS_SCENARIO_SCHEMA
       || scenario?.id !== expected.id
       || scenario?.label !== expected.label
-      || !exactScenarioUrl(scenario, expected)
+      || !visualLivenessScenarioUrlMatchesExpected(scenario, expected)
       || evidence?.id !== expected.id
     ) {
       fail(`${prefix} identity mismatch`);

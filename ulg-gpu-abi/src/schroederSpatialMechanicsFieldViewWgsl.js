@@ -211,6 +211,19 @@ fn field_grid_index(i: i32, j: i32, k: i32) -> u32 {
   return (u32(si) * params.grid_ny + u32(sj)) * params.grid_nz + u32(sk);
 }
 
+fn field_quadratic_weight_at(fraction: f32, offset: i32) -> f32 {
+  if (offset == 0) {
+    let value = 1.5 - fraction;
+    return 0.5 * value * value;
+  }
+  if (offset == 1) {
+    let value = fraction - 1.0;
+    return 0.75 - value * value;
+  }
+  let value = fraction - 0.5;
+  return 0.5 * value * value;
+}
+
 fn field_source_admitted(source_index: u32) -> bool {
   if (
     params.source_row_layout_id != SOURCE_LAYOUT_LEVEL_ASSIGNMENT
@@ -1448,12 +1461,21 @@ fn emit_field_candidates_v2(
   );
   let grid_position = position * params.inv_grid_spacing_m;
   let base = vec3<i32>(floor(grid_position - vec3<f32>(0.5)));
+  let fraction = grid_position - vec3<f32>(base);
   var candidate_ordinal = 0u;
   for (var ox = 0i; ox < 3i; ox = ox + 1i) {
     for (var oy = 0i; oy < 3i; oy = oy + 1i) {
       for (var oz = 0i; oz < 3i; oz = oz + 1i) {
         let candidate_index = active_ordinal * 27u + candidate_ordinal;
         candidate_ordinal = candidate_ordinal + 1u;
+        let support_weight =
+          field_quadratic_weight_at(fraction.x, ox)
+          * field_quadratic_weight_at(fraction.y, oy)
+          * field_quadratic_weight_at(fraction.z, oz);
+        if (support_weight == 0.0) {
+          field_write_invalid_candidate(candidate_index);
+          continue;
+        }
         let node_index = field_grid_index(base.x + ox, base.y + oy, base.z + oz);
         if (node_index >= params.grid_node_count) {
           field_write_invalid_candidate(candidate_index);

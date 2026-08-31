@@ -784,6 +784,20 @@ test('native directory-v2 phase volume is sparse, mixed-level, physical-id stabl
       const fieldDispatchShape = (count) => count === 0
         ? [0, 0, 0]
         : [Math.ceil(count / 64), 1, 1];
+      const positiveHalfCellStencils = [];
+      for (let ox = 0; ox < 3; ox += 1) {
+        for (let oy = 0; oy < 3; oy += 1) {
+          for (let oz = 0; oz < 3; oz += 1) {
+            const ordinal = ox * 9 + oy * 3 + oz;
+            if (ox < 2 && oy < 2 && oz < 2) {
+              positiveHalfCellStencils.push({
+                ordinal,
+                node: ((1 + ox) * 3 + (1 + oy)) * 3 + (1 + oz)
+              });
+            }
+          }
+        }
+      }
       const makeActiveSource = (activePhysical) => {
         const activeCount = activePhysical.length;
         const words = new Uint32Array(activeLayout.wordLength);
@@ -832,7 +846,9 @@ test('native directory-v2 phase volume is sparse, mixed-level, physical-id stabl
         return words;
       };
       const makeField = ({ activeCount, selectedPhysical }) => {
-        const fieldCount = selectedPhysical.length === 0 ? 0 : 27;
+        const fieldCount = selectedPhysical.length === 0
+          ? 0
+          : positiveHalfCellStencils.length;
         const words = new Uint32Array(fieldLayout.wordLength);
         words[0] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC;
         words[1] = fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION;
@@ -887,13 +903,18 @@ test('native directory-v2 phase volume is sparse, mixed-level, physical-id stabl
           words[descriptor + 2] = 0;
           words[descriptor + 3] = 1;
           for (let ordinal = 0; ordinal < 27; ordinal += 1) {
-            words[descriptor + 4 + ordinal] = ordinal;
+            const fieldIndex = positiveHalfCellStencils.findIndex(
+              (entry) => entry.ordinal === ordinal
+            );
+            words[descriptor + 4 + ordinal] = fieldIndex < 0
+              ? 0xffff_ffff
+              : fieldIndex;
           }
         }
         for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
           const key = fieldLayout.keyOffsetWords
             + fieldIndex * fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_KEY_WORDS;
-          words[key] = fieldIndex;
+          words[key] = positiveHalfCellStencils[fieldIndex].node;
           words[key + 1] = 1;
           words[key + 2] = 7;
           words[key + 3] = 0;
@@ -911,9 +932,9 @@ test('native directory-v2 phase volume is sparse, mixed-level, physical-id stabl
           assignments[assignment + 8] = 1;
           assignments[assignment + 9] = 7;
           assignments[assignment + 10] = 1;
-          // Exact half-cell alignment deliberately creates valid zero-weight
-          // boundary fields; v2 must retain those keyed rows without turning
-          // a conservation identity into a lineage failure.
+          // Exact half-cell alignment has two positive weights per axis.
+          // Directory-v2 authenticates the other 19 logical stencil slots as
+          // omitted zero support while retaining eight physical field keys.
           assignments[assignment + 12] = 0.375;
           assignments[assignment + 13] = 0.375;
           assignments[assignment + 14] = 0.375;
@@ -1313,7 +1334,7 @@ test('native directory-v2 phase volume is sparse, mixed-level, physical-id stabl
     assert.equal(native.sparseMixed.globalCandidateCount, 81);
     assert.equal(native.sparseMixed.selectedSourceCount, 2);
     assert.equal(native.sparseMixed.selectedCandidateCount, 54);
-    assert.equal(native.sparseMixed.fieldCount, 27);
+    assert.equal(native.sparseMixed.fieldCount, 8);
     assert.ok(Math.abs(native.sparseMixed.selectedSourceVolumeM3 - 0.012) < 2e-5);
     assert.ok(Math.abs(native.sparseMixed.fieldVolumeM3 - 0.012) < 2e-5);
     assert.ok(Math.abs(native.sparseMixed.residualM3) < 2e-5);

@@ -545,14 +545,6 @@ fn emit_phase_volume_moment_contributions(
   }`
     : ''}
   let field_index = candidate_field_index(candidate_index);
-  // The existing mechanics-field builder marks clipped/dormant rows with the
-  // sentinel.  The finalizer turns any clipped source evidence into a whole
-  // sidecar fail-close; sentinel rows themselves are not a new raw-volume error.
-  if (field_index == INVALID_FIELD) { return; }
-  if (field_index >= mechanics_field[34u] || field_index >= params.field_capacity) {
-    record_invalid_lineage();
-    return;
-  }
   if (!source_row_admitted(source_index)) {
     record_invalid_lineage();
     return;
@@ -568,36 +560,17 @@ fn emit_phase_volume_moment_contributions(
     assignment_rows[assignment_offset + 13u],
     assignment_rows[assignment_offset + 14u]
   );
-  let key_offset = mechanics_field[26u] + field_index * FIELD_KEY_WORDS;
   if (
-    key_offset > arrayLength(&mechanics_field)
-    || FIELD_KEY_WORDS > arrayLength(&mechanics_field) - key_offset
-    || !integral_f32(level)
+    !integral_f32(level)
     || i32(round(level)) != params.selected_level
     || bitcast<u32>(spacing) != bitcast<u32>(params.grid_spacing_m)
     || !integral_f32(phase)
     || !integral_f32(material)
-    || u32(round(phase)) != mechanics_field[key_offset + 1u]
-    || u32(round(material)) != mechanics_field[key_offset + 2u]
     || !finite_f32(position.x)
     || !finite_f32(position.y)
     || !finite_f32(position.z)
   ) {
     record_invalid_lineage();
-    return;
-  }
-  let volume_ratio_j = mechanics_rows[mechanics_offset + RAW_VOLUME_RATIO_J_WORD];
-  let rest_volume_m3 = mechanics_rows[mechanics_offset + RAW_REST_VOLUME_WORD];
-  let raw_current_volume_m3 = rest_volume_m3 * volume_ratio_j;
-  if (
-    !finite_f32(volume_ratio_j)
-    || !finite_f32(rest_volume_m3)
-    || !finite_f32(raw_current_volume_m3)
-    || !(volume_ratio_j > 0.0)
-    || !(rest_volume_m3 > 0.0)
-    || !(raw_current_volume_m3 > 0.0)
-  ) {
-    record_invalid_raw_volume();
     return;
   }
   let ox = stencil_ordinal / 9u;
@@ -617,6 +590,49 @@ fn emit_phase_volume_moment_contributions(
   if (!finite_f32(weight) || !(weight >= 0.0)
     || !finite_f32(gradient.x) || !finite_f32(gradient.y) || !finite_f32(gradient.z)) {
     record_invalid_lineage();
+    return;
+  }
+  if (field_index == INVALID_FIELD) {
+    ${directoryV2
+      ? `// Directory-v2 mechanics-field builders cull only canonical
+    // f32-zero support. Recompute that predicate here so a missing
+    // positive-support descriptor remains fail-closed lineage evidence.
+    if (weight != 0.0) {
+      record_invalid_lineage();
+    }
+    return;`
+      : `// Legacy builders use the sentinel for clipped/dormant rows and
+    // authenticate clipping through the mechanics-field header.
+    return;`}
+  }
+  if (field_index >= mechanics_field[34u]
+      || field_index >= params.field_capacity) {
+    record_invalid_lineage();
+    return;
+  }
+  let key_offset = mechanics_field[26u] + field_index * FIELD_KEY_WORDS;
+  if (
+    key_offset > arrayLength(&mechanics_field)
+    || FIELD_KEY_WORDS > arrayLength(&mechanics_field) - key_offset
+    || u32(round(phase)) != mechanics_field[key_offset + 1u]
+    || u32(round(material)) != mechanics_field[key_offset + 2u]
+    ${directoryV2 ? '|| !(weight > 0.0)' : ''}
+  ) {
+    record_invalid_lineage();
+    return;
+  }
+  let volume_ratio_j = mechanics_rows[mechanics_offset + RAW_VOLUME_RATIO_J_WORD];
+  let rest_volume_m3 = mechanics_rows[mechanics_offset + RAW_REST_VOLUME_WORD];
+  let raw_current_volume_m3 = rest_volume_m3 * volume_ratio_j;
+  if (
+    !finite_f32(volume_ratio_j)
+    || !finite_f32(rest_volume_m3)
+    || !finite_f32(raw_current_volume_m3)
+    || !(volume_ratio_j > 0.0)
+    || !(rest_volume_m3 > 0.0)
+    || !(raw_current_volume_m3 > 0.0)
+  ) {
+    record_invalid_raw_volume();
     return;
   }
   candidate_contributions[sorted_position] = vec4<f32>(

@@ -25,12 +25,14 @@ import {
   resolveSphNativeSurfaceLatePresentationSuccessEligibility,
   resolveSphNativeSurfacePostStepPresentationGateSettlement,
   resolveSphNativeSurfaceStartupPresentationGateSettlement,
+  resolveSphConfiguredAutoplayStartup,
   resolveSphResidentParticleBridgeStartupPreflight,
   resolveSphNativeSurfaceCandidateCompletionHandoff,
   resolveSphResidentPresentationProof,
   resolveSphInitialPresentationSchedulePlan,
   resolveSphNativeSurfaceCadenceRefreshPolicy,
   resolveSphNativeSurfaceStartupRefreshCoalescing,
+  resolveSphResidentSurfaceDrawModeRequest,
   resolveSphRendererSurfaceStartupSelection,
   resolveSphNativeWebGpuStartupPreflight,
   resolveSphResidentScheduleAdmission,
@@ -412,6 +414,56 @@ test('startup honors an explicit WebGL renderer without auto-selecting a native-
   assert.equal(result.nativeSurfaceDrawRequested, false);
 });
 
+test('preset-authored surface mode remains implicit across a menu hash reload', () => {
+  const presetReload = resolveSphResidentSurfaceDrawModeRequest({
+    hashSurfaceDraw: 'native-webgpu-surface-consumer',
+    hashScenarioPresetSurfaceDraw: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(presetReload.explicit, false);
+  assert.equal(presetReload.presetSerializedRuntime, true);
+  assert.equal(
+    presetReload.status,
+    'surface-draw-mode-preset-runtime-serialized'
+  );
+  assert.equal(
+    presetReload.requestedMode,
+    'native-webgpu-surface-consumer'
+  );
+
+  const presetDefault = resolveSphResidentSurfaceDrawModeRequest({
+    hashScenarioPresetSurfaceDraw: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(presetDefault.explicit, false);
+  assert.equal(
+    presetDefault.status,
+    'surface-draw-mode-preset-runtime-default'
+  );
+});
+
+test('surface mode provenance preserves genuine diagnostic overrides', () => {
+  const queryOverride = resolveSphResidentSurfaceDrawModeRequest({
+    querySurfaceDraw: 'native-webgpu-surface-consumer',
+    hashScenarioPresetSurfaceDraw: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(queryOverride.explicit, true);
+  assert.equal(queryOverride.presetSerializedRuntime, false);
+
+  const differingHashOverride = resolveSphResidentSurfaceDrawModeRequest({
+    hashSurfaceDraw: 'three-render-row-spheres',
+    hashScenarioPresetSurfaceDraw: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(differingHashOverride.explicit, true);
+
+  const sameModeDiagnosticMarker = resolveSphResidentSurfaceDrawModeRequest({
+    hashSurfaceDraw: 'native-webgpu-surface-consumer',
+    hashSurfaceDrawDiagnostic: 'native-webgpu-surface-consumer',
+    hashScenarioPresetSurfaceDraw: 'native-webgpu-surface-consumer'
+  });
+  assert.equal(sameModeDiagnosticMarker.explicit, true);
+  assert.equal(sameModeDiagnosticMarker.explicitDiagnosticMarker, true);
+  assert.equal(sameModeDiagnosticMarker.presetSerializedRuntime, false);
+});
+
 test('startup reconciles an explicit surface mode to its compatible renderer', () => {
   const native = resolveSphRendererSurfaceStartupSelection({
     requestedRendererBackend: 'webgl',
@@ -609,6 +661,91 @@ test('initial presentation scheduling orders bridge physics after the t=0 visual
   assert.equal(nativePaused.scheduleResidentPhysics, false);
   assert.equal(nativePaused.residentPhysicsOrder, 'disabled');
   assert.equal(Object.isFrozen(nativePaused), true);
+});
+
+test('configured preset autoplay survives either runtime/scene readiness ordering', () => {
+  const sceneFirst = resolveSphConfiguredAutoplayStartup({
+    configured: true,
+    runtimeReady: false,
+    workerViewReady: true
+  });
+  assert.deepEqual(sceneFirst, {
+    status: 'configured-autoplay-waiting-for-runtime',
+    start: false,
+    mode: null
+  });
+  const sceneThenRuntime = resolveSphConfiguredAutoplayStartup({
+    configured: true,
+    runtimeReady: true,
+    workerViewReady: true
+  });
+  assert.deepEqual(sceneThenRuntime, {
+    status: 'configured-autoplay-worker-view-ready',
+    start: true,
+    mode: 'worker-view'
+  });
+
+  const runtimeFirst = resolveSphConfiguredAutoplayStartup({
+    configured: true,
+    runtimeReady: true,
+    workerViewReady: false
+  });
+  assert.deepEqual(runtimeFirst, {
+    status: 'configured-autoplay-waiting-for-scene',
+    start: false,
+    mode: null
+  });
+  assert.deepEqual(
+    resolveSphConfiguredAutoplayStartup({
+      configured: true,
+      runtimeReady: true,
+      startupPresentationReady: false,
+      workerViewReady: true
+    }),
+    {
+      status: 'configured-autoplay-waiting-for-startup-presentation',
+      start: false,
+      mode: null
+    }
+  );
+  assert.deepEqual(
+    resolveSphConfiguredAutoplayStartup({
+      configured: true,
+      runtimeReady: true,
+      startupPresentationReady: true,
+      resetPending: true,
+      workerViewReady: true
+    }),
+    {
+      status: 'configured-autoplay-waiting-for-reset-rebuild',
+      start: false,
+      mode: null
+    }
+  );
+  assert.deepEqual(
+    resolveSphConfiguredAutoplayStartup({
+      configured: true,
+      runtimeReady: true,
+      driverReady: true
+    }),
+    {
+      status: 'configured-autoplay-driver-ready',
+      start: true,
+      mode: 'driver'
+    }
+  );
+  assert.equal(resolveSphConfiguredAutoplayStartup({
+    configured: false,
+    runtimeReady: true,
+    workerViewReady: true
+  }).start, false);
+  assert.equal(resolveSphConfiguredAutoplayStartup({
+    configured: true,
+    runtimeReady: true,
+    initialBodiesValid: false,
+    workerViewReady: true
+  }).start, false);
+  assert.equal(Object.isFrozen(sceneThenRuntime), true);
 });
 
 test('native startup presentation gate releases physics after bounded proof failure', () => {

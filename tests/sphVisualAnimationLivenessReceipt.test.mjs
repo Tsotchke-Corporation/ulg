@@ -13,6 +13,13 @@ import {
   VISUAL_LIVENESS_CHECKPOINT_STEP_DELTAS,
   VISUAL_LIVENESS_LIMITS_MS,
   VISUAL_LIVENESS_AUTOPLAY_START_MODE,
+  VISUAL_LIVENESS_RUN_MODE_CONTROLLED,
+  VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY,
+  PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO,
+  PRESET_ENTRY_AUTOPLAY_POLICY_ID,
+  PRESET_ENTRY_AUTOPLAY_RECEIPT_SCHEMA,
+  PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA,
+  PRESET_ENTRY_AUTOPLAY_START_MODE,
   MAX_COMPOSITOR_FRAME_COUNT,
   MIN_SUSTAINED_PRESENTED_STEP_COUNT,
   MIN_SUSTAINED_PROGRESS_MS,
@@ -22,22 +29,36 @@ import {
   VISUAL_LIVENESS_SCENARIO_SCHEMA,
   evaluateVisualLivenessReceipt,
   readVisualLivenessArtifactEvidence,
-  evaluateVisualLivenessMilestone,
+  evaluateVisualLivenessMilestone as evaluateVisualLivenessMilestoneRaw,
   evaluateVisualLivenessSustainedProgress,
+  configuredPresetEntryAutoplayScenarios,
   resolveVisualLivenessDeadlines,
+  resolveVisualLivenessRunMode,
   standardVisualLivenessScenarios,
   terminateOwnedProcessGroup,
   timeoutFailure,
   visualLivenessReceiptSummary,
+  visualLivenessScenarioUrlMatchesExpected,
   visualLivenessCaptureWindowStable,
   visualLivenessInitialPresentationReady,
+  visualLivenessChildArguments,
+  visualLivenessPolicyForMode,
+  visualLivenessPresetEntryAutoplayReady,
+  visualLivenessPresetEntryCheckpointUsesConfiguredBatch,
   visualLivenessQuiescentPresentationReady,
   visualLivenessQuiescentWindowStable,
   visualLivenessQuiescentSnapshotAdvanced,
   visualLivenessSnapshotAdvanced,
+  visualLivenessSnapshotAdvancedForMode,
   visualLivenessSnapshotReady,
+  visualLivenessSnapshotReadyForMode,
   waitForQuiescentCaptureSnapshot
 } from '../scripts/sph-visual-animation-liveness-receipt.mjs';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
 
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -136,6 +157,57 @@ function quiescentSnapshot(overrides = {}) {
   });
 }
 
+function presetEntryAutoplaySnapshot(id, overrides = {}) {
+  const stepCount = PRESET_ENTRY_AUTOPLAY_BATCH_STEPS_BY_SCENARIO[id];
+  return readySnapshot({
+    residentAuto: true,
+    residentAutoConfigured: true,
+    configuredAutoplayStartup: {
+      schema: 'peercompute.ulg.sph-configured-autoplay-startup.v0',
+      status: 'configured-autoplay-worker-view-ready',
+      start: true,
+      mode: 'worker-view'
+    },
+    runtimeAdmission: {
+      status: 'sph-simulation-runtime-admitted'
+    },
+    workerRebuild: { status: 'complete' },
+    startupPresentationGate: {
+      schema: 'peercompute.ulg.sph-native-surface-startup-presentation-gate.v0',
+      status: 'native-surface-startup-initial-presentation-admitted',
+      active: false
+    },
+    startupPresentationHandoff: {
+      schema: 'peercompute.ulg.sph-native-surface-startup-handoff.v0',
+      status:
+        'native-surface-startup-handoff-initial-resident-schedule-submitted',
+      active: false
+    },
+    pendingPresentation: {
+      schema: 'peercompute.ulg.sph-pending-body-envelope-preview.v0',
+      status: 'control-envelope-preview-retired-after-current-presentation',
+      active: false
+    },
+    pendingPresentationActive: false,
+    postStepPresentationGateActive: false,
+    residentStepsPerSchedule: stepCount,
+    residentStageOrderLastEvent: {
+      schema: 'peercompute.ulg.sph-demo-resident-stage-order-trace-event.v0',
+      status: 'resident-execution-pending',
+      stepCount
+    },
+    nextStep: stepCount,
+    nextTimeS: stepCount * 0.0005,
+    lastResidentCompletionAtMs: 250,
+    residentSubmissions: 1,
+    renderBridgeFrameCount: 3,
+    renderBridgeUpdateCount: 2,
+    renderBridgeSubmittedDrawCount: 1,
+    renderBridgeSourceResidentNextStep: stepCount,
+    ...overrides
+  });
+}
+
 function frameIdentity(snapshot) {
   return {
     residentStep: snapshot.nextStep,
@@ -171,6 +243,220 @@ function productHistoryGpuCommit(overrides = {}) {
     renderSeal: 12345,
     ...overrides
   };
+}
+
+function zeroLiveProductHistory(overrides = {}) {
+  const rowCapacity = 32768;
+  const bufferByteLength = rowCapacity * 32 * Float32Array.BYTES_PER_ELEMENT;
+  const generation = 17;
+  const seal = 991;
+  return {
+    workerEvidenceSchema:
+      'peercompute.ulg.worker-resident-product-history-evidence.v0',
+    workerEvidenceStatus:
+      'worker-resident-product-history-evidence-ready',
+    residentProductMassStatus: 'resident-product-mass-merged-gpu-resident',
+    productEventBufferRetained: true,
+    productEventBufferByteLength: bufferByteLength,
+    compactionStatus: 'product-event-filtered-append-gpu-count-resident',
+    gpuCommitStatus: 'gpu-conditioned-publication-commit-pending',
+    arenaStatus: 'resident-product-history-arena-gpu-commit-pending',
+    gridCouplingStatus:
+      'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter',
+    countAuthority: 'gpu-authored-filtered-live-prefix',
+    rowCapacity,
+    countHostKnown: false,
+    dispatchMode: 'gpu-authenticated-gas-only-no-mechanics-scatter',
+    generation,
+    seal,
+    liveBoundObservation: {
+      schema: 'peercompute.ulg.sph-product-history-live-bound-observation.v0',
+      observedLiveRowCount: 0,
+      previousUpperBound: rowCapacity,
+      tightenedUpperBound: 1,
+      arenaRowCapacity: rowCapacity,
+      readbackByteLength: Uint32Array.BYTES_PER_ELEMENT,
+      arenaIdentity: {
+        schema:
+          'peercompute.ulg.sph-resident-product-history-arena-identity.v0',
+        status: 'retained-product-history-arena-authenticated',
+        slotId: 2,
+        leaseSerial: 5,
+        viewOrdinal: 8,
+        rowCapacity,
+        bufferByteLength,
+        rowStrideFloats: 32,
+        countAuthorityGeneration: generation,
+        countAuthoritySeal: seal
+      }
+    },
+    renderProductEventBufferBound: false,
+    renderProductEventBufferByteLength: 0,
+    ...overrides
+  };
+}
+
+function inactiveGasBoundaryLawActivation(overrides = {}) {
+  return {
+    schema: 'peercompute.ulg.worker-schedule-law-activation-receipt.v0',
+    thermal: true,
+    reaction: true,
+    contactSolver: true,
+    contactSolverRequested: true,
+    contactSolverEscalatedForDynamicLaws: false,
+    lawQueue: true,
+    lawNeighborCandidates: true,
+    phaseVolumeMigration: true,
+    twoLevelMechanics: false,
+    surfaceTension: false,
+    gasBoundaryActionable: false,
+    explicitVacuumAmbient: false,
+    phaseVolumeSidecars: true,
+    mechanicsFieldViews: true,
+    activationAuthority: 'schedule-config-static-declaration-no-readback',
+    ...overrides
+  };
+}
+
+function completedWorkerSchedule(overrides = {}) {
+  return {
+    schema: 'peercompute.ulg.sph-scene-worker-owned-resident-lane-execution.v0',
+    status: 'worker-resident-schedule-completed',
+    requestedStepCount: 64,
+    completedStepCount: 64,
+    cancelled: false,
+    lawActivationReceipt: inactiveGasBoundaryLawActivation(),
+    retainedProductGasTransitionReceipt: null,
+    ...overrides
+  };
+}
+
+function retainedProductGasTransition(overrides = {}) {
+  const rowCapacity = 32768;
+  const transitionFingerprint = 'transition:retained-product:17';
+  return {
+    schema: 'peercompute.ulg.sph-scene-retained-product-gas-transition.v0',
+    status: 'retained-product-gas-transition-consumed-and-admitted',
+    predecessorScheduleId: 'schedule:s1',
+    consumerScheduleId: 'schedule:s2',
+    targetScheduleRequestId: 'schedule:s2',
+    configurationContinuityMode:
+      'prospective-retained-product-gas-boundary-actionable',
+    prospectiveDynamicLawTransitionFingerprint: transitionFingerprint,
+    transitionKind:
+      'retained-product-gas-boundary-inactive-to-actionable',
+    transitionLawFamily: 'gas-pressure',
+    transitionActivationPolicy:
+      'worker-retained-product-event-buffer-consumes-presealed-target',
+    transitionFingerprint,
+    transitionSourceReaction: true,
+    transitionTargetReaction: true,
+    transitionSourceGasBoundaryActionable: false,
+    transitionTargetGasBoundaryActionable: true,
+    transitionSourceMechanicsFieldViews: false,
+    transitionTargetMechanicsFieldViews: true,
+    transitionSourceMaxFutureSubsteps: 64,
+    transitionTargetMaxFutureSubsteps: 64,
+    transitionShadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+    transitionRoutingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+    transitionExecutionGating:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+    predecessorWriterEvidenceStatus:
+      'worker-retained-product-gas-boundary-actionable',
+    predecessorWriterGasBoundaryActionable: true,
+    predecessorProductEventBufferRetained: true,
+    predecessorProductEventRowCount: rowCapacity,
+    predecessorArenaIdentity: {
+      schema: 'peercompute.ulg.sph-resident-product-history-arena-identity.v0',
+      status: 'retained-product-history-arena-authenticated',
+      slotId: 2,
+      leaseSerial: 5,
+      viewOrdinal: 7,
+      rowCapacity,
+      bufferByteLength:
+        rowCapacity * 32 * Float32Array.BYTES_PER_ELEMENT,
+      rowStrideFloats: 32,
+      countAuthorityGeneration: 16,
+      countAuthoritySeal: 990
+    },
+    predecessorTerminalGpuFenceSatisfied: true,
+    predecessorScheduleCancelled: false,
+    conservativeActivationRequired: true,
+    gasBoundaryActionable: true,
+    mechanicsFieldViews: true,
+    terminalGpuFenceSatisfied: true,
+    stateManagerConsumptionStatus:
+      'predecessor-target-token-consumed-before-lease-acquisition',
+    outerConsumptionStatus:
+      'predecessor-target-token-consumed-before-schedule-gpu-work',
+    consumedBeforeLeaseAcquisition: true,
+    consumedBeforeRouteSelection: true,
+    consumedBeforeGpuWork: true,
+    shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+    routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+    executionGating:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+    ...overrides
+  };
+}
+
+function dynamicReactionActivationMilestone({
+  activationOverrides = {},
+  receiptOverrides = {},
+  ...milestoneOverrides
+} = {}) {
+  const transitionFingerprint = 'transition:dynamic-reaction:19';
+  const consumerScheduleId = 'schedule:s2';
+  return {
+    dynamicReactionActivation: {
+      state: 'active',
+      transitionFingerprint,
+      committedScheduleId: consumerScheduleId,
+      ...activationOverrides
+    },
+    dynamicReactionActivationReceipt: {
+      schema: 'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0',
+      status: 'dynamic-reaction-activation-consumed-and-admitted',
+      predecessorScheduleId: 'schedule:s1',
+      consumerScheduleId,
+      targetScheduleRequestId: consumerScheduleId,
+      configurationContinuityMode:
+        'prospective-reaction-dormant-to-executing',
+      transitionKind: 'reaction-dormant-watch-to-executing-reaction',
+      transitionFingerprint,
+      route: 'canonical-schroeder',
+      routeTransition: 'fresh-or-canonical-continuation',
+      reactionExecution: true,
+      sourceParticleCount: 32768,
+      terminalParticleCount: 32768,
+      sourcePhaseLaneCount: 4,
+      terminalPhaseLaneCount: 4,
+      phaseCarrierTopologyAuthority: 'preexisting-four-carrier-plan',
+      phaseCarrierTrigger: null,
+      phaseCarrierMapAsyncCount: 0,
+      phaseCarrierReadbackBytes: 0,
+      terminalGpuFenceSatisfied: true,
+      stateManagerCommitted: true,
+      consumedBeforeLeaseAcquisition: true,
+      consumedBeforeRouteSelection: true,
+      consumedBeforeGpuWork: true,
+      shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+      routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+      executionGating: SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+      ...receiptOverrides
+    },
+    ...milestoneOverrides
+  };
+}
+
+function evaluateVisualLivenessMilestone(scenarioId, snapshot) {
+  if (!['sodium-water', 'cesium-fluorine'].includes(scenarioId)) {
+    return evaluateVisualLivenessMilestoneRaw(scenarioId, snapshot);
+  }
+  return evaluateVisualLivenessMilestoneRaw(scenarioId, {
+    ...snapshot,
+    milestone: dynamicReactionActivationMilestone(snapshot?.milestone)
+  });
 }
 
 function formalSnapshot({
@@ -218,7 +504,9 @@ function formalMilestone(id) {
       }
     };
   }
-  const milestone = { productHistory: productHistoryGpuCommit() };
+  const milestone = dynamicReactionActivationMilestone({
+    productHistory: productHistoryGpuCommit()
+  });
   if (id === 'cesium-fluorine') {
     Object.assign(milestone, {
       twoLevelAuthority: 'authoritative',
@@ -452,6 +740,300 @@ test('bounded standard inventory preserves the worker-owned route while starting
     inventoryRows(standardVisualLivenessScenarios('water-cycle')),
     inventoryRows(scenarios)
   );
+});
+
+test('configured preset-entry inventory uses only exact scenario URLs and preset batch K', () => {
+  const scenarios = configuredPresetEntryAutoplayScenarios();
+  assert.deepEqual(
+    scenarios.map(({ id, url, expectedConfiguredBatchStepCount }) => ({
+      id,
+      url,
+      expectedConfiguredBatchStepCount
+    })),
+    [
+      { id: 'water-cycle', url: '/#scenario=water-cycle', expectedConfiguredBatchStepCount: 16 },
+      { id: 'iron-ice-quench', url: '/#scenario=iron-ice-quench', expectedConfiguredBatchStepCount: 16 },
+      { id: 'sodium-water', url: '/#scenario=sodium-water', expectedConfiguredBatchStepCount: 64 },
+      { id: 'cesium-fluorine', url: '/#scenario=cesium-fluorine', expectedConfiguredBatchStepCount: 16 }
+    ]
+  );
+  for (const scenario of scenarios) {
+    const url = new URL(scenario.url, 'https://ulg.invalid');
+    assert.deepEqual([...url.searchParams.entries()], []);
+    assert.deepEqual([
+      ...new URLSearchParams(url.hash.replace(/^#/, '')).entries()
+    ], [
+      ['scenario', scenario.id]
+    ]);
+    assert.equal(scenario.runMode, VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY);
+    assert.equal(scenario.scenarioSchema, PRESET_ENTRY_AUTOPLAY_SCENARIO_SCHEMA);
+  }
+  assert.deepEqual(
+    configuredPresetEntryAutoplayScenarios('water-cycle').map(({ id }) => id),
+    ['water-cycle']
+  );
+  assert.deepEqual(
+    configuredPresetEntryAutoplayScenarios(scenarios[2].label).map(({ id }) => id),
+    ['sodium-water']
+  );
+  assert.throws(
+    () => configuredPresetEntryAutoplayScenarios('unknown-preset'),
+    /unknown standard visual liveness scenarios/
+  );
+});
+
+test('configured preset-entry URL identity accepts exact loopback HTTP and HTTPS routes only', () => {
+  const expected = configuredPresetEntryAutoplayScenarios('water-cycle')[0];
+  for (const protocol of ['http:', 'https:']) {
+    const baseUrl = `${protocol}//127.0.0.1:5173/`;
+    assert.equal(visualLivenessScenarioUrlMatchesExpected({
+      ownedServer: { baseUrl },
+      url: new URL(expected.url, baseUrl).href
+    }, expected), true, protocol);
+  }
+  for (const [baseUrl, url] of [
+    ['https://localhost:5173/', 'https://localhost:5173/#scenario=water-cycle'],
+    ['ftp://127.0.0.1:5173/', 'ftp://127.0.0.1:5173/#scenario=water-cycle'],
+    ['https://127.0.0.1:5173/', 'https://127.0.0.1:5173/?scenario=water-cycle'],
+    ['https://127.0.0.1:5173/', 'https://127.0.0.1:5173/#scenario=sodium-water']
+  ]) {
+    assert.equal(visualLivenessScenarioUrlMatchesExpected({
+      ownedServer: { baseUrl },
+      url
+    }, expected), false, `${baseUrl} ${url}`);
+  }
+});
+
+test('configured preset-entry mode is explicit, no-click, and survives child fork arguments', () => {
+  assert.equal(
+    resolveVisualLivenessRunMode({ argv: [], env: {} }),
+    VISUAL_LIVENESS_RUN_MODE_CONTROLLED
+  );
+  assert.equal(resolveVisualLivenessRunMode({
+    argv: [],
+    env: {
+      ULG_VISUAL_LIVENESS_MODE: VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+    }
+  }), VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY);
+  assert.equal(resolveVisualLivenessRunMode({
+    argv: [`--visual-liveness-mode=${VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY}`],
+    env: { ULG_VISUAL_LIVENESS_MODE: VISUAL_LIVENESS_RUN_MODE_CONTROLLED }
+  }), VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY);
+  assert.throws(
+    () => resolveVisualLivenessRunMode({ argv: ['--mode=unknown'], env: {} }),
+    /unknown visual liveness run mode/
+  );
+
+  const entryPolicy = visualLivenessPolicyForMode(
+    VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+  );
+  assert.equal(entryPolicy.receiptSchema, PRESET_ENTRY_AUTOPLAY_RECEIPT_SCHEMA);
+  assert.equal(entryPolicy.policyId, PRESET_ENTRY_AUTOPLAY_POLICY_ID);
+  assert.equal(entryPolicy.autoplayStartMode, PRESET_ENTRY_AUTOPLAY_START_MODE);
+  assert.equal(entryPolicy.performInitialPlayClick, false);
+  assert.equal(
+    visualLivenessPolicyForMode(VISUAL_LIVENESS_RUN_MODE_CONTROLLED)
+      .performInitialPlayClick,
+    true
+  );
+
+  const scenario = configuredPresetEntryAutoplayScenarios('water-cycle')[0];
+  const childArgs = visualLivenessChildArguments({
+    scenario,
+    port: 5338,
+    outputDirectory: '/tmp/ulg-entry-child',
+    mode: VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY
+  });
+  assert.deepEqual(childArgs, [
+    '--visual-liveness-child',
+    '--scenario=water-cycle',
+    '--port=5338',
+    '--output-dir=/tmp/ulg-entry-child',
+    `--visual-liveness-mode=${VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY}`
+  ]);
+  assert.equal(childArgs.some((arg) => arg.includes('residentAuto')), false);
+  assert.equal(childArgs.some((arg) => arg.includes('visualCapture')), false);
+  assert.equal(
+    visualLivenessChildArguments({
+      scenario: standardVisualLivenessScenarios('water-cycle')[0],
+      port: 5338,
+      outputDirectory: '/tmp/ulg-controlled-child'
+    }).some((arg) => arg.startsWith('--visual-liveness-mode=')),
+    false
+  );
+});
+
+test('preset-entry self-start gate requires retired preview, released gate, Pause, native correlation, and exact K', () => {
+  for (const scenario of configuredPresetEntryAutoplayScenarios()) {
+    const snapshot = presetEntryAutoplaySnapshot(scenario.id);
+    assert.equal(
+      visualLivenessPresetEntryAutoplayReady(scenario, snapshot),
+      true,
+      scenario.id
+    );
+    const successorPendingSnapshot = {
+      ...snapshot,
+      residentPending: {
+        schema: 'peercompute.ulg.sph-demo-resident-pending.v0',
+        status: 'resident-execution-pending'
+      }
+    };
+    assert.equal(
+      visualLivenessSnapshotReady(successorPendingSnapshot),
+      false,
+      `${scenario.id}: controlled readiness still requires an idle resident lane`
+    );
+    assert.equal(
+      visualLivenessPresetEntryAutoplayReady(
+        scenario,
+        successorPendingSnapshot
+      ),
+      true,
+      `${scenario.id}: a pending successor must not hide the presented terminal source`
+    );
+    assert.equal(
+      visualLivenessSnapshotReadyForMode(
+        VISUAL_LIVENESS_RUN_MODE_CONTROLLED,
+        scenario,
+        successorPendingSnapshot
+      ),
+      false
+    );
+    assert.equal(
+      visualLivenessSnapshotReadyForMode(
+        VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY,
+        scenario,
+        successorPendingSnapshot
+      ),
+      true
+    );
+    assert.equal(
+      visualLivenessSnapshotAdvanced(snapshot, {
+        ...successorPendingSnapshot,
+        nextStep: snapshot.nextStep + snapshot.residentStepsPerSchedule,
+        nextTimeS: snapshot.nextTimeS + 0.01,
+        lastResidentCompletionAtMs: snapshot.lastResidentCompletionAtMs + 10,
+        residentSubmissions: snapshot.residentSubmissions + 1,
+        renderBridgeFrameCount: snapshot.renderBridgeFrameCount + 1,
+        renderBridgeUpdateCount: snapshot.renderBridgeUpdateCount + 1,
+        renderBridgeSourceResidentNextStep:
+          snapshot.renderBridgeSourceResidentNextStep
+          + snapshot.residentStepsPerSchedule
+      }, { allowResidentPending: true }),
+      true,
+      `${scenario.id}: correlated successor progress remains observable while pipelined`
+    );
+    assert.equal(
+      visualLivenessSnapshotAdvancedForMode(
+        VISUAL_LIVENESS_RUN_MODE_PRESET_ENTRY,
+        scenario,
+        snapshot,
+        {
+          ...successorPendingSnapshot,
+          nextStep: snapshot.nextStep + snapshot.residentStepsPerSchedule,
+          nextTimeS: snapshot.nextTimeS + 0.01,
+          lastResidentCompletionAtMs:
+            snapshot.lastResidentCompletionAtMs + 10,
+          residentSubmissions: snapshot.residentSubmissions + 1,
+          renderBridgeFrameCount: snapshot.renderBridgeFrameCount + 1,
+          renderBridgeUpdateCount: snapshot.renderBridgeUpdateCount + 1,
+          renderBridgeSourceResidentNextStep:
+            snapshot.renderBridgeSourceResidentNextStep
+            + snapshot.residentStepsPerSchedule
+        }
+      ),
+      true
+    );
+    for (const mutation of [
+      { playbackActive: false, playText: 'Play' },
+      {
+        configuredAutoplayStartup: {
+          ...snapshot.configuredAutoplayStartup,
+          start: false
+        }
+      },
+      {
+        startupPresentationGate: {
+          ...snapshot.startupPresentationGate,
+          active: true
+        }
+      },
+      {
+        pendingPresentation: {
+          ...snapshot.pendingPresentation,
+          status: 'physics-pending-control-envelope-preview',
+          active: true
+        }
+      },
+      { residentStepsPerSchedule: snapshot.residentStepsPerSchedule + 1 },
+      {
+        residentStageOrderLastEvent: {
+          ...snapshot.residentStageOrderLastEvent,
+          stepCount: snapshot.residentStepsPerSchedule + 1
+        }
+      },
+      { renderBridgeSourceResidentNextStep: snapshot.nextStep - 4 }
+    ]) {
+      assert.equal(
+        visualLivenessPresetEntryAutoplayReady(scenario, {
+          ...snapshot,
+          ...mutation
+        }),
+        false,
+        `${scenario.id}: ${JSON.stringify(mutation)}`
+      );
+    }
+  }
+});
+
+test('preset-entry quiescent checkpoints retain configured K after stage bookkeeping advances', () => {
+  const scenario = configuredPresetEntryAutoplayScenarios('sodium-water')[0];
+  const snapshot = presetEntryAutoplaySnapshot(scenario.id, {
+    residentStageOrderLastEvent: {
+      schema: 'peercompute.ulg.sph-demo-resident-stage-order-trace-event.v0',
+      status: 'resident-interface-refresh-excluded-from-canonical-schroeder-hot-loop',
+      stepCount: null
+    }
+  });
+  assert.equal(visualLivenessPresetEntryCheckpointUsesConfiguredBatch(
+    scenario,
+    { snapshot }
+  ), true);
+  assert.equal(visualLivenessPresetEntryCheckpointUsesConfiguredBatch(
+    scenario,
+    {
+      snapshot: {
+        ...snapshot,
+        residentStepsPerSchedule: 16
+      }
+    }
+  ), false);
+});
+
+test('preset-entry runner observes self-start before any pause/resume capture control', async () => {
+  const harnessSource = await readFile(
+    path.join(repoDir, 'scripts/sph-visual-animation-liveness-receipt.mjs'),
+    'utf8'
+  );
+  const entryBranchStart = harnessSource.indexOf(
+    'presetEntryAutoplayMode\n        && configuredAutoplaySelfStartSnapshot == null'
+  );
+  const followingReadyBranch = harnessSource.indexOf(
+    'initialPresentationSnapshot != null',
+    entryBranchStart
+  );
+  assert.notEqual(entryBranchStart, -1);
+  assert.notEqual(followingReadyBranch, -1);
+  const entryBranch = harnessSource.slice(entryBranchStart, followingReadyBranch);
+  const observedIndex = entryBranch.indexOf(
+    'configuredAutoplaySelfStartSnapshot = lastSnapshot'
+  );
+  const pauseIndex = entryBranch.indexOf('setPlaybackActive(page, false)');
+  const resumeIndex = entryBranch.indexOf('setPlaybackActive(page, true)');
+  assert.ok(observedIndex >= 0);
+  assert.ok(pauseIndex > observedIndex);
+  assert.ok(resumeIndex > pauseIndex);
+  assert.doesNotMatch(entryBranch, /initialPlayClickPerformed = true/);
 });
 
 test('joint physics and presentation progress is required; RAF/render-only motion is rejected', () => {
@@ -751,6 +1333,198 @@ test('each standard scenario has an early route-specific milestone', () => {
   assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
     milestone: { productHistory: productHistoryGpuCommit() }
   }).passed, true);
+  const zeroLiveTransition = evaluateVisualLivenessMilestone('sodium-water', {
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: retainedProductGasTransition()
+    }
+  });
+  assert.equal(
+    zeroLiveTransition.id,
+    'dynamic-reaction-active-and-resident-product-history-or-zero-live-gas-authority'
+  );
+  assert.equal(zeroLiveTransition.passed, true);
+  assert.equal(evaluateVisualLivenessMilestoneRaw('sodium-water', {
+    milestone: dynamicReactionActivationMilestone({
+      productHistory: productHistoryGpuCommit()
+    })
+  }).passed, true);
+  assert.equal(evaluateVisualLivenessMilestoneRaw('sodium-water', {
+    milestone: { productHistory: productHistoryGpuCommit() }
+  }).passed, false);
+  for (const activationMutation of [
+    { activationOverrides: { state: 'dormant' } },
+    {
+      receiptOverrides: {
+        transitionFingerprint: 'transition:dynamic-reaction:foreign'
+      }
+    },
+    { receiptOverrides: { sourcePhaseLaneCount: 1 } },
+    { receiptOverrides: { phaseCarrierReadbackBytes: 4 } },
+    { receiptOverrides: { terminalGpuFenceSatisfied: false } },
+    { receiptOverrides: { routingAuthority: false } }
+  ]) {
+    assert.equal(evaluateVisualLivenessMilestoneRaw('sodium-water', {
+      milestone: dynamicReactionActivationMilestone({
+        productHistory: productHistoryGpuCommit(),
+        ...activationMutation
+      })
+    }).passed, false, JSON.stringify(activationMutation));
+  }
+  const sodiumInactiveGasBoundary = inactiveGasBoundaryLawActivation();
+  const zeroLiveMultiStepInactiveAuthority =
+    evaluateVisualLivenessMilestone('sodium-water', {
+      residentStepsPerSchedule: 64,
+      milestone: {
+        productHistory: zeroLiveProductHistory(),
+        productGasTransition: null,
+        lawActivationReceipt: sodiumInactiveGasBoundary,
+        workerSchedule: completedWorkerSchedule({
+          lawActivationReceipt: sodiumInactiveGasBoundary
+        })
+      }
+    });
+  assert.equal(zeroLiveMultiStepInactiveAuthority.passed, true);
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    residentStepsPerSchedule: 1,
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: null,
+      lawActivationReceipt: sodiumInactiveGasBoundary,
+      workerSchedule: completedWorkerSchedule({
+        requestedStepCount: 1,
+        completedStepCount: 1,
+        lawActivationReceipt: sodiumInactiveGasBoundary
+      })
+    }
+  }).passed, false);
+  const activeGasBoundary = inactiveGasBoundaryLawActivation({
+    gasBoundaryActionable: true
+  });
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    residentStepsPerSchedule: 64,
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: null,
+      lawActivationReceipt: activeGasBoundary,
+      workerSchedule: completedWorkerSchedule({
+        lawActivationReceipt: activeGasBoundary
+      })
+    }
+  }).passed, false);
+  const extraFieldActivation = {
+    ...inactiveGasBoundaryLawActivation(),
+    unsealedField: false
+  };
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    residentStepsPerSchedule: 64,
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: null,
+      lawActivationReceipt: extraFieldActivation,
+      workerSchedule: completedWorkerSchedule({
+        lawActivationReceipt: extraFieldActivation
+      })
+    }
+  }).passed, false);
+  for (const scheduleMutation of [
+    { completedStepCount: 63 },
+    { requestedStepCount: 63, completedStepCount: 63 },
+    { cancelled: true },
+    { status: 'worker-resident-schedule-cancelled' },
+    { retainedProductGasTransitionReceipt: { schema: 'unexpected-transition' } }
+  ]) {
+    assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+      residentStepsPerSchedule: 64,
+      milestone: {
+        productHistory: zeroLiveProductHistory(),
+        productGasTransition: null,
+        lawActivationReceipt: sodiumInactiveGasBoundary,
+        workerSchedule: completedWorkerSchedule({
+          lawActivationReceipt: sodiumInactiveGasBoundary,
+          ...scheduleMutation
+        })
+      }
+    }).passed, false, JSON.stringify(scheduleMutation));
+  }
+  const nonEscalatedUnrequestedActivation = inactiveGasBoundaryLawActivation({
+    contactSolverRequested: false,
+    contactSolverEscalatedForDynamicLaws: false,
+    contactSolver: false
+  });
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    residentStepsPerSchedule: 64,
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: null,
+      lawActivationReceipt: nonEscalatedUnrequestedActivation,
+      workerSchedule: completedWorkerSchedule({
+        lawActivationReceipt: nonEscalatedUnrequestedActivation
+      })
+    }
+  }).passed, false);
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    milestone: {
+      productHistory: zeroLiveProductHistory({
+        liveBoundObservation: {
+          ...zeroLiveProductHistory().liveBoundObservation,
+          observedLiveRowCount: 1,
+          tightenedUpperBound: 1
+        }
+      }),
+      productGasTransition: retainedProductGasTransition()
+    }
+  }).passed, false);
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: retainedProductGasTransition({
+        consumedBeforeGpuWork: false
+      })
+    }
+  }).passed, false);
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    milestone: {
+      productHistory: zeroLiveProductHistory({
+        renderProductEventBufferBound: null,
+        renderProductEventBufferByteLength: null
+      }),
+      productGasTransition: retainedProductGasTransition()
+    }
+  }).passed, false);
+  assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+    milestone: {
+      productHistory: zeroLiveProductHistory(),
+      productGasTransition: retainedProductGasTransition({
+        targetScheduleRequestId: 'schedule:foreign-target'
+      })
+    }
+  }).passed, false);
+  for (const transitionMutation of [
+    { transitionSourceMaxFutureSubsteps: 63 },
+    { transitionTargetMaxFutureSubsteps: 63 },
+    { transitionShadowOnly: true },
+    { transitionRoutingAuthority: false },
+    {
+      transitionExecutionGating:
+        'disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers'
+    },
+    { shadowOnly: true },
+    { routingAuthority: false },
+    {
+      executionGating:
+        'disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers'
+    }
+  ]) {
+    assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
+      milestone: {
+        productHistory: zeroLiveProductHistory(),
+        productGasTransition: retainedProductGasTransition(
+          transitionMutation
+        )
+      }
+    }).passed, false, JSON.stringify(transitionMutation));
+  }
   assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
     milestone: {
       productHistory: productHistoryGpuCommit({
@@ -765,6 +1539,28 @@ test('each standard scenario has an early route-specific milestone', () => {
   assert.equal(evaluateVisualLivenessMilestone('cesium-fluorine', {
     milestone: {
       productHistory: productHistoryGpuCommit(),
+      twoLevelAuthority: 'authoritative',
+      twoLevelCommitVerified: true,
+      twoLevelFineSubstepCount: 2
+    }
+  }).passed, true);
+  const cesiumInactiveGasBoundary = inactiveGasBoundaryLawActivation({
+    twoLevelMechanics: true
+  });
+  assert.equal(evaluateVisualLivenessMilestone('cesium-fluorine', {
+    residentStepsPerSchedule: 16,
+    milestone: {
+      productHistory: zeroLiveProductHistory({
+        gridCouplingStatus: null,
+        countAuthority: null,
+        rowCapacity: null,
+        countHostKnown: null,
+        dispatchMode: null
+      }),
+      productGasTransition: retainedProductGasTransition({
+        transitionSourceMaxFutureSubsteps: 16,
+        transitionTargetMaxFutureSubsteps: 16
+      }),
       twoLevelAuthority: 'authoritative',
       twoLevelCommitVerified: true,
       twoLevelFineSubstepCount: 2
@@ -787,6 +1583,45 @@ test('each standard scenario has an early route-specific milestone', () => {
       twoLevelFineSubstepCount: 2
     }
   }).passed, true);
+  assert.equal(evaluateVisualLivenessMilestone('cesium-fluorine', {
+    residentStepsPerSchedule: 16,
+    milestone: {
+      productHistory: zeroLiveProductHistory({
+        gridCouplingStatus: null,
+        countAuthority: null,
+        rowCapacity: null,
+        countHostKnown: null,
+        dispatchMode: null
+      }),
+      productGasTransition: null,
+      lawActivationReceipt: cesiumInactiveGasBoundary,
+      workerSchedule: completedWorkerSchedule({
+        requestedStepCount: 16,
+        completedStepCount: 16,
+        lawActivationReceipt: cesiumInactiveGasBoundary
+      }),
+      twoLevelAuthority: 'authoritative',
+      twoLevelCommitVerified: true,
+      twoLevelFineSubstepCount: 2
+    }
+  }).passed, true);
+  assert.equal(evaluateVisualLivenessMilestone('cesium-fluorine', {
+    residentStepsPerSchedule: 16,
+    milestone: {
+      productHistory: zeroLiveProductHistory({
+        gridCouplingStatus: null,
+        countAuthority: null,
+        rowCapacity: null,
+        countHostKnown: null,
+        dispatchMode: null
+      }),
+      productGasTransition: null,
+      lawActivationReceipt: null,
+      twoLevelAuthority: 'authoritative',
+      twoLevelCommitVerified: true,
+      twoLevelFineSubstepCount: 2
+    }
+  }).passed, false);
   assert.equal(evaluateVisualLivenessMilestone('sodium-water', {
     milestone: {
       productHistory: productHistoryGpuCommit({
@@ -858,6 +1693,24 @@ test('visual success requires 160 correlated presented steps and 60 seconds of s
   assert.equal(accepted.passed, true);
   assert.equal(accepted.physicsStepDelta, 161);
   assert.equal(accepted.presentedStepDelta, 160);
+  const currentWithPendingSuccessor = {
+    ...current,
+    residentPending: {
+      schema: 'peercompute.ulg.sph-demo-resident-pending.v0',
+      status: 'resident-execution-pending'
+    }
+  };
+  assert.equal(evaluateVisualLivenessSustainedProgress({
+    ...baseOptions,
+    currentSnapshot: currentWithPendingSuccessor,
+    currentAtMs: 61_000
+  }).passed, false);
+  assert.equal(evaluateVisualLivenessSustainedProgress({
+    ...baseOptions,
+    currentSnapshot: currentWithPendingSuccessor,
+    currentAtMs: 61_000,
+    allowResidentPending: true
+  }).passed, true);
   assert.equal(evaluateVisualLivenessSustainedProgress({
     ...baseOptions,
     currentAtMs: 61_000,
@@ -866,8 +1719,36 @@ test('visual success requires 160 correlated presented steps and 60 seconds of s
 });
 
 test('supervisor timeout evidence retains completed frames and progress checkpoints', () => {
+  const residentScheduleFailure = {
+    schema: 'peercompute.ulg.worker-resident-schedule-error.v0',
+    reason: 'schedule-terminal-reflux-receipt-rejected',
+    scheduleId: 'ulg:test:late-cesium',
+    stepOrdinal: 356,
+    stageId: 'schroederResidentScheduleTerminalRefluxReceipt',
+    terminalGpuFence: {
+      status: 'gpu-fence-satisfied-authority-rejected',
+      fenceSatisfied: true,
+      authorityAdmissionReady: false,
+      terminalRefluxReceipt: {
+        status: 'terminal-reflux-receipt-rejected',
+        firstRejectedStepOrdinal: 1,
+        firstRejectedDiagnostic: {
+          structuralValid: true,
+          terminalAdmitted: false,
+          failClosed: true,
+          statusFlags: 535,
+          invalidCount: 3,
+          mutationRollbackCount: 3,
+          receiptRejectCount: { replay: 0, skip: 9, duplicate: 0 }
+        }
+      }
+    }
+  };
   const partialEvidence = {
-    lastSnapshot: readySnapshot({ nextStep: 82 }),
+    lastSnapshot: readySnapshot({
+      nextStep: 82,
+      residentScheduleFailure
+    }),
     samples: [readySnapshot({ nextStep: 81 })],
     checkpointSnapshots: [{ threshold: 40, stepDelta: 42 }],
     milestone: { id: 'resident-product-history-gpu-commit', passed: true },
@@ -891,6 +1772,15 @@ test('supervisor timeout evidence retains completed frames and progress checkpoi
   assert.deepEqual(failed.checkpointSnapshots, partialEvidence.checkpointSnapshots);
   assert.deepEqual(failed.compositorDelta, partialEvidence.compositorDelta);
   assert.equal(failed.artifactDirectory, '/tmp/evidence');
+  assert.deepEqual(
+    failed.failure.residentScheduleFailure,
+    residentScheduleFailure
+  );
+  assert.equal(
+    failed.failure.residentScheduleFailure.terminalGpuFence
+      .terminalRefluxReceipt.firstRejectedDiagnostic.mutationRollbackCount,
+    3
+  );
 });
 
 test('receipt summary identifies bounded liveness rather than deep science', () => {
@@ -1095,6 +1985,18 @@ test('normal visual commands are bounded and legacy campaigns are explicitly nam
     /surfaceDraw\?\.surfaceDrawVisibleGpuConsumerRuntimePresentationAdmitted/
   );
   assert.match(harnessSource, /renderBridgeLastRenderStatus/);
+  assert.match(
+    harnessSource,
+    /getWorkerOffscreenResidentStageStatus\?\.\(\)/
+  );
+  assert.match(
+    harnessSource,
+    /terminalRefluxReceipt\?\.firstRejectedDiagnostic/
+  );
+  assert.match(
+    harnessSource,
+    /lastSnapshot\?\.residentScheduleFailure/
+  );
   assert.match(harnessSource, /timeout: COMPOSITOR_CAPTURE_TIMEOUT_MS/);
   const matrixMainStart = harnessSource.indexOf('async function matrixMain()');
   const matrixMainEnd = harnessSource.indexOf(

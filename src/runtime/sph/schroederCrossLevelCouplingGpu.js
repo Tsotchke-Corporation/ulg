@@ -18,7 +18,10 @@ import {
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_FINE_CORRECTION_COMPLETE,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_PREDICTOR_VELOCITY_READY,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_CFL_REJECTED,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_FAIL_CLOSED,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY,
   createSchroederSpatialParentFieldMechanicsWorkspaceLayout
@@ -574,6 +577,15 @@ async function readTwoLevelCanonicalAuthorityTrace({
         words,
         SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT
       );
+      const preSealCflRejection =
+        Number(header.phase)
+          === SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_PREDICTOR_VELOCITY_READY
+        && (
+          (Number(header.statusFlags) >>> 0)
+          & SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_CFL_REJECTED
+        ) !== 0;
+      const completedFineCorrection = Number(header.phase)
+        >= SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_FINE_CORRECTION_COMPLETE;
       return Object.freeze({
         ...compactAuthorityHeaderStatus(header.statusFlags, {
           readyFlag:
@@ -582,6 +594,19 @@ async function readTwoLevelCanonicalAuthorityTrace({
             SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED,
           failClosedFlag:
             SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_FAIL_CLOSED
+        }),
+        routeCflSeal: Object.freeze({
+          status: preSealCflRejection
+            ? 'not-sealed-cfl-rejected'
+            : (
+                completedFineCorrection
+                  ? 'sealed-consumed-slot-reused'
+                  : 'indeterminate-pre-fine-complete'
+              ),
+          sealedRouteCflAlpha: null,
+          preSealPhaseCausalCrossEnergyCoefficientJ: preSealCflRejection
+            ? Number(header.sealedRouteCflAlpha)
+            : null
         }),
         header
       });
@@ -660,8 +685,8 @@ async function readTwoLevelCanonicalAuthorityTrace({
   if (
     !activeSourceBuffer
     || levelViews.length !== 2
-    || fixedSourceCount !== 12
-    || sources.length !== 13
+    || fixedSourceCount !== 13
+    || sources.length !== 14
   ) {
     return Object.freeze({
       schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
@@ -669,7 +694,7 @@ async function readTwoLevelCanonicalAuthorityTrace({
       selectedLevel,
       generationId: generation?.execution?.generationId ?? null,
       status: 'canonical-authority-trace-unavailable',
-      expectedSourceCount: 13,
+      expectedSourceCount: 14,
       availableSourceCount: sources.length
     });
   }
@@ -1380,8 +1405,8 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
       cacheKey: compactHierarchy
-        ? 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.compact-hierarchy.v1'
-        : 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.v0',
+        ? 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.compact-hierarchy.v2'
+        : 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.v1',
       label: compactHierarchy
         ? 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation-compact-hierarchy'
         : 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation',
@@ -3161,6 +3186,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       fineTransaction = null,
       terminalTransaction = null,
       crossLevelPressureConsumer = false,
+      temporalCoarsePredictor = null,
       queueOrderedSubmissionBatch = null
     }) => {
       const projection = await runGpuQueueStage(
@@ -3180,6 +3206,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           ambientPressurePa,
           mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
           pressureCrossLevelConsumerRequired: crossLevelPressureConsumer,
+          mechanicsFieldTemporalCoarsePredictor: temporalCoarsePredictor,
           queueOrderedSubmissionBatch,
           retainGridBuffer: false,
           readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
@@ -3466,6 +3493,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       const predictorThetaDt = Math.fround(
         ((substep + 1) / substeps) * dtSeconds
       );
+      const successorThetaDt = substep + 1 < substeps
+        ? Math.fround(((substep + 2) / substeps) * dtSeconds)
+        : null;
       const fineTransaction = createSchroederFusedFineSubstepTransaction({
         device,
         macroAuthority: fusedMacroAuthority,
@@ -3505,6 +3535,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             // The parent workspace authenticates and claims these coarse pressure
             // rows for the cross-level operator.
             crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled,
+            temporalCoarsePredictor: successorThetaDt == null
+              ? null
+              : Object.freeze({
+                  enabled: true,
+                  role: 'immediate-successor-coarse-predictor',
+                  successorThetaDt
+                }),
             queueOrderedSubmissionBatch: p2gSubmissionBatch
           })
         ]);

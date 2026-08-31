@@ -86,7 +86,9 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         identity,
         gpuBuffers,
         sphState,
-        reactionKernel
+        reactionKernel,
+        motionEnvelopeModule,
+        motionWatchModule
       ] = await Promise.all([
         import('/src/runtime/webgpuDeviceLimits.js'),
         import('/src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js'),
@@ -94,7 +96,9 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         import('/src/runtime/sph/sphGpuDeviceIdentity.js'),
         import('/src/runtime/sph/sphGpuBuffers.js'),
         import('/src/runtime/sph/sphState.js'),
-        import('/src/runtime/sph/sphReactionGpuKernel.js')
+        import('/src/runtime/sph/sphReactionGpuKernel.js'),
+        import('/src/runtime/sph/sphReactionMotionEnvelope.js'),
+        import('/src/runtime/sph/sphReactionMotionEnvelopeWatchGpu.js')
       ]);
       const device = await adapter.requestDevice(
         deviceLimits.webGpuDeviceDescriptorForResidentSph(adapter, {
@@ -293,6 +297,14 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         materialProperties,
         contactRadiusM: 0.1
       });
+      const thermalPhaseIneligibleReactionTable =
+        reactionKernel.buildSphReactionTable([{
+          ...reactions[0],
+          activationTemperatureK: 1.0e9
+        }], {
+          materialProperties,
+          contactRadiusM: 0.1
+        });
       requireTrue(
         reactionTable.reactionCount === reactions.length,
         `reaction table lost rules: ${reactionTable.reactionCount}`
@@ -343,6 +355,125 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         sourceSlot: 0,
         nextSlot: 1
       });
+      const mechanicsRows = new Float32Array(packed.particleCount * 32);
+      for (let index = 0; index < packed.particleCount; index += 1) {
+        mechanicsRows[index * 32 + 19] = 1;
+      }
+      const motionBoxDimsM = [
+        Math.max(...particles.map((particle) => particle.x[0])) + 1,
+        2,
+        2
+      ];
+      const mechanicsBuffer = createTaggedBuffer(
+        'ulg-native-reaction-motion-envelope-mechanics',
+        mechanicsRows,
+        GPUBufferUsage.STORAGE
+          | GPUBufferUsage.COPY_SRC
+          | GPUBufferUsage.COPY_DST
+      );
+      const reactionMotionEnvelope =
+        motionEnvelopeModule.createSphReactionMotionEnvelope({
+          maxFutureSubsteps: 4,
+          dtS: 1 / 120,
+          gridSpacingM: 0.1,
+          cflFactor: 0.4,
+          boxDimsM: motionBoxDimsM,
+          separationDisplacementEnabled: true
+        });
+      const thermalPhaseReactionMotionEnvelope =
+        motionEnvelopeModule.createSphReactionMotionEnvelope({
+          maxFutureSubsteps: 4,
+          dtS: 1 / 120,
+          gridSpacingM: 0.1,
+          cflFactor: 0.4,
+          boxDimsM: motionBoxDimsM,
+          separationDisplacementEnabled: true,
+          thermalPhaseEvolutionEnabled: true
+        });
+      const motionProbeBuffer = device.createBuffer({
+        label: 'ulg-native-reaction-motion-envelope-numeric-probe',
+        size: 3 * Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+      });
+      try {
+        const motionProbeModule = device.createShaderModule({
+          label: 'ulg-native-reaction-motion-envelope-numeric-probe',
+          code: `
+${motionEnvelopeModule.sphReactionMotionEnvelopeWgsl}
+@group(0) @binding(0) var<storage, read_write> probe: array<f32>;
+@compute @workgroup_size(1)
+fn main() {
+  probe[0] = reaction_motion_relative_reach_upper(
+    1u, 0.4, 0.1564, 0.0, false, false,
+    vec3<f32>(0.01), 0.0, 0.1
+  );
+  probe[1] = reaction_motion_relative_reach_upper(
+    1u, 0.4, 0.1564, 0.0, false, false,
+    vec3<f32>(0.01), 1048577.0, 0.1
+  );
+  probe[2] = reaction_motion_relative_reach_upper(
+    1u, 0.4, 0.05, 0.1, false, true,
+    vec3<f32>(0.01), 0.0, 0.0
+  );
+}
+`
+        });
+        const motionProbePipeline = device.createComputePipeline({
+          label: 'ulg-native-reaction-motion-envelope-numeric-probe',
+          layout: 'auto',
+          compute: { module: motionProbeModule, entryPoint: 'main' }
+        });
+        const motionProbeBindGroup = device.createBindGroup({
+          layout: motionProbePipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: { buffer: motionProbeBuffer } }]
+        });
+        const motionProbeEncoder = device.createCommandEncoder({
+          label: 'ulg-native-reaction-motion-envelope-numeric-probe'
+        });
+        const motionProbePass = motionProbeEncoder.beginComputePass();
+        motionProbePass.setPipeline(motionProbePipeline);
+        motionProbePass.setBindGroup(0, motionProbeBindGroup);
+        motionProbePass.dispatchWorkgroups(1);
+        motionProbePass.end();
+        device.queue.submit([motionProbeEncoder.finish()]);
+        const motionProbe = new Float32Array(await readBuffer(
+          motionProbeBuffer,
+          3 * Float32Array.BYTES_PER_ELEMENT,
+          'ulg-native-reaction-motion-envelope-numeric-probe-readback'
+        ));
+        const xA = Math.fround(1048576.75);
+        const xB = Math.fround(1048577.0);
+        const dx = Math.fround(Math.fround(0.4) * Math.fround(0.1564));
+        const storedA = Math.fround(xA + dx);
+        const storedB = Math.fround(xB - dx);
+        const initialDistance = xB - xA;
+        requireTrue(
+          storedA === storedB,
+          'native position-store fixture did not close under f32 storage'
+        );
+        requireTrue(
+          0.1 + motionProbe[0] < initialDistance,
+          'near-origin physical reach unexpectedly covers the counterexample'
+        );
+        requireTrue(
+          0.1 + motionProbe[1] >= initialDistance,
+          'absolute-coordinate store allowance missed the counterexample'
+        );
+        const oldCflSeparationRelativeReach = 2 * (
+          Math.fround(0.4) * Math.fround(0.05) + 0.5 * 0.1
+        );
+        const contactOnlyCounterexampleDistanceM = 0.5;
+        requireTrue(
+          oldCflSeparationRelativeReach < contactOnlyCounterexampleDistanceM,
+          'native contact fixture is not outside the former CFL/separation reach'
+        );
+        requireTrue(
+          motionProbe[2] >= contactOnlyCounterexampleDistanceM,
+          'canonical 16-diameter contact trust failed to cover the adversarial pair'
+        );
+      } finally {
+        motionProbeBuffer.destroy();
+      }
       const gridSpacingM = 0.1;
       const activeRows = new Float32Array(packed.particleCount * 16);
       for (let index = 0; index < packed.particleCount; index += 1) {
@@ -410,7 +541,13 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
           reactionTable.combinedRecords,
           GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
         );
-        const runVariant = async ({ indexed, label }) => {
+        const runVariant = async ({
+          indexed,
+          label,
+          motion = false,
+          table = reactionTable,
+          envelope = reactionMotionEnvelope
+        }) => {
           const timestamps = createCandidateTraversalTimestampRecorder(label);
           let generation = null;
           let proposal = null;
@@ -438,12 +575,37 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
               generation,
               sphParticleState: packed,
               sphParticleUpload: upload,
-              reactionTable,
+              reactionTable: table,
               reactionRecordBuffer: indexed ? null : fullScanRecordBuffer,
+              sourceMechanicsBuffer: motion ? mechanicsBuffer : null,
+              reactionMotionEnvelope: motion ? envelope : null,
+              boxDimsM: motion ? motionBoxDimsM : null,
               observeGpuEvidence: true,
+              captureActivationObservation: true,
               gpuTimestampRecorder: timestamps.recorder
             });
             await device.queue.onSubmittedWorkDone();
+            const activationObservation =
+              await discovery
+                .observeSchroederSpatialReactionDiscoveryActivation(
+                  proposal,
+                  { device }
+                );
+            requireTrue(
+              activationObservation.observationSucceeded === true
+                && activationObservation.uncertainty === false
+                && activationObservation.readbackByteLength
+                  === Uint32Array.BYTES_PER_ELEMENT
+                && activationObservation.mapAsyncCount === 1
+                && (motion
+                  ? activationObservation.triggeredSourceCount
+                      >= proposal.observedEvidence?.proposalCount
+                  : activationObservation.triggeredSourceCount
+                      === proposal.observedEvidence?.proposalCount)
+                && activationObservation.motionEnvelope
+                  === (motion ? envelope : null),
+              `${label}: four-byte activation reduction disagreed with the canonical diagnostic count: activation=${JSON.stringify(activationObservation)} evidence=${JSON.stringify(proposal.observedEvidence)}`
+            );
             const receipt = proposal.receipt;
             requireTrue(
               receipt?.status === 'schroeder-spatial-epoch-consumer-receipt-finalized'
@@ -472,6 +634,7 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
               proposalWords,
               proposalHash: hashWords(proposalWords),
               evidence: proposal.observedEvidence,
+              activationObservation,
               timestamp,
               reactionRuleIndex: {
                 mode: proposal.reactionRuleIndex.mode,
@@ -495,7 +658,9 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
                 privateLookupBuildCount: receipt.privateLookupBuildCount,
                 fixedCandidateBuildCount: receipt.fixedCandidateBuildCount,
                 exhaustiveTraversalCount: receipt.exhaustiveTraversalCount
-              }
+              },
+              motionEnvelopeEnabled:
+                proposal.activationMotionEnvelopeEnabled === true
             };
           } finally {
             proposal?.destroy();
@@ -515,6 +680,295 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
           indexedWarm.proposalHash === fullWarm.proposalHash,
           'warm indexed/full proposal hashes differ'
         );
+        const canonicalMotion = await runVariant({
+          indexed: true,
+          label: 'canonical-motion-envelope',
+          motion: true
+        });
+        requireTrue(
+          canonicalMotion.motionEnvelopeEnabled === true
+            && canonicalMotion.activationObservation.observationSucceeded
+              === true
+            && canonicalMotion.activationObservation.motionEnvelope
+              ?.maxFutureSubsteps === 4,
+          `canonical native motion watch failed: ${JSON.stringify(canonicalMotion.activationObservation)}`
+        );
+        const thermalPhaseLatch = await runVariant({
+          indexed: true,
+          label: 'canonical-thermal-phase-latch',
+          motion: true,
+          table: thermalPhaseIneligibleReactionTable,
+          envelope: thermalPhaseReactionMotionEnvelope
+        });
+        requireTrue(
+          thermalPhaseLatch.evidence.proposalCount === 0
+            && thermalPhaseLatch.activationObservation.observationSucceeded
+              === true
+            && thermalPhaseLatch.activationObservation.triggeredSourceCount
+              === packed.particleCount
+            && thermalPhaseLatch.activationObservation.nodeDomain
+              === 'fixed-phase-carrier-slot'
+            && thermalPhaseLatch.activationObservation.motionEnvelope
+              ?.futureRestDiameterBoundStatus
+                === 'future-upper-unclaimed-trigger-positive',
+          `canonical thermal/phase latch failed to override an exact current-state zero: ${JSON.stringify(thermalPhaseLatch.activationObservation)}`
+        );
+
+        const tier0StateBuffer = createTaggedBuffer(
+          'ulg-native-tier0-reaction-motion-watch-state',
+          packed.state,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        const tier0ThermoBuffer = createTaggedBuffer(
+          'ulg-native-tier0-reaction-motion-watch-thermo',
+          packed.thermo,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        const tier0MechanicsBuffer = createTaggedBuffer(
+          'ulg-native-tier0-reaction-motion-watch-mechanics',
+          mechanicsRows,
+          GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_SRC
+            | GPUBufferUsage.COPY_DST
+        );
+        let tier0MotionProposal = null;
+        let tier0MotionObservation = null;
+        let canonicalTerminalMotionObservation = null;
+        let canonicalThermalPhaseLatchObservation = null;
+        let canonicalTerminalFamilyPreserved = false;
+        let tier0Separation = null;
+        try {
+          const encoder = device.createCommandEncoder({
+            label: 'ulg-native-tier0-reaction-motion-watch'
+          });
+          tier0Separation =
+            motionWatchModule
+              .encodeSphReactionMotionEnvelopeWatchTerminalBinsWebGpu(
+                device,
+                encoder,
+                {
+                  stateBuffer: tier0StateBuffer,
+                  mechanicsBuffer: tier0MechanicsBuffer,
+                  particleCount: packed.particleCount,
+                  boxDimsM: motionBoxDimsM,
+                  // Keep the producer enabled so it emits the authentic
+                  // post-apply refill authority. Every fixture velocity is
+                  // zero, so damping mints bins without moving a particle.
+                  relaxation: 0,
+                  normalVelocityDamping: 1,
+                  maxPairRestDistanceM: 1,
+                  gridSpacingM: 0.1
+                }
+              );
+          tier0MotionProposal =
+            motionWatchModule.encodeSphReactionMotionEnvelopeWatchWebGpu({
+              device,
+              encoder,
+              terminalStateBuffer: tier0StateBuffer,
+              terminalThermoBuffer: tier0ThermoBuffer,
+              terminalMechanicsBuffer: tier0MechanicsBuffer,
+              reactionTable,
+              reactionMotionEnvelope,
+              boxDimsM: motionBoxDimsM,
+              neighborBins:
+                tier0Separation.postSeparationThermalBinCandidate,
+              particleCount: packed.particleCount
+            });
+          device.queue.submit([encoder.finish()]);
+          requireTrue(
+            tier0MotionProposal.markSubmittedWork() === true,
+            'native Tier0 watch did not accept its caller submission'
+          );
+          await device.queue.onSubmittedWorkDone();
+          tier0MotionObservation =
+            await motionWatchModule.observeSphReactionMotionEnvelopeWatch(
+              tier0MotionProposal,
+              { device }
+            );
+          requireTrue(
+            tier0MotionProposal.dispatchCount === 3
+              && tier0MotionObservation.observationSucceeded === true
+              && tier0MotionObservation.uncertainty === false
+              && tier0MotionObservation.triggeredSourceCount
+                === packed.particleCount
+              && tier0MotionObservation.producerRoute
+                === 'tier0-fused-resident-sequence'
+              && tier0MotionObservation.motionEnvelope
+                === reactionMotionEnvelope
+              && tier0MotionObservation.triggeredSourceCount
+                === canonicalMotion.activationObservation
+                  .triggeredSourceCount,
+            `native Tier0 motion watch failed: ${JSON.stringify({
+              observation: tier0MotionObservation,
+              proposal: {
+                dispatchCount: tier0MotionProposal.dispatchCount,
+                terminalBinsAdmitted:
+                  tier0MotionProposal.terminalBinsAdmitted,
+                status: tier0MotionProposal.status
+              },
+              separation: {
+                enabled: tier0Separation?.enabled,
+                postApplyBinCandidate: Boolean(
+                  tier0Separation?.postSeparationThermalBinCandidate
+                )
+              },
+              uncapturedErrors
+            })}`
+          );
+
+          let canonicalTerminalProposal = null;
+          let canonicalThermalPhaseLatchProposal = null;
+          const canonicalScopedErrors = [];
+          device.pushErrorScope('validation');
+          device.pushErrorScope('internal');
+          device.pushErrorScope('out-of-memory');
+          try {
+            canonicalTerminalProposal =
+              motionWatchModule
+                .runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+                  device,
+                  terminalStateBuffer: tier0StateBuffer,
+                  terminalThermoBuffer: tier0ThermoBuffer,
+                  terminalMechanicsBuffer: tier0MechanicsBuffer,
+                  reactionTable,
+                  reactionMotionEnvelope,
+                  particleCount: packed.particleCount,
+                  boxDimsM: motionBoxDimsM
+                });
+            requireTrue(
+              canonicalTerminalProposal.ownedCommandSubmissionCount === 1
+                && canonicalTerminalProposal.producerRoute
+                  === 'canonical-schroeder'
+                && canonicalTerminalProposal.sampleStage
+                  === 'canonical-terminal-published-carrier-family-motion-envelope'
+                && canonicalTerminalProposal.nodeDomain
+                  === 'fixed-phase-carrier-slot',
+              'native canonical terminal watch published torn route metadata'
+            );
+            await device.queue.onSubmittedWorkDone();
+            requireTrue(
+              motionWatchModule
+                .markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted(
+                  canonicalTerminalProposal,
+                  { device }
+                ) === true,
+              'native canonical terminal watch rejected its completion fence'
+            );
+            canonicalTerminalMotionObservation =
+              await motionWatchModule.observeSphReactionMotionEnvelopeWatch(
+                canonicalTerminalProposal,
+                { device }
+              );
+            requireTrue(
+              canonicalTerminalMotionObservation.observationSucceeded === true
+                && canonicalTerminalMotionObservation.uncertainty === false
+                && canonicalTerminalMotionObservation.triggeredSourceCount
+                  === packed.particleCount
+                && canonicalTerminalMotionObservation.triggeredSourceCount
+                  === tier0MotionObservation.triggeredSourceCount
+                && canonicalTerminalMotionObservation.producerRoute
+                  === 'canonical-schroeder',
+              `native canonical terminal motion watch failed: ${JSON.stringify(canonicalTerminalMotionObservation)}`
+            );
+            canonicalThermalPhaseLatchProposal =
+              motionWatchModule
+                .runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+                  device,
+                  terminalStateBuffer: tier0StateBuffer,
+                  terminalThermoBuffer: tier0ThermoBuffer,
+                  terminalMechanicsBuffer: tier0MechanicsBuffer,
+                  reactionTable: thermalPhaseIneligibleReactionTable,
+                  reactionMotionEnvelope:
+                    thermalPhaseReactionMotionEnvelope,
+                  particleCount: packed.particleCount,
+                  boxDimsM: motionBoxDimsM
+                });
+            await device.queue.onSubmittedWorkDone();
+            requireTrue(
+              motionWatchModule
+                .markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted(
+                  canonicalThermalPhaseLatchProposal,
+                  { device }
+                ) === true,
+              'native canonical thermal/phase latch rejected its completion fence'
+            );
+            canonicalThermalPhaseLatchObservation =
+              await motionWatchModule.observeSphReactionMotionEnvelopeWatch(
+                canonicalThermalPhaseLatchProposal,
+                { device }
+              );
+            requireTrue(
+              canonicalThermalPhaseLatchObservation.observationSucceeded
+                === true
+                && canonicalThermalPhaseLatchObservation
+                  .triggeredSourceCount === packed.particleCount
+                && canonicalThermalPhaseLatchObservation.motionEnvelope
+                  === thermalPhaseReactionMotionEnvelope,
+              `native canonical thermal/phase terminal latch failed: ${JSON.stringify(canonicalThermalPhaseLatchObservation)}`
+            );
+
+            const [stateAfter, thermoAfter, mechanicsAfter] = await Promise.all([
+              readBuffer(
+                tier0StateBuffer,
+                packed.state.byteLength,
+                'ulg-native-canonical-terminal-watch-state-after'
+              ),
+              readBuffer(
+                tier0ThermoBuffer,
+                packed.thermo.byteLength,
+                'ulg-native-canonical-terminal-watch-thermo-after'
+              ),
+              readBuffer(
+                tier0MechanicsBuffer,
+                mechanicsRows.byteLength,
+                'ulg-native-canonical-terminal-watch-mechanics-after'
+              )
+            ]);
+            const bytesEqual = (actual, expected) => {
+              const left = new Uint8Array(actual);
+              const right = new Uint8Array(
+                expected.buffer,
+                expected.byteOffset,
+                expected.byteLength
+              );
+              return left.length === right.length
+                && left.every((value, index) => value === right[index]);
+            };
+            canonicalTerminalFamilyPreserved = Boolean(
+              bytesEqual(stateAfter, packed.state)
+              && bytesEqual(thermoAfter, packed.thermo)
+              && bytesEqual(mechanicsAfter, mechanicsRows)
+            );
+            requireTrue(
+              canonicalTerminalFamilyPreserved,
+              'native canonical terminal bin/watch producer mutated its borrowed family'
+            );
+          } finally {
+            canonicalTerminalProposal?.destroy();
+            canonicalThermalPhaseLatchProposal?.destroy();
+            canonicalScopedErrors.push(
+              await device.popErrorScope(),
+              await device.popErrorScope(),
+              await device.popErrorScope()
+            );
+          }
+          requireTrue(
+            canonicalScopedErrors.every((error) => error == null),
+            `native canonical terminal watch raised scoped GPU errors: ${canonicalScopedErrors.map((error) => error?.message || null).join(', ')}`
+          );
+        } finally {
+          tier0MotionProposal?.destroy();
+          for (const buffer of tier0Separation?.transientBuffers || []) {
+            buffer.destroy();
+          }
+          tier0StateBuffer.destroy();
+          tier0ThermoBuffer.destroy();
+          tier0MechanicsBuffer.destroy();
+        }
         const indexedRuns = [];
         const fullRuns = [];
         for (let sample = 0; sample < sampleCount; sample += 1) {
@@ -544,6 +998,13 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         const indexedEvidence = referenceIndexed.evidence;
         const fullEvidence = referenceFull.evidence;
         requireTrue(proposalsEqual, 'indexed/full proposal rows differed');
+        requireTrue(
+          referenceIndexed.activationObservation.triggeredSourceCount
+            === indexedEvidence.proposalCount
+            && referenceFull.activationObservation.triggeredSourceCount
+              === fullEvidence.proposalCount,
+          `activation reduction parity failed: indexed=${JSON.stringify(referenceIndexed.activationObservation)} full=${JSON.stringify(referenceFull.activationObservation)}`
+        );
         requireTrue(
           referenceIndexed.reactionRuleIndex.mode === 'material-pair-indexed'
             && referenceIndexed.reactionRuleIndex.pairCount === 2
@@ -603,14 +1064,36 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
             && firstProposal[2] > 0,
           `indexed proposal did not retain original rule-order tie break: ${Array.from(firstProposal.slice(0, 4))}`
         );
+        await device.queue.onSubmittedWorkDone();
+        const outerScopedErrors = [
+          await device.popErrorScope(),
+          await device.popErrorScope(),
+          await device.popErrorScope()
+        ];
+        requireTrue(
+          outerScopedErrors.every((error) => error == null),
+          `native reaction-rule-index run raised scoped GPU errors: ${outerScopedErrors.map((error) => error?.message || null).join(', ')}`
+        );
         return {
           status: 'complete',
           particleCount: packed.particleCount,
           reactionCount: reactionTable.reactionCount,
           proposalParity: proposalsEqual,
+          canonicalMotion: {
+            motionEnvelopeEnabled: canonicalMotion.motionEnvelopeEnabled,
+            activationObservation: canonicalMotion.activationObservation
+          },
+          tier0Motion: tier0MotionObservation,
+          canonicalTerminalMotion: canonicalTerminalMotionObservation,
+          canonicalThermalPhaseLatch:
+            canonicalThermalPhaseLatchObservation,
+          sharedThermalPhaseLatch: thermalPhaseLatch.activationObservation,
+          canonicalTerminalFamilyPreserved,
           indexed: {
             ...referenceIndexed.reactionRuleIndex,
             evidence: indexedEvidence,
+            activationObservation:
+              referenceIndexed.activationObservation,
             receipt: referenceIndexed.receipt,
             samplesMs: indexedMs,
             medianMs: indexedMedianMs
@@ -618,6 +1101,7 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
           full: {
             ...referenceFull.reactionRuleIndex,
             evidence: fullEvidence,
+            activationObservation: referenceFull.activationObservation,
             receipt: referenceFull.receipt,
             samplesMs: fullMs,
             medianMs: fullMedianMs
@@ -631,14 +1115,53 @@ test('native Vulkan reaction material-pair index preserves canonical proposals a
         fullScanRecordBuffer?.destroy();
         discovery.destroySchroederSpatialReactionDiscoveryProposalCache(device);
         activeNodeBuffer.destroy();
+        mechanicsBuffer.destroy();
         gpuBuffers.destroySphGpuParticleBuffers(upload);
       }
     }, { sampleCount: 4, pairCount: 128 });
 
     assert.equal(native.status, 'complete', native.reason || JSON.stringify(native));
     assert.equal(native.proposalParity, true);
+    assert.equal(native.canonicalMotion.motionEnvelopeEnabled, true);
+    assert.equal(
+      native.canonicalMotion.activationObservation.observationSucceeded,
+      true
+    );
+    assert.equal(native.tier0Motion.observationSucceeded, true);
+    assert.equal(native.tier0Motion.uncertainty, false);
+    assert.equal(native.tier0Motion.triggeredSourceCount, native.particleCount);
+    assert.equal(
+      native.canonicalTerminalMotion.observationSucceeded,
+      true
+    );
+    assert.equal(native.canonicalTerminalMotion.uncertainty, false);
+    assert.equal(
+      native.canonicalTerminalMotion.triggeredSourceCount,
+      native.particleCount
+    );
+    assert.equal(
+      native.canonicalTerminalMotion.producerRoute,
+      'canonical-schroeder'
+    );
+    assert.equal(native.canonicalTerminalFamilyPreserved, true);
+    assert.equal(
+      native.sharedThermalPhaseLatch.triggeredSourceCount,
+      native.particleCount
+    );
+    assert.equal(
+      native.canonicalThermalPhaseLatch.triggeredSourceCount,
+      native.particleCount
+    );
     assert.equal(native.indexed.evidence.fullRuleScanRuleVisitCount, 0);
     assert.equal(native.full.evidence.ruleIndexRuleVisitCount, 0);
+    assert.equal(
+      native.indexed.activationObservation.triggeredSourceCount,
+      native.indexed.evidence.proposalCount
+    );
+    assert.equal(
+      native.full.activationObservation.triggeredSourceCount,
+      native.full.evidence.proposalCount
+    );
     assert.ok(native.indexed.evidence.exactCellTreeNodeVisitCount > 0);
     assert.ok(native.indexed.evidence.exactCellTreeLeafVisitCount > 0);
     assert.ok(

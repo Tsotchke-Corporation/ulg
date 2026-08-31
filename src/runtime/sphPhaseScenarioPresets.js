@@ -2,6 +2,11 @@ import {
   serializeSphInitialBodies,
   sphInitialBodiesFromLegacyDropBase
 } from './sphInitialBodies.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW
+} from './sph/schroederDynamicLawRoutingContract.js';
 
 export const SPH_PHASE_SCENARIO_PRESET_SCHEMA =
   'peercompute.ulg.sph-phase-scenario-preset.v0';
@@ -35,6 +40,7 @@ const COMMON_CONTROLS = Object.freeze({
 // menu selection now exercises the worker-owned SS lane instead of silently
 // falling back to a different main-thread topology.
 const COMMON_RUNTIME = Object.freeze({
+  reactionActivationPolicy: SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW,
   renderer: 'native-webgpu',
   surfaceDraw: 'native-webgpu-surface-consumer',
   surfaceOverlay: '0',
@@ -139,6 +145,10 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       wzmin: '300',
       wzmax: '300'
     },
+    runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
+    },
     validation: {
       // The first frozen steam lineage reaches the cold ceiling near 3.33 s.
       // Retain five post-contact checkpoints so the standard gate observes
@@ -197,6 +207,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       lawst: '1'
     },
     runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
       // See the controls above: this is an exact spatial refinement, not a
       // miniature substitute for the requested physical experiment.
       sceneLengthScale: '0.014',
@@ -256,6 +268,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       boxz: '3'
     },
     runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
       // The sodium starts 1 cm above the water. At the stable 1 ms preview
       // step, a 32-step visual batch ends before the ~45 ms free-fall contact
       // time and therefore looks frozen. A 64-step worker batch crosses that
@@ -349,6 +363,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       boxz: '4'
     },
     runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
       // Cs/F is deliberately an energetic architecture fixture. Keep the
       // execution CFL below one cell per step, but soften the preview-only
       // modulus cap so the two-level worker route exercises and verifies its
@@ -445,6 +461,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       lawp: '0'
     },
     runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
       sdt: '0.001',
       cfl: '0.6',
       cflSafety: '0.4',
@@ -553,6 +571,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       lawp: '0'
     },
     runtime: {
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
       sdt: '0.001',
       cfl: '0.6',
       cflSafety: '0.4',

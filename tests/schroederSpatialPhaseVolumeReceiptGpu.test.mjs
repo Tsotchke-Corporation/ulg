@@ -636,6 +636,21 @@ test('S9-B v2 scans ActiveSource indirectly, retains physical rows, and never in
   assert.match(v2Wgsl, /i32\(round\(level\)\) != params\.selected_level/);
   assert.match(v2Wgsl, /selected_source_count >= 0u/);
   assert.match(v2Wgsl, /volume >= 0\.0/);
+  assert.doesNotMatch(
+    v2Wgsl,
+    /moment_control\[40u\] % FIELD_STENCIL_SIZE/,
+    'the actual positive-support count need not be a multiple of 27'
+  );
+  assert.match(
+    v2Wgsl,
+    /moment_selected_candidate_count <= selected_candidate_count[\s\S]*field_contribution_count == moment_selected_candidate_count/,
+    'actual moment and row counts agree beneath the authenticated logical domain'
+  );
+  assert.match(
+    v2Wgsl,
+    /control_store\(48u, selected_candidate_count\)/,
+    'the public receipt retains selectedSourceCount × 27 as logical topology evidence'
+  );
   assert.match(
     v2Wgsl,
     /if \(count == 0u\) \{[\s\S]*dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u/

@@ -5953,6 +5953,10 @@ test('SPH preset changes reload the matching runtime tuning instead of retaining
       interfaceRefreshModeExplicit: policy.residentInterfaceRefreshModeExplicit,
       computeManagerModeExplicit: policy.residentComputeManagerModeExplicit,
       surfaceDraw: overlay?.querySelector('#sph-render-mode select')?.value ?? null,
+      surfaceDrawSelectedByUrl:
+        overlay?.__sphRenderModeSelection?.selectedByUrl ?? null,
+      surfaceDrawRequestStatus:
+        overlay?.__sphRenderModeSelection?.requestProvenance?.status ?? null,
       surfaceOverlay: overlay?.querySelector(
         '[data-architecture-control="surfaceOverlay"]'
       )?.checked ?? null,
@@ -5972,6 +5976,8 @@ test('SPH preset changes reload the matching runtime tuning instead of retaining
     interfaceRefreshModeExplicit: false,
     computeManagerModeExplicit: true,
     surfaceDraw: 'native-webgpu-surface-consumer',
+    surfaceDrawSelectedByUrl: false,
+    surfaceDrawRequestStatus: 'surface-draw-mode-preset-runtime-default',
     surfaceOverlay: false,
     workerParticleOverlay: false,
     contactSolver: true,
@@ -5992,7 +5998,8 @@ test('SPH preset changes reload the matching runtime tuning instead of retaining
       hash: Object.fromEntries([
         'sdt', 'cfl', 'cflSafety', 'avAlpha', 'residentStepsPerSchedule',
         'residentStepsPerScheduleMax', 'residentInterfaceRefreshMode',
-        'residentComputeManagerMode', 'surfaceDraw', 'surfaceOverlay',
+        'residentComputeManagerMode', 'surfaceDraw', 'surfaceDrawDiagnostic',
+        'surfaceOverlay',
         'workerParticleOverlay', 'contactSolver'
       ].map((key) => [key, params.get(key)])),
       query: Object.fromEntries(query.entries())
@@ -6008,7 +6015,8 @@ test('SPH preset changes reload the matching runtime tuning instead of retaining
       residentStepsPerScheduleMax: null,
       residentInterfaceRefreshMode: null,
       residentComputeManagerMode: 'worker-owned-resident-lane',
-      surfaceDraw: 'native-webgpu-surface-consumer',
+      surfaceDraw: null,
+      surfaceDrawDiagnostic: null,
       surfaceOverlay: '0',
       workerParticleOverlay: '0',
       contactSolver: '1'

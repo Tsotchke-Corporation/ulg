@@ -208,6 +208,57 @@ test('long-horizon validation checkpoints continue after the visual frame budget
   );
 });
 
+test('visual liveness correlates worker-lane physics coordinates instead of stale page seed rows', () => {
+  const source = readRepoFile(
+    'scripts/sph-visual-animation-liveness-receipt.mjs'
+  );
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const snapshotStart = source.indexOf('async function snapshotPage(page)');
+  const snapshotEnd = source.indexOf('\nasync function setPlaybackActive', snapshotStart);
+  assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart);
+  const snapshot = source.slice(snapshotStart, snapshotEnd);
+  assert.match(
+    snapshot,
+    /const workerLaneExecution = execution\?\.workerOwnedResidentLane \|\| null;/
+  );
+  assert.match(
+    snapshot,
+    /const nextStepCandidate = workerLaneExecution\?\.laneCompletedStepTotal[\s\S]*?\?\? execution\?\.nextSphParticleState\?\.step/
+  );
+  assert.match(
+    snapshot,
+    /const nextTimeCandidate = workerLaneExecution\?\.laneSimTimeS[\s\S]*?\?\? execution\?\.nextSphParticleState\?\.time/
+  );
+  assert.match(
+    snapshot,
+    /execution\?\.phaseVolumeSurfaceStressWorkerEvidence[\s\S]*?workerLaneExecution\?\.twoLevelMechanics\?\.lastStep/
+  );
+  assert.match(
+    snapshot,
+    /const workerProductHistory =[\s\S]*?workerHierarchyStageSummary\?\.residentProductHistory[\s\S]*?const productHistoryEvidence = residentProductMass[\s\S]*?\|\| workerProductHistory/
+  );
+  assert.match(
+    snapshot,
+    /workerEvidenceSchema: workerProductHistory\?\.schema[\s\S]*?workerProductHistory\?\.gridCouplingStatus[\s\S]*?workerProductHistory\?\.dispatchMode/
+  );
+  assert.match(
+    snapshot,
+    /liveBoundObservation:[\s\S]*?workerLaneExecution\?\.productHistoryLiveBoundObservation[\s\S]*?productGasTransition:[\s\S]*?workerLaneExecution\?\.retainedProductGasTransitionReceipt/
+  );
+  assert.match(
+    snapshot,
+    /renderProductEventBufferBound:[\s\S]*?renderState\?\.productEventBufferBound \?\? null/
+  );
+  assert.match(
+    snapshot,
+    /twoLevelAuthority: twoLevel\?\.twoLevelMechanicsAuthority[\s\S]*?workerHierarchyStageSummary\?\.twoLevelMechanicsAuthority[\s\S]*?twoLevel\?\.twoLevelAuthoritativeCommitVerified[\s\S]*?twoLevel\?\.twoLevelFineSubstepCount/
+  );
+  assert.match(
+    sceneSource,
+    /configurationContinuityMode[\s\S]*?prospective-retained-product-gas-boundary-actionable[\s\S]*?retainedProductGasTransitionReceipt = Object\.freeze\([\s\S]*?consumedBeforeLeaseAcquisition[\s\S]*?consumedBeforeGpuWork/
+  );
+});
+
 test('render-source staleness only clears after exact zero-geometry retention recovers to a newer current step', () => {
   const reason =
     'a zero-geometry render-field handoff has no native consumer; '
@@ -4585,10 +4636,15 @@ test('long-horizon SS batches keep diagnostics final-only and do not mirror stag
     scheduleRunStart,
     scheduleRunEnd
   );
-  assert.doesNotMatch(
+  assert.match(
     scheduleRunSource,
-    /postProgress:[\s\S]*?candidateDrawLoop\.notify/,
-    'pre-terminal progress candidates must remain telemetry-only and never draw'
+    /const livePreviewEnabled = Boolean\([\s\S]*?residentScheduleLivePreview === true[\s\S]*?postProgress:[\s\S]*?if \(\s*livePreviewEnabled[\s\S]*?candidateDrawLoop\.notify\(\{ livePreview: true \}, candidate\)/,
+    'pre-terminal drawing must remain behind an explicit non-authoritative live-preview request'
+  );
+  assert.doesNotMatch(
+    probeSource,
+    /residentScheduleLivePreview:\s*true/,
+    'the final-only long-horizon probe must not opt into progress-time preview draws'
   );
   assert.match(
     sceneSource,
@@ -4640,6 +4696,47 @@ test('long-horizon SS batches keep diagnostics final-only and do not mirror stag
     probeSource,
     /ULG_PROBE_WORKER_PROGRESS_EVERY_STEPS/,
     'the long-horizon probe must expose an explicit worker presentation cadence environment option'
+  );
+});
+
+test('worker SS lanes are incarnation-scoped and poison after an ambiguous dispatch', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const scheduleStart = sceneSource.indexOf(
+    'async function runWorkerLaneSchroederResidentSchedule'
+  );
+  const scheduleEnd = sceneSource.indexOf(
+    '// Adopt the worker lane\'s truthful terminal envelope',
+    scheduleStart
+  );
+  assert.ok(scheduleStart >= 0 && scheduleEnd > scheduleStart);
+  const scheduleSource = sceneSource.slice(scheduleStart, scheduleEnd);
+
+  assert.match(
+    sceneSource,
+    /const workerSchroederSceneIncarnation = \(\(\) => \{[\s\S]*?let workerSchroederLaneSequence = 0;/,
+    'each scene must mint an incarnation before allocating worker-lane ids'
+  );
+  assert.match(
+    scheduleSource,
+    /workerSchroederLaneBridgeReference !== bridge[\s\S]*?workerSchroederLaneSequence \+= 1;[\s\S]*?`ulg:scene:ss-worker-lane:\$\{workerSchroederSceneIncarnation\}`\s*\+\s*`:\$\{workerSchroederLaneSequence\}`/,
+    'a replacement bridge must force a fresh incarnation-scoped worker lane'
+  );
+
+  const dispatchFlag = scheduleSource.indexOf(
+    'workerScheduleDispatched = true;'
+  );
+  const dispatchCall = scheduleSource.indexOf(
+    'bridge.runResidentScheduleOnPresentationDevice({',
+    dispatchFlag
+  );
+  assert.ok(
+    dispatchFlag >= 0 && dispatchCall > dispatchFlag,
+    'the ambiguous-delivery guard must be set before the one-way worker dispatch'
+  );
+  assert.match(
+    scheduleSource.slice(dispatchCall),
+    /\} catch \(error\) \{\s*if \(\s*predecessorTargetScheduleRequestId != null\s*\|\| workerScheduleDispatched\s*\) \{[\s\S]*?laneState\.poisoned = true;/,
+    'a consumed predecessor or any attempted worker dispatch must poison the lane on failure'
   );
 });
 

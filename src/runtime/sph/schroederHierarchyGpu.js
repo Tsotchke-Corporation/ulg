@@ -186,13 +186,17 @@ import {
   mergeResidentProductMassBuffersWebGpu,
   runSchroederFarForceDeltaFusionWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu,
-  runSphPressureInterfaceStageComputeTask
+  runSphPressureInterfaceStageComputeTask,
+  selectSphReactionActivationWatchTable
 } from './sphMlsMpmGpuStep.js';
 import {
   claimMlsMpmPostMechanicsContinuation,
   retireMlsMpmPostMechanicsClosureOutputsAfter,
   runMlsMpmPostMechanicsClosureWebGpu
 } from './sphMlsMpmPostMechanicsClosure.js';
+import {
+  runCanonicalSphReactionMotionEnvelopeWatchWebGpu
+} from './sphReactionMotionEnvelopeWatchGpu.js';
 import { createSphStageMechanicsTracer } from './sphStageMechanicsTracer.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
@@ -18363,6 +18367,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let resolvedTwoLevelMechanics = null;
   let twoLevelSpatialThermalProposal = null;
   let twoLevelSpatialReactionDiscoveryProposal = null;
+  let terminalReactionActivationObservationProposal = null;
   let twoLevelSpatialAggregateTraversalRuntime = null;
   let twoLevelSpatialAggregateTraversal = null;
   let twoLevelSpatialAggregateTraversalReceipt = null;
@@ -18920,6 +18925,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         released: () => twoLevelThermalGraphReleaseScheduled
       }
     ];
+    const deferredHostCleanups = [];
+    const queueDeferredHostCleanup = (cleanup) => {
+      if (!deferredHostCleanups.includes(cleanup)) {
+        deferredHostCleanups.push(cleanup);
+      }
+    };
     for (const record of cleanupRecords) {
       if (!record.output || record.released()) continue;
       try {
@@ -18962,17 +18973,26 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             }
           );
         }
-        deferSidecarCleanup(record.cleanup);
+        queueDeferredHostCleanup(record.cleanup);
       } catch {
         // Continue through the complete sealed batch. One cleanup failure must
         // not strand another exact producer claim.
         twoLevelSidecarCleanupFailureCount += 1;
         try {
-          deferSidecarCleanup(record.cleanup);
+          queueDeferredHostCleanup(record.cleanup);
         } catch {
           // Retain a failed exact owner rather than replacing authority.
         }
       }
+    }
+    if (deferredHostCleanups.length > 0) {
+      deferSidecarCleanup(() => {
+        for (const cleanup of deferredHostCleanups) {
+          try { cleanup(); } catch {
+            twoLevelSidecarCleanupFailureCount += 1;
+          }
+        }
+      });
     }
     return true;
   };
@@ -20753,11 +20773,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
         status: 'webgpu-uploaded',
         sourceStage: 'schroeder-particle-storage-materialization',
+        thermoSourceStage: 'schroeder-particle-storage-materialization',
+        componentSourceStages: Object.freeze({
+          state: 'schroeder-particle-storage-materialization',
+          thermo: 'schroeder-particle-storage-materialization'
+        }),
         particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount,
         stateStrideBytes: twoLevelParticleStorageAdoption.stateStrideBytes,
         thermoStrideBytes: twoLevelParticleStorageAdoption.thermoStrideBytes,
+        stateBufferByteLength:
+          twoLevelParticleStorageAdoption.stateBufferByteLength,
+        thermoBufferByteLength:
+          twoLevelParticleStorageAdoption.thermoBufferByteLength,
         identitySchema: twoLevelParticleStorageAdoption.identitySchema,
         identityStrideBytes: twoLevelParticleStorageAdoption.identityStrideBytes,
+        identityBufferByteLength:
+          twoLevelParticleStorageAdoption.identityBufferByteLength,
         identityRequired: twoLevelParticleStorageAdoption.identityRequired === true,
         stateBuffer: twoLevelParticleStorageAdoption.stateBuffer,
         thermoBuffer: twoLevelParticleStorageAdoption.thermoBuffer,
@@ -20778,7 +20809,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
         status: 'webgpu-uploaded',
         sourceStage: 'schroeder-particle-storage-materialization',
+        componentSourceStages: Object.freeze({
+          mechanics: 'schroeder-particle-storage-materialization'
+        }),
         particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount,
+        mechanicsBufferByteLength:
+          twoLevelParticleStorageAdoption.mechanicsBufferByteLength,
         mechanicsBuffer: twoLevelParticleStorageAdoption.mechanicsBuffer,
         ownsMechanicsBuffer: twoLevelAdoptedStorageOwned,
         slot: twoLevelNextSlot,
@@ -20807,7 +20843,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           twoLevelPostMechanicsClosure.phaseCarrierPlan
           ?? twoLevelPublicEpochUploads.sphParticleUpload.phaseCarrierPlan
           ?? null,
-        sourceStage: 'schroeder-two-level-post-mechanics-closure'
+        sourceStage:
+          twoLevelPostMechanicsContinuation.componentSources?.state
+          ?? 'schroeder-two-level-post-mechanics-closure',
+        thermoSourceStage:
+          twoLevelPostMechanicsContinuation.componentSources?.thermo
+          ?? 'schroeder-two-level-post-mechanics-closure',
+        componentSourceStages: Object.freeze({
+          state:
+            twoLevelPostMechanicsContinuation.componentSources?.state
+            ?? 'schroeder-two-level-post-mechanics-closure',
+          thermo:
+            twoLevelPostMechanicsContinuation.componentSources?.thermo
+            ?? 'schroeder-two-level-post-mechanics-closure'
+        })
       },
       mlsMpmParticleUpload: {
         ...twoLevelPublicEpochUploads.mlsMpmParticleUpload,
@@ -20817,7 +20866,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           twoLevelPostMechanicsClosure.phaseCarrierPlan
           ?? twoLevelPublicEpochUploads.mlsMpmParticleUpload.phaseCarrierPlan
           ?? null,
-        sourceStage: 'schroeder-two-level-post-mechanics-closure'
+        sourceStage:
+          twoLevelPostMechanicsContinuation.componentSources?.mechanics
+          ?? 'schroeder-two-level-post-mechanics-closure',
+        componentSourceStages: Object.freeze({
+          mechanics:
+            twoLevelPostMechanicsContinuation.componentSources?.mechanics
+            ?? 'schroeder-two-level-post-mechanics-closure'
+        })
       }
     }
     : null;
@@ -21466,6 +21522,58 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && finalTwoLevelContinuationUploads
       ?.mlsMpmParticleUpload?.mechanicsBuffer
   );
+  const twoLevelMechanicsCompactSummary =
+    resolvedTwoLevelMechanics?.compactSummary ?? null;
+  const twoLevelTerminalStageRan = Boolean(
+    twoLevelAdopted
+    || twoLevelPostMechanicsClosure?.schroederFarForceDeltaFusion
+    || twoLevelPostMechanicsClosure?.thermalStep
+    || twoLevelPostMechanicsClosure?.reactionStep
+    || twoLevelPostMechanicsClosure?.mechanicsRefreshStep
+    || twoLevelPostMechanicsClosure?.phaseCarrierTransferStep
+  );
+  const twoLevelCompactSummaryTerminalFamilyMatches = Boolean(
+    twoLevelMechanicsCompactSummary
+    && !twoLevelTerminalStageRan
+    && finalTwoLevelContinuationUploads?.sphParticleUpload?.stateBuffer
+      === twoLevelCoupledUploads?.sphParticleUpload?.stateBuffer
+    && finalTwoLevelContinuationUploads?.sphParticleUpload?.thermoBuffer
+      === twoLevelCoupledUploads?.sphParticleUpload?.thermoBuffer
+    && finalTwoLevelContinuationUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+      === twoLevelCoupledUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+    && finalTwoLevelContinuationUploads?.sphParticleUpload?.particleCount
+      === twoLevelCoupledUploads?.sphParticleUpload?.particleCount
+    && finalTwoLevelContinuationUploads?.mlsMpmParticleUpload?.particleCount
+      === twoLevelCoupledUploads?.mlsMpmParticleUpload?.particleCount
+  );
+  const twoLevelTerminalDiagnostics = !twoLevelMechanicsCompactSummary
+    ? null
+    : (twoLevelCompactSummaryTerminalFamilyMatches
+      ? twoLevelMechanicsCompactSummary
+      : Object.freeze({
+          schema: twoLevelMechanicsCompactSummary.schema ?? null,
+          backend: twoLevelMechanicsCompactSummary.backend ?? 'webgpu',
+          status: 'compact-summary-superseded-by-terminal-particle-family',
+          reason:
+            'two-level-compact-summary-precedes-terminal-closure-or-storage-adoption',
+          compactGpuSummaryAvailable: false,
+          terminalParticleSummaryAvailable: false,
+          maxDisplacementM: null,
+          maxSpeedMPerS: null,
+          nextPositionBoundsM: null,
+          nextMassKg: null,
+          nextMomentumKgMPerS: null,
+          nextCenterOfMassM: null,
+          cohortDiagnostics: null,
+          cohortSummaryAvailable: false,
+          activeGridDispatchPlan: null,
+          preTerminalMechanicsSummaryAvailable: true,
+          preTerminalMechanicsSummary: twoLevelMechanicsCompactSummary,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        }));
   // Authoritative two-level mode replaces the resident mechanics with a
   // synthesized resident-step-shaped envelope built from the coupled-step
   // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
@@ -21579,7 +21687,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       // Compact particle summary (fixed-size readback) doubles as the
       // resident-step diagnostics: residentMotionDiagnostic reads
       // maxDisplacementM/maxSpeedMPerS/compactGpuSummaryAvailable from here.
-      diagnostics: resolvedTwoLevelMechanics?.compactSummary ?? null
+      diagnostics: twoLevelTerminalDiagnostics
     }
     : await residentStepRunner({
     ...residentStepOptions,
@@ -21724,6 +21832,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ? singleLevelReactionResult
         ?.reactionPlacementPositionEpochFloorReceipt ?? null
       : null;
+  const singleLevelResidentFamilyOwners =
+    residentStep.residentAuthorityFamilyOwners
+    ?? residentStep.residentAuthoritySummary?.familyOwners
+    ?? null;
+  const singleLevelComponentOwnerStages =
+    singleLevelResidentFamilyOwners?.['particle-kinematics']
+    && singleLevelResidentFamilyOwners?.['thermo-phase']
+    && singleLevelResidentFamilyOwners?.mechanics
+      ? Object.freeze({
+          state: singleLevelResidentFamilyOwners['particle-kinematics'],
+          thermo: singleLevelResidentFamilyOwners['thermo-phase'],
+          mechanics: singleLevelResidentFamilyOwners.mechanics
+        })
+      : null;
   if (
     !twoLevelAuthoritative
     && spatialEpochTransaction
@@ -21763,10 +21885,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           singleLevelPlacementPositionEpochFloorCandidate,
         forcePositionAdvance:
           conservativelyAdvanceFinalTransitions,
-        componentOwnerStages:
-          residentStep.residentAuthorityFamilyOwners
-          ?? residentStep.residentAuthoritySummary?.familyOwners
-          ?? null
+        componentOwnerStages: singleLevelComponentOwnerStages
       });
   }
   const exactNearConsumerArtifactFamilyByReader = {
@@ -24116,8 +24235,138 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         }
       : {})
   });
+  if (
+    twoLevelAuthoritative
+    && residentStepOptions?.captureReactionActivationObservation === true
+  ) {
+    if (
+      !residentStep
+      || typeof residentStep !== 'object'
+      || !Object.isExtensible(residentStep)
+      || Object.hasOwn(residentStep, 'reactionActivationObservationProposal')
+    ) {
+      throw new Error(
+        'Canonical two-level terminal reaction watch requires one extensible unclaimed resident step'
+      );
+    }
+    const terminalSphUpload = residentStep.nextParticleUploads
+      ?.sphParticleUpload ?? null;
+    const terminalMechanicsUpload = residentStep.nextParticleUploads
+      ?.mlsMpmParticleUpload ?? null;
+    const terminalParticleCount = Number(terminalSphUpload?.particleCount);
+    const exactAdoptedTerminalFamily = Boolean(
+      residentStep.nextParticleUploads === finalTwoLevelContinuationUploads
+      && twoLevelAdopted
+      && residentStep.schroederParticleStorageAdoption
+        === twoLevelParticleStorageAdoption
+      && twoLevelParticleStorageAdoption?.adopted === true
+      && twoLevelParticleStorageAdoption.authoritativeParticleCount
+        === terminalParticleCount
+      && terminalSphUpload?.stateBuffer
+        === twoLevelParticleStorageAdoption.stateBuffer
+      && terminalSphUpload?.thermoBuffer
+        === twoLevelParticleStorageAdoption.thermoBuffer
+      && terminalMechanicsUpload?.mechanicsBuffer
+        === twoLevelParticleStorageAdoption.mechanicsBuffer
+    );
+    const exactClaimedTerminalFamily = Boolean(
+      residentStep.nextParticleUploads === finalTwoLevelContinuationUploads
+      && !twoLevelAdopted
+      && twoLevelPostMechanicsContinuation?.ready === true
+      && twoLevelPostMechanicsContinuationClaim?.status
+        === 'post-mechanics-continuation-claimed'
+      && twoLevelPostMechanicsContinuationClaim.continuation
+        === twoLevelPostMechanicsContinuation
+      && twoLevelPostMechanicsContinuationClaim.nextParticleUploads
+        === finalTwoLevelContinuationUploads
+      && twoLevelPostMechanicsContinuationClaim.stateBuffer
+        === terminalSphUpload?.stateBuffer
+      && twoLevelPostMechanicsContinuationClaim.thermoBuffer
+        === terminalSphUpload?.thermoBuffer
+      && twoLevelPostMechanicsContinuationClaim.mechanicsBuffer
+        === terminalMechanicsUpload?.mechanicsBuffer
+      && twoLevelPostMechanicsContinuation.stateBuffer
+        === terminalSphUpload?.stateBuffer
+      && twoLevelPostMechanicsContinuation.thermoBuffer
+        === terminalSphUpload?.thermoBuffer
+      && twoLevelPostMechanicsContinuation.mechanicsBuffer
+        === terminalMechanicsUpload?.mechanicsBuffer
+      && terminalParticleCount
+        === finalTwoLevelContinuationUploads?.sphParticleUpload?.particleCount
+      && terminalParticleCount
+        === finalTwoLevelContinuationUploads
+          ?.mlsMpmParticleUpload?.particleCount
+    );
+    if (
+      !terminalSphUpload?.stateBuffer
+      || !terminalSphUpload?.thermoBuffer
+      || !terminalMechanicsUpload?.mechanicsBuffer
+      || !Number.isSafeInteger(terminalParticleCount)
+      || terminalParticleCount < 1
+      || terminalMechanicsUpload?.particleCount !== terminalParticleCount
+      || (
+        exactAdoptedTerminalFamily !== true
+        && exactClaimedTerminalFamily !== true
+      )
+    ) {
+      const error = new Error(
+        'Canonical two-level reaction watch requires one exact published post-closure particle family'
+      );
+      error.code = 'ERR_SCHROEDER_TWO_LEVEL_REACTION_WATCH_TERMINAL_FAMILY';
+      throw error;
+    }
+    terminalReactionActivationObservationProposal =
+      runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+        device,
+        terminalStateBuffer: terminalSphUpload.stateBuffer,
+        terminalThermoBuffer: terminalSphUpload.thermoBuffer,
+        terminalMechanicsBuffer: terminalMechanicsUpload.mechanicsBuffer,
+        reactionTable: selectSphReactionActivationWatchTable({
+          reactionTable: residentStepOptions?.reactionTable ?? null,
+          reactionActivationWatchTable:
+            residentStepOptions?.reactionActivationWatchTable ?? null
+        }),
+        reactionMotionEnvelope:
+          residentStepOptions?.reactionActivationMotionEnvelope ?? null,
+        particleCount: terminalParticleCount,
+        boxDimsM
+      });
+    Object.defineProperty(
+      residentStep,
+      'reactionActivationObservationProposal',
+      {
+        value: terminalReactionActivationObservationProposal,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      }
+    );
+    residentStep.reactionActivationObservationCapture = Object.freeze({
+      schema:
+        'peercompute.ulg.mls-mpm-reaction-activation-observation-capture.v1',
+      status:
+        'reaction-activation-observation-retained-for-schedule-boundary',
+      predicateRevision:
+        terminalReactionActivationObservationProposal.predicateRevision,
+      nodeDomain: terminalReactionActivationObservationProposal.nodeDomain,
+      producerRoute:
+        terminalReactionActivationObservationProposal.producerRoute,
+      sampleStage: terminalReactionActivationObservationProposal.sampleStage,
+      motionEnvelope:
+        terminalReactionActivationObservationProposal.reactionMotionEnvelope,
+      readbackByteLength:
+        terminalReactionActivationObservationProposal.readbackByteLength,
+      shadowOnly: true
+    });
+  }
   return result;
   } catch (error) {
+    if (terminalReactionActivationObservationProposal) {
+      // The standalone canonical watch owns its success-only fallback fence.
+      // One destroy request quarantines the private buffers until that fence
+      // or device loss supplies retirement authority.
+      terminalReactionActivationObservationProposal.destroy?.();
+    }
     if (spatialSuccessorPublicationPlan) {
       try {
         abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(

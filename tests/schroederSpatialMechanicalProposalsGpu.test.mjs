@@ -96,9 +96,16 @@ import {
   runMlsMpmG2pWebGpu
 } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import {
+  ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA
+} from '../src/runtime/sph/sphPhaseCarrierTransferGpu.js';
+import {
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER,
+  SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
+} from '../src/runtime/sph/sphCanonicalContactMotionBound.js';
 
 function copyBytes(data) {
   if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
@@ -109,6 +116,22 @@ function copyBytes(data) {
   }
   return new Uint8Array();
 }
+
+test('canonical solver and dynamic-law watcher share one contact trust contract', () => {
+  assert.equal(
+    SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS,
+    SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
+  );
+  assert.equal(SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS, 16);
+  assert.equal(
+    SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER,
+    64
+  );
+  assert.match(
+    schroederSpatialMechanicalGraphSolverWgsl,
+    /16\.0[\s\S]*self_diameter_m[\s\S]*2\.0 \* initial_displacement_m[\s\S]*current_wall_projection_m/
+  );
+});
 
 function createFakeEncoder(device, descriptor = {}) {
   const event = { descriptor, clears: [], passes: [], copies: [] };
@@ -6037,6 +6060,45 @@ test('canonical G2P applies the authenticated proposal before authority finaliza
   result.destroyOutputParticleBuffers();
   assert.equal(proposal.releaseAfterSubmittedWork(), true);
   await settleDeferredCleanup(fixture.device);
+  destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+});
+
+test('canonical mechanical proposals admit only the exact laws-quiescent one-lane phase family', async () => {
+  const fixture = liveFixture();
+  const oneLanePlan = {
+    schema: ULG_SPH_PHASE_CARRIER_PLAN_SCHEMA,
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 2,
+    primaryCapacity: 2,
+    phaseLaneCount: 1,
+    phaseLaneStride: 2,
+    companionStart: 2,
+    companionCapacity: 0,
+    particleCapacity: 2,
+    phaseCompanionLanesRequired: false
+  };
+  fixture.sphParticleUpload.phaseCarrierPlan = oneLanePlan;
+
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu({
+    ...fixture,
+    selectedLevel: 0
+  });
+  assert.equal(proposal.contactGraph.phaseLineageCapacity, 2);
+  assert.equal(proposal.contactGraph.phaseLaneCount, 1);
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  await settleDeferredCleanup(fixture.device);
+
+  fixture.sphParticleUpload.phaseCarrierPlan = {
+    ...oneLanePlan,
+    phaseCompanionLanesRequired: true
+  };
+  assert.throws(
+    () => runSchroederSpatialMechanicalProposalWebGpu({
+      ...fixture,
+      selectedLevel: 0
+    }),
+    /exact phase-carrier lineage plan/
+  );
   destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
 });
 

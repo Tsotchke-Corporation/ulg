@@ -1062,7 +1062,10 @@ function paramsData(execution, {
   ambientPressurePa = 0,
   phaseVolumePressureScale = 1,
   phaseVolumeDragScale = 1,
-  phaseVolumeMaxImpulseFraction = 0.5
+  phaseVolumeMaxImpulseFraction = 0.5,
+  temporalCoarseEnabled = execution.temporalCoarsePredictorEnabled === true,
+  temporalCoarseSuccessorDt =
+    execution.temporalCoarsePredictorSuccessorDt ?? 0
 }) {
   const data = new ArrayBuffer(
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES
@@ -1085,6 +1088,14 @@ function paramsData(execution, {
   const macroDtSeconds = finiteNumber(macroDt, 'macroDt');
   const substepOrdinal = Number(fineSubstepOrdinal);
   const substepCount = Number(fineSubstepCount);
+  const temporalRequired = terminalOperation !== true
+    && substepOrdinal + 1 < substepCount;
+  const temporalSuccessorDt = temporalCoarseEnabled
+    ? finiteNumber(
+        temporalCoarseSuccessorDt,
+        'temporalCoarseSuccessorDt'
+      )
+    : 0;
   const cfl = finiteNumber(cflFactor, 'cflFactor');
   const delta = finiteNumber(deltaScale, 'deltaScale');
   const correction = finiteNumber(maxCorrectionMPerS, 'maxCorrectionMPerS');
@@ -1105,6 +1116,20 @@ function paramsData(execution, {
       || !Number.isInteger(substepOrdinal) || substepOrdinal < 0
       || !ordinalAdmitted) {
     throw new RangeError('fine substep ordinal/count are outside the admitted range');
+  }
+  const expectedTemporalSuccessorDt = temporalRequired
+    ? Math.fround(((substepOrdinal + 2) / substepCount) * macroDtSeconds)
+    : 0;
+  if (
+    temporalCoarseEnabled !== temporalRequired
+    || !Object.is(
+      Math.fround(temporalSuccessorDt),
+      expectedTemporalSuccessorDt
+    )
+  ) {
+    throw new RangeError(
+      'temporal coarse predictor must match the exact immediate successor theta and be disabled on the final substep'
+    );
   }
   if (!(cfl > 0)) throw new RangeError('cflFactor must be positive');
   if (!(delta >= 0)) throw new RangeError('deltaScale must be nonnegative');
@@ -1213,6 +1238,10 @@ function paramsData(execution, {
       )
     )
   );
+  u32(72, temporalCoarseEnabled ? 1 : 0);
+  f32(73, temporalSuccessorDt);
+  u32(74, 0);
+  u32(75, 0);
   return data;
 }
 
@@ -2186,6 +2215,22 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         token,
         fineSubstepCount
       );
+      const resolvedSubstepOrdinal = Number(fineSubstepOrdinal);
+      const resolvedSubstepCount = Number(fineSubstepCount);
+      const resolvedMacroDt = Number(macroDt);
+      const expectedThetaDt = Math.fround(
+        ((resolvedSubstepOrdinal + 1) / resolvedSubstepCount)
+          * resolvedMacroDt
+      );
+      const temporalCoarsePredictorRequired =
+        resolvedSubstepOrdinal + 1 < resolvedSubstepCount;
+      const expectedTemporalCoarseSuccessorDt =
+        temporalCoarsePredictorRequired
+          ? Math.fround(
+              ((resolvedSubstepOrdinal + 2) / resolvedSubstepCount)
+                * resolvedMacroDt
+            )
+          : null;
       if (
         fusedFineSubstepTransaction != null
         && (
@@ -2202,11 +2247,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           )
           || !Object.is(
             Math.fround(coarseP2gProjection.dt),
-            Math.fround(
-              ((fusedFineSubstepTransaction.substepOrdinal + 1)
-                / fusedFineSubstepTransaction.macroAuthority.fineSubstepCount)
-              * fusedFineSubstepTransaction.macroAuthority.macroDt
-            )
+            expectedThetaDt
           )
           || !Object.is(
             Number(fineDt),
@@ -2218,12 +2259,42 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           )
           || !Object.is(
             Math.fround(Number(dt)),
-            Math.fround(
-              ((fusedFineSubstepTransaction.substepOrdinal + 1)
-                / fusedFineSubstepTransaction.macroAuthority.fineSubstepCount)
-              * fusedFineSubstepTransaction.macroAuthority.macroDt
-            )
+            expectedThetaDt
           )
+          || fineP2gProjection.mechanicsFieldTemporalCoarsePredictorEnabled
+            !== false
+          || fineP2gProjection.mechanicsFieldTemporalCoarsePredictorRole
+            !== 'disabled'
+          || fineP2gProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt
+            != null
+          || !Object.is(
+            fineP2gProjection.mechanicsFieldTemporalCoarsePredictorCurrentDt,
+            Math.fround(Number(fineDt))
+          )
+          || coarseP2gProjection.mechanicsFieldTemporalCoarsePredictorEnabled
+            !== temporalCoarsePredictorRequired
+          || coarseP2gProjection.mechanicsFieldTemporalCoarsePredictorRole
+            !== (temporalCoarsePredictorRequired
+              ? 'immediate-successor-coarse-predictor'
+              : 'disabled')
+          || !Object.is(
+            coarseP2gProjection.mechanicsFieldTemporalCoarsePredictorCurrentDt,
+            expectedThetaDt
+          )
+          || !Object.is(
+            coarseP2gProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+            expectedTemporalCoarseSuccessorDt
+          )
+          || (temporalCoarsePredictorRequired && (
+            coarseP2gProjection.activeSourceP2gEnabled !== true
+            || coarseP2gProjection.mechanicsFieldTemporalCoarsePredictorStorage
+              !== 'field-accumulator-xyz-p2g-finalized-only'
+            || !exactArrayMatches(
+              coarseP2gProjection
+                .mechanicsFieldTemporalCoarsePredictorReceiptWords,
+              [13, 14, 15]
+            )
+          ))
           || !validateLocallyOwnedSchroederCrossLevelRefluxLedgerGpu(
             device,
             resolvedRefluxLedger,
@@ -2262,6 +2333,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         fineSubstepOrdinal: Number(fineSubstepOrdinal),
         terminalOperation: terminalOperation === true,
         fineSubstepCount: Number(fineSubstepCount),
+        temporalCoarsePredictorEnabled: temporalCoarsePredictorRequired,
+        temporalCoarsePredictorSuccessorDt:
+          expectedTemporalCoarseSuccessorDt,
         finePredictorMutationOrdinal:
           fineP2gProjection.mechanicsFieldMutationOutputOrdinal,
         coarsePredictorMutationOrdinal:
@@ -2425,7 +2499,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
               * Number(macroDt)
           ),
           fineDt: Number(fineDt),
-          macroDt: Number(macroDt)
+          macroDt: Number(macroDt),
+          successorRequired: temporalCoarsePredictorRequired,
+          successorThetaDt: expectedTemporalCoarseSuccessorDt
         }),
         phase: 'predictors-encoded',
         anySubmitted: false,
@@ -2563,6 +2639,20 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         || !Object.is(
           Math.fround(execution.coarseP2gProjection?.dt),
           predictorTemporalAuthority.expectedThetaDt
+        )
+        || execution.temporalCoarsePredictorEnabled
+          !== predictorTemporalAuthority.successorRequired
+        || !Object.is(
+          execution.temporalCoarsePredictorSuccessorDt,
+          predictorTemporalAuthority.successorThetaDt
+        )
+        || execution.coarseP2gProjection
+          ?.mechanicsFieldTemporalCoarsePredictorEnabled
+          !== predictorTemporalAuthority.successorRequired
+        || !Object.is(
+          execution.coarseP2gProjection
+            ?.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+          predictorTemporalAuthority.successorThetaDt
         )
         || !validateLocallyOwnedSchroederCrossLevelRefluxLedgerGpu(
           device,
@@ -2840,6 +2930,10 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           outputEncoding: mutationToken.outputEncoding,
           predictorDt: predictorTemporalAuthority.predictorDt,
           expectedThetaDt: predictorTemporalAuthority.expectedThetaDt,
+          temporalCoarseSuccessorRequired:
+            predictorTemporalAuthority.successorRequired,
+          temporalCoarseSuccessorThetaDt:
+            predictorTemporalAuthority.successorThetaDt,
           fineDt: predictorTemporalAuthority.fineDt,
           macroDt: predictorTemporalAuthority.macroDt,
           dt: fineGridUpdate.dt,

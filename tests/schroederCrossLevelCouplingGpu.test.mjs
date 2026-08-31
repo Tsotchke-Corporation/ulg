@@ -503,6 +503,7 @@ function productionM3Fixture({
 
 async function runProductionM3Fixture(fixture, {
   counts = { p2g: 0, gridUpdate: 0, g2p: 0 },
+  p2gOptions = null,
   g2pOptions = null,
   progress = null,
   overrides = {}
@@ -519,6 +520,7 @@ async function runProductionM3Fixture(fixture, {
     gridSpecFactory: createMlsMpmGridSpec,
     p2gRunner: async (options) => {
       counts.p2g += 1;
+      p2gOptions?.push(options);
       progress?.('p2g-start', counts);
       const projection = await runMlsMpmP2gGridProjectionWebGpu(options);
       progress?.('p2g-complete', counts);
@@ -1135,8 +1137,10 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
     const executionCflFactor = 0.75 + (ratio * 0.01);
     const predictorCflFactors = [];
+    const p2gOptions = [];
     const { result, gridUpdates } = await runProductionM3Fixture(fixture, {
       counts,
+      p2gOptions,
       overrides: {
         cflFactor: executionCflFactor,
         parentFieldMechanicsWorkspaceRuntimeFactory: (...args) => {
@@ -1159,6 +1163,57 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
       gridUpdate: ratio + 1,
       g2p: ratio + 1
     });
+    const macroDt = Math.fround(0.005 * ratio);
+    for (let substep = 0; substep < ratio; substep += 1) {
+      const fineOptions = p2gOptions[2 * substep];
+      const coarseOptions = p2gOptions[2 * substep + 1];
+      const expectedCurrentTheta = Math.fround(
+        ((substep + 1) / ratio) * macroDt
+      );
+      const expectedSuccessorTheta = substep + 1 < ratio
+        ? Math.fround(((substep + 2) / ratio) * macroDt)
+        : null;
+      assert.equal(fineOptions.schroederSelectedLevel, 0);
+      assert.equal(fineOptions.dt, Math.fround(0.005));
+      assert.equal(fineOptions.mechanicsFieldTemporalCoarsePredictor, null);
+      assert.ok(fineOptions.fusedFineSubstepTransaction);
+      assert.equal(coarseOptions.schroederSelectedLevel, 1);
+      assert.equal(coarseOptions.dt, expectedCurrentTheta);
+      assert.equal(coarseOptions.fusedFineSubstepTransaction, undefined);
+      assert.equal(coarseOptions.fusedCoarseTerminalTransaction, undefined);
+      assert.equal(
+        coarseOptions.mechanicsFieldTemporalCoarsePredictor?.enabled ?? false,
+        expectedSuccessorTheta != null
+      );
+      assert.equal(
+        coarseOptions.mechanicsFieldTemporalCoarsePredictor?.role ?? null,
+        expectedSuccessorTheta == null
+          ? null
+          : 'immediate-successor-coarse-predictor'
+      );
+      assert.equal(
+        coarseOptions.mechanicsFieldTemporalCoarsePredictor
+          ?.successorThetaDt ?? null,
+        expectedSuccessorTheta
+      );
+      assert.equal(
+        fineOptions.queueOrderedSubmissionBatch,
+        coarseOptions.queueOrderedSubmissionBatch
+      );
+      assert.equal(
+        fineOptions.queueOrderedSubmissionBatch?.schema,
+        'peercompute.ulg.queue-ordered-submission-batch.v0'
+      );
+    }
+    const terminalOptions = p2gOptions[2 * ratio];
+    assert.equal(terminalOptions.schroederSelectedLevel, 1);
+    assert.equal(terminalOptions.dt, macroDt);
+    assert.equal(
+      terminalOptions.mechanicsFieldTemporalCoarsePredictor,
+      null
+    );
+    assert.ok(terminalOptions.fusedCoarseTerminalTransaction);
+    assert.equal(terminalOptions.queueOrderedSubmissionBatch, null);
     assert.equal(result.parentFieldMechanicsWorkspaceBuildCount, ratio + 1);
     assert.equal(result.parentFieldMechanicsFineCorrectionCount, ratio);
     assert.equal(result.parentFieldMechanicsCoarseTerminalCount, 1);

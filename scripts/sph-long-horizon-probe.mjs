@@ -7815,6 +7815,30 @@ async function runBrowserProbe({
                   steps.workerOwnedResidentLane.authority
                     .stateManagerCommitStatus ?? null
               } : null,
+              dynamicReactionActivation:
+                steps.workerOwnedResidentLane.dynamicReactionActivation
+                  ? {
+                      state:
+                        steps.workerOwnedResidentLane
+                          .dynamicReactionActivation.state ?? null,
+                      transitionFingerprint:
+                        steps.workerOwnedResidentLane
+                          .dynamicReactionActivation
+                          .transitionFingerprint ?? null,
+                      committedScheduleId:
+                        steps.workerOwnedResidentLane
+                          .dynamicReactionActivation
+                          .committedScheduleId ?? null
+                    }
+                  : null,
+              dynamicReactionActivationReceipt:
+                steps.workerOwnedResidentLane
+                  .dynamicReactionActivationReceipt
+                  ? {
+                      ...steps.workerOwnedResidentLane
+                        .dynamicReactionActivationReceipt
+                    }
+                  : null,
               committedPresentation:
                 steps.workerOwnedResidentLane.committedPresentation ? {
                   status:

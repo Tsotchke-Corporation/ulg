@@ -1,6 +1,539 @@
 # Implementation Status
 
-## Current Focus - 2026-07-24 AKDT
+## Current Focus - 2026-08-30 AKDT (authenticated reaction routing enabled)
+
+The reaction-activation arm of the scale-adaptive law router is enabled for
+the serialized scene/worker SS lane. The public policy is exact tri-state:
+`disabled` is hard user-off, `shadow` preserves static execution while
+observing the authenticated route, and explicit `authoritative` starts a
+positive reaction catalog dormant. The default remains `shadow`; the sodium
+and Cesium configured presets explicitly select `authoritative`.
+
+An authoritative lane now runs its first schedule with `reactionTable:null`
+and a separately authenticated `reactionActivationWatchTable`. A trustworthy
+zero remains dormant. Triggered or conservative-uncertain evidence pre-seals
+one exact dormant-to-executing successor. Main, StateManager, the outer lane
+authority, and the worker each bind the same target authority and transition
+fingerprint; the predecessor token is consumed before lease acquisition,
+route selection, or GPU work. Only the committed canonical successor sets the
+scene activation latch. Subsequent schedules retain reaction execution rather
+than accidentally returning to the dormant options.
+
+The composite route carries `shadowOnly:false`, `routingAuthority:true`, and
+the exact gate
+`enabled-on-serialized-scene-worker-lane-after-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+Raw watch words and carrier receipts remain evidence, not independent route
+authority. Cancellation before a proven observation stays dormant; partial or
+post-dispatch ambiguity remains fail-closed and cannot mint or replay a usable
+successor.
+
+Topology is exact at activation. A one-lane Tier0 source must publish the
+authenticated GPU-resident `N -> 4N` carrier family with one submit, no map,
+no particle readback, a satisfied terminal fence, and retirement of the
+superseded source. The configured sodium and Cesium presets already seed four
+phase lanes, so their visible route proves the distinct `4 -> 4`
+`preexisting-four-carrier-plan` case. The retained-product S1 -> S2 gas writer
+transition remains independently sealed; sodium retained `K=64` and Cesium
+retained `K=16` across that multi-schedule handoff.
+
+Verification is green on the current cumulative tree:
+
+- full Node suite: `3125` total, `3074` passed, `51` expected opt-in skips,
+  zero failures;
+- focused cumulative dynamic-law matrix: `276` total, `275` passed and one
+  expected native opt-in skip; visual liveness `19/19`, visual sanity `19/19`,
+  and formal standard visual receipt `25/25`;
+- native Vulkan/WebGPU: phase-carrier materialization `1/1` and reaction-index
+  execution `2/2`;
+- production Vite build and `git diff --check`: passed.
+
+Real visible desktop Chrome proof is also green. Water and iron/ice advance and
+present without browser/GPU issues. Sodium sustained `1920` correlated
+physics/presentation steps over `60.161 s`, changed `26.2407%` of sampled
+pixels, and committed the exact dormant -> active receipt. Cesium sustained
+`528` correlated steps over `60.927 s`, changed `3.7575%`, and committed the
+same transition through the authoritative two-level route. The mobile
+configured-preset plus three random-element spot-check matrix produced only
+nonblank moving frames and zero console or surface issues; the final dynamic
+policy rerun reports `failedCount:0`. These checks used visible desktop Chrome,
+not terminal-browser or headless acceptance, and every agent-owned browser and
+temporary server was closed afterward.
+
+The validation framework may start next. Its first job is to consume these
+exact schedule, activation, topology, retained-gas, presentation, and visual
+liveness receipts without weakening them. This enablement is intentionally
+scoped to reaction activation on the serialized scene/worker lane; general
+per-node activation for every law family, distributed multi-consumer token
+reservation, and the online closure factory remain later architecture work.
+Restoring the earlier high water-demo frame rate is a post-refactor performance
+priority, not a validation-framework prerequisite. Periodic configured-preset
+desktop visual sweeps remain mandatory while that work proceeds.
+
+## Current Focus - 2026-08-29 AKDT (watch numeric and canonical-dormant hardening)
+
+The authenticated reaction-watch numeric domain is now closed from authored
+tables through GPU evidence and successor-token admission. Particle and
+reaction counts must be positive safe integers within the shared exact-f32
+ceiling; byte-size multiplication, device buffer/storage/uniform/workgroup
+limits, source capacities, and every private allocation are checked before a
+dispatch. Malformed, short, nonfinite, over-count, or torn inputs cannot reach
+an arena allocation or queue submission.
+
+The private GPU evidence word now reserves zero for failure and stores every
+successful trigger count with a +1 bias. Public failure remains
+`0xffffffff`, so neither a cleared buffer nor a dropped copy can masquerade as
+a trustworthy zero. Both shader reducers use the same bias. Observation
+requires an exact four-byte mapped range and reauthenticates device, source
+family, table identity/fingerprint, count, and immutable envelope after the
+map. Fatal malformed/authenticity failures poison the worker lane; a follow-up
+schedule cannot consume a successor token from that lane.
+
+The audit also closed a production availability seam for dormant canonical
+schedules. A schedule made canonical by another law now captures its positive
+`reactionActivationWatchTable` even while reaction execution stays inactive.
+The exact empty executable table is a receipt, not the watch source: a shared
+selector yields only that exact quiescent table to the separately authorized
+dormant descriptor. Any positive or malformed non-null executable table keeps
+precedence and must validate on its own. Direct single-level and authoritative
+two-level tests prove the dormant table never reaches `reactionStepRunner`,
+while active-table tests prove a competing dormant descriptor cannot replace
+the executing table.
+
+Target-table validation now rejects layout/stride drift, shared storage,
+combined-prefix mismatch, trailing records, unsafe counts, and nonfinite
+values. Discovery and terminal-bin producers reject hostile device limits and
+torn allocations. The outer control plane admits an authority-bound uncertain
+canonical dormant observation without setting the reaction activation bit.
+
+Verification for this slice is complete:
+
+- reaction discovery `23/23`, watch `28/28`, lane control `24/24`, worker
+  integration `52/52`, hierarchy `175/175`, and MLS-MPM `221/224` with three
+  expected opt-in skips;
+- full Node suite: `3080` tests, `3029` passed, `51` expected skips, zero
+  failures;
+- production Vite build, syntax checks across 18 touched files,
+  `git diff --check`, and scoped ICC guard-diff: passed.
+
+The native watcher rerun remains unavailable under the known Chrome/Dawn
+`OperationError: A valid external Instance reference no longer exists`;
+previous native parity evidence is unchanged. The next ICC item is storage,
+cancellation, and device-loss lifecycle hardening. Routing remains exactly
+`shadowOnly:true`, `routingAuthority:false`, under
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+
+## Previous Focus - 2026-08-29 AKDT (predecessor target-token consumption)
+
+The independently main-authored target-schedule seal now crosses an exact
+two-schedule continuity boundary. Schedule S-1 names the actual next same-lane
+schedule id, returns one clone-safe dynamic-law observation bound to that
+request and seal fingerprint, and retains the full admitted authority in the
+worker. Schedule S must present that observation as
+`predecessorDynamicLawObservation` in its own main-authored authority.
+
+Consumption has three independent witnesses. The scene holds an ephemeral
+dispatch claim and burns it before the outer call. Before acquiring a GPU lane
+lease, the outer authority rereads S-1's committed StateManager issuance and
+exact-validates its payload schema/status/count, queue fence, lane/state,
+route-terminal evidence, authority, observation, lineage, cardinality, and
+phase-lane rollover. The worker separately matches the same observation and
+full prior authority against its retained live lane, then burns both before
+route selection or GPU work. The outer authority admits the worker's exact
+consumption receipt and persists both admission and consumption in S's warm
+entry.
+
+Missing, replayed, torn, foreign, lineage/count/topology-mismatched, or
+state-manager-unavailable tokens reject fail-closed. A persisted S warm entry
+also rejects sequential outer replay before lease acquisition. Nested lineage
+keys are exact rather than permissive. Any failure after worker dispatch
+poisons the scene lane, while loss of worker-local state or StateManager state
+remains non-recoverable. Fresh scene incarnations are included in lane,
+schedule, task, and token identities, and a replacement bridge object forces a
+fresh lane, removing the prior counter-only warm-key ABA alias.
+
+This is exactly-once for the serialized live scene/worker incarnation, not a
+distributed CAS claim. The outer issuance reread is still read-then-acquire;
+concurrent direct callers would need a StateManager issued -> reserved ->
+consumed CAS/ledger before global exactly-once can be claimed. StateManager
+evidence is audit authority only and never rehydrates lost worker GPU state.
+
+Routing remains disabled. Token uncertainty/triggering is recorded as
+`conservativeActivationRequired`, but route selection does not consume that
+field. Prior/current motion, writer, provider, and table equality is
+deliberately strict while `routingAuthority:false`; before gate enablement it
+must become a named prospective transition rather than allowing a dynamic
+observation to rewrite configuration. The exact cumulative gate remains
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+
+Verification for this slice is complete:
+
+- combined scene-contract, authority, worker, watcher, and discovery suites:
+  `207/207` passed;
+- full Node suite: `3069` tests, `3018` passed, `51` expected opt-in skips,
+  zero failures;
+- production Vite build, five source syntax checks, and full
+  `git diff --check`: passed.
+
+The next priority is production provisioning of a separately named dormant
+`reactionActivationWatchTable`. Laws-quiescent Tier0 currently has no reaction
+descriptor to watch, so the production route normally cannot issue this
+shadow token until that descriptor exists. After provisioning, prove exact
+watch non-omission and close the numeric/overflow/storage-adoption/device-loss
+gates; do not enable routing.
+
+## Current Focus - 2026-08-29 AKDT (thermal/phase false-zero envelope)
+
+The schedule-boundary motion envelope is now exact schema v2, the raw GPU
+observation is v3, and the clone-safe worker observation is v3. The worker
+seals `thermalPhaseEvolutionEnabled:true` whenever either
+`scheduleLawActivation.thermal` or
+`scheduleLawActivation.phaseVolumeMigration` is true. It also forces the
+latch for any general `scheduleStepOptionsProvider` that is not branded in
+`workerLaneAssignmentOnlyScheduleProviders`; only the known assignment-only
+provider may retain the statically proved no-writer path.
+
+When that latch is true, both the dedicated canonical watcher and the shared
+Tier0 GPU watcher deliberately count every fixed carrier slot as
+trigger-positive before consulting terminal mass, material/phase,
+temperature, or reference volume `V0`. This is a conservative nonselective
+envelope: phase-volume merge is an independent `V0`-growth writer even when a
+thermal table is absent, so an inactive or currently distant carrier cannot
+be accepted as a future zero merely from its terminal row. When the latch is
+false on a statically laws-quiescent horizon, the existing motion-inflated
+selective predicate remains in force.
+
+This closes the thermal/phase/rest-volume false-zero class without claiming a
+numeric upper bound on future contact diameter or thermal selectivity. A later
+selective diameter proof must use lineage-total mass and the minimum reachable
+density; a maximum taken from one terminal carrier slot is insufficient when
+phase transfer or phase-volume merge can redistribute a lineage into another
+fixed slot.
+
+Dynamic routing remains disabled. Every observation stays
+`shadowOnly:true`, `routingAuthority:false`, with the exact cumulative gate
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+The next priority is an independently authored main-thread authorization of
+the target schedule and complete writer set, including drift in dynamic
+provider identity and thermal/phase/reaction table fingerprints. After that,
+close Tier0/watch omission, numeric fail-closed, and device-loss gates before
+considering routing authority.
+
+Verification for this slice is complete:
+
+- focused schema, watcher, worker, and outer-authority suites: `514` tests,
+  `511` passed and `3` expected opt-in skips;
+- native dedicated/shared GPU watcher execution: `2/2` passed, including a
+  current-state-ineligible reaction whose dynamic latch counts every fixed
+  carrier slot trigger-positive;
+- full Node suite: `3066` tests, `3015` passed, `51` expected opt-in skips,
+  zero failures; and
+- production Vite build and `git diff --check`: passed.
+
+## Current Focus - 2026-08-29 AKDT (canonical contact motion bound)
+
+The schedule-boundary reaction watcher now encloses canonical contact
+correction as a versioned motion source. A new shared leaf contract owns the
+solver's exact 16-diameter position trust factor and its
+`max(1e-6, 64*epsilon*max(capacity, 1))` acceptance tolerance; the mechanical
+solver and motion watcher import the same constants.
+
+For each future substep the GPU computes upward-rounded bounds for CFL travel
+`A`, the maximum active terminal rest diameter `D`, and a three-dimensional
+wall-shell transition `W`. The per-particle candidates are:
+
+- G2P: `A + W`;
+- generic separation: `A + 0.5D + 2W`; and
+- canonical contact: `16D + 2A + 3W + tolerance`.
+
+The relative horizon remains two endpoints times `K`, with the existing
+accumulation factor and absolute-coordinate f32 position-store allowance.
+Jacobi iterations, cleanup passes, and inner rounds do not multiply the
+contact term: every solver stage consumes and verifies one absolute epoch
+trust ball.
+
+The sealed envelope advanced to v1 and now exact-binds three f32 box
+dimensions, generic-separation mode, contact-correction mode, the contact
+bound revision/factor/tolerance, the wall-shell numeric revision, and an
+explicit no-future-rest-volume-increase precondition. Both GPU producers use
+the same expanded 96-byte uniform. Active terminal coordinates outside the
+sealed physical box, invalid dimensions, one-ULP box mismatch, nonfinite
+diameter/bound arithmetic, incomplete bins, or a forged contact descriptor
+seal the existing sentinel or reject before encoding.
+
+The worker derives the mode from the actual schedule activation receipt:
+contact-free Tier0 seals generic separation on/contact off, while canonical
+reaction schedules seal generic separation off/contact on after contact is
+escalated for the dynamic law. The raw observation and worker observation
+advanced to v2, and the outer exact validator rejects torn box bits and
+contact-contract fields. This does not authenticate a separately authored
+target schedule; that remains a later slice.
+
+The execution topology is unchanged: three watch dispatches, one four-byte
+copy/map, no extra Tier0 submission, and one compact canonical watch
+submission. Dynamic routing is still disabled. Every receipt retains
+`shadowOnly:true`, `routingAuthority:false`, and the exact gate
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+The stable gate string is cumulative even though the contact-motion subgate is
+now closed.
+
+Verification for this slice:
+
+- focused envelope/discovery/solver/outer-authority suites: `105/105` passed;
+- worker/resident-step/hierarchy integration: `449` tests, `446` passed and
+  `3` expected opt-in skips;
+- native Vulkan/WebGPU reaction-index/watch execution: `2/2` passed, including
+  an adversarial distance outside the former CFL/separation reach but inside
+  the canonical contact trust horizon;
+- full Node suite: `3063` tests, `3012` passed, `51` expected opt-in skips,
+  zero failures;
+- production Vite build and `git diff --check`: passed.
+
+The next blocker is temperature/phase-only activation and the associated
+future rest-volume/clearance evolution. After that, bind every target-schedule
+parameter from an independently authored request, prove Tier0 cannot omit a
+required watch, and close the remaining numeric/selector/storage-adoption
+guards before considering routing authority.
+
+## Current Focus - 2026-08-29 AKDT (deterministic phase carriers)
+
+The Tier0-to-canonical topology transition now has a deterministic,
+GPU-resident one-to-four phase-carrier materializer. When an exact Tier0
+continuation still carries the laws-quiescent one-lane plan and the next
+schedule statically declares thermal or reaction work, the worker publishes a
+complete `N -> 4N` state/thermo/mechanics/identity family before building the
+first canonical spatial epoch. Dynamic-law observation does not select this
+route; the only trigger remains the static schedule activation receipt.
+
+The fixed correspondence is lane-major:
+
+`terminalIndex = phaseLane * sourceParticleCount + sourceParticleIndex`
+
+and its inverse is `sourceIndex = terminalIndex % sourceParticleCount`.
+The primary lane is copied exactly. The other three lanes retain source
+position, specific internal energy, thermal base rows, smoothing length,
+mechanics template, and render-domain identity, but begin with zero mass,
+velocity, entity/radius, current/reference volume-mass fields, and reserved
+status `254`. This reserves deterministic carrier slots; the existing phase
+transfer remains responsible for conservative phase-pure redistribution.
+Identity is truthfully described as duplicated render-domain cohort identity
+plus exact slot correspondence, not invented unique particle identity.
+
+The publication increments `storageGeneration` and `topologyEpoch` exactly
+once and changes no other lineage word. Planning fails closed on torn state/
+upload schemas, counts, one-lane plans, lineage, byte lengths, identity schema/
+stride/revision, source buffer device/size/usage, buffer aliasing, device
+storage/buffer/dispatch limits, and WebGPU validation errors. The execution
+uses one command submission and performs no particle readback.
+
+The worker adopts the 4N family before the canonical loop, authenticates the
+first epoch seal against the new topology lineage, and forces at least that
+first canonical step even if cancellation arrives at the boundary. Submitted
+temporaries, the old N family, the new family, and borrowed material-property
+buffers have explicit terminal-fence ownership. The superseded N family is
+retired only after the schedule fence; rejected or poisoned publications stay
+pinned for safe lane teardown.
+
+Post-review lifetime hardening keeps every immutable material-property-bank
+sidecar reference descriptor-owned across canonical continuations. Auxiliary
+and identity ownership transfers are transactional and roll back when a
+post-run adoption guard rejects the successor. Source retirement is now
+admitted only from cleanup evidence that names all four superseded core
+buffers after any asynchronous cleanup completion; pointer cardinality alone
+is not retirement authority. The materializer also binds exact planned byte
+ranges, so overallocated source buffers cannot exceed a device binding limit
+that was checked only for the live prefix.
+
+A different failure mode applies after a canonical successor has already
+received those sidecar owners: if predecessor cleanup throws partway through,
+the committed predecessor remains the logical lane state, the submitted
+successor is retained separately on a poisoned lane, and neither family may
+be reused. Explicit lane retirement invokes both owner-aware destructors after
+the schedule terminal fence. This prevents rollback into a partly destroyed
+predecessor while keeping every successor owner reachable.
+
+The outer route receipt is now v1. It exact-validates source and terminal
+particle counts across all four state/upload descriptors and the last step,
+the `N -> 4N` ratio, source and terminal byte lengths, identity ABI and
+revisions, kernel/correspondence revisions, WebGPU validation-scope status,
+auxiliary ownership transfer, topology lineage, source retirement, one submit,
+zero readback, and false routing authority. Tampering any of those fields is
+rejected before ComputeManager completion or StateManager commit. Its topology
+attestation identity schema, stride, revision, and declared byte length must
+also equal the transition source identity metadata.
+
+Outer admission also binds topology mode to proof presence. A declared
+`tier0-one-to-four-to-canonical-schedule-boundary` requires the exact N -> 4N
+transition, while a same-count `tier0-to-canonical-schedule-boundary` is
+rejected whenever static thermal or reaction activation makes carrier
+materialization mandatory. A worker result can no longer delete the proof and
+downgrade only the transition label.
+
+The leaf schedule-route evidence schemas and exact validators now live in
+`schroederWorkerScheduleRouteEvidence.js`; the existing control-plane facade
+re-exports its public schemas. This reduces the facade from 2,329 lines to
+1,711 while preserving authority and orchestration at the original boundary.
+
+Compact summary deliberately remains same-count v0. Because materialization
+precedes the canonical loop, its first canonical source and terminal families
+are both 4N; the existing distinct-count rejection is preserved rather than
+weakened into an ambiguous mixed-topology summary.
+
+Verification for this slice:
+
+- materializer contract/adversarial suite: `10/10` passed;
+- combined worker and outer-authority suites: `71/71` passed;
+- native Vulkan/WebGPU `N=2` execution: two bitwise-identical 4N runs,
+  unchanged sources, exact reserved companions and repeated identities, clean
+  validation scope, then successful consumption by the existing 4N phase
+  transfer with conserved lineage mass;
+- full Node suite: `3059` tests, `3008` passed, `51` expected opt-in skips,
+  zero failures;
+- production Vite build and `git diff --check`: passed.
+
+This closes the topology blocker only. The reaction motion watch stays
+`shadowOnly:true`, `routingAuthority:false`, with execution gate
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+Routing still requires a contact-correction motion envelope, thermal/phase
+activation evidence, full target-schedule parameter authentication, Tier0
+watch-omission proof, and the remaining numeric/selector/storage-adoption
+guards. None of those authorities were inferred from the carrier slice.
+
+## Previous Focus - 2026-08-29 AKDT (motion watch)
+
+The motion-inflated adaptive-law shadow watch is now terminal on both resident
+mechanics routes. A sealed `K`-substep reaction motion envelope binds exact f32
+`dt`, grid spacing, CFL factor, and separation policy to the schedule. Its
+conservative reach includes CFL-bounded motion, separation displacement, rule
+radius, and absolute-coordinate f32 position-store rounding. Canonical
+reaction discovery and mutation remain exact and uninflated; they no longer
+serve as the dynamic-law observation sample.
+
+After the post-mechanics closure publishes `nextParticleUploads`, the canonical
+route authenticates that exact state/thermo/mechanics family, rebuilds private
+terminal bins over every fixed carrier slot, and runs the watch in one compact
+additional command submission. The Tier0 fused route encodes the equivalent
+bin/watch passes after its final G2P/separation pass in the route's existing
+sole submission. Both routes copy one four-byte word and expose the same v1
+schedule-boundary ABI, exact-bound to route, terminal sample stage,
+reaction-table fingerprint, terminal lineage, and the sealed motion envelope.
+The worker maps only after its single schedule-terminal fence; neither route
+reads particle payloads.
+
+Terminal publication precedence is now explicit: phase-carrier transfer owns
+state and thermo; the later constitutive refresh owns mechanics when it runs,
+and phase transfer owns mechanics when refresh is absent. One branded terminal
+family selector drives both continuation publication and compact-summary input,
+so partial phase output and no-op reaction buffers cannot leak into either
+consumer. The GPU continuation, CPU full-readback mirror, source-stage
+descriptors, resident-authority ledger, and terminal watch all report the same
+family.
+
+Adopted Schroeder storage is accepted only as a complete three-buffer family
+with its authoritative count and exact per-buffer byte lengths. Compact
+summary deliberately fails closed for every storage adoption, including a
+same-count adoption, until the summary ABI carries separate source/terminal
+counts and a stable particle identity or slot correspondence. A pre-terminal
+two-level compact diagnostic is likewise marked superseded whenever terminal
+closure changes the published family.
+
+This remains deliberately shadow-only. `routingAuthority` is false and
+`executionGating` is
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+Unknown evidence is trigger-positive, but even a successful zero cannot change
+the next schedule. Source admission rejects malformed/negative phase data and
+active same-material rules that the current watch cannot prove; copy source and
+destination are independently sentinel-seeded; submitted buffers remain
+quarantined across map/fence failure; and device-loss cleanup is shared and
+retryable.
+
+The remaining false-zero boundary is now narrower and concrete. Canonical
+contact correction can move an endpoint much farther than the current
+CFL-plus-separation allowance, thermal or phase evolution can activate a law
+without motion, and the outer receipt authenticates only part of the target
+schedule request. Tier0 omission attestation, deterministic one-to-four
+carrier materialization (including source/terminal-count and identity
+correspondence for topology adoption), and the remaining clamp/overflow audit
+are also required before routing authority is possible.
+
+Verification for this slice reports:
+
+- focused terminal-watch, closure, resident-authority, hierarchy, worker, and
+  control-plane suites: `522` tests, `519` passed, `3` expected native-only
+  skips, zero failures;
+- full Node suite: `3044` tests, `2994` passed, `50` skipped, zero failures;
+- explicit native Vulkan reaction-index/motion-watch parity: `2/2` passed;
+- production build and `git diff --check`: passed;
+- headed hardware-WebGPU bulk-water smoke: 133 particles, four fused steps,
+  one command submission, zero map/readback bytes in the hot route, satisfied
+  terminal fence, exact one-lane topology, released cleanup, and nonblank
+  initial/final frames;
+- the standard cesium-fluorine visual probe advanced 256 steps, formed CsF,
+  consumed fluorine, and passed physics/scientific/framework checks; its
+  headless compositor still reported native pixel validation unsupported.
+
+Next priority is deterministic one-to-four carrier materialization, including
+an explicit source/terminal-count summary ABI and stable identity or slot
+correspondence. Routing must also wait for contact-motion and thermal/phase
+activation envelopes, full target-schedule-to-observation parameter
+authentication, Tier0 watch-omission attestation, and the remaining numeric
+guards. The current watcher proves fixed carrier slots; it is not general
+Tier1 Schroeder aggregate-node law authority.
+
+## Previous Focus - 2026-08-28 AKDT
+
+The first adaptive-law GPU watch is implemented as a canonical-route shadow
+observation, not routing authority. On the terminal canonical schedule step,
+reaction discovery reduces its already-sealed evidence to one four-byte word,
+copies that word in the existing production submission, and exposes a
+module-authenticated one-shot observer. The worker maps it only after the
+terminal queue fence, publishes a strict clone-safe receipt bound to schedule,
+lane, state, predicate revision, reaction-table fingerprint, and terminal
+lineage, and the outer control plane exact-validates and persists the same
+receipt. Both same-level and authoritative two-level canonical steps retain
+the private terminal capability. Its arena lease stays pinned across spatial
+generation retirement until observation/proposal release, preventing a later
+generation from overwriting the pending word.
+
+The public count is deliberately named `triggeredSourceCount`: it counts
+canonical primary-carrier particle proposal rows, not proved SS aggregate
+nodes. GPU sentinel, malformed evidence, missing capability, mapping failure,
+or inconsistent identity becomes a conservative uncertain shadow receipt.
+The current schedule's static activation receipt is unchanged, full-particle
+readback remains forbidden, and this observation cannot disable a law.
+The lane lease budgets an additive eight-byte schedule-boundary maximum: this
+four-byte word plus the existing optional four-byte product-history live-row
+bound. Route-execution telemetry stays separate, so Tier0 still reports zero
+fused hot-loop readback.
+
+The execution gate remains explicitly disabled. A zero terminal pre-reaction
+sample is not a sound certificate for the next schedule while particles can
+move into range, and the Tier0 fused route does not yet run canonical reaction
+discovery. Before this evidence may drive routing, the runtime still needs a
+proved motion-inflated terminal envelope, an equivalent Tier0 watcher, and the
+deterministic one-to-four phase-carrier transition required when an activating
+law needs the canonical multi-lane topology.
+
+Verification for this slice reports:
+
+- focused hierarchy, proposal, canonical-step, worker-boundary,
+  outer-authority, and native-opt-in suites: `474` tests, `470` passed, `4`
+  expected native-only skips, zero failures;
+- explicit native Vulkan reaction-index/reducer parity: `2/2` passed;
+- full Node suite: `3009` tests, `2958` passed, `50` skipped, with the one
+  inherited unrelated `nativeSurfaceHarness` regex failure that matches the
+  intentional guarded live-preview branch;
+- structured Vulkan/WebGPU sodium-water execution advanced 256 steps, formed
+  NaOH and H2, and passed framework behavior; headless compositor pixel
+  validation remained unsupported;
+- three sequential headed bulk-water captures were nonblank and visibly
+  distinct, with the existing coarse/blocky surface quality still apparent.
+
+Next priority is the motion-inflated terminal envelope and Tier0-equivalent
+four-byte watch. Only after both routes share the observation ABI should the
+one-to-four carrier transition and fail-closed dynamic activation gate be
+enabled.
+
+## Previous Focus - 2026-07-24 AKDT
 
 Slice S9D-5 is in final closeout with exact semantic and lifecycle evidence and
 a measured production rejection. The canonical GPU-resident direct exact-cell
@@ -6324,3 +6857,161 @@ Still open:
   terminal velocity only after product-mass provenance localizes the transfer.
 - Smooth-water visual acceptance and the first production shared-directory
   consumer remain later checkpoints.
+
+## 2026-08-29 AKDT - Target-schedule authority boundary verified
+
+Verified in shadow-only mode:
+
+- Main thread authors and freezes one exact target-schedule authority before
+  dispatch. One clone is posted to the worker; the original is passed directly
+  to `runSchroederWorkerLaneScheduleWithAuthority` and never recovered from the
+  worker result.
+- Worker preflight independently recomputes the source lineage/cardinality/
+  phase-lane topology, motion envelope, complete writer set, assignment-only
+  provider descriptor, and SHA-256 fingerprints for every executing/dormant
+  law table and nested step-option authority. Mismatch stops before any
+  schedule runner, submit, or map.
+- Execution-route receipt v2 and dynamic-law observation v4 return the exact
+  admitted seal plus target request/fingerprint. Outer admission compares the
+  full seal to the retained main value, and StateManager must persist and
+  reread the same clone-safe value.
+- Contact, thermal/phase/rest-volume, cross-level coupling,
+  mechanics-field-pair V2, and general-provider writer authority are covered.
+  Canonical and Tier0 reaction-table immutable-authenticity checks now use the
+  same SHA-256 content fingerprint as the schedule seal.
+- `118/118` focused tests and `3068/3068` full tests completed with zero
+  failures (`51` full-suite tests were expected opt-in skips); build passed.
+
+The follow-on predecessor-token slice now consumes the prior target request in
+the serialized live lane, binds terminal lineage/cardinality/topology and the
+full observation, and rejects replay/missing/torn state before GPU work when
+the evidence is available prelease.
+
+Still blocked before routing authority:
+
+- Complete the remaining numeric/count/capacity/overflow and storage-adoption/
+  device-loss gates, define the prospective configuration transition, and add
+  atomic reservation if authority expands beyond the serialized scene. The
+  execution gate and false routing authority remain unchanged.
+
+### Dormant reaction watch is now provisioned on production Tier0
+
+The former production omission is closed. `refreshMlsMpmResidentSteps`
+selects the full positive-count scene reaction catalog when reaction execution
+is disabled, names it `reactionActivationWatchTable`, and injects it only at
+the clone-safe SS worker boundary. The executable `reactionTable` remains
+null, so neither the main writer set nor the worker activation receipt can
+classify reaction as active. Empty reaction catalogs are not watched.
+
+The existing target-schedule protocol now authenticates the real production
+descriptor: main hashes the clone-safe table and its `combinedRecords`, the
+worker recomputes both from its retained snapshot, and outer authority checks
+the returned fingerprint. Focused tests prove omission and one-record drift
+fail at target-authority preflight before any GPU or provider activity; the
+valid Tier0 S0 observation retains the exact target fingerprint and its S1
+predecessor token is consumed under the already verified one-use protocol.
+
+Verification is green: `210/210` complete focused tests, `3070` full Node
+tests (`3019` passed, `51` expected skips, zero failures), production build,
+syntax checks, and full diff check.
+
+Remaining blockers are narrower but still real: numeric/count/capacity and
+overflow failure domains; storage-adoption, cancellation, worker/device-loss
+lifecycle; canonical dormant observation if that scope is required; and an
+explicit prospective dormant-to-executing transition seal. Routing remains
+`shadowOnly:true`, `routingAuthority:false`, under the exact existing gate.
+
+## 2026-08-29 AKDT - Reaction-watch storage and loss lifecycle verified
+
+Verified in shadow-only mode:
+
+- Each private watch proposal now retains its particle count and can be
+  authenticated through an opaque WeakMap record against the exact terminal
+  device, state, thermo, mechanics, and count family. The worker checks that
+  family before terminal completion/map and again after map. Single- and
+  authoritative two-level hierarchy producers also rederive the terminal
+  adoption/continuation family at the watch site instead of trusting cached
+  branch booleans.
+- An authentic watch over a superseded predecessor family rejects before map,
+  releases its owned resources, poisons the lane, and cannot mint a successor
+  token. Adopted dormant canonical storage remains covered by the positive
+  single- and two-level integration tests.
+- Concurrent observe/destroy order is deterministic. Completion recorded
+  before destroy is honored, completion can be retried after a release request,
+  owned buffers are destroyed exactly once, and a late rejected fallback fence
+  cannot quarantine buffers that a successful map already released.
+- A partially cancelled schedule emits only the exact unmeasured conservative
+  uncertainty shape: no raw evidence, no map, no readback bytes, and no routing
+  authority. A forged successful observation on a cancelled result rejects
+  before ComputeManager completion or StateManager commit. The real S1
+  consumer burns the uncertainty token once and rejects replay before GPU work.
+- Device loss during a pending terminal map is a tagged terminal failure. The
+  worker returns neither schedule result nor token, poisons the lane, releases
+  all owned watch buffers exactly once, rejects lane reuse, and permits a clean
+  explicit release plus replacement-device reseed. Existing restart coverage
+  continues to prove worker loss cannot reconstruct predecessor authority from
+  StateManager audit evidence.
+- Verification is green: watcher `33/33`, worker `55/55`, lane control `25/25`,
+  hierarchy `175/175`, MLS-MPM `224` total / `221` passed / `3` expected skips,
+  and full Node `3089` total / `3038` passed / `51` expected skips / zero
+  failures. Production build, source/test syntax, `git diff --check`, refreshed
+  ICC index/memory/graph/FTS/history, and scoped guard-diff pass.
+
+Native WGSL was not rerun because the local Chrome/Dawn harness still fails
+before device creation with `OperationError: A valid external Instance reference
+no longer exists`; prior native parity evidence is unchanged. Dynamic routing
+is still not enabled: `shadowOnly:true`, `routingAuthority:false`, and
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`
+remain exact. The next authority increment must separately seal a prospective
+dormant-to-executing transition; broader-than-serialized consumers also require
+an atomic StateManager reservation protocol before enablement.
+
+## 2026-08-30 AKDT - Retained-product gas transition authority verified
+
+Verified in shadow-only mode:
+
+- Target-schedule authority v4 and prospective-transition v1 seal one exact
+  `retained-product-gas-boundary-inactive-to-actionable` S1 -> S2 change. Both
+  sides keep reaction and mechanics-field writers active, gas-boundary
+  authority changes false -> true, and the one-step source/target schedules,
+  writer delta, tables, motion envelope, request ids, arena evidence, and
+  transition fingerprint are exact.
+- The scene pre-seals S2 while S1 still owns the retained product arena. Worker
+  preflight authenticates that arena before token or GPU activity. The outer
+  control plane burns StateManager authority before lease acquisition, and the
+  worker burns its witness before route selection or GPU work. S2 uses the
+  prospective bootstrap exactly once; S3 returns to exact continuation.
+  Mutation, replay, cancellation, foreign identity, incomplete fence, and
+  post-dispatch ambiguity remain fail-closed.
+- Reaction-motion watcher v9 uses one entry point per WGSL module and an exact
+  factorized bin-product guard, avoiding the NVIDIA compiler crash reproduced
+  by the prior combined-module/dynamic-division source. Native sodium and
+  Cesium complete without `libnvidia-gpucomp.so` failure.
+- The worker publishes a fixed-size clone-safe retained-product summary, never
+  the GPUBuffer. The scene retains a compact durable S1 -> S2 consumption
+  receipt. Visual evaluation reads the actual worker-owned summary and accepts
+  zero live rows only when the four-byte observation, arena identity, current
+  generation/seal/bytes, explicit unbound zero-byte render state, consumed
+  transition, and route-specific P2G evidence all agree. Missing render state
+  remains null and fails; Cesium's authoritative two-level path must seal the
+  complete top-level P2G tuple absent.
+- Verification is green after adversarial review: focused suites `229/229`;
+  full Node `3098` total / `3047` passed / `51` expected skips / zero failures;
+  production Vite build and `git diff --check` pass. Final headed native
+  receipts are complete with zero console/page/GPU issues: water `583/583`,
+  iron/ice `213/213`, sodium/water `460/460`, and Cesium/fluorine `262/262`
+  physics/presented-step deltas, each sustained for at least 60 seconds. Direct
+  PNG inspection confirms coherent water-surface evolution, iron descent and
+  quench-cap deformation, sodium descent plus a pale-yellow interface band,
+  and growth of the white fluorine/product region around the orange Cesium
+  body.
+
+Routing is deliberately unchanged: `shadowOnly:true`,
+`routingAuthority:false`, and
+`disabled-until-contact-thermo-phase-envelope-schedule-auth-and-1-to-4-carriers`.
+A separate late-horizon Cesium replay fails closed at schedule 350-356 with
+three upstream nonfinite two-level rows before the first fine commit. That is
+outside the bounded 300-step qualification and unrelated to the already-
+consumed S1 -> S2 transition, but it is the next numeric diagnostic priority:
+export `firstRejectedDiagnostic`, trace the first producer, fix it, and add a
+greater-than-350-step regression before route enablement.

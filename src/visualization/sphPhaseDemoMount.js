@@ -49,6 +49,12 @@ import {
   createReactionDiscoveryCacheKey
 } from '../runtime/sph/reactionDiscovery.js';
 import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_DEFAULT_POLICY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICIES,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+  exactSchroederDynamicLawRoutingPolicy
+} from '../runtime/sph/schroederDynamicLawRoutingContract.js';
+import {
   buildUlgSphMlsMpmRemoteSeedTaskGraph,
   ensurePeerComputeResidentAuthorityHost,
   refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot,
@@ -132,6 +138,35 @@ const PHYSICAL_LAW_GROUPS = Object.freeze([
   ['viscosity', 'viscosity', true],
   ['surfaceTension', 'surface tension (single-level SS)', false]
 ]);
+
+export function resolveSphReactionActivationConfiguration({
+  reactionsEnabled = true,
+  schroederSimulationEnabled = false,
+  reactionActivationPolicy = SCHROEDER_DYNAMIC_LAW_ROUTING_DEFAULT_POLICY
+} = {}) {
+  const normalizedPolicy =
+    exactSchroederDynamicLawRoutingPolicy(reactionActivationPolicy)
+    ?? SCHROEDER_DYNAMIC_LAW_ROUTING_DEFAULT_POLICY;
+  const requestedReactionsEnabled = reactionsEnabled !== false;
+  const normalizedSchroederSimulationEnabled =
+    schroederSimulationEnabled === true;
+  const authoritativeDynamicActivation = Boolean(
+    requestedReactionsEnabled
+    && normalizedSchroederSimulationEnabled
+    && normalizedPolicy === SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+  );
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-reaction-activation-configuration.v0',
+    reactionsEnabled: requestedReactionsEnabled,
+    schroederSimulationEnabled: normalizedSchroederSimulationEnabled,
+    reactionActivationPolicy: normalizedPolicy,
+    hardUserOff: !requestedReactionsEnabled,
+    staticReactionExecution: Boolean(
+      requestedReactionsEnabled && !authoritativeDynamicActivation
+    ),
+    authoritativeDynamicActivation
+  });
+}
 const MECHANICS_MODE_OPTIONS = Object.freeze([
   ['mlsmpm', 'MLS-MPM resident'],
   ['sph', 'Plain SPH CPU reference']
@@ -1147,6 +1182,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawp',
   'lawt',
   'lawr',
+  'reactionActivationPolicy',
   'lawv',
   'lawst',
   'blob',
@@ -1286,6 +1322,61 @@ const THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED = false;
 function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-render-row-points') {
   const normalized = String(value ?? fallback).trim().toLowerCase();
   return RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES.has(normalized) ? normalized : fallback;
+}
+
+// `surfaceDraw` serves two distinct URL roles: scenario presets serialize it
+// as mount-time runtime state, while direct URLs and the render-mode control
+// use it as an explicit diagnostic override. Treating the former as the latter
+// steals display ownership from the worker-owned SS lane after a menu preset
+// reload. A same-preset hash value without the diagnostic marker is legacy
+// preset serialization; query values, differing values, and the explicit
+// `surfaceDrawDiagnostic` marker remain true user overrides.
+export function resolveSphResidentSurfaceDrawModeRequest({
+  hashSurfaceDraw = null,
+  querySurfaceDraw = null,
+  hashSurfaceDrawDiagnostic = null,
+  querySurfaceDrawDiagnostic = null,
+  hashScenarioPresetSurfaceDraw = null
+} = {}) {
+  const serializedUrlMode = hashSurfaceDraw ?? querySurfaceDraw;
+  const diagnosticUrlMode =
+    hashSurfaceDrawDiagnostic ?? querySurfaceDrawDiagnostic;
+  const requestedUrlMode = serializedUrlMode ?? diagnosticUrlMode;
+  const presetMode = hashScenarioPresetSurfaceDraw;
+  const normalizeForComparison = (value) =>
+    String(value ?? '').trim().toLowerCase();
+  const hashMatchesSelectedPreset = Boolean(
+    hashSurfaceDraw != null
+    && presetMode != null
+    && normalizeForComparison(hashSurfaceDraw)
+      === normalizeForComparison(presetMode)
+  );
+  const explicitDiagnosticMarker = diagnosticUrlMode != null;
+  const presetSerializedRuntime = Boolean(
+    hashMatchesSelectedPreset
+    && !explicitDiagnosticMarker
+  );
+  const explicit = Boolean(
+    requestedUrlMode != null
+    && !presetSerializedRuntime
+  );
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-resident-surface-draw-mode-request.v0',
+    status: explicit
+      ? 'surface-draw-mode-explicit-diagnostic-override'
+      : (presetSerializedRuntime
+        ? 'surface-draw-mode-preset-runtime-serialized'
+        : (presetMode != null
+          ? 'surface-draw-mode-preset-runtime-default'
+          : 'surface-draw-mode-unconfigured')),
+    requestedMode: requestedUrlMode ?? presetMode ?? null,
+    requestedUrlMode,
+    presetMode: presetMode ?? null,
+    explicit,
+    explicitDiagnosticMarker,
+    presetSerializedRuntime,
+    hashMatchesSelectedPreset
+  });
 }
 
 export function resolveSphRendererSurfaceStartupSelection({
@@ -1610,6 +1701,40 @@ export function resolveSphInitialPresentationSchedulePlan({
         ? 'after-initial-visual-presentation'
         : (scheduleResidentPhysics ? 'after-upload-prerequisites' : 'disabled')
   });
+}
+
+export function resolveSphConfiguredAutoplayStartup({
+  configured = false,
+  runtimeReady = false,
+  initialBodiesValid = true,
+  startupPresentationReady = true,
+  resetPending = false,
+  driverReady = false,
+  workerViewReady = false
+} = {}) {
+  let status = 'configured-autoplay-disabled';
+  let start = false;
+  let mode = null;
+  if (configured && !initialBodiesValid) {
+    status = 'configured-autoplay-blocked-invalid-initial-bodies';
+  } else if (configured && resetPending) {
+    status = 'configured-autoplay-waiting-for-reset-rebuild';
+  } else if (configured && !runtimeReady) {
+    status = 'configured-autoplay-waiting-for-runtime';
+  } else if (configured && !startupPresentationReady) {
+    status = 'configured-autoplay-waiting-for-startup-presentation';
+  } else if (configured && driverReady) {
+    status = 'configured-autoplay-driver-ready';
+    start = true;
+    mode = 'driver';
+  } else if (configured && workerViewReady) {
+    status = 'configured-autoplay-worker-view-ready';
+    start = true;
+    mode = 'worker-view';
+  } else if (configured) {
+    status = 'configured-autoplay-waiting-for-scene';
+  }
+  return Object.freeze({ status, start, mode });
 }
 
 // A native surface cannot become active until its first exact presentation
@@ -5558,6 +5683,10 @@ function normalizeUrlControlValue(key, value) {
   if (key === 'drop' || key === 'base') return canonicalMaterialKeyFromUrl(value);
   if (key === 'bg') return normalizeSphSceneBackgroundColorHex(value);
   if (key === 'lighting') return normalizeSphSceneLightingMode(value);
+  if (key === 'reactionActivationPolicy') {
+    return exactSchroederDynamicLawRoutingPolicy(value)
+      ?? SCHROEDER_DYNAMIC_LAW_ROUTING_DEFAULT_POLICY;
+  }
   return value;
 }
 
@@ -5851,6 +5980,38 @@ export async function mountSphPhaseDemoOverlay({
     lawsEl.appendChild(wrap);
     lawInputs[key] = input;
   }
+  const reactionActivationPolicyWrap = document.createElement('label');
+  reactionActivationPolicyWrap.style.cssText =
+    'font-size:11px;display:flex;flex-direction:column;gap:3px;margin-top:3px;';
+  const reactionActivationPolicyLabel = document.createElement('span');
+  reactionActivationPolicyLabel.textContent =
+    'reaction activation policy (reload-applied)';
+  const reactionActivationPolicySelect = document.createElement('select');
+  reactionActivationPolicySelect.title =
+    'Choose whether SS reaction activation is disabled, observed, or authoritative';
+  reactionActivationPolicySelect.setAttribute(
+    'aria-label',
+    'Choose reaction activation policy'
+  );
+  const reactionActivationPolicyLabels = Object.freeze({
+    disabled: 'Disabled selector · static reactions remain available',
+    shadow: 'Shadow selector · static reactions remain active',
+    authoritative: 'Authoritative selector · start adaptively dormant'
+  });
+  for (const policy of SCHROEDER_DYNAMIC_LAW_ROUTING_POLICIES) {
+    const option = document.createElement('option');
+    option.value = policy;
+    option.textContent = reactionActivationPolicyLabels[policy] || policy;
+    if (policy === SCHROEDER_DYNAMIC_LAW_ROUTING_DEFAULT_POLICY) {
+      option.selected = true;
+    }
+    reactionActivationPolicySelect.appendChild(option);
+  }
+  reactionActivationPolicyWrap.append(
+    reactionActivationPolicyLabel,
+    reactionActivationPolicySelect
+  );
+  lawsEl.appendChild(reactionActivationPolicyWrap);
 
   const wallInputs = {};
   for (const face of WALL_FACES) {
@@ -6501,6 +6662,7 @@ export async function mountSphPhaseDemoOverlay({
     lawp: lawInputs.pressure,
     lawt: lawInputs.thermal,
     lawr: lawInputs.reactions,
+    reactionActivationPolicy: reactionActivationPolicySelect,
     lawv: lawInputs.viscosity,
     lawst: lawInputs.surfaceTension,
     ss: architectureInputs.ss,
@@ -6626,6 +6788,7 @@ export async function mountSphPhaseDemoOverlay({
   }
   const mountedRuntimeControlKeys = new Set([
     'mech',
+    'reactionActivationPolicy',
     'ss',
     'schroederTwoLevel',
     'schroederActiveNodeIndex',
@@ -6711,6 +6874,7 @@ export async function mountSphPhaseDemoOverlay({
     'sep',
     'sepVel',
     'reactionProductReserveMinimumLiveFraction',
+    'reactionActivationPolicy',
     'hydroInit',
     'residentStepsPerSchedule',
     'residentStepBatch',
@@ -6866,6 +7030,11 @@ export async function mountSphPhaseDemoOverlay({
       for (const [key, value] of Object.entries(presetEntry?.runtime || {})) {
         if (value != null && value !== '') params.set(key, String(value));
       }
+      // The selected scenario already supplies its surface mode at mount.
+      // Keeping it in the hash would misrepresent preset runtime as a user
+      // diagnostic override and steal display ownership from the SS worker.
+      params.delete('surfaceDraw');
+      params.delete('surfaceDrawDiagnostic');
     } else {
       const architectureState = architectureStateOverride
         ?? syncArchitectureControlDependencies({ normalizeDependencies: true });
@@ -7004,8 +7173,10 @@ export async function mountSphPhaseDemoOverlay({
   // (not a preset id). The query still names the preset the page was opened
   // with, so fall back to it — otherwise "Preset defaults" on an edited
   // `?scenario=X#scenario=custom` tab has no preset runtime to restore.
+  const initialHashScenarioPreset =
+    sphPhaseScenarioPresetById(initialHash.get('scenario'));
   const initialScenarioPreset =
-    sphPhaseScenarioPresetById(initialHash.get('scenario'))
+    initialHashScenarioPreset
     ?? sphPhaseScenarioPresetById(initialQuery.get('scenario'));
   const initialScenarioRuntime = initialScenarioPreset?.runtime || {};
   const initialHashScenarioId = initialHash.get('scenario');
@@ -7654,13 +7825,21 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialScenarioRuntime.surfaceOverlay
       ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
   );
+  const residentSurfaceDrawModeRequest =
+    resolveSphResidentSurfaceDrawModeRequest({
+      hashSurfaceDraw: initialHash.get('surfaceDraw'),
+      querySurfaceDraw: initialQuery.get('surfaceDraw'),
+      hashSurfaceDrawDiagnostic: initialHash.get('surfaceDrawDiagnostic'),
+      querySurfaceDrawDiagnostic: initialQuery.get('surfaceDrawDiagnostic'),
+      hashScenarioPresetSurfaceDraw:
+        initialHashScenarioPreset?.runtime?.surfaceDraw ?? null
+    });
   const explicitResidentSurfaceDrawDiagnosticMode =
-    initialHash.get('surfaceDraw')
-    ?? initialQuery.get('surfaceDraw')
-    ?? initialHash.get('surfaceDrawDiagnostic')
-    ?? initialQuery.get('surfaceDrawDiagnostic');
+    residentSurfaceDrawModeRequest.explicit
+      ? residentSurfaceDrawModeRequest.requestedUrlMode
+      : null;
   const rawResidentSurfaceDrawDiagnosticMode =
-    explicitResidentSurfaceDrawDiagnosticMode
+    residentSurfaceDrawModeRequest.requestedMode
     ?? initialScenarioRuntime.surfaceDraw;
   const rawRendererBackend =
     initialHash.get('renderer')
@@ -8251,9 +8430,9 @@ export async function mountSphPhaseDemoOverlay({
     : (residentParticleBridgeStartupPreflight?.fallbackApplied
       ? residentParticleBridgeStartupPreflight.surfaceDrawMode
       : provisionalResidentSurfaceDrawDiagnosticMode);
-  // Explicit render-mode selections (URL surfaceDraw= or the render-mode
+  // Explicit render-mode selections (a direct URL override or the render-mode
   // menu) must override the auto render-ownership policy's worker-owned
-  // presentation; a defaulted mode must not.
+  // presentation; preset-authored runtime values must not.
   let residentSurfaceDrawDiagnosticModeExplicit =
     explicitResidentSurfaceDrawDiagnosticMode != null;
   renderModeSelect.value = residentSurfaceDrawDiagnosticMode;
@@ -8273,7 +8452,8 @@ export async function mountSphPhaseDemoOverlay({
       variableSizeSphereMode: particleRenderMode === 'variable-size-spheres',
       requiresLivePhysicsRefresh: particleRenderMode != null,
       requiresFreshPhysicsReadback: particleRenderMode != null,
-      selectedByUrl: explicitResidentSurfaceDrawDiagnosticMode != null,
+      selectedByUrl: residentSurfaceDrawDiagnosticModeExplicit,
+      requestProvenance: residentSurfaceDrawModeRequest,
       updatedAtMs: performance.now(),
       ...extra
     };
@@ -8401,7 +8581,12 @@ export async function mountSphPhaseDemoOverlay({
     if (renderOwnershipUseCase) q.set('renderUseCase', renderOwnershipUseCase);
     if (nativeSurfacePixelValidationEnabled) q.set('nativeSurfacePixelValidation', '1');
     if (residentSurfaceDrawDiagnosticModeExplicit) {
-      q.set('surfaceDraw', currentResidentSurfaceDrawDiagnosticMode());
+      const explicitSurfaceDrawMode =
+        currentResidentSurfaceDrawDiagnosticMode();
+      q.set('surfaceDraw', explicitSurfaceDrawMode);
+      // Preserve user intent when the selected diagnostic happens to equal a
+      // scenario preset's default. Preset reloads clear both keys below.
+      q.set('surfaceDrawDiagnostic', explicitSurfaceDrawMode);
     }
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -8502,12 +8687,34 @@ export async function mountSphPhaseDemoOverlay({
     return Object.fromEntries(PHYSICAL_LAW_GROUPS.map(([key]) => [key, lawInputs[key]?.checked !== false]));
   }
 
+  function reactionActivationConfigurationFromControls() {
+    return resolveSphReactionActivationConfiguration({
+      reactionsEnabled: lawInputs.reactions?.checked !== false,
+      schroederSimulationEnabled: Boolean(
+        architectureInputs.ss.checked
+        && mechanicsModeSelect.value === 'mlsmpm'
+      ),
+      reactionActivationPolicy: reactionActivationPolicySelect.value
+    });
+  }
+
+  function physicalLawGroupsForInitialExecutionFromControls() {
+    const requested = physicalLawGroupsFromControls();
+    const reactionActivation = reactionActivationConfigurationFromControls();
+    return {
+      ...requested,
+      reactions: reactionActivation.staticReactionExecution
+    };
+  }
+
   function effectivePhysicalLawGroups(
     admission = activeViewState?.surfaceTensionLawAdmission ?? null
   ) {
     const requested = physicalLawGroupsFromControls();
+    const reactionActivation = reactionActivationConfigurationFromControls();
     return {
       ...requested,
+      reactions: reactionActivation.staticReactionExecution,
       surfaceTension: Boolean(
         requested.surfaceTension
         && requested.mechanics
@@ -8543,7 +8750,11 @@ export async function mountSphPhaseDemoOverlay({
       mechanics: mechanicsModeFromControls(),
       reactionProductReserveMinimumLiveFraction:
         initialReactionProductReserveMinimumLiveFraction,
-      physicalLawGroups: physicalLawGroupsFromControls(),
+      // Authoritative dynamic activation begins with a genuinely dormant
+      // reaction writer set. The requested checkbox remains independently
+      // true and the discovered reaction catalog is handed to the scene,
+      // which owns the authenticated next-schedule cutover.
+      physicalLawGroups: physicalLawGroupsForInitialExecutionFromControls(),
       schroederSimulationConfig: initialSchroederSimulationConfig,
       allowReducedProductProperties: true,
       ...(initialGridCflFactor != null ? { gridCflFactor: initialGridCflFactor } : {}),
@@ -10369,6 +10580,7 @@ export async function mountSphPhaseDemoOverlay({
     presentationProofWait = null,
     refreshError = null
   } = {}) {
+    const priorGate = residentStartupPresentationGate;
     const settledGate = resolveSphNativeSurfaceStartupPresentationGateSettlement({
       gate: residentStartupPresentationGate,
       generation,
@@ -10387,6 +10599,16 @@ export async function mountSphPhaseDemoOverlay({
       generation,
       gateStatus: settledGate?.status || null
     });
+    if (
+      residentAutoStartEnabled
+      && priorGate?.active === true
+      && settledGate?.active !== true
+    ) {
+      window.requestAnimationFrame(() => {
+        if (!overlay.isConnected || generation !== particleSyncGeneration) return;
+        startConfiguredResidentAutoplay();
+      });
+    }
     return true;
   }
 
@@ -10586,8 +10808,8 @@ export async function mountSphPhaseDemoOverlay({
           || host?.renderOwnershipPolicy
           || initialPeerComputeRenderOwnershipPolicy;
         publishPeerComputeResidentAuthorityHostStatus('ready');
-        if (overlay.isConnected) {
-          scheduleMlsMpmResidentSteps();
+        if (overlay.isConnected && residentAutoStartEnabled) {
+          startConfiguredResidentAutoplay();
         }
         return host;
       })
@@ -11299,13 +11521,39 @@ export async function mountSphPhaseDemoOverlay({
       residentStepsPerSchedule: currentResidentStepsPerSchedule(),
       residentAutoScheduleStatus: 'resident-initial-visual-refresh-scheduled'
     });
+    const residentAuthorityHostPrerequisite = simulationRuntimeAdmission.ready
+      ? null
+      : startPeerComputeResidentAuthorityHost();
     const prereqs = [
+      residentAuthorityHostPrerequisite,
       scheduleSphGpuParticleUpload(),
       scheduleMlsMpmGpuParticleUpload(),
       scheduleSphThermalResponseGraphUpload()
     ].filter(Boolean);
     const runRefresh = async () => {
       if (!initialRenderPublicationIsCurrent()) return null;
+      if (!simulationRuntimeAdmission.ready) {
+        const message = simulationRuntimeAdmission.reason
+          || 'resident authority host did not become ready for the initial presentation';
+        if (nativeSurfaceConsumerRefresh) {
+          settleResidentStartupPresentationGate({
+            generation,
+            presentationVisible: false,
+            presentationProof: overlay.__sphResidentPresentationProof || null,
+            refreshError: message
+          });
+        }
+        overlay.__sphResidentRenderStateError = message;
+        overlay.__mlsMpmResidentAutoSchedule = {
+          ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+          status: 'resident-initial-visual-refresh-blocked-by-runtime-prerequisite',
+          error: message,
+          updatedAtMs: performance.now()
+        };
+        renderStatus();
+        updateWarningBanner();
+        return null;
+      }
       overlay.__mlsMpmResidentAutoSchedule = {
         ...(overlay.__mlsMpmResidentAutoSchedule || {}),
         status: 'resident-initial-visual-refresh-pending',
@@ -11479,9 +11727,18 @@ export async function mountSphPhaseDemoOverlay({
         return null;
       }
     };
-    const refreshPromise = prereqs.length
+    const refreshWork = prereqs.length
       ? Promise.allSettled(prereqs).then(runRefresh)
       : Promise.resolve().then(runRefresh);
+    // Do not fail open around an unresolved t=0 render refresh. The scene owns
+    // one serialized presentation lane; releasing resident physics while that
+    // exact startup request still owns the lane queues every current post-step
+    // surface behind it and leaves the honest control-envelope preview stuck
+    // over advancing physics. The presentation proof below remains bounded
+    // once the render refresh itself settles, so an unadmitted completed
+    // attempt still releases playback without allowing physics to outrun an
+    // active presentation transaction.
+    const refreshPromise = refreshWork;
     pendingInitialResidentVisualRefreshPromise = refreshPromise;
     const clearPendingRefresh = () => {
       if (pendingInitialResidentVisualRefreshSignature === signature) {
@@ -11601,10 +11858,7 @@ export async function mountSphPhaseDemoOverlay({
             };
             overlay.__sphResidentStartupPresentationHandoff = residentStartupPresentationHandoff;
           }
-          scheduleMlsMpmResidentSteps({
-            stepCount: currentResidentStepsPerSchedule(),
-            generation
-          });
+          startConfiguredResidentAutoplay();
         });
       });
       return;
@@ -11645,15 +11899,12 @@ export async function mountSphPhaseDemoOverlay({
       residentStepsPerSchedule: currentResidentStepsPerSchedule()
     });
     if (!prereqs.length) {
-      scheduleMlsMpmResidentSteps({ generation });
+      startConfiguredResidentAutoplay();
       return;
     }
     Promise.allSettled(prereqs).finally(() => {
       if (!overlay.isConnected || generation !== particleSyncGeneration) return;
-      scheduleMlsMpmResidentSteps({
-        stepCount: currentResidentStepsPerSchedule(),
-        generation
-      });
+      startConfiguredResidentAutoplay();
     });
   }
 
@@ -15588,7 +15839,7 @@ export async function mountSphPhaseDemoOverlay({
         )?.click();
       });
     } else if (postRebuildIntent == null && residentAutoStartEnabled) {
-      startWorkerResidentPlayback();
+      startConfiguredResidentAutoplay();
     }
     return true;
   }
@@ -15819,6 +16070,11 @@ export async function mountSphPhaseDemoOverlay({
     for (const [key, value] of Object.entries(entry.runtime || {})) {
       if (value != null && value !== '') params.set(key, String(value));
     }
+    // `scenario=<id>` is the authority for the preset surface mode. Do not
+    // serialize an ambiguous override that changes worker-lane ownership on
+    // the reload we are about to perform.
+    params.delete('surfaceDraw');
+    params.delete('surfaceDrawDiagnostic');
     mountedRuntimeControlReloadPending = true;
     window.history.replaceState(
       null,
@@ -15909,18 +16165,22 @@ export async function mountSphPhaseDemoOverlay({
       activeViewStateGasPressure = null;
       const requestedPhysicalLawGroups = physicalLawGroupsFromControls();
       const activePhysicalLawGroups = effectivePhysicalLawGroups(null);
+      const reactionActivation = reactionActivationConfigurationFromControls();
       scene.setParticles({
         positionsM: new Float32Array(0),
         colorsRgb: new Float32Array(0),
         particleRadiiM: new Float32Array(0),
         materials: [],
         reactions: [],
+        reactionActivationPolicy:
+          reactionActivation.reactionActivationPolicy,
         physicalLawGroups: activePhysicalLawGroups,
         requestedPhysicalLawGroups,
         surfaceTensionLawAdmission: null
       });
       overlay.__sphPhysicalLawGroups = requestedPhysicalLawGroups;
       overlay.__sphEffectivePhysicalLawGroups = activePhysicalLawGroups;
+      overlay.__sphReactionActivationConfiguration = reactionActivation;
       overlay.__sphSurfaceTensionLawAdmission = null;
       overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
       overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
@@ -15941,6 +16201,10 @@ export async function mountSphPhaseDemoOverlay({
     const activePhysicalLawGroups = effectivePhysicalLawGroups(
       viewState.surfaceTensionLawAdmission
     );
+    const reactionActivation = reactionActivationConfigurationFromControls();
+    const sceneReactions = reactionActivation.authoritativeDynamicActivation
+      ? (viewState.reactionDiscovery?.reactions ?? viewState.reactions)
+      : viewState.reactions;
     scene.setParticles({
       positionsM: viewState.positionsM,
       colorsRgb: viewState.colorsRgb,
@@ -15949,7 +16213,13 @@ export async function mountSphPhaseDemoOverlay({
       emissiveByMaterial: viewState.emissiveByMaterial,
       emissiveTemperatureByMaterial: viewState.emissiveTemperatureByMaterial ?? null,
       materialProperties: viewState.materialProperties,
-      reactions: viewState.reactions,
+      // The authoritative route receives the discovered catalog while its
+      // effective writer set is still dormant. This provisions the sealed
+      // watch and successor table without executing reaction physics on the
+      // page-side reference driver.
+      reactions: sceneReactions,
+      reactionActivationPolicy:
+        reactionActivation.reactionActivationPolicy,
       reactionContactRadiusM: viewState.reactionContactRadiusM,
       sphGpuParticleState: viewState.sphGpuParticleState,
       mlsMpmGpuParticleState: viewState.mlsMpmGpuParticleState,
@@ -15988,6 +16258,7 @@ export async function mountSphPhaseDemoOverlay({
     }
     overlay.__sphPhysicalLawGroups = requestedPhysicalLawGroups;
     overlay.__sphEffectivePhysicalLawGroups = activePhysicalLawGroups;
+    overlay.__sphReactionActivationConfiguration = reactionActivation;
     overlay.__sphSurfaceTensionLawAdmission =
       viewState.surfaceTensionLawAdmission;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
@@ -16657,6 +16928,41 @@ export async function mountSphPhaseDemoOverlay({
     renderStatus();
     updateWarningBanner();
     return true;
+  }
+
+  // URL/preset autoplay is a durable startup intent, not a one-shot attempt.
+  // The packed scene and the required resident authority host are prepared by
+  // independent async paths; either may win the race. Every readiness edge
+  // calls this coordinator, and playback starts only once both sides exist.
+  // This prevents a normal preset from submitting one bootstrap schedule with
+  // `playing === false` and then remaining forever on its t=0 body preview.
+  function startConfiguredResidentAutoplay({ force = false } = {}) {
+    const startup = resolveSphConfiguredAutoplayStartup({
+      configured: residentAutoStartEnabled,
+      runtimeReady: simulationRuntimeAdmission.ready,
+      initialBodiesValid: overlay.__sphInitialBodiesDraftInvalid !== true,
+      startupPresentationReady: residentStartupPresentationGate?.active !== true,
+      resetPending: Boolean(resetRebuildPending),
+      driverReady: Boolean(driver),
+      workerViewReady: Boolean(activeViewState)
+    });
+    overlay.__sphConfiguredAutoplayStartup = {
+      schema: 'peercompute.ulg.sph-configured-autoplay-startup.v0',
+      ...startup,
+      updatedAtMs: performance.now()
+    };
+    if (!startup.start) {
+      return false;
+    }
+    if (startup.mode === 'driver') {
+      playing = true;
+      overlay.querySelector('#sph-play').textContent = 'Pause';
+      requestPlaybackTick();
+      renderStatus();
+      updateWarningBanner();
+      return true;
+    }
+    return startWorkerResidentPlayback({ force });
   }
 
   function beginNativeSurfaceLatePresentationSuccessRecovery() {
@@ -17693,13 +17999,7 @@ export async function mountSphPhaseDemoOverlay({
     syncParticles();
     renderStatus();
   }
-  if (residentAutoStartEnabled && driver && overlay.__sphInitialBodiesDraftInvalid !== true) {
-    playing = true;
-    overlay.querySelector('#sph-play').textContent = 'Pause';
-    requestPlaybackTick();
-  } else if (residentAutoStartEnabled && overlay.__sphInitialBodiesDraftInvalid !== true) {
-    startWorkerResidentPlayback();
-  }
+  startConfiguredResidentAutoplay();
   return {
     close,
     overlay,

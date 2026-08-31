@@ -1586,6 +1586,39 @@ function pressureInterfaceImpulseForNode({
   return impulse;
 }
 
+const MLS_MPM_CFL_NUMERIC_GUARD = 0.9999847412109375;
+
+function clampMlsMpmVelocityToCfl(velocity, maxSpeedMPerS) {
+  if (
+    !Array.isArray(velocity)
+    || velocity.length !== 3
+    || !velocity.every(Number.isFinite)
+    || !Number.isFinite(maxSpeedMPerS)
+    || !(maxSpeedMPerS > 0)
+  ) {
+    return [0, 0, 0];
+  }
+  const guardedMaxSpeed = maxSpeedMPerS * MLS_MPM_CFL_NUMERIC_GUARD;
+  if (!(guardedMaxSpeed > 0) || !Number.isFinite(guardedMaxSpeed)) {
+    return [0, 0, 0];
+  }
+  const largestComponent = Math.max(...velocity.map(Math.abs));
+  if (!(largestComponent > 0)) return [...velocity];
+  if (largestComponent < 2 ** -126 || largestComponent > 2 ** 126) {
+    return [0, 0, 0];
+  }
+  const scaled = velocity.map((component) => component / largestComponent);
+  const scaledLength = Math.hypot(...scaled);
+  if (!(scaledLength > 0) || !Number.isFinite(scaledLength)) {
+    return [0, 0, 0];
+  }
+  if (largestComponent > guardedMaxSpeed / scaledLength) {
+    const scale = guardedMaxSpeed / scaledLength;
+    return scaled.map((component) => component * scale);
+  }
+  return [...velocity];
+}
+
 export function updateMlsMpmGridCpu({
   p2gGridProjection,
   dt = p2gGridProjection?.dt ?? 0,
@@ -1609,7 +1642,6 @@ export function updateMlsMpmGridCpu({
   const boundaryEpsilonM = Math.max(1e-7, Math.abs(gridSpacingM) * 1e-6);
   const floorNoSlipLimitM = gridSpacingM - boundaryEpsilonM;
   const vmax = dtSeconds > 0 ? (cfl * gridSpacingM) / dtSeconds : Number.POSITIVE_INFINITY;
-  const vmax2 = vmax * vmax;
   const source = p2gGridProjection.gridNodes;
   const updatedGridNodes = new Float32Array(p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
   const pressureForceApplicationApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver)
@@ -1696,11 +1728,7 @@ export function updateMlsMpmGridCpu({
         (source[offset + 2] + pressureImpulse[1]) / mass + dtSeconds * gravity[1],
         (source[offset + 3] + pressureImpulse[2]) / mass + dtSeconds * gravity[2]
       ];
-      const speed2 = velocity[0] ** 2 + velocity[1] ** 2 + velocity[2] ** 2;
-      if (speed2 > vmax2) {
-        const scale = vmax / Math.sqrt(speed2);
-        velocity = velocity.map((component) => component * scale);
-      }
+      velocity = clampMlsMpmVelocityToCfl(velocity, vmax);
       if (nodePosition[1] < floorNoSlipLimitM) {
         applyWallBarrierNormal({
           velocity,
@@ -1746,6 +1774,7 @@ export function updateMlsMpmGridCpu({
         nodeMassKg: mass,
         gapM: Math.max(0, dims[2] - gridSpacingM - nodePosition[2] + boundaryEpsilonM)
       });
+      velocity = clampMlsMpmVelocityToCfl(velocity, vmax);
       status = 1;
     }
     updatedGridNodes.set([
@@ -4078,7 +4107,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       wallBarrierMinGapM: wallBarrierContact.wallBarrierMinGapM
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.v2',
+      cacheKey: 'ulg-mls-mpm-grid-update.v3',
       label: 'ulg-mls-mpm-grid-update',
       code: mlsMpmGridUpdateWgsl,
       entryPoint: 'main',

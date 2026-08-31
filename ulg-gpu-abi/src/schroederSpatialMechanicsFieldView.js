@@ -59,6 +59,19 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_ENERGY_READY = 4;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_G2P_CLAIMED = 5;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_CONSUMED = 6;
 
+// While the general receipt is in P2G_FINALIZED, words 13..15 may carry one
+// short-lived, versioned coarse-predictor momentum subreceipt.  The parent
+// workspace consumes it before grid update reuses the same accumulator rows as
+// the heat ledger and clears receipt words 8..23.  No storage stride changes.
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_TEMPORAL_COARSE_MAGIC =
+  0x53544331;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_TEMPORAL_COARSE_RECEIPT_MAGIC_WORD =
+  13;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_TEMPORAL_COARSE_RECEIPT_DT_WORD =
+  14;
+export const SCHROEDER_SPATIAL_MECHANICS_FIELD_TEMPORAL_COARSE_RECEIPT_SEAL_WORD =
+  15;
+
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_LAW_EXACT_P2G = 1;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_MAGIC = 0x53504631;
 export const SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_VERSION = 1;
@@ -209,6 +222,14 @@ export const SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_ABI = Object.freeze({
     'solid-initial-body-domain;non-solid-material-continuum-domain-zero',
   construction:
     'gpu-authenticated-particle-stencil-packed-u32x3-stable-radix-scan-unique-to-public-u32x4',
+  temporalCoarsePredictorSidecar: Object.freeze({
+    phase: 'p2g-finalized-only',
+    accumulatorWords: Object.freeze([0, 1, 2]),
+    receiptWords: Object.freeze([13, 14, 15]),
+    contributionRecordFloats: 12,
+    lifecycle:
+      'active-source-v2-p2g-publish;parent-workspace-consume-before-grid-update;heat-clear-reuse'
+  }),
   sourceAuthorities: Object.freeze({
     v1: Object.freeze({
       id: SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V1,

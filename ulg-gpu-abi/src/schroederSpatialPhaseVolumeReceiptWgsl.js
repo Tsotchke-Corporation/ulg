@@ -490,14 +490,17 @@ fn moment_header_admitted() -> bool {
     && moment_control[37u] == 0u
     && moment_control[38u] == 0u
     && moment_control[39u] == 0u
-    // S9-A scans the full source family, but it records only the exact
-    // selected-level candidates here.  A mixed-level family therefore has a
-    // smaller valid contribution count than its global scan capacity.
+    // S9-A scans the full logical source family, but word 40 records only
+    // selected-level candidates with positive canonical f32 support. A
+    // mixed-level family or authenticated zero support therefore has fewer
+    // contributions than the global 27N scan domain.
     && moment_control[40u] ${directoryV2 ? '>=' : '>'} 0u
     && moment_control[40u] <= ${directoryV2
       ? 'active_candidate_count()'
       : 'params.candidate_count'}
-    && moment_control[40u] % FIELD_STENCIL_SIZE == 0u
+    ${directoryV2
+      ? '// Directory-v2 reports actual positive-support contributions; the logical 27N domain remains in the receipt.'
+      : '&& moment_control[40u] % FIELD_STENCIL_SIZE == 0u'}
     // The S9-A reducer dispatches its retained capacity.  Every unused
     // field-capacity row is deliberately zeroed, so this is an expected
     // capacity tail rather than evidence of a rejected active field.
@@ -974,8 +977,11 @@ fn finalize_phase_volume_receipt(@builtin(local_invocation_id) local_id: vec3<u3
     && selected_source_count <= global_scan_source_count
     && selected_source_count <= 0xffffffffu / FIELD_STENCIL_SIZE
     && selected_candidate_count <= global_scan_candidate_count
-    && selected_candidate_count == moment_selected_candidate_count
-    && field_contribution_count == selected_candidate_count;
+    ${directoryV2
+      ? `&& moment_selected_candidate_count <= selected_candidate_count
+    && field_contribution_count == moment_selected_candidate_count;`
+      : `&& selected_candidate_count == moment_selected_candidate_count
+    && field_contribution_count == selected_candidate_count;`}
   let finite_totals = finite_f32(source_total)
     && finite_f32(field_total)
     && finite_f32(volume_residual)

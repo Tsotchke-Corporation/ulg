@@ -120,6 +120,18 @@
       "reason": "This module currently owns the queue-ordered post-mechanics closure boundary, including admission, GPU resource lifetime, and fail-closed ownership transitions. Keeping that orchestration cohesive during the contained merge avoids changing same-device ordering or introducing a readback boundary while the exact six-stage replay is being sealed.",
       "mitigation": "After the contained merge, split closure laws, telemetry, and ownership/admission orchestration behind the existing public contract, retaining queue ordering, zero-readback enforcement, and focused runtime tests. New unrelated behavior must not be added to this integration boundary.",
       "migration_evidence": "Focused gas-ledger, reaction-product, phase-volume, energy-budget, and GPU-readback telemetry modules have already been extracted from the closure path. The durable successor task ulg-device-aware-throughput-20260803 tracks the remaining architecture decomposition and testability work."
+    },
+    {
+      "path_patterns": [
+        "src/runtime/sph/schroederWorkerLaneControlPlane.js",
+        "src/runtime/sph/schroederTargetScheduleAuthority.js",
+        "src/runtime/sph/sphReactionMotionEnvelopeWatchGpu.js"
+      ],
+      "status": "temporary_dynamic_law_authority_boundary",
+      "task_id": "ss-dynamic-law-routing-enablement-20260830",
+      "reason": "These modules remain an intentionally cohesive temporary co-location of opaque authority issuance and consumption, exact schedule-transition validation, worker-lane one-use witnesses, and same-device watch resource lifetime while authenticated dynamic-law routing is first enabled. Splitting those boundaries before the validation framework freezes their schemas would create cross-module mutation and cleanup seams in the security-critical predecessor/successor transaction.",
+      "mitigation": "Add no unrelated physics or presentation behavior here. During the validation-framework and throughput follow-on, extract stable pure normalization and receipt-format helpers behind the existing exported contracts while keeping token mutation, worker witness consumption, and GPU resource retirement cohesive and covered by replay, cancellation, device-loss, native, and visible-route gates.",
+      "migration_evidence": "The campaign already extracted authority fingerprints, the routing tuple, worker schedule-route evidence, phase-carrier materialization, canonical contact bounds, motion-envelope math, and the mounted presentation provenance fix into focused modules. Full Node, native phase-carrier and reaction-index proofs, and the four-preset desktop receipt cover the retained integration boundaries."
     }
   ]
 }

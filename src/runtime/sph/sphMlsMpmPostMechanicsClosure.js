@@ -26,6 +26,8 @@ import {
 
 export const ULG_MLS_MPM_POST_MECHANICS_CLOSURE_SCHEMA =
   'peercompute.ulg.mls-mpm-post-mechanics-closure.v1';
+export const ULG_MLS_MPM_TERMINAL_PARTICLE_FAMILY_SCHEMA =
+  'peercompute.ulg.mls-mpm-terminal-particle-family.v0';
 
 export const MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER = Object.freeze([
   'schroeder-far-force-delta-fusion',
@@ -43,6 +45,7 @@ const POST_MECHANICS_COMPONENTS = Object.freeze([
   'mechanics'
 ]);
 const POST_MECHANICS_CLOSURE_AUTHORITIES = new WeakMap();
+const MLS_MPM_TERMINAL_PARTICLE_FAMILIES = new WeakSet();
 
 function retainedStageSource(stage) {
   return stage?.result || stage || null;
@@ -230,6 +233,137 @@ export function reactionOutputComponentMutations(reactionStep) {
 
 export function reactionOutputMutatesParticles(reactionStep) {
   return reactionOutputComponentMutations(reactionStep).any;
+}
+
+export function selectMlsMpmTerminalParticleFamily({
+  sphParticleState = null,
+  sphParticleUpload = null,
+  g2pReconstruction = null,
+  schroederFarForceDeltaFusion = null,
+  schroederParticleStorageAdoption = null,
+  thermalStep = null,
+  reactionStep = null,
+  mechanicsRefreshStep = null,
+  phaseCarrierTransferStep = null
+} = {}) {
+  const g2p = retainedG2pOutputBuffers(g2pReconstruction);
+  const farForce = retainedSchroederFarForceDeltaFusionOutputBuffers(
+    schroederFarForceDeltaFusion
+  );
+  const thermal = retainedThermalOutputBuffers(thermalStep);
+  const reaction = retainedReactionOutputBuffers(reactionStep);
+  const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(
+    mechanicsRefreshStep
+  );
+  const phase = retainedPhaseCarrierTransferOutputBuffers(
+    phaseCarrierTransferStep
+  );
+  const phaseCarrierFamilySelected = Boolean(
+    phase.stateBuffer && phase.thermoBuffer && phase.mechanicsBuffer
+  );
+  const storage = !phaseCarrierFamilySelected
+    && schroederParticleStorageAdoption?.adopted === true
+    ? schroederParticleStorageAdoption
+    : null;
+  const reactionMutations = reactionOutputComponentMutations(reactionStep);
+  const sourceThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.thermoBuffer ?? null
+    : null;
+  const stateBuffer = (
+    (phaseCarrierFamilySelected ? phase.stateBuffer : null)
+    || storage?.stateBuffer
+    || (reactionMutations.state ? reaction.stateBuffer : null)
+    || thermal.stateBuffer
+    || farForce.stateBuffer
+    || g2p.stateBuffer
+    || null
+  );
+  const thermoBuffer = (
+    (phaseCarrierFamilySelected ? phase.thermoBuffer : null)
+    || storage?.thermoBuffer
+    || (reactionMutations.thermo ? reaction.thermoBuffer : null)
+    || thermal.thermoBuffer
+    || sourceThermoBuffer
+    || null
+  );
+  const mechanicsBuffer = (
+    storage?.mechanicsBuffer
+    || mechanicsRefresh.mechanicsBuffer
+    || (phaseCarrierFamilySelected ? phase.mechanicsBuffer : null)
+    || (reactionMutations.mechanics ? reaction.mechanicsBuffer : null)
+    || g2p.mechanicsBuffer
+    || null
+  );
+  const sourceParticleCount = Number(sphParticleState?.particleCount);
+  const particleCount = Number(
+    storage?.authoritativeParticleCount ?? sourceParticleCount
+  );
+  const ready = Boolean(
+    stateBuffer
+    && thermoBuffer
+    && mechanicsBuffer
+    && Number.isSafeInteger(sourceParticleCount)
+    && sourceParticleCount >= 0
+    && Number.isSafeInteger(particleCount)
+    && particleCount >= 0
+  );
+  const stateSource = phaseCarrierFamilySelected
+    ? 'phase-carrier-transfer-v2'
+    : (storage
+      ? 'schroeder-particle-storage-materialization'
+      : (reactionMutations.state && reaction.stateBuffer
+        ? 'reaction-product'
+        : (thermal.stateBuffer
+          ? 'thermal-phase'
+          : (farForce.stateBuffer
+            ? 'schroeder-far-force-delta-fusion'
+            : 'g2p'))));
+  const thermoSource = phaseCarrierFamilySelected
+    ? 'phase-carrier-transfer-v2'
+    : (storage
+      ? 'schroeder-particle-storage-materialization'
+      : (reactionMutations.thermo && reaction.thermoBuffer
+        ? 'reaction-product'
+        : (thermal.thermoBuffer ? 'thermal-phase' : 'source-thermo-buffer')));
+  const mechanicsSource = storage
+    ? 'schroeder-particle-storage-materialization'
+    : (mechanicsRefresh.mechanicsBuffer
+      ? 'mechanics-constitutive-refresh'
+      : (phaseCarrierFamilySelected
+        ? 'phase-carrier-transfer-v2'
+        : (reactionMutations.mechanics && reaction.mechanicsBuffer
+          ? 'reaction-product'
+          : 'g2p')));
+  const family = Object.freeze({
+    schema: ULG_MLS_MPM_TERMINAL_PARTICLE_FAMILY_SCHEMA,
+    status: ready
+      ? 'mls-mpm-terminal-particle-family-ready'
+      : 'mls-mpm-terminal-particle-family-incomplete',
+    ready,
+    sourceParticleCount,
+    particleCount,
+    cardinalityPreserved: particleCount === sourceParticleCount,
+    phaseCarrierFamilySelected,
+    schroederParticleStorageSelected: Boolean(storage),
+    reactionMutations,
+    stateBuffer,
+    thermoBuffer,
+    mechanicsBuffer,
+    stateSource,
+    thermoSource,
+    mechanicsSource
+  });
+  MLS_MPM_TERMINAL_PARTICLE_FAMILIES.add(family);
+  return family;
+}
+
+export function isMlsMpmTerminalParticleFamily(family) {
+  return Boolean(
+    family
+    && Object.isFrozen(family)
+    && MLS_MPM_TERMINAL_PARTICLE_FAMILIES.has(family)
+    && family.schema === ULG_MLS_MPM_TERMINAL_PARTICLE_FAMILY_SCHEMA
+  );
 }
 
 export function destroyReactionOutputAfterFailedMechanicsRefresh(reactionStep) {
@@ -1707,6 +1841,14 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         reactionTable,
         sourceStateBuffer: reactionSourceStateBuffer,
         sourceThermoBuffer: reactionSourceThermoBuffer,
+        sourceMechanicsBuffer:
+          postMechanicsParticleBuffers.mechanicsBuffer,
+        // This proposal is the current schedule's pre-reaction mutation
+        // input. The next-schedule shadow observation must instead sample the
+        // exact post-transfer/post-refresh continuation, so it is encoded by
+        // the owning resident route after this closure returns.
+        reactionMotionEnvelope: null,
+        captureActivationObservation: false,
         gpuTimestampRecorder
       })
     );

@@ -42,6 +42,19 @@ for (let i = 0; i < SHOTS; i += 1) {
 }
 const wallS = (Date.now() - startMs) / 1000;
 const after = await lane();
+const owner = await page.evaluate(() => {
+  const overlay = document.querySelector('#sph-phase-overlay');
+  const p = overlay?.__sphScene?.getWorkerOffscreenPresentation?.() || null;
+  const h = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return {
+    displayOwner: p?.displayOwner ?? null,
+    displayOwnerContentReady: p?.displayOwnerContentReady ?? null,
+    status: p?.status ?? null,
+    hashWorkerLivePreview: h.get('workerLivePreview'),
+    hashCompactMechanicsView: h.get('compactMechanicsView'),
+    hashScenario: h.get('scenario'),
+  };
+});
 await browser.close();
 let transitions = 0;
 for (let i = 1; i < hashes.length; i += 1) if (hashes[i] !== hashes[i - 1]) transitions += 1;
@@ -52,6 +65,6 @@ console.log(JSON.stringify({
   observedDistinctFps: Number((transitions / wallS).toFixed(2)),
   committedBefore: before.committed, committedAfter: after.committed,
   committedStepsPerS: before.committed != null && after.committed != null ? Number(((after.committed - before.committed) / wallS).toFixed(1)) : null,
-  hudBefore: before.hud, hudAfter: after.hud, fpsEl: after.fps,
+  hudBefore: before.hud, hudAfter: after.hud, fpsEl: after.fps, owner,
   errors: errors.slice(0, 5),
 }, null, 1));

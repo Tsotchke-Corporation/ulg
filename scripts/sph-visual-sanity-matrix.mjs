@@ -9,6 +9,11 @@ import {
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
+import {
   coldCeilingCondensationEvidence,
   condensedLaunchEvidence,
   generatedCohortTrajectoryEvidence,
@@ -1742,6 +1747,66 @@ export function evaluateAuthoritativeTwoLevelMechanicsEvidence(
  * uses the canonical mechanics-field transaction instead, whose authority is
  * independently sealed by the terminal reflux evaluator above.
  */
+function exactConfiguredPresetDynamicReactionActivation({
+  activation,
+  receipt,
+  firstActiveScheduleId = null
+}) {
+  const nonEmpty = (value) => (
+    typeof value === 'string' && value.trim().length > 0
+  );
+  const sourceParticleCount = Number(receipt?.sourceParticleCount);
+  const terminalParticleCount = Number(receipt?.terminalParticleCount);
+  return Boolean(
+    activation?.state === 'active'
+    && nonEmpty(activation.transitionFingerprint)
+    && nonEmpty(activation.committedScheduleId)
+    && receipt?.schema
+      === 'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0'
+    && receipt?.status
+      === 'dynamic-reaction-activation-consumed-and-admitted'
+    && nonEmpty(receipt.predecessorScheduleId)
+    && nonEmpty(receipt.consumerScheduleId)
+    && receipt.consumerScheduleId === activation.committedScheduleId
+    && receipt.targetScheduleRequestId === receipt.consumerScheduleId
+    && (
+      firstActiveScheduleId == null
+      || receipt.consumerScheduleId === firstActiveScheduleId
+    )
+    && receipt.configurationContinuityMode
+      === 'prospective-reaction-dormant-to-executing'
+    && receipt.transitionKind
+      === 'reaction-dormant-watch-to-executing-reaction'
+    && receipt.transitionFingerprint === activation.transitionFingerprint
+    && receipt.route === 'canonical-schroeder'
+    && [
+      'fresh-or-canonical-continuation',
+      'tier0-to-canonical-schedule-boundary',
+      'tier0-one-to-four-to-canonical-schedule-boundary'
+    ].includes(receipt.routeTransition)
+    && receipt.reactionExecution === true
+    && Number.isSafeInteger(sourceParticleCount)
+    && sourceParticleCount > 0
+    && terminalParticleCount === sourceParticleCount
+    && receipt.sourcePhaseLaneCount === 4
+    && receipt.terminalPhaseLaneCount === 4
+    && receipt.phaseCarrierTopologyAuthority
+      === 'preexisting-four-carrier-plan'
+    && receipt.phaseCarrierTrigger == null
+    && receipt.phaseCarrierMapAsyncCount === 0
+    && receipt.phaseCarrierReadbackBytes === 0
+    && receipt.terminalGpuFenceSatisfied === true
+    && receipt.stateManagerCommitted === true
+    && receipt.consumedBeforeLeaseAcquisition === true
+    && receipt.consumedBeforeRouteSelection === true
+    && receipt.consumedBeforeGpuWork === true
+    && receipt.shadowOnly === SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    && receipt.routingAuthority === SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    && receipt.executionGating
+      === SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+  );
+}
+
 export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
   const executionEvidence = residentExecutionMetricsForEvidence(
     scenario,
@@ -1764,6 +1829,10 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
   let previousPositionEpoch = null;
   let canonicalLaneId = null;
   let canonicalStateKey = null;
+  let dynamicReactionDormantObserved = false;
+  let dynamicReactionActiveObserved = false;
+  let dynamicReactionActivationFingerprint = null;
+  let dynamicReactionCommittedScheduleId = null;
 
   for (const metric of executionEvidence.metrics) {
     const lane = metric?.residentSteps?.workerOwnedResidentLane ?? null;
@@ -1778,6 +1847,10 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
     const positionEpoch = Number(lane?.finalEpochIdentity?.positionEpoch);
     const laneId = String(lane?.laneId || '');
     const stateKey = String(lane?.stateKey || '');
+    const dynamicReactionActivation =
+      lane?.dynamicReactionActivation ?? null;
+    const dynamicReactionActivationReceipt =
+      lane?.dynamicReactionActivationReceipt ?? null;
 
     if (canonicalLaneId == null) canonicalLaneId = laneId;
     if (canonicalStateKey == null) canonicalStateKey = stateKey;
@@ -1838,16 +1911,70 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
     ) {
       blockers.push('static-gpu-table-path-unproven');
     }
+    let reactionActive = false;
+    if (reactionRequired) {
+      reactionActive = dynamicReactionActivation?.state === 'active';
+      if (!reactionActive) {
+        if (
+          dynamicReactionActiveObserved
+          || dynamicReactionActivation?.state !== 'dormant'
+          || dynamicReactionActivation?.transitionFingerprint != null
+          || dynamicReactionActivation?.committedScheduleId != null
+          || dynamicReactionActivationReceipt != null
+        ) {
+          blockers.push('dynamic-reaction-dormant-state-unproven');
+        } else {
+          dynamicReactionDormantObserved = true;
+        }
+      } else {
+        const firstActiveScheduleId = dynamicReactionActiveObserved
+          ? null
+          : lane?.scheduleId ?? null;
+        if (!exactConfiguredPresetDynamicReactionActivation({
+          activation: dynamicReactionActivation,
+          receipt: dynamicReactionActivationReceipt,
+          firstActiveScheduleId
+        })) {
+          blockers.push('dynamic-reaction-activation-receipt-unproven');
+        }
+        if (
+          !dynamicReactionDormantObserved
+          || (
+            dynamicReactionActivationFingerprint != null
+            && dynamicReactionActivation.transitionFingerprint
+              !== dynamicReactionActivationFingerprint
+          )
+          || (
+            dynamicReactionCommittedScheduleId != null
+            && dynamicReactionActivation.committedScheduleId
+              !== dynamicReactionCommittedScheduleId
+          )
+        ) {
+          blockers.push('dynamic-reaction-activation-lineage-unproven');
+        }
+        dynamicReactionActiveObserved = true;
+        dynamicReactionActivationFingerprint =
+          dynamicReactionActivation.transitionFingerprint;
+        dynamicReactionCommittedScheduleId =
+          dynamicReactionActivation.committedScheduleId;
+      }
+    }
     if (twoLevelRequired) {
       const closure = hierarchy?.postMechanicsClosure ?? null;
       const executedStageOrder = arrayOf(closure?.executedStageOrder);
-      const requiredClosureStageOrder = [
-        'thermal-phase',
-        'reaction-discovery',
-        'reaction-product',
-        'phase-carrier-transfer-v2',
-        'mechanics-constitutive-refresh'
-      ];
+      const requiredClosureStageOrder = reactionActive
+        ? [
+            'thermal-phase',
+            'reaction-discovery',
+            'reaction-product',
+            'phase-carrier-transfer-v2',
+            'mechanics-constitutive-refresh'
+          ]
+        : [
+            'thermal-phase',
+            'phase-carrier-transfer-v2',
+            'mechanics-constitutive-refresh'
+          ];
       let previousStageIndex = -1;
       const closureStagesOrdered = requiredClosureStageOrder.every(
         (stage) => {
@@ -1868,11 +1995,16 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
       }
       if (
         hierarchy?.thermalRequested !== true
-        || hierarchy?.reactionRequested !== true
+        || hierarchy?.reactionRequested !== reactionActive
         || closure?.schema
           !== 'peercompute.ulg.mls-mpm-post-mechanics-closure.v1'
         || closure?.status !== 'post-mechanics-closure-complete'
         || closure?.backend !== 'webgpu'
+        || (
+          reactionActive
+            ? closure?.reactionStatus !== 'reaction-step-executed'
+            : closure?.reactionStatus != null
+        )
         || closure?.fullParticleReadbackFree !== true
         || closure?.residentContinuationReady !== true
         || !closureStagesOrdered
@@ -1890,12 +2022,18 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
       }
       if (
         reactionRequired
-        && (
-          hierarchy?.reactionRequested !== true
-          || hierarchy?.residentStageStatus?.reaction
-            !== 'reaction-step-executed'
-          || hierarchy?.residentStageBackends?.reaction !== 'webgpu'
-        )
+        && (reactionActive
+          ? (
+              hierarchy?.reactionRequested !== true
+              || hierarchy?.residentStageStatus?.reaction
+                !== 'reaction-step-executed'
+              || hierarchy?.residentStageBackends?.reaction !== 'webgpu'
+            )
+          : (
+              hierarchy?.reactionRequested !== false
+              || hierarchy?.residentStageStatus?.reaction !== 'missing'
+              || hierarchy?.residentStageBackends?.reaction != null
+            ))
       ) {
         blockers.push('reaction-law-path-unproven');
       }
@@ -1918,6 +2056,8 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
       laneCompletedStepTotal:
         Number.isSafeInteger(completedTotal) ? completedTotal : null,
       finalEpochIdentity: lane?.finalEpochIdentity ?? null,
+      dynamicReactionActivation,
+      dynamicReactionActivationReceipt,
       hierarchyStageSummary: hierarchy,
       blockers
     });
@@ -1926,6 +2066,13 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
   const passed = Boolean(
     executionEvidence.coverageComplete === true
     && samples.length >= minimumScheduleCount
+    && (
+      !reactionRequired
+      || (
+        dynamicReactionDormantObserved
+        && dynamicReactionActiveObserved
+      )
+    )
     && samples.every((sample) => sample.blockers.length === 0)
   );
   return behaviorCheck(
@@ -1936,6 +2083,10 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
       acceptanceTrack: scenario?.acceptanceTrack ?? null,
       twoLevelRequired,
       reactionRequired,
+      dynamicReactionDormantObserved,
+      dynamicReactionActiveObserved,
+      dynamicReactionActivationFingerprint,
+      dynamicReactionCommittedScheduleId,
       minimumScheduleCount,
       residentExecutionSampleCount: samples.length,
       expectedExecutionSampleCount: executionEvidence.expectedSampleCount,

@@ -336,6 +336,12 @@ import {
   runSphThermalStepWebGpu
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import {
+  buildSphReactionTable
+} from '../src/runtime/sph/sphReactionGpuKernel.js';
+import {
+  createSphReactionMotionEnvelope
+} from '../src/runtime/sph/sphReactionMotionEnvelope.js';
+import {
   buildMlsMpmMechanicsMaterialTable
 } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
@@ -509,6 +515,13 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
   const bindGroups = [];
   const queueFenceCalls = [];
   return {
+    limits: {
+      maxBufferSize: 256 * 1024 * 1024,
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxUniformBufferBindingSize: 64 * 1024,
+      maxStorageBuffersPerShaderStage: 16,
+      maxComputeWorkgroupsPerDimension: 65_535
+    },
     createdBuffers,
     writes,
     shaderModules,
@@ -7512,7 +7525,10 @@ test('Schroeder particle-storage materialization blocks without admission and di
 
 test('Schroeder particle-storage materialization rejects a device below its identity-aware storage-binding limit', async () => {
   const device = createFakeWebGpuDevice();
-  device.limits = { maxStorageBuffersPerShaderStage: 8 };
+  device.limits = {
+    ...device.limits,
+    maxStorageBuffersPerShaderStage: 8
+  };
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const particleStorageSlotAssignment = {
     schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -8425,6 +8441,17 @@ test('Schroeder single-level commits and fences a generation before successor pu
       nextParticleUploads: {
         sphParticleUpload: options.sphParticleUpload,
         mlsMpmParticleUpload: options.mlsMpmParticleUpload
+      },
+      residentAuthorityFamilyOwners: {
+        'particle-kinematics': {
+          ownerStage: 'phase-carrier-transfer-v2'
+        },
+        'thermo-phase': {
+          ownerStage: 'phase-carrier-transfer-v2'
+        },
+        mechanics: {
+          ownerStage: 'mechanics-constitutive-refresh'
+        }
       }
     };
   };
@@ -8481,6 +8508,28 @@ test('Schroeder single-level commits and fences a generation before successor pu
     result.schroederSpatialSuccessorSourceFamily.positionEpoch,
     generation.execution.positionEpoch,
     'no resident position mutation and no topology mutation preserve position identity'
+  );
+  assert.deepEqual(
+    result.schroederSpatialSuccessorSourceFamily.componentOwnerStages,
+    {
+      state: 'phase-carrier-transfer-v2',
+      thermo: 'phase-carrier-transfer-v2',
+      mechanics: 'mechanics-constitutive-refresh'
+    }
+  );
+  assert.equal(
+    Object.hasOwn(
+      result.schroederSpatialSuccessorSourceFamily.componentOwnerStages,
+      'particle-kinematics'
+    ),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(
+      result.schroederSpatialSuccessorSourceFamily.componentOwnerStages,
+      'thermo-phase'
+    ),
+    false
   );
   assert.equal(
     device.createdBuffers.filter(
@@ -13056,9 +13105,18 @@ test('hierarchy artifact retirement waits for full controller completion and a f
 });
 
 test('Schroeder two-level authoritative mode adopts admitted merged storage over the coupled outputs', async () => {
-  const device = createFakeWebGpuDevice();
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const dormantWatchTable = canonicalSidecarReactionTable();
+  const reactionMotionEnvelope = createSphReactionMotionEnvelope({
+    maxFutureSubsteps: 1,
+    dtS: 5e-4,
+    gridSpacingM: 0.25,
+    cflFactor: 0.4,
+    boxDimsM: [5, 5, 5],
+    separationDisplacementEnabled: true
+  });
   const fakeBuffer = (label, size = 4096) => tagWebGpuBufferDevice(
     device.createBuffer({ label, size, usage: 128 }),
     device
@@ -13111,6 +13169,12 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
       particleIdentityMutationApproved: true,
       identityRevision: 1
     },
+    residentStepOptions: {
+      captureReactionActivationObservation: true,
+      reactionActivationMotionEnvelope: reactionMotionEnvelope,
+      reactionTable: buildSphReactionTable([]),
+      reactionActivationWatchTable: dormantWatchTable
+    },
     residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
   });
 
@@ -13133,16 +13197,75 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
   assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'merged-state');
   assert.equal(step.nextParticleUploads.sphParticleUpload.particleCount, 2);
   assert.equal(
+    step.nextParticleUploads.sphParticleUpload.stateBufferByteLength,
+    6 * 8 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoBufferByteLength,
+    6 * 12 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.identityBufferByteLength,
+    6 * Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
     step.nextParticleUploads.sphParticleUpload.sourceStage,
     'schroeder-particle-storage-materialization'
   );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoSourceStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.deepEqual(
+    step.nextParticleUploads.sphParticleUpload.componentSourceStages,
+    {
+      state: 'schroeder-particle-storage-materialization',
+      thermo: 'schroeder-particle-storage-materialization'
+    }
+  );
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'merged-mechanics');
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBufferByteLength,
+    6 * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.deepEqual(
+    step.nextParticleUploads.mlsMpmParticleUpload.componentSourceStages,
+    { mechanics: 'schroeder-particle-storage-materialization' }
+  );
   assert.equal(step.nextSphParticleState.particleCount, 2);
   assert.equal(step.nextMlsMpmParticleState.particleCount, 2);
   assert.equal(
     step.nextParticleUploads.schroederSpatialSuccessorSourceFamily ?? null,
     result.schroederSpatialSuccessorSourceFamily ?? null
   );
+  assert.equal(step.reactionStep, null);
+  const proposal = step.reactionActivationObservationProposal;
+  assert.equal(proposal.reactionTable, dormantWatchTable);
+  assert.equal(proposal.particleCount, 2);
+  const terminalWatchBindGroups = device.bindGroups.filter(({ label }) => (
+    String(label).startsWith(
+      'ulg-canonical-terminal-reaction-motion-watch-'
+    ) && String(label).endsWith('-bindings')
+  ));
+  assert.equal(terminalWatchBindGroups.length, 3);
+  for (const bindGroup of terminalWatchBindGroups) {
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 0).resource.buffer,
+      step.nextParticleUploads.sphParticleUpload.stateBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 1).resource.buffer,
+      step.nextParticleUploads.sphParticleUpload.thermoBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 2).resource.buffer,
+      step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+    );
+  }
+  await result.schroederTwoLevelPositiveCompletionPromise;
+  assert.equal(proposal.destroy(), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(proposal.released, true);
 });
 
 test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequentially on the coupled outputs', async () => {
@@ -13348,14 +13471,128 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
   );
   assert.equal(
     step.nextParticleUploads.sphParticleUpload.sourceStage,
-    'schroeder-two-level-post-mechanics-closure'
+    'thermal-phase'
   );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoSourceStage,
+    'thermal-phase'
+  );
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.sourceStage,
+    'mechanics-constitutive-refresh'
+  );
+  assert.equal(
+    step.diagnostics.status,
+    'compact-summary-superseded-by-terminal-particle-family'
+  );
+  assert.equal(step.diagnostics.compactGpuSummaryAvailable, false);
+  assert.equal(step.diagnostics.preTerminalMechanicsSummaryAvailable, true);
+});
+
+test('M4: authoritative two-level mechanics observes a dormant reaction table without executing it', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const dormantWatchTable = canonicalSidecarReactionTable();
+  const exactQuiescentReactionTable = buildSphReactionTable([]);
+  const reactionMotionEnvelope = createSphReactionMotionEnvelope({
+    maxFutureSubsteps: 1,
+    dtS: 5e-4,
+    gridSpacingM: 0.25,
+    cflFactor: 0.4,
+    boxDimsM: [5, 5, 5],
+    separationDisplacementEnabled: true
+  });
+  let coupledResult = null;
+  let reactionStepCallCount = 0;
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner: async (options) => {
+      coupledResult = await driveAuthoritativeCanonicalEpochs(options, {
+        prefix: 'dormant-reaction-watch-two-level'
+      });
+      return coupledResult;
+    },
+    residentStepOptions: {
+      captureReactionActivationObservation: true,
+      reactionActivationMotionEnvelope: reactionMotionEnvelope,
+      reactionTable: exactQuiescentReactionTable,
+      reactionActivationWatchTable: dormantWatchTable,
+      reactionStepRunner: async () => {
+        reactionStepCallCount += 1;
+        throw new Error('dormant reaction watch must not execute a reaction');
+      }
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+
+  const step = result.residentStep;
+  const proposal = step.reactionActivationObservationProposal;
+  assert.equal(reactionStepCallCount, 0);
+  assert.equal(step.postMechanicsClosure.reactionStep, null);
+  assert.equal(proposal.reactionTable, dormantWatchTable);
+  assert.equal(proposal.reactionCount, 1);
+  assert.equal(proposal.producerRoute, 'canonical-schroeder');
+  assert.equal(proposal.shadowOnly, true);
+  assert.equal(
+    step.reactionActivationObservationCapture.motionEnvelope,
+    reactionMotionEnvelope
+  );
+  assert.equal(
+    step.reactionActivationObservationCapture.sampleStage,
+    'canonical-terminal-published-carrier-family-motion-envelope'
+  );
+  const terminalWatchBindGroups = device.bindGroups.filter(({ label }) => (
+    String(label).startsWith(
+      'ulg-canonical-terminal-reaction-motion-watch-'
+    ) && String(label).endsWith('-bindings')
+  ));
+  assert.equal(terminalWatchBindGroups.length, 3);
+  for (const bindGroup of terminalWatchBindGroups) {
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 0).resource.buffer,
+      step.nextParticleUploads.sphParticleUpload.stateBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 1).resource.buffer,
+      step.nextParticleUploads.sphParticleUpload.thermoBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 2).resource.buffer,
+      step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+    );
+  }
+  assert.equal(
+    summarizeSchroederSpatialEpochTransaction(
+      coupledResult.postMechanicsEpoch.transaction
+    ).consumerReceipts.some((receipt) => (
+      receipt.consumerId === SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY
+    )),
+    false
+  );
+  await result.schroederTwoLevelPositiveCompletionPromise;
+  assert.equal(proposal.destroy(), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(proposal.released, true);
 });
 
 test('M4: Schroeder two-level authoritative mode chains the reaction sidecar after thermal', async () => {
   const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const executingReactionTable = canonicalSidecarReactionTable();
+  const competingDormantWatchTable = canonicalSidecarReactionTable();
+  competingDormantWatchTable.records[3] = 950;
   let coupledResult = null;
   let thermalStepResult = null;
   const reactionCalls = [];
@@ -13369,6 +13606,14 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
   const reactionMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'reaction-mechanics-out', size: 4096, usage: 128
   }), device);
+  const reactionMotionEnvelope = createSphReactionMotionEnvelope({
+    maxFutureSubsteps: 1,
+    dtS: 5e-4,
+    gridSpacingM: 0.25,
+    cflFactor: 0.4,
+    boxDimsM: [5, 5, 5],
+    separationDisplacementEnabled: true
+  });
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
@@ -13404,12 +13649,15 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
       return coupledResult;
     },
     residentStepOptions: {
+      captureReactionActivationObservation: true,
+      reactionActivationMotionEnvelope: reactionMotionEnvelope,
       thermalMaterialTable: canonicalSidecarThermalMaterialTable,
       thermalStepRunner: async (options) => {
         thermalStepResult = await runSphThermalStepWebGpu(options);
         return thermalStepResult;
       },
-      reactionTable: canonicalSidecarReactionTable(),
+      reactionTable: executingReactionTable,
+      reactionActivationWatchTable: competingDormantWatchTable,
       reactionStepRunner: async (options) => {
         reactionCalls.push(options);
         return {
@@ -13430,12 +13678,68 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
   assert.equal(step.sidecars, 'shared-post-mechanics-closure');
   assert.equal(
     result.twoLevelMechanics.sidecarHostQueueFenceCount,
-    2,
-    'the non-paired sidecar route reports its reaction-proposal and graph fences'
+    1,
+    'the non-paired sidecar route fences the graph while retaining the reaction watch'
   );
-  assert.ok(step.observedHostQueueFenceCount >= 2);
+  assert.ok(step.observedHostQueueFenceCount >= 1);
   assert.equal(step.normalHotLoopReadbackFree, false);
   assert.equal(reactionCalls.length, 1);
+  const retainedReactionActivationProposal =
+    step.reactionActivationObservationProposal;
+  assert.equal(
+    retainedReactionActivationProposal.reactionTable,
+    executingReactionTable
+  );
+  assert.notEqual(
+    retainedReactionActivationProposal,
+    reactionCalls[0].schroederSpatialReactionDiscoveryProposal
+  );
+  assert.equal(retainedReactionActivationProposal.released, false);
+  assert.equal(
+    retainedReactionActivationProposal.ownedCommandSubmissionCount,
+    1
+  );
+  assert.equal(
+    Object.prototype.propertyIsEnumerable.call(
+      step,
+      'reactionActivationObservationProposal'
+    ),
+    false
+  );
+  const terminalWatchBindGroups = device.bindGroups.filter(({ label }) => (
+    String(label).startsWith(
+      'ulg-canonical-terminal-reaction-motion-watch-'
+    ) && String(label).endsWith('-bindings')
+  ));
+  assert.equal(terminalWatchBindGroups.length, 3);
+  for (const bindGroup of terminalWatchBindGroups) {
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 0).resource.buffer,
+      reactionStateBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 1).resource.buffer,
+      reactionThermoBuffer
+    );
+    assert.equal(
+      bindGroup.entries.find(({ binding }) => binding === 2).resource.buffer,
+      reactionMechanicsBuffer
+    );
+  }
+  assert.deepEqual(step.reactionActivationObservationCapture, {
+    schema:
+      'peercompute.ulg.mls-mpm-reaction-activation-observation-capture.v1',
+    status: 'reaction-activation-observation-retained-for-schedule-boundary',
+    predicateRevision:
+      'canonical-reaction-motion-envelope-cfl-separation-contact-thermal-phase-latch-v3',
+    nodeDomain: 'fixed-phase-carrier-slot',
+    producerRoute: 'canonical-schroeder',
+    sampleStage:
+      'canonical-terminal-published-carrier-family-motion-envelope',
+    motionEnvelope: reactionMotionEnvelope,
+    readbackByteLength: Uint32Array.BYTES_PER_ELEMENT,
+    shadowOnly: true
+  });
   assert.ok(timedProducerIds.includes(
     'schroeder-hierarchy:two-level-post-mechanics-reaction-discovery-proposal'
   ));
@@ -13511,7 +13815,15 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.ownsMechanicsBuffer, false);
   assert.equal(
     step.nextParticleUploads.sphParticleUpload.sourceStage,
-    'schroeder-two-level-post-mechanics-closure'
+    'reaction-product'
+  );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoSourceStage,
+    'reaction-product'
+  );
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.sourceStage,
+    'reaction-product'
   );
   await result.schroederTwoLevelPositiveCompletionPromise;
   await new Promise((resolve) => setImmediate(resolve));
@@ -13522,6 +13834,9 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
   ]) {
     assert.equal(borrowedReplacement.destroyCount, 0);
   }
+  assert.equal(retainedReactionActivationProposal.destroy(), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(retainedReactionActivationProposal.released, true);
 });
 
 test('M4: paired canonical mechanics refresh settles thermal and reaction sidecar claims at one existing submit', async () => {
@@ -13598,6 +13913,18 @@ test('M4: paired canonical mechanics refresh settles thermal and reaction sideca
   assert.equal(step.normalHotLoopReadbackFree, true);
   assert.ok(
     step.postMechanicsClosure.queueOrderedFinalConsumerCapabilities.upstream
+  );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.sourceStage,
+    'reaction-product'
+  );
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.thermoSourceStage,
+    'reaction-product'
+  );
+  assert.equal(
+    step.nextParticleUploads.mlsMpmParticleUpload.sourceStage,
+    'mechanics-constitutive-refresh'
   );
   assert.equal(retiredReactionProposal.released, true);
   assert.equal(retiredThermalGraph.destroyed, true);

@@ -582,6 +582,21 @@ test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves phy
   assert.match(v2Wgsl, /!\(sum\.x >= 0\.0\)/);
   assert.match(
     v2Wgsl,
+    /let weight = wx \* wy \* wz;[\s\S]*if \(field_index == INVALID_FIELD\) \{[\s\S]*if \(weight != 0\.0\) \{[\s\S]*record_invalid_lineage\(\);[\s\S]*return;/,
+    'directory-v2 authenticates every omitted descriptor as exact f32-zero support'
+  );
+  assert.match(
+    v2Wgsl,
+    /field_index >= mechanics_field\[34u\][\s\S]*\|\| !\(weight > 0\.0\)/,
+    'every retained directory-v2 field candidate has positive support'
+  );
+  assert.match(
+    v2Wgsl,
+    /if \(field_index == INVALID_FIELD\)[\s\S]*return;[\s\S]*atomicAdd\(&control\[CONTROL_CONTRIBUTION_COUNT\], 1u\)/,
+    'only retained positive-support candidates advance the actual contribution count'
+  );
+  assert.match(
+    v2Wgsl,
     /if \(count == 0u\) \{[\s\S]*dispatch_x == 0u && dispatch_y == 1u && dispatch_z == 1u/
   );
   assert.doesNotMatch(

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_COARSE_PUBLISH_COMPLETE,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_FINE_CORRECTION_COMPLETE,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PHASE_PREDICTOR_VELOCITY_READY,
@@ -567,11 +568,15 @@ function submittedPredictorWorkspace(device, { arenaCount = 2 } = {}) {
 test('parent-field mechanics ABI reserves predictors plus phase-separated causal-route proposals', () => {
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS, 104);
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT.length, 104);
-  assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES, 288);
+  assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES, 304);
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS, 16);
   assert.equal(
     SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
     16
+  );
+  assert.equal(
+    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS,
+    1
   );
   const layout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     parentFieldCapacity: 9
@@ -583,11 +588,31 @@ test('parent-field mechanics ABI reserves predictors plus phase-separated causal
   assert.equal(layout.coarsePredictorStateOffsetWords, 320);
   assert.equal(layout.routeProposalOffsetWords, 392);
   assert.equal(layout.fineImpulseOffsetWords, 536);
+  assert.equal(layout.cflIntervalOffsetWords, 680);
+  assert.equal(layout.cflIntervalWords, 1);
   assert.equal(layout.parentToCoarseOrdinalOffsetWords, 704);
   assert.equal(layout.parentToCoarseOrdinalPaddingWords, 24);
   assert.equal(layout.workspaceBindingWordLength, 704);
   assert.equal(layout.workspaceBindingByteLength, 2816);
   assert.equal(layout.parentToCoarseOrdinalByteOffset, 2816);
+  for (let parentFieldCapacity = 1; parentFieldCapacity <= 16; parentFieldCapacity += 1) {
+    for (let fineFieldCapacity = 1; fineFieldCapacity <= 16; fineFieldCapacity += 1) {
+      const residueLayout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
+        parentFieldCapacity,
+        fineFieldCapacity
+      });
+      assert.ok(
+        residueLayout.parentToCoarseOrdinalPaddingWords
+          >= SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_CFL_INTERVAL_WORDS
+      );
+      assert.equal(
+        residueLayout.cflIntervalOffsetWords
+          + residueLayout.cflIntervalWords
+          <= residueLayout.parentToCoarseOrdinalOffsetWords,
+        true
+      );
+    }
+  }
   assert.equal(layout.parentToCoarseOrdinalByteLength, 36);
   assert.equal(layout.wordLength, 713);
   assert.throws(
@@ -763,11 +788,11 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn seal_fine_correction_alpha/);
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let sealed_causal_impulse = impulse - phase_impulse[\s\S]*ws_atomic_add_f32\(\s*80u, dot\(after_phase, sealed_causal_impulse\)/
+    /let sealed_causal_impulse = impulse - phase_impulse[\s\S]*ws_atomic_add_f32\(\s*80u, dot\(prior, sealed_causal_impulse\)[\s\S]*ws_atomic_add_f32\(\s*84u, dot\(phase_impulse \/ mass, sealed_causal_impulse\)/
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let causal_impulse = proposal - phase_impulse[\s\S]*ws_atomic_add_f32\(\s*82u, dot\(after_phase, causal_impulse\)/
+    /let causal_impulse = proposal - phase_impulse[\s\S]*ws_atomic_add_f32\(\s*82u, dot\(prior, causal_impulse\)[\s\S]*ws_atomic_add_f32\(\s*84u, dot\(phase_impulse \/ mass, causal_impulse\)/
   );
   const fineCorrectionSealSource =
     schroederSpatialParentFieldMechanicsWorkspaceWgsl
@@ -781,6 +806,14 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /causal_alpha = clamp\(\s*-causal_linear \/ causal_quadratic/
+  );
+  assert.match(
+    fineCorrectionSealSource,
+    /let causal_linear = cfl_alpha_limit \* \(\s*raw_causal_linear \+ cfl_alpha_limit \* phase_causal_cross\s*\)/
+  );
+  assert.match(
+    fineCorrectionSealSource,
+    /let causal_quadratic = route_alpha_squared \* raw_causal_quadratic/
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
@@ -800,11 +833,13 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   );
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /let correction_speed = length\(applied \/ mass\)[\s\S]*params\.max_correction_m_per_s[\s\S]*STATUS_CFL_REJECTED/
+    /let applied_velocity_delta = applied \/ mass;[\s\S]*velocity_delta_within_ceiling\([\s\S]*params\.max_correction_m_per_s[\s\S]*STATUS_CFL_REJECTED/
   );
   const predictorStateSource =
     schroederSpatialParentFieldMechanicsWorkspaceWgsl
-      .split('fn update_predictor_state(base: u32, node: vec3<f32>) {')[1]
+      .split(
+        'fn update_predictor_state(base: u32, node: vec3<f32>, predictor_dt: f32) {'
+      )[1]
       .split('\n}')[0];
   assert.match(
     predictorStateSource,
@@ -816,11 +851,11 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   );
   assert.match(
     predictorStateSource,
-    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\) \* params\.dt/
+    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\)\s*\* predictor_dt/
   );
   assert.doesNotMatch(
     predictorStateSource,
-    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\) \* params\.macro_dt/
+    /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\)\s*\* params\.macro_dt/
   );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn prepare_fine_transaction/);
   assert.match(
@@ -946,6 +981,93 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   );
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_INTERNAL_ENERGY_REFLUX_DEPOSIT, 2);
   assert.equal(SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_REFLUX_MEASURED_CONSERVATIVE, 2);
+});
+
+test('workspace temporal coarse sidecar is authenticated, recycled, and predictor-only', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const between = (start, end) => {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex + start.length);
+    assert.notEqual(startIndex, -1);
+    assert.notEqual(endIndex, -1);
+    return source.slice(startIndex, endIndex);
+  };
+  const receiptSource = between(
+    'fn temporal_coarse_receipts_admitted()',
+    'fn workspace_admitted('
+  );
+  assert.match(
+    receiptSource,
+    /fine_load\(fine_receipt \+ 13u\) != 0u[\s\S]*fine_load\(fine_receipt \+ 14u\) != 0u[\s\S]*fine_load\(fine_receipt \+ 15u\) != 0u/
+  );
+  assert.match(
+    receiptSource,
+    /coarse_load\(coarse_receipt \+ 13u\) == FIELD_TEMPORAL_COARSE_MAGIC[\s\S]*coarse_load\(coarse_receipt \+ 14u\)[\s\S]*bitcast<u32>\(params\.temporal_coarse_successor_dt\)[\s\S]*coarse_load\(coarse_receipt \+ 15u\)[\s\S]*coarse_temporal_receipt_seal\(\)/
+  );
+  const finalizeSource = between(
+    'fn finalize_fine_parent_baseline(',
+    'fn inject_coarse_native_state('
+  );
+  assert.ok(
+    finalizeSource.indexOf('state_store(baseline, word, value)')
+      < finalizeSource.indexOf('ws_store(accumulator + word, 0u)'),
+    'the fixed-point restriction bank must be materialized before recycling'
+  );
+  assert.match(
+    finalizeSource,
+    /for \(var word = 0u; word < ROW_WORDS; word = word \+ 1u\) \{\s*ws_store\(accumulator \+ word, 0u\)/
+  );
+  const injectSource = between(
+    'fn inject_coarse_native_state(',
+    'fn parent_node_position('
+  );
+  assert.match(
+    injectSource,
+    /let temporal_source = coarse_load\(28u\)\s*\+ coarse_field \* FIELD_ACCUMULATOR_WORDS/
+  );
+  assert.match(
+    injectSource,
+    /for \(var word = 0u; word < ROW_WORDS; word = word \+ 1u\) \{\s*if \(ws_load\(temporal_state \+ word\) != 0u\)/
+  );
+  assert.match(
+    injectSource,
+    /state_store\(temporal_state, 0u, source_values\[0\]\)[\s\S]*state_store\(temporal_state, 1u, temporal_momentum\.x\)[\s\S]*state_store\(temporal_state, 4u, source_values\[4\]\)/
+  );
+  const updateSource = between(
+    'fn update_predictor_state(',
+    'fn velocity('
+  );
+  assert.match(updateSource, /\* predictor_dt/);
+  assert.match(
+    updateSource,
+    /params\.cfl_factor \* params\.coarse_spacing_m\s*\/ max\(params\.macro_dt, 1\.0e-12\)/
+  );
+  assert.match(updateSource, /wall_correct\([\s\S]*predictor_dt/);
+  assert.match(
+    updateSource,
+    /params\.accumulator_offset \+ parent \* ROW_WORDS,[\s\S]*params\.temporal_coarse_successor_dt/
+  );
+  const contactSource = between(
+    'fn contact_parent_field_predictors(',
+    'fn seal_parent_field_predictors()'
+  );
+  assert.match(
+    contactSource,
+    /contact_pair\(params\.accumulator_offset, left, right, false\)/
+  );
+  const sealSource = between(
+    'fn seal_parent_field_predictors()',
+    'fn seal_coarse_terminal_workspace()'
+  );
+  assert.match(
+    sealSource,
+    /if \(!temporal_coarse_receipts_admitted\(\)\) \{\s*ws_reject\(STATUS_INVALID_SOURCE, 37u\)/
+  );
+  const fineValidatorSource = between(
+    'fn validate_fine_velocity_correction(',
+    '@compute @workgroup_size(64)\nfn validate_routed_coarse_cfl('
+  );
+  assert.doesNotMatch(fineValidatorSource, /temporal_coarse|successor_state/);
 });
 
 test('workspace indirect parent-field kernels flatten two-dimensional dispatch rows', () => {
@@ -1106,6 +1228,926 @@ test('cross-level phase routes omit sparse incomplete cohorts without fabricatin
   assert.doesNotMatch(causalSource, /var incomplete/);
 });
 
+test('workspace channel-energy closure uses pre-cancellation operation conditioning', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const helperSource = source
+    .split('fn dot_product_conditioning(')[1]
+    .split('fn range_fits(')[0];
+  assert.match(
+    helperSource,
+    /abs\(left\.x \* right\.x\)[\s\S]*abs\(left\.y \* right\.y\)[\s\S]*abs\(left\.z \* right\.z\)/
+  );
+  assert.match(
+    helperSource,
+    /let conditioning = max\(result_conditioning, operation_conditioning\)/
+  );
+  assert.match(
+    helperSource,
+    /finite_f32\(operation_conditioning\)[\s\S]*operation_conditioning >= 0\.0/
+  );
+  assert.equal(
+    [...source.matchAll(/let channel_operation_conditioning =/g)].length,
+    2
+  );
+  assert.equal(
+    [
+      ...source.matchAll(
+        /dot_product_conditioning\(pressure_velocity_delta, drag_impulse\)/g
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [
+      ...source.matchAll(
+        /if \(!measured_channel_energy_close\([\s\S]*?\)\) \{\s*reflux_reject\(REFLUX_ENERGY_REJECTED\)/g
+      )
+    ].length,
+    2
+  );
+  assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
+
+  const f32 = Math.fround;
+  const add = (left, right) => left.map(
+    (value, index) => f32(value + right[index])
+  );
+  const divide = (value, scalar) => value.map(
+    (component) => f32(component / scalar)
+  );
+  const dot = (left, right) => f32(
+    f32(f32(left[0] * right[0]) + f32(left[1] * right[1]))
+      + f32(left[2] * right[2])
+  );
+  const dotConditioning = (left, right) => f32(
+    f32(
+      Math.abs(f32(left[0] * right[0]))
+        + Math.abs(f32(left[1] * right[1]))
+    ) + Math.abs(f32(left[2] * right[2]))
+  );
+  const mass = f32(1e-8);
+  const prior = [10, -8, 20].map(f32);
+  const pressure = [
+    -2.000000023e-7,
+    1.599999990e-7,
+    -4.000000047e-7
+  ].map(f32);
+  const drag = [
+    2.000000165e-7,
+    -1.600000132e-7,
+    4.000000331e-7
+  ].map(f32);
+  const causal = [
+    9.99999996e-12,
+    -3.999999984e-12,
+    6.999999972e-12
+  ].map(f32);
+  const applied = add(add(pressure, drag), causal);
+  const pressureVelocityDelta = divide(pressure, mass);
+  const dragVelocityDelta = divide(drag, mass);
+  const afterPressure = add(prior, pressureVelocityDelta);
+  const afterDrag = add(afterPressure, dragVelocityDelta);
+  const quadratic = (impulse) => f32(
+    f32(0.5 * dot(impulse, impulse)) / mass
+  );
+  const totalQuadratic = quadratic(applied);
+  const pressureQuadratic = quadratic(pressure);
+  const dragQuadratic = quadratic(drag);
+  const causalQuadratic = quadratic(causal);
+  const total = f32(dot(prior, applied) + totalQuadratic);
+  const pressureDelta = f32(dot(prior, pressure) + pressureQuadratic);
+  const dragDelta = f32(dot(afterPressure, drag) + dragQuadratic);
+  const causalDelta = f32(dot(afterDrag, causal) + causalQuadratic);
+  const recomposed = f32(f32(pressureDelta + dragDelta) + causalDelta);
+  const resultConditioning = f32(
+    f32(f32(Math.abs(total) + Math.abs(pressureDelta)) + Math.abs(dragDelta))
+      + Math.abs(causalDelta)
+  );
+  const operationTerms = [
+    dotConditioning(prior, applied),
+    Math.abs(totalQuadratic),
+    dotConditioning(prior, pressure),
+    Math.abs(pressureQuadratic),
+    dotConditioning(prior, drag),
+    dotConditioning(pressureVelocityDelta, drag),
+    Math.abs(dragQuadratic),
+    dotConditioning(prior, causal),
+    dotConditioning(pressureVelocityDelta, causal),
+    dotConditioning(dragVelocityDelta, causal),
+    Math.abs(causalQuadratic)
+  ];
+  const operationConditioning = operationTerms.reduce(
+    (sum, value) => f32(sum + value),
+    f32(0)
+  );
+  const gamma64 = f32(
+    f32(64 * (2 ** -24)) / f32(1 - 64 * (2 ** -24))
+  );
+  const tolerance = (conditioning) => Math.max(
+    8 * 1.175494351e-38,
+    f32(gamma64 * Math.abs(conditioning))
+  );
+  const residual = Math.abs(total - recomposed);
+  assert.ok(residual > tolerance(resultConditioning));
+  assert.ok(
+    residual <= tolerance(Math.max(resultConditioning, operationConditioning))
+  );
+  assert.ok(
+    residual + 1e-8
+      > tolerance(Math.max(resultConditioning, operationConditioning))
+  );
+});
+
+test('workspace signed receipt closure uses operation-conditioned reductions', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const conditionedHelperSource = source
+    .split('fn measured_conditioned_close(')[1]
+    .split('fn independent_reduction_operation_count(')[0];
+  const countHelperSource = source
+    .split('fn independent_reduction_operation_count(')[1]
+    .split('fn dot_product_conditioning(')[0];
+  const fineSource = source
+    .split('fn prepare_fine_transaction() {')[1]
+    .split('@compute')[0];
+  const commitSource = source
+    .split('fn commit_routed_reflux() {')[1]
+    .split('@compute')[0];
+  const terminalSource = source
+    .split('fn seal_coarse_velocity_publish() {')[1]
+    .split('@compute')[0];
+  const coarsePrepareSource = source
+    .split('fn prepare_coarse_transaction() {')[1]
+    .split('@compute')[0];
+
+  assert.match(
+    conditionedHelperSource,
+    /let conditioning = max\(\s*abs\(left\) \+ abs\(right\),\s*operation_conditioning\s*\)/
+  );
+  assert.match(
+    conditionedHelperSource,
+    /finite_f32\(operation_conditioning\)[\s\S]*operation_conditioning >= 0\.0[\s\S]*measured_scale_tolerance\(conditioning, count\)/
+  );
+  assert.match(
+    countHelperSource,
+    /return min\(count, 0x55555555u\) \* 3u;/
+  );
+  assert.equal(
+    [...source.matchAll(/measured_conditioned_close\(/g)].length - 1,
+    11
+  );
+  assert.match(
+    fineSource,
+    /let fine_signed_reduction_count = independent_reduction_operation_count\(\s*ws_load\(21u\)\s*\)/
+  );
+  assert.match(
+    terminalSource,
+    /let coarse_signed_reduction_count = independent_reduction_operation_count\(\s*ws_load\(22u\)\s*\)/
+  );
+
+  const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const conditionedCall = (...terms) => new RegExp(
+    `measured_conditioned_close\\(\\s*${terms
+      .map(escapeRegex)
+      .join('\\s*,\\s*')}\\s*\\)`
+  );
+  const assertConditioned = (section, left, right, conditioning, count) => {
+    assert.match(
+      section,
+      conditionedCall(left, right, conditioning, count)
+    );
+  };
+  const signedReceiptChannels = [
+    [
+      'local_pressure_internal_compensation_sum',
+      'local_pressure_internal_compensation',
+      'local_pressure_internal_compensation_sum_abs'
+    ],
+    [
+      'local_ambient_impulse_sum.x',
+      'receipt_ambient_impulse.x',
+      'local_ambient_impulse_sum_abs.x'
+    ],
+    [
+      'local_ambient_impulse_sum.y',
+      'receipt_ambient_impulse.y',
+      'local_ambient_impulse_sum_abs.y'
+    ],
+    [
+      'local_ambient_impulse_sum.z',
+      'receipt_ambient_impulse.z',
+      'local_ambient_impulse_sum_abs.z'
+    ],
+    [
+      'local_ambient_external_work_sum',
+      'receipt_ambient_external_work',
+      'local_ambient_external_work_sum_abs'
+    ]
+  ];
+  for (const [left, right, conditioning] of signedReceiptChannels) {
+    assertConditioned(
+      fineSource,
+      left,
+      right,
+      conditioning,
+      'fine_signed_reduction_count'
+    );
+  }
+  assert.match(
+    fineSource,
+    /local_pressure_internal_compensation_sum_abs\s*=\s*next_local_pressure_internal_compensation_sum_abs/
+  );
+  assert.match(
+    fineSource,
+    /local_ambient_impulse_sum_abs\s*=\s*next_local_ambient_impulse_sum_abs/
+  );
+  assert.match(
+    fineSource,
+    /local_ambient_external_work_sum_abs\s*=\s*next_local_ambient_external_work_sum_abs/
+  );
+  assertConditioned(
+    terminalSource,
+    'local_pressure_internal_compensation_sum',
+    'receipt_pressure_internal_compensation',
+    'local_pressure_internal_compensation_sum_abs',
+    'coarse_signed_reduction_count'
+  );
+  for (const [left, right, conditioning] of signedReceiptChannels.slice(1)) {
+    assertConditioned(
+      terminalSource,
+      left,
+      right,
+      conditioning,
+      'coarse_signed_reduction_count'
+    );
+  }
+  assert.match(
+    terminalSource,
+    /local_pressure_internal_compensation_sum_abs\s*=\s*next_local_pressure_internal_compensation_sum_abs/
+  );
+  assert.match(
+    terminalSource,
+    /local_ambient_impulse_sum_abs\s*=\s*next_local_ambient_impulse_sum_abs/
+  );
+  assert.match(
+    terminalSource,
+    /local_ambient_external_work_sum_abs\s*=\s*next_local_ambient_external_work_sum_abs/
+  );
+
+  // Cross-level row 16 and header 129 now share one canonical row-order sum;
+  // they do not need a tolerance that could hide header corruption.
+  assert.match(
+    fineSource,
+    /var future_coarse_pressure_compensation_sum = 0\.0;[\s\S]*ws_store\(\s*params\.route_proposal_offset \+ 12u,\s*bitcast<u32>\(future_coarse_pressure_compensation_sum\)\s*\)/
+  );
+  assert.match(
+    commitSource,
+    /reflux_store\(\s*129u,\s*ws_load\(params\.route_proposal_offset \+ 12u\)\s*\)/
+  );
+  assert.doesNotMatch(
+    commitSource,
+    /reflux_load\(129u\)[\s\S]{0,120}coarse_pressure_compensation/
+  );
+  assert.match(
+    terminalSource,
+    /bitcast<u32>\(coarse_pressure_compensation_sum\)\s*!= bitcast<u32>\(coarse_cross_level_pressure_compensation\)/
+  );
+  assertConditioned(
+    coarsePrepareSource,
+    'future_pressure_compensation_sum',
+    'expected_future_pressure_compensation',
+    'future_pressure_compensation_sum_abs',
+    'future_pressure_reassociation_count'
+  );
+  assert.match(
+    coarsePrepareSource,
+    /future_pressure_compensation_sum_abs\s*\+ abs\(local_pressure_compensation\)\s*\+ abs\(pressure_compensation\)/
+  );
+  assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
+
+  const f32 = Math.fround;
+  const f32Sum = (values) => values.reduce(
+    (sum, value) => f32(sum + f32(value)),
+    f32(0)
+  );
+  const tolerance = (scale, count) => {
+    const epsilon = f32(2 ** -24);
+    const nEpsilon = f32(Math.min(
+      0.25,
+      f32(f32(Math.max(1, count)) * epsilon)
+    ));
+    const gamma = f32(
+      nEpsilon / f32(Math.max(1e-20, f32(1 - nEpsilon)))
+    );
+    return Math.max(
+      f32(8 * 1.175494351e-38),
+      f32(gamma * Math.abs(f32(scale)))
+    );
+  };
+  const terms = [f32(1), f32(2 ** -24), f32(-1)];
+  const local = f32Sum(terms);
+  const independentlyReduced = f32Sum([terms[0], terms[2], terms[1]]);
+  const sumAbs = f32Sum(terms.map(Math.abs));
+  const operationCount = terms.length * 3;
+  const residual = Math.abs(f32(local - independentlyReduced));
+  const resultScale = f32(
+    Math.abs(local) + Math.abs(independentlyReduced)
+  );
+  assert.equal(local, 0);
+  assert.equal(independentlyReduced, f32(2 ** -24));
+  assert.equal(sumAbs, 2);
+  assert.ok(residual > tolerance(resultScale, operationCount));
+  assert.ok(
+    residual <= tolerance(
+      Math.max(resultScale, sumAbs),
+      operationCount
+    )
+  );
+  const corruptedPeer = f32(2 ** -18);
+  const corruptedResidual = Math.abs(f32(local - corruptedPeer));
+  const corruptedScale = Math.max(
+    f32(Math.abs(local) + Math.abs(corruptedPeer)),
+    sumAbs
+  );
+  assert.ok(corruptedResidual > tolerance(corruptedScale, operationCount));
+
+  // Updating an already rounded aggregate by the sum of row deltas does not
+  // generally equal summing the exact future rows in their canonical order.
+  const priorRows = [f32(1), f32(2 ** -24), f32(-1)];
+  const pressureShares = [f32(0), f32(2 ** -24), f32(0)];
+  const futureRows = priorRows.map(
+    (value, index) => f32(value + pressureShares[index])
+  );
+  const oldHeader = f32Sum(priorRows);
+  const incrementalHeader = f32(oldHeader + f32Sum(pressureShares));
+  const canonicalFutureHeader = f32Sum(futureRows);
+  assert.equal(oldHeader, 0);
+  assert.equal(incrementalHeader, f32(2 ** -24));
+  assert.equal(canonicalFutureHeader, f32(2 ** -23));
+  assert.notEqual(incrementalHeader, canonicalFutureHeader);
+});
+
+test('workspace route CFL solver intersects cumulative feasible alpha intervals', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  assert.match(source, /const CFL_INTERVAL_WORDS: u32 = 1u;/);
+  assert.match(source, /fn velocity_alpha_interval\(/);
+  assert.match(source, /fn cfl_interval_offset\(\) -> u32/);
+  assert.match(
+    source,
+    /ws_atomic_max_nonnegative_f32\(\s*cfl_interval_offset\(\), alpha_lower/
+  );
+  assert.match(
+    source,
+    /let cfl_alpha_lower = bitcast<f32>\(ws_load\(cfl_interval_offset\(\)\)\)/
+  );
+  assert.match(
+    source,
+    /params\.fine_impulse_offset\s*\+ params\.fine_capacity \* FINE_IMPULSE_WORDS/
+  );
+  assert.match(
+    source,
+    /if \(cfl_alpha_lower > cfl_alpha_limit\) \{\s*ws_reject\(STATUS_CFL_REJECTED/
+  );
+  assert.match(
+    source,
+    /const ROUTE_CFL_NUMERIC_GUARD_FACTOR: f32 = 0\.9999847412109375;/
+  );
+  assert.match(
+    source,
+    /const ROUTE_CFL_PHYSICAL_AUDIT_FACTOR: f32 = 1\.000003814697265625;/
+  );
+  const intervalSource = source
+    .split('fn velocity_alpha_interval(')[1]
+    .split('fn velocity_endpoint_within_physical_audit')[0];
+  assert.match(
+    intervalSource,
+    /let numeric_scale = max\(vmax, max\(prior_largest, delta_largest\)\);/
+  );
+  assert.match(
+    intervalSource,
+    /let target_vmax2 = max\(\s*guarded_vmax2, min\(prior2, audit_vmax2\)\s*\);/
+  );
+  assert.match(
+    intervalSource,
+    /let q = -b - select\(-root_term, root_term, b >= 0\.0\);/
+  );
+  assert.match(
+    intervalSource,
+    /root_a = q \/ a;\s*root_b = c \/ q;/
+  );
+  assert.doesNotMatch(intervalSource, /max\(prior2, guarded_vmax2\)/);
+  const endpointAuditSource = source
+    .split('fn velocity_endpoint_within_physical_audit(')[1]
+    .split('fn velocity_delta_within_ceiling(')[0];
+  assert.match(
+    endpointAuditSource,
+    /scaled_vmax \* ROUTE_CFL_PHYSICAL_AUDIT_FACTOR/
+  );
+  assert.doesNotMatch(
+    endpointAuditSource,
+    /ROUTE_CFL_NUMERIC_GUARD_FACTOR/
+  );
+  assert.equal(
+    [...source.matchAll(
+      /let phase_alpha_interval = velocity_alpha_interval\(/g
+    )].length,
+    2
+  );
+  assert.equal(
+    [...source.matchAll(
+      /let full_alpha_interval = velocity_alpha_interval\(/g
+    )].length,
+    2
+  );
+  assert.equal(
+    [...source.matchAll(
+      /let alpha_lower = max\(\s*phase_alpha_interval\.x, full_alpha_interval\.x\s*\);/g
+    )].length,
+    1
+  );
+  assert.match(
+    source,
+    /let alpha_lower = max\(\s*max\(phase_alpha_interval\.x, full_alpha_interval\.x\),\s*max\(\s*successor_phase_alpha_interval\.x,\s*successor_full_alpha_interval\.x\s*\)\s*\);/
+  );
+  const fineValidatorSource = source
+    .split('fn validate_fine_velocity_correction(')[1]
+    .split('@compute')[0];
+  const coarseValidatorSource = source
+    .split('fn validate_routed_coarse_cfl(')[1]
+    .split('@compute')[0];
+  for (const validatorSource of [fineValidatorSource, coarseValidatorSource]) {
+    assert.match(
+      validatorSource,
+      /let phase_alpha_interval = velocity_alpha_interval\(/
+    );
+    assert.match(
+      validatorSource,
+      /let full_alpha_interval = velocity_alpha_interval\(/
+    );
+    assert.match(
+      validatorSource,
+      /let alpha_lower = max\(/
+    );
+  }
+  assert.match(
+    fineValidatorSource,
+    /prior, phase_delta, vmax, correction_ceiling[\s\S]*prior, full_delta, vmax, correction_ceiling/
+  );
+  assert.equal(
+    [...coarseValidatorSource.matchAll(/\+ existing \/ mass/g)].length,
+    2
+  );
+  assert.match(
+    coarseValidatorSource,
+    /successor_prior = velocity\(successor_state\) \+ existing \/ mass/
+  );
+  assert.doesNotMatch(
+    coarseValidatorSource,
+    /successor_prior\s*=\s*[^;]*(?:proposal|phase_impulse)/
+  );
+  const prepareSource = source
+    .split('fn prepare_fine_transaction()')[1]
+    .split('@compute')[0];
+  assert.equal(
+    [...prepareSource.matchAll(
+      /velocity_endpoint_within_physical_audit\(/g
+    )].length,
+    2
+  );
+  assert.equal(
+    [...prepareSource.matchAll(/velocity_magnitude_ratio\(/g)].length,
+    2
+  );
+  assert.doesNotMatch(prepareSource, /length\(next_velocity\)/);
+  const coarsePublishValidatorSource = source
+    .split('fn validate_coarse_velocity_publish(')[1]
+    .split('fn seal_coarse_velocity_publish()')[0];
+  assert.match(
+    coarsePublishValidatorSource,
+    /let cfl_ratio = velocity_magnitude_ratio\(future, vmax\);/
+  );
+  assert.match(
+    coarsePublishValidatorSource,
+    /velocity_endpoint_within_physical_audit\(future, vmax\)/
+  );
+  assert.doesNotMatch(coarsePublishValidatorSource, /length\(future\)/);
+  const coarsePublishSealSource = source
+    .split('fn seal_coarse_velocity_publish()')[1]
+    .split('@compute')[0];
+  assert.match(
+    coarsePublishSealSource,
+    /max_coarse_cfl > ROUTE_CFL_PHYSICAL_AUDIT_FACTOR/
+  );
+  assert.doesNotMatch(
+    coarsePublishSealSource,
+    /max_coarse_cfl > 1\.0 \+ measured_tolerance/
+  );
+  assert.match(source, /fn prepare_reject\(flags: u32, reason: u32\)/);
+  assert.match(source, /reflux_store\(124u, 0x50520000u \| \(reason & 0xffffu\)\)/);
+  assert.match(source, /fn publish_cfl_interval_reject_trace\(/);
+  assert.match(source, /fn publish_cfl_interval_seal_reject_trace\(/);
+  const cflRejectTraceSource = source
+    .split('fn publish_cfl_interval_reject_trace(')[1]
+    .split('fn publish_cfl_interval_seal_reject_trace(')[0];
+  assert.ok(
+    cflRejectTraceSource.indexOf(
+      '&reflux_ledger[124u], 0xffffffffu, 0xfffffffeu'
+    ) < cflRejectTraceSource.indexOf(
+      'reflux_store(125u, bitcast<u32>(prior.x))'
+    )
+  );
+  assert.ok(
+    cflRejectTraceSource.indexOf(
+      'reflux_store(135u, bitcast<u32>(ceiling))'
+    ) < cflRejectTraceSource.lastIndexOf('reflux_store(124u, tag)')
+  );
+  assert.doesNotMatch(cflRejectTraceSource, /storageBarrier\(/);
+  assert.match(
+    source,
+    /ws_reject\(STATUS_CFL_REJECTED, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED\);\s*publish_cfl_interval_reject_trace\(\s*0u, fine_field/
+  );
+  assert.match(
+    coarseValidatorSource,
+    /ws_reject\(STATUS_CFL_REJECTED, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED\)/
+  );
+  assert.match(
+    coarseValidatorSource,
+    /publish_cfl_interval_reject_trace\(\s*3u, coarse_field, successor_prior/
+  );
+  assert.match(
+    coarseValidatorSource,
+    /else \{\s*publish_cfl_interval_reject_trace\(\s*1u, coarse_field, prior/
+  );
+  assert.match(
+    coarseValidatorSource,
+    /let temporal_joint_interval_rejected =\s*!current_interval_rejected\s*&& !successor_interval_rejected\s*&& max\(current_alpha_lower, successor_alpha_lower\)\s*> min\(current_alpha_upper, successor_alpha_upper\)/
+  );
+  assert.match(
+    coarseValidatorSource,
+    /successor_interval_rejected\s*\|\| temporal_joint_interval_rejected\s*\|\| successor_alpha_upper < current_alpha_upper/
+  );
+  assert.match(
+    source,
+    /ws_reject\(STATUS_CFL_REJECTED, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED\);\s*publish_cfl_interval_seal_reject_trace\(/
+  );
+  assert.equal(
+    [...prepareSource.matchAll(/prepare_reject\(REFLUX_NONFINITE, [1-6]u\)/g)]
+      .length,
+    6
+  );
+  assert.equal(
+    [...prepareSource.matchAll(
+      /prepare_reject\(REFLUX_CFL_REJECTED, (?:10[12]|201)u\)/g
+    )].length,
+    3
+  );
+  assert.doesNotMatch(
+    prepareSource,
+    /prepare_reject\(REFLUX_CFL_REJECTED, (?:103|203)u\)/
+  );
+  assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
+
+  const f32 = Math.fround;
+  const add = (left, right) => left.map(
+    (value, index) => f32(value + right[index])
+  );
+  const scale = (value, scalar) => value.map(
+    (component) => f32(component * scalar)
+  );
+  const dot = (left, right) => f32(
+    f32(f32(left[0] * right[0]) + f32(left[1] * right[1]))
+      + f32(left[2] * right[2])
+  );
+  const alphaInterval = (prior, delta, maximum, ceiling = 0) => {
+    const vmax = f32(maximum);
+    const priorLargest = Math.max(...prior.map((value) => Math.abs(value)));
+    const deltaLargest = Math.max(...delta.map((value) => Math.abs(value)));
+    const numericScale = Math.max(vmax, priorLargest, deltaLargest);
+    if (!(numericScale > 0) || !Number.isFinite(numericScale)) {
+      return { valid: false, lower: 0, upper: -1 };
+    }
+    let ceilingUpper = f32(1);
+    if (ceiling > 0 && deltaLargest > 0) {
+      const normalizedDelta = delta.map(
+        (value) => f32(value / deltaLargest)
+      );
+      const normalizedLength = f32(Math.sqrt(dot(
+        normalizedDelta,
+        normalizedDelta
+      )));
+      const ceilingToLargest = f32(ceiling / deltaLargest);
+      if (ceilingToLargest < normalizedLength) {
+        ceilingUpper = f32(ceilingToLargest / normalizedLength);
+      }
+    }
+    const scaledPrior = prior.map((value) => f32(value / numericScale));
+    const scaledDelta = delta.map((value) => f32(value / numericScale));
+    const scaledVmax = f32(vmax / numericScale);
+    const scaledGuardedVmax = f32(
+      scaledVmax * f32(0.9999847412109375)
+    );
+    const scaledAuditVmax = f32(
+      scaledVmax * f32(1.000003814697265625)
+    );
+    const a = dot(scaledDelta, scaledDelta);
+    const b = dot(scaledPrior, scaledDelta);
+    const prior2 = dot(scaledPrior, scaledPrior);
+    const guardedVmax2 = f32(scaledGuardedVmax * scaledGuardedVmax);
+    const auditVmax2 = f32(scaledAuditVmax * scaledAuditVmax);
+    const targetVmax2 = Math.max(
+      guardedVmax2,
+      Math.min(prior2, auditVmax2)
+    );
+    const c = f32(prior2 - targetVmax2);
+    if (!(a > 0)) {
+      return c <= 0
+        ? { valid: true, lower: 0, upper: ceilingUpper }
+        : { valid: false, lower: 0, upper: -1 };
+    }
+    const bb = f32(b * b);
+    const ac = f32(a * c);
+    const rawDiscriminant = f32(bb - ac);
+    const discriminantTolerance = Math.max(
+      f32(8 * 1.175494351e-38),
+      f32(f32(32 * 5.960464477539063e-8) * f32(
+        Math.abs(bb) + Math.abs(ac)
+      ))
+    );
+    if (!Number.isFinite(rawDiscriminant)
+        || rawDiscriminant < -discriminantTolerance) {
+      return { valid: false, lower: 0, upper: -1 };
+    }
+    const rootTerm = f32(Math.sqrt(Math.max(rawDiscriminant, 0)));
+    const q = f32(-b - (b >= 0 ? rootTerm : -rootTerm));
+    const rootA = q === 0 ? f32(-b / a) : f32(q / a);
+    const rootB = q === 0 ? rootA : f32(c / q);
+    const lower = f32(Math.max(0, Math.min(rootA, rootB)));
+    const upper = f32(Math.min(
+      ceilingUpper,
+      1,
+      Math.max(rootA, rootB)
+    ));
+    const valid = Number.isFinite(lower)
+      && Number.isFinite(upper)
+      && lower <= upper;
+    return {
+      valid,
+      lower: valid && lower === 0 ? 0 : lower,
+      upper: valid && upper === 0 ? 0 : upper
+    };
+  };
+  const alphaLimit = (prior, delta, maximum, ceiling = 0) => {
+    const interval = alphaInterval(prior, delta, maximum, ceiling);
+    return interval.valid ? interval.upper : f32(-1);
+  };
+
+  const vmax = f32(100);
+  const guardedVmax = f32(vmax * f32(0.9999847412109375));
+  const auditVmax = f32(vmax * f32(1.000003814697265625));
+  const insideAlpha = alphaLimit(
+    [f32(90), f32(0), f32(0)],
+    [f32(20), f32(0), f32(0)],
+    vmax
+  );
+  const insideEndpoint = add(
+    [f32(90), f32(0), f32(0)],
+    scale([f32(20), f32(0), f32(0)], insideAlpha)
+  );
+  assert.ok(insideAlpha > 0 && insideAlpha < 1);
+  assert.ok(Math.abs(insideEndpoint[0] - guardedVmax) <= 2e-5);
+
+  const bandPrior = [f32(99.9995), f32(0), f32(0)];
+  assert.equal(
+    alphaLimit(bandPrior, [f32(1), f32(0), f32(0)], vmax),
+    0
+  );
+  assert.ok(bandPrior[0] > guardedVmax && bandPrior[0] <= auditVmax);
+  assert.equal(
+    alphaLimit(
+      [f32(100.01), f32(0), f32(0)],
+      [f32(1), f32(0), f32(0)],
+      vmax
+    ),
+    -1
+  );
+  const inwardCrossingInterval = alphaInterval(
+    [f32(100.01), f32(0), f32(0)],
+    [f32(-300.02), f32(0), f32(0)],
+    vmax
+  );
+  const inwardCrossingAlpha = inwardCrossingInterval.upper;
+  assert.equal(inwardCrossingInterval.valid, true);
+  assert.ok(inwardCrossingInterval.lower > 0);
+  assert.ok(inwardCrossingAlpha > 0.66 && inwardCrossingAlpha < 0.67);
+  assert.ok(
+    alphaLimit(
+      [f32(101), f32(0), f32(0)],
+      [f32(-1), f32(0), f32(0)],
+      vmax
+    ) > 0.99
+  );
+  for (const magnitude of [f32(1e-30), f32(1e30)]) {
+    const scaledInterval = alphaInterval(
+      [f32(0.9 * magnitude), f32(0), f32(0)],
+      [f32(0.2 * magnitude), f32(0), f32(0)],
+      magnitude
+    );
+    assert.equal(scaledInterval.valid, true);
+    assert.ok(scaledInterval.upper > 0.49 && scaledInterval.upper < 0.51);
+  }
+
+  // A reduced causal component can remove cancellation from the full route.
+  // Constraining both endpoint rays makes every intermediate causal blend a
+  // convex combination of two admitted velocities.
+  const envelopeVmax = f32(10);
+  const envelopePrior = [f32(0), f32(9), f32(0)];
+  const phaseDelta = [f32(8), f32(0), f32(0)];
+  const causalDelta = [f32(-8), f32(0), f32(0)];
+  const fullDelta = add(phaseDelta, causalDelta);
+  const phaseAlpha = alphaLimit(
+    envelopePrior,
+    phaseDelta,
+    envelopeVmax
+  );
+  const fullAlpha = alphaLimit(
+    envelopePrior,
+    fullDelta,
+    envelopeVmax
+  );
+  const dualRayAlpha = Math.min(phaseAlpha, fullAlpha);
+  assert.equal(fullAlpha, 1);
+  assert.ok(phaseAlpha > 0 && phaseAlpha < 1);
+  assert.ok(
+    Math.sqrt(dot(
+      add(envelopePrior, scale(phaseDelta, fullAlpha)),
+      add(envelopePrior, scale(phaseDelta, fullAlpha))
+    )) > envelopeVmax
+  );
+  const envelopeGuard = f32(
+    envelopeVmax * f32(0.9999847412109375)
+  );
+  const phaseEndpoint = add(
+    envelopePrior,
+    scale(phaseDelta, dualRayAlpha)
+  );
+  const fullEndpoint = add(
+    envelopePrior,
+    scale(fullDelta, dualRayAlpha)
+  );
+  const endpointDifference = add(
+    fullEndpoint,
+    scale(phaseEndpoint, f32(-1))
+  );
+  const convexCurvature = f32(2 * dot(
+    endpointDifference,
+    endpointDifference
+  ));
+  assert.ok(convexCurvature >= 0);
+  assert.ok(Math.sqrt(dot(phaseEndpoint, phaseEndpoint)) <= envelopeGuard + 2e-5);
+  assert.ok(Math.sqrt(dot(fullEndpoint, fullEndpoint)) <= envelopeGuard + 2e-5);
+  for (let index = 0; index <= 1024; index += 1) {
+    const causalAlpha = f32(index / 1024);
+    const blendedDelta = add(
+      phaseDelta,
+      scale(causalDelta, causalAlpha)
+    );
+    const endpoint = add(
+      envelopePrior,
+      scale(blendedDelta, dualRayAlpha)
+    );
+    assert.ok(Math.sqrt(dot(endpoint, endpoint)) <= envelopeGuard + 2e-5);
+  }
+
+  // The current predictor can admit the entire route while the immediate
+  // successor predictor constrains it. Intersecting the same two route rays
+  // at both temporal endpoints protects every causal blend without adding
+  // the already committed reflux more than once.
+  const temporalCurrentPrior = [f32(99), f32(0), f32(0)];
+  const temporalSuccessorPrior = [f32(99.9), f32(0), f32(0)];
+  const temporalPhaseDelta = [f32(0.25), f32(0), f32(0)];
+  const temporalFullDelta = [f32(0.5), f32(0), f32(0)];
+  const currentTemporalUpper = Math.min(
+    alphaLimit(temporalCurrentPrior, temporalPhaseDelta, vmax),
+    alphaLimit(temporalCurrentPrior, temporalFullDelta, vmax)
+  );
+  const successorTemporalUpper = Math.min(
+    alphaLimit(temporalSuccessorPrior, temporalPhaseDelta, vmax),
+    alphaLimit(temporalSuccessorPrior, temporalFullDelta, vmax)
+  );
+  assert.equal(currentTemporalUpper, 1);
+  assert.ok(successorTemporalUpper > 0.19 && successorTemporalUpper < 0.21);
+  const temporalJointUpper = Math.min(
+    currentTemporalUpper,
+    successorTemporalUpper
+  );
+  for (let index = 0; index <= 1024; index += 1) {
+    const causalBlend = f32(index / 1024);
+    const blendedDelta = add(
+      temporalPhaseDelta,
+      scale(
+        add(
+          temporalFullDelta,
+          scale(temporalPhaseDelta, f32(-1))
+        ),
+        causalBlend
+      )
+    );
+    for (const prior of [temporalCurrentPrior, temporalSuccessorPrior]) {
+      const endpoint = add(prior, scale(blendedDelta, temporalJointUpper));
+      assert.ok(
+        Math.sqrt(dot(endpoint, endpoint)) <= guardedVmax + 2e-5
+      );
+    }
+  }
+
+  // Schedule 405's captured fine0 endpoint spent effectively the entire
+  // physical sphere. Its theta=.5 -> 1 predictor refresh then crossed the
+  // unchanged physical audit, while the 2^-16 route debit remains inside it.
+  const capturedVmax = f32(Math.sqrt(25220.5234375));
+  const capturedFine0Endpoint = f32(Math.sqrt(25220.51953125));
+  const capturedFine1Prior = f32(Math.sqrt(25221.375));
+  const predictorRefresh = f32(capturedFine1Prior - capturedFine0Endpoint);
+  const physicalAuditRatio = f32(1 + 3.8146973e-6);
+  assert.ok(
+    f32(capturedFine0Endpoint + predictorRefresh)
+      > f32(capturedVmax * physicalAuditRatio)
+  );
+  assert.ok(
+    f32(
+      f32(capturedVmax * f32(0.9999847412109375)) + predictorRefresh
+    ) <= f32(capturedVmax * physicalAuditRatio)
+  );
+});
+
+test('workspace causal-energy seal evaluates coefficients at sealed route alpha', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const predictorSealSource = source
+    .split('fn seal_parent_field_predictors() {')[1]
+    .split('@compute')[0];
+  const causalSealSource = source
+    .split('fn seal_fine_correction_alpha() {')[1]
+    .split('@compute')[0];
+  assert.match(
+    predictorSealSource,
+    /ws_store\(84u, bitcast<u32>\(0\.0\)\)/
+  );
+  assert.match(
+    causalSealSource,
+    /let raw_causal_linear =[\s\S]*let phase_causal_cross = bitcast<f32>\(ws_load\(84u\)\)[\s\S]*let raw_causal_quadratic =/
+  );
+  assert.match(
+    causalSealSource,
+    /let causal_linear = cfl_alpha_limit \* \(\s*raw_causal_linear \+ cfl_alpha_limit \* phase_causal_cross\s*\)/
+  );
+  assert.match(
+    causalSealSource,
+    /let causal_quadratic = route_alpha_squared \* raw_causal_quadratic/
+  );
+
+  const scaledCoefficients = ({ routeAlpha, priorLinear, phaseCross, quadratic }) => ({
+    linear: routeAlpha * (priorLinear + routeAlpha * phaseCross),
+    quadratic: routeAlpha * routeAlpha * quadratic
+  });
+  const scaledEnergy = (coefficients, causalAlpha) => (
+    causalAlpha * coefficients.linear
+      + causalAlpha * causalAlpha * coefficients.quadratic
+  );
+
+  // The old alpha=1 coefficients see cancellation that disappears after the
+  // shared route is reduced. Its accepted causal alpha would create energy.
+  const unsafeAtUnitRoute = {
+    routeAlpha: 0.25,
+    priorLinear: 1,
+    phaseCross: -2,
+    quadratic: 2
+  };
+  const oldLinear = unsafeAtUnitRoute.priorLinear
+    + unsafeAtUnitRoute.phaseCross;
+  const oldCausalAlpha = -oldLinear / unsafeAtUnitRoute.quadratic;
+  const unsafeScaled = scaledCoefficients(unsafeAtUnitRoute);
+  assert.equal(oldCausalAlpha, 0.5);
+  assert.ok(scaledEnergy(unsafeScaled, oldCausalAlpha) > 0);
+  assert.ok(unsafeScaled.linear >= 0);
+
+  // Route scaling can also turn a unit-route rejection into a safe full
+  // causal step; the sealed coefficients must retain that admissible case.
+  const safeAfterRouteReduction = scaledCoefficients({
+    routeAlpha: 0.25,
+    priorLinear: -1,
+    phaseCross: 2,
+    quadratic: 0.2
+  });
+  assert.ok(scaledEnergy(safeAfterRouteReduction, 1) < 0);
+
+  const rootCase = scaledCoefficients({
+    routeAlpha: 0.5,
+    priorLinear: -2,
+    phaseCross: 1,
+    quadratic: 4
+  });
+  const rootAlpha = -rootCase.linear / rootCase.quadratic;
+  assert.equal(rootAlpha, 0.75);
+  assert.ok(Math.abs(scaledEnergy(rootCase, rootAlpha)) <= Number.EPSILON);
+});
+
 test('workspace floating-point CAS reductions scale retries to admitted fields', () => {
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
@@ -1117,7 +2159,7 @@ test('workspace floating-point CAS reductions scale retries to admitted fields',
         /attempts >= atomic_retry_limit\(\)/g
       )
     ].length,
-    6
+    8
   );
   assert.doesNotMatch(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,

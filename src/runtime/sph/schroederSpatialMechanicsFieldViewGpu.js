@@ -82,7 +82,7 @@ const FIELD_P2G_CONTRIBUTION_WORDS = 12;
 // can reuse both allocations and bind groups after queue-ordered retirement.
 // The buffers remain private to the owning execution; no two pending field
 // generations can alias them.
-const FIELD_P2G_PARAMS_BYTES = 192;
+const FIELD_P2G_PARAMS_BYTES = 208;
 const FIELD_P2G_PRODUCT_ROUTE_CERTIFICATE_PARAMS_BYTES = 32;
 const FIELD_P2G_INDIRECT_BYTES = 3 * UINT32_BYTES;
 const FIELD_P2G_EMPTY_PRODUCT_EVENT_BYTES = 32 * Float32Array.BYTES_PER_ELEMENT;

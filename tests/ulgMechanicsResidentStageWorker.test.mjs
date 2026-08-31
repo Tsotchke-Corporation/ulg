@@ -6,8 +6,17 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+  ULG_REACTION_CLOSURE_SCHEMA,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
+  SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED,
   SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY,
   SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_CONSUMED,
@@ -22,12 +31,14 @@ import {
   ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_SCHEMA,
+  ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA,
   ULG_WORKER_SCHROEDER_EPOCH_SEAL_SCHEMA,
   ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS,
   ULG_WORKER_SCHROEDER_LANE_SEED_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_SCHEMA,
   ULG_WORKER_SCHROEDER_SPATIAL_EPOCH_STAGE_SCHEMA,
   cancelUlgMechanicsResidentStageWorkerSchedule,
+  createWorkerSchroederLaneLevelAssignmentProvider,
   exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot,
   releaseUlgMechanicsResidentStageWorkerLane,
   resolveUlgMechanicsResidentStageWorkerRetainedParticleState,
@@ -36,8 +47,21 @@ import {
   runUlgMechanicsResidentStageWorkerSchedulePayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 import {
-  createSchroederWorkerHierarchyConfig
+  createSchroederTargetScheduleAuthority,
+  createSchroederTargetScheduleProviderAuthority,
+  createSchroederWorkerHierarchyConfig,
+  schroederTargetScheduleConfigurationReceipt,
+  validateSchroederWorkerScheduleExecutionRouteReceipt
 } from '../src/runtime/sph/schroederWorkerLaneControlPlane.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
+import {
+  SPH_CANONICAL_CONTACT_MOTION_BOUND_REVISION,
+  SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
+} from '../src/runtime/sph/sphCanonicalContactMotionBound.js';
 import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
   runSchroederSpatialEpochGenerationWebGpu,
@@ -45,6 +69,7 @@ import {
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import {
   createSchroederSameLevelMechanicsSpatialEpochTransaction,
+  runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import {
@@ -76,6 +101,23 @@ import {
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS
 } from '../src/runtime/sph/sphGpuBuffers.js';
+import {
+  mergeResidentProductMassBuffersWebGpu
+} from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA,
+  runCanonicalSphReactionMotionEnvelopeWatchWebGpu
+} from '../src/runtime/sph/sphReactionMotionEnvelopeWatchGpu.js';
+import {
+  SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_COUNT_BIAS,
+  isExactSphReactionMotionEnvelope
+} from '../src/runtime/sph/sphReactionMotionEnvelope.js';
+import {
+  buildSphThermalMaterialTable
+} from '../src/runtime/sph/sphThermalGpuKernel.js';
+import {
+  createReferenceMaterialClosures
+} from '../src/runtime/material/materialClosures.js';
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -116,6 +158,111 @@ function manualBuffers({
       gridCflFactor: 10,
       gravityMPerS2: [0, 0, 0],
       mechanics
+    }
+  };
+}
+
+function authorizedReactionWatchTable(records) {
+  assert.ok(records instanceof Float32Array);
+  assert.equal(
+    records.length % SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length,
+    0
+  );
+  const reactionCount =
+    records.length / SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length;
+  const reactionHeaders = new Float32Array(
+    reactionCount * SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length
+  );
+  const reactantTermRecords = new Float32Array(0);
+  const productTermRecords = new Float32Array(0);
+  const gasProductRecords = new Float32Array(0);
+  const atomTermRecords = new Float32Array(0);
+  const productPhaseRecords = new Float32Array(0);
+  const combinedRecords = new Float32Array([
+    ...records,
+    ...productPhaseRecords,
+    ...reactionHeaders,
+    ...reactantTermRecords,
+    ...productTermRecords,
+    ...gasProductRecords,
+    ...atomTermRecords
+  ]);
+  return Object.freeze({
+    schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+    reactionClosureSchema: ULG_REACTION_CLOSURE_SCHEMA,
+    status: 'derived-reaction-table-ready',
+    reactionCount,
+    reactionHeaderCount: reactionCount,
+    reactantTermCount: 0,
+    productTermCount: 0,
+    gasProductCount: 0,
+    atomTermCount: 0,
+    productPhaseCount: 0,
+    combinedRecordCount: combinedRecords.length / 4,
+    recordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
+    reactionHeaderLayout: [...SPH_GPU_REACTION_HEADER_ROW_LAYOUT],
+    reactantTermLayout: [...SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT],
+    productTermLayout: [...SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT],
+    gasProductLayout: [...SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT],
+    atomTermLayout: [...SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT],
+    productPhaseLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
+    recordStrideFloats: SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length,
+    reactionHeaderStrideFloats: SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length,
+    reactantTermStrideFloats:
+      SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.length,
+    productTermStrideFloats:
+      SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length,
+    gasProductStrideFloats:
+      SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length,
+    atomTermStrideFloats: SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length,
+    productPhaseStrideFloats:
+      SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length,
+    records,
+    reactionHeaders,
+    reactantTermRecords,
+    productTermRecords,
+    gasProductRecords,
+    atomTermRecords,
+    productPhaseRecords,
+    combinedRecords
+  });
+}
+
+function thermalPhaseLatchReactionWatchTable() {
+  const records = new Float32Array([
+    1, 2, 3, 100,
+    -100, 1, 1, 1,
+    1, 0, 0, 0
+  ]);
+  return authorizedReactionWatchTable(records);
+}
+
+function lawsQuiescentSingleLaneBuffers(options = {}) {
+  const base = manualBuffers(options);
+  const phaseCarrierPlan = {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 1,
+    primaryCapacity: 1,
+    phaseLaneCount: 1,
+    phaseLaneStride: 1,
+    companionStart: 1,
+    companionCapacity: 0,
+    particleCapacity: 1,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    phaseCompanionLanesRequired: false,
+    reason: 'laws-quiescent'
+  };
+  return {
+    sphParticleState: {
+      ...base.sphParticleState,
+      identity: new Uint32Array([101]),
+      identityRevision: 'tier0-laws-quiescent-identity',
+      phaseCarrierPlan
+    },
+    mlsMpmParticleState: {
+      ...base.mlsMpmParticleState,
+      phaseCarrierPlan: { ...phaseCarrierPlan }
     }
   };
 }
@@ -236,6 +383,8 @@ class FakeGpuBuffer {
 function createFakeGpuDevice() {
   return {
     lost: new Promise(() => {}),
+    pushErrorScope() {},
+    async popErrorScope() { return null; },
     limits: {
       maxBufferSize: 256 * 1024 * 1024,
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -4209,7 +4358,8 @@ test('ULG resident stage worker SS stages fail closed on missing epoch and ident
 
 function writeWorkerTerminalRefluxReceiptTarget(target, {
   rolledBack = false,
-  ownerGeneration = 1
+  ownerGeneration = 1,
+  cflIntervalRejectTrace = null
 } = {}) {
   const words = createSchroederCrossLevelRefluxLedgerHeader({
     rowCapacity: 1,
@@ -4246,6 +4396,46 @@ function writeWorkerTerminalRefluxReceiptTarget(target, {
   words[122] = rolledBack ? 1 : 0;
   words[124] = 0xffff_ffff;
   words[125] = 0;
+  if (cflIntervalRejectTrace) {
+    const stageCode = {
+      fine: 0,
+      coarse: 1,
+      seal: 2
+    }[cflIntervalRejectTrace.stage];
+    const priorRegimeCode = {
+      guard: 0,
+      audit: 1,
+      outside: 2,
+      invalid: 3
+    }[cflIntervalRejectTrace.priorRegime ?? 'invalid'];
+    const fieldOrdinal = stageCode === 2
+      ? 0xffff
+      : Math.min(0xffff, cflIntervalRejectTrace.fieldOrdinal ?? 0);
+    words[124] = (
+      0xc700_0000
+      | ((stageCode & 3) << 22)
+      | (cflIntervalRejectTrace.phaseIntervalValid === true ? 1 << 21 : 0)
+      | (cflIntervalRejectTrace.fullIntervalValid === true ? 1 << 20 : 0)
+      | (cflIntervalRejectTrace.localIntervalOverlap === true ? 1 << 19 : 0)
+      | ((priorRegimeCode & 3) << 17)
+      | (cflIntervalRejectTrace.fieldOrdinalOverflow === true ? 1 << 16 : 0)
+      | fieldOrdinal
+    ) >>> 0;
+    const payload = stageCode === 2
+      ? [
+          cflIntervalRejectTrace.globalAlphaInterval?.lower ?? 0,
+          cflIntervalRejectTrace.globalAlphaInterval?.upper ?? 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]
+      : [
+          ...(cflIntervalRejectTrace.priorVelocityMPerS ?? [0, 0, 0]),
+          ...(cflIntervalRejectTrace.phaseDeltaVelocityMPerS ?? [0, 0, 0]),
+          ...(cflIntervalRejectTrace.fullDeltaVelocityMPerS ?? [0, 0, 0]),
+          cflIntervalRejectTrace.maximumVelocityMPerS ?? 0,
+          cflIntervalRejectTrace.correctionCeilingMPerS ?? 0
+        ];
+    new Float32Array(words.buffer).set(payload, 125);
+  }
   target.targetBuffer.bytes.set(
     new Uint8Array(words.buffer, words.byteOffset, words.byteLength),
     target.targetOffsetBytes
@@ -4280,7 +4470,9 @@ function workerScheduleFixture({
   invalidSurfaceStressAtStep = null,
   withTwoLevelEvidence = false,
   invalidTwoLevelCommitAtStep = null,
-  invalidTwoLevelCflFactorAtStep = null
+  invalidTwoLevelCflFactorAtStep = null,
+  cflIntervalRejectTraceAtStep = null,
+  cflIntervalRejectTrace = null
 } = {}) {
   const device = createFakeGpuDevice();
   const buffers = manualBuffers();
@@ -4464,8 +4656,13 @@ function workerScheduleFixture({
             SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
           ],
           {
-            rolledBack: ordinal === invalidTwoLevelCommitAtStep,
-            ownerGeneration: 1000 + ordinal
+            rolledBack: ordinal === invalidTwoLevelCommitAtStep
+              || ordinal === cflIntervalRejectTraceAtStep,
+            ownerGeneration: 1000 + ordinal,
+            cflIntervalRejectTrace:
+              ordinal === cflIntervalRejectTraceAtStep
+                ? cflIntervalRejectTrace
+                : null
           }
         )
       : null;
@@ -4699,6 +4896,7 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
   for (const enabled of [true, false]) {
     const suffix = enabled ? 'policy-enabled' : 'policy-disabled';
     const fixture = workerScheduleFixture({ laneSuffix: suffix });
+    fixture.buffers.gridSpacingM = 0.25;
     const laneOptions = {
       laneId: `ulg:test:${suffix}-lane`,
       stateKey: `ulg:test:${suffix}-state`
@@ -4732,6 +4930,8 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
       lawNeighborCandidateReadbackMode:
         hierarchyConfig.lawNeighborCandidateReadbackMode
     });
+    fixture.stageOptions.schroederSpatialEpoch.scheduleStepOptionsProvider = null;
+    fixture.stageOptions.schroederSameLevelMechanics.residentStepOptions = {};
 
     try {
       const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
@@ -4754,6 +4954,7 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
           `${field} must reach the hierarchy runner as ${enabled}`
         );
       }
+      assert.equal(result.nextScheduleLawActivationObservation, null);
       assert.equal(
         fixture.runnerCalls[0].activeNodeSortedIndexPolicyMode ?? null,
         hierarchyConfig.activeNodeSortedIndexPolicyMode
@@ -5389,13 +5590,17 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
     stepCount,
     invalidCommitAt = null,
     invalidCflAt = null,
+    cflIntervalRejectTraceAtStep = null,
+    cflIntervalRejectTrace = null,
     requestedCflFactor = 0.8
   }) => {
     const fixture = workerScheduleFixture({
       laneSuffix,
       withTwoLevelEvidence: true,
       invalidTwoLevelCommitAtStep: invalidCommitAt,
-      invalidTwoLevelCflFactorAtStep: invalidCflAt
+      invalidTwoLevelCflFactorAtStep: invalidCflAt,
+      cflIntervalRejectTraceAtStep,
+      cflIntervalRejectTrace
     });
     for (const stageId of [
       'schroederSpatialEpoch',
@@ -5497,6 +5702,109 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
       return true;
     }
   );
+
+  const cflTraceCases = [
+    {
+      laneSuffix: 'two-level-cfl-fine-trace',
+      input: {
+        stage: 'fine',
+        fieldOrdinal: 321,
+        priorRegime: 'audit',
+        phaseIntervalValid: true,
+        fullIntervalValid: false,
+        localIntervalOverlap: false,
+        priorVelocityMPerS: [1.25, -2.5, 3.75],
+        phaseDeltaVelocityMPerS: [0.5, 0.25, -0.75],
+        fullDeltaVelocityMPerS: [0.75, 0.5, -1],
+        maximumVelocityMPerS: 4.5,
+        correctionCeilingMPerS: 0.125
+      },
+      expectedStage: 'fine-validator'
+    },
+    {
+      laneSuffix: 'two-level-cfl-coarse-trace',
+      input: {
+        stage: 'coarse',
+        fieldOrdinal: 654,
+        priorRegime: 'outside',
+        phaseIntervalValid: true,
+        fullIntervalValid: true,
+        localIntervalOverlap: true,
+        priorVelocityMPerS: [-11, 12, -13],
+        phaseDeltaVelocityMPerS: [0.125, 0.25, 0.5],
+        fullDeltaVelocityMPerS: [0.25, 0.5, 1],
+        maximumVelocityMPerS: 14,
+        correctionCeilingMPerS: 0
+      },
+      expectedStage: 'coarse-validator'
+    },
+    {
+      laneSuffix: 'two-level-cfl-seal-trace',
+      input: {
+        stage: 'seal',
+        priorRegime: 'invalid',
+        phaseIntervalValid: true,
+        fullIntervalValid: true,
+        localIntervalOverlap: false,
+        globalAlphaInterval: { lower: 0.75, upper: 0.5 }
+      },
+      expectedStage: 'global-interval-seal'
+    }
+  ];
+  for (const traceCase of cflTraceCases) {
+    await assert.rejects(
+      run({
+        laneSuffix: traceCase.laneSuffix,
+        stepCount: 3,
+        cflIntervalRejectTraceAtStep: 2,
+        cflIntervalRejectTrace: traceCase.input
+      }),
+      (error) => {
+        const diagnostic = error?.residentScheduleError?.terminalGpuFence
+          ?.terminalRefluxReceipt?.firstRejectedDiagnostic;
+        const trace = diagnostic?.cflIntervalRejectTrace;
+        assert.equal(trace?.status, 'capture-complete');
+        assert.equal(trace?.stage, traceCase.expectedStage);
+        assert.equal(trace?.headerEvidenceRepurposed, true);
+        assert.equal(diagnostic?.headerEvidenceRepurposed, true);
+        assert.equal(diagnostic?.statusCaptureMissingCount, null);
+        assert.equal(diagnostic?.operatorSplitValid, null);
+        assert.equal(diagnostic?.phaseVolumeTransportValid, null);
+        assert.equal(diagnostic?.ambientBoundaryValid, null);
+        assert.equal(trace?.rawPayloadWords?.length, 11);
+        if (traceCase.input.stage === 'seal') {
+          assert.deepEqual(
+            trace.globalAlphaInterval,
+            traceCase.input.globalAlphaInterval
+          );
+          assert.equal(trace.fieldOrdinal, null);
+        } else {
+          assert.equal(trace.fieldOrdinal, traceCase.input.fieldOrdinal);
+          assert.deepEqual(
+            trace.priorVelocityMPerS,
+            traceCase.input.priorVelocityMPerS
+          );
+          assert.deepEqual(
+            trace.phaseDeltaVelocityMPerS,
+            traceCase.input.phaseDeltaVelocityMPerS
+          );
+          assert.deepEqual(
+            trace.fullDeltaVelocityMPerS,
+            traceCase.input.fullDeltaVelocityMPerS
+          );
+          assert.equal(
+            trace.maximumVelocityMPerS,
+            traceCase.input.maximumVelocityMPerS
+          );
+          assert.equal(
+            trace.correctionCeilingMPerS,
+            traceCase.input.correctionCeilingMPerS
+          );
+        }
+        return true;
+      }
+    );
+  }
 
   await assert.rejects(
     run({
@@ -5997,6 +6305,250 @@ test('ULG resident schedule rejects hierarchy claims whose cleanup authority did
   assert.equal(fixture.runnerCalls.length, 1);
 });
 
+test('ULG resident schedule retains the adopted sidecar owner when predecessor cleanup throws', async () => {
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'predecessor-cleanup-owner-retention'
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:predecessor-cleanup-owner-retention-lane',
+    stateKey: 'ulg:test:predecessor-cleanup-owner-retention-state'
+  };
+  const sourceSph =
+    fixture.stageOptions.schroederSpatialEpoch.sphParticleUpload;
+  const sourceMls =
+    fixture.stageOptions.schroederSpatialEpoch.mlsMpmParticleUpload;
+  const auxiliaryFields = [
+    {
+      source: sourceSph,
+      buffer: 'materialPropertyBankWarmInputBuffer',
+      rowCount: 'materialPropertyBankWarmInputRowCount',
+      owns: 'ownsMaterialPropertyBankWarmInputBuffer',
+      label: 'worker-cleanup-owner-sph-warm',
+      rows: 2
+    },
+    {
+      source: sourceSph,
+      buffer: 'materialPropertyBankParticleSizeBuffer',
+      rowCount: 'materialPropertyBankParticleSizeRowCount',
+      owns: 'ownsMaterialPropertyBankParticleSizeBuffer',
+      label: 'worker-cleanup-owner-sph-particle-size',
+      rows: 2
+    },
+    {
+      source: sourceMls,
+      buffer: 'materialPropertyBankWarmInputBuffer',
+      rowCount: 'materialPropertyBankWarmInputRowCount',
+      owns: 'ownsMaterialPropertyBankWarmInputBuffer',
+      label: 'worker-cleanup-owner-mls-warm',
+      rows: 3
+    },
+    {
+      source: sourceMls,
+      buffer: 'materialPropertyBankParticleSizeBuffer',
+      rowCount: 'materialPropertyBankParticleSizeRowCount',
+      owns: 'ownsMaterialPropertyBankParticleSizeBuffer',
+      label: 'worker-cleanup-owner-mls-particle-size',
+      rows: 2
+    }
+  ];
+  for (const fields of auxiliaryFields) {
+    fields.source[fields.buffer] = fixture.taggedBuffer(fields.label, 32);
+    fields.source[fields.rowCount] = fields.rows;
+    fields.source[fields.owns] = true;
+  }
+  Object.assign(sourceSph, {
+    ownsStateBuffer: true,
+    ownsThermoBuffer: true,
+    ownsIdentityBuffer: true,
+    identityOwnership: 'worker-cleanup-owner-source'
+  });
+  sourceMls.ownsMechanicsBuffer = true;
+
+  const baseRunner = fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner;
+  const producedSteps = [];
+  let injectedCleanupFailureCount = 0;
+  let poisonedSuccessorOwnerReleaseCount = 0;
+  const poisonedSuccessorOwnerBuffer = fixture.taggedBuffer(
+    'worker-cleanup-owner-poisoned-successor-owner-buffer',
+    16
+  );
+  fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner = async (args) => {
+      const result = await baseRunner(args);
+      const residentStep = result.residentStep;
+      const nextSph = residentStep.nextParticleUploads.sphParticleUpload;
+      const nextMls = residentStep.nextParticleUploads.mlsMpmParticleUpload;
+      Object.assign(nextSph, {
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true
+      });
+      nextMls.ownsMechanicsBuffer = true;
+
+      const discardedIdentityBuffer = nextSph.identityBuffer;
+      discardedIdentityBuffer.destroy();
+      nextSph.identityBuffer = args.sphParticleUpload.identityBuffer;
+      nextSph.identityBufferByteLength =
+        args.sphParticleUpload.identityBufferByteLength;
+      nextSph.identityRevision = args.sphParticleUpload.identityRevision;
+      nextSph.ownsIdentityBuffer = true;
+      nextSph.identityOwnership = 'worker-cleanup-owner-successor';
+      assert.equal(args.sphParticleUpload.ownsIdentityBuffer, true);
+      args.sphParticleUpload.ownsIdentityBuffer = false;
+      args.sphParticleUpload.identityOwnership =
+        'transferred-to-worker-cleanup-owner-successor';
+
+      for (const fields of auxiliaryFields) {
+        const source = fields.source === sourceSph
+          ? args.sphParticleUpload
+          : args.mlsMpmParticleUpload;
+        const target = fields.source === sourceSph ? nextSph : nextMls;
+        assert.equal(source[fields.owns], true);
+        target[fields.buffer] = source[fields.buffer];
+        target[fields.rowCount] = source[fields.rowCount];
+        target[fields.owns] = true;
+        source[fields.owns] = false;
+      }
+
+      if (producedSteps.length === 0) {
+        const predecessorMechanicsBuffer = nextMls.mechanicsBuffer;
+        const destroy = predecessorMechanicsBuffer.destroy.bind(
+          predecessorMechanicsBuffer
+        );
+        predecessorMechanicsBuffer.destroy = () => {
+          if (injectedCleanupFailureCount === 0) {
+            injectedCleanupFailureCount += 1;
+            throw new Error('injected predecessor resident cleanup failure');
+          }
+          return destroy();
+        };
+      } else {
+        residentStep.localRetainedRenderBuffers = {
+          buffers: [{
+            family: 'test-poisoned-successor-owner',
+            buffer: poisonedSuccessorOwnerBuffer
+          }],
+          destroyRetainedBuffers() {
+            poisonedSuccessorOwnerReleaseCount += 1;
+            poisonedSuccessorOwnerBuffer.destroy();
+            return true;
+          }
+        };
+      }
+      producedSteps.push(residentStep);
+      return result;
+    };
+
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount: 2,
+          scheduleId: 'ulg:test:predecessor-cleanup-owner-retention'
+        },
+        laneOptions
+      )
+    ),
+    (error) => {
+      assert.equal(
+        error.residentScheduleError?.reason,
+        'previous-resident-step-cleanup-failed'
+      );
+      assert.equal(error.residentScheduleError?.stepOrdinal, 2);
+      assert.equal(
+        error.residentScheduleError?.terminalGpuFence?.fenceSatisfied,
+        true
+      );
+      return true;
+    }
+  );
+
+  assert.equal(producedSteps.length, 2);
+  const predecessorSph =
+    producedSteps[0].nextParticleUploads.sphParticleUpload;
+  const predecessorMls =
+    producedSteps[0].nextParticleUploads.mlsMpmParticleUpload;
+  const successorSph =
+    producedSteps[1].nextParticleUploads.sphParticleUpload;
+  const successorMls =
+    producedSteps[1].nextParticleUploads.mlsMpmParticleUpload;
+  assert.equal(predecessorSph.ownsIdentityBuffer, false);
+  assert.equal(successorSph.ownsIdentityBuffer, true);
+  assert.strictEqual(successorSph.identityBuffer, predecessorSph.identityBuffer);
+  assert.equal(predecessorSph.stateBuffer.destroyed, true);
+  assert.equal(predecessorSph.thermoBuffer.destroyed, true);
+  assert.equal(predecessorSph.identityBuffer.destroyed, false);
+  assert.equal(predecessorMls.mechanicsBuffer.destroyed, false);
+  assert.equal(successorSph.stateBuffer.destroyed, false);
+  assert.equal(successorSph.thermoBuffer.destroyed, false);
+  assert.equal(successorSph.identityBuffer.destroyed, false);
+  assert.equal(successorMls.mechanicsBuffer.destroyed, false);
+  for (const fields of auxiliaryFields) {
+    const predecessor = fields.source === sourceSph
+      ? predecessorSph
+      : predecessorMls;
+    const successor = fields.source === sourceSph
+      ? successorSph
+      : successorMls;
+    assert.equal(predecessor[fields.owns], false, fields.label);
+    assert.equal(successor[fields.owns], true, fields.label);
+    assert.strictEqual(successor[fields.buffer], predecessor[fields.buffer]);
+    assert.equal(successor[fields.buffer].destroyCount, 0, fields.label);
+  }
+  assert.equal(injectedCleanupFailureCount, 1);
+
+  await assert.rejects(
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'schroederSpatialEpoch',
+        ['schroeder-level-assignment'],
+        ['schroeder-spatial-epoch']
+      ),
+      workerSchroederStageContext(
+        fixture.device,
+        fixture.buffers,
+        fixture.stageOptions
+      ),
+      null,
+      laneOptions
+    )),
+    (error) => {
+      assert.equal(
+        error.code,
+        'ERR_ULG_WORKER_RESIDENT_SCHEDULE_LANE_POISONED'
+      );
+      assert.equal(
+        error.residentSchedulePoison?.reason,
+        'previous-resident-step-cleanup-failed'
+      );
+      return true;
+    }
+  );
+
+  const release = releaseUlgMechanicsResidentStageWorkerLane({
+    ...laneOptions,
+    reason: 'test-predecessor-cleanup-owner-retention-complete'
+  });
+  assert.equal(release.status, 'worker-resident-lane-released');
+  assert.equal(poisonedSuccessorOwnerReleaseCount, 1);
+  assert.equal(poisonedSuccessorOwnerBuffer.destroyed, true);
+  assert.equal(predecessorSph.identityBuffer.destroyed, true);
+  assert.equal(predecessorMls.mechanicsBuffer.destroyed, true);
+  assert.equal(successorSph.stateBuffer.destroyed, true);
+  assert.equal(successorSph.thermoBuffer.destroyed, true);
+  assert.equal(successorSph.identityBuffer.destroyed, true);
+  assert.equal(successorMls.mechanicsBuffer.destroyed, true);
+  for (const fields of auxiliaryFields) {
+    assert.equal(fields.source[fields.buffer].destroyed, true, fields.label);
+    assert.ok(fields.source[fields.buffer].destroyCount >= 1, fields.label);
+  }
+});
+
 test('ULG resident schedule keeps SS transport refs bounded across 256 persistent-lane steps', async () => {
   const fixture = workerScheduleFixture({ laneSuffix: 'bounded-transport-refs' });
   const laneOptions = {
@@ -6186,6 +6738,228 @@ test('ULG resident stage worker schedule cancellation finishes the in-flight ste
     followUp.value.levelAssignmentSource,
     'stage-option-level-assignment-with-worker-retained-particle-buffers'
   );
+});
+
+test('ULG partial cancellation emits only unmeasured watch uncertainty and burns it exactly once', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:cancelled-reaction-watch-lane',
+    stateKey: 'ulg:test:cancelled-reaction-watch-state'
+  };
+  const reactionTable = thermalPhaseLatchReactionWatchTable();
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:cancelled-reaction-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'cancelled-reaction-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const classifierOptions = {
+      minLevel: 0,
+      maxLevel: 0,
+      chartId: 0,
+      baseGridSpacingM: 1
+    };
+    const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+      ...laneOptions,
+      classifierOptions,
+      levelAssignmentRunner: runSchroederLevelAssignmentWebGpu
+    });
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-cancelled-reaction-watch',
+      particleCount: 1
+    });
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false,
+      mechanicsFieldViewsRequired: false,
+      scheduleStepOptionsProvider: laneProvider
+    };
+    const residentStepOptions = {
+      contactSolverEnabled: true,
+      ambientPressurePa: 0,
+      reactionActivationWatchTable: reactionTable
+    };
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+      residentStepOptions
+    };
+    const scheduleId = 'ulg:test:cancelled-reaction-watch-schedule';
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 3,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: mechanicsOptions
+        }),
+        {
+          stepCount: 3,
+          scheduleId,
+          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+        },
+        laneOptions
+      ),
+      {
+        postProgress(progress) {
+          if (progress.stepOrdinal === 1) {
+            setTimeout(() => {
+              cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
+            }, 0);
+          }
+        }
+      }
+    );
+    assert.equal(result.status, 'worker-resident-schedule-cancelled');
+    assert.equal(result.cancelled, true);
+    assert.equal(result.completedStepCount, 1);
+    const observation = result.nextScheduleLawActivationObservation;
+    assert.equal(observation.observationSucceeded, false);
+    assert.equal(observation.uncertainty, true);
+    assert.equal(observation.triggered, true);
+    assert.equal(observation.triggeredSourceCount, null);
+    assert.equal(observation.rawEvidenceWord, null);
+    assert.equal(observation.mapAsyncCount, 0);
+    assert.equal(observation.readbackByteLength, 0);
+    assert.equal(
+      observation.routingAuthority,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    );
+    assert.equal(
+      observation.shadowOnly,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    );
+    validateSchroederWorkerScheduleExecutionRouteReceipt(result, {
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      requestedStepCount: 3,
+      targetScheduleAuthority
+    });
+
+    const continuationScheduleId = observation.targetScheduleRequestId;
+    let continuationAssignmentOrdinal = 0;
+    const continuationLaneProvider =
+      createWorkerSchroederLaneLevelAssignmentProvider({
+        ...laneOptions,
+        classifierOptions,
+        async levelAssignmentRunner(args) {
+          continuationAssignmentOrdinal += 1;
+          const sphUpload = args.sphParticleUpload;
+          return workerSchroederLevelAssignmentFixture(device, {
+            particleCount: sphUpload.particleCount,
+            storageGeneration: sphUpload.storageGeneration,
+            physicsTick: sphUpload.physicsTick,
+            physicsSubstep: sphUpload.physicsSubstep,
+            positionEpoch: sphUpload.positionEpoch,
+            topologyEpoch: sphUpload.topologyEpoch,
+            chartEpoch: sphUpload.chartEpoch,
+            levelEpoch: sphUpload.levelEpoch,
+            supportEpoch: sphUpload.supportEpoch,
+            sourceStateBuffer: sphUpload.stateBuffer,
+            sourceThermoBuffer: sphUpload.thermoBuffer,
+            sourceMechanicsBuffer:
+              args.mlsMpmParticleUpload.mechanicsBuffer,
+            label:
+              `worker-cancelled-watch-continuation-${
+                continuationAssignmentOrdinal
+              }`
+          });
+        }
+      });
+    const continuationEpochOptions = {
+      ...epochOptions,
+      scheduleStepOptionsProvider: continuationLaneProvider
+    };
+    const continuationAuthority = workerTargetScheduleAuthority({
+      scheduleId: continuationScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: result.finalMechanicsLineage,
+      predecessorDynamicLawObservation: observation,
+      stepCount: 3,
+      residentStepOptions,
+      epochOptions: continuationEpochOptions,
+      mechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const continuation =
+      await runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: continuationEpochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 3,
+            scheduleId: continuationScheduleId,
+            targetScheduleAuthority: structuredClone(continuationAuthority)
+          },
+          laneOptions
+        )
+      );
+    assert.equal(
+      continuation.predecessorTargetTokenConsumption
+        .targetScheduleRequestId,
+      continuationScheduleId
+    );
+    assert.equal(
+      continuation.predecessorTargetTokenConsumption
+        .conservativeActivationRequired,
+      false,
+      'a cancelled partial schedule burns its dormant continuation token without authorizing conservative activation'
+    );
+    const runnerCallCount = mechanicsFixture.runnerCalls.length;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: continuationEpochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 3,
+            scheduleId: continuationScheduleId,
+            targetScheduleAuthority: structuredClone(continuationAuthority)
+          },
+          laneOptions
+        )
+      ),
+      /predecessor-target-token-replayed/
+    );
+    assert.equal(mechanicsFixture.runnerCalls.length, runnerCallCount);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
 });
 
 test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage error and stays consistent', async () => {
@@ -6497,6 +7271,68 @@ const WORKER_LANE_SEED_DEFAULT_LINEAGE = Object.freeze({
   supportEpoch: 31
 });
 
+function workerTargetScheduleAuthority({
+  scheduleId,
+  targetScheduleRequestId = `${scheduleId}:next-law-route`,
+  laneId,
+  stateKey,
+  sourceLineage = WORKER_LANE_SEED_DEFAULT_LINEAGE,
+  sourceParticleCount = 1,
+  sourcePhaseLaneCount = 1,
+  predecessorDynamicLawObservation = null,
+  predecessorTargetScheduleAuthority = null,
+  prospectiveTargetConfiguration = null,
+  stepCount,
+  residentStepOptions,
+  epochOptions,
+  mechanicsOptions,
+  providerKind = 'none',
+  classifierOptions = null,
+  dtS = 0.1,
+  gridSpacingM = 1,
+  cflFactor = 10,
+  boxDimsM = [5, 5, 5]
+}) {
+  const persistedResidentStepOptions = {
+    ...(residentStepOptions || {}),
+    thermalStepOptions: {
+      ...(residentStepOptions?.thermalStepOptions || {})
+    },
+    reactionStepOptions: {
+      ...(residentStepOptions?.reactionStepOptions || {})
+    },
+    mechanicsRefreshOptions: {
+      ...(residentStepOptions?.mechanicsRefreshOptions || {})
+    }
+  };
+  return createSchroederTargetScheduleAuthority({
+    sourceScheduleId: scheduleId,
+    targetScheduleRequestId,
+    laneId,
+    stateKey,
+    sourceLineage,
+    sourceParticleCount,
+    sourcePhaseLaneCount,
+    predecessorDynamicLawObservation,
+    predecessorTargetScheduleAuthority,
+    prospectiveTargetConfiguration,
+    maxFutureSubsteps: stepCount,
+    dtS,
+    gridSpacingM,
+    cflFactor,
+    boxDimsM,
+    residentStepOptions: persistedResidentStepOptions,
+    epochOptions,
+    mechanicsOptions,
+    hierarchyConfig: mechanicsOptions?.hierarchyConfig ?? null,
+    scheduleStepOptionsProvider:
+      createSchroederTargetScheduleProviderAuthority({
+        kind: providerKind,
+        classifierOptions
+      })
+  });
+}
+
 function workerLaneSeedStage() {
   return stage(
     'schroederLaneSeed',
@@ -6509,7 +7345,8 @@ function workerLaneSeedStageOptions({
   hotBufferKey = 'ulg:sph-resident-schroeder-adopted-storage:lane-seed',
   particleCount = 1,
   lineage = WORKER_LANE_SEED_DEFAULT_LINEAGE,
-  seedOptionOverrides = {}
+  seedOptionOverrides = {},
+  rematerializationSeedOverrides = {}
 } = {}) {
   return {
     useSchroederAdoptedParticleStorageWorkerRematerialization: true,
@@ -6519,7 +7356,8 @@ function workerLaneSeedStageOptions({
       ready: true,
       hotBufferKey,
       authoritativeParticleCount: particleCount,
-      materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed'
+      materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed',
+      ...rematerializationSeedOverrides
     },
     schroederLaneSeed: {
       ...(lineage ? { lineage: { ...lineage } } : {}),
@@ -6542,6 +7380,22 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
   const runner = async (args) => {
     runnerCalls.push(args);
     const ordinal = runnerCalls.length;
+    const sourceLineage = Object.fromEntries(
+      ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS.map(
+        (field) => [field, Number(args.sphParticleUpload?.[field])]
+      )
+    );
+    const terminalLineage = Object.values(sourceLineage).every(
+      Number.isSafeInteger
+    )
+      ? {
+          ...sourceLineage,
+          storageGeneration: sourceLineage.storageGeneration + 1,
+          physicsTick: sourceLineage.physicsTick + 1,
+          physicsSubstep: 0,
+          positionEpoch: sourceLineage.positionEpoch + 1
+        }
+      : null;
     const residentProductMass = {
       schema: 'peercompute.ulg.test-worker-resident-product-mass.v0',
       ordinal
@@ -6560,6 +7414,13 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
         nextParticleUploads: {
           sphParticleUpload: {
             particleCount,
+            ...(terminalLineage || {}),
+            ...(terminalLineage
+              ? {
+                  bufferFamilyGeneration:
+                    terminalLineage.storageGeneration
+                }
+              : {}),
             stateBuffer: taggedBuffer(
               `${labelPrefix}-next-state-${ordinal}`,
               particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
@@ -6575,6 +7436,13 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
           },
           mlsMpmParticleUpload: {
             particleCount,
+            ...(terminalLineage || {}),
+            ...(terminalLineage
+              ? {
+                  bufferFamilyGeneration:
+                    terminalLineage.storageGeneration
+                }
+              : {}),
             mechanicsBuffer: taggedBuffer(
               `${labelPrefix}-next-mechanics-${ordinal}`,
               particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
@@ -6716,6 +7584,13 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
   );
   assert.equal(scheduleResult.status, 'worker-resident-schedule-completed');
   assert.equal(scheduleResult.completedStepCount, 2);
+  assert.equal(scheduleResult.executionRouteReceipt.route, 'canonical-schroeder');
+  assert.ok(
+    scheduleResult.executionRouteReceipt.blockers.includes(
+      'phase-carrier-plan-not-single-lane-quiescent'
+    ),
+    'an absent phase plan cannot prove that Tier0 has no companion lanes'
+  );
   assert.equal(mechanicsFixture.runnerCalls.length, 2);
   assert.equal(
     mechanicsFixture.runnerCalls[0].sphParticleState,
@@ -6813,6 +7688,2963 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
     assertNoWorkerGpuBuffers(progress, `seededProgress[${index}]`);
     structuredClone(progress);
   });
+});
+
+test('ULG worker schedule selects Tier0 from the first contact-free seed receipt and adopts one exact fused terminal family', async () => {
+  const device = createFakeGpuDevice();
+  const originalQueueSubmit = device.queue.submit.bind(device.queue);
+  let exactZeroTier0WatchPending = true;
+  device.queue.submit = (commandBuffers) => {
+    for (const commandBuffer of commandBuffers || []) {
+      for (const operation of commandBuffer || []) {
+        if (
+          exactZeroTier0WatchPending
+          && operation.type === 'copy'
+          && operation.source?.label
+            === 'ulg-tier0-reaction-motion-watch-control'
+        ) {
+          new Uint32Array(operation.source.bytes.buffer)[0] =
+            SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_COUNT_BIAS;
+          exactZeroTier0WatchPending = false;
+        }
+      }
+    }
+    return originalQueueSubmit(commandBuffers);
+  };
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-first-seed-lane',
+    stateKey: 'ulg:test:tier0-first-seed-state'
+  };
+  const scheduleId = 'ulg:test:tier0-first-seed-schedule';
+  const secondScheduleId = `${scheduleId}:continuation`;
+  const stepCount = 3;
+  let trustedAssignmentProviderCallCount = 0;
+  const trustedAssignmentProvider =
+    createWorkerSchroederLaneLevelAssignmentProvider({
+      ...laneOptions,
+      async levelAssignmentRunner() {
+        trustedAssignmentProviderCallCount += 1;
+        throw new Error('Tier0 must not invoke its assignment-only provider');
+      }
+    });
+  const dormantReactionRecords = new Float32Array([
+    1, 2, 3, 100,
+    -100, 1, 1, 1,
+    1, 0, 0, 0
+  ]);
+  const dormantReactionWatchTable =
+    authorizedReactionWatchTable(dormantReactionRecords);
+  const seedLineage = WORKER_LANE_SEED_DEFAULT_LINEAGE;
+  const seeded = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:tier0-first-seed',
+        particleCount: 1,
+        rematerializationSeedOverrides: {
+          identityRequired: true,
+          identityRevision: 'tier0-laws-quiescent-identity',
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          particleIdentityMutationApproved: true,
+          requiresAuthoritativeFourBufferRows: true,
+          outputParticleCapacity: 1
+        }
+      })
+    }),
+    null,
+    laneOptions
+  ));
+  assert.equal(seeded.value.status, 'worker-schroeder-lane-seeded');
+  const boundaryEvents = [];
+  const originalCreateBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor = {}) => {
+    const buffer = originalCreateBuffer(descriptor);
+    if (descriptor.label === 'ulg-tier0-reaction-motion-watch-readback') {
+      const originalMapAsync = buffer.mapAsync.bind(buffer);
+      buffer.mapAsync = (...args) => {
+        boundaryEvents.push('activation-map');
+        return originalMapAsync(...args);
+      };
+    }
+    return buffer;
+  };
+  const originalFence = device.queue.onSubmittedWorkDone.bind(device.queue);
+  device.queue.onSubmittedWorkDone = (...args) => {
+    boundaryEvents.push('queue-fence');
+    return originalFence(...args);
+  };
+  const submissionsBeforeSchedule = device.queue.submitCalls.length;
+  const fencesBeforeSchedule = device.queue.submittedWorkDoneCount || 0;
+  const tier0EpochOptions = {
+    selectedLevel: 0,
+    mechanicsFieldViewsRequired: false,
+    scheduleStepOptionsProvider: trustedAssignmentProvider
+  };
+  const tier0ResidentStepOptions = {
+    contactSolverEnabled: false,
+    ambientPressurePa: 0,
+    activeGridSafetyCells: 1,
+    reactionActivationWatchTable: dormantReactionWatchTable
+  };
+  const targetScheduleAuthority = workerTargetScheduleAuthority({
+    scheduleId,
+    targetScheduleRequestId: secondScheduleId,
+    laneId: laneOptions.laneId,
+    stateKey: laneOptions.stateKey,
+    sourceLineage: seedLineage,
+    stepCount,
+    residentStepOptions: tier0ResidentStepOptions,
+    epochOptions: tier0EpochOptions,
+    mechanicsOptions: { residentStepOptions: tier0ResidentStepOptions },
+    providerKind: 'worker-lane-assignment-only'
+  });
+  const tier0WorkerContext = (residentStepOptions) =>
+    workerSchroederStageContext(device, buffers, {
+      schroederSpatialEpoch: tier0EpochOptions,
+      schroederSameLevelMechanics: { residentStepOptions }
+    });
+  const tier0SchedulePayload = (residentStepOptions) => schedulePayload(
+    tier0WorkerContext(residentStepOptions),
+    { stepCount, scheduleId, targetScheduleAuthority },
+    laneOptions
+  );
+  const assertDormantWatchAuthorityRejectsBeforeGpu = async (
+    residentStepOptions,
+    label
+  ) => {
+    const submitCount = device.queue.submitCalls.length;
+    const fenceCount = device.queue.submittedWorkDoneCount || 0;
+    const writeCount = device.queue.writeBufferCalls.length;
+    const boundaryEventCount = boundaryEvents.length;
+    const providerCallCount = trustedAssignmentProviderCallCount;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        tier0SchedulePayload(residentStepOptions)
+      ),
+      (error) => {
+        assert.equal(
+          error.code,
+          'ERR_ULG_WORKER_RESIDENT_SCHEDULE_TARGET_SCHEDULE_AUTHORITY_MISMATCH',
+          label
+        );
+        assert.equal(error.reason, 'target-schedule-authority-mismatch', label);
+        assert.equal(
+          error.residentScheduleError?.stageId,
+          'target-schedule-authority-preflight',
+          label
+        );
+        assert.equal(error.residentScheduleError?.stepOrdinal, 0, label);
+        return true;
+      }
+    );
+    assert.equal(device.queue.submitCalls.length, submitCount, label);
+    assert.equal(
+      device.queue.submittedWorkDoneCount || 0,
+      fenceCount,
+      label
+    );
+    assert.equal(device.queue.writeBufferCalls.length, writeCount, label);
+    assert.equal(boundaryEvents.length, boundaryEventCount, label);
+    assert.equal(
+      trustedAssignmentProviderCallCount,
+      providerCallCount,
+      label
+    );
+  };
+  const {
+    reactionActivationWatchTable: ignoredDormantWatchTable,
+    ...omittedDormantWatchOptions
+  } = tier0ResidentStepOptions;
+  await assertDormantWatchAuthorityRejectsBeforeGpu(
+    omittedDormantWatchOptions,
+    'omitting the main-authored dormant table must reject before GPU work'
+  );
+  const driftedDormantReactionRecords = new Float32Array(
+    dormantReactionRecords
+  );
+  driftedDormantReactionRecords[0] += 1;
+  await assertDormantWatchAuthorityRejectsBeforeGpu(
+    {
+      ...tier0ResidentStepOptions,
+      reactionActivationWatchTable: {
+        ...dormantReactionWatchTable,
+        records: driftedDormantReactionRecords,
+        combinedRecords: driftedDormantReactionRecords
+      }
+    },
+    'drifting the dormant table fingerprint must reject before GPU work'
+  );
+
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    tier0SchedulePayload(tier0ResidentStepOptions)
+  );
+  const outerRouteAdmission =
+    validateSchroederWorkerScheduleExecutionRouteReceipt(result, {
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      requestedStepCount: stepCount,
+      targetScheduleAuthority
+    });
+
+  assert.equal(result.status, 'worker-resident-schedule-completed');
+  assert.equal(result.completedStepCount, stepCount);
+  assert.equal(result.cancelled, false);
+  assert.equal(
+    outerRouteAdmission.route,
+    'tier0-fused-resident-sequence'
+  );
+  assert.equal(result.lawActivationReceipt.contactSolver, false);
+  assert.equal(result.lawActivationReceipt.contactSolverRequested, false);
+  assert.equal(
+    result.lawActivationReceipt.contactSolverEscalatedForDynamicLaws,
+    false
+  );
+  assert.equal(result.lawActivationReceipt.thermal, false);
+  assert.equal(result.lawActivationReceipt.reaction, false);
+  assert.equal(result.lawActivationReceipt.mechanicsFieldViews, false);
+  assert.equal(targetScheduleAuthority.writerSet.reaction, false);
+  assert.equal(targetScheduleAuthority.tableFingerprints.reactionTable, null);
+  assert.notEqual(
+    targetScheduleAuthority.tableFingerprints.reactionActivationWatchTable,
+    null
+  );
+  assert.equal(
+    targetScheduleAuthority.tableFingerprints.watchReactionTableSource,
+    'reaction-activation-watch-table'
+  );
+  assert.equal(
+    result.executionRouteReceipt.status,
+    'tier0-fused-resident-sequence-admitted'
+  );
+  assert.equal(
+    result.executionRouteReceipt.route,
+    'tier0-fused-resident-sequence'
+  );
+  assert.deepEqual(result.executionRouteReceipt.blockers, []);
+  assert.equal(
+    result.executionRouteReceipt.transition,
+    'fresh-to-tier0-schedule-boundary'
+  );
+  assert.equal(
+    result.executionRouteReceipt.topologyAttestation.status,
+    'tier0-topology-quiescence-attested'
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.commandSubmissionCount,
+    1
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.internalPositionSubstepCount,
+    stepCount
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.canonicalSpatialEpochGenerated,
+    false
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.fullParticleReadbackFree,
+    true
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.residentContinuationReady,
+    true
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.submittedCleanupRelease.status,
+    'tier0-submitted-cleanup-released-after-terminal-fence'
+  );
+  assert.deepEqual(result.executionRouteReceipt.lineage.source, {
+    ...seedLineage
+  });
+  const expectedLineage = {
+    storageGeneration: seedLineage.storageGeneration + 1,
+    physicsTick: seedLineage.physicsTick + stepCount,
+    physicsSubstep: 0,
+    positionEpoch: seedLineage.positionEpoch + 1,
+    topologyEpoch: seedLineage.topologyEpoch,
+    chartEpoch: seedLineage.chartEpoch,
+    levelEpoch: seedLineage.levelEpoch,
+    supportEpoch: seedLineage.supportEpoch
+  };
+  assert.deepEqual(result.finalEpochIdentity, expectedLineage);
+  assert.deepEqual(
+    result.executionRouteReceipt.lineage.target,
+    expectedLineage
+  );
+  assert.equal(result.finalEpochSeal, null);
+  assert.equal(result.retainedBufferRefs.length, 4);
+  assert.deepEqual(
+    result.executionRouteReceipt.retainedBufferRefs,
+    result.retainedBufferRefs
+  );
+  assert.equal(
+    result.executionRouteReceipt.supersededFamilyRetirement.status,
+    'tier0-superseded-family-retired-after-terminal-fence'
+  );
+  assert.equal(
+    result.executionRouteReceipt.supersededFamilyRetirement
+      .seedAssignmentRetired,
+    true
+  );
+  assert.equal(
+    device.queue.submitCalls.length - submissionsBeforeSchedule,
+    1,
+    'Tier0 must encode all K mechanics steps in one queue submission'
+  );
+  assert.equal(
+    (device.queue.submittedWorkDoneCount || 0) - fencesBeforeSchedule,
+    1,
+    'Tier0 must take only the worker schedule terminal queue fence'
+  );
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  const reactionObservation = result.nextScheduleLawActivationObservation;
+  assert.equal(
+    reactionObservation.status,
+    'dynamic-law-routing-observation-ready'
+  );
+  assert.equal(reactionObservation.observationSucceeded, true);
+  assert.equal(reactionObservation.triggered, false);
+  assert.equal(reactionObservation.triggeredSourceCount, 0);
+  assert.equal(reactionObservation.rawEvidenceWord, 0);
+  assert.equal(
+    reactionObservation.producerRoute,
+    'tier0-fused-resident-sequence'
+  );
+  assert.equal(
+    reactionObservation.sampleStage,
+    'tier0-terminal-post-separation-motion-envelope'
+  );
+  assert.equal(
+    reactionObservation.routingAuthority,
+    SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+  );
+  assert.equal(
+    reactionObservation.shadowOnly,
+    SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+  );
+  assert.equal(
+    reactionObservation.targetScheduleRequestId,
+    targetScheduleAuthority.targetScheduleRequestId
+  );
+  assert.equal(
+    reactionObservation.targetScheduleAuthorityFingerprint,
+    targetScheduleAuthority.requestFingerprint
+  );
+  assert.equal(
+    reactionObservation.reactionTableFingerprint,
+    targetScheduleAuthority.tableFingerprints.watchReactionTableFingerprint
+  );
+  assert.deepEqual(
+    result.executionRouteReceipt.targetScheduleAuthority,
+    targetScheduleAuthority
+  );
+  assert.equal(
+    reactionObservation.executionGating,
+    SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+  );
+  assert.equal(reactionObservation.motionEnvelope.maxFutureSubsteps, stepCount);
+  assert.equal(
+    reactionObservation.motionEnvelope.separationDisplacementEnabled,
+    true
+  );
+  assert.equal(
+    reactionObservation.motionEnvelope.contactCorrectionEnabled,
+    false
+  );
+  assert.equal(
+    reactionObservation.motionEnvelope.thermalPhaseEvolutionEnabled,
+    false
+  );
+  assert.equal(
+    reactionObservation.motionEnvelope.futureRestDiameterBoundStatus,
+    'terminal-upper-under-declared-no-writer-premise'
+  );
+  assert.deepEqual(reactionObservation.motionEnvelope.boxDimsM, [5, 5, 5]);
+  assert.equal(reactionObservation.mapAsyncCount, 1);
+  assert.equal(
+    reactionObservation.readbackByteLength,
+    Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    reactionObservation.failureReason,
+    null
+  );
+  assert.deepEqual(boundaryEvents, ['queue-fence', 'activation-map']);
+  assert.equal(
+    result.perStepSummaries.ring.length
+      + result.perStepSummaries.droppedStepCount,
+    result.perStepSummaries.totalStepCount
+  );
+  assert.equal(result.executionRouteReceipt.authority.computeManager, 'pending');
+  assert.equal(result.executionRouteReceipt.authority.stateManager, 'pending');
+  assertNoWorkerGpuBuffers(result, 'tier0ScheduleResult');
+  structuredClone(result);
+
+  const secondSubmissionsBefore = device.queue.submitCalls.length;
+  const secondFencesBefore = device.queue.submittedWorkDoneCount || 0;
+  const continuationEpochOptions = tier0EpochOptions;
+  const continuationTargetScheduleAuthority = workerTargetScheduleAuthority({
+    scheduleId: secondScheduleId,
+    laneId: laneOptions.laneId,
+    stateKey: laneOptions.stateKey,
+    sourceLineage: expectedLineage,
+    predecessorDynamicLawObservation: reactionObservation,
+    stepCount,
+    residentStepOptions: tier0ResidentStepOptions,
+    epochOptions: continuationEpochOptions,
+    mechanicsOptions: { residentStepOptions: tier0ResidentStepOptions },
+    providerKind: 'worker-lane-assignment-only'
+  });
+  const continuationWorkerContext = () => workerSchroederStageContext(
+    device,
+    buffers,
+    {
+      schroederSpatialEpoch: continuationEpochOptions,
+      schroederSameLevelMechanics: {
+        residentStepOptions: tier0ResidentStepOptions
+      }
+    }
+  );
+  const continuationPayload = (targetAuthority) => schedulePayload(
+    continuationWorkerContext(),
+    {
+      stepCount,
+      scheduleId: secondScheduleId,
+      targetScheduleAuthority: targetAuthority
+    },
+    laneOptions
+  );
+  const assertPredecessorTokenRejectsBeforeGpu = async (
+    targetAuthority,
+    expectedReason,
+    label,
+    rejectedPayload = continuationPayload(targetAuthority)
+  ) => {
+    const submitCount = device.queue.submitCalls.length;
+    const fenceCount = device.queue.submittedWorkDoneCount || 0;
+    const writeCount = device.queue.writeBufferCalls.length;
+    const boundaryEventCount = boundaryEvents.length;
+    const providerCallCount = trustedAssignmentProviderCallCount;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        rejectedPayload
+      ),
+      (error) => {
+        assert.equal(error.reason, expectedReason, label);
+        assert.equal(
+          error.code,
+          `ERR_ULG_WORKER_RESIDENT_SCHEDULE_${
+            expectedReason.toUpperCase().replaceAll('-', '_')
+          }`,
+          label
+        );
+        assert.equal(
+          error.residentScheduleError?.stageId,
+          'predecessor-target-token-preflight',
+          label
+        );
+        assert.equal(error.residentScheduleError?.stepOrdinal, 0, label);
+        if (expectedReason === 'predecessor-target-token-replayed') {
+          assert.equal(
+            error.residentScheduleError?.laneState
+              ?.lastConsumedDynamicLawTargetScheduleRequestId,
+            reactionObservation.targetScheduleRequestId,
+            label
+          );
+        }
+        return true;
+      }
+    );
+    assert.equal(device.queue.submitCalls.length, submitCount, label);
+    assert.equal(
+      device.queue.submittedWorkDoneCount || 0,
+      fenceCount,
+      label
+    );
+    assert.equal(device.queue.writeBufferCalls.length, writeCount, label);
+    assert.equal(boundaryEvents.length, boundaryEventCount, label);
+    assert.equal(
+      trustedAssignmentProviderCallCount,
+      providerCallCount,
+      label
+    );
+  };
+
+  const missingPredecessorAuthority = workerTargetScheduleAuthority({
+    scheduleId: secondScheduleId,
+    laneId: laneOptions.laneId,
+    stateKey: laneOptions.stateKey,
+    sourceLineage: expectedLineage,
+    stepCount,
+    residentStepOptions: tier0ResidentStepOptions,
+    epochOptions: continuationEpochOptions,
+    mechanicsOptions: { residentStepOptions: tier0ResidentStepOptions },
+    providerKind: 'worker-lane-assignment-only'
+  });
+  await assertPredecessorTokenRejectsBeforeGpu(
+    missingPredecessorAuthority,
+    'predecessor-target-token-missing',
+    'missing predecessor token'
+  );
+
+  const predecessorMismatchCases = [
+    ['terminal-lineage', (observation) => {
+      observation.terminalLineage.physicsTick += 1;
+    }],
+    ['authority-fingerprint', (observation) => {
+      observation.targetScheduleAuthorityFingerprint =
+        `sha256:schroeder-target-schedule-authority-v5:${'0'.repeat(64)}`;
+    }]
+  ];
+  for (const [label, mutate] of predecessorMismatchCases) {
+    const forgedObservation = structuredClone(reactionObservation);
+    mutate(forgedObservation);
+    const forgedAuthority = workerTargetScheduleAuthority({
+      scheduleId: secondScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: forgedObservation.terminalLineage,
+      predecessorDynamicLawObservation: forgedObservation,
+      stepCount,
+      residentStepOptions: tier0ResidentStepOptions,
+      epochOptions: continuationEpochOptions,
+      mechanicsOptions: { residentStepOptions: tier0ResidentStepOptions },
+      providerKind: 'worker-lane-assignment-only'
+    });
+    await assertPredecessorTokenRejectsBeforeGpu(
+      forgedAuthority,
+      'predecessor-target-token-mismatch',
+      label
+    );
+  }
+
+  const continuation = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    continuationPayload(continuationTargetScheduleAuthority)
+  );
+  validateSchroederWorkerScheduleExecutionRouteReceipt(continuation, {
+    scheduleId: secondScheduleId,
+    laneId: laneOptions.laneId,
+    stateKey: laneOptions.stateKey,
+    requestedStepCount: stepCount,
+    targetScheduleAuthority: continuationTargetScheduleAuthority
+  });
+  const predecessorConsumption =
+    continuation.predecessorTargetTokenConsumption;
+  assert.deepEqual(
+    continuation.executionRouteReceipt.predecessorTargetTokenConsumption,
+    predecessorConsumption
+  );
+  assert.equal(
+    predecessorConsumption.status,
+    'predecessor-target-token-consumed-before-route-selection'
+  );
+  assert.equal(
+    predecessorConsumption.targetScheduleRequestId,
+    secondScheduleId
+  );
+  assert.equal(predecessorConsumption.conservativeActivationRequired, false);
+  assert.equal(predecessorConsumption.consumedBeforeGpuWork, true);
+  assert.equal(
+    continuation.executionRouteReceipt.transition,
+    'tier0-continuation'
+  );
+  assert.equal(trustedAssignmentProviderCallCount, 0);
+  assert.deepEqual(
+    continuation.executionRouteReceipt.lineage.source,
+    expectedLineage
+  );
+  assert.equal(continuation.retainedBufferRefs.length, 4);
+  assert.equal(device.queue.submitCalls.length - secondSubmissionsBefore, 1);
+  assert.equal(
+    (device.queue.submittedWorkDoneCount || 0) - secondFencesBefore,
+    1
+  );
+  assert.equal(
+    continuation.perStepSummaries.ring.length
+      + continuation.perStepSummaries.droppedStepCount,
+    continuation.perStepSummaries.totalStepCount
+  );
+  assert.equal(
+    continuation.nextScheduleLawActivationObservation.motionEnvelope
+      .thermalPhaseEvolutionEnabled,
+    false,
+    'the branded assignment-only provider preserves the static latch premise'
+  );
+  assert.deepEqual(
+    continuation.executionRouteReceipt.targetScheduleAuthority
+      .predecessorDynamicLawObservation,
+    reactionObservation,
+    'the uncertain predecessor observation is consumed exactly as authored'
+  );
+  assertNoWorkerGpuBuffers(continuation, 'tier0ContinuationScheduleResult');
+  structuredClone(continuation);
+
+  await assertPredecessorTokenRejectsBeforeGpu(
+    continuationTargetScheduleAuthority,
+    'predecessor-target-token-replayed',
+    'replayed predecessor token'
+  );
+
+  const restartSourceLineage = continuation.finalMechanicsLineage;
+  const restartPredecessorObservation =
+    continuation.nextScheduleLawActivationObservation;
+  const restartScheduleId =
+    restartPredecessorObservation.targetScheduleRequestId;
+  assert.equal(
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'predecessor-token-worker-restart'
+    }).released,
+    true
+  );
+  await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:tier0-predecessor-restart',
+        particleCount: 1,
+        lineage: restartSourceLineage,
+        rematerializationSeedOverrides: {
+          identityRequired: true,
+          identityRevision: 'tier0-predecessor-restart-identity',
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          particleIdentityMutationApproved: true,
+          requiresAuthoritativeFourBufferRows: true,
+          outputParticleCapacity: 1
+        }
+      })
+    }),
+    null,
+    laneOptions
+  ));
+  const restartTargetScheduleAuthority = workerTargetScheduleAuthority({
+    scheduleId: restartScheduleId,
+    laneId: laneOptions.laneId,
+    stateKey: laneOptions.stateKey,
+    sourceLineage: restartSourceLineage,
+    predecessorDynamicLawObservation: restartPredecessorObservation,
+    stepCount,
+    residentStepOptions: tier0ResidentStepOptions,
+    epochOptions: continuationEpochOptions,
+    mechanicsOptions: { residentStepOptions: tier0ResidentStepOptions },
+    providerKind: 'worker-lane-assignment-only'
+  });
+  await assertPredecessorTokenRejectsBeforeGpu(
+    restartTargetScheduleAuthority,
+    'predecessor-target-token-state-unavailable',
+    'worker restart discarded retained predecessor authority',
+    schedulePayload(
+      continuationWorkerContext(),
+      {
+        stepCount,
+        scheduleId: restartScheduleId,
+        targetScheduleAuthority: restartTargetScheduleAuthority
+      },
+      laneOptions
+    )
+  );
+  releaseUlgMechanicsResidentStageWorkerLane({
+    ...laneOptions,
+    reason: 'predecessor-token-worker-restart-test-complete'
+  });
+});
+
+test('ULG worker consumes a presealed dormant reaction transition and seals its active S2 continuation', async () => {
+  const device = createFakeGpuDevice();
+  const originalQueueSubmit = device.queue.submit.bind(device.queue);
+  let nextTier0WatchTriggeredSourceCount = null;
+  device.queue.submit = (commandBuffers) => {
+    for (const commandBuffer of commandBuffers || []) {
+      for (const operation of commandBuffer || []) {
+        if (
+          operation.type === 'copy'
+          && operation.source?.label
+            === 'ulg-tier0-reaction-motion-watch-control'
+          && Number.isSafeInteger(nextTier0WatchTriggeredSourceCount)
+        ) {
+          new Uint32Array(operation.source.bytes.buffer)[0] =
+            nextTier0WatchTriggeredSourceCount
+            + SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_COUNT_BIAS;
+          nextTier0WatchTriggeredSourceCount = null;
+        }
+      }
+    }
+    return originalQueueSubmit(commandBuffers);
+  };
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:prospective-reaction-transition-lane',
+    stateKey: 'ulg:test:prospective-reaction-transition-state'
+  };
+  const s0ScheduleId = 'ulg:test:prospective-reaction-transition:s0';
+  const s1ScheduleId = 'ulg:test:prospective-reaction-transition:s1';
+  const s2ScheduleId = 'ulg:test:prospective-reaction-transition:s2';
+  const stepCount = 2;
+  const classifierOptions = {
+    minLevel: 0,
+    maxLevel: 0,
+    chartId: 0,
+    baseGridSpacingM: 1
+  };
+  let assignmentOrdinal = 0;
+  const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+    ...laneOptions,
+    classifierOptions,
+    async levelAssignmentRunner(args) {
+      assignmentOrdinal += 1;
+      const sphUpload = args.sphParticleUpload;
+      return workerSchroederLevelAssignmentFixture(device, {
+        particleCount: sphUpload.particleCount,
+        storageGeneration: sphUpload.storageGeneration,
+        physicsTick: sphUpload.physicsTick,
+        physicsSubstep: sphUpload.physicsSubstep,
+        positionEpoch: sphUpload.positionEpoch,
+        topologyEpoch: sphUpload.topologyEpoch,
+        chartEpoch: sphUpload.chartEpoch,
+        levelEpoch: sphUpload.levelEpoch,
+        supportEpoch: sphUpload.supportEpoch,
+        sourceStateBuffer: sphUpload.stateBuffer,
+        sourceThermoBuffer: sphUpload.thermoBuffer,
+        sourceMechanicsBuffer: args.mlsMpmParticleUpload.mechanicsBuffer,
+        label: `worker-prospective-reaction-assignment-${assignmentOrdinal}`
+      });
+    }
+  });
+  const epochOptions = {
+    selectedLevel: 0,
+    mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+    exactNearCellTreeEnabled: false,
+    mechanicsFieldViewsRequired: false,
+    scheduleStepOptionsProvider: laneProvider
+  };
+  const reactionTable = authorizedReactionWatchTable(new Float32Array([
+    1, 2, 3, 100,
+    -100, 1, 1, 1,
+    1, 0, 0, 0
+  ]));
+  const dormantResidentStepOptions = {
+    contactSolverEnabled: false,
+    ambientPressurePa: 0,
+    activeGridSafetyCells: 1,
+    reactionActivationWatchTable: reactionTable
+  };
+  const activeResidentStepOptions = {
+    contactSolverEnabled: false,
+    ambientPressurePa: 0,
+    activeGridSafetyCells: 1,
+    reactionTable,
+    reactionActivationWatchTable: null
+  };
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-prospective-reaction-transition',
+    particleCount: 4
+  });
+  const activeMechanicsOptions = {
+    schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+    residentStepOptions: activeResidentStepOptions
+  };
+  const seedProspectiveLane = () =>
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:prospective-reaction-transition',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'prospective-reaction-transition-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+  try {
+    await seedProspectiveLane();
+
+    const activePrototypeAuthority = workerTargetScheduleAuthority({
+      scheduleId: 'ulg:test:prospective-reaction-transition:prototype',
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount,
+      residentStepOptions: activeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: activeMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const prospectiveTargetConfiguration =
+      schroederTargetScheduleConfigurationReceipt(activePrototypeAuthority);
+    const s0Authority = workerTargetScheduleAuthority({
+      scheduleId: s0ScheduleId,
+      targetScheduleRequestId: s1ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount,
+      residentStepOptions: dormantResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: {
+        residentStepOptions: dormantResidentStepOptions
+      },
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions,
+      prospectiveTargetConfiguration
+    });
+    nextTier0WatchTriggeredSourceCount = 1;
+    const s0 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: {
+            residentStepOptions: dormantResidentStepOptions
+          }
+        }),
+        {
+          stepCount,
+          scheduleId: s0ScheduleId,
+          targetScheduleAuthority: structuredClone(s0Authority)
+        },
+        laneOptions
+      )
+    );
+    assert.equal(s0.executionRouteReceipt.route, 'tier0-fused-resident-sequence');
+    assert.equal(s0.lawActivationReceipt.reaction, false);
+    assert.equal(s0.lawActivationReceipt.contactSolver, false);
+    const s0Observation = s0.nextScheduleLawActivationObservation;
+    assert.equal(
+      s0Observation.status,
+      'dynamic-law-routing-observation-ready'
+    );
+    assert.equal(s0Observation.observationSucceeded, true);
+    assert.equal(s0Observation.triggered, true);
+    assert.equal(s0Observation.triggeredSourceCount, 1);
+    assert.equal(s0Observation.uncertainty, false);
+    assert.equal(s0Observation.rawEvidenceWord, 1);
+    assert.equal(s0Observation.failureReason, null);
+
+    const s1Authority = workerTargetScheduleAuthority({
+      scheduleId: s1ScheduleId,
+      targetScheduleRequestId: s2ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: s0.finalMechanicsLineage,
+      predecessorDynamicLawObservation: s0Observation,
+      predecessorTargetScheduleAuthority: s0Authority,
+      stepCount,
+      residentStepOptions: activeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: activeMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    assert.equal(
+      s1Authority.predecessorDynamicLawTransition.transitionFingerprint,
+      s0Authority.prospectiveDynamicLawTransition.transitionFingerprint
+    );
+    const forgedS1Authority = structuredClone(s1Authority);
+    forgedS1Authority.predecessorDynamicLawTransition.transitionFingerprint =
+      `sha256:schroeder-prospective-dynamic-law-transition-v0:${'0'.repeat(64)}`;
+    const submissionsBeforeForgery = device.queue.submitCalls.length;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: activeMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s1ScheduleId,
+          targetScheduleAuthority: forgedS1Authority
+        },
+        laneOptions
+      )),
+      (error) => {
+        assert.equal(error.reason, 'target-schedule-authority-mismatch');
+        assert.equal(
+          error.residentScheduleError?.stageId,
+          'target-schedule-authority-preflight'
+        );
+        return true;
+      }
+    );
+    assert.equal(device.queue.submitCalls.length, submissionsBeforeForgery);
+
+    const callerOwnedS1Authority = structuredClone(s1Authority);
+    let callerAuthorityMutatedAfterAdmission = false;
+    const latchedActiveMechanicsOptions = {
+      ...activeMechanicsOptions,
+      async schroederSameLevelMechanicsRunner(args) {
+        if (!callerAuthorityMutatedAfterAdmission) {
+          callerAuthorityMutatedAfterAdmission = true;
+          callerOwnedS1Authority.requestFingerprint =
+            `sha256:schroeder-target-schedule-authority-v5:${'0'.repeat(64)}`;
+          callerOwnedS1Authority.writerSet.reaction = false;
+        }
+        return mechanicsFixture.runner(args);
+      }
+    };
+    const s1 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: latchedActiveMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s1ScheduleId,
+          targetScheduleAuthority: callerOwnedS1Authority
+        },
+        laneOptions
+      )
+    );
+    assert.equal(callerAuthorityMutatedAfterAdmission, true);
+    assert.equal(
+      s1.executionRouteReceipt.targetScheduleAuthority.requestFingerprint,
+      s1Authority.requestFingerprint,
+      'the worker receipt must retain the entry-latched authority fingerprint'
+    );
+    assert.equal(
+      s1.executionRouteReceipt.targetScheduleAuthority.writerSet.reaction,
+      true,
+      'callback-time caller mutation must not alter worker-local authority'
+    );
+    assert.equal(s1.executionRouteReceipt.route, 'canonical-schroeder');
+    assert.equal(s1.lawActivationReceipt.reaction, true);
+    assert.equal(s1.lawActivationReceipt.contactSolverRequested, false);
+    assert.equal(s1.lawActivationReceipt.contactSolver, true);
+    assert.equal(
+      s1.lawActivationReceipt.contactSolverEscalatedForDynamicLaws,
+      true
+    );
+    assert.equal(
+      s1.predecessorTargetTokenConsumption.configurationContinuityMode,
+      'prospective-reaction-dormant-to-executing'
+    );
+    assert.equal(
+      s1.predecessorTargetTokenConsumption
+        .prospectiveDynamicLawTransitionFingerprint,
+      s0Authority.prospectiveDynamicLawTransition.transitionFingerprint
+    );
+    assert.equal(
+      s1.executionRouteReceipt.targetScheduleAuthority.tableFingerprints
+        .reactionActivationWatchTable,
+      null
+    );
+    assert.notEqual(
+      s1.executionRouteReceipt.targetScheduleAuthority.tableFingerprints
+        .reactionTable,
+      null
+    );
+    const dynamicCarrierTransition =
+      s1.executionRouteReceipt.phaseCarrierOneToFourTransition;
+    assert.equal(
+      dynamicCarrierTransition.status,
+      'phase-carrier-one-to-four-adopted-terminal-fence-satisfied'
+    );
+    assert.equal(
+      dynamicCarrierTransition.trigger,
+      'authenticated-dynamic-reaction-successor'
+    );
+    assert.equal(dynamicCarrierTransition.routingAuthority, true);
+    assert.equal(dynamicCarrierTransition.dynamicLawRoutingAuthority, true);
+    assert.equal(
+      dynamicCarrierTransition.terminalParticleCount,
+      dynamicCarrierTransition.sourceParticleCount * 4
+    );
+    assert.equal(dynamicCarrierTransition.mapAsyncCount, 0);
+    assert.equal(dynamicCarrierTransition.readbackBytes, 0);
+    assert.equal(dynamicCarrierTransition.terminalFenceSatisfied, true);
+    assert.equal(dynamicCarrierTransition.supersededSourceRetired, true);
+
+    const s1Observation = s1.nextScheduleLawActivationObservation;
+    const s2Authority = workerTargetScheduleAuthority({
+      scheduleId: s2ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: s1.finalMechanicsLineage,
+      sourceParticleCount: dynamicCarrierTransition.terminalParticleCount,
+      sourcePhaseLaneCount:
+        s1.executionRouteReceipt.phaseCarrierOneToFourTransition
+          ?.terminalPhaseCarrierPlan?.phaseLaneCount ?? 1,
+      predecessorDynamicLawObservation: s1Observation,
+      predecessorTargetScheduleAuthority: s1Authority,
+      stepCount,
+      residentStepOptions: activeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: activeMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    assert.equal(
+      s2Authority.predecessorDynamicLawTransition,
+      null,
+      'S2 exact continuity must not consume a second reaction transition'
+    );
+    assert.equal(
+      s2Authority.writerSet.reaction,
+      true
+    );
+    assert.equal(
+      s2Authority.tableFingerprints.reactionActivationWatchTable,
+      null,
+      'the sealed S2 target must not revert to its dormant watch'
+    );
+    const s2 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: activeMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s2ScheduleId,
+          targetScheduleAuthority: structuredClone(s2Authority)
+        },
+        laneOptions
+      )
+    );
+    validateSchroederWorkerScheduleExecutionRouteReceipt(s2, {
+      scheduleId: s2ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      requestedStepCount: stepCount,
+      targetScheduleAuthority: s2Authority
+    });
+    assert.equal(s2.executionRouteReceipt.route, 'canonical-schroeder');
+    assert.equal(s2.lawActivationReceipt.reaction, true);
+    assert.equal(s2.phaseCarrierOneToFourTransition, null);
+    assert.equal(
+      s2.predecessorTargetTokenConsumption.configurationContinuityMode,
+      'exact-configuration-continuation'
+    );
+    assert.equal(
+      s2.predecessorTargetTokenConsumption
+        .prospectiveDynamicLawTransitionFingerprint,
+      null
+    );
+    assert.equal(
+      s2.executionRouteReceipt.targetScheduleAuthority.writerSet.reaction,
+      true
+    );
+    assert.equal(
+      s2.executionRouteReceipt.targetScheduleAuthority.tableFingerprints
+        .reactionActivationWatchTable,
+      null
+    );
+
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'prospective-reaction-transition-zero-reseed'
+    });
+    await seedProspectiveLane();
+    nextTier0WatchTriggeredSourceCount = 0;
+    const zeroS0 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: {
+            residentStepOptions: dormantResidentStepOptions
+          }
+        }),
+        {
+          stepCount,
+          scheduleId: s0ScheduleId,
+          targetScheduleAuthority: structuredClone(s0Authority)
+        },
+        laneOptions
+      )
+    );
+    const zeroObservation = zeroS0.nextScheduleLawActivationObservation;
+    assert.equal(
+      zeroObservation.status,
+      'dynamic-law-routing-observation-ready'
+    );
+    assert.equal(zeroObservation.observationSucceeded, true);
+    assert.equal(zeroObservation.triggered, false);
+    assert.equal(zeroObservation.triggeredSourceCount, 0);
+    assert.equal(zeroObservation.uncertainty, false);
+    assert.equal(zeroObservation.rawEvidenceWord, 0);
+    assert.equal(zeroObservation.failureReason, null);
+    assert.throws(
+      () => workerTargetScheduleAuthority({
+        scheduleId: s1ScheduleId,
+        targetScheduleRequestId: s2ScheduleId,
+        laneId: laneOptions.laneId,
+        stateKey: laneOptions.stateKey,
+        sourceLineage: zeroS0.finalMechanicsLineage,
+        predecessorDynamicLawObservation: zeroObservation,
+        predecessorTargetScheduleAuthority: s0Authority,
+        stepCount,
+        residentStepOptions: activeResidentStepOptions,
+        epochOptions,
+        mechanicsOptions: activeMechanicsOptions,
+        providerKind: 'worker-lane-assignment-only',
+        classifierOptions
+      }),
+      /not prospectively authorized/,
+      'a trustworthy successful-zero observation must not activate S1'
+    );
+
+    const submitCountBeforeZeroMismatch = device.queue.submitCalls.length;
+    const writeCountBeforeZeroMismatch = device.queue.writeBufferCalls.length;
+    const fenceCountBeforeZeroMismatch =
+      device.queue.submittedWorkDoneCount || 0;
+    const assignmentCountBeforeZeroMismatch = assignmentOrdinal;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: activeMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s1ScheduleId,
+          targetScheduleAuthority: structuredClone(s1Authority)
+        },
+        laneOptions
+      )),
+      (error) => {
+        assert.equal(error.reason, 'predecessor-target-token-mismatch');
+        assert.equal(
+          error.residentScheduleError?.stageId,
+          'predecessor-target-token-preflight'
+        );
+        return true;
+      }
+    );
+    assert.equal(device.queue.submitCalls.length, submitCountBeforeZeroMismatch);
+    assert.equal(
+      device.queue.writeBufferCalls.length,
+      writeCountBeforeZeroMismatch
+    );
+    assert.equal(
+      device.queue.submittedWorkDoneCount || 0,
+      fenceCountBeforeZeroMismatch
+    );
+    assert.equal(assignmentOrdinal, assignmentCountBeforeZeroMismatch);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'prospective-reaction-transition-test-complete'
+    });
+  }
+});
+
+test('ULG worker authenticates a retained product arena for a multi-step S1-to-S2 gas transition', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:retained-product-gas-transition-lane',
+    stateKey: 'ulg:test:retained-product-gas-transition-state'
+  };
+  const s1ScheduleId = 'ulg:test:retained-product-gas-transition:s1';
+  const s2ScheduleId = 'ulg:test:retained-product-gas-transition:s2';
+  const stepCount = 2;
+  const classifierOptions = {
+    minLevel: 0,
+    maxLevel: 0,
+    chartId: 0,
+    baseGridSpacingM: 1
+  };
+  let assignmentOrdinal = 0;
+  const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+    ...laneOptions,
+    classifierOptions,
+    async levelAssignmentRunner(args) {
+      assignmentOrdinal += 1;
+      const sphUpload = args.sphParticleUpload;
+      return workerSchroederLevelAssignmentFixture(device, {
+        particleCount: sphUpload.particleCount,
+        storageGeneration: sphUpload.storageGeneration,
+        physicsTick: sphUpload.physicsTick,
+        physicsSubstep: sphUpload.physicsSubstep,
+        positionEpoch: sphUpload.positionEpoch,
+        topologyEpoch: sphUpload.topologyEpoch,
+        chartEpoch: sphUpload.chartEpoch,
+        levelEpoch: sphUpload.levelEpoch,
+        supportEpoch: sphUpload.supportEpoch,
+        sourceStateBuffer: sphUpload.stateBuffer,
+        sourceThermoBuffer: sphUpload.thermoBuffer,
+        sourceMechanicsBuffer: args.mlsMpmParticleUpload.mechanicsBuffer,
+        label: `worker-retained-product-gas-assignment-${assignmentOrdinal}`
+      });
+    }
+  });
+  const epochOptions = {
+    selectedLevel: 0,
+    mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+    exactNearCellTreeEnabled: false,
+    mechanicsFieldViewsRequired: false,
+    scheduleStepOptionsProvider: laneProvider
+  };
+  const reactionTable = authorizedReactionWatchTable(new Float32Array([
+    1, 2, 3, 100,
+    -100, 1, 1, 1,
+    1, 0, 0, 0
+  ]));
+  const activeResidentStepOptions = {
+    contactSolverEnabled: false,
+    ambientPressurePa: 0,
+    activeGridSafetyCells: 1,
+    reactionTable,
+    reactionActivationWatchTable: null
+  };
+  const gasPrototypeResidentStepOptions = {
+    ...activeResidentStepOptions,
+    externalGaugePressureEnabled: true
+  };
+  const sourceProductBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'worker-retained-product-gas-source-events',
+    size: 128,
+    usage: 128 | 4 | 8
+  }), device);
+  const emittedProductMass = tagResidentProductMassDevice({
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-buffer-retained',
+    source: 'worker-retained-product-gas-test-source',
+    productEventBuffer: sourceProductBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: 128,
+    productEventRowCount: 1,
+    productEventActiveEventCount: 1,
+    productEventStrideFloats: 32,
+    productEventStrideBytes: 128,
+    productEventGenerationCount: 1,
+    productEventSourceRowCounts: [1],
+    mergeSourceProductEventBufferCount: 1,
+    mergeSourceProductEventRowCounts: [1],
+    mergeSourceProductEventBufferByteLengths: [128],
+    productInventoryCount: 1,
+    gasSpeciesLedgerCount: 0,
+    gasSpeciesReadbackByteLength: 0,
+    sealedBoxGasProductMoles: 0,
+    visibleProductMassKg: 0,
+    unplacedProductMassKg: 1,
+    unplacedGasProductMassKg: 0,
+    consumeMassPolicy: 'unplaced-product-mass-only',
+    visibleMassAlreadyInParticleBuffers: true,
+    destroyResidentProductMassBuffers() {
+      sourceProductBuffer.destroy();
+    }
+  }, device);
+  const retainedProductMass = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    emittedResidentProductMass: emittedProductMass,
+    allowHostCompactionObservation: false
+  });
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-retained-product-gas-transition',
+    particleCount: 1
+  });
+  const productMechanicsOptions = {
+    async schroederSameLevelMechanicsRunner(args) {
+      const result = await mechanicsFixture.runner(args);
+      result.residentStep.residentProductMass = retainedProductMass;
+      return result;
+    },
+    residentStepOptions: activeResidentStepOptions
+  };
+  const previousGpuBufferUsage = globalThis.GPUBufferUsage;
+  const previousGpuMapMode = globalThis.GPUMapMode;
+  globalThis.GPUBufferUsage = {
+    ...(previousGpuBufferUsage || {}),
+    COPY_DST: previousGpuBufferUsage?.COPY_DST ?? 8,
+    MAP_READ: previousGpuBufferUsage?.MAP_READ ?? 1
+  };
+  globalThis.GPUMapMode = {
+    ...(previousGpuMapMode || {}),
+    READ: previousGpuMapMode?.READ ?? 1
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:retained-product-gas-transition',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'retained-product-gas-transition-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const targetPrototype = workerTargetScheduleAuthority({
+      scheduleId: 'ulg:test:retained-product-gas-transition:prototype',
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount,
+      residentStepOptions: gasPrototypeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: {
+        ...productMechanicsOptions,
+        residentStepOptions: gasPrototypeResidentStepOptions
+      },
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const s1Authority = workerTargetScheduleAuthority({
+      scheduleId: s1ScheduleId,
+      targetScheduleRequestId: s2ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount,
+      residentStepOptions: activeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: productMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions,
+      prospectiveTargetConfiguration:
+        schroederTargetScheduleConfigurationReceipt(targetPrototype)
+    });
+    assert.equal(
+      s1Authority.prospectiveDynamicLawTransition.kind,
+      'retained-product-gas-boundary-inactive-to-actionable'
+    );
+    const s1 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: productMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s1ScheduleId,
+          targetScheduleAuthority: structuredClone(s1Authority)
+        },
+        laneOptions
+      )
+    );
+    const writerEvidence = s1.nextScheduleLawActivationObservation
+      .prospectiveWriterEvidence;
+    const productHistoryEvidence = s1.perStepSummaries.lastStep
+      .hierarchyStageSummary.residentProductHistory;
+    assert.equal(
+      productHistoryEvidence.schema,
+      'peercompute.ulg.worker-resident-product-history-evidence.v0'
+    );
+    assert.equal(
+      productHistoryEvidence.status,
+      'worker-resident-product-history-evidence-ready'
+    );
+    assert.equal(
+      productHistoryEvidence.residentProductMassStatus,
+      'resident-product-mass-merged-gpu-resident'
+    );
+    assert.equal(productHistoryEvidence.productEventBufferRetained, true);
+    assert.equal(
+      productHistoryEvidence.compactionStatus,
+      'product-event-filtered-append-gpu-count-resident'
+    );
+    assert.equal(
+      productHistoryEvidence.gpuCommitStatus,
+      'gpu-conditioned-publication-commit-pending'
+    );
+    assert.equal(
+      productHistoryEvidence.arenaStatus,
+      'resident-product-history-arena-gpu-commit-pending'
+    );
+    assert.ok(productHistoryEvidence.generation > 0);
+    assert.ok(productHistoryEvidence.seal > 0);
+    assert.equal(writerEvidence.gasBoundaryActionable, true);
+    assert.equal(
+      writerEvidence.status,
+      'worker-retained-product-gas-boundary-actionable'
+    );
+    assert.ok(writerEvidence.productHistoryArenaIdentity);
+    if (writerEvidence.productHistoryLiveBoundObservation) {
+      assert.equal(
+        writerEvidence.productHistoryLiveBoundObservation.observedLiveRowCount,
+        0
+      );
+      assert.equal(
+        writerEvidence.productHistoryArenaIdentity.countAuthorityGeneration,
+        writerEvidence.productHistoryLiveBoundObservation.arenaIdentity
+          .countAuthorityGeneration
+      );
+    }
+    assert.equal(writerEvidence.terminalGpuFenceSatisfied, true);
+    assert.equal(writerEvidence.scheduleCancelled, false);
+
+    const s2Authority = workerTargetScheduleAuthority({
+      scheduleId: s2ScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: s1.finalMechanicsLineage,
+      predecessorDynamicLawObservation:
+        s1.nextScheduleLawActivationObservation,
+      predecessorTargetScheduleAuthority: s1Authority,
+      stepCount,
+      residentStepOptions: activeResidentStepOptions,
+      epochOptions,
+      mechanicsOptions: productMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    assert.equal(s2Authority.writerSet.gasBoundaryActionable, true);
+    assert.equal(
+      s2Authority.predecessorDynamicLawTransition.transitionFingerprint,
+      s1Authority.prospectiveDynamicLawTransition.transitionFingerprint
+    );
+    const s2 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: productMechanicsOptions
+        }),
+        {
+          stepCount,
+          scheduleId: s2ScheduleId,
+          targetScheduleAuthority: structuredClone(s2Authority)
+        },
+        laneOptions
+      )
+    );
+    assert.equal(s2.lawActivationReceipt.gasBoundaryActionable, true);
+    assert.equal(
+      s2.predecessorTargetTokenConsumption.configurationContinuityMode,
+      'prospective-retained-product-gas-boundary-actionable'
+    );
+    assert.equal(
+      s2.predecessorTargetTokenConsumption.conservativeActivationRequired,
+      true
+    );
+    assert.ok(
+      s2.executionRouteReceipt.blockers.includes('gas-boundary-actionable')
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'retained-product-gas-transition-test-complete'
+    });
+    try { emittedProductMass.destroyResidentProductMassBuffers(); } catch {}
+    if (previousGpuBufferUsage === undefined) {
+      delete globalThis.GPUBufferUsage;
+    } else {
+      globalThis.GPUBufferUsage = previousGpuBufferUsage;
+    }
+    if (previousGpuMapMode === undefined) {
+      delete globalThis.GPUMapMode;
+    } else {
+      globalThis.GPUMapMode = previousGpuMapMode;
+    }
+  }
+});
+
+test('ULG worker rejects an unsealed provider before dynamic-watch execution', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-provider-guard-lane',
+    stateKey: 'ulg:test:tier0-provider-guard-state'
+  };
+  await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:tier0-provider-guard',
+        particleCount: 1,
+        rematerializationSeedOverrides: {
+          identityRequired: true,
+          identityRevision: 'tier0-provider-guard-identity',
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          particleIdentityMutationApproved: true,
+          requiresAuthoritativeFourBufferRows: true,
+          outputParticleCapacity: 1
+        }
+      })
+    }),
+    null,
+    laneOptions
+  ));
+
+  const continuationAssignment = workerSchroederLevelAssignmentFixture(
+    device,
+    {
+      particleCount: 1,
+      storageGeneration:
+        WORKER_LANE_SEED_DEFAULT_LINEAGE.storageGeneration + 1,
+      physicsTick: WORKER_LANE_SEED_DEFAULT_LINEAGE.physicsTick + 1,
+      positionEpoch: WORKER_LANE_SEED_DEFAULT_LINEAGE.positionEpoch + 1,
+      sourceStateBuffer: null,
+      label: 'worker-tier0-provider-guard-step2'
+    }
+  );
+  let providerCallCount = 0;
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-tier0-provider-guard',
+    particleCount: 1
+  });
+  const scheduleId = 'ulg:test:tier0-provider-guard-schedule';
+  const submissionsBefore = device.queue.submitCalls.length;
+  try {
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: {
+              selectedLevel: 0,
+              mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+              exactNearCellTreeEnabled: false,
+              mechanicsFieldViewsRequired: false,
+              async scheduleStepOptionsProvider() {
+                providerCallCount += 1;
+                return { levelAssignment: continuationAssignment };
+              }
+            },
+            schroederSameLevelMechanics: {
+              schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+              residentStepOptions: {
+                contactSolverEnabled: false,
+                ambientPressurePa: 0,
+                reactionTable:
+                  thermalPhaseLatchReactionWatchTable()
+              }
+            }
+          }),
+          { stepCount: 2, scheduleId },
+          laneOptions
+        )
+      ),
+      (error) => {
+        assert.equal(
+          error.code,
+          'ERR_ULG_WORKER_RESIDENT_SCHEDULE_TARGET_SCHEDULE_AUTHORITY_REQUIRED'
+        );
+        assert.equal(error.reason, 'target-schedule-authority-required');
+        assert.equal(
+          error.residentScheduleError?.stageId,
+          'target-schedule-authority-preflight'
+        );
+        return true;
+      }
+    );
+    assert.equal(providerCallCount, 0);
+    assert.equal(mechanicsFixture.runnerCalls.length, 0);
+    assert.equal(device.queue.submitCalls.length, submissionsBefore);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker schedule activates a dynamic law by rebuilding the first canonical SS epoch from the exact Tier0 terminal family', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-canonical-transition-lane',
+    stateKey: 'ulg:test:tier0-canonical-transition-state'
+  };
+  await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:tier0-canonical-transition',
+        particleCount: 1,
+        rematerializationSeedOverrides: {
+          identityRequired: true,
+          identityRevision: 'tier0-canonical-transition-identity',
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          particleIdentityMutationApproved: true,
+          requiresAuthoritativeFourBufferRows: true,
+          outputParticleCapacity: 1
+        }
+      })
+    }),
+    null,
+    laneOptions
+  ));
+
+  const tier0StepCount = 2;
+  const tier0 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          selectedLevel: 0,
+          mechanicsFieldViewsRequired: false
+        },
+        schroederSameLevelMechanics: {
+          residentStepOptions: {
+            contactSolverEnabled: false,
+            ambientPressurePa: 0,
+            activeGridSafetyCells: 1
+          }
+        }
+      }),
+      {
+        stepCount: tier0StepCount,
+        scheduleId: 'ulg:test:tier0-before-law-activation'
+      },
+      laneOptions
+    )
+  );
+  const tier0TerminalLineage = tier0.finalMechanicsLineage;
+  assert.equal(tier0.executionRouteReceipt.route, 'tier0-fused-resident-sequence');
+  assert.equal(tier0.finalEpochSeal, null);
+  assert.deepEqual(tier0.finalEpochIdentity, tier0TerminalLineage);
+  const continuationAssignment = workerSchroederLevelAssignmentFixture(
+    device,
+    {
+      particleCount: 1,
+      storageGeneration: tier0TerminalLineage.storageGeneration + 1,
+      physicsTick: tier0TerminalLineage.physicsTick + 1,
+      positionEpoch: tier0TerminalLineage.positionEpoch + 1,
+      sourceStateBuffer: null,
+      label: 'worker-tier0-canonical-transition-step2'
+    }
+  );
+
+  const classifierCalls = [];
+  const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+    ...laneOptions,
+    classifierOptions: {
+      minLevel: 0,
+      maxLevel: 0,
+      chartId: 0,
+      baseGridSpacingM: 1
+    },
+    async levelAssignmentRunner(args) {
+      classifierCalls.push(args);
+      return runSchroederLevelAssignmentWebGpu(args);
+    }
+  });
+  let providerCallCount = 0;
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-tier0-canonical-transition',
+    particleCount: 1
+  });
+  const canonicalScheduleId = 'ulg:test:canonical-after-law-activation';
+  const canonical = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false,
+          mechanicsFieldViewsRequired: false,
+          async scheduleStepOptionsProvider() {
+            providerCallCount += 1;
+            return providerCallCount === 1
+              ? laneProvider()
+              : { levelAssignment: continuationAssignment };
+          }
+        },
+        schroederSameLevelMechanics: {
+          enableLawQueue: true,
+          schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+          residentStepOptions: {
+            contactSolverEnabled: false,
+            ambientPressurePa: 0
+          }
+        }
+      }),
+      { stepCount: 2, scheduleId: canonicalScheduleId },
+      laneOptions
+    )
+  );
+  const outerRouteAdmission =
+    validateSchroederWorkerScheduleExecutionRouteReceipt(canonical, {
+      scheduleId: canonicalScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      requestedStepCount: 2
+    });
+
+  assert.equal(providerCallCount, 2);
+  assert.equal(classifierCalls.length, 1);
+  const classifierCall = classifierCalls[0];
+  assert.equal(mechanicsFixture.runnerCalls.length, 2);
+  assert.equal(canonical.lawActivationReceipt.lawQueue, true);
+  assert.equal(canonical.lawActivationReceipt.contactSolverRequested, false);
+  assert.equal(
+    canonical.lawActivationReceipt.contactSolverEscalatedForDynamicLaws,
+    true
+  );
+  assert.equal(canonical.lawActivationReceipt.contactSolver, true);
+  assert.equal(
+    mechanicsFixture.runnerCalls[0].residentStepOptions.contactSolverEnabled,
+    true
+  );
+  assert.equal(canonical.executionRouteReceipt.route, 'canonical-schroeder');
+  assert.equal(outerRouteAdmission.route, 'canonical-schroeder');
+  assert.deepEqual(
+    canonical.executionRouteReceipt.blockers,
+    [
+      'schedule-step-options-provider-present',
+      'contact-solver-active',
+      'law-queue-active'
+    ]
+  );
+  assert.equal(
+    canonical.executionRouteReceipt.transition,
+    'tier0-to-canonical-schedule-boundary'
+  );
+  assert.ok(canonical.finalEpochSeal);
+  for (const field of ULG_WORKER_SCHROEDER_LANE_SEED_LINEAGE_WORD_FIELDS) {
+    assert.equal(
+      classifierCall.sphParticleUpload[field],
+      tier0TerminalLineage[field],
+      `first classifier source ${field}`
+    );
+    assert.equal(
+      canonical.finalEpochSeal[field],
+      mechanicsFixture.runnerCalls[1].sphParticleUpload[field],
+      `terminal canonical generation ${field}`
+    );
+  }
+  assert.deepEqual(
+    canonical.executionRouteReceipt.lineage.source,
+    tier0TerminalLineage
+  );
+  assert.equal(
+    classifierCall.sphParticleUpload,
+    mechanicsFixture.runnerCalls[0].sphParticleUpload
+  );
+  assert.equal(
+    classifierCall.mlsMpmParticleUpload,
+    mechanicsFixture.runnerCalls[0].mlsMpmParticleUpload
+  );
+  assertNoWorkerGpuBuffers(canonical, 'canonicalAfterTier0');
+  structuredClone(canonical);
+});
+
+test('ULG worker materializes exact 1-to-4 carriers before a static thermal canonical transition', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-one-to-four-lane',
+    stateKey: 'ulg:test:tier0-one-to-four-state'
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:tier0-one-to-four',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'tier0-one-to-four-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const tier0 = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: {
+            selectedLevel: 0,
+            mechanicsFieldViewsRequired: false
+          },
+          schroederSameLevelMechanics: {
+            residentStepOptions: {
+              contactSolverEnabled: false,
+              ambientPressurePa: 0,
+              activeGridSafetyCells: 1
+            }
+          }
+        }),
+        {
+          stepCount: 2,
+          scheduleId: 'ulg:test:tier0-before-one-to-four'
+        },
+        laneOptions
+      )
+    );
+    const tier0TerminalLineage = tier0.finalMechanicsLineage;
+    assert.equal(
+      tier0.executionRouteReceipt.route,
+      'tier0-fused-resident-sequence'
+    );
+
+    const classifierCalls = [];
+    const classifierOptions = {
+      minLevel: 0,
+      maxLevel: 0,
+      chartId: 0,
+      baseGridSpacingM: 1
+    };
+    const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+      ...laneOptions,
+      classifierOptions,
+      async levelAssignmentRunner(args) {
+        classifierCalls.push(args);
+        return runSchroederLevelAssignmentWebGpu(args);
+      }
+    });
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-tier0-one-to-four',
+      particleCount: 4
+    });
+    const referenceClosures = createReferenceMaterialClosures();
+    const thermalMaterialTable = buildSphThermalMaterialTable({
+      h2o: referenceClosures.h2o.properties
+    });
+    const scheduleId = 'ulg:test:thermal-after-tier0-one-to-four';
+    const retainedContinuationScheduleId =
+      'ulg:test:thermal-four-lane-retained-continuation';
+    const reactionTable = thermalPhaseLatchReactionWatchTable();
+    const canonicalEpochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false,
+      mechanicsFieldViewsRequired: false,
+      scheduleStepOptionsProvider: laneProvider
+    };
+    const canonicalResidentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      thermalMaterialTable,
+      reactionTable
+    };
+    const canonicalMechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+      residentStepOptions: canonicalResidentStepOptions
+    };
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      targetScheduleRequestId: retainedContinuationScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: tier0TerminalLineage,
+      stepCount: 1,
+      residentStepOptions: canonicalResidentStepOptions,
+      epochOptions: canonicalEpochOptions,
+      mechanicsOptions: canonicalMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const canonical =
+      await runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: canonicalEpochOptions,
+            schroederSameLevelMechanics: canonicalMechanicsOptions
+          }),
+          { stepCount: 1, scheduleId, targetScheduleAuthority },
+          laneOptions
+        )
+      );
+    const admitted = validateSchroederWorkerScheduleExecutionRouteReceipt(
+      canonical,
+      {
+        scheduleId,
+        laneId: laneOptions.laneId,
+        stateKey: laneOptions.stateKey,
+        requestedStepCount: 1,
+        targetScheduleAuthority
+      }
+    );
+    const transition = canonical.phaseCarrierOneToFourTransition;
+
+    assert.equal(admitted.route, 'canonical-schroeder');
+    assert.equal(canonical.lawActivationReceipt.thermal, true);
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].residentStepOptions
+        .reactionActivationMotionEnvelope.thermalPhaseEvolutionEnabled,
+      true
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation.motionEnvelope
+        .futureRestDiameterBoundStatus,
+      'future-upper-unclaimed-trigger-positive'
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation.shadowOnly,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation.routingAuthority,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation.targetScheduleRequestId,
+      targetScheduleAuthority.targetScheduleRequestId
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation
+        .targetScheduleAuthorityFingerprint,
+      targetScheduleAuthority.requestFingerprint
+    );
+    assert.equal(
+      canonical.nextScheduleLawActivationObservation.executionGating,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+    );
+    assert.equal(
+      canonical.executionRouteReceipt.transition,
+      'tier0-one-to-four-to-canonical-schedule-boundary'
+    );
+    assert.equal(transition.sourceParticleCount, 1);
+    assert.equal(transition.terminalParticleCount, 4);
+    assert.equal(transition.companionParticleCount, 3);
+    assert.equal(transition.countSummary.exactCountAuthority, true);
+    assert.equal(transition.commandSubmissionCount, 1);
+    assert.equal(transition.fullParticleReadbackPerformed, false);
+    assert.equal(transition.mapAsyncCount, 0);
+    assert.equal(transition.readbackBytes, 0);
+    assert.equal(transition.routingAuthority, false);
+    assert.equal(transition.dynamicLawRoutingAuthority, false);
+    assert.equal(
+      transition.validationErrorScopeStatus,
+      'validation-error-scope-clean'
+    );
+    assert.equal(transition.validationErrorObserved, false);
+    assert.match(
+      transition.materializationKernelRevision,
+      /reserved-companions-v0$/
+    );
+    assert.match(
+      transition.identityCorrespondenceRevision,
+      /lane-major-v0$/
+    );
+    assert.equal(
+      transition.terminalIdentityRevision,
+      `${transition.sourceIdentityRevision}:phase-carrier-1-to-4:1->4:sg${
+        transition.terminalLineage.storageGeneration
+      }:te${transition.terminalLineage.topologyEpoch}`
+    );
+    assert.equal(
+      transition.auxiliaryBufferOwnershipTransfer
+        .terminalOwnershipAdopted,
+      true
+    );
+    assert.equal(canonical.particleCardinality.sourceParticleCount, 1);
+    assert.equal(canonical.particleCardinality.targetParticleCount, 4);
+    assert.equal(
+      canonical.particleCardinality.terminalStepParticleCount,
+      4
+    );
+    assert.equal(
+      canonical.particleCardinality.exactTargetParticleFamily,
+      true
+    );
+    assert.deepEqual(transition.sourceLineage, tier0TerminalLineage);
+    assert.deepEqual(transition.terminalLineage, {
+      ...tier0TerminalLineage,
+      storageGeneration: tier0TerminalLineage.storageGeneration + 1,
+      topologyEpoch: tier0TerminalLineage.topologyEpoch + 1
+    });
+    assert.equal(
+      transition.sourceRetirement.status,
+      'phase-carrier-one-to-four-source-retired-after-terminal-fence'
+    );
+    assert.equal(transition.sourceRetirement.retiredSourceBufferCount, 4);
+    assert.equal(classifierCalls.length, 1);
+    assert.equal(classifierCalls[0].sphParticleUpload.particleCount, 4);
+    assert.equal(
+      classifierCalls[0].sphParticleUpload.phaseCarrierPlan.phaseLaneCount,
+      4
+    );
+    assert.equal(
+      classifierCalls[0].sphParticleUpload.identityBuffer.label,
+      'ulg-sph-phase-carrier-one-to-four-identity'
+    );
+    assert.equal(mechanicsFixture.runnerCalls.length, 1);
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].sphParticleUpload.particleCount,
+      4
+    );
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].mlsMpmParticleUpload.particleCount,
+      4
+    );
+    assert.deepEqual(
+      canonical.executionRouteReceipt.lineage.source,
+      tier0TerminalLineage
+    );
+    assert.equal(
+      canonical.executionRouteReceipt.lineage.topologyChanged,
+      true
+    );
+    assertNoWorkerGpuBuffers(canonical, 'oneToFourCanonicalResult');
+    structuredClone(canonical);
+
+    const retainedContinuationAssignment =
+      workerSchroederLevelAssignmentFixture(device, {
+        particleCount: 4,
+        storageGeneration:
+          canonical.finalMechanicsLineage.storageGeneration,
+        physicsTick: canonical.finalMechanicsLineage.physicsTick,
+        physicsSubstep: canonical.finalMechanicsLineage.physicsSubstep,
+        positionEpoch: canonical.finalMechanicsLineage.positionEpoch,
+        topologyEpoch: canonical.finalMechanicsLineage.topologyEpoch,
+        chartEpoch: canonical.finalMechanicsLineage.chartEpoch,
+        levelEpoch: canonical.finalMechanicsLineage.levelEpoch,
+        supportEpoch: canonical.finalMechanicsLineage.supportEpoch,
+        sourceStateBuffer: null,
+        label: 'worker-four-lane-retained-continuation'
+      });
+    let retainedProviderCallCount = 0;
+    const retainedContinuationProvider =
+      createWorkerSchroederLaneLevelAssignmentProvider({
+        ...laneOptions,
+        classifierOptions,
+        async levelAssignmentRunner() {
+          retainedProviderCallCount += 1;
+          return retainedContinuationAssignment;
+        }
+      });
+    const retainedContinuationEpochOptions = {
+      ...canonicalEpochOptions,
+      scheduleStepOptionsProvider: retainedContinuationProvider
+    };
+    const retainedContinuationAuthority = workerTargetScheduleAuthority({
+      scheduleId: retainedContinuationScheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      sourceLineage: canonical.finalMechanicsLineage,
+      sourceParticleCount: 4,
+      sourcePhaseLaneCount: 4,
+      predecessorDynamicLawObservation:
+        canonical.nextScheduleLawActivationObservation,
+      stepCount: 1,
+      residentStepOptions: canonicalResidentStepOptions,
+      epochOptions: retainedContinuationEpochOptions,
+      mechanicsOptions: canonicalMechanicsOptions,
+      providerKind: 'worker-lane-assignment-only',
+      classifierOptions
+    });
+    const retainedContinuation =
+      await runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: retainedContinuationEpochOptions,
+            schroederSameLevelMechanics: canonicalMechanicsOptions
+          }),
+          {
+            stepCount: 1,
+            scheduleId: retainedContinuationScheduleId,
+            targetScheduleAuthority: retainedContinuationAuthority
+          },
+          laneOptions
+        )
+      );
+    const retainedContinuationAdmission =
+      validateSchroederWorkerScheduleExecutionRouteReceipt(
+        retainedContinuation,
+        {
+          scheduleId: retainedContinuationScheduleId,
+          laneId: laneOptions.laneId,
+          stateKey: laneOptions.stateKey,
+          requestedStepCount: 1,
+          targetScheduleAuthority: retainedContinuationAuthority
+        }
+      );
+    const retainedPredecessorConsumption =
+      retainedContinuation.predecessorTargetTokenConsumption;
+    assert.equal(retainedContinuationAdmission.route, 'canonical-schroeder');
+    assert.deepEqual(
+      retainedContinuation.executionRouteReceipt
+        .predecessorTargetTokenConsumption,
+      retainedPredecessorConsumption
+    );
+    assert.equal(
+      retainedPredecessorConsumption.targetScheduleRequestId,
+      retainedContinuationScheduleId
+    );
+    assert.equal(retainedPredecessorConsumption.sourceParticleCount, 4);
+    assert.equal(retainedPredecessorConsumption.sourcePhaseLaneCount, 4);
+    assert.equal(retainedPredecessorConsumption.consumedBeforeGpuWork, true);
+    assert.equal(retainedProviderCallCount, 1);
+    assert.equal(
+      retainedContinuationAuthority.sourcePhaseLaneCount,
+      4
+    );
+    assert.equal(retainedContinuationAuthority.sourceParticleCount, 4);
+    assert.deepEqual(
+      retainedContinuation.executionRouteReceipt.lineage.source,
+      canonical.finalMechanicsLineage
+    );
+    assert.equal(
+      retainedContinuation.executionRouteReceipt.transition,
+      'fresh-or-canonical-continuation'
+    );
+    assert.equal(retainedContinuation.phaseCarrierOneToFourTransition, null);
+    assert.equal(
+      retainedContinuation.particleCardinality.sourceParticleCount,
+      4
+    );
+    assert.equal(
+      retainedContinuation.particleCardinality.targetParticleCount,
+      4
+    );
+    assert.equal(
+      retainedContinuation.nextScheduleLawActivationObservation
+        .targetScheduleAuthorityFingerprint,
+      retainedContinuationAuthority.requestFingerprint
+    );
+    assertNoWorkerGpuBuffers(
+      retainedContinuation,
+      'fourLaneRetainedContinuationResult'
+    );
+    structuredClone(retainedContinuation);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'one-to-four worker test complete'
+    });
+  }
+});
+
+test('ULG worker maps a terminal canonical dormant reaction watch only after its schedule fence', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:reaction-shadow-watch-lane',
+    stateKey: 'ulg:test:reaction-shadow-watch-state'
+  };
+  const reactionRecords = new Float32Array([
+    1, 2, 3, 100,
+    -100, 1, 1, 1,
+    1, 0, 0, 0
+  ]);
+  const reactionTable = authorizedReactionWatchTable(reactionRecords);
+
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:reaction-shadow-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'reaction-shadow-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const boundaryEvents = [];
+    const originalCreateBuffer = device.createBuffer.bind(device);
+    device.createBuffer = (descriptor = {}) => {
+      const buffer = originalCreateBuffer(descriptor);
+      if (descriptor.label?.includes('reaction-motion-watch-readback')) {
+        const originalMapAsync = buffer.mapAsync.bind(buffer);
+        buffer.mapAsync = (...args) => {
+          boundaryEvents.push('activation-map');
+          return originalMapAsync(...args);
+        };
+      }
+      return buffer;
+    };
+    const originalSubmit = device.queue.submit.bind(device.queue);
+    device.queue.submit = (commandBuffers) => {
+      for (const commandBuffer of commandBuffers || []) {
+        for (const operation of commandBuffer || []) {
+          if (
+            operation.type === 'copy'
+            && operation.source?.label?.includes(
+              'reaction-motion-watch-control'
+            )
+          ) {
+            // The private GPU word biases real counts by one; zero remains
+            // the fail-closed/uninitialized value.
+            new Uint32Array(operation.source.bytes.buffer)[0] = 2;
+          }
+        }
+      }
+      return originalSubmit(commandBuffers);
+    };
+    const originalFence = device.queue.onSubmittedWorkDone.bind(device.queue);
+    device.queue.onSubmittedWorkDone = (...args) => {
+      boundaryEvents.push('queue-fence');
+      return originalFence(...args);
+    };
+
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-reaction-shadow-watch',
+      particleCount: 1
+    });
+    const mechanicsRunner = async (args) => {
+      const result = await mechanicsFixture.runner(args);
+      assert.equal(
+        args.residentStepOptions.captureReactionActivationObservation,
+        true
+      );
+      assert.equal(args.residentStepOptions.reactionTable, undefined);
+      assert.equal(
+        args.residentStepOptions.reactionActivationWatchTable,
+        reactionTable
+      );
+      assert.equal(
+        isExactSphReactionMotionEnvelope(
+          args.residentStepOptions.reactionActivationMotionEnvelope
+        ),
+        true
+      );
+      assert.equal(
+        Object.isFrozen(
+          args.residentStepOptions.reactionActivationMotionEnvelope?.boxDimsM
+        ),
+        true
+      );
+      assert.equal(
+        args.residentStepOptions.reactionActivationMotionEnvelope
+          ?.maxFutureSubsteps,
+        1
+      );
+      assert.equal(
+        args.residentStepOptions.reactionActivationMotionEnvelope
+          ?.separationDisplacementEnabled,
+        true
+      );
+      assert.equal(
+        args.residentStepOptions.reactionActivationMotionEnvelope
+          ?.contactCorrectionEnabled,
+        false
+      );
+      assert.equal(
+        args.residentStepOptions.reactionActivationMotionEnvelope
+          ?.thermalPhaseEvolutionEnabled,
+        false
+      );
+      assert.deepEqual(
+        args.residentStepOptions.reactionActivationMotionEnvelope?.boxDimsM,
+        [5, 5, 5]
+      );
+      const terminalUploads = result.residentStep.nextParticleUploads;
+      const proposal =
+        runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+          device,
+          terminalStateBuffer:
+            terminalUploads.sphParticleUpload.stateBuffer,
+          terminalThermoBuffer:
+            terminalUploads.sphParticleUpload.thermoBuffer,
+          terminalMechanicsBuffer:
+            terminalUploads.mlsMpmParticleUpload.mechanicsBuffer,
+          reactionTable,
+          reactionMotionEnvelope:
+            args.residentStepOptions.reactionActivationMotionEnvelope,
+          particleCount: terminalUploads.sphParticleUpload.particleCount,
+          boxDimsM: [5, 5, 5]
+        });
+      Object.defineProperty(
+        result.residentStep,
+        'reactionActivationObservationProposal',
+        {
+          configurable: true,
+          enumerable: false,
+          value: proposal
+        }
+      );
+      return result;
+    };
+    const scheduleId = 'ulg:test:reaction-shadow-watch-schedule';
+    const reactionWatchEpochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: true,
+      mechanicsFieldViewsRequired: false
+    };
+    const reactionWatchResidentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      reactionActivationWatchTable: reactionTable
+    };
+    const reactionWatchMechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsRunner,
+      residentStepOptions: reactionWatchResidentStepOptions
+    };
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions: reactionWatchResidentStepOptions,
+      epochOptions: reactionWatchEpochOptions,
+      mechanicsOptions: reactionWatchMechanicsOptions
+    });
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: reactionWatchEpochOptions,
+          schroederSameLevelMechanics: reactionWatchMechanicsOptions
+        }),
+        {
+          stepCount: 1,
+          scheduleId,
+          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+        },
+        laneOptions
+      )
+    );
+    const outerAdmission =
+      validateSchroederWorkerScheduleExecutionRouteReceipt(result, {
+        scheduleId,
+        laneId: laneOptions.laneId,
+        stateKey: laneOptions.stateKey,
+        requestedStepCount: 1,
+        targetScheduleAuthority
+      });
+
+    const observation = result.nextScheduleLawActivationObservation;
+    assert.equal(outerAdmission.route, 'canonical-schroeder');
+    assert.equal(
+      observation.schema,
+      ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA
+    );
+    assert.equal(observation.status, 'dynamic-law-routing-observation-ready');
+    assert.equal(
+      observation.shadowOnly,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+    );
+    assert.equal(
+      observation.routingAuthority,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
+    );
+    assert.equal(
+      observation.targetScheduleRequestId,
+      targetScheduleAuthority.targetScheduleRequestId
+    );
+    assert.equal(
+      observation.targetScheduleAuthorityFingerprint,
+      targetScheduleAuthority.requestFingerprint
+    );
+    assert.equal(observation.producerRoute, 'canonical-schroeder');
+    assert.equal(
+      observation.sampleStage,
+      'canonical-terminal-published-carrier-family-motion-envelope'
+    );
+    assert.equal(observation.nodeDomain, 'fixed-phase-carrier-slot');
+    assert.equal(observation.motionEnvelope.maxFutureSubsteps, 1);
+    assert.equal(observation.motionEnvelope.contactCorrectionEnabled, false);
+    assert.equal(observation.motionEnvelope.thermalPhaseEvolutionEnabled, false);
+    assert.equal(
+      observation.motionEnvelope.futureRestDiameterBoundStatus,
+      'terminal-upper-under-declared-no-writer-premise'
+    );
+    assert.equal(
+      observation.motionEnvelope.separationDisplacementEnabled,
+      true
+    );
+    assert.equal(
+      observation.motionEnvelope.contactMotionBoundRevision,
+      SPH_CANONICAL_CONTACT_MOTION_BOUND_REVISION
+    );
+    assert.equal(
+      observation.motionEnvelope.contactPositionTrustDiameters,
+      SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
+    );
+    assert.deepEqual(observation.motionEnvelope.boxDimsM, [5, 5, 5]);
+    assert.equal(
+      observation.executionGating,
+      SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+    );
+    assert.equal(observation.observationSucceeded, true);
+    assert.equal(observation.triggered, true);
+    assert.equal(observation.triggeredSourceCount, 1);
+    assert.equal(observation.mapAsyncCount, 1);
+    assert.equal(observation.readbackByteLength, Uint32Array.BYTES_PER_ELEMENT);
+    assert.deepEqual(observation.terminalLineage, result.finalMechanicsLineage);
+    assert.deepEqual(
+      result.executionRouteReceipt.nextScheduleLawActivationObservation,
+      observation
+    );
+    assert.equal(result.lawActivationReceipt.reaction, false);
+    assert.equal(
+      targetScheduleAuthority.tableFingerprints.watchReactionTableSource,
+      'reaction-activation-watch-table'
+    );
+    assert.equal(
+      result.lawActivationReceipt.activationAuthority,
+      'schedule-config-static-declaration-no-readback'
+    );
+    assert.deepEqual(boundaryEvents, ['queue-fence', 'activation-map']);
+    assertNoWorkerGpuBuffers(result, 'reactionShadowWatchResult');
+    structuredClone(result);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker treats an unauthenticated compact watch proposal as fatal evidence', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:forged-reaction-watch-lane',
+    stateKey: 'ulg:test:forged-reaction-watch-state'
+  };
+  const reactionTable = thermalPhaseLatchReactionWatchTable();
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:forged-reaction-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'forged-reaction-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    let forgedDestroyCount = 0;
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-forged-reaction-watch',
+      particleCount: 1
+    });
+    const mechanicsRunner = async (args) => {
+      const result = await mechanicsFixture.runner(args);
+      const forgedProposal = Object.freeze({
+        schema: ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA,
+        ready: true,
+        destroy() { forgedDestroyCount += 1; }
+      });
+      Object.defineProperty(
+        result.residentStep,
+        'reactionActivationObservationProposal',
+        {
+          configurable: true,
+          enumerable: false,
+          value: forgedProposal
+        }
+      );
+      return result;
+    };
+    const scheduleId = 'ulg:test:forged-reaction-watch-schedule';
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false,
+      mechanicsFieldViewsRequired: false
+    };
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      reactionTable
+    };
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsRunner,
+      residentStepOptions
+    };
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions
+    });
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 1,
+            scheduleId,
+            targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+          },
+          laneOptions
+        )
+      ),
+      (error) => {
+        assert.equal(
+          error.reason,
+          'reaction-activation-observation-malformed-evidence'
+        );
+        assert.match(
+          error.message,
+          /reaction-activation-observation-malformed-evidence/
+        );
+        return true;
+      }
+    );
+    assert.equal(forgedDestroyCount, 1);
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 1,
+            scheduleId: `${scheduleId}:must-not-consume-successor`
+          },
+          laneOptions
+        )
+      ),
+      /lane-terminal-fence-poisoned/
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker rejects an authentic watch over a superseded terminal storage family before mapping', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:superseded-reaction-watch-lane',
+    stateKey: 'ulg:test:superseded-reaction-watch-state'
+  };
+  const reactionTable = thermalPhaseLatchReactionWatchTable();
+  let proposal = null;
+  let watchMapCount = 0;
+  const originalCreateBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor = {}) => {
+    const buffer = originalCreateBuffer(descriptor);
+    if (descriptor.label?.includes('reaction-motion-watch-readback')) {
+      const mapAsync = buffer.mapAsync.bind(buffer);
+      buffer.mapAsync = (...args) => {
+        watchMapCount += 1;
+        return mapAsync(...args);
+      };
+    }
+    return buffer;
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:superseded-reaction-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'superseded-reaction-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-superseded-reaction-watch',
+      particleCount: 1
+    });
+    const mechanicsRunner = async (args) => {
+      const predecessorSphUpload = args.sphParticleUpload;
+      const predecessorMlsUpload = args.mlsMpmParticleUpload;
+      const result = await mechanicsFixture.runner(args);
+      proposal = runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+        device,
+        terminalStateBuffer: predecessorSphUpload.stateBuffer,
+        terminalThermoBuffer: predecessorSphUpload.thermoBuffer,
+        terminalMechanicsBuffer: predecessorMlsUpload.mechanicsBuffer,
+        reactionTable,
+        reactionMotionEnvelope:
+          args.residentStepOptions.reactionActivationMotionEnvelope,
+        particleCount: predecessorSphUpload.particleCount,
+        boxDimsM: [5, 5, 5]
+      });
+      Object.defineProperty(
+        result.residentStep,
+        'reactionActivationObservationProposal',
+        {
+          configurable: true,
+          enumerable: false,
+          value: proposal
+        }
+      );
+      return result;
+    };
+    const scheduleId = 'ulg:test:superseded-reaction-watch-schedule';
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: true,
+      mechanicsFieldViewsRequired: false
+    };
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      reactionActivationWatchTable: reactionTable
+    };
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsRunner,
+      residentStepOptions
+    };
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions
+    });
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 1,
+            scheduleId,
+            targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+          },
+          laneOptions
+        )
+      ),
+      (error) => {
+        assert.equal(
+          error.reason,
+          'reaction-activation-observation-malformed-evidence'
+        );
+        assert.match(error.message, /exact terminal particle storage family/);
+        return true;
+      }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(watchMapCount, 0);
+    assert.equal(proposal?.released, true);
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          { stepCount: 1, scheduleId: `${scheduleId}:poisoned-reuse` },
+          laneOptions
+        )
+      ),
+      /lane-terminal-fence-poisoned/
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker makes device loss during terminal watch observation fatal to the retained lane', async () => {
+  const device = createFakeGpuDevice();
+  let resolveDeviceLoss;
+  device.lost = new Promise((resolve) => {
+    resolveDeviceLoss = resolve;
+  });
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:lost-device-reaction-watch-lane',
+    stateKey: 'ulg:test:lost-device-reaction-watch-state'
+  };
+  const reactionTable = thermalPhaseLatchReactionWatchTable();
+  let proposal = null;
+  let resolveMapStarted;
+  const mapStarted = new Promise((resolve) => {
+    resolveMapStarted = resolve;
+  });
+  const pendingMap = new Promise(() => {});
+  const watchOwnedBuffers = [];
+  const originalCreateBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor = {}) => {
+    const buffer = originalCreateBuffer(descriptor);
+    if (
+      descriptor.label?.includes('reaction-motion-watch')
+      || descriptor.label?.startsWith('ulg-mls-mpm-terminal-motion-watch-')
+    ) {
+      watchOwnedBuffers.push(buffer);
+    }
+    if (descriptor.label?.includes('reaction-motion-watch-readback')) {
+      buffer.mapAsync = () => {
+        resolveMapStarted();
+        return pendingMap;
+      };
+    }
+    return buffer;
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:lost-device-reaction-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'lost-device-reaction-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-lost-device-reaction-watch',
+      particleCount: 1
+    });
+    const mechanicsRunner = async (args) => {
+      const result = await mechanicsFixture.runner(args);
+      const terminalUploads = result.residentStep.nextParticleUploads;
+      proposal = runCanonicalSphReactionMotionEnvelopeWatchWebGpu({
+        device,
+        terminalStateBuffer:
+          terminalUploads.sphParticleUpload.stateBuffer,
+        terminalThermoBuffer:
+          terminalUploads.sphParticleUpload.thermoBuffer,
+        terminalMechanicsBuffer:
+          terminalUploads.mlsMpmParticleUpload.mechanicsBuffer,
+        reactionTable,
+        reactionMotionEnvelope:
+          args.residentStepOptions.reactionActivationMotionEnvelope,
+        particleCount: terminalUploads.sphParticleUpload.particleCount,
+        boxDimsM: [5, 5, 5]
+      });
+      Object.defineProperty(
+        result.residentStep,
+        'reactionActivationObservationProposal',
+        {
+          configurable: true,
+          enumerable: false,
+          value: proposal
+        }
+      );
+      return result;
+    };
+    const scheduleId = 'ulg:test:lost-device-reaction-watch-schedule';
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: true,
+      mechanicsFieldViewsRequired: false
+    };
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      reactionActivationWatchTable: reactionTable
+    };
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsRunner,
+      residentStepOptions
+    };
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions
+    });
+    const schedulePromise = runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: mechanicsOptions
+        }),
+        {
+          stepCount: 1,
+          scheduleId,
+          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+        },
+        laneOptions
+      )
+    );
+    await mapStarted;
+    resolveDeviceLoss({ reason: 'destroyed' });
+    await assert.rejects(schedulePromise, (error) => {
+      assert.equal(
+        error.reason,
+        'reaction-activation-observation-device-lost'
+      );
+      assert.match(error.message, /device was lost while MAP_READ was pending/);
+      return true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(proposal?.released, true);
+    assert.equal(proposal?.quarantined, false);
+    assert.equal(watchOwnedBuffers.length, 6);
+    assert.ok(watchOwnedBuffers.every(({ destroyCount }) => destroyCount === 1));
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          { stepCount: 1, scheduleId: `${scheduleId}:poisoned-reuse` },
+          laneOptions
+        )
+      ),
+      /lane-terminal-fence-poisoned/
+    );
+
+    assert.equal(
+      releaseUlgMechanicsResidentStageWorkerLane({
+        ...laneOptions,
+        reason: 'replace-lost-watch-device'
+      }).released,
+      true
+    );
+    const replacementDevice = createFakeGpuDevice();
+    const reseeded = await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(replacementDevice, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:replacement-reaction-watch',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'replacement-reaction-watch-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+    assert.equal(reseeded.value.status, 'worker-schroeder-lane-seeded');
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker target authority rejects a malformed reaction table before schedule GPU work', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-malformed-reaction-lane',
+    stateKey: 'ulg:test:tier0-malformed-reaction-state'
+  };
+  await runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(),
+    workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:tier0-malformed-reaction',
+        particleCount: 1,
+        rematerializationSeedOverrides: {
+          identityRequired: true,
+          identityRevision: 'tier0-malformed-reaction-identity',
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          particleIdentityMutationApproved: true,
+          requiresAuthoritativeFourBufferRows: true,
+          outputParticleCapacity: 1
+        }
+      })
+    }),
+    null,
+    laneOptions
+  ));
+
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+    labelPrefix: 'worker-tier0-malformed-reaction',
+    particleCount: 1
+  });
+  const scheduleId = 'ulg:test:tier0-malformed-reaction-schedule';
+  const malformedReactionTable = {
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v1',
+    status: 'no-derived-reactions',
+    reactionCount: -1,
+    combinedRecords: new Float32Array(0)
+  };
+  const malformedReactionEpochOptions = {
+    selectedLevel: 0,
+    mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+    exactNearCellTreeEnabled: false,
+    mechanicsFieldViewsRequired: false
+  };
+  const malformedReactionResidentStepOptions = {
+    contactSolverEnabled: false,
+    ambientPressurePa: 0,
+    reactionTable: malformedReactionTable
+  };
+  const malformedReactionMechanicsOptions = {
+    schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+    residentStepOptions: malformedReactionResidentStepOptions
+  };
+  const submitCount = device.queue.submitCalls.length;
+  const writeCount = device.queue.writeBufferCalls.length;
+  assert.throws(
+    () => workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions: malformedReactionResidentStepOptions,
+      epochOptions: malformedReactionEpochOptions,
+      mechanicsOptions: malformedReactionMechanicsOptions
+    }),
+    /authorized reaction watch table requires the ready packed v1 schema/
+  );
+  assert.equal(device.queue.submitCalls.length, submitCount);
+  assert.equal(device.queue.writeBufferCalls.length, writeCount);
+  assert.equal(mechanicsFixture.runnerCalls.length, 0);
+  releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
 });
 
 test('ULG resident stage worker retires superseded lanes and their GPU buffers before a fresh seed', async () => {

@@ -9757,6 +9757,55 @@ fn wall_barrier_corrected_normal_velocity(normal_velocity_m_per_s: f32, node_mas
   return corrected_normal_velocity_m_per_s;
 }
 
+fn grid_update_clamp_velocity_to_speed(
+  velocity: vec3<f32>,
+  max_speed_m_per_s: f32
+) -> vec3<f32> {
+  // Squaring an otherwise finite f32 velocity can overflow. Comparing
+  // dot(v,v) with vmax*vmax then degenerates to inf > inf == false and
+  // silently bypasses the CFL bound. Normalize by the largest component
+  // first so the only squared norm is in [0, 3].
+  let finite_velocity = all(vec3<bool>(
+    (bitcast<u32>(velocity.x) & 0x7fffffffu) < 0x7f800000u,
+    (bitcast<u32>(velocity.y) & 0x7fffffffu) < 0x7f800000u,
+    (bitcast<u32>(velocity.z) & 0x7fffffffu) < 0x7f800000u
+  ));
+  let finite_cap =
+    (bitcast<u32>(max_speed_m_per_s) & 0x7fffffffu) < 0x7f800000u;
+  if (!finite_velocity || !finite_cap || !(max_speed_m_per_s > 0.0)) {
+    return vec3<f32>(0.0);
+  }
+  // Leave a 2^-16 relative debit for division, normalization, and the final
+  // multiply. The reaction motion envelope uses the unguarded CFL distance,
+  // so this makes the published velocity strictly conservative.
+  let guarded_max_speed = max_speed_m_per_s * 0.9999847412109375;
+  if (!(guarded_max_speed > 0.0)) {
+    return vec3<f32>(0.0);
+  }
+  let largest_component = max(
+    max(abs(velocity.x), abs(velocity.y)),
+    abs(velocity.z)
+  );
+  if (largest_component > 0.0) {
+    let largest_bits = bitcast<u32>(largest_component);
+    if (largest_bits < 0x00800000u || largest_bits > 0x7e800000u) {
+      return vec3<f32>(0.0);
+    }
+    let scaled_velocity = velocity / largest_component;
+    let scaled_length = length(scaled_velocity);
+    if (
+      !((bitcast<u32>(scaled_length) & 0x7fffffffu) < 0x7f800000u)
+      || !(scaled_length > 0.0)
+    ) {
+      return vec3<f32>(0.0);
+    }
+    if (largest_component > guarded_max_speed / scaled_length) {
+      return scaled_velocity * (guarded_max_speed / scaled_length);
+    }
+  }
+  return velocity;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let node_index = global_id.x;
@@ -9804,10 +9853,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (mass > 0.0) {
     velocity = momentum / mass + vec3<f32>(params.gravity_x, params.gravity_y, params.gravity_z) * params.dt;
     let vmax = params.cfl_factor * params.grid_spacing_m / max(params.dt, 1.0e-12);
-    let speed2 = dot(velocity, velocity);
-    if (speed2 > vmax * vmax) {
-      velocity = velocity * (vmax / sqrt(speed2));
-    }
+    velocity = grid_update_clamp_velocity_to_speed(velocity, vmax);
     let node_pos = row1.xyz;
     let boundary_epsilon_m = max(1.0e-7, abs(params.grid_spacing_m) * 1.0e-6);
     let floor_no_slip_limit_m = params.grid_spacing_m - boundary_epsilon_m;
@@ -9855,6 +9901,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         max(0.0, params.box_z - params.grid_spacing_m - node_pos.z + boundary_epsilon_m)
       );
     }
+    velocity = grid_update_clamp_velocity_to_speed(velocity, vmax);
     status = 1.0;
   }
 
@@ -19138,9 +19185,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           parent_pre_velocity = parent_pre_velocity / pre_mass;
         }
         if (vmax > 0.0) {
-          let pre_speed2 = dot(parent_pre_velocity, parent_pre_velocity);
-          if (pre_speed2 > vmax * vmax) {
-            parent_pre_velocity = parent_pre_velocity * (vmax / sqrt(pre_speed2));
+          let largest_pre_component = max(
+            max(abs(parent_pre_velocity.x), abs(parent_pre_velocity.y)),
+            abs(parent_pre_velocity.z)
+          );
+          if (largest_pre_component > 0.0) {
+            let scaled_pre_velocity =
+              parent_pre_velocity / largest_pre_component;
+            let scaled_pre_length = max(
+              length(scaled_pre_velocity),
+              1.0e-30
+            );
+            if (largest_pre_component > vmax / scaled_pre_length) {
+              parent_pre_velocity = scaled_pre_velocity
+                * (vmax / scaled_pre_length);
+            }
           }
         }
         let parent_post_velocity = vec3<f32>(

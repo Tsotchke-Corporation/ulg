@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
+  SPH_PHASE_URL_PARAM_KEYS,
+  resolveSphReactionActivationConfiguration,
   resolveSphMountedArchitectureControlState,
   resolveSphMountedScheduleControlEvidence,
   resolveSphResidentInterfaceRefreshContinuationPolicy,
@@ -16,6 +18,127 @@ import {
   sphResidentSchedulePublicationIsCurrent,
   sphResidentPlaybackRestartAllowed
 } from '../src/visualization/sphPhaseDemoMount.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
+
+test('reaction activation defaults to shadow without conflating the reactions checkbox', () => {
+  assert.deepEqual(resolveSphReactionActivationConfiguration(), {
+    schema: 'peercompute.ulg.sph-reaction-activation-configuration.v0',
+    reactionsEnabled: true,
+    schroederSimulationEnabled: false,
+    reactionActivationPolicy:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW,
+    hardUserOff: false,
+    staticReactionExecution: true,
+    authoritativeDynamicActivation: false
+  });
+
+  const authoritative = resolveSphReactionActivationConfiguration({
+    reactionsEnabled: true,
+    schroederSimulationEnabled: true,
+    reactionActivationPolicy:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+  });
+  assert.equal(authoritative.reactionsEnabled, true);
+  assert.equal(authoritative.schroederSimulationEnabled, true);
+  assert.equal(authoritative.staticReactionExecution, false);
+  assert.equal(authoritative.authoritativeDynamicActivation, true);
+
+  const hardOff = resolveSphReactionActivationConfiguration({
+    reactionsEnabled: false,
+    schroederSimulationEnabled: true,
+    reactionActivationPolicy:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+  });
+  assert.equal(hardOff.reactionsEnabled, false);
+  assert.equal(
+    hardOff.reactionActivationPolicy,
+    SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+  );
+  assert.equal(hardOff.hardUserOff, true);
+  assert.equal(hardOff.staticReactionExecution, false);
+  assert.equal(hardOff.authoritativeDynamicActivation, false);
+
+  const nonSsAuthoritativePolicy =
+    resolveSphReactionActivationConfiguration({
+      reactionsEnabled: true,
+      schroederSimulationEnabled: false,
+      reactionActivationPolicy:
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+    });
+  assert.equal(nonSsAuthoritativePolicy.staticReactionExecution, true);
+  assert.equal(
+    nonSsAuthoritativePolicy.authoritativeDynamicActivation,
+    false
+  );
+
+  const staticWithoutSelector = resolveSphReactionActivationConfiguration({
+    reactionsEnabled: true,
+    reactionActivationPolicy: SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
+  });
+  assert.equal(staticWithoutSelector.staticReactionExecution, true);
+  assert.equal(staticWithoutSelector.authoritativeDynamicActivation, false);
+
+  const invalidFallsBackToShadow = resolveSphReactionActivationConfiguration({
+    reactionActivationPolicy: 'unknown-policy'
+  });
+  assert.equal(
+    invalidFallsBackToShadow.reactionActivationPolicy,
+    SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW
+  );
+  assert.equal(Object.isFrozen(invalidFallsBackToShadow), true);
+});
+
+test('mounted reaction activation policy is URL-bound and provisions a dormant authoritative catalog', () => {
+  assert.equal(SPH_PHASE_URL_PARAM_KEYS.includes('reactionActivationPolicy'), true);
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    source,
+    /reactionActivationPolicy:\s*reactionActivationPolicySelect,/
+  );
+  assert.match(
+    source,
+    /physicalLawGroups:\s*physicalLawGroupsForInitialExecutionFromControls\(\),/
+  );
+  assert.match(
+    source,
+    /const sceneReactions = reactionActivation\.authoritativeDynamicActivation[\s\S]*?viewState\.reactionDiscovery\?\.reactions \?\? viewState\.reactions/
+  );
+  assert.equal(
+    (source.match(
+      /reactionActivationPolicy:\s*\n\s*reactionActivation\.reactionActivationPolicy,/g
+    ) || []).length,
+    2
+  );
+  assert.match(
+    source,
+    /const requestedPhysicalLawGroups = physicalLawGroupsFromControls\(\);[\s\S]*?const activePhysicalLawGroups = effectivePhysicalLawGroups/
+  );
+
+  const query = new URLSearchParams({
+    lawr: '1',
+    reactionActivationPolicy:
+      SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE
+  });
+  const restored = resolveSphReactionActivationConfiguration({
+    reactionsEnabled: query.get('lawr') !== '0',
+    schroederSimulationEnabled: true,
+    reactionActivationPolicy: query.get('reactionActivationPolicy')
+  });
+  const canonical = new URLSearchParams();
+  canonical.set('lawr', restored.reactionsEnabled ? '1' : '0');
+  canonical.set(
+    'reactionActivationPolicy',
+    restored.reactionActivationPolicy
+  );
+  assert.equal(canonical.toString(), query.toString());
+});
 
 test('mounted schedule controls publish requested, policy maximum, and effective cadence', () => {
   const evidence = resolveSphMountedScheduleControlEvidence({

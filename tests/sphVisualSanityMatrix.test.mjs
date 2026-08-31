@@ -47,6 +47,11 @@ import {
 import {
   estimateSchroederLevelFromSupportRadius
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
+import {
+  SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
+  SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
+} from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
 
 test('an explicit matrix timeout overrides a scenario timeout', () => {
   assert.equal(resolveVisualMatrixScenarioTimeoutMs({
@@ -559,6 +564,106 @@ test('worker-owned SS framework evidence requires law dispatch and monotonic per
   assert.ok(
     staleLaneEvidence.observed.samples[1].blockers.includes(
       'lane-step-total-not-monotonic'
+    )
+  );
+
+  const dynamicScenario = {
+    ...scenario,
+    presetId: 'sodium-water'
+  };
+  const dynamicFirst = structuredClone(first);
+  dynamicFirst.residentSteps.workerOwnedResidentLane
+    .dynamicReactionActivation = {
+      state: 'dormant',
+      transitionFingerprint: null,
+      committedScheduleId: null
+    };
+  dynamicFirst.residentSteps.workerOwnedResidentLane
+    .dynamicReactionActivationReceipt = null;
+  const dynamicSecond = structuredClone(second);
+  const dynamicSecondLane =
+    dynamicSecond.residentSteps.workerOwnedResidentLane;
+  const transitionFingerprint = 'transition:dynamic-reaction:visual:1';
+  dynamicSecondLane.dynamicReactionActivation = {
+    state: 'active',
+    transitionFingerprint,
+    committedScheduleId: dynamicSecondLane.scheduleId
+  };
+  dynamicSecondLane.dynamicReactionActivationReceipt = {
+    schema: 'peercompute.ulg.sph-scene-dynamic-reaction-activation.v0',
+    status: 'dynamic-reaction-activation-consumed-and-admitted',
+    predecessorScheduleId:
+      dynamicFirst.residentSteps.workerOwnedResidentLane.scheduleId,
+    consumerScheduleId: dynamicSecondLane.scheduleId,
+    targetScheduleRequestId: dynamicSecondLane.scheduleId,
+    configurationContinuityMode:
+      'prospective-reaction-dormant-to-executing',
+    transitionKind: 'reaction-dormant-watch-to-executing-reaction',
+    transitionFingerprint,
+    route: 'canonical-schroeder',
+    routeTransition: 'fresh-or-canonical-continuation',
+    reactionExecution: true,
+    sourceParticleCount: 760,
+    terminalParticleCount: 760,
+    sourcePhaseLaneCount: 4,
+    terminalPhaseLaneCount: 4,
+    phaseCarrierTopologyAuthority: 'preexisting-four-carrier-plan',
+    phaseCarrierTrigger: null,
+    phaseCarrierMapAsyncCount: 0,
+    phaseCarrierReadbackBytes: 0,
+    terminalGpuFenceSatisfied: true,
+    stateManagerCommitted: true,
+    consumedBeforeLeaseAcquisition: true,
+    consumedBeforeRouteSelection: true,
+    consumedBeforeGpuWork: true,
+    shadowOnly: SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY,
+    routingAuthority: SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
+    executionGating: SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE
+  };
+  dynamicSecondLane.hierarchyStageSummary.reactionRequested = true;
+  dynamicSecondLane.hierarchyStageSummary.residentStageStatus.reaction =
+    'reaction-step-executed';
+  dynamicSecondLane.hierarchyStageSummary.residentStageBackends.reaction =
+    'webgpu';
+
+  const dynamicPassing = evaluateWorkerOwnedSsFrameworkEvidence(
+    dynamicScenario,
+    { timeline: { metrics: [dynamicFirst, dynamicSecond] } }
+  );
+  assert.equal(dynamicPassing.status, 'pass');
+  assert.equal(dynamicPassing.observed.dynamicReactionDormantObserved, true);
+  assert.equal(dynamicPassing.observed.dynamicReactionActiveObserved, true);
+
+  const activeWithoutReceipt = structuredClone(dynamicSecond);
+  activeWithoutReceipt.residentSteps.workerOwnedResidentLane
+    .dynamicReactionActivationReceipt = null;
+  const activeWithoutReceiptEvidence =
+    evaluateWorkerOwnedSsFrameworkEvidence(dynamicScenario, {
+      timeline: { metrics: [dynamicFirst, activeWithoutReceipt] }
+    });
+  assert.equal(activeWithoutReceiptEvidence.status, 'fail');
+  assert.ok(
+    activeWithoutReceiptEvidence.observed.samples[1].blockers.includes(
+      'dynamic-reaction-activation-receipt-unproven'
+    )
+  );
+
+  const dormantReactionExecution = structuredClone(dynamicFirst);
+  dormantReactionExecution.residentSteps.workerOwnedResidentLane
+    .hierarchyStageSummary.reactionRequested = true;
+  dormantReactionExecution.residentSteps.workerOwnedResidentLane
+    .hierarchyStageSummary.residentStageStatus.reaction =
+      'reaction-step-executed';
+  dormantReactionExecution.residentSteps.workerOwnedResidentLane
+    .hierarchyStageSummary.residentStageBackends.reaction = 'webgpu';
+  const dormantReactionExecutionEvidence =
+    evaluateWorkerOwnedSsFrameworkEvidence(dynamicScenario, {
+      timeline: { metrics: [dormantReactionExecution, dynamicSecond] }
+    });
+  assert.equal(dormantReactionExecutionEvidence.status, 'fail');
+  assert.ok(
+    dormantReactionExecutionEvidence.observed.samples[0].blockers.includes(
+      'reaction-law-path-unproven'
     )
   );
 });

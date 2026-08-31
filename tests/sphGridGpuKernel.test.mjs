@@ -897,8 +897,20 @@ function runFusedGridUpdateProducer(fixture, p2gProjection, overrides = {}) {
 
 function runCoarseP2gProducer(
   fixture,
-  projectionDt = fixture.predictorThetaDt
+  projectionDt = fixture.predictorThetaDt,
+  overrides = {}
 ) {
+  const temporalCoarsePredictor = fixture.fineSubstepCount > 1
+    && Object.is(
+      Math.fround(Number(projectionDt)),
+      Math.fround(fixture.predictorThetaDt)
+    )
+    ? {
+        enabled: true,
+        role: 'immediate-successor-coarse-predictor',
+        successorThetaDt: Math.fround(2 * fixture.fineDt)
+      }
+    : null;
   return runMlsMpmP2gGridProjectionWebGpu({
     device: fixture.device,
     sphParticleState: fixture.sphParticleState,
@@ -912,13 +924,62 @@ function runCoarseP2gProducer(
     gridSpacingM: 0.5,
     boxDimsM: [1, 1, 1],
     dt: projectionDt,
-    readbackMode: 'no-full-readback'
+    mechanicsFieldTemporalCoarsePredictor: temporalCoarsePredictor,
+    readbackMode: 'no-full-readback',
+    ...overrides
   });
 }
 
 async function fusedFineCorrectionWorkspace(fixture) {
   const fineProjection = await runFusedP2gProducer(fixture);
   const coarseProjection = await runCoarseP2gProducer(fixture);
+  const temporalRequired = fixture.fineSubstepCount > 1;
+  const expectedSuccessorDt = temporalRequired
+    ? Math.fround((2 / fixture.fineSubstepCount) * fixture.macroDt)
+    : null;
+  assert.equal(
+    fineProjection.mechanicsFieldTemporalCoarsePredictorEnabled,
+    false
+  );
+  assert.equal(
+    fineProjection.mechanicsFieldTemporalCoarsePredictorRole,
+    'disabled'
+  );
+  assert.equal(
+    fineProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+    null
+  );
+  assert.equal(
+    fineProjection.mechanicsFieldTemporalCoarsePredictorCurrentDt,
+    Math.fround(fixture.fineDt)
+  );
+  assert.equal(
+    coarseProjection.mechanicsFieldTemporalCoarsePredictorEnabled,
+    temporalRequired
+  );
+  assert.equal(
+    coarseProjection.mechanicsFieldTemporalCoarsePredictorRole,
+    temporalRequired ? 'immediate-successor-coarse-predictor' : 'disabled'
+  );
+  assert.equal(
+    coarseProjection.mechanicsFieldTemporalCoarsePredictorCurrentDt,
+    Math.fround(fixture.predictorThetaDt)
+  );
+  assert.equal(
+    coarseProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+    expectedSuccessorDt
+  );
+  assert.equal(coarseProjection.activeSourceP2gEnabled, true);
+  if (temporalRequired) {
+    assert.equal(
+      coarseProjection.mechanicsFieldTemporalCoarsePredictorStorage,
+      'field-accumulator-xyz-p2g-finalized-only'
+    );
+    assert.deepEqual(
+      coarseProjection.mechanicsFieldTemporalCoarsePredictorReceiptWords,
+      [13, 14, 15]
+    );
+  }
   const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
     fixture.device,
     {
@@ -5476,6 +5537,27 @@ test('fused WebGPU fine correction owns exact reflux provenance and observation'
       assert.equal(chain.gridUpdate.dt, fixture.fineDt);
       assert.equal(chain.coarseProjection.dt, fixture.predictorThetaDt);
       assert.equal(chain.execution.predictorDt, fixture.predictorThetaDt);
+      assert.equal(
+        chain.coarseProjection.mechanicsFieldTemporalCoarsePredictorEnabled,
+        true
+      );
+      assert.equal(
+        chain.coarseProjection.mechanicsFieldTemporalCoarsePredictorRole,
+        'immediate-successor-coarse-predictor'
+      );
+      assert.equal(
+        chain.coarseProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+        Math.fround(2 * fixture.fineDt)
+      );
+      assert.deepEqual(
+        chain.coarseProjection.mechanicsFieldTemporalCoarsePredictorReceiptWords,
+        [13, 14, 15]
+      );
+      assert.equal(chain.execution.temporalCoarsePredictorEnabled, true);
+      assert.equal(
+        chain.execution.temporalCoarsePredictorSuccessorDt,
+        Math.fround(2 * fixture.fineDt)
+      );
       assert.notEqual(chain.coarseProjection.dt, fixture.macroDt);
       const encoder = fixture.device.createCommandEncoder();
       chain.runtime.encodeFineCorrection(encoder, chain.execution, {
@@ -5547,6 +5629,65 @@ test('fused WebGPU fine correction owns exact reflux provenance and observation'
       {
         microepochAuthority: fixture.microepochAuthority,
         reason: new Error('wrong theta fixture cleanup')
+      }
+    );
+    fixture.refluxLedger.destroy();
+  });
+
+  await t.test('r=4 rejects a forged non-successor temporal theta before workspace submission', async () => {
+    const fixture = fusedP2gProducerFixture({ fineSubstepCount: 4 });
+    const fineProjection = await runFusedP2gProducer(fixture);
+    const forgedSuccessorDt = Math.fround(3 * fixture.fineDt);
+    const wrongCoarseProjection = await runCoarseP2gProducer(
+      fixture,
+      fixture.predictorThetaDt,
+      {
+        mechanicsFieldTemporalCoarsePredictor: {
+          enabled: true,
+          role: 'immediate-successor-coarse-predictor',
+          successorThetaDt: forgedSuccessorDt
+        }
+      }
+    );
+    assert.equal(
+      wrongCoarseProjection.mechanicsFieldTemporalCoarsePredictorSuccessorDt,
+      forgedSuccessorDt
+    );
+    const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(
+      fixture.device,
+      {
+        parentFieldCapacity:
+          fixture.generation.parentFieldView.parentFieldCapacity,
+        fineFieldCapacity:
+          fixture.generation.parentFieldView.fineFieldCapacity,
+        arenaCount: 1
+      }
+    );
+    assert.throws(
+      () => runtime.encodePredictors(fixture.device.createCommandEncoder(), {
+        parentFieldView: fixture.generation.parentFieldView,
+        fineP2gProjection: fineProjection,
+        coarseP2gProjection: wrongCoarseProjection,
+        dt: fixture.predictorThetaDt,
+        fineDt: fixture.fineDt,
+        macroDt: fixture.macroDt,
+        fineSubstepOrdinal: 0,
+        fineSubstepCount: 4,
+        gravityMPerS2: [0, -9.80665, 0],
+        boxDimsM: [1, 1, 1],
+        refluxLedger: fixture.refluxLedger,
+        fusedFineSubstepTransaction: fixture.transaction
+      }),
+      /exact local macro reflux ledger and substep/
+    );
+    assert.equal(runtime.activeExecutionCount(), 0);
+    runtime.destroy();
+    await abortSchroederTwoLevelMacroAuthorityAfter(
+      fixture.device,
+      fixture.macroAuthority,
+      {
+        microepochAuthority: fixture.microepochAuthority,
+        reason: new Error('forged successor theta fixture cleanup')
       }
     );
     fixture.refluxLedger.destroy();

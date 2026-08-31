@@ -400,6 +400,12 @@ test('MLS-MPM grid update WGSL declares grid update bindings', () => {
   assert.match(mlsMpmGridUpdateWgsl, /wall_barrier_elastic_stiffness_n_per_m: f32/);
   assert.match(mlsMpmGridUpdateWgsl, /fn wall_barrier_response_alpha/);
   assert.match(mlsMpmGridUpdateWgsl, /fn wall_barrier_corrected_normal_velocity/);
+  assert.match(mlsMpmGridUpdateWgsl, /fn grid_update_clamp_velocity_to_speed/);
+  assert.match(
+    mlsMpmGridUpdateWgsl,
+    /velocity = grid_update_clamp_velocity_to_speed\(velocity, vmax\)/
+  );
+  assert.doesNotMatch(mlsMpmGridUpdateWgsl, /speed2 > vmax \* vmax/);
   assert.match(mlsMpmGridUpdateWgsl, /@compute @workgroup_size\(64\)/);
 });
 
@@ -498,7 +504,7 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
     boxDimsM: [5, 5, 5],
     cflFactor: 0.2
   });
-  nearlyEqual(cfl.updatedGridNodes[1], 2);
+  nearlyEqual(cfl.updatedGridNodes[1], 2 * 0.9999847412109375);
 
   const wall = updateMlsMpmGridCpu({
     p2gGridProjection: manualP2gProjection({ momentum: [3, -4, 5], nodePosition: [2, 0, 2] }),
@@ -539,6 +545,49 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
   assert.equal(rowDrivenWall.wallBarrierShearModulusPa, 0);
   assert.equal(rowDrivenWall.wallBarrierSupportLengthM, 1);
   assert.ok(rowDrivenWall.wallBarrierElasticStiffnessNPerM > 0);
+});
+
+test('CPU MLS-MPM CFL reference clamps diagonal and square-overflow velocities', () => {
+  const diagonal = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({
+      mass: 1,
+      momentum: [0.8, 0.8, 0],
+      nodePosition: [2, 2, 2]
+    }),
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 0.1
+  });
+  const diagonalSpeed = Math.hypot(
+    diagonal.updatedGridNodes[1],
+    diagonal.updatedGridNodes[2],
+    diagonal.updatedGridNodes[3]
+  );
+  assert.ok(diagonal.updatedGridNodes[1] < 0.8);
+  assert.ok(diagonalSpeed <= 0.9999847412109375 + 1e-6);
+
+  const hugeProjection = manualP2gProjection({
+    mass: 1,
+    momentum: [3e26, 0, 0],
+    nodePosition: [1.5e8, 1.5e8, 1.5e8]
+  });
+  hugeProjection.gridSpacingM = 1e8;
+  const huge = updateMlsMpmGridCpu({
+    p2gGridProjection: hugeProjection,
+    dt: 1e-12,
+    gravityMPerS2: [3e38, 0, 0],
+    boxDimsM: [3e8, 3e8, 3e8],
+    cflFactor: 0.4
+  });
+  const hugeSpeed = Math.hypot(
+    huge.updatedGridNodes[1],
+    huge.updatedGridNodes[2],
+    huge.updatedGridNodes[3]
+  );
+  assert.ok(Number.isFinite(hugeSpeed));
+  assert.ok(hugeSpeed > 0);
+  assert.ok(hugeSpeed <= 4e19);
 });
 
 test('CPU MLS-MPM grid update leaves the first interior floor row free for liquid spreading', () => {

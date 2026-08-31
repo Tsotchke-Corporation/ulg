@@ -36,11 +36,33 @@ import {
   webGpuBufferMatchesDevice
 } from './sphGpuDeviceIdentity.js';
 import {
+  schroederAuthorityTypedArrayFingerprint
+} from './schroederAuthorityFingerprint.js';
+import {
   createGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+import {
+  SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_COUNT_BIAS,
+  SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE_WORD,
+  SPH_REACTION_ACTIVATION_OBSERVATION_PUBLIC_FAILURE_WORD,
+  SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT,
+  SPH_REACTION_MOTION_ENVELOPE_PREDICATE_REVISION,
+  ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE,
+  ULG_SPH_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
+  assertSphReactionMotionEnvelopeBoxDimsMatch,
+  assertSphReactionMotionEnvelopeRulePrefix,
+  isExactSphReactionMotionEnvelope,
+  sphReactionMotionEnvelopeWgsl
+} from './sphReactionMotionEnvelope.js';
 
 export const ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-reaction-discovery-proposal.v1';
+export const ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA =
+  ULG_SPH_REACTION_ACTIVATION_OBSERVATION_SCHEMA;
+export const SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION =
+  SPH_REACTION_MOTION_ENVELOPE_PREDICATE_REVISION;
+export const SCHROEDER_SPATIAL_REACTION_CURRENT_STATE_PREDICATE_REVISION =
+  'canonical-reaction-exact-current-state-v1';
 export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_CONSUMER_ID =
   'reaction-discovery';
 // Bump whenever the shared WGSL module changes. The per-device compute
@@ -49,7 +71,7 @@ export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_CONSUMER_ID =
 // WebGPU device (including Vite HMR) from retaining the pre-aggregation
 // proposal module.
 export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION =
-  'v5-version-matched-exact-near-traversal';
+  'v12-zero-failure-biased-activation-watch';
 export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_ROW_LAYOUT =
   Object.freeze([
     'partnerParticleIndex:f32',
@@ -104,8 +126,9 @@ export const SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_LAYOUT =
 const WORKGROUP_SIZE = 64;
 const REACTION_RECORD_VEC4S = 3;
 const REACTION_RECORD_FLOATS = REACTION_RECORD_VEC4S * 4;
-const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
-const PARAMS_BYTES = 64;
+const MAX_EXACT_F32_INTEGER =
+  SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT;
+const PARAMS_BYTES = 96;
 const DISPLACEMENT_CERTIFICATE_READY_F32_BITS = 0x3f80_0000;
 const REACTION_DISCOVERY_EVIDENCE_MAXIMUM_DISPLACEMENT_BITS = 20;
 const REACTION_DISCOVERY_EVIDENCE_CERTIFICATE_STATUS_BITS = 21;
@@ -114,15 +137,27 @@ const REACTION_DISCOVERY_EVIDENCE_CURRENT_ACTIVE_COUNT = 23;
 const REACTION_DISCOVERY_EVIDENCE_TREE_NODE_VISITS = 24;
 const REACTION_DISCOVERY_EVIDENCE_TREE_LEAF_VISITS = 25;
 const REACTION_DISCOVERY_EVIDENCE_TREE_MEMBER_VISITS = 26;
+const REACTION_ACTIVATION_OBSERVATION_SENTINEL =
+  SPH_REACTION_ACTIVATION_OBSERVATION_PUBLIC_FAILURE_WORD;
+const REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE =
+  SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE_WORD;
+const REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS =
+  SPH_REACTION_ACTIVATION_OBSERVATION_ENCODED_COUNT_BIAS;
+const REACTION_ACTIVATION_OBSERVATION_BYTES = Uint32Array.BYTES_PER_ELEMENT;
+const REACTION_ACTIVATION_CONTROL_WORDS = 4;
+const REACTION_ACTIVATION_CONTROL_BYTES =
+  REACTION_ACTIVATION_CONTROL_WORDS * Uint32Array.BYTES_PER_ELEMENT;
 const REACTION_RULE_INDEX_SCHEMA =
   'peercompute.ulg.schroeder-spatial-reaction-rule-index.v1';
 const REACTION_RULE_INDEX_MODE_FULL_SCAN = 0;
 const REACTION_RULE_INDEX_MODE_MATERIAL_PAIR = 1;
 const REACTION_RULE_INDEX_PAIR_FLOATS = 4;
 const REACTION_RULE_INDEX_RULES_PER_VEC4 = 4;
+const REACTION_DISCOVERY_STORAGE_BINDING_COUNT = 8;
 const reactionDiscoveryArenaCaches = new WeakMap();
 const reactionDiscoveryProposalRecords = new WeakMap();
 const reactionRuleIndexUploads = new WeakMap();
+const reactionObservationDeviceTerminalSignals = new WeakMap();
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -133,16 +168,144 @@ const GPU_BUFFER_USAGE = {
 };
 const GPU_MAP_MODE = { READ: globalThis.GPUMapMode?.READ ?? 1 };
 
+function reactionObservationDeviceTerminalSignalFor(device) {
+  if (!device?.lost?.then) return null;
+  let signal = reactionObservationDeviceTerminalSignals.get(device);
+  if (signal) return signal;
+  signal = { observed: false, promise: null };
+  reactionObservationDeviceTerminalSignals.set(device, signal);
+  const settle = () => {
+    signal.observed = true;
+    return 'device-terminal';
+  };
+  // The signal captures no proposal or arena. All observations on one device
+  // share this listener, so released generations remain collectible while the
+  // device's lost promise is still pending.
+  signal.promise = Promise.resolve(device.lost).then(settle, settle);
+  return signal;
+}
+
+function reactionActivationObservationFailure(error, mapAsyncCount) {
+  const failure = error instanceof Error
+    ? error
+    : new Error(String(error));
+  try {
+    Object.defineProperty(
+      failure,
+      'reactionActivationObservationMapAsyncCount',
+      {
+        value: mapAsyncCount,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      }
+    );
+    return failure;
+  } catch {
+    const wrapped = new Error(failure.message, { cause: failure });
+    wrapped.name = failure.name;
+    Object.defineProperty(
+      wrapped,
+      'reactionActivationObservationMapAsyncCount',
+      { value: mapAsyncCount }
+    );
+    return wrapped;
+  }
+}
+
+function fatalReactionActivationObservationFailure(error, ErrorType = Error) {
+  const failure = error instanceof Error
+    ? error
+    : new ErrorType(String(error));
+  try {
+    Object.defineProperties(failure, {
+      code: {
+        value: ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE
+      },
+      reactionActivationObservationFatal: { value: true }
+    });
+    return failure;
+  } catch {
+    const wrapped = new ErrorType(failure.message, { cause: failure });
+    wrapped.code = ULG_SPH_REACTION_ACTIVATION_OBSERVATION_FATAL_ERROR_CODE;
+    wrapped.reactionActivationObservationFatal = true;
+    return wrapped;
+  }
+}
+
 function exactPositiveU32(value, label, max = 0xffff_ffff) {
   if (
     typeof value !== 'number'
-    || !Number.isInteger(value)
+    || !Number.isSafeInteger(value)
     || value < 1
     || value > max
   ) {
     throw new RangeError(`${label} must be an integer in [1, ${max}]`);
   }
   return value;
+}
+
+function exactPositiveDeviceLimit(device, name) {
+  const value = device?.limits?.[name];
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < 1
+  ) {
+    throw new RangeError(
+      `reaction discovery requires exact device.limits.${name}`
+    );
+  }
+  return value;
+}
+
+function reactionDiscoveryDeviceLimits(device) {
+  const limits = Object.freeze({
+    maxBufferSize: exactPositiveDeviceLimit(device, 'maxBufferSize'),
+    maxStorageBufferBindingSize: exactPositiveDeviceLimit(
+      device,
+      'maxStorageBufferBindingSize'
+    ),
+    maxUniformBufferBindingSize: exactPositiveDeviceLimit(
+      device,
+      'maxUniformBufferBindingSize'
+    ),
+    maxStorageBuffersPerShaderStage: exactPositiveDeviceLimit(
+      device,
+      'maxStorageBuffersPerShaderStage'
+    ),
+    maxComputeWorkgroupsPerDimension: exactPositiveDeviceLimit(
+      device,
+      'maxComputeWorkgroupsPerDimension'
+    )
+  });
+  if (
+    limits.maxStorageBuffersPerShaderStage
+      < REACTION_DISCOVERY_STORAGE_BINDING_COUNT
+  ) {
+    throw new RangeError(
+      'reaction discovery requires eight storage buffers per shader stage'
+    );
+  }
+  return limits;
+}
+
+function checkedPositiveProduct(
+  values,
+  label,
+  maximum = Number.MAX_SAFE_INTEGER
+) {
+  let product = 1;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new RangeError(`${label} factors must be positive safe integers`);
+    }
+    if (product > Math.floor(maximum / value)) {
+      throw new RangeError(`${label} exceeds its exact integer domain`);
+    }
+    product *= value;
+  }
+  return product;
 }
 
 function finitePositive(value, label) {
@@ -186,40 +349,94 @@ function requireBuffer(device, buffer, label) {
 
 function requireMinimumBufferBytes(buffer, byteLength, label) {
   if (
-    Number.isFinite(Number(buffer?.size))
-    && Number(buffer.size) < byteLength
+    !Number.isSafeInteger(byteLength)
+    || byteLength < 4
   ) {
-    throw new RangeError(`${label} has ${buffer.size} bytes; ${byteLength} required`);
+    throw new RangeError(`${label} requires an exact positive byte length`);
+  }
+  if (
+    typeof buffer?.size !== 'number'
+    || !Number.isSafeInteger(buffer.size)
+    || buffer.size < byteLength
+  ) {
+    throw new RangeError(
+      `${label} has ${String(buffer?.size)} bytes; ${byteLength} required`
+    );
   }
   return buffer;
 }
 
-function requireStorageCapacity(device, byteLength, label) {
+function requireStorageBufferPrefix(
+  buffer,
+  byteLength,
+  label,
+  limits
+) {
+  requireStorageCapacity(limits, byteLength, label);
+  requireMinimumBufferBytes(buffer, byteLength, label);
+  requireBufferCapacity(limits, buffer.size, label);
+  return buffer;
+}
+
+function exactBufferBindingResource(buffer, size) {
+  return { buffer, offset: 0, size };
+}
+
+function requireBufferCapacity(limits, byteLength, label) {
   if (!Number.isSafeInteger(byteLength) || byteLength < 4) {
     throw new RangeError(`${label} byte length is not safely addressable`);
   }
-  const limits = [
-    Number(device?.limits?.maxBufferSize),
-    Number(device?.limits?.maxStorageBufferBindingSize)
-  ].filter((value) => Number.isFinite(value) && value > 0);
-  const limit = limits.length > 0 ? Math.min(...limits) : Number.MAX_SAFE_INTEGER;
-  if (byteLength > limit) {
-    throw new RangeError(`${label} requires ${byteLength} bytes; device limit is ${limit}`);
+  if (byteLength > limits.maxBufferSize) {
+    throw new RangeError(
+      `${label} requires ${byteLength} bytes; maxBufferSize is ${limits.maxBufferSize}`
+    );
   }
   return byteLength;
 }
 
-function createBuffer(device, label, size, usage) {
-  return tagWebGpuBufferDevice(device.createBuffer({
-    label,
-    size: Math.max(4, size),
-    usage
-  }), device);
+function requireStorageCapacity(limits, byteLength, label) {
+  requireBufferCapacity(limits, byteLength, label);
+  if (byteLength > limits.maxStorageBufferBindingSize) {
+    throw new RangeError(
+      `${label} requires ${byteLength} bytes; maxStorageBufferBindingSize is ${limits.maxStorageBufferBindingSize}`
+    );
+  }
+  return byteLength;
 }
 
-function powerOfTwoByteCapacity(requiredBytes) {
+function requireUniformCapacity(limits, byteLength, label) {
+  requireBufferCapacity(limits, byteLength, label);
+  if (byteLength > limits.maxUniformBufferBindingSize) {
+    throw new RangeError(
+      `${label} requires ${byteLength} bytes; maxUniformBufferBindingSize is ${limits.maxUniformBufferBindingSize}`
+    );
+  }
+  return byteLength;
+}
+
+function createBuffer(device, limits, label, size, usage) {
+  requireBufferCapacity(limits, size, label);
+  const buffer = tagWebGpuBufferDevice(device.createBuffer({
+    label,
+    size,
+    usage
+  }), device);
+  if (buffer?.size !== size) {
+    try { buffer?.destroy?.(); } catch {}
+    throw new RangeError(`${label} was not created at its exact requested size`);
+  }
+  return buffer;
+}
+
+function powerOfTwoByteCapacity(requiredBytes, maximum, label) {
+  requireBufferCapacity({ maxBufferSize: maximum }, requiredBytes, label);
   let capacity = 4;
-  while (capacity < requiredBytes) capacity *= 2;
+  while (capacity < requiredBytes) {
+    if (capacity > Math.floor(maximum / 2)) {
+      throw new RangeError(`${label} cannot grow to an exact power-of-two capacity`);
+    }
+    capacity *= 2;
+  }
   return capacity;
 }
 
@@ -236,6 +453,8 @@ function destroyArenaEntry(entry) {
   entry.proposalBuffer?.destroy?.();
   entry.evidenceBuffer?.destroy?.();
   entry.evidenceReadbackBuffer?.destroy?.();
+  entry.activationObservationWordBuffer?.destroy?.();
+  entry.activationObservationReadbackBuffer?.destroy?.();
   entry.expectationBuffer?.destroy?.();
   entry.paramsBuffer?.destroy?.();
   entry.reactionRecordBuffer?.destroy?.();
@@ -244,12 +463,14 @@ function destroyArenaEntry(entry) {
 
 function acquireReactionDiscoveryArenaResources({
   device,
+  limits,
   generation,
   directoryAbiVersion,
   expectationBufferByteLength,
   proposalBytes,
   localReactionRecordBytes,
-  observeGpuEvidence = false
+  observeGpuEvidence = false,
+  captureActivationObservation = false
 }) {
   const arenaIndex = generation?.execution?.arenaIndex;
   if (!Number.isInteger(arenaIndex) || arenaIndex < 0) {
@@ -273,13 +494,68 @@ function acquireReactionDiscoveryArenaResources({
       'reaction discovery expectation buffer byte length must be positive'
     );
   }
+  requireStorageCapacity(
+    limits,
+    proposalBytes,
+    'reaction discovery proposal buffer'
+  );
+  requireStorageCapacity(
+    limits,
+    SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_WORDS
+      * Uint32Array.BYTES_PER_ELEMENT,
+    'reaction discovery evidence buffer'
+  );
+  requireUniformCapacity(
+    limits,
+    expectationBufferByteLength,
+    'reaction discovery expectation buffer'
+  );
+  requireUniformCapacity(
+    limits,
+    PARAMS_BYTES,
+    'reaction discovery params buffer'
+  );
+  if (observeGpuEvidence === true) {
+    requireBufferCapacity(
+      limits,
+      SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_WORDS
+        * Uint32Array.BYTES_PER_ELEMENT,
+      'reaction discovery evidence readback buffer'
+    );
+  }
+  if (captureActivationObservation === true) {
+    requireStorageCapacity(
+      limits,
+      REACTION_ACTIVATION_CONTROL_BYTES,
+      'reaction discovery activation control buffer'
+    );
+    requireBufferCapacity(
+      limits,
+      REACTION_ACTIVATION_OBSERVATION_BYTES,
+      'reaction discovery activation readback buffer'
+    );
+  }
+  if (localReactionRecordBytes > 0) {
+    requireStorageCapacity(
+      limits,
+      localReactionRecordBytes,
+      'reaction discovery reaction record buffer'
+    );
+  }
   const cache = arenaCacheForDevice(device);
   const arenaKey = `${directoryAbiVersion}:${arenaIndex}`;
   let entry = cache.get(arenaKey) || null;
   if (entry?.inUse === true) {
     if (entry.generation?.execution?.released === true) {
+      if (entry.activationObservationLease === entry.lease) {
+        throw new Error(
+          `reaction discovery arena ${arenaIndex} remains pinned by a pending activation observation`
+        );
+      }
       entry.inUse = false;
       entry.generation = null;
+      entry.generationId = null;
+      entry.lease = null;
     } else {
       throw new Error(
         `reaction discovery arena ${arenaIndex} is already leased by generation ${entry.generationId}`
@@ -306,6 +582,8 @@ function acquireReactionDiscoveryArenaResources({
       proposalCapacityBytes: 0,
       evidenceBuffer: null,
       evidenceReadbackBuffer: null,
+      activationObservationWordBuffer: null,
+      activationObservationReadbackBuffer: null,
       expectationBuffer: null,
       paramsBuffer: null,
       reactionRecordBuffer: null,
@@ -313,6 +591,8 @@ function acquireReactionDiscoveryArenaResources({
       generation: null,
       generationId: null,
       inUse: false,
+      lease: null,
+      activationObservationLease: null,
       destroyed: false,
       totalBufferCreationCount: 0,
       acquisitionCount: 0
@@ -329,14 +609,19 @@ function acquireReactionDiscoveryArenaResources({
   }
   if (entry.proposalCapacityBytes < proposalBytes) {
     entry.proposalBuffer?.destroy?.();
-    entry.proposalCapacityBytes = powerOfTwoByteCapacity(proposalBytes);
+    entry.proposalCapacityBytes = powerOfTwoByteCapacity(
+      proposalBytes,
+      Math.min(limits.maxBufferSize, limits.maxStorageBufferBindingSize),
+      'reaction discovery cached proposal buffer'
+    );
     requireStorageCapacity(
-      device,
+      limits,
       entry.proposalCapacityBytes,
       'reaction discovery cached proposal buffer'
     );
     entry.proposalBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-proposals-arena-${arenaIndex}`,
       entry.proposalCapacityBytes,
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
@@ -346,6 +631,7 @@ function acquireReactionDiscoveryArenaResources({
   if (!entry.evidenceBuffer) {
     entry.evidenceBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-evidence-arena-${arenaIndex}`,
       SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_WORDS
         * Uint32Array.BYTES_PER_ELEMENT,
@@ -356,6 +642,7 @@ function acquireReactionDiscoveryArenaResources({
   if (observeGpuEvidence === true && !entry.evidenceReadbackBuffer) {
     entry.evidenceReadbackBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-evidence-readback-arena-${arenaIndex}`,
       SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_WORDS
         * Uint32Array.BYTES_PER_ELEMENT,
@@ -363,9 +650,38 @@ function acquireReactionDiscoveryArenaResources({
     );
     bufferCreationCount += 1;
   }
+  if (
+    captureActivationObservation === true
+    && !entry.activationObservationWordBuffer
+  ) {
+    entry.activationObservationWordBuffer = createBuffer(
+      device,
+      limits,
+      `ulg-schroeder-spatial-reaction-activation-word-arena-${arenaIndex}`,
+      REACTION_ACTIVATION_CONTROL_BYTES,
+      GPU_BUFFER_USAGE.STORAGE
+        | GPU_BUFFER_USAGE.COPY_SRC
+        | GPU_BUFFER_USAGE.COPY_DST
+    );
+    bufferCreationCount += 1;
+  }
+  if (
+    captureActivationObservation === true
+    && !entry.activationObservationReadbackBuffer
+  ) {
+    entry.activationObservationReadbackBuffer = createBuffer(
+      device,
+      limits,
+      `ulg-schroeder-spatial-reaction-activation-readback-arena-${arenaIndex}`,
+      REACTION_ACTIVATION_OBSERVATION_BYTES,
+      GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    );
+    bufferCreationCount += 1;
+  }
   if (!entry.expectationBuffer) {
     entry.expectationBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-expectation-v${
         directoryAbiVersion
       }-arena-${arenaIndex}`,
@@ -377,6 +693,7 @@ function acquireReactionDiscoveryArenaResources({
   if (!entry.paramsBuffer) {
     entry.paramsBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-params-arena-${arenaIndex}`,
       PARAMS_BYTES,
       GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -389,15 +706,18 @@ function acquireReactionDiscoveryArenaResources({
   ) {
     entry.reactionRecordBuffer?.destroy?.();
     entry.reactionRecordCapacityBytes = powerOfTwoByteCapacity(
-      localReactionRecordBytes
+      localReactionRecordBytes,
+      Math.min(limits.maxBufferSize, limits.maxStorageBufferBindingSize),
+      'reaction discovery cached reaction record buffer'
     );
     requireStorageCapacity(
-      device,
+      limits,
       entry.reactionRecordCapacityBytes,
       'reaction discovery cached reaction record buffer'
     );
     entry.reactionRecordBuffer = createBuffer(
       device,
+      limits,
       `ulg-schroeder-spatial-reaction-discovery-records-arena-${arenaIndex}`,
       entry.reactionRecordCapacityBytes,
       GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
@@ -415,6 +735,9 @@ function acquireReactionDiscoveryArenaResources({
   entry.generation = generation;
   entry.generationId = generation.execution.generationId;
   entry.lease = lease;
+  entry.activationObservationLease = captureActivationObservation === true
+    ? lease
+    : null;
   return { entry, lease, bufferCreationCount };
 }
 
@@ -422,6 +745,7 @@ function releaseReactionDiscoveryArenaResources(entry, lease) {
   if (!entry || entry.lease !== lease || entry.inUse !== true) return false;
   entry.inUse = false;
   entry.lease = null;
+  entry.activationObservationLease = null;
   return true;
 }
 
@@ -430,6 +754,11 @@ export function destroySchroederSpatialReactionDiscoveryProposalCache(device) {
   const cache = reactionDiscoveryArenaCaches.get(device);
   if (!cache) return false;
   for (const entry of cache.values()) {
+    if (entry.inUse === true) {
+      throw new Error(
+        `cannot destroy leased reaction discovery arena ${entry.arenaIndex}`
+      );
+    }
     if (entry.generation && entry.generation.execution?.released !== true) {
       throw new Error(
         `cannot destroy live reaction discovery arena ${entry.arenaIndex}`
@@ -471,7 +800,10 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
   let currentReactionFingerprint = null;
   try {
     currentReactionFingerprint = reactionTable
-      ? typedArrayContentFingerprint(reactionRecordArray(reactionTable).combined)
+      ? schroederAuthorityTypedArrayFingerprint(
+          reactionRecordArray(reactionTable).combined,
+          'reaction-table-combined-records-v2'
+        )
       : null;
   } catch {
     return reject(
@@ -626,10 +958,8 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     * Float32Array.BYTES_PER_ELEMENT;
   if (
     proposal.proposalBufferByteLength !== requiredProposalBytes
-    || (
-      Number.isFinite(Number(proposal.proposalBuffer.size))
-      && Number(proposal.proposalBuffer.size) < requiredProposalBytes
-    )
+    || !Number.isSafeInteger(proposal.proposalBuffer.size)
+    || proposal.proposalBuffer.size < requiredProposalBytes
   ) {
     return reject(
       'schroeder-spatial-reaction-discovery-proposal-rejected-capacity',
@@ -662,7 +992,10 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
   });
 }
 
-function reactionRecordArray(reactionTable) {
+function reactionRecordArray(
+  reactionTable,
+  { requireExactPrefixMirror = false } = {}
+) {
   if (reactionTable?.schema !== ULG_SPH_GPU_REACTION_TABLE_SCHEMA) {
     throw new TypeError('canonical reaction discovery requires a packed SPH reaction table');
   }
@@ -674,17 +1007,58 @@ function reactionRecordArray(reactionTable) {
   if (!(reactionTable.records instanceof Float32Array)) {
     throw new TypeError('reactionTable.records must be a Float32Array');
   }
+  if (
+    typeof SharedArrayBuffer === 'function'
+    && reactionTable.records.buffer instanceof SharedArrayBuffer
+  ) {
+    throw new TypeError('reactionTable.records cannot use shared mutable storage');
+  }
   const requiredFloats = reactionCount * REACTION_RECORD_FLOATS;
-  if (reactionTable.records.length < requiredFloats) {
+  if (reactionTable.records.length !== requiredFloats) {
     throw new RangeError(
-      `reactionTable.records has ${reactionTable.records.length} floats; ${requiredFloats} required`
+      `reactionTable.records has ${reactionTable.records.length} floats; exactly ${requiredFloats} required`
     );
   }
   const combined = reactionTable.combinedRecords instanceof Float32Array
     ? reactionTable.combinedRecords
     : reactionTable.records;
+  if (
+    typeof SharedArrayBuffer === 'function'
+    && combined.buffer instanceof SharedArrayBuffer
+  ) {
+    throw new TypeError(
+      'reactionTable.combinedRecords cannot use shared mutable storage'
+    );
+  }
   if (combined.length < requiredFloats) {
     throw new RangeError('reaction table combined records do not contain every reaction header');
+  }
+  if (
+    requireExactPrefixMirror === true
+    && reactionTable.combinedRecords instanceof Float32Array
+  ) {
+    for (let index = 0; index < requiredFloats; index += 1) {
+      if (!Object.is(reactionTable.records[index], combined[index])) {
+        throw new TypeError(
+          'reaction table combined-record prefix does not match records'
+        );
+      }
+    }
+  }
+  if (
+    Object.hasOwn(reactionTable, 'recordStrideFloats')
+    && reactionTable.recordStrideFloats !== REACTION_RECORD_FLOATS
+  ) {
+    throw new RangeError('reactionTable.recordStrideFloats must equal 12');
+  }
+  if (
+    Object.hasOwn(reactionTable, 'combinedRecordCount')
+    && (
+      !Number.isSafeInteger(reactionTable.combinedRecordCount)
+      || reactionTable.combinedRecordCount !== combined.length / 4
+    )
+  ) {
+    throw new RangeError('reactionTable.combinedRecordCount is inconsistent');
   }
   return { reactionCount, combined };
 }
@@ -877,7 +1251,8 @@ function createParamsArray({
   reactionCount,
   maximumContactRadiusM,
   reactionRuleIndex,
-  collectDiagnosticEvidence = false
+  collectDiagnosticEvidence = false,
+  reactionMotionEnvelope = null
 }) {
   const data = new ArrayBuffer(PARAMS_BYTES);
   const view = new DataView(data);
@@ -905,11 +1280,55 @@ function createParamsArray({
   view.setUint32(44, reactionRuleIndex.ruleOffsetVec4s, true);
   view.setUint32(48, reactionRuleIndex.ruleCount, true);
   view.setUint32(52, reactionRuleIndex.recordVec4Count, true);
-  // The trailing two uniform words were reserved by the fixed 64-byte
-  // allocation. They leave the reaction-discovery parameter ABI stable while
-  // allowing diagnostic-only counters to stay off the production hot path.
+  // The last word in the original 64-byte prefix now carries the exact sealed
+  // thermal/phase/rest-volume writer latch. The diagnostic word remains off
+  // the production hot path when evidence collection is disabled.
   view.setUint32(56, collectDiagnosticEvidence === true ? 1 : 0, true);
-  view.setUint32(60, 0, true);
+  view.setUint32(
+    60,
+    reactionMotionEnvelope?.thermalPhaseEvolutionEnabled === true ? 1 : 0,
+    true
+  );
+  view.setUint32(
+    64,
+    reactionMotionEnvelope?.maxFutureSubsteps ?? 0,
+    true
+  );
+  view.setUint32(
+    68,
+    reactionMotionEnvelope?.separationDisplacementEnabled === true ? 1 : 0,
+    true
+  );
+  view.setUint32(
+    72,
+    reactionMotionEnvelope?.cflFactorF32Bits ?? 0,
+    true
+  );
+  view.setUint32(
+    76,
+    reactionMotionEnvelope?.gridSpacingF32Bits ?? 0,
+    true
+  );
+  view.setUint32(
+    80,
+    reactionMotionEnvelope?.boxDimsF32Bits?.[0] ?? 0,
+    true
+  );
+  view.setUint32(
+    84,
+    reactionMotionEnvelope?.boxDimsF32Bits?.[1] ?? 0,
+    true
+  );
+  view.setUint32(
+    88,
+    reactionMotionEnvelope?.boxDimsF32Bits?.[2] ?? 0,
+    true
+  );
+  view.setUint32(
+    92,
+    reactionMotionEnvelope?.contactCorrectionEnabled === true ? 1 : 0,
+    true
+  );
   return data;
 }
 
@@ -962,7 +1381,15 @@ struct ReactionDiscoveryParams {
   reaction_rule_index_rule_count: u32,
   reaction_rule_index_record_vec4_count: u32,
   collect_diagnostic_evidence: u32,
-  reserved: u32,
+  activation_thermal_phase_evolution_enabled: u32,
+  activation_max_future_substeps: u32,
+  activation_separation_enabled: u32,
+  activation_cfl_factor: f32,
+  activation_grid_spacing_m: f32,
+  activation_box_dim_x_m: f32,
+  activation_box_dim_y_m: f32,
+  activation_box_dim_z_m: f32,
+  activation_contact_correction_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state_authority: array<vec4<f32>>;
@@ -975,9 +1402,11 @@ struct ReactionDiscoveryParams {
 @group(0) @binding(7) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
 @group(0) @binding(8) var<uniform> spatial_expectation: ${exactNearExpectationType};
 @group(0) @binding(9) var<uniform> params: ReactionDiscoveryParams;
+@group(0) @binding(10) var<storage, read_write> reaction_activation_observation: array<atomic<u32>>;
 
 ${exactNearTraversalWgsl}
 ${exactNearCellTreeTraversalWgsl}
+${sphReactionMotionEnvelopeWgsl}
 
 const REACTION_DISCOVERY_INVALID_INDEX: f32 = -1.0;
 const REACTION_DISCOVERY_MAX_F32: f32 = 3.402823e38;
@@ -998,6 +1427,12 @@ const REACTION_DISCOVERY_EVIDENCE_CURRENT_ACTIVE_COUNT: u32 = 23u;
 const REACTION_DISCOVERY_EVIDENCE_TREE_NODE_VISITS: u32 = 24u;
 const REACTION_DISCOVERY_EVIDENCE_TREE_LEAF_VISITS: u32 = 25u;
 const REACTION_DISCOVERY_EVIDENCE_TREE_MEMBER_VISITS: u32 = 26u;
+const REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE: u32 = 0u;
+const REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS: u32 = 1u;
+const REACTION_ACTIVATION_RESULT_WORD: u32 = 0u;
+const REACTION_ACTIVATION_TRIGGERED_SOURCE_COUNT_WORD: u32 = 1u;
+const REACTION_ACTIVATION_MAX_REST_DIAMETER_BITS_WORD: u32 = 2u;
+const REACTION_ACTIVATION_FAILURE_WORD: u32 = 3u;
 
 fn reaction_discovery_invalid_proposal() -> vec4<f32> {
   return vec4<f32>(
@@ -1952,6 +2387,518 @@ fn seal(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   reaction_discovery_increment_counter(7u);
 }
+
+fn reaction_activation_fail_closed() {
+  atomicOr(
+    &reaction_activation_observation[REACTION_ACTIVATION_FAILURE_WORD],
+    0x80000000u
+  );
+}
+
+fn reaction_activation_source_row_admitted(source_index: u32) -> bool {
+  let state_offset = source_index * params.state_stride_vec4s;
+  let thermo_offset = source_index * params.thermo_stride_vec4s;
+  if (
+    state_offset + 1u >= arrayLength(&source_state)
+    || thermo_offset + 2u >= arrayLength(&source_thermo)
+  ) {
+    return false;
+  }
+  for (var row = 0u; row < 2u; row = row + 1u) {
+    if (!reaction_motion_vec4_finite(source_state[state_offset + row])) {
+      return false;
+    }
+  }
+  for (var row = 0u; row < 3u; row = row + 1u) {
+    if (!reaction_motion_vec4_finite(source_thermo[thermo_offset + row])) {
+      return false;
+    }
+  }
+  // The mutation shader's wildcard phase mask bypasses phase conversion.
+  // Refuse a negative phase here so the watch cannot seal a false zero.
+  return source_thermo[thermo_offset].y >= 0.0;
+}
+
+// Binding 0 is intentionally rebound to the terminal mechanics family for
+// this entry point. The declaration is a raw vec4 array, so the exact same
+// shader module can retain the canonical position authority for proposal
+// production while the watch-only pipeline certifies row4.w rest volumes.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn prepare_activation_motion_bounds(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let source_index = global_id.x;
+  if (source_index >= params.particle_count) {
+    return;
+  }
+  if (
+    arrayLength(&reaction_activation_observation) < 4u
+    || params.activation_max_future_substeps == 0u
+    || !reaction_motion_finite(params.activation_cfl_factor)
+    || !(params.activation_cfl_factor > 0.0)
+    || !reaction_motion_finite(params.activation_grid_spacing_m)
+    || !(params.activation_grid_spacing_m > 0.0)
+    || params.activation_separation_enabled > 1u
+    || params.activation_contact_correction_enabled > 1u
+    || params.activation_thermal_phase_evolution_enabled > 1u
+    || !reaction_motion_box_dims_admitted(vec3<f32>(
+      params.activation_box_dim_x_m,
+      params.activation_box_dim_y_m,
+      params.activation_box_dim_z_m
+    ))
+    || arrayLength(&source_state_authority) < params.particle_count * 8u
+    || !reaction_activation_source_row_admitted(source_index)
+  ) {
+    reaction_activation_fail_closed();
+    return;
+  }
+  let mechanics_offset = source_index * 8u;
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    if (!reaction_motion_vec4_finite(
+      source_state_authority[mechanics_offset + row]
+    )) {
+      reaction_activation_fail_closed();
+      return;
+    }
+  }
+  let position_mass = source_state[
+    source_index * params.state_stride_vec4s
+  ];
+  if (position_mass.w <= 0.0) {
+    return;
+  }
+  if (!reaction_motion_position_inside_box(
+    position_mass.xyz,
+    vec3<f32>(
+      params.activation_box_dim_x_m,
+      params.activation_box_dim_y_m,
+      params.activation_box_dim_z_m
+    )
+  )) {
+    reaction_activation_fail_closed();
+    return;
+  }
+  if (
+    params.activation_separation_enabled == 0u
+    && params.activation_contact_correction_enabled == 0u
+  ) {
+    return;
+  }
+  let rest_volume_m3 = source_state_authority[source_index * 8u + 4u].w;
+  let diameter_m = reaction_motion_rest_diameter_upper(rest_volume_m3);
+  if (!(diameter_m > 0.0) || !reaction_motion_finite(diameter_m)) {
+    reaction_activation_fail_closed();
+    return;
+  }
+  atomicMax(
+    &reaction_activation_observation[
+      REACTION_ACTIVATION_MAX_REST_DIAMETER_BITS_WORD
+    ],
+    bitcast<u32>(diameter_m)
+  );
+}
+
+fn reaction_activation_pair_triggered(
+  self_index: u32,
+  other_index: u32,
+  relative_reach_m: f32
+) -> bool {
+  if (other_index == self_index || other_index >= params.particle_count) {
+    return false;
+  }
+  if (!reaction_activation_source_row_admitted(other_index)) {
+    reaction_activation_fail_closed();
+    return false;
+  }
+  let other_position_mass = source_state[
+    other_index * params.state_stride_vec4s
+  ];
+  if (other_position_mass.w <= 0.0) {
+    return false;
+  }
+  let self_position_mass = source_state[
+    self_index * params.state_stride_vec4s
+  ];
+  let self_thermo0 = source_thermo[
+    self_index * params.thermo_stride_vec4s
+  ];
+  let other_thermo0 = source_thermo[
+    other_index * params.thermo_stride_vec4s
+  ];
+  let distance_m = length(self_position_mass.xyz - other_position_mass.xyz);
+  if (!reaction_motion_finite(distance_m)) {
+    reaction_activation_fail_closed();
+    return false;
+  }
+  for (
+    var reaction_index = 0u;
+    reaction_index < params.reaction_count;
+    reaction_index = reaction_index + 1u
+  ) {
+    let reaction_base = reaction_index
+      * params.reaction_record_stride_vec4s;
+    let row0 = reaction_records[reaction_base];
+    let row1 = reaction_records[reaction_base + 1u];
+    let row2 = reaction_records[reaction_base + 2u];
+    if (row2.x != 1.0) {
+      continue;
+    }
+    if (
+      !all(vec4<bool>(
+        reaction_motion_finite(row0.x),
+        reaction_motion_finite(row0.y),
+        reaction_motion_finite(row0.z),
+        reaction_motion_finite(row0.w)
+      ))
+      || !all(vec4<bool>(
+        reaction_motion_finite(row1.x),
+        reaction_motion_finite(row1.y),
+        reaction_motion_finite(row1.z),
+        reaction_motion_finite(row1.w)
+      ))
+      || !reaction_motion_finite(row2.x)
+      || row0.x == row0.y
+    ) {
+      reaction_activation_fail_closed();
+      continue;
+    }
+    // A ready zero-radius rule cannot mutate. Match the dedicated watcher by
+    // treating it as a deterministic non-match instead of malformed input.
+    if (!(row1.y > 0.0)) {
+      continue;
+    }
+    var self_phase_mask = 0.0;
+    var other_phase_mask = 0.0;
+    if (self_thermo0.x == row0.x && other_thermo0.x == row0.y) {
+      self_phase_mask = row1.z;
+      other_phase_mask = row1.w;
+    } else if (
+      self_thermo0.x == row0.y && other_thermo0.x == row0.x
+    ) {
+      self_phase_mask = row1.w;
+      other_phase_mask = row1.z;
+    } else {
+      continue;
+    }
+    if (
+      !reaction_discovery_phase_mask_satisfied(
+        self_phase_mask,
+        self_thermo0.y
+      )
+      || !reaction_discovery_phase_mask_satisfied(
+        other_phase_mask,
+        other_thermo0.y
+      )
+      || max(self_thermo0.z, other_thermo0.z) < row0.w
+    ) {
+      continue;
+    }
+    let expanded_radius_m = reaction_motion_upward(
+      row1.y + relative_reach_m
+    );
+    if (!reaction_motion_finite(expanded_radius_m)) {
+      reaction_activation_fail_closed();
+      continue;
+    }
+    if (distance_m <= expanded_radius_m) {
+      return true;
+    }
+  }
+  return false;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn watch_activation_motion_envelope(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  var triggered = false;
+  var malformed = false;
+  if (
+    arrayLength(&reaction_activation_observation) < 4u
+    || spatial_expectation.support_profile_id != params.support_profile_id
+    || !ss_exact_near_directory_admitted(spatial_expectation)
+    || !ss_exact_cell_tree_admitted(spatial_expectation)
+    || arrayLength(&reaction_records)
+      < params.reaction_count * params.reaction_record_stride_vec4s
+    || !reaction_activation_source_row_admitted(particle_index)
+  ) {
+    malformed = true;
+  }
+  let position_mass = source_state[
+    particle_index * params.state_stride_vec4s
+  ];
+  if (
+    !malformed
+    && params.activation_thermal_phase_evolution_enabled != 0u
+  ) {
+    // A dynamic thermal/phase/rest-volume writer can satisfy the reaction
+    // predicate or enlarge/activate a carrier without terminal motion. Count
+    // every fixed carrier slot positive before consulting terminal mass,
+    // temperature, phase, rest diameter, or spatial reach.
+    triggered = true;
+  }
+  if (!malformed && position_mass.w > 0.0 && !triggered) {
+    let max_rest_diameter_m = bitcast<f32>(atomicLoad(
+      &reaction_activation_observation[
+        REACTION_ACTIVATION_MAX_REST_DIAMETER_BITS_WORD
+      ]
+    ));
+    let max_abs_position_m = max(
+      abs(position_mass.x),
+      max(abs(position_mass.y), abs(position_mass.z))
+    );
+    let relative_reach_m = reaction_motion_relative_reach_upper(
+      params.activation_max_future_substeps,
+      params.activation_cfl_factor,
+      params.activation_grid_spacing_m,
+      max_rest_diameter_m,
+      params.activation_separation_enabled != 0u,
+      params.activation_contact_correction_enabled != 0u,
+      vec3<f32>(
+        params.activation_box_dim_x_m,
+        params.activation_box_dim_y_m,
+        params.activation_box_dim_z_m
+      ),
+      max_abs_position_m,
+      params.maximum_contact_radius_m
+    );
+    let certified_search_radius_m = reaction_motion_upward(
+      reaction_motion_upward(params.maximum_contact_radius_m)
+        + reaction_motion_upward(bitcast<f32>(atomicLoad(
+          &traversal_evidence[
+            REACTION_DISCOVERY_EVIDENCE_MAXIMUM_DISPLACEMENT_BITS
+          ]
+        )))
+        + relative_reach_m
+    );
+    if (
+      !reaction_motion_finite(relative_reach_m)
+      || !reaction_motion_finite(certified_search_radius_m)
+      || !(certified_search_radius_m >= 0.0)
+    ) {
+      malformed = true;
+    } else if (certified_search_radius_m > 0.0) {
+      let query_extent = vec3<f32>(certified_search_radius_m);
+      let query_minimum = position_mass.xyz - query_extent;
+      let query_maximum = position_mass.xyz + query_extent;
+      let tree_cell_count = exact_near_cell_tree[18u];
+      let tree_leaf_capacity = exact_near_cell_tree[20u];
+      let tree_leaf_offset = tree_leaf_capacity - 1u;
+      let tree_node_capacity = exact_near_cell_tree[21u];
+      let tree_depth = exact_near_cell_tree[23u];
+      var node_stack: array<u32, 32>;
+      var stack_count = 0u;
+      if (
+        tree_node_capacity == 0u
+        || tree_depth >= 32u
+        || !all(vec3<bool>(
+          reaction_motion_finite(query_minimum.x),
+          reaction_motion_finite(query_minimum.y),
+          reaction_motion_finite(query_minimum.z)
+        ))
+        || !all(vec3<bool>(
+          reaction_motion_finite(query_maximum.x),
+          reaction_motion_finite(query_maximum.y),
+          reaction_motion_finite(query_maximum.z)
+        ))
+        || !all(query_minimum <= query_maximum)
+      ) {
+        malformed = true;
+      } else {
+        node_stack[0u] = 0u;
+        stack_count = 1u;
+        for (
+          var node_iteration = 0u;
+          node_iteration < tree_node_capacity && stack_count > 0u;
+          node_iteration = node_iteration + 1u
+        ) {
+          stack_count = stack_count - 1u;
+          let node_index = node_stack[stack_count];
+          if (node_index >= tree_node_capacity) {
+            malformed = true;
+            break;
+          }
+          if (!ss_exact_cell_tree_node_intersects(
+            node_index,
+            query_minimum,
+            query_maximum
+          )) {
+            continue;
+          }
+          if (ss_exact_cell_tree_node_is_leaf(node_index)) {
+            let cell_index = ss_exact_cell_tree_leaf_cell_index(node_index);
+            if (
+              node_index < tree_leaf_offset
+              || cell_index >= tree_cell_count
+              || cell_index >= spatial_expectation.expected_cell_capacity
+            ) {
+              malformed = true;
+              break;
+            }
+            let member_range = ss_exact_near_cell_member_range(
+              spatial_expectation,
+              cell_index
+            );
+            if (member_range.admitted == 0u) {
+              malformed = true;
+              break;
+            }
+            for (
+              var member_offset = member_range.begin;
+              member_offset < member_range.end;
+              member_offset = member_offset + 1u
+            ) {
+              let lookup = ss_exact_near_source_at_member(
+                spatial_expectation,
+                member_offset
+              );
+              if (lookup.admitted == 0u) {
+                malformed = true;
+                break;
+              }
+              if (reaction_activation_pair_triggered(
+                particle_index,
+                lookup.source_index,
+                relative_reach_m
+              )) {
+                triggered = true;
+                break;
+              }
+            }
+            if (malformed || triggered) {
+              break;
+            }
+            continue;
+          }
+          if (
+            node_index >= tree_leaf_offset
+            || !ss_exact_cell_tree_node_is_internal(node_index)
+          ) {
+            malformed = true;
+            break;
+          }
+          let left_child = node_index * 2u + 1u;
+          let right_child = left_child + 1u;
+          if (right_child >= tree_node_capacity || stack_count + 2u > 32u) {
+            malformed = true;
+            break;
+          }
+          node_stack[stack_count] = right_child;
+          node_stack[stack_count + 1u] = left_child;
+          stack_count = stack_count + 2u;
+        }
+        if (stack_count != 0u && !triggered) {
+          malformed = true;
+        }
+      }
+    }
+  }
+  if (malformed) {
+    reaction_activation_fail_closed();
+  }
+  if (triggered) {
+    atomicAdd(
+      &reaction_activation_observation[
+        REACTION_ACTIVATION_TRIGGERED_SOURCE_COUNT_WORD
+      ],
+      1u
+    );
+  }
+  atomicAdd(
+    &reaction_activation_observation[REACTION_ACTIVATION_FAILURE_WORD],
+    1u
+  );
+}
+
+@compute @workgroup_size(1)
+fn seal_activation_motion_watch(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (global_id.x != 0u || arrayLength(&reaction_activation_observation) < 4u) {
+    return;
+  }
+  let control = atomicLoad(
+    &reaction_activation_observation[REACTION_ACTIVATION_FAILURE_WORD]
+  );
+  let triggered_source_count = atomicLoad(
+    &reaction_activation_observation[
+      REACTION_ACTIVATION_TRIGGERED_SOURCE_COUNT_WORD
+    ]
+  );
+  let admitted = (control & 0x80000000u) == 0u
+    && (control & 0x7fffffffu) == params.particle_count
+    && triggered_source_count <= params.particle_count
+    && atomicLoad(&traversal_evidence[0u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[1u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[2u]) == 0u
+    && atomicLoad(&traversal_evidence[5u]) == 0u
+    && atomicLoad(&traversal_evidence[7u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[8u]) == 0u
+    && atomicLoad(&traversal_evidence[REACTION_DISCOVERY_EVIDENCE_OVERFLOW]) == 0u
+    && atomicLoad(
+      &traversal_evidence[REACTION_DISCOVERY_EVIDENCE_CERTIFICATE_STATUS_BITS]
+    ) == REACTION_DISCOVERY_CERTIFICATE_READY_BITS;
+  atomicStore(
+    &reaction_activation_observation[REACTION_ACTIVATION_RESULT_WORD],
+    select(
+      REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE,
+      triggered_source_count + REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS,
+      admitted
+    )
+  );
+}
+
+// The schedule boundary maps only this word. An encoded one is a trustworthy
+// public zero only when
+// the same GPU submission proves every completion/admission field that the
+// optional 27-word diagnostic readback validates on the host. Any torn,
+// rejected, or overflowing traversal remains WebGPU's zero-initialized
+// fail-closed word. particle_count is capped far below u32 overflow.
+@compute @workgroup_size(1)
+fn reduce_activation_watch(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  if (
+    global_id.x != 0u
+    || arrayLength(&traversal_evidence)
+      < REACTION_DISCOVERY_EVIDENCE_TREE_MEMBER_VISITS + 1u
+    || arrayLength(&reaction_activation_observation) < 1u
+  ) {
+    return;
+  }
+  let proposal_count = atomicLoad(&traversal_evidence[6u]);
+  let admitted = atomicLoad(&traversal_evidence[0u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[1u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[2u]) == 0u
+    && atomicLoad(&traversal_evidence[5u]) == 0u
+    && proposal_count <= params.particle_count
+    && atomicLoad(&traversal_evidence[7u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[8u]) == 0u
+    && atomicLoad(&traversal_evidence[9u]) == params.support_profile_id
+    && atomicLoad(&traversal_evidence[10u])
+      == spatial_expectation.expected_generation_id
+    && atomicLoad(&traversal_evidence[11u])
+      == spatial_expectation.expected_support_epoch
+    && atomicLoad(&traversal_evidence[12u]) == params.particle_count
+    && atomicLoad(&traversal_evidence[13u]) == params.reaction_count
+    && atomicLoad(&traversal_evidence[14u]) == 0u
+    && atomicLoad(&traversal_evidence[REACTION_DISCOVERY_EVIDENCE_OVERFLOW]) == 0u
+    && atomicLoad(
+      &traversal_evidence[REACTION_DISCOVERY_EVIDENCE_CERTIFICATE_STATUS_BITS]
+    ) == REACTION_DISCOVERY_CERTIFICATE_READY_BITS;
+  atomicStore(
+    &reaction_activation_observation[0u],
+    select(
+      REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE,
+      proposal_count + REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS,
+      admitted
+    )
+  );
+}
 `;
 }
 
@@ -2094,18 +3041,46 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   positionAuthorityStateBuffer = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
+  sourceMechanicsBuffer = null,
   reactionTable,
+  reactionMotionEnvelope = null,
+  boxDimsM = null,
   reactionRecordBuffer = null,
   gpuTimestampRecorder = null,
   collectGpuResidentDiagnosticEvidence = false,
-  observeGpuEvidence = false
+  observeGpuEvidence = false,
+  captureActivationObservation = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer || !device.queue?.submit) {
     throw new TypeError('canonical reaction discovery requires a WebGPU-like device');
   }
+  const deviceLimits = reactionDiscoveryDeviceLimits(device);
   if (typeof collectGpuResidentDiagnosticEvidence !== 'boolean') {
     throw new TypeError(
       'collectGpuResidentDiagnosticEvidence must be a boolean'
+    );
+  }
+  if (typeof captureActivationObservation !== 'boolean') {
+    throw new TypeError('captureActivationObservation must be a boolean');
+  }
+  if (
+    reactionMotionEnvelope != null
+    && !isExactSphReactionMotionEnvelope(reactionMotionEnvelope)
+  ) {
+    throw new TypeError(
+      'reactionMotionEnvelope must be an exact sealed reaction motion envelope'
+    );
+  }
+  if (reactionMotionEnvelope && captureActivationObservation !== true) {
+    throw new TypeError(
+      'reactionMotionEnvelope requires captureActivationObservation'
+    );
+  }
+  if (reactionMotionEnvelope) {
+    assertSphReactionMotionEnvelopeBoxDimsMatch(
+      reactionMotionEnvelope,
+      boxDimsM,
+      'reaction discovery boxDimsM'
     );
   }
   const particleCount = exactPositiveU32(
@@ -2119,8 +3094,21 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   ) {
     throw new RangeError('reaction discovery particle count does not match the canonical epoch');
   }
-  const { reactionCount, combined } = reactionRecordArray(reactionTable);
-  const reactionTableFingerprint = typedArrayContentFingerprint(combined);
+  const { reactionCount, combined } = reactionRecordArray(reactionTable, {
+    requireExactPrefixMirror: captureActivationObservation === true
+  });
+  if (captureActivationObservation === true) {
+    assertSphReactionMotionEnvelopeRulePrefix(
+      combined,
+      reactionCount,
+      'reactionTable'
+    );
+  }
+  const reactionTableFingerprint =
+    schroederAuthorityTypedArrayFingerprint(
+      combined,
+      'reaction-table-combined-records-v2'
+    );
   const materialPairIndexRequested = reactionRecordBuffer == null && reactionCount > 1;
   const reactionRuleIndex = cachedReactionRuleIndexUpload({
     reactionTable,
@@ -2163,26 +3151,56 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     sourceThermoBuffer || sphParticleUpload?.thermoBuffer,
     'reaction discovery sourceThermoBuffer'
   );
+  const mechanicsBuffer = reactionMotionEnvelope
+    ? requireBuffer(
+        device,
+        sourceMechanicsBuffer,
+        'reaction discovery sourceMechanicsBuffer'
+      )
+    : null;
   const canonicalSourceBuffer = requireBuffer(
     device,
     generation?.source?.sourceBuffer ?? generation?.source?.activeNodeBuffer,
     'reaction discovery canonical sourceBuffer'
   );
-  requireMinimumBufferBytes(
+  const stateBufferByteLength = checkedPositiveProduct(
+    [particleCount, 2, 4, Float32Array.BYTES_PER_ELEMENT],
+    'reaction discovery state buffer byte length'
+  );
+  const thermoBufferByteLength = checkedPositiveProduct(
+    [particleCount, 3, 4, Float32Array.BYTES_PER_ELEMENT],
+    'reaction discovery thermo buffer byte length'
+  );
+  const mechanicsBufferByteLength = checkedPositiveProduct(
+    [particleCount, 8, 4, Float32Array.BYTES_PER_ELEMENT],
+    'reaction discovery mechanics buffer byte length'
+  );
+  requireStorageBufferPrefix(
     currentStateBuffer,
-    particleCount * 2 * 4 * Float32Array.BYTES_PER_ELEMENT,
-    'reaction discovery sourceStateBuffer'
+    stateBufferByteLength,
+    'reaction discovery sourceStateBuffer',
+    deviceLimits
   );
-  requireMinimumBufferBytes(
+  requireStorageBufferPrefix(
     positionStateBuffer,
-    particleCount * 2 * 4 * Float32Array.BYTES_PER_ELEMENT,
-    'reaction discovery positionAuthorityStateBuffer'
+    stateBufferByteLength,
+    'reaction discovery positionAuthorityStateBuffer',
+    deviceLimits
   );
-  requireMinimumBufferBytes(
+  requireStorageBufferPrefix(
     thermoBuffer,
-    particleCount * 3 * 4 * Float32Array.BYTES_PER_ELEMENT,
-    'reaction discovery sourceThermoBuffer'
+    thermoBufferByteLength,
+    'reaction discovery sourceThermoBuffer',
+    deviceLimits
   );
+  if (mechanicsBuffer) {
+    requireStorageBufferPrefix(
+      mechanicsBuffer,
+      mechanicsBufferByteLength,
+      'reaction discovery sourceMechanicsBuffer',
+      deviceLimits
+    );
+  }
   const authentication = resolveSchroederSpatialExactNearConsumerGeneration(
     generation,
     {
@@ -2238,21 +3256,58 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     'reaction discovery exactNearCellTreeBuffer'
   );
 
+  requireStorageBufferPrefix(
+    directoryBuffer,
+    directoryBuffer.size,
+    'reaction discovery canonical directoryBuffer',
+    deviceLimits
+  );
+  requireStorageBufferPrefix(
+    exactNearCellTreeBuffer,
+    exactNearCellTreeBuffer.size,
+    'reaction discovery exactNearCellTreeBuffer',
+    deviceLimits
+  );
   requireStorageCapacity(
-    device,
+    deviceLimits,
     reactionRecordUpload.byteLength,
     'reaction discovery reaction record buffer'
   );
-  const proposalByteLength = particleCount
-    * SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_ROW_FLOATS
-    * Float32Array.BYTES_PER_ELEMENT;
+  const proposalByteLength = checkedPositiveProduct(
+    [
+      particleCount,
+      SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_ROW_FLOATS,
+      Float32Array.BYTES_PER_ELEMENT
+    ],
+    'reaction discovery proposal buffer byte length'
+  );
   requireStorageCapacity(
-    device,
+    deviceLimits,
     proposalByteLength,
     'reaction discovery proposal buffer'
   );
+  requireUniformCapacity(
+    deviceLimits,
+    traversalProgram.expectationBufferByteLength,
+    'reaction discovery expectation buffer'
+  );
+  requireUniformCapacity(
+    deviceLimits,
+    PARAMS_BYTES,
+    'reaction discovery params buffer'
+  );
+  const workgroups = Math.max(1, Math.ceil(particleCount / WORKGROUP_SIZE));
+  if (
+    !Number.isSafeInteger(workgroups)
+    || workgroups > deviceLimits.maxComputeWorkgroupsPerDimension
+  ) {
+    throw new RangeError(
+      `reaction discovery requires ${workgroups} workgroups; device limit is ${deviceLimits.maxComputeWorkgroupsPerDimension}`
+    );
+  }
   const arenaResources = acquireReactionDiscoveryArenaResources({
     device,
+    limits: deviceLimits,
     generation,
     directoryAbiVersion: traversalProgram.directoryAbiVersion,
     expectationBufferByteLength:
@@ -2261,16 +3316,19 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     localReactionRecordBytes: reactionRecordBuffer
       ? 0
       : reactionRecordUpload.byteLength,
-    observeGpuEvidence: observeGpuEvidence === true
+    observeGpuEvidence: observeGpuEvidence === true,
+    captureActivationObservation: captureActivationObservation === true
   });
   const { entry: arenaEntry, lease: arenaLease } = arenaResources;
+  try {
   const resolvedReactionRecordBuffer = reactionRecordBuffer
     ? requireBuffer(device, reactionRecordBuffer, 'reaction discovery reactionRecordBuffer')
     : arenaEntry.reactionRecordBuffer;
-  requireMinimumBufferBytes(
+  requireStorageBufferPrefix(
     resolvedReactionRecordBuffer,
     reactionRecordUpload.byteLength,
-    'reaction discovery reactionRecordBuffer'
+    'reaction discovery reactionRecordBuffer',
+    deviceLimits
   );
   // Establish the exact immutable prefix snapshot. The owned arena receives
   // the private discovery suffix too; borrowed caller buffers deliberately
@@ -2293,6 +3351,12 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   const evidenceReadbackBuffer = observeGpuEvidence === true
     ? arenaEntry.evidenceReadbackBuffer
     : null;
+  const activationObservationWordBuffer = captureActivationObservation === true
+    ? arenaEntry.activationObservationWordBuffer
+    : null;
+  const activationObservationReadbackBuffer = captureActivationObservation === true
+    ? arenaEntry.activationObservationReadbackBuffer
+    : null;
   // The four certificate words are resident fields of evidenceBuffer. Keeping
   // this public alias avoids changing downstream receipt shape while freeing
   // the ninth storage binding for the shared exact-cell tree.
@@ -2312,9 +3376,29 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     reactionRuleIndex,
     collectDiagnosticEvidence:
       collectGpuResidentDiagnosticEvidence === true
-      || observeGpuEvidence === true
+      || observeGpuEvidence === true,
+    reactionMotionEnvelope
   }));
   device.queue.writeBuffer(evidenceBuffer, 0, evidenceInitial);
+  if (captureActivationObservation === true) {
+    device.queue.writeBuffer(
+      activationObservationWordBuffer,
+      0,
+      new Uint32Array([
+        REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE,
+        0,
+        0,
+        0
+      ])
+    );
+    // WebGPU zero initialization and this explicit cached reset share the same
+    // fail-closed encoding. A validation-dropped copy cannot replay success.
+    device.queue.writeBuffer(
+      activationObservationReadbackBuffer,
+      0,
+      new Uint32Array([REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE])
+    );
+  }
 
   const displacementPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
@@ -2373,55 +3457,264 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       computeBufferBinding(9, 'uniform')
     ]
   });
+  const activationMotionBoundsPipeline = reactionMotionEnvelope
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-reaction-discovery-activation-bounds.${
+            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+          }.${traversalProgram.cacheKeySuffix}`,
+        label: `ulg-schroeder-spatial-reaction-discovery-activation-bounds-v${
+          traversalProgram.directoryAbiVersion
+        }`,
+        code: traversalProgram.shaderCode,
+        entryPoint: 'prepare_activation_motion_bounds',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(9, 'uniform'),
+          computeBufferBinding(10, 'storage')
+        ]
+      })
+    : null;
+  const activationMotionWatchPipeline = reactionMotionEnvelope
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-reaction-discovery-activation-watch.${
+            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+          }.${traversalProgram.cacheKeySuffix}`,
+        label: `ulg-schroeder-spatial-reaction-discovery-activation-watch-v${
+          traversalProgram.directoryAbiVersion
+        }`,
+        code: traversalProgram.shaderCode,
+        entryPoint: 'watch_activation_motion_envelope',
+        bindings: [
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'read-only-storage'),
+          computeBufferBinding(7, 'storage'),
+          computeBufferBinding(8, 'uniform'),
+          computeBufferBinding(9, 'uniform'),
+          computeBufferBinding(10, 'storage')
+        ]
+      })
+    : null;
+  const activationObservationPipeline = captureActivationObservation === true
+    ? createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-reaction-discovery-activation.${
+            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
+          }.${traversalProgram.cacheKeySuffix}`,
+        label: `ulg-schroeder-spatial-reaction-discovery-activation-v${
+          traversalProgram.directoryAbiVersion
+        }`,
+        code: traversalProgram.shaderCode,
+        entryPoint: reactionMotionEnvelope
+          ? 'seal_activation_motion_watch'
+          : 'reduce_activation_watch',
+        bindings: [
+          computeBufferBinding(7, 'storage'),
+          computeBufferBinding(8, 'uniform'),
+          computeBufferBinding(9, 'uniform'),
+          computeBufferBinding(10, 'storage')
+        ]
+      })
+    : null;
   const proposalBindGroup = device.createBindGroup({
     label: 'ulg-schroeder-spatial-reaction-discovery-proposal-bindings',
     layout: proposalPipeline.bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: positionStateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
-      { binding: 2, resource: { buffer: currentStateBuffer } },
-      { binding: 3, resource: { buffer: resolvedReactionRecordBuffer } },
-      { binding: 4, resource: { buffer: directoryBuffer } },
-      { binding: 5, resource: { buffer: exactNearCellTreeBuffer } },
-      { binding: 6, resource: { buffer: proposalBuffer } },
-      { binding: 7, resource: { buffer: evidenceBuffer } },
-      { binding: 8, resource: { buffer: expectationBuffer } },
-      { binding: 9, resource: { buffer: paramsBuffer } }
+      { binding: 0, resource: exactBufferBindingResource(
+        positionStateBuffer,
+        stateBufferByteLength
+      ) },
+      { binding: 1, resource: exactBufferBindingResource(
+        thermoBuffer,
+        thermoBufferByteLength
+      ) },
+      { binding: 2, resource: exactBufferBindingResource(
+        currentStateBuffer,
+        stateBufferByteLength
+      ) },
+      { binding: 3, resource: exactBufferBindingResource(
+        resolvedReactionRecordBuffer,
+        reactionRecordUpload.byteLength
+      ) },
+      { binding: 4, resource: exactBufferBindingResource(
+        directoryBuffer,
+        directoryBuffer.size
+      ) },
+      { binding: 5, resource: exactBufferBindingResource(
+        exactNearCellTreeBuffer,
+        exactNearCellTreeBuffer.size
+      ) },
+      { binding: 6, resource: exactBufferBindingResource(
+        proposalBuffer,
+        proposalByteLength
+      ) },
+      { binding: 7, resource: exactBufferBindingResource(
+        evidenceBuffer,
+        evidenceInitial.byteLength
+      ) },
+      { binding: 8, resource: exactBufferBindingResource(
+        expectationBuffer,
+        traversalProgram.expectationBufferByteLength
+      ) },
+      { binding: 9, resource: exactBufferBindingResource(
+        paramsBuffer,
+        PARAMS_BYTES
+      ) }
     ]
   });
   const displacementBindGroup = device.createBindGroup({
     label: 'ulg-schroeder-spatial-reaction-discovery-displacement-bindings',
     layout: displacementPipeline.bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: positionStateBuffer } },
-      { binding: 2, resource: { buffer: currentStateBuffer } },
-      { binding: 7, resource: { buffer: evidenceBuffer } },
-      { binding: 9, resource: { buffer: paramsBuffer } }
+      { binding: 0, resource: exactBufferBindingResource(
+        positionStateBuffer,
+        stateBufferByteLength
+      ) },
+      { binding: 2, resource: exactBufferBindingResource(
+        currentStateBuffer,
+        stateBufferByteLength
+      ) },
+      { binding: 7, resource: exactBufferBindingResource(
+        evidenceBuffer,
+        evidenceInitial.byteLength
+      ) },
+      { binding: 9, resource: exactBufferBindingResource(
+        paramsBuffer,
+        PARAMS_BYTES
+      ) }
     ]
   });
   const sealBindGroup = device.createBindGroup({
     label: 'ulg-schroeder-spatial-reaction-discovery-seal-bindings',
     layout: sealPipeline.bindGroupLayout,
     entries: [
-      { binding: 6, resource: { buffer: proposalBuffer } },
-      { binding: 7, resource: { buffer: evidenceBuffer } },
-      { binding: 9, resource: { buffer: paramsBuffer } }
+      { binding: 6, resource: exactBufferBindingResource(
+        proposalBuffer,
+        proposalByteLength
+      ) },
+      { binding: 7, resource: exactBufferBindingResource(
+        evidenceBuffer,
+        evidenceInitial.byteLength
+      ) },
+      { binding: 9, resource: exactBufferBindingResource(
+        paramsBuffer,
+        PARAMS_BYTES
+      ) }
     ]
   });
-  const workgroups = Math.max(1, Math.ceil(particleCount / WORKGROUP_SIZE));
-  const maxWorkgroups = Number(
-    device?.limits?.maxComputeWorkgroupsPerDimension
-  );
-  if (
-    Number.isFinite(maxWorkgroups)
-    && maxWorkgroups > 0
-    && workgroups > maxWorkgroups
-  ) {
-    releaseReactionDiscoveryArenaResources(arenaEntry, arenaLease);
-    throw new RangeError(
-      `reaction discovery requires ${workgroups} workgroups; device limit is ${maxWorkgroups}`
-    );
-  }
+  const activationMotionBoundsBindGroup = activationMotionBoundsPipeline
+    ? device.createBindGroup({
+        label:
+          'ulg-schroeder-spatial-reaction-discovery-activation-bounds-bindings',
+        layout: activationMotionBoundsPipeline.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: exactBufferBindingResource(
+            mechanicsBuffer,
+            mechanicsBufferByteLength
+          ) },
+          { binding: 1, resource: exactBufferBindingResource(
+            thermoBuffer,
+            thermoBufferByteLength
+          ) },
+          { binding: 2, resource: exactBufferBindingResource(
+            currentStateBuffer,
+            stateBufferByteLength
+          ) },
+          { binding: 9, resource: exactBufferBindingResource(
+            paramsBuffer,
+            PARAMS_BYTES
+          ) },
+          {
+            binding: 10,
+            resource: exactBufferBindingResource(
+              activationObservationWordBuffer,
+              REACTION_ACTIVATION_CONTROL_BYTES
+            )
+          }
+        ]
+      })
+    : null;
+  const activationMotionWatchBindGroup = activationMotionWatchPipeline
+    ? device.createBindGroup({
+        label:
+          'ulg-schroeder-spatial-reaction-discovery-activation-watch-bindings',
+        layout: activationMotionWatchPipeline.bindGroupLayout,
+        entries: [
+          { binding: 1, resource: exactBufferBindingResource(
+            thermoBuffer,
+            thermoBufferByteLength
+          ) },
+          { binding: 2, resource: exactBufferBindingResource(
+            currentStateBuffer,
+            stateBufferByteLength
+          ) },
+          { binding: 3, resource: exactBufferBindingResource(
+            resolvedReactionRecordBuffer,
+            reactionRecordUpload.byteLength
+          ) },
+          { binding: 4, resource: exactBufferBindingResource(
+            directoryBuffer,
+            directoryBuffer.size
+          ) },
+          { binding: 5, resource: exactBufferBindingResource(
+            exactNearCellTreeBuffer,
+            exactNearCellTreeBuffer.size
+          ) },
+          { binding: 7, resource: exactBufferBindingResource(
+            evidenceBuffer,
+            evidenceInitial.byteLength
+          ) },
+          { binding: 8, resource: exactBufferBindingResource(
+            expectationBuffer,
+            traversalProgram.expectationBufferByteLength
+          ) },
+          { binding: 9, resource: exactBufferBindingResource(
+            paramsBuffer,
+            PARAMS_BYTES
+          ) },
+          {
+            binding: 10,
+            resource: exactBufferBindingResource(
+              activationObservationWordBuffer,
+              REACTION_ACTIVATION_CONTROL_BYTES
+            )
+          }
+        ]
+      })
+    : null;
+  const activationObservationBindGroup = activationObservationPipeline
+    ? device.createBindGroup({
+        label: 'ulg-schroeder-spatial-reaction-discovery-activation-bindings',
+        layout: activationObservationPipeline.bindGroupLayout,
+        entries: [
+          { binding: 7, resource: exactBufferBindingResource(
+            evidenceBuffer,
+            evidenceInitial.byteLength
+          ) },
+          { binding: 8, resource: exactBufferBindingResource(
+            expectationBuffer,
+            traversalProgram.expectationBufferByteLength
+          ) },
+          { binding: 9, resource: exactBufferBindingResource(
+            paramsBuffer,
+            PARAMS_BYTES
+          ) },
+          {
+            binding: 10,
+            resource: exactBufferBindingResource(
+              activationObservationWordBuffer,
+              REACTION_ACTIVATION_CONTROL_BYTES
+            )
+          }
+        ]
+      })
+    : null;
   const encoder = device.createCommandEncoder({
     label: 'ulg-schroeder-spatial-reaction-discovery'
   });
@@ -2485,6 +3778,42 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     encoder,
     sealTimestampSpan
   );
+  if (activationMotionBoundsPipeline) {
+    const boundsPass = encoder.beginComputePass({
+      label:
+        'ulg-schroeder-spatial-reaction-discovery-activation-motion-bounds'
+    });
+    boundsPass.setPipeline(activationMotionBoundsPipeline.pipeline);
+    boundsPass.setBindGroup(0, activationMotionBoundsBindGroup);
+    boundsPass.dispatchWorkgroups(workgroups);
+    boundsPass.end();
+    const watchPass = encoder.beginComputePass({
+      label:
+        'ulg-schroeder-spatial-reaction-discovery-activation-motion-watch'
+    });
+    watchPass.setPipeline(activationMotionWatchPipeline.pipeline);
+    watchPass.setBindGroup(0, activationMotionWatchBindGroup);
+    watchPass.dispatchWorkgroups(workgroups);
+    watchPass.end();
+  }
+  if (activationObservationPipeline) {
+    const activationObservationPass = encoder.beginComputePass({
+      label: 'ulg-schroeder-spatial-reaction-discovery-activation-reduction'
+    });
+    activationObservationPass.setPipeline(
+      activationObservationPipeline.pipeline
+    );
+    activationObservationPass.setBindGroup(0, activationObservationBindGroup);
+    activationObservationPass.dispatchWorkgroups(1);
+    activationObservationPass.end();
+    encoder.copyBufferToBuffer(
+      activationObservationWordBuffer,
+      0,
+      activationObservationReadbackBuffer,
+      0,
+      REACTION_ACTIVATION_OBSERVATION_BYTES
+    );
+  }
   if (observeGpuEvidence === true) {
     encoder.copyBufferToBuffer(
       evidenceBuffer,
@@ -2597,6 +3926,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     gpuEvidence
   );
   let destroyed = false;
+  let proposalRecord = null;
   // Per-arena uniforms are intentionally retained. The spatial runtime cannot
   // reuse this arena until its generation retires, so no submitted-work
   // callback or transient buffer destruction is required between ticks.
@@ -2604,6 +3934,10 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   const destroy = () => {
     if (destroyed) return false;
     destroyed = true;
+    if (proposalRecord?.activationObservationInFlight === true) {
+      proposalRecord.releaseAfterActivationObservation = true;
+      return true;
+    }
     return releaseReactionDiscoveryArenaResources(arenaEntry, arenaLease);
   };
 
@@ -2638,6 +3972,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       'traversal-evidence-words-20-through-23',
     sourceCurrentStateBuffer: currentStateBuffer,
     sourceThermoBuffer: thermoBuffer,
+    sourceMechanicsBuffer: mechanicsBuffer,
     proposalBuffer,
     proposalBufferByteLength: proposalByteLength,
     proposalBufferCapacityByteLength: arenaEntry.proposalCapacityBytes,
@@ -2679,6 +4014,31 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       ? SCHROEDER_SPATIAL_REACTION_DISCOVERY_EVIDENCE_WORDS
         * Uint32Array.BYTES_PER_ELEMENT
       : 0,
+    activationObservationRequested: captureActivationObservation === true,
+    activationObservationMode: captureActivationObservation === true
+      ? 'deferred-schedule-terminal-four-byte-map'
+      : 'not-requested',
+    activationObservationReadbackByteLength:
+      captureActivationObservation === true
+        ? REACTION_ACTIVATION_OBSERVATION_BYTES
+        : 0,
+    activationObservationPredicateRevision:
+      reactionMotionEnvelope
+        ? SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION
+        : SCHROEDER_SPATIAL_REACTION_CURRENT_STATE_PREDICATE_REVISION,
+    activationObservationProducerRoute: 'canonical-schroeder',
+    activationObservationSampleStage:
+      reactionMotionEnvelope
+        ? 'canonical-post-thermal-pre-reaction-motion-envelope'
+        : 'canonical-post-thermal-pre-reaction-exact-current-state',
+    activationObservationNodeDomain:
+      reactionMotionEnvelope
+        ? 'fixed-phase-carrier-slot'
+        : 'primary-carrier-particle',
+    reactionMotionEnvelope,
+    activationMotionEnvelopeEnabled: Boolean(reactionMotionEnvelope),
+    activationMotionBoundsDispatchCount: reactionMotionEnvelope ? 1 : 0,
+    activationMotionWatchDispatchCount: reactionMotionEnvelope ? 1 : 0,
     authentication,
     gpuEvidence,
     receipt,
@@ -2718,8 +4078,9 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       return destroyed;
     }
   };
-  reactionDiscoveryProposalRecords.set(proposalArtifact, {
+  proposalRecord = {
     proposal: proposalArtifact,
+    device,
     generation,
     directoryAbiVersion: traversalProgram.directoryAbiVersion,
     directoryBuffer,
@@ -2729,13 +4090,305 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     positionAuthorityStateBuffer: positionStateBuffer,
     sourceCurrentStateBuffer: currentStateBuffer,
     sourceThermoBuffer: thermoBuffer,
+    sourceMechanicsBuffer: mechanicsBuffer,
     displacementCertificateBuffer,
     reactionTable,
+    reactionCount,
+    reactionRecords: combined,
     reactionTableFingerprint,
     reactionDiscoveryPayloadFingerprint,
     reactionRuleIndex,
     reactionRecordBuffer: resolvedReactionRecordBuffer,
-    receipt
-  });
+    reactionMotionEnvelope,
+    receipt,
+    arenaEntry,
+    arenaLease,
+    activationObservationWordBuffer,
+    activationObservationReadbackBuffer,
+    activationObservationConsumed: false,
+    activationObservationInFlight: false,
+    releaseAfterActivationObservation: false,
+    activationObservationDeviceTerminalSignal:
+      captureActivationObservation === true
+        ? reactionObservationDeviceTerminalSignalFor(device)
+        : null
+  };
+  reactionDiscoveryProposalRecords.set(proposalArtifact, proposalRecord);
   return Object.freeze(proposalArtifact);
+  } catch (error) {
+    releaseReactionDiscoveryArenaResources(arenaEntry, arenaLease);
+    throw error;
+  }
+}
+
+function assertReactionActivationObservationAuthenticity(
+  record,
+  proposal,
+  resolvedDevice
+) {
+  if (!resolvedDevice || resolvedDevice !== record.device) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation buffers do not match the proposal device',
+      TypeError
+    );
+  }
+  let currentTable;
+  let currentFingerprint;
+  try {
+    currentTable = reactionRecordArray(record.reactionTable, {
+      requireExactPrefixMirror: true
+    });
+    assertSphReactionMotionEnvelopeRulePrefix(
+      currentTable.combined,
+      currentTable.reactionCount,
+      'reactionTable'
+    );
+    currentFingerprint = schroederAuthorityTypedArrayFingerprint(
+      currentTable.combined,
+      'reaction-table-combined-records-v2'
+    );
+  } catch (error) {
+    throw fatalReactionActivationObservationFailure(error, TypeError);
+  }
+  if (
+    record.proposal !== proposal
+    || record.generation !== proposal.generation
+    || record.directoryAbiVersion !== proposal.directoryAbiVersion
+    || record.reactionTable !== proposal.reactionTable
+    || currentTable.reactionCount !== record.reactionCount
+    || currentTable.reactionCount !== proposal.reactionCount
+    || currentTable.combined !== record.reactionRecords
+    || record.reactionTableFingerprint !== proposal.reactionTableFingerprint
+    || currentFingerprint !== proposal.reactionTableFingerprint
+    || record.sourceCurrentStateBuffer !== proposal.sourceCurrentStateBuffer
+    || record.sourceThermoBuffer !== proposal.sourceThermoBuffer
+    || record.sourceMechanicsBuffer !== proposal.sourceMechanicsBuffer
+    || record.reactionMotionEnvelope !== proposal.reactionMotionEnvelope
+    || (
+      record.reactionMotionEnvelope != null
+      && !isExactSphReactionMotionEnvelope(record.reactionMotionEnvelope)
+    )
+    || record.receipt !== proposal.receipt
+    || !isFinalizedSchroederSpatialExactNearConsumerReceipt(proposal.receipt)
+    || !record.activationObservationWordBuffer
+    || !record.activationObservationReadbackBuffer
+    || record.activationObservationWordBuffer
+      !== record.arenaEntry?.activationObservationWordBuffer
+    || record.activationObservationReadbackBuffer
+      !== record.arenaEntry?.activationObservationReadbackBuffer
+    || !webGpuBufferMatchesDevice(
+      record.activationObservationWordBuffer,
+      resolvedDevice
+    )
+    || !webGpuBufferMatchesDevice(
+      record.activationObservationReadbackBuffer,
+      resolvedDevice
+    )
+    || record.activationObservationWordBuffer.size
+      !== REACTION_ACTIVATION_CONTROL_BYTES
+    || record.activationObservationReadbackBuffer.size
+      !== REACTION_ACTIVATION_OBSERVATION_BYTES
+    || proposal.activationObservationReadbackByteLength
+      !== REACTION_ACTIVATION_OBSERVATION_BYTES
+  ) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation proposal failed immutable authenticity',
+      TypeError
+    );
+  }
+  return true;
+}
+
+/**
+ * Decode the one-word reaction trigger only after the owning schedule has
+ * satisfied its terminal queue fence. The copy was encoded in the proposal's
+ * production submission; this function performs no submit and maps exactly
+ * four bytes once. A GPU-produced sentinel is an authenticated fail-closed
+ * result, while a forged/stale artifact or host mapping failure rejects so the
+ * schedule owner can materialize its own conservative observation receipt.
+ */
+export async function observeSchroederSpatialReactionDiscoveryActivation(
+  proposal,
+  { device = null } = {}
+) {
+  let mapAsyncCount = 0;
+  try {
+  const record = reactionDiscoveryProposalRecords.get(proposal);
+  if (
+    !record
+    || record.proposal !== proposal
+    || proposal?.schema
+      !== ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA
+    || proposal.ready !== true
+    || proposal.released === true
+  ) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation requires a live authentic proposal',
+      TypeError
+    );
+  }
+  if (proposal.activationObservationRequested !== true) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation was not requested',
+      TypeError
+    );
+  }
+  if (record.activationObservationConsumed === true) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation was already consumed'
+    );
+  }
+  if (
+    !record.arenaEntry
+    || record.arenaEntry.inUse !== true
+    || record.arenaEntry.lease !== record.arenaLease
+    || record.arenaEntry.activationObservationLease !== record.arenaLease
+  ) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation lost its authenticated arena lease',
+      TypeError
+    );
+  }
+  const resolvedDevice = device || webGpuBufferDevice(
+    record.activationObservationReadbackBuffer
+  );
+  // The generation may already be queue-ordered for retirement by the time
+  // the schedule terminal fence resolves. Authenticate the immutable proposal
+  // record directly rather than requiring the generation to remain live; the
+  // retained arena lease owns this already-copied readback word until destroy.
+  assertReactionActivationObservationAuthenticity(
+    record,
+    proposal,
+    resolvedDevice
+  );
+  const readbackBuffer = record.activationObservationReadbackBuffer;
+
+  record.activationObservationConsumed = true;
+  record.activationObservationInFlight = true;
+  let mapped = false;
+  let rawEvidenceWord;
+  try {
+    mapAsyncCount = 1;
+    if (record.activationObservationDeviceTerminalSignal?.observed) {
+      throw new Error(
+        'reaction activation observation aborted because the WebGPU device was lost'
+      );
+    }
+    const mapPromise = Promise.resolve(
+      readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
+    );
+    // Device loss can settle before an implementation rejects its pending
+    // map. Keep the late rejection handled after the fail-closed race exits.
+    mapPromise.catch(() => {});
+    const completion = record.activationObservationDeviceTerminalSignal?.promise
+      ? await Promise.race([
+          mapPromise.then(() => 'mapped'),
+          record.activationObservationDeviceTerminalSignal.promise
+        ])
+      : await mapPromise.then(() => 'mapped');
+    if (completion !== 'mapped') {
+      throw new Error(
+        'reaction activation observation aborted because the WebGPU device was lost while MAP_READ was pending'
+      );
+    }
+    mapped = true;
+    const mappedRange = readbackBuffer.getMappedRange(
+      0,
+      REACTION_ACTIVATION_OBSERVATION_BYTES
+    );
+    if (
+      !mappedRange
+      || typeof mappedRange.byteLength !== 'number'
+      || mappedRange.byteLength !== REACTION_ACTIVATION_OBSERVATION_BYTES
+    ) {
+      throw fatalReactionActivationObservationFailure(
+        'reaction activation observation returned a malformed mapped range',
+        RangeError
+      );
+    }
+    rawEvidenceWord = new Uint32Array(
+      mappedRange,
+      0,
+      1
+    )[0];
+  } finally {
+    try {
+      if (mapped) readbackBuffer.unmap();
+    } finally {
+      record.activationObservationInFlight = false;
+      if (record.releaseAfterActivationObservation === true) {
+        releaseReactionDiscoveryArenaResources(
+          record.arenaEntry,
+          record.arenaLease
+        );
+      }
+    }
+  }
+
+  // The reaction table can change while MAP_READ is pending. Repeat the full
+  // immutable count/identity/fingerprint check before admitting copied bytes.
+  assertReactionActivationObservationAuthenticity(
+    record,
+    proposal,
+    resolvedDevice
+  );
+  const uncertainty = rawEvidenceWord
+    === REACTION_ACTIVATION_OBSERVATION_ENCODED_FAILURE;
+  if (
+    !uncertainty
+    && (
+      !Number.isSafeInteger(rawEvidenceWord)
+      || rawEvidenceWord < REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS
+      || rawEvidenceWord
+        > proposal.particleCount + REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS
+    )
+  ) {
+    throw fatalReactionActivationObservationFailure(
+      'reaction activation observation word exceeded its authenticated source domain',
+      RangeError
+    );
+  }
+  const triggeredSourceCount = uncertainty
+    ? null
+    : rawEvidenceWord - REACTION_ACTIVATION_OBSERVATION_COUNT_BIAS;
+  if (
+    !uncertainty
+    && proposal.reactionMotionEnvelope?.thermalPhaseEvolutionEnabled === true
+    && triggeredSourceCount !== proposal.particleCount
+  ) {
+    throw fatalReactionActivationObservationFailure(
+      'thermal/phase-latched reaction activation observation did not trigger every fixed carrier slot'
+    );
+  }
+  const publicEvidenceWord = uncertainty
+    ? REACTION_ACTIVATION_OBSERVATION_SENTINEL
+    : triggeredSourceCount;
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
+    status: uncertainty
+      ? 'reaction-activation-observation-uncertain'
+      : 'reaction-activation-observation-ready',
+    predicateRevision:
+      proposal.activationObservationPredicateRevision,
+    producerRoute: proposal.activationObservationProducerRoute,
+    sampleStage: proposal.activationObservationSampleStage,
+    nodeDomain: proposal.activationObservationNodeDomain,
+    motionEnvelope: proposal.reactionMotionEnvelope,
+    shadowOnly: true,
+    routingAuthority: false,
+    observationSucceeded: !uncertainty,
+    triggered: uncertainty || triggeredSourceCount > 0,
+    triggeredSourceCount,
+    uncertainty,
+    rawEvidenceWord: publicEvidenceWord,
+    particleCount: proposal.particleCount,
+    reactionCount: proposal.reactionCount,
+    reactionTableFingerprint: proposal.reactionTableFingerprint,
+    mapAsyncCount: 1,
+    readbackByteLength: REACTION_ACTIVATION_OBSERVATION_BYTES,
+    fullParticleReadbackPerformed: false
+  });
+  } catch (error) {
+    throw reactionActivationObservationFailure(error, mapAsyncCount);
+  }
 }

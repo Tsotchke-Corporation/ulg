@@ -7412,6 +7412,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       runMlsMpmResidentStepsWithOptionalWebGpu
   } = {}
 ) {
+  const scheduleFunctionEnteredAtMs = workerResidentScheduleNowMs();
   const schedule = payload.schedule && typeof payload.schedule === 'object'
     ? payload.schedule
     : {};
@@ -8895,11 +8896,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           schroederSpatialEpochGeneration: null,
           residentProductMass: null,
           reactionActivationWatchTable:
-            scheduleReactionActivationMotionEnvelope
+            scheduleReactionActivationWatchRequested
               ? scheduleReactionActivationWatchTable
               : null,
           reactionActivationMotionEnvelope:
-            scheduleReactionActivationMotionEnvelope,
+            scheduleReactionActivationWatchRequested
+              ? scheduleReactionActivationMotionEnvelope
+              : null,
           deferContinuationOwnershipTransfer: true,
           registerFusedSubmittedCleanup:
             registerTier0SubmittedCleanup
@@ -11303,6 +11306,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // Worker-clock phase stamps (see declaration): consecutive schedule
       // results on one lane share this clock, so the inter-schedule
       // turnaround is directly computable from them.
+      scheduleFunctionEnteredAtMs,
       scheduleFirstStepStartedAtMs,
       scheduleLastStepEndedAtMs,
       tailTerminalFenceDoneAtMs,

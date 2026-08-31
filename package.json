@@ -13,6 +13,7 @@
     "generate:material-properties": "node scripts/material-properties/generate-material-property-bank.mjs",
     "validate:material-properties": "node scripts/material-properties/validate-material-property-bank.mjs",
     "bench:sph-performance": "node scripts/sph-performance-benchmark.mjs",
+    "bench:sph-presets": "node scripts/sph-preset-throughput-matrix.mjs",
     "probe:sph-long-horizon": "node scripts/sph-long-horizon-probe.mjs",
     "probe:sph-visual-matrix": "node scripts/sph-visual-sanity-matrix.mjs",
     "probe:schroeder-spatial-epoch": "node scripts/schroeder-spatial-epoch-probe.mjs",

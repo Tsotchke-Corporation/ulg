@@ -3482,6 +3482,86 @@ export function residentWorkerLaneContinuationReady(execution = null) {
   );
 }
 
+export function resolveSphWorkerLanePostCommitFastContinuation({
+  execution = null,
+  workerLivePreviewEnabled = false
+} = {}) {
+  const lane = execution?.workerOwnedResidentLane ?? null;
+  const route = lane?.executionRoute ?? null;
+  const blockers = [];
+  if (!residentWorkerLaneContinuationReady(execution)) {
+    blockers.push('strict-worker-lane-continuation-not-ready');
+  }
+  if (workerLivePreviewEnabled !== true) {
+    blockers.push('worker-live-preview-not-enabled');
+  }
+  if (
+    route?.schema !== 'peercompute.ulg.worker-schedule-execution-route-receipt.v6'
+    || route?.status !== 'tier0-fused-resident-sequence-admitted'
+    || route?.route !== 'tier0-fused-resident-sequence'
+    || route?.routeDecisionStatus
+      !== 'tier0-fused-resident-sequence-selected'
+  ) {
+    blockers.push('tier0-route-not-exactly-admitted');
+  }
+  if (!Array.isArray(route?.blockers) || route.blockers.length !== 0) {
+    blockers.push('tier0-route-blockers-present');
+  }
+  const requestedStepCount = Number(route?.requestedStepCount);
+  const completedStepCount = Number(route?.completedStepCount);
+  if (
+    !Number.isSafeInteger(requestedStepCount)
+    || requestedStepCount < 1
+    || completedStepCount !== requestedStepCount
+    || route?.atomicSchedule !== true
+    || route?.commandSubmissionCount !== 1
+    || route?.internalPositionSubstepCount !== requestedStepCount
+  ) {
+    blockers.push('tier0-atomic-execution-incomplete');
+  }
+  if (
+    execution?.fullParticleReadbackPerformed !== false
+    || execution?.fullParticleReadbackFree !== true
+    || route?.fullParticleReadbackPerformed !== false
+    || route?.fullParticleReadbackFree !== true
+    || route?.mapAsyncCount !== 0
+    || route?.readbackBytes !== 0
+  ) {
+    blockers.push('tier0-readback-contract-incomplete');
+  }
+  if (
+    route?.residentContinuationReady !== true
+    || route?.terminalFenceSatisfied !== true
+  ) {
+    blockers.push('tier0-terminal-authority-incomplete');
+  }
+  return Object.freeze({
+    schema:
+      'peercompute.ulg.sph-worker-lane-post-commit-fast-continuation.v0',
+    status: blockers.length === 0
+      ? 'tier0-post-commit-fast-continuation-ready'
+      : 'tier0-post-commit-fast-continuation-blocked',
+    eligible: blockers.length === 0,
+    physicsAuthority:
+      blockers.length === 0
+        ? 'terminal-fence-compute-manager-state-manager-committed'
+        : null,
+    presentationConsumer:
+      blockers.length === 0
+        ? 'worker-live-preview-versioned-mailbox'
+        : null,
+    scheduleId: lane?.scheduleId ?? null,
+    laneId: lane?.laneId ?? null,
+    stateKey: lane?.stateKey ?? null,
+    route: route?.route ?? null,
+    requestedStepCount:
+      Number.isSafeInteger(requestedStepCount) ? requestedStepCount : null,
+    completedStepCount:
+      Number.isSafeInteger(completedStepCount) ? completedStepCount : null,
+    blockers: Object.freeze(blockers)
+  });
+}
+
 export function residentWorkerLaneNativeSurfacePresentationReady({
   execution = null,
   presentation = null,
@@ -13951,6 +14031,13 @@ export async function mountSphPhaseDemoOverlay({
       // page-device continuation evidence stays byte-identical.
       const workerLaneContinuationReady =
         residentWorkerLaneContinuationReady(execution);
+      // Publish the result of the full lane/presentation authority predicate
+      // for diagnostics and release probes. Route-local continuation fields
+      // are exact for Tier0, while canonical receipts deliberately keep those
+      // counters sealed; consumers must not reinterpret a canonical null as a
+      // failed worker-lane continuation.
+      overlay.__sphWorkerLaneContinuationReady =
+        workerLaneContinuationReady;
       workerLaneScheduleCompletionContinuation = workerLaneContinuationReady;
       scheduleContinuation = Boolean(
         (residentGpuContinuationReady(execution) || workerLaneContinuationReady)
@@ -13987,6 +14074,44 @@ export async function mountSphPhaseDemoOverlay({
         generationCurrent: generation === particleSyncGeneration,
         requiredInterfaceRefreshReady
       });
+      const workerLanePostCommitFastContinuation =
+        resolveSphWorkerLanePostCommitFastContinuation({
+          execution,
+          workerLivePreviewEnabled: initialWorkerLivePreview
+        });
+      overlay.__sphWorkerLanePostCommitFastContinuation =
+        workerLanePostCommitFastContinuation;
+      if (workerLanePostCommitFastContinuation.eligible) {
+        // Tier0 has already crossed its worker terminal fence, ComputeManager
+        // completion, StateManager commit, and exact committed worker
+        // presentation. Its live-preview canvas is the versioned presentation
+        // mailbox, so a second page-device particle readback + native-surface
+        // extraction would only serialize the next physics schedule behind a
+        // duplicate consumer. Leave active-law canonical routes unchanged.
+        residentRenderReadbackSkippedCount += 1;
+        completePendingBodyEnvelopePreview({
+          generation,
+          reason: 'tier0-worker-committed-presentation-ready'
+        });
+        updateResidentPerf({
+          residentStepsPerSchedule: normalizedStepCount,
+          renderReadbacks: residentRenderReadbackCount,
+          skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+          lastRenderReadbackSkipped: true,
+          lastRenderReadbackSkipReason:
+            'tier0-worker-live-preview-versioned-mailbox',
+          workerLanePostCommitFastContinuation: true
+        });
+        traceResidentSchedule('tier0-post-commit-fast-continuation-ready', {
+          route: workerLanePostCommitFastContinuation.route,
+          scheduleId: workerLanePostCommitFastContinuation.scheduleId,
+          presentationConsumer:
+            workerLanePostCommitFastContinuation.presentationConsumer
+        });
+        renderStatus();
+        updateWarningBanner();
+        return execution;
+      }
       if (execution?.backend === 'webgpu') {
         const selectedSurfaceDrawDiagnosticMode = currentResidentSurfaceDrawDiagnosticMode();
         const selectedParticleRenderMode = residentSurfaceDrawParticleRenderMode(selectedSurfaceDrawDiagnosticMode);

@@ -167,3 +167,37 @@ test('production scene preseals and latches exact dynamic-law successors after c
     'the scene proves both isolated Tier0 one-to-four and production preexisting-four-carrier successors'
   );
 });
+
+test('worker-lane public execution projects bounded route and turnaround evidence', async () => {
+  const source = await readFile(sceneSourcePath, 'utf8');
+  const projectionStart = source.indexOf(
+    'function workerLaneResidentExecutionFromScheduleResult('
+  );
+  const projectionEnd = source.indexOf(
+    'function compactWorkerOffscreenResidentStageStatus',
+    projectionStart
+  );
+  assert.ok(projectionStart >= 0 && projectionEnd > projectionStart);
+  const projection = source.slice(projectionStart, projectionEnd);
+
+  assert.match(
+    projection,
+    /authority\?\.executionRouteAdmission\?\.receipt[\s\S]*authority\?\.executionRouteReceipt/
+  );
+  for (const field of [
+    'routeDecisionStatus',
+    'transition',
+    'blockers',
+    'commandSubmissionCount',
+    'internalPositionSubstepCount',
+    'fullParticleReadbackFree',
+    'mapAsyncCount',
+    'readbackBytes',
+    'terminalFenceSatisfied'
+  ]) {
+    assert.match(projection, new RegExp(`${field}:`), field);
+  }
+  assert.match(projection, /scheduleFirstStepStartedAtMs:/);
+  assert.match(projection, /resultAssembledAtMs:/);
+  assert.match(projection, /workerLanePageTiming:/);
+});

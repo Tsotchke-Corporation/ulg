@@ -198,9 +198,47 @@ function targetAuthority({
 }
 
 function prospectiveWriterEvidence({
+  gasBoundaryActionable = false,
   terminalGpuFenceSatisfied = true,
   scheduleCancelled = false
 } = {}) {
+  if (gasBoundaryActionable) {
+    const productEventRowCount = 8;
+    const arenaIdentity = {
+      schema:
+        'peercompute.ulg.sph-resident-product-history-arena-identity.v0',
+      status: 'retained-product-history-arena-authenticated',
+      slotId: 3,
+      leaseSerial: 11,
+      viewOrdinal: 7,
+      rowCapacity: productEventRowCount,
+      bufferByteLength: productEventRowCount * 80,
+      rowStrideFloats: 20,
+      countAuthorityGeneration: 19,
+      countAuthoritySeal: 0x5a17_c0de
+    };
+    return {
+      schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
+      status: 'worker-retained-product-gas-boundary-actionable',
+      gasBoundaryActionable: true,
+      source: 'worker-retained-product-event-buffer',
+      productEventBufferRetained: true,
+      productEventRowCount,
+      productHistoryArenaIdentity: arenaIdentity,
+      productHistoryLiveBoundObservation: {
+        schema:
+          'peercompute.ulg.sph-product-history-live-bound-observation.v0',
+        observedLiveRowCount: 0,
+        previousUpperBound: productEventRowCount,
+        tightenedUpperBound: 1,
+        arenaRowCapacity: productEventRowCount,
+        readbackByteLength: Uint32Array.BYTES_PER_ELEMENT,
+        arenaIdentity: structuredClone(arenaIdentity)
+      },
+      terminalGpuFenceSatisfied,
+      scheduleCancelled
+    };
+  }
   return {
     schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
     status: 'worker-retained-product-gas-boundary-inactive',
@@ -218,6 +256,7 @@ function prospectiveWriterEvidence({
 function dynamicLawObservation(authority, {
   triggeredSourceCount = 0,
   uncertainty = false,
+  retainedProductGasBoundaryActionable = false,
   terminalGpuFenceSatisfied = true,
   scheduleCancelled = false,
   failureReason = 'gpu-reaction-activation-evidence-fail-closed'
@@ -255,6 +294,7 @@ function dynamicLawObservation(authority, {
     reactionTableFingerprint:
       authority.tableFingerprints.watchReactionTableFingerprint,
     prospectiveWriterEvidence: prospectiveWriterEvidence({
+      gasBoundaryActionable: retainedProductGasBoundaryActionable,
       terminalGpuFenceSatisfied,
       scheduleCancelled
     }),
@@ -312,6 +352,176 @@ test('dynamic-law routing contract exposes one enabled composite tuple and exact
     'invalid',
     SCHROEDER_REACTION_ACTIVATION_POLICY_DISABLED
   ), 'disabled');
+});
+
+test('target authority accepts one exact precomputed configuration without re-deriving it', () => {
+  const rawAuthority = targetAuthority({
+    sourceScheduleId: 'schedule:precomputed-source',
+    targetScheduleRequestId: 'schedule:precomputed-target'
+  });
+  const configuration = targetConfiguration(false);
+  const precomputedAuthority = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:precomputed-source',
+    targetScheduleRequestId: 'schedule:precomputed-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: configuration
+  });
+
+  assert.equal(
+    precomputedAuthority.requestFingerprint,
+    rawAuthority.requestFingerprint
+  );
+  assert.deepEqual(
+    precomputedAuthority.motionEnvelope,
+    rawAuthority.motionEnvelope
+  );
+  assert.throws(() => createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:mixed-source',
+    targetScheduleRequestId: 'schedule:mixed-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: configuration,
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(false),
+    scheduleStepOptionsProvider: PROVIDER
+  }), /mutually exclusive/);
+});
+
+test('precomputed configuration preserves dormant-to-active reaction continuity', () => {
+  const predecessor = targetAuthority({
+    sourceScheduleId: 'schedule:precomputed-dormant-source',
+    targetScheduleRequestId: 'schedule:precomputed-dormant-target',
+    presealReactionActivation: true
+  });
+  const observation = dynamicLawObservation(predecessor, {
+    triggeredSourceCount: 1
+  });
+  const successor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: predecessor.targetScheduleRequestId,
+    targetScheduleRequestId: 'schedule:precomputed-active-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: TERMINAL_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    predecessorTargetScheduleAuthority: predecessor,
+    predecessorDynamicLawObservation: observation,
+    currentTargetConfiguration: targetConfiguration(true)
+  });
+
+  assert.equal(successor.writerSet.reaction, true);
+  assert.equal(
+    validateSchroederTargetScheduleConfigurationContinuity({
+      predecessorTargetScheduleAuthority: predecessor,
+      currentTargetScheduleAuthority: successor,
+      predecessorDynamicLawObservation: observation
+    }).mode,
+    'prospective-reaction-dormant-to-executing'
+  );
+});
+
+test('precomputed gas actionability stays fail-closed without rejecting static gas writers', () => {
+  const gasInactive = targetConfiguration(true);
+  assert.equal(gasInactive.writerSet.gasBoundaryActionable, false);
+  const retainedGasActive = createSchroederTargetScheduleConfiguration({
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(true),
+    scheduleStepOptionsProvider: PROVIDER,
+    retainedProductGasBoundaryActionable: true
+  });
+  const predecessor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:precomputed-gas-predecessor-source',
+    targetScheduleRequestId: 'schedule:precomputed-gas-predecessor-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    prospectiveTargetConfiguration: retainedGasActive,
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(true),
+    scheduleStepOptionsProvider: PROVIDER
+  });
+  const observation = dynamicLawObservation(predecessor, {
+    retainedProductGasBoundaryActionable: true
+  });
+  assert.throws(() => createSchroederTargetScheduleAuthority({
+    sourceScheduleId: predecessor.targetScheduleRequestId,
+    targetScheduleRequestId: 'schedule:precomputed-gas-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: TERMINAL_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    predecessorTargetScheduleAuthority: predecessor,
+    predecessorDynamicLawObservation: observation,
+    currentTargetConfiguration: gasInactive
+  }), /gas-boundary actionability does not match predecessor authority/);
+
+  const retainedGasAuthority = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: predecessor.targetScheduleRequestId,
+    targetScheduleRequestId: 'schedule:precomputed-retained-gas-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: TERMINAL_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    predecessorTargetScheduleAuthority: predecessor,
+    predecessorDynamicLawObservation: observation,
+    currentTargetConfiguration: retainedGasActive
+  });
+  assert.equal(retainedGasAuthority.writerSet.gasBoundaryActionable, true);
+  assert.equal(
+    validateSchroederTargetScheduleConfigurationContinuity({
+      predecessorTargetScheduleAuthority: predecessor,
+      currentTargetScheduleAuthority: retainedGasAuthority,
+      predecessorDynamicLawObservation: observation
+    }).mode,
+    'prospective-retained-product-gas-boundary-actionable'
+  );
+
+  const externalGaugeGasActive = createSchroederTargetScheduleConfiguration({
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: {
+      ...residentStepOptions(true),
+      externalGaugePressureEnabled: true
+    },
+    scheduleStepOptionsProvider: PROVIDER
+  });
+  const externalGaugeAuthority = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:precomputed-external-gauge-source',
+    targetScheduleRequestId: 'schedule:precomputed-external-gauge-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: externalGaugeGasActive,
+    retainedProductGasBoundaryActionable: false
+  });
+  assert.equal(externalGaugeAuthority.writerSet.gasBoundaryActionable, true);
+});
+
+test('precomputed configuration rejects a structurally tampered receipt', () => {
+  const tampered = structuredClone(targetConfiguration(false));
+  tampered.motionEnvelope.dtS *= 2;
+  assert.throws(() => createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:precomputed-tampered-source',
+    targetScheduleRequestId: 'schedule:precomputed-tampered-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: tampered
+  }), /must be an exact target schedule configuration/);
 });
 
 test('target authority and prospective transition reject every legacy disabled tuple', () => {

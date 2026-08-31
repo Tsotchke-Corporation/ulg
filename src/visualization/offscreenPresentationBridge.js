@@ -1853,12 +1853,15 @@ export function createUlgWorkerOffscreenPresentationBridge({
         this.committedResidentSchedulePresentationStatus = blocked;
         return blocked;
       }
+      const presentationAdmissionPostedAtMs = nowMs();
       this.worker.postMessage?.({
         type: 'present-committed-resident-schedule-candidate',
-        ...admission
+        ...admission,
+        presentationAdmissionPostedAtMs
       });
       const posted = Object.freeze({
         ...admission,
+        presentationAdmissionPostedAtMs,
         status:
           'state-manager-committed-resident-schedule-presentation-admission-posted'
       });
@@ -2405,7 +2408,31 @@ export function createUlgWorkerOffscreenPresentationBridge({
             producerSourceTransport: contentReceipt.producerSourceTransport ?? null,
             sourceStageId: contentReceipt.sourceStageId ?? null,
             retainedParticleStateStatus:
-              contentReceipt.retainedParticleStateStatus ?? null
+              contentReceipt.retainedParticleStateStatus ?? null,
+            ...(typeof contentReceipt.residentSchedulePresentationMode === 'string'
+              ? {
+                  residentSchedulePresentationMode:
+                    contentReceipt.residentSchedulePresentationMode
+                }
+              : {}),
+            ...(contentReceipt.committedPresentationPromotedWithoutRedraw === true
+              ? { committedPresentationPromotedWithoutRedraw: true }
+              : {}),
+            ...(Number.isFinite(Number(
+              contentReceipt.presentationAdmissionPostedAtMs
+            ))
+              ? {
+                  presentationAdmissionPostedAtMs:
+                    Number(contentReceipt.presentationAdmissionPostedAtMs)
+                }
+              : {}),
+            ...(Number.isFinite(Number(contentReceipt.updatedAtMs))
+              ? {
+                  workerPresentationUpdatedAtMs:
+                    Number(contentReceipt.updatedAtMs),
+                  bridgePresentationReceivedAtMs: nowMs()
+                }
+              : {})
           })
         : null;
       if (candidateReceiptReady) {

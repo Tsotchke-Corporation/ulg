@@ -9,6 +9,7 @@ import {
   resolveSphMountedScheduleControlEvidence,
   resolveSphResidentInterfaceRefreshContinuationPolicy,
   resolveSphMountedWorkerLaneScheduleStepCount,
+  resolveSphWorkerLanePostCommitFastContinuation,
   residentWorkerLaneContinuationReady,
   shouldSkipSphResidentPressureInterfaceForRenderRefresh,
   sphResidentChainedContinuationAllowed,
@@ -420,6 +421,75 @@ test('worker lane continuation requires the exact committed rendered receipt', (
       }
     }), false, `${field} must fail closed`);
   }
+
+  const tier0Execution = {
+    ...execution,
+    fullParticleReadbackPerformed: false,
+    fullParticleReadbackFree: true,
+    workerOwnedResidentLane: {
+      ...execution.workerOwnedResidentLane,
+      executionRoute: {
+        schema:
+          'peercompute.ulg.worker-schedule-execution-route-receipt.v6',
+        status: 'tier0-fused-resident-sequence-admitted',
+        route: 'tier0-fused-resident-sequence',
+        routeDecisionStatus: 'tier0-fused-resident-sequence-selected',
+        transition: 'tier0-continuation',
+        blockers: [],
+        requestedStepCount: 64,
+        completedStepCount: 64,
+        atomicSchedule: true,
+        commandSubmissionCount: 1,
+        internalPositionSubstepCount: 64,
+        fullParticleReadbackPerformed: false,
+        fullParticleReadbackFree: true,
+        mapAsyncCount: 0,
+        readbackBytes: 0,
+        residentContinuationReady: true,
+        terminalFenceSatisfied: true
+      }
+    }
+  };
+  const fast = resolveSphWorkerLanePostCommitFastContinuation({
+    execution: tier0Execution,
+    workerLivePreviewEnabled: true
+  });
+  assert.equal(fast.eligible, true);
+  assert.equal(fast.status, 'tier0-post-commit-fast-continuation-ready');
+  assert.equal(
+    fast.physicsAuthority,
+    'terminal-fence-compute-manager-state-manager-committed'
+  );
+  assert.equal(
+    fast.presentationConsumer,
+    'worker-live-preview-versioned-mailbox'
+  );
+  assert.equal(Object.isFrozen(fast), true);
+  assert.equal(Object.isFrozen(fast.blockers), true);
+
+  const noPreview = resolveSphWorkerLanePostCommitFastContinuation({
+    execution: tier0Execution,
+    workerLivePreviewEnabled: false
+  });
+  assert.equal(noPreview.eligible, false);
+  assert.ok(noPreview.blockers.includes('worker-live-preview-not-enabled'));
+
+  const readback = resolveSphWorkerLanePostCommitFastContinuation({
+    execution: {
+      ...tier0Execution,
+      workerOwnedResidentLane: {
+        ...tier0Execution.workerOwnedResidentLane,
+        executionRoute: {
+          ...tier0Execution.workerOwnedResidentLane.executionRoute,
+          mapAsyncCount: 1,
+          readbackBytes: 4
+        }
+      }
+    },
+    workerLivePreviewEnabled: true
+  });
+  assert.equal(readback.eligible, false);
+  assert.ok(readback.blockers.includes('tier0-readback-contract-incomplete'));
 });
 
 test('canonical direct SS continuation excludes legacy post-step interface readback from the hot loop', () => {

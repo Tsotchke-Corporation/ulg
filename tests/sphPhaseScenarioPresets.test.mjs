@@ -43,10 +43,8 @@ function selectKeys(value, keys) {
 // The four standard scenes share the worker-owned single-source SS runtime
 // and the framework-liveness acceptance track. The two adaptive-laws
 // performance presets deliberately deviate and are asserted explicitly
-// below: bulk-water keeps ss=1 but turns law structures off (Tier-0
-// substrate), water-realtime runs the pre-Schroeder fused path (ss=0)
-// because the canonical lane still freezes bulk liquid rigid (the Phase-A
-// gap recorded in plan/todo/scale-adaptive-law-activation-plan.md).
+// below. Both water presets use the same canonical Tier-0 tuple; the visible
+// dam-break arm differs only in geometry.
 const STANDARD_MATRIX_PRESETS = SPH_PHASE_SCENARIO_PRESETS.filter(
   (entry) => entry.standardMatrixEnabled !== false
 );
@@ -120,7 +118,7 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
 test('adaptive-laws presets declare their runtime deviations explicitly', () => {
   const bulk = sphPhaseScenarioPresetById('bulk-water');
   assert.equal(bulk.standardMatrixEnabled, false);
-  assert.deepEqual(selectKeys(bulk.runtime, [
+  const tier0Keys = [
     'ss',
     'ambientPressurePa',
     'contactSolver',
@@ -131,7 +129,8 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
     'schroederPhaseVolumeMigration',
     'schroederActiveNodeSortedIndex',
     'submitBurstSteps'
-  ]), {
+  ];
+  const tier0Runtime = {
     ss: '1',
     ambientPressurePa: '0',
     // Explicit contact-free bulk mode: grid + EOS own same-material liquid
@@ -146,11 +145,11 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
     schroederPhaseVolumeMigration: '0',
     schroederActiveNodeSortedIndex: '0',
     submitBurstSteps: '8'
-  });
+  };
+  assert.deepEqual(selectKeys(bulk.runtime, tier0Keys), tier0Runtime);
   const realtime = sphPhaseScenarioPresetById('water-realtime');
   assert.equal(realtime.standardMatrixEnabled, false);
-  assert.equal(realtime.runtime.ss, '0');
-  assert.equal(realtime.runtime.ambientPressurePa, '0');
+  assert.deepEqual(selectKeys(realtime.runtime, tier0Keys), tier0Runtime);
   assert.equal(realtime.controls.dropn, '16');
   assert.equal(realtime.controls.basen, '32');
   // Drop cube top (ironh + 0.2 * dropn) must stay inside the box and its

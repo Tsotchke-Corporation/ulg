@@ -1765,6 +1765,7 @@ export function createSchroederTargetScheduleAuthority({
   predecessorDynamicLawObservation = null,
   predecessorTargetScheduleAuthority = null,
   prospectiveTargetConfiguration = null,
+  currentTargetConfiguration = null,
   maxFutureSubsteps,
   dtS,
   gridSpacingM,
@@ -1843,19 +1844,62 @@ export function createSchroederTargetScheduleAuthority({
       predecessorTargetScheduleAuthority: predecessorAuthority,
       predecessorDynamicLawObservation: predecessorObservation
     });
-  const currentConfiguration = createSchroederTargetScheduleConfiguration({
-    maxFutureSubsteps,
-    dtS,
-    gridSpacingM,
-    cflFactor,
-    boxDimsM,
-    residentStepOptions,
-    epochOptions,
-    mechanicsOptions,
-    hierarchyConfig,
-    scheduleStepOptionsProvider,
-    retainedProductGasBoundaryActionable
-  });
+  const precomputedCurrentConfiguration = currentTargetConfiguration == null
+    ? null
+    : exactSchroederTargetScheduleConfiguration(
+        currentTargetConfiguration
+      );
+  if (
+    currentTargetConfiguration != null
+    && !precomputedCurrentConfiguration
+  ) {
+    throw new TypeError(
+      'currentTargetConfiguration must be an exact target schedule configuration'
+    );
+  }
+  if (
+    precomputedCurrentConfiguration
+    && [
+      maxFutureSubsteps,
+      dtS,
+      gridSpacingM,
+      cflFactor,
+      boxDimsM,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions,
+      hierarchyConfig,
+      scheduleStepOptionsProvider
+    ].some((value) => value != null)
+  ) {
+    throw new TypeError(
+      'currentTargetConfiguration is mutually exclusive with raw configuration inputs'
+    );
+  }
+  const currentConfiguration = precomputedCurrentConfiguration
+    || createSchroederTargetScheduleConfiguration({
+      maxFutureSubsteps,
+      dtS,
+      gridSpacingM,
+      cflFactor,
+      boxDimsM,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions,
+      hierarchyConfig,
+      scheduleStepOptionsProvider,
+      retainedProductGasBoundaryActionable
+    });
+  if (
+    precomputedCurrentConfiguration
+    && retainedProductGasBoundaryActionable
+    && precomputedCurrentConfiguration.writerSet.gasBoundaryActionable
+      !== true
+  ) {
+    throw new TypeError(
+      'currentTargetConfiguration gas-boundary actionability does not match predecessor authority'
+    );
+  }
   let predecessorTransition = null;
   if (predecessorAuthority && predecessorObservation) {
     const predecessorConfiguration =

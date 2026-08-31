@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -8353,6 +8354,33 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
     ...laneOptions,
     reason: 'predecessor-token-worker-restart-test-complete'
   });
+});
+
+test('Tier0 forwards a reaction motion envelope only when a dormant watch is requested', async () => {
+  const workerSource = await readFile(
+    new URL(
+      '../src/services/ulgMechanicsResidentStage.worker.js',
+      import.meta.url
+    ),
+    'utf8'
+  );
+  const tier0CallStart = workerSource.indexOf(
+    'const tier0Execution = await runTier0FusedResidentSequence({'
+  );
+  const tier0CallEnd = workerSource.indexOf(
+    'tier0ExecutionResult = tier0Execution;',
+    tier0CallStart
+  );
+  assert.ok(tier0CallStart >= 0 && tier0CallEnd > tier0CallStart);
+  const tier0Call = workerSource.slice(tier0CallStart, tier0CallEnd);
+  assert.match(
+    tier0Call,
+    /reactionActivationWatchTable:\s*scheduleReactionActivationWatchRequested\s*\? scheduleReactionActivationWatchTable\s*:\s*null/
+  );
+  assert.match(
+    tier0Call,
+    /reactionActivationMotionEnvelope:\s*scheduleReactionActivationWatchRequested\s*\? scheduleReactionActivationMotionEnvelope\s*:\s*null/
+  );
 });
 
 test('ULG worker consumes a presealed dormant reaction transition and seals its active S2 continuation', async () => {

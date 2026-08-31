@@ -887,6 +887,10 @@ function committedResidentSchedulePresentationReceiptFields(
     scheduleId: admission?.scheduleId ?? null,
     laneId: admission?.laneId ?? null,
     stateKey: admission?.stateKey ?? null,
+    presentationAdmissionPostedAtMs:
+      Number.isFinite(Number(admission?.presentationAdmissionPostedAtMs))
+        ? Number(admission.presentationAdmissionPostedAtMs)
+        : null,
     presentationLaneEpoch:
       candidate?.presentationLaneEpoch ?? null,
     residentExecutionGeneration:
@@ -1089,6 +1093,8 @@ function createResidentScheduleCandidateDrawLoop({
     };
   }
   let drawing = false;
+  let lastDrawnCandidate = null;
+  let lastDrawnStatus = null;
   // A live-preview draw presents the lane's CURRENT retained state
   // mid-schedule. It must never claim StateManager commitment: the
   // committed receipt helper hardcodes stateManagerCommittedPresentation
@@ -1176,7 +1182,7 @@ function createResidentScheduleCandidateDrawLoop({
           // next physics candidate.
           previewCameraRedraw = () => drawCandidate({ livePreview: true }, candidate);
         }
-        return drawResidentParticleStateProducer({
+        const drawStatus = drawResidentParticleStateProducer({
           ...request,
           ...(livePreviewMode && previewViewProjectionOverride
             ? { viewProjectionMatrix: previewViewProjectionOverride }
@@ -1217,6 +1223,14 @@ function createResidentScheduleCandidateDrawLoop({
               : clearAlpha),
           reason: `${reason}:resident-schedule-candidate`
         });
+        if (
+          drawStatus?.status
+            === 'worker-offscreen-resident-particle-state-producer-rendered'
+        ) {
+          lastDrawnCandidate = candidate;
+          lastDrawnStatus = drawStatus;
+        }
+        return drawStatus;
     } finally {
       drawing = false;
     }
@@ -1227,6 +1241,22 @@ function createResidentScheduleCandidateDrawLoop({
     inactiveReason: null,
     notify(admission = null, candidate = null) {
       try {
+        const promotion = resolveCommittedResidentSchedulePreviewPromotion({
+          admission,
+          candidate,
+          lastDrawnCandidate,
+          lastDrawnStatus,
+          reason
+        });
+        if (promotion) {
+          // The exact terminal candidate was already submitted to the worker
+          // canvas as an uncommitted live-preview frame. StateManager commit
+          // does not change its pixels; promote that same versioned frame to
+          // an authority-bearing receipt without a duplicate compute/render
+          // submission. A non-matching candidate still takes the ordinary
+          // committed draw path below.
+          return publishRenderRowsStatus(promotion);
+        }
         return drawCandidate(admission, candidate);
       } catch (error) {
         // Candidate presentation must never abort the batch; surface the
@@ -1250,7 +1280,55 @@ function createResidentScheduleCandidateDrawLoop({
         }
         return null;
       }
+    },
+    ensureTerminalPreview(candidate = null) {
+      if (
+        lastDrawnStatus?.status
+          === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && sameResidentScheduleCandidateVersion(
+          lastDrawnCandidate?.version,
+          candidate?.version
+        )
+      ) {
+        return lastDrawnStatus;
+      }
+      return drawCandidate({ livePreview: true }, candidate);
     }
+  };
+}
+
+export function resolveCommittedResidentSchedulePreviewPromotion({
+  admission = null,
+  candidate = null,
+  lastDrawnCandidate = null,
+  lastDrawnStatus = null,
+  reason = 'run-resident-schedule-on-presentation-device'
+} = {}) {
+  if (
+    admission?.livePreview === true
+    || lastDrawnStatus?.status
+      !== 'worker-offscreen-resident-particle-state-producer-rendered'
+    || !sameResidentScheduleCandidateVersion(
+      lastDrawnCandidate?.version,
+      candidate?.version
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...lastDrawnStatus,
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    reason:
+      `${reason}:resident-schedule-terminal-preview-promoted-after-commit`,
+    residentSchedulePresentationMode:
+      'committed-terminal-live-preview-promotion',
+    committedPresentationPromotedWithoutRedraw: true,
+    workerLocalRenderRowsProduced: true,
+    updatedAtMs: nowMs(),
+    ...committedResidentSchedulePresentationReceiptFields(
+      admission,
+      candidate
+    )
   };
 }
 
@@ -1600,6 +1678,20 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
           throw new Error(
             'worker resident schedule terminal candidate cannot overwrite a pending committed presentation'
           );
+        }
+        if (livePreviewEnabled) {
+          // Materialize the exact terminal pixels while the terminal retained
+          // family is current. The later post-StateManager admission can then
+          // promote this same candidate without submitting a duplicate draw.
+          // This draw is presentation-only and remains outside the already
+          // satisfied physics/authority fence.
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+          candidateDrawLoop.ensureTerminalPreview(terminalCandidate);
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
         }
         pendingCommittedResidentSchedulePresentation = {
           scheduleId: result?.scheduleId ?? null,
@@ -2837,6 +2929,8 @@ function drawResidentParticleStateProducer(data) {
           scheduleId: data.scheduleId ?? null,
           laneId: data.laneId ?? null,
           stateKey: data.stateKey ?? null,
+          presentationAdmissionPostedAtMs:
+            data.presentationAdmissionPostedAtMs ?? null,
           presentationLaneEpoch:
             data.presentationLaneEpoch ?? null,
           residentExecutionGeneration:

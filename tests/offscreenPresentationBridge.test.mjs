@@ -247,6 +247,14 @@ test('committed resident schedule presentation posts only after exact authority'
   assert.equal(message.scheduleId, 'schedule:authority');
   assert.equal(message.authority.stateManagerCommitAccepted, true);
   assert.equal(message.terminalFence.terminalScheduleFence, true);
+  assert.equal(
+    Number.isFinite(Number(message.presentationAdmissionPostedAtMs)),
+    true
+  );
+  assert.equal(
+    posted.presentationAdmissionPostedAtMs,
+    message.presentationAdmissionPostedAtMs
+  );
   bridge.dispose();
 });
 

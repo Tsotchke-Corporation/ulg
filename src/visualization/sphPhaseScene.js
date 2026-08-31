@@ -3314,6 +3314,14 @@ export function workerResidentParticleStateProducerColorRows(
     const meta = sphParticleState.metadata[index];
     const materialId = Number(meta?.materialId);
     const phaseId = Number(meta?.phaseId);
+    const colorRowKey = Number.isFinite(materialId) && Number.isFinite(phaseId)
+      ? `${Math.round(materialId)}:${Math.round(phaseId)}`
+      : null;
+    // Color rows are keyed by material + phase, not by particle. Large
+    // presets may carry tens of thousands of identical metadata records;
+    // resolving optical descriptors for every duplicate made presentation
+    // request construction dominate the resident hot loop.
+    if (colorRowKey && colorRowsByKey.has(colorRowKey)) continue;
     const descriptor = renderDescriptorForSurfaceRecord(meta, index, {
       materialProperties,
       reactionTable,
@@ -3333,6 +3341,10 @@ export function workerResidentParticleStateProducerColorRows(
     const row = rows[index];
     const materialId = Number(row?.materialId);
     const phaseId = Number(row?.phaseId);
+    const colorRowKey = Number.isFinite(materialId) && Number.isFinite(phaseId)
+      ? `${Math.round(materialId)}:${Math.round(phaseId)}`
+      : null;
+    if (colorRowKey && colorRowsByKey.has(colorRowKey)) continue;
     const colorOffset = index * 3;
     const red = Number(colorsRgb?.[colorOffset + 0]);
     const green = Number(colorsRgb?.[colorOffset + 1]);
@@ -15210,6 +15222,38 @@ export function createSphPhaseScene(container, {
   let workerOffscreenRetainedStateContinuationCompletedSignature = null;
   let workerOffscreenRetainedStateContinuationSequence = 0;
   let workerOffscreenRetainedCompactSnapshotExportSignature = null;
+  const workerOffscreenResidentStageStatusWaiters = new Set();
+  const workerOffscreenRenderRowsStatusWaiters = new Set();
+  const wakeWorkerOffscreenStatusWaiters = (waiters, status) => {
+    for (const waiter of [...waiters]) waiter(status);
+  };
+  const waitForWorkerOffscreenStatusChange = ({
+    waiters,
+    currentStatus,
+    readStatus,
+    timeoutMs
+  }) => {
+    const latest = readStatus();
+    if (latest !== currentStatus) return Promise.resolve(latest);
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeoutId = null;
+      const finish = (status) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId != null) clearTimeout(timeoutId);
+        waiters.delete(finish);
+        resolve(status);
+      };
+      waiters.add(finish);
+      timeoutId = setTimeout(
+        () => finish(null),
+        Math.max(1, Math.floor(Number(timeoutMs) || 1))
+      );
+      const afterSubscription = readStatus();
+      if (afterSubscription !== currentStatus) finish(afterSubscription);
+    });
+  };
   // Compact snapshots contain the full packed particle rows. Keep the latest
   // exact payload private to this scene so probes/status overlays never clone
   // megabytes of Float32 data on every sample. Public diagnostics retain only
@@ -15258,6 +15302,10 @@ export function createSphPhaseScene(container, {
       || null;
     scene.userData.sphWorkerOffscreenResidentStage = nextStatus;
     renderer.userData.sphWorkerOffscreenResidentStage = nextStatus;
+    wakeWorkerOffscreenStatusWaiters(
+      workerOffscreenResidentStageStatusWaiters,
+      nextStatus
+    );
     refreshWorkerOffscreenRetainedStatePromotionCandidate({
       reason: 'worker-offscreen-resident-stage-status'
     });
@@ -15291,6 +15339,10 @@ export function createSphPhaseScene(container, {
       || null;
     scene.userData.sphWorkerOffscreenRenderRows = nextStatus;
     renderer.userData.sphWorkerOffscreenRenderRows = nextStatus;
+    wakeWorkerOffscreenStatusWaiters(
+      workerOffscreenRenderRowsStatusWaiters,
+      nextStatus
+    );
     refreshWorkerOffscreenRetainedStatePromotionCandidate({
       reason: 'worker-offscreen-render-rows-status'
     });
@@ -52369,7 +52421,14 @@ fn main(
       ) {
         return status;
       }
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await waitForWorkerOffscreenStatusChange({
+        waiters: workerOffscreenResidentStageStatusWaiters,
+        currentStatus: status,
+        readStatus: () => (
+          workerOffscreenPresentationBridge?.residentStageStatus || null
+        ),
+        timeoutMs: timeoutMs - (nowMs() - startedAt)
+      });
     }
     return null;
   }
@@ -52436,7 +52495,15 @@ fn main(
       ) {
         return status;
       }
-      await new Promise((resolve) => setTimeout(resolve, 16));
+      await waitForWorkerOffscreenStatusChange({
+        waiters: workerOffscreenRenderRowsStatusWaiters,
+        currentStatus: status,
+        readStatus: () => (
+          workerOffscreenPresentationBridge
+            ?.committedResidentSchedulePresentationStatus || null
+        ),
+        timeoutMs: timeoutMs - (nowMs() - startedAt)
+      });
     }
     return null;
   }
@@ -52472,6 +52539,23 @@ fn main(
     residentStateManager = null,
     computeTaskDomainKey = 'sph-phase-scene'
   } = {}) {
+    const workerLaneScheduleEnteredAtMs = nowMs();
+    const workerLanePageTiming = {
+      scheduleFunctionEnteredAtMs: workerLaneScheduleEnteredAtMs,
+      hierarchyConfigurationReadyAtMs: null,
+      targetProviderAuthorityReadyAtMs: null,
+      residentStepOptionVariantsReadyAtMs: null,
+      staticTargetConfigurationReadyAtMs: null,
+      prospectiveTargetConfigurationReadyAtMs: null,
+      targetScheduleAuthorityReadyAtMs: null,
+      renderRequestReadyAtMs: null,
+      scheduleDispatchPostedAtMs: null,
+      scheduleTerminalReceivedAtMs: null,
+      authorityCommitCompletedAtMs: null,
+      presentationAdmissionPostedAtMs: null,
+      presentationTerminalReceivedAtMs: null,
+      laneExecutionReturnedAtMs: null
+    };
     const bridge = workerOffscreenPresentationBridge;
     if (!bridge || bridge.disposed || !bridge.worker) {
       throw workerLaneFallbackError(
@@ -52493,6 +52577,7 @@ fn main(
         twoLevelFineSubstepCount
       }
     );
+    workerLanePageTiming.hierarchyConfigurationReadyAtMs = nowMs();
     const requestedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
     const requestedProgressEverySteps = Math.max(
       1,
@@ -52790,6 +52875,7 @@ fn main(
         kind: 'worker-lane-assignment-only',
         classifierOptions: laneContinuationClassifierOptions
       });
+    workerLanePageTiming.targetProviderAuthorityReadyAtMs = nowMs();
     const targetScheduleEpochOptions = {
       hierarchyConfig: workerHierarchyConfig,
       enableMechanicsFieldPairV2:
@@ -52866,6 +52952,7 @@ fn main(
           reactionActivationWatchTable: null
         })
       : residentStepOptions;
+    workerLanePageTiming.residentStepOptionVariantsReadyAtMs = nowMs();
     const predecessorReactionExecutionRequired = Boolean(
       requestedDynamicReactionRoutingAllowed
       && schroederTargetScheduleSuccessorReactionExecutionRequired({
@@ -52914,6 +53001,11 @@ fn main(
     );
     let targetScheduleAuthority;
     try {
+      const predecessorRetainedProductGasActionable =
+        schroederTargetScheduleSuccessorGasBoundaryActionable({
+          predecessorTargetScheduleAuthority,
+          predecessorDynamicLawObservation
+        });
       const targetConfigurationOptions = {
         maxFutureSubsteps: requestedStepCount,
         dtS: dt,
@@ -52927,14 +53019,12 @@ fn main(
         scheduleStepOptionsProvider: targetScheduleProviderAuthority
       };
       const staticTargetConfiguration =
-        createSchroederTargetScheduleConfiguration(
-          targetConfigurationOptions
-        );
-      const predecessorRetainedProductGasActionable =
-        schroederTargetScheduleSuccessorGasBoundaryActionable({
-          predecessorTargetScheduleAuthority,
-          predecessorDynamicLawObservation
+        createSchroederTargetScheduleConfiguration({
+          ...targetConfigurationOptions,
+          retainedProductGasBoundaryActionable:
+            predecessorRetainedProductGasActionable
         });
+      workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
       let prospectiveTargetConfiguration = null;
       if (
         requestedDynamicReactionRoutingAllowed
@@ -52960,6 +53050,7 @@ fn main(
             retainedProductGasBoundaryActionable: true
           });
       }
+      workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
       targetScheduleAuthority = createSchroederTargetScheduleAuthority({
         sourceScheduleId: scheduleId,
         targetScheduleRequestId: nextScheduleRequestId,
@@ -52971,8 +53062,9 @@ fn main(
         predecessorDynamicLawObservation,
         predecessorTargetScheduleAuthority,
         prospectiveTargetConfiguration,
-        ...targetConfigurationOptions
+        currentTargetConfiguration: staticTargetConfiguration
       });
+      workerLanePageTiming.targetScheduleAuthorityReadyAtMs = nowMs();
     } catch (error) {
       if (predecessorTargetScheduleRequestId != null) {
         laneState.pendingDynamicLawObservation = null;
@@ -53008,6 +53100,7 @@ fn main(
           livePreviewMinIntervalMs: 66
         }
       : null;
+    workerLanePageTiming.renderRequestReadyAtMs = nowMs();
     if (predecessorTargetScheduleRequestId != null) {
       // Burn the main-held token at dispatch. If anything after this point
       // fails, the lane is poisoned rather than retrying an authority token
@@ -53091,6 +53184,7 @@ fn main(
           // worker may already own a newer retained GPU family. Either case
           // must abandon this lane instead of attempting a delayed retry.
           workerScheduleDispatched = true;
+          workerLanePageTiming.scheduleDispatchPostedAtMs = nowMs();
           bridge.runResidentScheduleOnPresentationDevice({
             id: scheduleId,
             reason: 'schroeder-worker-lane-schedule',
@@ -53263,6 +53357,7 @@ fn main(
             laneId,
             timeoutMs: scheduleTimeoutMs + 5000
           });
+          workerLanePageTiming.scheduleTerminalReceivedAtMs = nowMs();
           const scheduleResult =
             scheduleTerminal?.residentScheduleResult ?? null;
           if (
@@ -53284,6 +53379,7 @@ fn main(
           return scheduleResult;
         }
         });
+      workerLanePageTiming.authorityCommitCompletedAtMs = nowMs();
     } catch (error) {
       if (
         predecessorTargetScheduleRequestId != null
@@ -53308,6 +53404,7 @@ fn main(
             workerLaneAuthority,
             reason: 'worker-lane-state-manager-committed-presentation'
           }) || null;
+        workerLanePageTiming.presentationAdmissionPostedAtMs = nowMs();
         if (
           presentationAdmission?.status
             === 'state-manager-committed-resident-schedule-presentation-admission-posted'
@@ -53322,6 +53419,7 @@ fn main(
             physicsTick: terminal?.finalEpochIdentity?.physicsTick ?? null,
             completedStepCount: terminal?.completedStepCount ?? null
           });
+          workerLanePageTiming.presentationTerminalReceivedAtMs = nowMs();
           if (!committedPresentation) {
             committedPresentation = {
               schema:
@@ -53756,6 +53854,7 @@ fn main(
     const dtS = Number(dt) || 0;
     laneState.completedStepTotal += completedStepCount;
     laneState.simTimeS += completedStepCount * dtS;
+    workerLanePageTiming.laneExecutionReturnedAtMs = nowMs();
     markResidentStepsProgress('resident-steps-worker-lane-schedule-complete', {
       laneId,
       scheduleId,
@@ -53789,6 +53888,7 @@ fn main(
         laneState.dynamicReactionActivationReceipt == null
           ? null
           : { ...laneState.dynamicReactionActivationReceipt },
+      workerLanePageTiming: { ...workerLanePageTiming },
       committedPresentation,
       workerLaneAuthority
     };
@@ -53833,6 +53933,11 @@ fn main(
     };
     const perStepSummaries = result.perStepSummaries ?? null;
     const authority = lane.workerLaneAuthority ?? null;
+    const executionRouteReceipt =
+      authority?.executionRouteAdmission?.receipt
+      ?? authority?.executionRouteReceipt
+      ?? null;
+    const executionRoute = executionRouteReceipt?.execution ?? null;
     return {
       schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
       backend: 'webgpu',
@@ -53852,6 +53957,8 @@ fn main(
         cancelled: result.cancelled === true,
         // Worker-clock schedule phase stamps (inter-schedule turnaround
         // diagnosis; same clock across a lane's consecutive results).
+        scheduleFunctionEnteredAtMs:
+          result.scheduleFunctionEnteredAtMs ?? null,
         scheduleFirstStepStartedAtMs:
           result.scheduleFirstStepStartedAtMs ?? null,
         scheduleLastStepEndedAtMs:
@@ -53870,6 +53977,9 @@ fn main(
         retainedProductGasTransitionReceipt:
           lane.retainedProductGasTransitionReceipt ?? null,
         resultAssembledAtMs: result.resultAssembledAtMs ?? null,
+        workerLanePageTiming: lane.workerLanePageTiming
+          ? { ...lane.workerLanePageTiming }
+          : null,
         progressEverySteps: result.progressEverySteps ?? null,
         finalEpochIdentity: result.finalEpochIdentity ?? null,
         finalEpochSeal: result.finalEpochSeal ?? null,
@@ -53884,6 +53994,43 @@ fn main(
           : [],
         hierarchyStageSummary:
           perStepSummaries?.lastStep?.hierarchyStageSummary ?? null,
+        // The control plane has already validated this exact route receipt
+        // before StateManager commit. Publish only the bounded fields needed
+        // to distinguish Tier-0 GPU work from page-side presentation
+        // turnaround; probes must not reach back through the private authority
+        // envelope or clone its retained GPU resources.
+        executionRoute: executionRouteReceipt
+          ? {
+              schema: executionRouteReceipt.schema ?? null,
+              status: executionRouteReceipt.status ?? null,
+              route: executionRouteReceipt.route ?? null,
+              routeDecisionStatus:
+                executionRouteReceipt.routeDecisionStatus ?? null,
+              transition: executionRouteReceipt.transition ?? null,
+              blockers: Array.isArray(executionRouteReceipt.blockers)
+                ? [...executionRouteReceipt.blockers]
+                : [],
+              requestedStepCount:
+                executionRoute?.requestedStepCount ?? null,
+              completedStepCount:
+                executionRoute?.completedStepCount ?? null,
+              atomicSchedule: executionRoute?.atomicSchedule === true,
+              commandSubmissionCount:
+                executionRoute?.commandSubmissionCount ?? null,
+              internalPositionSubstepCount:
+                executionRoute?.internalPositionSubstepCount ?? null,
+              fullParticleReadbackPerformed:
+                executionRoute?.fullParticleReadbackPerformed === true,
+              fullParticleReadbackFree:
+                executionRoute?.fullParticleReadbackFree === true,
+              mapAsyncCount: executionRoute?.mapAsyncCount ?? null,
+              readbackBytes: executionRoute?.readbackBytes ?? null,
+              residentContinuationReady:
+                executionRoute?.residentContinuationReady === true,
+              terminalFenceSatisfied:
+                executionRoute?.terminalFenceSatisfied === true
+            }
+          : null,
         committedPresentation: lane.committedPresentation
           ? { ...lane.committedPresentation }
           : null,

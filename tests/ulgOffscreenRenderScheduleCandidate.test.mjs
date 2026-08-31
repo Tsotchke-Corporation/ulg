@@ -626,6 +626,77 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
   };
   workerModule.presentCommittedResidentScheduleCandidate(nextAdmission);
   assert.equal(retainedResolveCount, 2);
+
+});
+
+test('exact rendered terminal preview promotes to committed authority without redraw', () => {
+  const version = {
+    residentExecutionGeneration: 9,
+    nextStep: 101,
+    scheduleId: 'ulg:test:sched-terminal-preview-promotion',
+    stepOrdinal: 1
+  };
+  const candidate = {
+    scheduleId: version.scheduleId,
+    laneId: 'ulg:test:lane-terminal-preview-promotion',
+    stateKey: 'ulg:test:state-terminal-preview-promotion',
+    version
+  };
+  const admission = {
+    schema:
+      'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+    status:
+      'state-manager-committed-resident-schedule-presentation-admission',
+    scheduleId: candidate.scheduleId,
+    laneId: candidate.laneId,
+    stateKey: candidate.stateKey,
+    candidateVersion: version
+  };
+  const renderedPreview = {
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    stateManagerCommittedPresentation: false,
+    residentSchedulePresentationMode: 'uncommitted-live-preview',
+    workerLocalRenderRowsProduced: true
+  };
+  const promoted = workerModule.resolveCommittedResidentSchedulePreviewPromotion({
+    admission,
+    candidate,
+    lastDrawnCandidate: candidate,
+    lastDrawnStatus: renderedPreview,
+    reason: 'test-terminal-preview-promotion'
+  });
+  assert.equal(promoted.stateManagerCommittedPresentation, true);
+  assert.equal(promoted.committedPresentationPromotedWithoutRedraw, true);
+  assert.equal(
+    promoted.residentSchedulePresentationMode,
+    'committed-terminal-live-preview-promotion'
+  );
+  assert.equal(
+    workerModule.resolveCommittedResidentSchedulePreviewPromotion({
+      admission,
+      candidate,
+      lastDrawnCandidate: {
+        ...candidate,
+        version: { ...version, nextStep: version.nextStep - 1 }
+      },
+      lastDrawnStatus: renderedPreview
+    }),
+    null,
+    'a stale preview cannot be promoted'
+  );
+  assert.equal(
+    workerModule.resolveCommittedResidentSchedulePreviewPromotion({
+      admission,
+      candidate,
+      lastDrawnCandidate: candidate,
+      lastDrawnStatus: {
+        ...renderedPreview,
+        status: 'worker-offscreen-resident-schedule-candidate-render-failed'
+      }
+    }),
+    null,
+    'a failed preview cannot be promoted'
+  );
 });
 
 test('presentation worker schedule verb skips candidates truthfully when no epoch identity exists', async () => {

@@ -536,18 +536,12 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
   }),
   preset({
     id: 'water-realtime',
-    label: 'Water - real-time dam break (fused bulk path)',
+    label: 'Water - real-time dam break (canonical Tier 0)',
     // The VISIBLE bulk-fluid demo. Same laws-quiescent water as bulk-water
-    // but on the pre-Schroeder fused sequence path (ss=0), where the block
-    // actually collapses and sloshes: measured 2026-08-28 on this hardware,
-    // ~1.7-2.1k physics steps/s at 32.8k particles (~2x faster than real
-    // time at sdt=1ms) and ~3.8k steps/s at 4k. The canonical SS lane
-    // freezes bulk liquid rigid (contact rest-distance projection cancels
-    // the EOS densification a lattice-seeded block needs to develop its
-    // hydrostatic gradient) - recorded as the top Phase-A gap in
-    // plan/todo/scale-adaptive-law-activation-plan.md; when Tier-0 routing
-    // drops laws-quiescent bulk onto the fused path INSIDE the canonical
-    // lane, this preset flips back to ss=1 and becomes its acceptance arm.
+    // and now admitted to the fused sequence INSIDE the canonical SS worker
+    // lane. This is the visible acceptance arm for Tier-0 routing: the exact
+    // law-activation receipt must remain quiescent and the route receipt must
+    // prove one atomic submission, zero readback, and retained continuation.
     standardMatrixEnabled: false,
     controls: {
       drop: 'h2o',
@@ -578,11 +572,19 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       cflSafety: '0.4',
       avAlpha: '0',
       ambientPressurePa: '0',
-      ss: '0',
+      ss: '1',
+      contactSolver: '0',
+      compactMechanicsView: '0',
       reactionProductReserveMinimumLiveFraction: '0',
+      submitBurstSteps: '8',
+      workerLivePreview: '1',
       residentStepsPerSchedule: '64',
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',
+      schroederLawQueue: '0',
+      schroederLawNeighborCandidates: '0',
+      schroederPhaseVolumeMigration: '0',
+      schroederActiveNodeSortedIndex: '0',
       cameraPositionNormalized: '0.80,0.45,1.60',
       cameraTargetNormalized: '0.50,0.30,0.50'
     },

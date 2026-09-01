@@ -701,6 +701,9 @@ test('fine-correction and phase-admission pipelines share exact explicit layouts
     'validate_fine_velocity_correction',
     'validate_routed_coarse_cfl',
     'seal_fine_correction_alpha',
+    'begin_prepare_fine_transaction',
+    'project_prepare_fine_rows',
+    'project_prepare_coarse_rows',
     'prepare_fine_transaction',
     'apply_fine_velocity_correction',
     'apply_fine_route_heat',
@@ -1340,6 +1343,8 @@ test('workspace indirect parent-field kernels flatten two-dimensional dispatch r
     'propose_cross_level_phase_volume',
     'validate_fine_velocity_correction',
     'validate_routed_coarse_cfl',
+    'project_prepare_fine_rows',
+    'project_prepare_coarse_rows',
     'commit_routed_reflux_rows',
     'apply_fine_route_heat',
     'apply_fine_velocity_correction',
@@ -1453,6 +1458,158 @@ test('phase-volume admission validates rows in parallel and seals deterministic 
   assert.match(
     source,
     /fn phase_admission_scratch_fits\(\)[\s\S]*params\.baseline_offset[\s\S]*PHASE_ADMISSION_SCRATCH_WORDS/
+  );
+});
+
+test('fine transaction projects rows in parallel before one canonical seal', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const entrySource = (entryPoint) => {
+    const functionBegin = source.indexOf(`fn ${entryPoint}(`);
+    assert.notEqual(functionBegin, -1, `missing ${entryPoint}`);
+    const begin = source.lastIndexOf('@compute', functionBegin);
+    const end = source.indexOf('@compute', functionBegin + entryPoint.length);
+    return source.slice(begin, end === -1 ? source.length : end);
+  };
+  const beginSource = entrySource('begin_prepare_fine_transaction');
+  const fineSource = entrySource('project_prepare_fine_rows');
+  const coarseSource = entrySource('project_prepare_coarse_rows');
+  const sealSource = entrySource('prepare_fine_transaction');
+
+  assert.match(beginSource, /@compute @workgroup_size\(1\)/);
+  assert.match(
+    beginSource,
+    /let dispatch_mirrors_admitted =[\s\S]*ws_load\(63u\) == parent_view\[64u\][\s\S]*ws_load\(68u\) == parent_view\[70u\]/
+  );
+  assert.ok(
+    beginSource.indexOf('let dispatch_mirrors_admitted')
+      < beginSource.indexOf('ws_store(66u, 0u)'),
+    'begin must authenticate untouched dispatch mirrors before clearing them'
+  );
+  assert.match(
+    beginSource,
+    /if \(!dispatch_mirrors_admitted[\s\S]*!fine_transaction_dispatch_shape_admitted\(ws_load\(22u\), 68u\)/
+  );
+  assert.match(
+    beginSource,
+    /fine_stage_store\(0u, ws_load\(evidence_row \+ 4u\)\)[\s\S]*fine_stage_store\(3u, ws_load\(evidence_row \+ 7u\)\)/
+  );
+  assert.match(
+    beginSource,
+    /fine_stage_store\(4u, ws_load\(102u\)\)[\s\S]*fine_stage_store\(5u, ws_load\(103u\)\)[\s\S]*fine_stage_store\(6u, ws_load\(47u\)\)/
+  );
+  assert.match(
+    beginSource,
+    /fine_stage_store\(7u, params\.completion_ordinal\)[\s\S]*fine_stage_store\(8u, params\.generation_id\)[\s\S]*fine_stage_store\(9u, params\.storage_generation\)[\s\S]*fine_stage_store\(10u, params\.physics_tick\)[\s\S]*fine_stage_store\(11u, params\.fine_substep_ordinal\)/
+  );
+  assert.doesNotMatch(
+    beginSource,
+    /fine_stage_store\((?:1[2-9]|[2-9]\d)u/,
+    'begin identity must not overwrite live alpha words 84 and 85'
+  );
+  assert.ok(
+    beginSource.lastIndexOf('ws_store(66u, fine_transaction_begin_token())')
+      > beginSource.lastIndexOf('fine_stage_store(11u'),
+    'begin token must publish after evidence and exact transaction identity'
+  );
+
+  const tokenSource = source.slice(
+    source.indexOf('fn fine_transaction_identity_hash()'),
+    source.indexOf('// Fine-impulse row zero')
+  );
+  assert.match(
+    tokenSource,
+    /return 0x80000000u \| \(fine_transaction_identity_hash\(\) & 0x7fffffffu\)/
+  );
+  assert.match(
+    tokenSource,
+    /select\(0x7fc00000u, 0xffc00000u, kind != 0u\) \| payload/
+  );
+  assert.match(
+    tokenSource,
+    /fine_stage_load\(7u\) == params\.completion_ordinal[\s\S]*fine_stage_load\(11u\) == params\.fine_substep_ordinal/
+  );
+  assert.match(
+    tokenSource,
+    /params\.lease_token[\s\S]*params\.physics_substep[\s\S]*params\.fine_substep_count[\s\S]*params\.fine_correction_expected_mutation_ordinal/
+  );
+  assert.match(
+    tokenSource,
+    /fn fine_transaction_dispatch_shape_admitted\([\s\S]*dispatch_z != 1u[\s\S]*\(group_count - 1u\) \/ dispatch_x \+ 1u/
+  );
+  assert.match(
+    beginSource,
+    /fine_transaction_dispatch_shape_admitted\(ws_load\(21u\), 64u\)[\s\S]*fine_transaction_dispatch_shape_admitted\(ws_load\(22u\), 68u\)/
+  );
+
+  for (const [projectSource, kind, row] of [
+    [fineSource, '0u', 'fine_field'],
+    [coarseSource, '1u', 'coarse_field']
+  ]) {
+    assert.match(projectSource, /@compute @workgroup_size\(64\)/);
+    assert.match(projectSource, /indirect_row_index\(id, workgroup_count\)/);
+    assert.match(projectSource, /!fine_transaction_started\(\)/);
+    assert.match(
+      projectSource,
+      new RegExp(`!fine_transaction_dispatch_matches\\(${kind}, workgroup_count\\)`)
+    );
+    assert.match(
+      projectSource,
+      new RegExp(`fine_transaction_row_token\\(${kind}, ${row}\\)`)
+    );
+    assert.doesNotMatch(
+      projectSource,
+      /ws_reject\(|reflux_reject\(|prepare_reject\(|fine_store\(|coarse_store\(|reflux_store\(/
+    );
+    assert.ok(
+      projectSource.lastIndexOf('TRANSACTION_PROJECTION_STATUS_READY')
+        < projectSource.lastIndexOf(
+          `fine_transaction_row_token(${kind}, ${row})`
+        ),
+      'descriptor token must publish after row status'
+    );
+  }
+  assert.match(
+    fineSource,
+    /ws_store\(impulse_row, bitcast<u32>\(next_velocity\.x\)\)[\s\S]*ws_store\(impulse_row \+ 13u, bitcast<u32>\(cfl_ratio\)\)/
+  );
+  assert.match(
+    coarseSource,
+    /ws_store\(proposal_base, bitcast<u32>\(applied\.x\)\)[\s\S]*ws_store\(proposal_base \+ 11u, proposal_count\)/
+  );
+
+  const fineFold = sealSource.indexOf(
+    'for (var fine_field = 0u; fine_field < ws_load(21u);'
+  );
+  const evidenceGate = sealSource.indexOf(
+    'let measured_mass_residual = bitcast<f32>(fine_stage_load(4u))'
+  );
+  const coarseFold = sealSource.indexOf(
+    'for (var coarse_field = 0u; coarse_field < ws_load(22u);'
+  );
+  assert.ok(fineFold >= 0 && evidenceGate > fineFold && coarseFold > evidenceGate);
+  assert.match(
+    sealSource,
+    /if \(!fine_transaction_started\(\)\) \{[\s\S]*ws_reject\(STATUS_INVALID_SOURCE \| STATUS_INVALID_ROUTE, 37u\)/
+  );
+  assert.equal(
+    [...sealSource.matchAll(
+      /fine_transaction_row_token\([01]u, (?:fine|coarse)_field\)\) \{\s*ws_reject\(STATUS_INVALID_SOURCE \| STATUS_INVALID_ROUTE, 37u\)/g
+    )].length,
+    2
+  );
+  assert.match(
+    sealSource,
+    /committed_fine_pressure_compensation\s*\+ sealed_next_field_pressure - prior_pressure/
+  );
+  assert.match(
+    sealSource,
+    /committed_coarse_drag_heat\s*\+ sealed_future_coarse_drag_heat - prior_coarse_drag_heat/
+  );
+  assert.match(sealSource, /existing\.x \+ applied\.x/);
+  assert.ok(
+    sealSource.lastIndexOf('ws_store(67u, ordinal + 1u)')
+      > sealSource.lastIndexOf('ws_store(68u'),
+    'external preparation authority must publish last'
   );
 });
 
@@ -1585,11 +1742,32 @@ test('workspace channel-energy closure uses pre-cancellation operation condition
     2
   );
   assert.equal(
-    [
-      ...source.matchAll(
-        /if \(!measured_channel_energy_close\([\s\S]*?\)\) \{\s*reflux_reject\(REFLUX_ENERGY_REJECTED\)/g
-      )
-    ].length,
+    [...source.matchAll(/if \(!measured_channel_energy_close\(/g)].length,
+    2
+  );
+  for (const entryPoint of [
+    'project_prepare_fine_rows',
+    'project_prepare_coarse_rows'
+  ]) {
+    const projectSource = source
+      .split(`fn ${entryPoint}(`)[1]
+      .split('@compute')[0];
+    assert.match(
+      projectSource,
+      /TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH/
+    );
+    assert.doesNotMatch(
+      projectSource,
+      /ws_reject\(|reflux_reject\(|prepare_reject\(|fine_store\(|reflux_store\(/
+    );
+  }
+  const prepareSource = source
+    .split('fn prepare_fine_transaction()')[1]
+    .split('@compute')[0];
+  assert.equal(
+    [...prepareSource.matchAll(
+      /projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH\) \{\s*reflux_reject\(REFLUX_ENERGY_REJECTED\)/g
+    )].length,
     2
   );
   assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
@@ -2033,14 +2211,35 @@ test('workspace route CFL solver intersects cumulative feasible alpha intervals'
   const prepareSource = source
     .split('fn prepare_fine_transaction()')[1]
     .split('@compute')[0];
-  assert.equal(
-    [...prepareSource.matchAll(
-      /velocity_endpoint_within_physical_audit\(/g
-    )].length,
-    2
+  const fineProjectionSource = source
+    .split('fn project_prepare_fine_rows(')[1]
+    .split('@compute')[0];
+  const coarseProjectionSource = source
+    .split('fn project_prepare_coarse_rows(')[1]
+    .split('@compute')[0];
+  for (const projectionSource of [
+    fineProjectionSource,
+    coarseProjectionSource
+  ]) {
+    assert.equal(
+      [...projectionSource.matchAll(
+        /velocity_endpoint_within_physical_audit\(/g
+      )].length,
+      1
+    );
+    assert.equal(
+      [...projectionSource.matchAll(/velocity_magnitude_ratio\(/g)].length,
+      1
+    );
+  }
+  assert.doesNotMatch(
+    prepareSource,
+    /velocity_endpoint_within_physical_audit\(|velocity_magnitude_ratio\(/
   );
   assert.equal(
-    [...prepareSource.matchAll(/velocity_magnitude_ratio\(/g)].length,
+    [...prepareSource.matchAll(
+      /projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT/g
+    )].length,
     2
   );
   assert.doesNotMatch(prepareSource, /length\(next_velocity\)/);
@@ -3354,6 +3553,214 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           expectedFutureBits: bitsOf(future)
         };
       };
+      const runProjectionCoverageProbe = async () => {
+        const rowCount = 128;
+        const fineOffset = 16;
+        const coarseOffset = fineOffset + rowCount;
+        const wordLength = coarseOffset + rowCount;
+        const fieldSentinel = 0x13579bdf;
+        const refluxSentinel = 0x2468ace0;
+        const committedField = 0x10203040;
+        const committedReflux = 0x50607080;
+        const module = device.createShaderModule({
+          label: 'native-parent-mechanics-projection-coverage-wgsl',
+          code: `
+            @group(0) @binding(0)
+            var<storage, read_write> values: array<atomic<u32>>;
+
+            fn identity_hash() -> u32 {
+              var hash: u32 = 0x42504654u;
+              hash = (hash ^ 11u) * 0x85ebca6bu;
+              hash = (hash ^ 17u) * 0xc2b2ae35u;
+              hash = (hash ^ 23u) * 0x27d4eb2fu;
+              hash = (hash ^ 29u) * 0x165667b1u;
+              hash = (hash ^ 31u) * 0x9e3779b9u;
+              return hash ^ (hash >> 16u);
+            }
+
+            fn begin_token() -> u32 {
+              return 0x80000000u | (identity_hash() & 0x7fffffffu);
+            }
+
+            fn row_token(kind: u32, row: u32) -> u32 {
+              let payload = (
+                identity_hash() ^ (row * 0x9e3779b9u)
+              ) & 0x003fffffu;
+              return select(
+                0x7fc00000u,
+                0xffc00000u,
+                kind != 0u
+              ) | payload;
+            }
+
+            @compute @workgroup_size(1)
+            fn begin_projection() {
+              atomicStore(&values[0], begin_token());
+              atomicStore(&values[3], 0u);
+              atomicStore(&values[6], 0u);
+            }
+
+            @compute @workgroup_size(64)
+            fn project_fine(
+              @builtin(global_invocation_id) id: vec3<u32>,
+              @builtin(num_workgroups) groups: vec3<u32>
+            ) {
+              if (!all(groups == vec3<u32>(2u, 1u, 1u))
+                  || id.x >= 128u) {
+                return;
+              }
+              atomicStore(&values[16u + id.x], row_token(0u, id.x));
+            }
+
+            @compute @workgroup_size(64)
+            fn project_coarse(
+              @builtin(global_invocation_id) id: vec3<u32>,
+              @builtin(num_workgroups) groups: vec3<u32>
+            ) {
+              if (!all(groups == vec3<u32>(2u, 1u, 1u))
+                  || id.x >= 128u) {
+                return;
+              }
+              atomicStore(&values[144u + id.x], row_token(1u, id.x));
+            }
+
+            @compute @workgroup_size(1)
+            fn seal_projection() {
+              if (atomicLoad(&values[0]) != begin_token()) {
+                atomicStore(&values[6], 1u);
+                return;
+              }
+              for (var row = 0u; row < 128u; row = row + 1u) {
+                if (atomicLoad(&values[16u + row])
+                    != row_token(0u, row)) {
+                  atomicStore(&values[6], 1u);
+                  return;
+                }
+              }
+              for (var row = 0u; row < 128u; row = row + 1u) {
+                if (atomicLoad(&values[144u + row])
+                    != row_token(1u, row)) {
+                  atomicStore(&values[6], 1u);
+                  return;
+                }
+              }
+              atomicStore(&values[4], 0x10203040u);
+              atomicStore(&values[5], 0x50607080u);
+              atomicStore(&values[3], 1u);
+            }
+          `
+        });
+        const entryPoints = [
+          'begin_projection',
+          'project_fine',
+          'project_coarse',
+          'seal_projection'
+        ];
+        const pipelines = [];
+        for (const entryPoint of entryPoints) {
+          pipelines.push(await device.createComputePipelineAsync({
+            label: `native-parent-mechanics-projection-coverage-${entryPoint}`,
+            layout: 'auto',
+            compute: { module, entryPoint }
+          }));
+        }
+        const indirect = (label, x) => {
+          const buffer = device.createBuffer({
+            label,
+            size: 3 * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+          });
+          device.queue.writeBuffer(buffer, 0, new Uint32Array([x, 1, 1]));
+          return buffer;
+        };
+        const fullIndirect = indirect(
+          'native-parent-mechanics-projection-coverage-full-indirect',
+          2
+        );
+        const truncatedIndirect = indirect(
+          'native-parent-mechanics-projection-coverage-truncated-indirect',
+          1
+        );
+        const runCase = async (label, fineIndirect, coarseIndirect) => {
+          const initial = new Uint32Array(wordLength);
+          initial[4] = fieldSentinel;
+          initial[5] = refluxSentinel;
+          initial.fill(0x3e800000, fineOffset, coarseOffset);
+          initial.fill(0xbe800000, coarseOffset);
+          const buffer = device.createBuffer({
+            label: `native-parent-mechanics-projection-coverage-${label}`,
+            size: initial.byteLength,
+            usage: GPUBufferUsage.STORAGE
+              | GPUBufferUsage.COPY_DST
+              | GPUBufferUsage.COPY_SRC
+          });
+          device.queue.writeBuffer(buffer, 0, initial);
+          const bindGroups = pipelines.map((pipeline, index) => (
+            device.createBindGroup({
+              label:
+                `native-parent-mechanics-projection-coverage-${label}-bind-${index}`,
+              layout: pipeline.getBindGroupLayout(0),
+              entries: [{ binding: 0, resource: { buffer } }]
+            })
+          ));
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginComputePass({
+            label: `native-parent-mechanics-projection-coverage-${label}-pass`
+          });
+          pass.setPipeline(pipelines[0]);
+          pass.setBindGroup(0, bindGroups[0]);
+          pass.dispatchWorkgroups(1);
+          pass.setPipeline(pipelines[1]);
+          pass.setBindGroup(0, bindGroups[1]);
+          pass.dispatchWorkgroupsIndirect(fineIndirect, 0);
+          pass.setPipeline(pipelines[2]);
+          pass.setBindGroup(0, bindGroups[2]);
+          pass.dispatchWorkgroupsIndirect(coarseIndirect, 0);
+          pass.setPipeline(pipelines[3]);
+          pass.setBindGroup(0, bindGroups[3]);
+          pass.dispatchWorkgroups(1);
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          const read = await readWords(
+            buffer,
+            initial.byteLength,
+            `native-parent-mechanics-projection-coverage-${label}-readback`
+          );
+          buffer.destroy();
+          return {
+            authority: read.words[3],
+            field: read.words[4],
+            reflux: read.words[5],
+            rejected: read.words[6]
+          };
+        };
+        const fineTruncated = await runCase(
+          'fine-truncated',
+          truncatedIndirect,
+          fullIndirect
+        );
+        const coarseTruncated = await runCase(
+          'coarse-truncated',
+          fullIndirect,
+          truncatedIndirect
+        );
+        const complete = await runCase(
+          'complete',
+          fullIndirect,
+          fullIndirect
+        );
+        fullIndirect.destroy();
+        truncatedIndirect.destroy();
+        return {
+          fieldSentinel,
+          refluxSentinel,
+          committedField,
+          committedReflux,
+          fineTruncated,
+          coarseTruncated,
+          complete
+        };
+      };
       // A capture is deliberately a GPU-only copy.  M2 queues these while the
       // fused lifecycle is still running and maps them only after terminal
       // G2P has completed, so fixture diagnostics never become a host
@@ -4397,9 +4804,11 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         const coarseMeasuredParticleHeat = postCoarseReflux.floats[84]
           - terminalReflux.floats[84];
         const atomicFoldBarrierProbe = await runAtomicFoldBarrierProbe();
+        const projectionCoverageProbe = await runProjectionCoverageProbe();
         const result = {
           status: 'm2-complete',
           atomicFoldBarrierProbe,
+          projectionCoverageProbe,
           fineEncodedDispatchCount: fineWorkspace.execution.encodedDispatchCount,
           fineEncodedComputePassCount:
             fineWorkspace.execution.encodedComputePassCount,
@@ -5219,7 +5628,24 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
       native.atomicFoldBarrierProbe.expectedFutureBits,
       JSON.stringify(native.atomicFoldBarrierProbe)
     );
-    assert.equal(native.fineEncodedDispatchCount, 19, JSON.stringify(native));
+    for (const truncated of [
+      native.projectionCoverageProbe.fineTruncated,
+      native.projectionCoverageProbe.coarseTruncated
+    ]) {
+      assert.deepEqual(truncated, {
+        authority: 0,
+        field: native.projectionCoverageProbe.fieldSentinel,
+        reflux: native.projectionCoverageProbe.refluxSentinel,
+        rejected: 1
+      }, JSON.stringify(native.projectionCoverageProbe));
+    }
+    assert.deepEqual(native.projectionCoverageProbe.complete, {
+      authority: 1,
+      field: native.projectionCoverageProbe.committedField,
+      reflux: native.projectionCoverageProbe.committedReflux,
+      rejected: 0
+    }, JSON.stringify(native.projectionCoverageProbe));
+    assert.equal(native.fineEncodedDispatchCount, 22, JSON.stringify(native));
     assert.equal(native.fineEncodedComputePassCount, 2, JSON.stringify(native));
     assert.equal(native.workspaceFlags, 3, JSON.stringify(native));
     assert.equal(

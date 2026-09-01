@@ -316,6 +316,15 @@ const PHASE_ADMISSION_FINE_PRESSURE_WORD: u32 = 3u;
 const PHASE_ADMISSION_COARSE_REGISTRY_WORD: u32 = 4u;
 const PHASE_ADMISSION_COARSE_MOMENT_WORD: u32 = 5u;
 const PHASE_ADMISSION_COARSE_PRESSURE_WORD: u32 = 6u;
+const TRANSACTION_PROJECTION_STATUS_READY: u32 = 0u;
+const TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE: u32 = 1u;
+const TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE: u32 = 2u;
+const TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT: u32 = 3u;
+const TRANSACTION_PROJECTION_STATUS_CFL_DELTA: u32 = 4u;
+const TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE: u32 = 5u;
+const TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH: u32 = 6u;
+const TRANSACTION_PROJECTION_STATUS_ROW_NONFINITE: u32 = 7u;
+const TRANSACTION_PROJECTION_STATUS_ROUTE_PHASE: u32 = 8u;
 const ROUTE_CFL_NUMERIC_GUARD_FACTOR: f32 = 0.9999847412109375;
 const ROUTE_CFL_PHYSICAL_AUDIT_FACTOR: f32 = 1.000003814697265625;
 
@@ -602,6 +611,81 @@ fn fine_stage_load(index: u32) -> u32 {
 
 fn fine_stage_store(index: u32, value: u32) {
   ws_store(fine_stage_address(index), value);
+}
+
+fn fine_transaction_identity_hash() -> u32 {
+  var hash: u32 = 0x42504654u;
+  hash = (hash ^ params.generation_id) * 0x85ebca6bu;
+  hash = (hash ^ params.device_ordinal) * 0xc2b2ae35u;
+  hash = (hash ^ params.lane_ordinal) * 0x27d4eb2fu;
+  hash = (hash ^ params.lease_token) * 0x165667b1u;
+  hash = (hash ^ params.source_family_id) * 0x9e3779b9u;
+  hash = (hash ^ params.completion_ordinal) * 0x85ebca6bu;
+  hash = (hash ^ params.storage_generation) * 0xc2b2ae35u;
+  hash = (hash ^ params.physics_tick) * 0x27d4eb2fu;
+  hash = (hash ^ params.physics_substep) * 0x165667b1u;
+  hash = (hash ^ params.fine_substep_count) * 0x9e3779b9u;
+  hash = (hash ^ params.fine_substep_ordinal) * 0x85ebca6bu;
+  hash = (
+    hash ^ params.fine_correction_expected_mutation_ordinal
+  ) * 0xc2b2ae35u;
+  hash = hash ^ (hash >> 16u);
+  return hash;
+}
+
+fn fine_transaction_begin_token() -> u32 {
+  // Bit 31 is always set, so the cleared value zero can never authenticate a
+  // begin stage even when the mixed identity happens to hash to zero.
+  return 0x80000000u | (fine_transaction_identity_hash() & 0x7fffffffu);
+}
+
+fn fine_transaction_row_token(kind: u32, row: u32) -> u32 {
+  let payload = (
+    fine_transaction_identity_hash() ^ (row * 0x9e3779b9u)
+  ) & 0x003fffffu;
+  // Fine and coarse use opposite-sign quiet-NaN domains. Raw word 15 is an
+  // admitted finite physical scalar, so an unvisited row cannot accidentally
+  // authenticate as projected. The token is consumed before that word is
+  // materialized back into its final finite payload.
+  return select(0x7fc00000u, 0xffc00000u, kind != 0u) | payload;
+}
+
+fn fine_transaction_started() -> bool {
+  return ws_load(66u) == fine_transaction_begin_token()
+    && fine_stage_load(7u) == params.completion_ordinal
+    && fine_stage_load(8u) == params.generation_id
+    && fine_stage_load(9u) == params.storage_generation
+    && fine_stage_load(10u) == params.physics_tick
+    && fine_stage_load(11u) == params.fine_substep_ordinal;
+}
+
+fn fine_transaction_dispatch_shape_admitted(
+  count: u32,
+  offset: u32
+) -> bool {
+  let dispatch_x = parent_view[offset];
+  let dispatch_y = parent_view[offset + 1u];
+  let dispatch_z = parent_view[offset + 2u];
+  if (count == 0u) {
+    return dispatch_x == 0u && dispatch_y == 0u && dispatch_z == 0u;
+  }
+  let group_count = (count - 1u) / 64u + 1u;
+  if (dispatch_x == 0u || dispatch_x > group_count || dispatch_z != 1u) {
+    return false;
+  }
+  return dispatch_y == (group_count - 1u) / dispatch_x + 1u;
+}
+
+fn fine_transaction_dispatch_matches(
+  kind: u32,
+  workgroup_count: vec3<u32>
+) -> bool {
+  let offset = select(64u, 68u, kind != 0u);
+  return all(workgroup_count == vec3<u32>(
+    parent_view[offset],
+    parent_view[offset + 1u],
+    parent_view[offset + 2u]
+  ));
 }
 
 // Fine-impulse row zero's raw channel decomposition is dead once preparation
@@ -4202,6 +4286,473 @@ fn seal_fine_correction_alpha() {
   ws_store(85u, bitcast<u32>(causal_alpha));
 }
 
+// Capture the raw global evidence before the coarse row projector replaces
+// route row zero. Words 66..68 are private between predictor sealing and the
+// externally authoritative preparation token written to word 67 by the final
+// deterministic seal.
+@compute @workgroup_size(1)
+fn begin_prepare_fine_transaction() {
+  if (arrayLength(&workspace) <= 68u) { return; }
+  // The initializer publishes immutable fine/coarse dispatch mirrors here.
+  // Authenticate them before clearing the private transaction words so a
+  // duplicate begin cannot recapture already-projected route row zero or
+  // reuse row tokens from the same schedule identity.
+  let dispatch_mirrors_admitted =
+    ws_load(63u) == parent_view[64u]
+    && ws_load(64u) == parent_view[65u]
+    && ws_load(65u) == parent_view[66u]
+    && ws_load(66u) == parent_view[68u]
+    && ws_load(67u) == parent_view[69u]
+    && ws_load(68u) == parent_view[70u];
+  ws_store(66u, 0u);
+  ws_store(67u, 0u);
+  ws_store(68u, 0u);
+  if (!dispatch_mirrors_admitted
+      || !workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
+      || !fine_admitted(
+        FIELD_VELOCITY,
+        params.fine_correction_expected_mutation_ordinal
+      )
+      || !fine_receipt_admitted(
+        FIELD_RECEIPT_HEAT_BUILDING,
+        params.fine_correction_expected_mutation_ordinal
+      )) {
+    return;
+  }
+  let route_cfl_alpha = bitcast<f32>(ws_load(84u));
+  let causal_alpha = bitcast<f32>(ws_load(85u));
+  let ordinal = params.fine_substep_ordinal;
+  let expected = params.fine_substep_count;
+  if (!finite_f32(route_cfl_alpha)
+      || route_cfl_alpha < 0.0
+      || route_cfl_alpha > 1.0
+      || !finite_f32(causal_alpha)
+      || causal_alpha < 0.0
+      || causal_alpha > 1.0
+      || ordinal >= expected
+      || reflux_load(8u) != ordinal
+      || reflux_load(15u) != ordinal
+      || reflux_load(54u) != expected
+      || reflux_load(97u) != ordinal
+      || reflux_load(111u) != ordinal + 1u
+      || !fine_transaction_dispatch_shape_admitted(ws_load(21u), 64u)
+      || !fine_transaction_dispatch_shape_admitted(ws_load(22u), 68u)) {
+    return;
+  }
+  let evidence_row = params.route_proposal_offset;
+  fine_stage_store(0u, ws_load(evidence_row + 4u));
+  fine_stage_store(1u, ws_load(evidence_row + 5u));
+  fine_stage_store(2u, ws_load(evidence_row + 6u));
+  fine_stage_store(3u, ws_load(evidence_row + 7u));
+  fine_stage_store(4u, ws_load(102u));
+  fine_stage_store(5u, ws_load(103u));
+  fine_stage_store(6u, ws_load(47u));
+  fine_stage_store(7u, params.completion_ordinal);
+  fine_stage_store(8u, params.generation_id);
+  fine_stage_store(9u, params.storage_generation);
+  fine_stage_store(10u, params.physics_tick);
+  fine_stage_store(11u, params.fine_substep_ordinal);
+  ws_store(66u, fine_transaction_begin_token());
+}
+
+// Project row-local fine physics in parallel into the now-dead raw impulse
+// rows. Projectors publish no rejection and touch no persistent field/ledger
+// state; word 15 is written last so the serial seal can authenticate coverage.
+@compute @workgroup_size(64)
+fn project_prepare_fine_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
+  if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
+      || !fine_transaction_started()
+      || !fine_transaction_dispatch_matches(0u, workgroup_count)
+      || fine_field >= ws_load(21u)) {
+    return;
+  }
+  let route_cfl_alpha = bitcast<f32>(ws_load(84u));
+  let causal_alpha = bitcast<f32>(ws_load(85u));
+  let fine_spacing = bitcast<f32>(fine_load(23u));
+  let fine_vmax = params.cfl_factor * fine_spacing
+    / max(params.fine_dt, 1.0e-12);
+  if (!finite_f32(route_cfl_alpha)
+      || route_cfl_alpha < 0.0
+      || route_cfl_alpha > 1.0
+      || !finite_f32(causal_alpha)
+      || causal_alpha < 0.0
+      || causal_alpha > 1.0
+      || !(fine_vmax > 0.0)
+      || !finite_f32(fine_vmax)) {
+    return;
+  }
+  let impulse_row = params.fine_impulse_offset
+    + fine_field * FINE_IMPULSE_WORDS;
+  let pou_residual = bitcast<f32>(ws_load(impulse_row + 6u));
+  let moment_residual = bitcast<f32>(ws_load(impulse_row + 7u));
+  if (!finite_f32(pou_residual) || pou_residual < 0.0
+      || !finite_f32(moment_residual) || moment_residual < 0.0
+      || ws_load(impulse_row + 5u) != params.fine_substep_ordinal) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_ROW_NONFINITE
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  let state = fine_load(30u) + fine_field * ROW_WORDS;
+  let state_active = fine_load(state + 7u) != 0u;
+  let impulse_active = ws_load(impulse_row + 4u) != 0u;
+  if (!state_active) {
+    ws_store(impulse_row + 14u, TRANSACTION_PROJECTION_STATUS_READY);
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  if (!impulse_active) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_ROUTE_PHASE
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  let mass = bitcast<f32>(fine_load(state));
+  let prior = vec3<f32>(
+    bitcast<f32>(fine_load(state + 1u)),
+    bitcast<f32>(fine_load(state + 2u)),
+    bitcast<f32>(fine_load(state + 3u))
+  );
+  let impulse = vec3<f32>(
+    bitcast<f32>(ws_load(impulse_row)),
+    bitcast<f32>(ws_load(impulse_row + 1u)),
+    bitcast<f32>(ws_load(impulse_row + 2u))
+  );
+  let raw_pressure_impulse = vec3<f32>(
+    bitcast<f32>(ws_load(impulse_row + 8u)),
+    bitcast<f32>(ws_load(impulse_row + 9u)),
+    bitcast<f32>(ws_load(impulse_row + 10u))
+  );
+  let raw_drag_impulse = vec3<f32>(
+    bitcast<f32>(ws_load(impulse_row + 11u)),
+    bitcast<f32>(ws_load(impulse_row + 12u)),
+    bitcast<f32>(ws_load(impulse_row + 13u))
+  );
+  let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
+  let drag_impulse = route_cfl_alpha * raw_drag_impulse;
+  let causal_impulse = route_cfl_alpha * causal_alpha * (
+    impulse - raw_pressure_impulse - raw_drag_impulse
+  );
+  let applied = pressure_impulse + drag_impulse + causal_impulse;
+  if (!(mass > 0.0) || !finite_f32(mass)
+      || !all(vec3<bool>(
+        finite_f32(prior.x), finite_f32(prior.y), finite_f32(prior.z)
+      ))
+      || !all(vec3<bool>(
+        finite_f32(applied.x), finite_f32(applied.y), finite_f32(applied.z)
+      ))) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  let applied_velocity_delta = applied / mass;
+  let next_velocity = prior + applied_velocity_delta;
+  if (!all(vec3<bool>(
+      finite_f32(applied_velocity_delta.x),
+      finite_f32(applied_velocity_delta.y),
+      finite_f32(applied_velocity_delta.z)
+    )) || !all(vec3<bool>(
+      finite_f32(next_velocity.x), finite_f32(next_velocity.y),
+      finite_f32(next_velocity.z)
+    ))) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  if (!velocity_endpoint_within_physical_audit(next_velocity, fine_vmax)) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  if (!velocity_delta_within_ceiling(
+      applied_velocity_delta,
+      max(params.max_correction_m_per_s, 0.0)
+    )) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_CFL_DELTA
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  let pressure_velocity_delta = pressure_impulse / mass;
+  let drag_velocity_delta = drag_impulse / mass;
+  let total_linear = dot(prior, applied);
+  let total_quadratic = 0.5 * dot(applied, applied) / mass;
+  let delta = total_linear + total_quadratic;
+  let pressure_linear = dot(prior, pressure_impulse);
+  let pressure_quadratic =
+    0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+  let pressure_delta = pressure_linear + pressure_quadratic;
+  let after_pressure = prior + pressure_velocity_delta;
+  let drag_linear = dot(after_pressure, drag_impulse);
+  let drag_quadratic = 0.5 * dot(drag_impulse, drag_impulse) / mass;
+  let drag_delta = drag_linear + drag_quadratic;
+  let after_drag = after_pressure + drag_velocity_delta;
+  let causal_linear = dot(after_drag, causal_impulse);
+  let causal_quadratic = 0.5 * dot(causal_impulse, causal_impulse) / mass;
+  let causal_delta = causal_linear + causal_quadratic;
+  let channel_operation_conditioning =
+    dot_product_conditioning(prior, applied) + abs(total_quadratic)
+    + dot_product_conditioning(prior, pressure_impulse)
+    + abs(pressure_quadratic)
+    + dot_product_conditioning(prior, drag_impulse)
+    + dot_product_conditioning(pressure_velocity_delta, drag_impulse)
+    + abs(drag_quadratic)
+    + dot_product_conditioning(prior, causal_impulse)
+    + dot_product_conditioning(pressure_velocity_delta, causal_impulse)
+    + dot_product_conditioning(drag_velocity_delta, causal_impulse)
+    + abs(causal_quadratic);
+  let cfl_ratio = velocity_magnitude_ratio(next_velocity, fine_vmax);
+  if (!finite_f32(delta)
+      || !finite_f32(pressure_delta)
+      || !finite_f32(drag_delta)
+      || !finite_f32(causal_delta)
+      || !finite_f32(channel_operation_conditioning)
+      || !(cfl_ratio >= 0.0)
+      || !finite_f32(cfl_ratio)) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  if (!measured_channel_energy_close(
+      delta,
+      pressure_delta,
+      drag_delta,
+      causal_delta,
+      channel_operation_conditioning
+    )) {
+    ws_store(
+      impulse_row + 14u,
+      TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH
+    );
+    ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+    return;
+  }
+  let applied_angular = cross(fine_node_position(fine_field), applied);
+  ws_store(impulse_row, bitcast<u32>(next_velocity.x));
+  ws_store(impulse_row + 1u, bitcast<u32>(next_velocity.y));
+  ws_store(impulse_row + 2u, bitcast<u32>(next_velocity.z));
+  ws_store(impulse_row + 3u, bitcast<u32>(applied.x));
+  ws_store(impulse_row + 4u, bitcast<u32>(applied.y));
+  ws_store(impulse_row + 5u, bitcast<u32>(applied.z));
+  ws_store(impulse_row + 6u, bitcast<u32>(applied_angular.x));
+  ws_store(impulse_row + 7u, bitcast<u32>(applied_angular.y));
+  ws_store(impulse_row + 8u, bitcast<u32>(applied_angular.z));
+  ws_store(impulse_row + 9u, bitcast<u32>(delta));
+  ws_store(impulse_row + 10u, bitcast<u32>(pressure_delta));
+  ws_store(impulse_row + 11u, bitcast<u32>(drag_delta));
+  ws_store(impulse_row + 12u, bitcast<u32>(causal_delta));
+  ws_store(impulse_row + 13u, bitcast<u32>(cfl_ratio));
+  ws_store(impulse_row + 14u, TRANSACTION_PROJECTION_STATUS_READY);
+  ws_store(impulse_row + 15u, fine_transaction_row_token(0u, fine_field));
+}
+
+@compute @workgroup_size(64)
+fn project_prepare_coarse_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
+      || !fine_transaction_started()
+      || !fine_transaction_dispatch_matches(1u, workgroup_count)
+      || coarse_field >= ws_load(22u)) {
+    return;
+  }
+  let route_cfl_alpha = bitcast<f32>(ws_load(84u));
+  let causal_alpha = bitcast<f32>(ws_load(85u));
+  let coarse_vmax = params.cfl_factor * params.coarse_spacing_m
+    / max(params.macro_dt, 1.0e-12);
+  if (!finite_f32(route_cfl_alpha)
+      || route_cfl_alpha < 0.0
+      || route_cfl_alpha > 1.0
+      || !finite_f32(causal_alpha)
+      || causal_alpha < 0.0
+      || causal_alpha > 1.0
+      || !(coarse_vmax > 0.0)
+      || !finite_f32(coarse_vmax)) {
+    return;
+  }
+  let proposal_base = params.route_proposal_offset
+    + coarse_field * ROUTE_WORDS;
+  let proposal = vec3<f32>(
+    bitcast<f32>(ws_load(proposal_base)),
+    bitcast<f32>(ws_load(proposal_base + 1u)),
+    bitcast<f32>(ws_load(proposal_base + 2u))
+  );
+  let proposal_count = ws_load(proposal_base + 3u);
+  let raw_pressure_impulse = vec3<f32>(
+    bitcast<f32>(ws_load(proposal_base + 8u)),
+    bitcast<f32>(ws_load(proposal_base + 9u)),
+    bitcast<f32>(ws_load(proposal_base + 10u))
+  );
+  let raw_drag_impulse = vec3<f32>(
+    bitcast<f32>(ws_load(proposal_base + 11u)),
+    bitcast<f32>(ws_load(proposal_base + 12u)),
+    bitcast<f32>(ws_load(proposal_base + 13u))
+  );
+  let row = reflux_row(coarse_field);
+  let existing = vec3<f32>(
+    bitcast<f32>(reflux_load(row + 5u)),
+    bitcast<f32>(reflux_load(row + 6u)),
+    bitcast<f32>(reflux_load(row + 7u))
+  );
+  let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
+  let drag_impulse = route_cfl_alpha * raw_drag_impulse;
+  let causal_impulse = route_cfl_alpha * causal_alpha * (
+    proposal - raw_pressure_impulse - raw_drag_impulse
+  );
+  let applied = pressure_impulse + drag_impulse + causal_impulse;
+  let next = existing + applied;
+  let parent = parent_view[parent_view[54u] + coarse_field];
+  let coarse_state = params.coarse_state_offset + parent * ROW_WORDS;
+  let mass = state_load(coarse_state, 0u);
+  let prior_velocity = velocity(coarse_state) + existing / mass;
+  let applied_velocity_delta = applied / mass;
+  let next_velocity = prior_velocity + applied_velocity_delta;
+  let cfl_ratio = velocity_magnitude_ratio(next_velocity, coarse_vmax);
+  let prior_virtual_delta = bitcast<f32>(reflux_load(row + 9u));
+  let prior_weight = bitcast<f32>(reflux_load(row + 15u));
+  let contribution_count = reflux_load(row + 13u);
+  if (!(mass > 0.0) || !finite_f32(mass)
+      || !all(vec3<bool>(
+        finite_f32(next.x), finite_f32(next.y), finite_f32(next.z)
+      ))
+      || !all(vec3<bool>(
+        finite_f32(prior_velocity.x), finite_f32(prior_velocity.y),
+        finite_f32(prior_velocity.z)
+      ))
+      || !all(vec3<bool>(
+        finite_f32(next_velocity.x), finite_f32(next_velocity.y),
+        finite_f32(next_velocity.z)
+      ))
+      || !finite_f32(prior_virtual_delta)
+      || !finite_f32(prior_weight)
+      || prior_weight < 0.0
+      || proposal_count > 0xffffffffu - contribution_count) {
+    ws_store(
+      proposal_base + 14u,
+      TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE
+    );
+    ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+    return;
+  }
+  if (!velocity_endpoint_within_physical_audit(next_velocity, coarse_vmax)) {
+    ws_store(
+      proposal_base + 14u,
+      TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT
+    );
+    ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+    return;
+  }
+  if (!(cfl_ratio >= 0.0) || !finite_f32(cfl_ratio)) {
+    ws_store(
+      proposal_base + 14u,
+      TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE
+    );
+    ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+    return;
+  }
+  let pressure_velocity_delta = pressure_impulse / mass;
+  let drag_velocity_delta = drag_impulse / mass;
+  let total_linear = dot(prior_velocity, applied);
+  let total_quadratic = 0.5 * dot(applied, applied) / mass;
+  let delta = total_linear + total_quadratic;
+  let pressure_linear = dot(prior_velocity, pressure_impulse);
+  let pressure_quadratic =
+    0.5 * dot(pressure_impulse, pressure_impulse) / mass;
+  let pressure_delta = pressure_linear + pressure_quadratic;
+  let after_pressure = prior_velocity + pressure_velocity_delta;
+  let drag_linear = dot(after_pressure, drag_impulse);
+  let drag_quadratic = 0.5 * dot(drag_impulse, drag_impulse) / mass;
+  let drag_delta = drag_linear + drag_quadratic;
+  let after_drag = after_pressure + drag_velocity_delta;
+  let causal_linear = dot(after_drag, causal_impulse);
+  let causal_quadratic = 0.5 * dot(causal_impulse, causal_impulse) / mass;
+  let causal_delta = causal_linear + causal_quadratic;
+  let channel_operation_conditioning =
+    dot_product_conditioning(prior_velocity, applied) + abs(total_quadratic)
+    + dot_product_conditioning(prior_velocity, pressure_impulse)
+    + abs(pressure_quadratic)
+    + dot_product_conditioning(prior_velocity, drag_impulse)
+    + dot_product_conditioning(pressure_velocity_delta, drag_impulse)
+    + abs(drag_quadratic)
+    + dot_product_conditioning(prior_velocity, causal_impulse)
+    + dot_product_conditioning(pressure_velocity_delta, causal_impulse)
+    + dot_product_conditioning(drag_velocity_delta, causal_impulse)
+    + abs(causal_quadratic);
+  let pressure_weight = abs(pressure_delta);
+  let drag_weight = abs(drag_delta);
+  let causal_weight = abs(causal_delta);
+  let weight = drag_weight + causal_weight;
+  if (!finite_f32(delta) || !finite_f32(weight)
+      || !finite_f32(pressure_delta)
+      || !finite_f32(drag_delta)
+      || !finite_f32(causal_delta)
+      || !finite_f32(channel_operation_conditioning)
+      || !finite_f32(prior_virtual_delta + delta)
+      || !finite_f32(prior_weight + weight)) {
+    ws_store(
+      proposal_base + 14u,
+      TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE
+    );
+    ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+    return;
+  }
+  if (!measured_channel_energy_close(
+      delta,
+      pressure_delta,
+      drag_delta,
+      causal_delta,
+      channel_operation_conditioning
+    )) {
+    ws_store(
+      proposal_base + 14u,
+      TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH
+    );
+    ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+    return;
+  }
+  let applied_angular = cross(parent_node_position(parent), applied);
+  ws_store(proposal_base, bitcast<u32>(applied.x));
+  ws_store(proposal_base + 1u, bitcast<u32>(applied.y));
+  ws_store(proposal_base + 2u, bitcast<u32>(applied.z));
+  ws_store(proposal_base + 3u, bitcast<u32>(applied_angular.x));
+  ws_store(proposal_base + 4u, bitcast<u32>(applied_angular.y));
+  ws_store(proposal_base + 5u, bitcast<u32>(applied_angular.z));
+  ws_store(proposal_base + 6u, bitcast<u32>(delta));
+  ws_store(proposal_base + 7u, bitcast<u32>(pressure_delta));
+  ws_store(proposal_base + 8u, bitcast<u32>(drag_delta));
+  ws_store(proposal_base + 9u, bitcast<u32>(causal_delta));
+  ws_store(proposal_base + 10u, bitcast<u32>(cfl_ratio));
+  ws_store(proposal_base + 11u, proposal_count);
+  ws_store(proposal_base + 12u, 0u);
+  ws_store(proposal_base + 13u, 0u);
+  ws_store(proposal_base + 14u, TRANSACTION_PROJECTION_STATUS_READY);
+  ws_store(proposal_base + 15u, fine_transaction_row_token(1u, coarse_field));
+}
+
 @compute @workgroup_size(64)
 fn apply_fine_route_heat(
   @builtin(global_invocation_id) id: vec3<u32>,
@@ -4262,6 +4813,10 @@ fn prepare_fine_transaction() {
         FIELD_RECEIPT_HEAT_BUILDING,
         params.fine_correction_expected_mutation_ordinal
       )) {
+    return;
+  }
+  if (!fine_transaction_started()) {
+    ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
     return;
   }
   let route_cfl_alpha = bitcast<f32>(ws_load(84u));
@@ -4359,8 +4914,12 @@ fn prepare_fine_transaction() {
   for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
     let impulse_row = params.fine_impulse_offset
       + fine_field * FINE_IMPULSE_WORDS;
-    let pou_residual = bitcast<f32>(ws_load(impulse_row + 6u));
-    let moment_residual = bitcast<f32>(ws_load(impulse_row + 7u));
+    if (ws_load(impulse_row + 15u)
+        != fine_transaction_row_token(0u, fine_field)) {
+      ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
+      return;
+    }
+    let projection_status = ws_load(impulse_row + 14u);
     let accumulator = fine_load(28u)
       + fine_field * FIELD_ACCUMULATOR_WORDS;
     let prior_total = bitcast<f32>(fine_load(accumulator));
@@ -4389,9 +4948,7 @@ fn prepare_fine_transaction() {
       local_ambient_external_work_sum + ambient_work;
     let next_local_ambient_external_work_sum_abs =
       local_ambient_external_work_sum_abs + abs(ambient_work);
-    if (!finite_f32(pou_residual) || pou_residual < 0.0
-        || !finite_f32(moment_residual) || moment_residual < 0.0
-        || ws_load(impulse_row + 5u) != ordinal
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ROW_NONFINITE
         || !finite_f32(prior_total) || prior_total < 0.0
         || prior_route != 0.0
         || !finite_f32(pressure_compensation)
@@ -4431,15 +4988,11 @@ fn prepare_fine_transaction() {
     local_ambient_external_work_sum = next_local_ambient_external_work_sum;
     local_ambient_external_work_sum_abs =
       next_local_ambient_external_work_sum_abs;
-    max_pou_residual = max(max_pou_residual, pou_residual);
-    max_first_moment_residual = max(
-      max_first_moment_residual, moment_residual
-    );
     let state = fine_load(30u) + fine_field * ROW_WORDS;
     let state_active = fine_load(state + 7u) != 0u;
-    let impulse_active = ws_load(impulse_row + 4u) != 0u;
     if (!state_active) {
-      if (impulse_active
+      if (projection_status != TRANSACTION_PROJECTION_STATUS_READY
+          || ws_load(impulse_row + 4u) != 0u
           || prior_total != 0.0
           || local_count != 0u
           || pressure_compensation != 0.0
@@ -4452,130 +5005,58 @@ fn prepare_fine_transaction() {
       }
       continue;
     }
-    if (!impulse_active) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ROUTE_PHASE) {
       reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_PHASE_REJECTED);
       return;
     }
-    let mass = bitcast<f32>(fine_load(state));
-    let prior = vec3<f32>(
-      bitcast<f32>(fine_load(state + 1u)),
-      bitcast<f32>(fine_load(state + 2u)),
-      bitcast<f32>(fine_load(state + 3u))
-    );
-    let impulse = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row)),
-      bitcast<f32>(ws_load(impulse_row + 1u)),
-      bitcast<f32>(ws_load(impulse_row + 2u))
-    );
-    let raw_pressure_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 8u)),
-      bitcast<f32>(ws_load(impulse_row + 9u)),
-      bitcast<f32>(ws_load(impulse_row + 10u))
-    );
-    let raw_drag_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 11u)),
-      bitcast<f32>(ws_load(impulse_row + 12u)),
-      bitcast<f32>(ws_load(impulse_row + 13u))
-    );
-    let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
-    let drag_impulse = route_cfl_alpha * raw_drag_impulse;
-    let causal_impulse = route_cfl_alpha * causal_alpha * (
-      impulse - raw_pressure_impulse - raw_drag_impulse
-    );
-    let applied = pressure_impulse + drag_impulse + causal_impulse;
-    if (!(mass > 0.0) || !finite_f32(mass)
-        || !all(vec3<bool>(
-          finite_f32(prior.x), finite_f32(prior.y), finite_f32(prior.z)
-        ))
-        || !all(vec3<bool>(
-          finite_f32(applied.x), finite_f32(applied.y), finite_f32(applied.z)
-        ))) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE) {
       prepare_reject(REFLUX_NONFINITE, 1u);
       return;
     }
-    let applied_velocity_delta = applied / mass;
-    let next_velocity = prior + applied_velocity_delta;
-    if (!all(vec3<bool>(
-        finite_f32(applied_velocity_delta.x),
-        finite_f32(applied_velocity_delta.y),
-        finite_f32(applied_velocity_delta.z)
-      )) || !all(vec3<bool>(
-        finite_f32(next_velocity.x), finite_f32(next_velocity.y),
-        finite_f32(next_velocity.z)
-      ))) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE) {
       prepare_reject(REFLUX_NONFINITE, 2u);
       return;
     }
-    if (!velocity_endpoint_within_physical_audit(
-        next_velocity, fine_vmax
-      )) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT) {
       ws_reject(STATUS_CFL_REJECTED, 86u);
       prepare_reject(REFLUX_CFL_REJECTED, 101u);
       return;
     }
-    if (!velocity_delta_within_ceiling(
-        applied_velocity_delta,
-        max(params.max_correction_m_per_s, 0.0)
-      )) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_DELTA) {
       ws_reject(STATUS_CFL_REJECTED, 86u);
       prepare_reject(REFLUX_CFL_REJECTED, 102u);
       return;
     }
-    let pressure_velocity_delta = pressure_impulse / mass;
-    let drag_velocity_delta = drag_impulse / mass;
-    let total_linear = dot(prior, applied);
-    let total_quadratic = 0.5 * dot(applied, applied) / mass;
-    let delta = total_linear + total_quadratic;
-    let pressure_linear = dot(prior, pressure_impulse);
-    let pressure_quadratic =
-      0.5 * dot(pressure_impulse, pressure_impulse) / mass;
-    let pressure_delta = pressure_linear + pressure_quadratic;
-    let after_pressure = prior + pressure_velocity_delta;
-    let drag_linear = dot(after_pressure, drag_impulse);
-    let drag_quadratic = 0.5 * dot(drag_impulse, drag_impulse) / mass;
-    let drag_delta = drag_linear + drag_quadratic;
-    let after_drag = after_pressure + drag_velocity_delta;
-    let causal_linear = dot(after_drag, causal_impulse);
-    let causal_quadratic = 0.5 * dot(causal_impulse, causal_impulse) / mass;
-    let causal_delta = causal_linear + causal_quadratic;
-    let channel_operation_conditioning =
-      dot_product_conditioning(prior, applied) + abs(total_quadratic)
-      + dot_product_conditioning(prior, pressure_impulse)
-      + abs(pressure_quadratic)
-      + dot_product_conditioning(prior, drag_impulse)
-      + dot_product_conditioning(pressure_velocity_delta, drag_impulse)
-      + abs(drag_quadratic)
-      + dot_product_conditioning(prior, causal_impulse)
-      + dot_product_conditioning(pressure_velocity_delta, causal_impulse)
-      + dot_product_conditioning(drag_velocity_delta, causal_impulse)
-      + abs(causal_quadratic);
-    let cfl_ratio = velocity_magnitude_ratio(next_velocity, fine_vmax);
-    if (!finite_f32(delta)
-        || !finite_f32(pressure_delta)
-        || !finite_f32(drag_delta)
-        || !finite_f32(causal_delta)
-        || !finite_f32(channel_operation_conditioning)
-        || !all(vec3<bool>(
-          finite_f32(next_velocity.x), finite_f32(next_velocity.y),
-          finite_f32(next_velocity.z)
-        )) || !(cfl_ratio >= 0.0) || !finite_f32(cfl_ratio)) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE) {
       prepare_reject(REFLUX_NONFINITE, 3u);
       return;
     }
-    if (!measured_channel_energy_close(
-        delta,
-        pressure_delta,
-        drag_delta,
-        causal_delta,
-        channel_operation_conditioning
-      )) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH) {
       reflux_reject(REFLUX_ENERGY_REJECTED);
       return;
     }
+    if (projection_status != TRANSACTION_PROJECTION_STATUS_READY) {
+      reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED);
+      return;
+    }
+    let applied = vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 3u)),
+      bitcast<f32>(ws_load(impulse_row + 4u)),
+      bitcast<f32>(ws_load(impulse_row + 5u))
+    );
+    let applied_angular = vec3<f32>(
+      bitcast<f32>(ws_load(impulse_row + 6u)),
+      bitcast<f32>(ws_load(impulse_row + 7u)),
+      bitcast<f32>(ws_load(impulse_row + 8u))
+    );
+    let delta = bitcast<f32>(ws_load(impulse_row + 9u));
+    let pressure_delta = bitcast<f32>(ws_load(impulse_row + 10u));
+    let drag_delta = bitcast<f32>(ws_load(impulse_row + 11u));
+    let causal_delta = bitcast<f32>(ws_load(impulse_row + 12u));
+    let cfl_ratio = bitcast<f32>(ws_load(impulse_row + 13u));
     max_fine_cfl_ratio = max(max_fine_cfl_ratio, cfl_ratio);
     applied_fine_impulse = applied_fine_impulse + applied;
-    applied_fine_angular = applied_fine_angular
-      + cross(fine_node_position(fine_field), applied);
+    applied_fine_angular = applied_fine_angular + applied_angular;
     fine_energy_delta = fine_energy_delta + delta;
     fine_pressure_energy_delta =
       fine_pressure_energy_delta + pressure_delta;
@@ -4679,18 +5160,15 @@ fn prepare_fine_transaction() {
     prepare_reject(REFLUX_NONFINITE, 4u);
     return;
   }
-  let evidence_row = params.route_proposal_offset;
-  let measured_mass_residual = bitcast<f32>(ws_load(102u));
-  let measured_mass_sum_abs = bitcast<f32>(ws_load(103u));
+  let measured_mass_residual = bitcast<f32>(fine_stage_load(4u));
+  let measured_mass_sum_abs = bitcast<f32>(fine_stage_load(5u));
   let measured_first_mass_moment_residual = vec3<f32>(
-    bitcast<f32>(ws_load(evidence_row + 4u)),
-    bitcast<f32>(ws_load(evidence_row + 5u)),
-    bitcast<f32>(ws_load(evidence_row + 6u))
+    bitcast<f32>(fine_stage_load(0u)),
+    bitcast<f32>(fine_stage_load(1u)),
+    bitcast<f32>(fine_stage_load(2u))
   );
-  let measured_first_mass_moment_sum_abs = bitcast<f32>(
-    ws_load(evidence_row + 7u)
-  );
-  let measured_contribution_count = ws_load(47u);
+  let measured_first_mass_moment_sum_abs = bitcast<f32>(fine_stage_load(3u));
+  let measured_contribution_count = fine_stage_load(6u);
   if (!finite_f32(measured_mass_residual)
       || !finite_f32(measured_mass_sum_abs) || measured_mass_sum_abs < 0.0
       || !all(vec3<bool>(
@@ -4726,126 +5204,54 @@ fn prepare_fine_transaction() {
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal_base = params.route_proposal_offset
       + coarse_field * ROUTE_WORDS;
-    let proposal = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base)),
-      bitcast<f32>(ws_load(proposal_base + 1u)),
-      bitcast<f32>(ws_load(proposal_base + 2u))
-    );
-    let raw_pressure_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base + 8u)),
-      bitcast<f32>(ws_load(proposal_base + 9u)),
-      bitcast<f32>(ws_load(proposal_base + 10u))
-    );
-    let raw_drag_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base + 11u)),
-      bitcast<f32>(ws_load(proposal_base + 12u)),
-      bitcast<f32>(ws_load(proposal_base + 13u))
-    );
-    let row = reflux_row(coarse_field);
-    let existing = vec3<f32>(
-      bitcast<f32>(reflux_load(row + 5u)),
-      bitcast<f32>(reflux_load(row + 6u)),
-      bitcast<f32>(reflux_load(row + 7u))
-    );
-    let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
-    let drag_impulse = route_cfl_alpha * raw_drag_impulse;
-    let causal_impulse = route_cfl_alpha * causal_alpha * (
-      proposal - raw_pressure_impulse - raw_drag_impulse
-    );
-    let applied = pressure_impulse + drag_impulse + causal_impulse;
-    let next = existing + applied;
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    let coarse_state = params.coarse_state_offset + parent * ROW_WORDS;
-    let mass = state_load(coarse_state, 0u);
-    let prior_velocity = velocity(coarse_state) + existing / mass;
-    let applied_velocity_delta = applied / mass;
-    let next_velocity = prior_velocity + applied_velocity_delta;
-    let cfl_ratio = velocity_magnitude_ratio(next_velocity, coarse_vmax);
-    let prior_virtual_delta = bitcast<f32>(reflux_load(row + 9u));
-    let prior_weight = bitcast<f32>(reflux_load(row + 15u));
-    let proposal_count = ws_load(proposal_base + 3u);
-    let contribution_count = reflux_load(row + 13u);
-    if (!(mass > 0.0) || !finite_f32(mass)
-        || !all(vec3<bool>(
-          finite_f32(next.x), finite_f32(next.y), finite_f32(next.z)
-        ))
-        || !all(vec3<bool>(
-          finite_f32(prior_velocity.x), finite_f32(prior_velocity.y),
-          finite_f32(prior_velocity.z)
-        ))
-        || !all(vec3<bool>(
-          finite_f32(next_velocity.x), finite_f32(next_velocity.y),
-          finite_f32(next_velocity.z)
-        ))
-        || !finite_f32(prior_virtual_delta)
-        || !finite_f32(prior_weight) || prior_weight < 0.0
-        || proposal_count > 0xffffffffu - contribution_count) {
+    if (ws_load(proposal_base + 15u)
+        != fine_transaction_row_token(1u, coarse_field)) {
+      ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
+      return;
+    }
+    let projection_status = ws_load(proposal_base + 14u);
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE) {
       reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
       return;
     }
-    if (!velocity_endpoint_within_physical_audit(
-        next_velocity, coarse_vmax
-      )) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT) {
       ws_reject(STATUS_CFL_REJECTED, 86u);
       prepare_reject(REFLUX_CFL_REJECTED, 201u);
       return;
     }
-    if (!(cfl_ratio >= 0.0) || !finite_f32(cfl_ratio)) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE) {
       reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
       return;
     }
-    let pressure_velocity_delta = pressure_impulse / mass;
-    let drag_velocity_delta = drag_impulse / mass;
-    let total_linear = dot(prior_velocity, applied);
-    let total_quadratic = 0.5 * dot(applied, applied) / mass;
-    let delta = total_linear + total_quadratic;
-    let pressure_linear = dot(prior_velocity, pressure_impulse);
-    let pressure_quadratic =
-      0.5 * dot(pressure_impulse, pressure_impulse) / mass;
-    let pressure_delta = pressure_linear + pressure_quadratic;
-    let after_pressure = prior_velocity + pressure_velocity_delta;
-    let drag_linear = dot(after_pressure, drag_impulse);
-    let drag_quadratic = 0.5 * dot(drag_impulse, drag_impulse) / mass;
-    let drag_delta = drag_linear + drag_quadratic;
-    let after_drag = after_pressure + drag_velocity_delta;
-    let causal_linear = dot(after_drag, causal_impulse);
-    let causal_quadratic = 0.5 * dot(causal_impulse, causal_impulse) / mass;
-    let causal_delta = causal_linear + causal_quadratic;
-    let channel_operation_conditioning =
-      dot_product_conditioning(prior_velocity, applied) + abs(total_quadratic)
-      + dot_product_conditioning(prior_velocity, pressure_impulse)
-      + abs(pressure_quadratic)
-      + dot_product_conditioning(prior_velocity, drag_impulse)
-      + dot_product_conditioning(pressure_velocity_delta, drag_impulse)
-      + abs(drag_quadratic)
-      + dot_product_conditioning(prior_velocity, causal_impulse)
-      + dot_product_conditioning(pressure_velocity_delta, causal_impulse)
-      + dot_product_conditioning(drag_velocity_delta, causal_impulse)
-      + abs(causal_quadratic);
-    let pressure_weight = abs(pressure_delta);
-    let drag_weight = abs(drag_delta);
-    let causal_weight = abs(causal_delta);
-    let weight = drag_weight + causal_weight;
-    if (!finite_f32(delta) || !finite_f32(weight)
-        || !finite_f32(pressure_delta)
-        || !finite_f32(drag_delta)
-        || !finite_f32(causal_delta)
-        || !finite_f32(channel_operation_conditioning)
-        || !finite_f32(prior_virtual_delta + delta)
-        || !finite_f32(prior_weight + weight)) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE) {
       prepare_reject(REFLUX_NONFINITE, 5u);
       return;
     }
-    if (!measured_channel_energy_close(
-        delta,
-        pressure_delta,
-        drag_delta,
-        causal_delta,
-        channel_operation_conditioning
-      )) {
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH) {
       reflux_reject(REFLUX_ENERGY_REJECTED);
       return;
     }
+    if (projection_status != TRANSACTION_PROJECTION_STATUS_READY) {
+      reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED);
+      return;
+    }
+    let applied = vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base)),
+      bitcast<f32>(ws_load(proposal_base + 1u)),
+      bitcast<f32>(ws_load(proposal_base + 2u))
+    );
+    let applied_angular = vec3<f32>(
+      bitcast<f32>(ws_load(proposal_base + 3u)),
+      bitcast<f32>(ws_load(proposal_base + 4u)),
+      bitcast<f32>(ws_load(proposal_base + 5u))
+    );
+    let delta = bitcast<f32>(ws_load(proposal_base + 6u));
+    let pressure_delta = bitcast<f32>(ws_load(proposal_base + 7u));
+    let drag_delta = bitcast<f32>(ws_load(proposal_base + 8u));
+    let causal_delta = bitcast<f32>(ws_load(proposal_base + 9u));
+    let pressure_weight = abs(pressure_delta);
+    let drag_weight = abs(drag_delta);
+    let causal_weight = abs(causal_delta);
     coarse_virtual_energy_delta = coarse_virtual_energy_delta + delta;
     coarse_pressure_energy_delta =
       coarse_pressure_energy_delta + pressure_delta;
@@ -4854,8 +5260,7 @@ fn prepare_fine_transaction() {
     coarse_causal_energy_delta =
       coarse_causal_energy_delta + causal_delta;
     applied_coarse_impulse = applied_coarse_impulse + applied;
-    applied_coarse_angular = applied_coarse_angular
-      + cross(parent_node_position(parent), applied);
+    applied_coarse_angular = applied_coarse_angular + applied_angular;
     coarse_pressure_weight = coarse_pressure_weight + pressure_weight;
     coarse_drag_weight = coarse_drag_weight + drag_weight;
     coarse_causal_weight = coarse_causal_weight + causal_weight;
@@ -5110,6 +5515,7 @@ fn prepare_fine_transaction() {
       ws_store(impulse_row + 1u, 0u);
       ws_store(impulse_row + 2u, 0u);
       ws_store(impulse_row + 3u, 0u);
+      ws_store(impulse_row + 4u, 0u);
       ws_store(impulse_row + 5u, 0u);
       ws_store(impulse_row + 6u, 0u);
       ws_store(impulse_row + 7u, 0u);
@@ -5143,43 +5549,14 @@ fn prepare_fine_transaction() {
       continue;
     }
     let mass = bitcast<f32>(fine_load(state));
-    let prior = vec3<f32>(
-      bitcast<f32>(fine_load(state + 1u)),
-      bitcast<f32>(fine_load(state + 2u)),
-      bitcast<f32>(fine_load(state + 3u))
-    );
-    let impulse = vec3<f32>(
+    let next_velocity = vec3<f32>(
       bitcast<f32>(ws_load(impulse_row)),
       bitcast<f32>(ws_load(impulse_row + 1u)),
       bitcast<f32>(ws_load(impulse_row + 2u))
     );
-    let raw_pressure_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 8u)),
-      bitcast<f32>(ws_load(impulse_row + 9u)),
-      bitcast<f32>(ws_load(impulse_row + 10u))
-    );
-    let raw_drag_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 11u)),
-      bitcast<f32>(ws_load(impulse_row + 12u)),
-      bitcast<f32>(ws_load(impulse_row + 13u))
-    );
-    let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
-    let drag_impulse = route_cfl_alpha * raw_drag_impulse;
-    let causal_impulse = route_cfl_alpha * causal_alpha * (
-      impulse - raw_pressure_impulse - raw_drag_impulse
-    );
-    let applied = pressure_impulse + drag_impulse + causal_impulse;
-    let next_velocity = prior + applied / mass;
-    let delta = dot(prior, applied)
-      + 0.5 * dot(applied, applied) / mass;
-    let pressure_delta = dot(prior, pressure_impulse)
-      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
-    let after_pressure = prior + pressure_impulse / mass;
-    let drag_delta = dot(after_pressure, drag_impulse)
-      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
-    let after_drag = after_pressure + drag_impulse / mass;
-    let causal_delta = dot(after_drag, causal_impulse)
-      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
+    let pressure_delta = bitcast<f32>(ws_load(impulse_row + 10u));
+    let drag_delta = bitcast<f32>(ws_load(impulse_row + 11u));
+    let causal_delta = bitcast<f32>(ws_load(impulse_row + 12u));
     let pressure_weight = abs(pressure_delta);
     let drag_weight = abs(drag_delta);
     let causal_weight = abs(causal_delta);
@@ -5315,6 +5692,7 @@ fn prepare_fine_transaction() {
     ws_store(impulse_row + 1u, bitcast<u32>(next_velocity.y));
     ws_store(impulse_row + 2u, bitcast<u32>(next_velocity.z));
     ws_store(impulse_row + 3u, bitcast<u32>(share));
+    ws_store(impulse_row + 4u, 1u);
     ws_store(impulse_row + 5u, bitcast<u32>(next_field_total));
     ws_store(impulse_row + 6u, bitcast<u32>(next_field_route));
     ws_store(impulse_row + 7u, next_local_count);
@@ -5385,7 +5763,7 @@ fn prepare_fine_transaction() {
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal_base = params.route_proposal_offset
       + coarse_field * ROUTE_WORDS;
-    let proposal = vec3<f32>(
+    let applied = vec3<f32>(
       bitcast<f32>(ws_load(proposal_base)),
       bitcast<f32>(ws_load(proposal_base + 1u)),
       bitcast<f32>(ws_load(proposal_base + 2u))
@@ -5396,36 +5774,11 @@ fn prepare_fine_transaction() {
       bitcast<f32>(reflux_load(row + 6u)),
       bitcast<f32>(reflux_load(row + 7u))
     );
-    let raw_pressure_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base + 8u)),
-      bitcast<f32>(ws_load(proposal_base + 9u)),
-      bitcast<f32>(ws_load(proposal_base + 10u))
-    );
-    let raw_drag_impulse = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base + 11u)),
-      bitcast<f32>(ws_load(proposal_base + 12u)),
-      bitcast<f32>(ws_load(proposal_base + 13u))
-    );
-    let pressure_impulse = route_cfl_alpha * raw_pressure_impulse;
-    let drag_impulse = route_cfl_alpha * raw_drag_impulse;
-    let causal_impulse = route_cfl_alpha * causal_alpha * (
-      proposal - raw_pressure_impulse - raw_drag_impulse
-    );
-    let applied = pressure_impulse + drag_impulse + causal_impulse;
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    let coarse_state = params.coarse_state_offset + parent * ROW_WORDS;
-    let mass = state_load(coarse_state, 0u);
-    let prior_velocity = velocity(coarse_state) + existing / mass;
-    let delta = dot(prior_velocity, applied)
-      + 0.5 * dot(applied, applied) / mass;
-    let pressure_delta = dot(prior_velocity, pressure_impulse)
-      + 0.5 * dot(pressure_impulse, pressure_impulse) / mass;
-    let after_pressure = prior_velocity + pressure_impulse / mass;
-    let drag_delta = dot(after_pressure, drag_impulse)
-      + 0.5 * dot(drag_impulse, drag_impulse) / mass;
-    let after_drag = after_pressure + drag_impulse / mass;
-    let causal_delta = dot(after_drag, causal_impulse)
-      + 0.5 * dot(causal_impulse, causal_impulse) / mass;
+    let delta = bitcast<f32>(ws_load(proposal_base + 6u));
+    let pressure_delta = bitcast<f32>(ws_load(proposal_base + 7u));
+    let drag_delta = bitcast<f32>(ws_load(proposal_base + 8u));
+    let causal_delta = bitcast<f32>(ws_load(proposal_base + 9u));
+    let proposal_count = ws_load(proposal_base + 11u);
     let pressure_weight = abs(pressure_delta);
     let drag_weight = abs(drag_delta);
     let causal_weight = abs(causal_delta);
@@ -5496,7 +5849,7 @@ fn prepare_fine_transaction() {
     ws_store(proposal_base + 2u, bitcast<u32>(existing.z + applied.z));
     ws_store(
       proposal_base + 3u,
-      reflux_load(row + 13u) + ws_load(proposal_base + 3u)
+      reflux_load(row + 13u) + proposal_count
     );
     ws_store(
       proposal_base + 4u,

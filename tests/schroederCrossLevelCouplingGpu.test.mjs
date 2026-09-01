@@ -169,7 +169,11 @@ function productionM3Device({
     ['begin_cross_level_phase_volume_admission', [0, 1, 2, 3, 5, 6, 8, 9]],
     ['validate_fine_cross_level_phase_volume_admission', [0, 1, 3, 5, 7, 8]],
     ['validate_coarse_cross_level_phase_volume_admission', [0, 2, 3, 5, 9, 11]],
-    ['seal_cross_level_phase_volume_admission', [1, 2, 3, 5]]
+    ['seal_cross_level_phase_volume_admission', [1, 2, 3, 5]],
+    ['begin_prepare_fine_transaction', [0, 1, 3, 4, 5, 11]],
+    ['project_prepare_fine_rows', [0, 1, 3, 4, 5, 11]],
+    ['project_prepare_coarse_rows', [0, 3, 4, 5, 11]],
+    ['prepare_fine_transaction', [0, 1, 3, 4, 5, 11]]
   ]);
   const device = {
     createdBuffers: [],
@@ -245,6 +249,7 @@ function productionM3Device({
               device.passTrace.push({
                 kind: 'direct',
                 passOrdinal,
+                direct: dims,
                 label: pipeline?.descriptor?.label ?? null,
                 entryPoint:
                   pipeline?.descriptor?.compute?.entryPoint ?? null
@@ -1456,6 +1461,9 @@ const BASE_FINE_CORRECTION_TIMESTAMP_STAGES = Object.freeze([
   'validate-fine-correction',
   'validate-routed-coarse-cfl',
   'seal-fine-correction-alpha',
+  'begin-prepare-fine-transaction',
+  'project-prepare-fine-rows',
+  'project-prepare-coarse-rows',
   'prepare-fine-transaction',
   'begin-fine-correction',
   'commit-routed-reflux-rows',
@@ -1478,6 +1486,9 @@ const BASE_FINE_CORRECTION_ENTRY_POINTS = Object.freeze([
   'validate_fine_velocity_correction',
   'validate_routed_coarse_cfl',
   'seal_fine_correction_alpha',
+  'begin_prepare_fine_transaction',
+  'project_prepare_fine_rows',
+  'project_prepare_coarse_rows',
   'prepare_fine_transaction',
   'begin_fine_velocity_correction',
   'commit_routed_reflux_rows',
@@ -1691,6 +1702,27 @@ test('M3 profiling-off corrections retain one grouped compute pass per fine subs
       scenario.fineSubstepCount,
       `${scenario.label} grouped pass count`
     );
+    for (const entry of fineTrace.filter(({ entryPoint }) => (
+      entryPoint === 'project_prepare_fine_rows'
+    ))) {
+      assert.equal(entry.kind, 'indirect');
+      assert.match(entry.indirectBuffer?.label ?? '', /fine-indirect$/);
+      assert.equal(entry.indirectOffset, 0);
+    }
+    for (const entry of fineTrace.filter(({ entryPoint }) => (
+      entryPoint === 'project_prepare_coarse_rows'
+    ))) {
+      assert.equal(entry.kind, 'indirect');
+      assert.match(entry.indirectBuffer?.label ?? '', /coarse-indirect$/);
+      assert.equal(entry.indirectOffset, 0);
+    }
+    for (const entry of fineTrace.filter(({ entryPoint }) => (
+      entryPoint === 'begin_prepare_fine_transaction'
+        || entryPoint === 'prepare_fine_transaction'
+    ))) {
+      assert.equal(entry.kind, 'direct');
+      assert.deepEqual(entry.direct, [1, 1, 1]);
+    }
     if (scenario.phaseVolumeInterfaceTransportEnabled) {
       for (const entry of fineTrace.filter(({ entryPoint }) => (
         entryPoint === 'validate_fine_cross_level_phase_volume_admission'
@@ -1722,7 +1754,7 @@ test('M3 profiling-off corrections retain one grouped compute pass per fine subs
   }
 });
 
-test('M3 phase admission auto-layout fallback binds only reflected resources', async () => {
+test('M3 projected transaction and phase auto layouts bind reflected resources', async () => {
   const device = productionM3Device({
     explicitLayouts: false,
     validatePhaseAutoBindings: true
@@ -1739,13 +1771,18 @@ test('M3 phase admission auto-layout fallback binds only reflected resources', a
       .filter(({ entryPoint }) => (
         entryPoint !== 'seal_parent_field_predictors'
       ))
-      .map(({ entryPoint }) => entryPoint),
+      .map(({ entryPoint, bindings }) => [entryPoint, bindings])
+      .sort(([left], [right]) => left.localeCompare(right)),
     [
-      'begin_cross_level_phase_volume_admission',
-      'validate_fine_cross_level_phase_volume_admission',
-      'validate_coarse_cross_level_phase_volume_admission',
-      'seal_cross_level_phase_volume_admission'
-    ]
+      ['begin_cross_level_phase_volume_admission', [0, 1, 2, 3, 5, 6, 8, 9]],
+      ['begin_prepare_fine_transaction', [0, 1, 3, 4, 5, 11]],
+      ['prepare_fine_transaction', [0, 1, 3, 4, 5, 11]],
+      ['project_prepare_coarse_rows', [0, 3, 4, 5, 11]],
+      ['project_prepare_fine_rows', [0, 1, 3, 4, 5, 11]],
+      ['seal_cross_level_phase_volume_admission', [1, 2, 3, 5]],
+      ['validate_coarse_cross_level_phase_volume_admission', [0, 2, 3, 5, 9, 11]],
+      ['validate_fine_cross_level_phase_volume_admission', [0, 1, 3, 5, 7, 8]]
+    ].sort(([left], [right]) => left.localeCompare(right))
   );
   assert.equal(
     device.validatedAutoBindGroups.some(({ entryPoint }) => (

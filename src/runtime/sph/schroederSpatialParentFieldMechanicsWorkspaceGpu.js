@@ -117,6 +117,9 @@ const PIPELINE_BINDINGS = Object.freeze({
   validateFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   validateRoutedCoarse: Object.freeze([0, 3, 4, 5, 11]),
   sealFineAlpha: Object.freeze([3, 4, 5, 11]),
+  beginPrepareFine: Object.freeze([0, 1, 3, 4, 5, 11]),
+  projectPrepareFineRows: Object.freeze([0, 1, 3, 4, 5, 11]),
+  projectPrepareCoarseRows: Object.freeze([0, 3, 4, 5, 11]),
   prepareFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   applyFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   applyFineHeat: Object.freeze([0, 1, 3, 4, 5, 11]),
@@ -186,6 +189,9 @@ const FINE_CORRECTION_PIPELINE_NAMES = new Set([
   'validateFine',
   'validateRoutedCoarse',
   'sealFineAlpha',
+  'beginPrepareFine',
+  'projectPrepareFineRows',
+  'projectPrepareCoarseRows',
   'prepareFine',
   'applyFine',
   'applyFineHeat',
@@ -1588,6 +1594,12 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     validateFine: pipeline('validateFine', 'validate_fine_velocity_correction'),
     validateRoutedCoarse: pipeline('validateRoutedCoarse', 'validate_routed_coarse_cfl'),
     sealFineAlpha: pipeline('sealFineAlpha', 'seal_fine_correction_alpha'),
+    beginPrepareFine:
+      pipeline('beginPrepareFine', 'begin_prepare_fine_transaction'),
+    projectPrepareFineRows:
+      pipeline('projectPrepareFineRows', 'project_prepare_fine_rows'),
+    projectPrepareCoarseRows:
+      pipeline('projectPrepareCoarseRows', 'project_prepare_coarse_rows'),
     prepareFine: pipeline('prepareFine', 'prepare_fine_transaction'),
     applyFine: pipeline('applyFine', 'apply_fine_velocity_correction'),
     applyFineHeat: pipeline('applyFineHeat', 'apply_fine_route_heat'),
@@ -2922,6 +2934,23 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         name: 'seal-fine-correction-alpha',
         pipeline: pipelines.sealFineAlpha,
         bindGroup: fineCorrectionBindGroup('sealFineAlpha')
+      },
+      {
+        name: 'begin-prepare-fine-transaction',
+        pipeline: pipelines.beginPrepareFine,
+        bindGroup: fineCorrectionBindGroup('beginPrepareFine')
+      },
+      {
+        name: 'project-prepare-fine-rows',
+        pipeline: pipelines.projectPrepareFineRows,
+        bindGroup: fineCorrectionBindGroup('projectPrepareFineRows'),
+        indirectBuffer: ownership.arena.fineIndirectBuffer
+      },
+      {
+        name: 'project-prepare-coarse-rows',
+        pipeline: pipelines.projectPrepareCoarseRows,
+        bindGroup: fineCorrectionBindGroup('projectPrepareCoarseRows'),
+        indirectBuffer: ownership.arena.coarseIndirectBuffer
       },
       {
         name: 'prepare-fine-transaction',

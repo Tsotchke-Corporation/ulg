@@ -161,6 +161,7 @@ function productionM3Device({
   fenceFactory = () => Promise.resolve(),
   lost = new Promise(() => {})
 } = {}) {
+  let nextPassOrdinal = 0;
   const device = {
     createdBuffers: [],
     createdPipelines: [],
@@ -208,6 +209,8 @@ function productionM3Device({
         clearBuffer() {},
         copyBufferToBuffer() {},
         beginComputePass() {
+          const passOrdinal = nextPassOrdinal;
+          nextPassOrdinal += 1;
           let pipeline = null;
           return {
             setPipeline(value) { pipeline = value; },
@@ -216,6 +219,7 @@ function productionM3Device({
               device.dispatches.push(dims);
               device.passTrace.push({
                 kind: 'direct',
+                passOrdinal,
                 label: pipeline?.descriptor?.label ?? null,
                 entryPoint:
                   pipeline?.descriptor?.compute?.entryPoint ?? null
@@ -225,6 +229,7 @@ function productionM3Device({
               device.dispatches.push(['indirect', buffer, offset]);
               device.passTrace.push({
                 kind: 'indirect',
+                passOrdinal,
                 label: pipeline?.descriptor?.label ?? null,
                 entryPoint:
                   pipeline?.descriptor?.compute?.entryPoint ?? null
@@ -1414,6 +1419,254 @@ test('M3 production profiling brackets every fine and terminal mechanics queue s
     { reason: new Error('M3 profiling fixture cleanup') }
   ), true);
   assert.equal(await fixture.controller.completionPromise(), true);
+});
+
+const BASE_FINE_CORRECTION_TIMESTAMP_STAGES = Object.freeze([
+  'validate-fine-correction',
+  'validate-routed-coarse-cfl',
+  'seal-fine-correction-alpha',
+  'prepare-fine-transaction',
+  'begin-fine-correction',
+  'commit-routed-reflux-rows',
+  'commit-routed-reflux',
+  'apply-fine-route-heat',
+  'apply-fine-correction',
+  'finalize-fine-correction'
+]);
+
+const PHASE_FINE_CORRECTION_TIMESTAMP_STAGES = Object.freeze([
+  'admit-cross-level-phase-volume',
+  'propose-cross-level-phase-volume',
+  ...BASE_FINE_CORRECTION_TIMESTAMP_STAGES
+]);
+
+const BASE_FINE_CORRECTION_ENTRY_POINTS = Object.freeze([
+  'validate_fine_velocity_correction',
+  'validate_routed_coarse_cfl',
+  'seal_fine_correction_alpha',
+  'prepare_fine_transaction',
+  'begin_fine_velocity_correction',
+  'commit_routed_reflux_rows',
+  'commit_routed_reflux',
+  'apply_fine_route_heat',
+  'apply_fine_velocity_correction',
+  'finalize_fine_velocity_correction'
+]);
+
+const PHASE_FINE_CORRECTION_ENTRY_POINTS = Object.freeze([
+  'admit_cross_level_phase_volume',
+  'propose_cross_level_phase_volume',
+  ...BASE_FINE_CORRECTION_ENTRY_POINTS
+]);
+
+test('M3 dispatch timestamps cover each exact base and phase fine-correction stage', async () => {
+  for (const scenario of [
+    {
+      label: 'base',
+      fineSubstepCount: 3,
+      phaseVolumeInterfaceTransportEnabled: false,
+      expectedStages: BASE_FINE_CORRECTION_TIMESTAMP_STAGES
+    },
+    {
+      label: 'phase',
+      fineSubstepCount: 2,
+      phaseVolumeInterfaceTransportEnabled: true,
+      expectedStages: PHASE_FINE_CORRECTION_TIMESTAMP_STAGES
+    }
+  ]) {
+    const fixture = productionM3Fixture({
+      fineSubstepCount: scenario.fineSubstepCount,
+      phaseVolumeInterfaceTransportEnabled:
+        scenario.phaseVolumeInterfaceTransportEnabled
+    });
+    const calls = [];
+    let nextToken = 0;
+    const gpuTimestampRecorder = {
+      active: true,
+      encoderSpansSupported: true,
+      async measureQueueStage(_descriptor, runStage) {
+        return runStage();
+      },
+      beginEncoderSpan(encoder, descriptor) {
+        if (!String(descriptor?.producerId ?? '').startsWith(
+          'schroeder-parent-workspace:'
+        )) return null;
+        const token = {
+          id: nextToken,
+          encoder,
+          descriptor
+        };
+        nextToken += 1;
+        calls.push({
+          kind: 'begin',
+          encoder,
+          token,
+          stage: descriptor.stage
+        });
+        return token;
+      },
+      endEncoderSpan(encoder, token) {
+        assert.ok(token);
+        calls.push({
+          kind: 'end',
+          encoder,
+          token,
+          stage: token.descriptor.stage
+        });
+        return true;
+      },
+      discardEncoderSpans() {
+        assert.fail('successful M3 timing must not discard encoder spans');
+      }
+    };
+    const { result } = await runProductionM3Fixture(fixture, {
+      overrides: { gpuTimestampRecorder }
+    });
+    const expectedStageSet = new Set(scenario.expectedStages);
+    const fineCorrectionEncoders = new Set(calls.filter(
+      ({ kind, stage }) => kind === 'begin' && expectedStageSet.has(stage)
+    ).map(({ encoder }) => encoder));
+    assert.equal(
+      fineCorrectionEncoders.size,
+      scenario.fineSubstepCount,
+      `${scenario.label} correction encoder count`
+    );
+    // Once an expected correction stage identifies an encoder, assert the
+    // complete recorder stream for that encoder. Filtering by the expected
+    // stage names here would let an accidental extra dispatch evade the exact
+    // inventory contract.
+    const fineCalls = calls.filter(
+      ({ encoder }) => fineCorrectionEncoders.has(encoder)
+    );
+    const fineBegins = fineCalls.filter(({ kind }) => kind === 'begin');
+    const fineEnds = fineCalls.filter(({ kind }) => kind === 'end');
+    const expectedStageSequence = Array.from(
+      { length: scenario.fineSubstepCount },
+      () => scenario.expectedStages
+    ).flat();
+
+    assert.deepEqual(
+      fineBegins.map(({ stage }) => stage),
+      expectedStageSequence,
+      `${scenario.label} begin-stage order`
+    );
+    assert.deepEqual(
+      fineEnds.map(({ stage }) => stage),
+      expectedStageSequence,
+      `${scenario.label} end-stage order`
+    );
+    assert.deepEqual(
+      fineCalls.map(({ kind, stage }) => `${kind}:${stage}`),
+      expectedStageSequence.flatMap((stage) => [
+        `begin:${stage}`,
+        `end:${stage}`
+      ]),
+      `${scenario.label} begin/end pairing`
+    );
+    for (const begin of fineBegins) {
+      const matches = fineEnds.filter(({ token }) => token === begin.token);
+      assert.equal(matches.length, 1, `${scenario.label}:${begin.stage}`);
+      assert.equal(matches[0].encoder, begin.encoder);
+    }
+    for (const stage of scenario.expectedStages) {
+      assert.equal(
+        fineBegins.filter((entry) => entry.stage === stage).length,
+        scenario.fineSubstepCount,
+        `${scenario.label}:${stage}`
+      );
+    }
+
+    assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+      fixture.device,
+      result.pendingPostMechanicsClosure,
+      { reason: new Error(`${scenario.label} timestamp inventory cleanup`) }
+    ), true);
+    assert.equal(await fixture.controller.completionPromise(), true);
+    if (fixture.mechanicsMaterialPhaseUpload) {
+      destroyMlsMpmMechanicsMaterialPhaseUpload(
+        fixture.mechanicsMaterialPhaseUpload
+      );
+    }
+  }
+});
+
+test('M3 profiling-off corrections retain one grouped compute pass per fine substep', async () => {
+  for (const scenario of [
+    {
+      label: 'base',
+      fineSubstepCount: 3,
+      phaseVolumeInterfaceTransportEnabled: false,
+      expectedEntryPoints: BASE_FINE_CORRECTION_ENTRY_POINTS
+    },
+    {
+      label: 'phase',
+      fineSubstepCount: 2,
+      phaseVolumeInterfaceTransportEnabled: true,
+      expectedEntryPoints: PHASE_FINE_CORRECTION_ENTRY_POINTS
+    }
+  ]) {
+    const fixture = productionM3Fixture({
+      fineSubstepCount: scenario.fineSubstepCount,
+      phaseVolumeInterfaceTransportEnabled:
+        scenario.phaseVolumeInterfaceTransportEnabled
+    });
+    const { result } = await runProductionM3Fixture(fixture);
+    const expectedEntryPointSet = new Set(scenario.expectedEntryPoints);
+    const fineCorrectionPassOrdinals = new Set(fixture.device.passTrace.filter(
+      ({ entryPoint }) => expectedEntryPointSet.has(entryPoint)
+    ).map(({ passOrdinal }) => passOrdinal));
+    assert.equal(
+      fineCorrectionPassOrdinals.size,
+      scenario.fineSubstepCount,
+      `${scenario.label} correction pass count`
+    );
+    // Inspect every dispatch in each identified correction pass so unexpected
+    // work cannot be hidden by an expected-entry-point filter.
+    const fineTrace = fixture.device.passTrace.filter(
+      ({ passOrdinal }) => fineCorrectionPassOrdinals.has(passOrdinal)
+    );
+    const expectedEntryPointSequence = Array.from(
+      { length: scenario.fineSubstepCount },
+      () => scenario.expectedEntryPoints
+    ).flat();
+    assert.deepEqual(
+      fineTrace.map(({ entryPoint }) => entryPoint),
+      expectedEntryPointSequence,
+      `${scenario.label} grouped dispatch order`
+    );
+    for (
+      let offset = 0;
+      offset < fineTrace.length;
+      offset += scenario.expectedEntryPoints.length
+    ) {
+      const correction = fineTrace.slice(
+        offset,
+        offset + scenario.expectedEntryPoints.length
+      );
+      assert.equal(
+        new Set(correction.map(({ passOrdinal }) => passOrdinal)).size,
+        1,
+        `${scenario.label} correction ${offset / scenario.expectedEntryPoints.length}`
+      );
+    }
+    assert.equal(
+      new Set(fineTrace.map(({ passOrdinal }) => passOrdinal)).size,
+      scenario.fineSubstepCount,
+      `${scenario.label} grouped pass count`
+    );
+
+    assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+      fixture.device,
+      result.pendingPostMechanicsClosure,
+      { reason: new Error(`${scenario.label} grouped-pass cleanup`) }
+    ), true);
+    assert.equal(await fixture.controller.completionPromise(), true);
+    if (fixture.mechanicsMaterialPhaseUpload) {
+      destroyMlsMpmMechanicsMaterialPhaseUpload(
+        fixture.mechanicsMaterialPhaseUpload
+      );
+    }
+  }
 });
 
 test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid update', async () => {

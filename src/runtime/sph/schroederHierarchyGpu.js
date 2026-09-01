@@ -892,7 +892,35 @@ export function createSchroederTwoLevelResidentStageTiming(
   const summary = summarizeGpuTimestampRecorderQueueStages(
     gpuTimestampRecorder
   );
-  if (summary.stageGpuMs == null && summary.stageGpuStats == null) return null;
+  const rawEncoderTimestampProfile =
+    typeof gpuTimestampRecorder?.encoderTimestampProfile === 'function'
+      ? gpuTimestampRecorder.encoderTimestampProfile()
+      : null;
+  const encoderStageGpuMs = rawEncoderTimestampProfile?.stageGpuMs
+    && typeof rawEncoderTimestampProfile.stageGpuMs === 'object'
+    && !Array.isArray(rawEncoderTimestampProfile.stageGpuMs)
+      ? { ...rawEncoderTimestampProfile.stageGpuMs }
+      : null;
+  const encoderStageGpuStats = rawEncoderTimestampProfile?.stageGpuStats
+    && typeof rawEncoderTimestampProfile.stageGpuStats === 'object'
+    && !Array.isArray(rawEncoderTimestampProfile.stageGpuStats)
+      ? Object.fromEntries(Object.entries(
+          rawEncoderTimestampProfile.stageGpuStats
+        ).map(([stage, stats]) => [stage, { ...stats }]))
+      : null;
+  const gpuTimestampProfile = rawEncoderTimestampProfile
+    && typeof rawEncoderTimestampProfile === 'object'
+      ? {
+          ...rawEncoderTimestampProfile,
+          stageGpuMs: encoderStageGpuMs,
+          stageGpuStats: encoderStageGpuStats
+        }
+      : null;
+  if (
+    summary.stageGpuMs == null
+    && summary.stageGpuStats == null
+    && gpuTimestampProfile == null
+  ) return null;
   return {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
     totalMs: null,
@@ -901,8 +929,8 @@ export function createSchroederTwoLevelResidentStageTiming(
     // intervals. They deliberately remain separate from timestamp-query pass
     // spans (`stageGpuMs`) because the former serialize the queue and include
     // submit latency.
-    stageGpuMs: null,
-    gpuTimestampProfile: null,
+    stageGpuMs: encoderStageGpuMs,
+    gpuTimestampProfile,
     queueStageGpuMs: summary.stageGpuMs == null
       ? null
       : { ...summary.stageGpuMs },

@@ -5424,6 +5424,8 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     ? createSphGpuQueueStageRecorder({
         device,
         enabled: true,
+        encoderTimestampSpans: true,
+        encoderSpanProducerPrefix: 'schroeder-parent-workspace:',
         label: 'ulg-worker-two-level-queue-stage-recorder'
       })
     : null;
@@ -5551,6 +5553,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       successorLeaseReleasePromise.catch(() => {});
       lane.successorLeaseReleasePromise = successorLeaseReleasePromise;
     }
+    twoLevelGpuQueueStageRecorder?.destroy?.();
   }
   const residentStep = kernelResult?.residentStep || null;
   if (!residentStep) {

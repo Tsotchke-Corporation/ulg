@@ -4458,6 +4458,28 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
 
 const directRuntimeCache = new WeakMap();
 const DIRECT_RUNTIME_CACHE_LIMIT = 4;
+const directRuntimeTimestampRecorderIds = new WeakMap();
+let nextDirectRuntimeTimestampRecorderId = 1;
+
+function directRuntimeTimestampRecorderKey(gpuTimestampRecorder) {
+  if (!gpuTimestampEncoderSpansSupported(gpuTimestampRecorder)) {
+    return 'production';
+  }
+  if (
+    (typeof gpuTimestampRecorder !== 'object'
+      && typeof gpuTimestampRecorder !== 'function')
+    || gpuTimestampRecorder == null
+  ) {
+    return 'timestamp-capable-unidentified';
+  }
+  let id = directRuntimeTimestampRecorderIds.get(gpuTimestampRecorder);
+  if (id == null) {
+    id = nextDirectRuntimeTimestampRecorderId;
+    nextDirectRuntimeTimestampRecorderId += 1;
+    directRuntimeTimestampRecorderIds.set(gpuTimestampRecorder, id);
+  }
+  return `timestamp-recorder-${id}`;
+}
 
 export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   parentFieldCapacity,
@@ -4507,9 +4529,7 @@ export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     fineCapacity,
     resolvedArenaCount,
     externalRefluxLedgerRequired ? 'external' : 'local',
-    gpuTimestampEncoderSpansSupported(gpuTimestampRecorder)
-      ? 'timestamp-capable'
-      : 'production'
+    directRuntimeTimestampRecorderKey(gpuTimestampRecorder)
   ].join(':');
   let runtime = byCapacity.get(key);
   if (runtime?.status !== 'schroeder-spatial-parent-field-mechanics-workspace-gpu-runtime-ready') {

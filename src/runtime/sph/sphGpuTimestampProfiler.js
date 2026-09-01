@@ -21,6 +21,7 @@
 
 const TIMESTAMP_QUERY_FEATURE = 'timestamp-query';
 const NS_PER_MS = 1e6;
+const TIMESTAMP_QUERY_RESOLVE_ALIGNMENT = 256;
 
 // Same pattern as the other GPU kernels here: the WebGPU globals do not exist
 // under node, so the numeric fallbacks keep this module importable in tests.
@@ -321,11 +322,11 @@ export const SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES = Object.freeze([
  * "how long did the device take", as opposed to the host enqueue time that
  * `stageMs` records and that made a 1.1 ms dense field build look plausible.
  *
- * Encoder spans are deliberately inert. Current WebGPU has no
- * `encoder.writeTimestamp`; timestamps can only be written by `timestampWrites`
- * on a pass descriptor. `beginEncoderSpan` therefore returns null rather than
- * pretending, and every consumer already handles a null span. Pass-level timing
- * comes from `createSphGpuTimestampProfiler` itself.
+ * Encoder spans stay inert by default. An explicit diagnostic request can
+ * enable portable timestamp marker passes around the existing commands, then
+ * resolve each pair on that same production encoder. This changes pass
+ * topology and is therefore labeled instrumented/non-representative; it is
+ * useful for relative dispatch attribution, never as a frame-rate result.
  *
  * Fences serialise the queue, so this is a diagnostic mode and must stay off by
  * default.
@@ -333,45 +334,404 @@ export const SPH_FUSED_SEQUENCE_UNATTRIBUTED_STAGES = Object.freeze([
 export function createSphGpuQueueStageRecorder({
   device = null,
   enabled = true,
+  encoderTimestampSpans = false,
+  encoderSpanCapacity = 256,
+  encoderSpanProducerPrefix = null,
   label = 'ulg-sph-gpu-queue-stage-recorder'
 } = {}) {
   const usable = Boolean(enabled === true && device?.queue?.onSubmittedWorkDone);
-  /** @type {{stage: string, gpuMs: number, producerId: string|null}[]} */
-  const spans = [];
+  const timestampRequested = Boolean(
+    enabled === true
+    && encoderTimestampSpans === true
+  );
+  const timestampSupported = deviceSupportsTimestampQuery(device);
+  const resolvedEncoderSpanCapacity = Math.max(
+    1,
+    Math.floor(Number(encoderSpanCapacity) || 256)
+  );
+  const resolvedEncoderSpanProducerPrefix =
+    encoderSpanProducerPrefix == null
+      ? null
+      : String(encoderSpanProducerPrefix);
+  const queryCapacity = resolvedEncoderSpanCapacity * 2;
+  const timestampResolveBufferByteLength =
+    resolvedEncoderSpanCapacity * TIMESTAMP_QUERY_RESOLVE_ALIGNMENT;
+  const timestampReadBufferByteLength =
+    queryCapacity * BigUint64Array.BYTES_PER_ELEMENT;
+  let timestampQuerySet = null;
+  let timestampResolveBuffer = null;
+  let timestampReadBuffer = null;
+  let encoderSpansUsable = Boolean(
+    usable
+    && timestampRequested
+    && timestampSupported
+    && typeof device?.createQuerySet === 'function'
+    && typeof device?.createBuffer === 'function'
+  );
+  let encoderSpanFailureReason = null;
+  if (encoderSpansUsable) {
+    try {
+      timestampQuerySet = device.createQuerySet({
+        label: `${label}-encoder-span-query-set`,
+        type: 'timestamp',
+        count: queryCapacity
+      });
+      timestampResolveBuffer = device.createBuffer({
+        label: `${label}-encoder-span-resolve`,
+        size: timestampResolveBufferByteLength,
+        usage: GPU_BUFFER_USAGE.QUERY_RESOLVE | GPU_BUFFER_USAGE.COPY_SRC
+      });
+      timestampReadBuffer = device.createBuffer({
+        label: `${label}-encoder-span-read`,
+        size: timestampReadBufferByteLength,
+        usage: GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.MAP_READ
+      });
+    } catch (error) {
+      encoderSpansUsable = false;
+      encoderSpanFailureReason = String(error?.message || error);
+      timestampQuerySet?.destroy?.();
+      timestampResolveBuffer?.destroy?.();
+      timestampReadBuffer?.destroy?.();
+      timestampQuerySet = null;
+      timestampResolveBuffer = null;
+      timestampReadBuffer = null;
+    }
+  }
 
-  return {
+  /** @type {{stage: string, gpuMs: number, producerId: string|null}[]} */
+  const queueSpans = [];
+  /** @type {{stage: string, gpuMs: number|null, producerId: string|null, spanClass: string|null}[]} */
+  const encoderSpans = [];
+  const pendingEncoderSpans = [];
+  let nextEncoderSpanSlot = 0;
+  let encoderSpanOverflowCount = 0;
+  let encoderSpanDiscardedCount = 0;
+  let encoderSpanReadFailureCount = 0;
+  let encoderSpanReadInFlight = null;
+  let destroyed = false;
+
+  const settlePendingEncoderSpans = () => {
+    while (
+      pendingEncoderSpans.length > 0
+      && (pendingEncoderSpans[0].harvested || pendingEncoderSpans[0].discarded)
+    ) {
+      pendingEncoderSpans.shift();
+    }
+    if (pendingEncoderSpans.length === 0) nextEncoderSpanSlot = 0;
+  };
+
+  const harvestEncoderSpans = async () => {
+    if (!encoderSpansUsable || destroyed) return false;
+    if (encoderSpanReadInFlight) {
+      await encoderSpanReadInFlight;
+      return harvestEncoderSpans();
+    }
+    const batch = pendingEncoderSpans.filter((span) => (
+      span.closed === true
+      && span.discarded !== true
+      && span.harvested !== true
+    ));
+    if (batch.length === 0) {
+      settlePendingEncoderSpans();
+      return false;
+    }
+    encoderSpanReadInFlight = (async () => {
+      let mapped = false;
+      try {
+        await timestampReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+        mapped = true;
+        const raw = new BigUint64Array(
+          timestampReadBuffer.getMappedRange().slice(0)
+        );
+        timestampReadBuffer.unmap();
+        mapped = false;
+        for (const span of batch) {
+          const begin = raw[span.beginIndex];
+          const end = raw[span.endIndex];
+          const gpuMs = begin != null && end != null && end > begin
+            ? Number(end - begin) / NS_PER_MS
+            : null;
+          encoderSpans.push({
+            stage: span.stage,
+            producerId: span.producerId,
+            spanClass: span.spanClass,
+            gpuMs
+          });
+          span.harvested = true;
+        }
+      } catch (error) {
+        if (mapped) {
+          try {
+            timestampReadBuffer.unmap();
+          } catch {
+            // Preserve the diagnostic read failure below.
+          }
+        }
+        encoderSpanReadFailureCount += 1;
+        encoderSpanFailureReason = String(error?.message || error);
+        for (const span of batch) {
+          encoderSpans.push({
+            stage: span.stage,
+            producerId: span.producerId,
+            spanClass: span.spanClass,
+            gpuMs: null
+          });
+          span.harvested = true;
+        }
+      } finally {
+        settlePendingEncoderSpans();
+      }
+    })();
+    try {
+      await encoderSpanReadInFlight;
+      return true;
+    } finally {
+      encoderSpanReadInFlight = null;
+    }
+  };
+
+  const encoderStageSummary = () => {
+    if (encoderSpans.length === 0) {
+      return { stageGpuMs: null, stageGpuStats: null };
+    }
+    const stageGpuMs = {};
+    const stageGpuStats = {};
+    for (const span of encoderSpans) {
+      const entry = stageGpuStats[span.stage] ?? (stageGpuStats[span.stage] = {
+        totalMs: 0,
+        count: 0,
+        invalidCount: 0,
+        maxMs: 0,
+        meanMs: null
+      });
+      if (!Number.isFinite(span.gpuMs)) {
+        entry.invalidCount += 1;
+        if (!(span.stage in stageGpuMs)) stageGpuMs[span.stage] = null;
+        continue;
+      }
+      entry.totalMs += span.gpuMs;
+      entry.count += 1;
+      entry.maxMs = Math.max(entry.maxMs, span.gpuMs);
+      entry.meanMs = entry.totalMs / entry.count;
+      stageGpuMs[span.stage] = entry.totalMs;
+    }
+    return { stageGpuMs, stageGpuStats };
+  };
+
+  const encoderTimestampProfile = () => {
+    const { stageGpuMs, stageGpuStats } = encoderStageSummary();
+    const validPassCount = encoderSpans.reduce(
+      (count, span) => count + (Number.isFinite(span.gpuMs) ? 1 : 0),
+      0
+    );
+    const pendingSpanCount = pendingEncoderSpans.reduce(
+      (count, span) => count + (
+        span.harvested !== true && span.discarded !== true ? 1 : 0
+      ),
+      0
+    );
+    const status = destroyed
+      ? 'gpu-timestamp-encoder-stage-recorder-destroyed'
+      : !timestampRequested
+        ? 'gpu-timestamp-encoder-stage-profiling-not-requested'
+        : !timestampSupported
+          ? 'gpu-timestamp-encoder-stage-profiling-unsupported-by-device'
+          : !encoderSpansUsable
+            ? 'gpu-timestamp-encoder-stage-profiling-unavailable'
+            : encoderSpanReadFailureCount > 0
+              ? 'gpu-timestamp-encoder-stage-summary-read-failed'
+              : encoderSpanDiscardedCount > 0
+                ? 'gpu-timestamp-encoder-stage-summary-discarded'
+                : encoderSpanOverflowCount > 0
+                  ? 'gpu-timestamp-encoder-stage-summary-overflow'
+                  : pendingSpanCount > 0
+                    ? 'gpu-timestamp-encoder-stage-summary-pending'
+                    : encoderSpans.length === 0
+                      ? 'gpu-timestamp-encoder-stage-summary-no-spans'
+                      : validPassCount !== encoderSpans.length
+                        ? 'gpu-timestamp-encoder-stage-summary-invalid'
+                        : 'gpu-timestamp-encoder-stage-summary-ready';
+    return {
+      schema: 'peercompute.ulg.sph-gpu-encoder-stage-profile.v0',
+      status,
+      measurementMode: 'instrumented-dispatch-granular-nonrepresentative',
+      timestampUnit: 'milliseconds',
+      timestampQueryRequested: timestampRequested,
+      timestampQuerySupported: timestampSupported,
+      encoderSpansSupported: encoderSpansUsable && !destroyed,
+      encoderSpanCapacity: resolvedEncoderSpanCapacity,
+      encoderSpanProducerPrefix: resolvedEncoderSpanProducerPrefix,
+      profiledPassCount: encoderSpans.length,
+      validPassCount,
+      invalidPassCount: encoderSpans.length - validPassCount,
+      pendingSpanCount,
+      discardedSpanCount: encoderSpanDiscardedCount,
+      overflowCount: encoderSpanOverflowCount,
+      readFailureCount: encoderSpanReadFailureCount,
+      reason: encoderSpanFailureReason,
+      stageGpuMs,
+      stageGpuStats
+    };
+  };
+
+  const recorderCapabilities = {};
+  Object.defineProperties(recorderCapabilities, {
+    queueStageMeasurement: {
+      enumerable: true,
+      value: true
+    },
+    queueStageSummary: {
+      enumerable: true,
+      value: true
+    },
+    encoderSpans: {
+      enumerable: true,
+      get() { return encoderSpansUsable && !destroyed; }
+    },
+    encoderStageSummary: {
+      enumerable: true,
+      get() { return encoderSpansUsable && !destroyed; }
+    }
+  });
+  Object.freeze(recorderCapabilities);
+
+  const recorder = {
     schema: 'peercompute.ulg.sph-gpu-queue-stage-recorder.v0',
     label,
-    recorderKind: 'queue-fence-stage-summary',
-    active: usable,
-    encoderSpansSupported: false,
-    capabilities: Object.freeze({
-      queueStageMeasurement: true,
-      queueStageSummary: true,
-      encoderSpans: false
-    }),
+    get recorderKind() {
+      return encoderSpansUsable && !destroyed
+        ? 'queue-fence-and-timestamp-query-stage-summary'
+        : 'queue-fence-stage-summary';
+    },
+    get active() { return usable && !destroyed; },
+    capabilities: recorderCapabilities,
     async measureQueueStage(descriptor, runStage) {
-      if (!usable) return runStage();
+      if (!usable || destroyed) return runStage();
       // Fence first so the measurement excludes work already in flight.
       await device.queue.onSubmittedWorkDone();
       const startedMs = (globalThis.performance ?? Date).now();
       const result = await runStage();
       await device.queue.onSubmittedWorkDone();
-      const gpuMs = Math.max(0, ((globalThis.performance ?? Date).now()) - startedMs);
-      spans.push({
+      const gpuMs = Math.max(
+        0,
+        ((globalThis.performance ?? Date).now()) - startedMs
+      );
+      await harvestEncoderSpans();
+      queueSpans.push({
         stage: String(descriptor?.stage ?? 'unknown'),
         producerId: descriptor?.producerId ?? null,
         gpuMs
       });
       return result;
     },
-    // Inert by necessity, not by choice; see the note above.
-    beginEncoderSpan() { return null; },
-    endEncoderSpan() {},
-    discardEncoderSpans() {},
+    beginEncoderSpan(encoder, descriptor = {}) {
+      if (!encoderSpansUsable || destroyed) return null;
+      if (
+        resolvedEncoderSpanProducerPrefix != null
+        && !String(descriptor?.producerId ?? '').startsWith(
+          resolvedEncoderSpanProducerPrefix
+        )
+      ) return null;
+      if (nextEncoderSpanSlot >= resolvedEncoderSpanCapacity) {
+        encoderSpanOverflowCount += 1;
+        return null;
+      }
+      const beginIndex = nextEncoderSpanSlot * 2;
+      const endIndex = beginIndex + 1;
+      try {
+        encodeSphGpuTimestampMarkerPass(encoder, {
+          querySet: timestampQuerySet,
+          queryIndex: beginIndex,
+          boundary: 'start',
+          label: `${label}-${String(descriptor?.stage ?? 'unknown')}-start`
+        });
+      } catch (error) {
+        encoderSpansUsable = false;
+        encoderSpanFailureReason = String(error?.message || error);
+        return null;
+      }
+      nextEncoderSpanSlot += 1;
+      const token = {
+        encoder,
+        beginIndex,
+        endIndex,
+        stage: String(descriptor?.stage ?? 'unknown'),
+        producerId: descriptor?.producerId ?? null,
+        spanClass: descriptor?.spanClass ?? null,
+        closed: false,
+        discarded: false,
+        harvested: false
+      };
+      pendingEncoderSpans.push(token);
+      return token;
+    },
+    endEncoderSpan(encoder, token) {
+      if (token == null) return false;
+      if (
+        !encoderSpansUsable
+        || destroyed
+        || token.encoder !== encoder
+        || token.closed === true
+        || token.discarded === true
+      ) return false;
+      try {
+        encodeSphGpuTimestampMarkerPass(encoder, {
+          querySet: timestampQuerySet,
+          queryIndex: token.endIndex,
+          boundary: 'end',
+          label: `${label}-${token.stage}-end`
+        });
+        const slot = token.beginIndex / 2;
+        const resolveByteOffset = slot * TIMESTAMP_QUERY_RESOLVE_ALIGNMENT;
+        const readByteOffset =
+          token.beginIndex * BigUint64Array.BYTES_PER_ELEMENT;
+        encoder.resolveQuerySet(
+          timestampQuerySet,
+          token.beginIndex,
+          2,
+          timestampResolveBuffer,
+          resolveByteOffset
+        );
+        encoder.copyBufferToBuffer(
+          timestampResolveBuffer,
+          resolveByteOffset,
+          timestampReadBuffer,
+          readByteOffset,
+          2 * BigUint64Array.BYTES_PER_ELEMENT
+        );
+        token.closed = true;
+        return true;
+      } catch (error) {
+        token.discarded = true;
+        encoderSpanDiscardedCount += 1;
+        encoderSpansUsable = false;
+        encoderSpanFailureReason = String(error?.message || error);
+        return false;
+      }
+    },
+    discardEncoderSpans(encoder) {
+      let discardedCount = 0;
+      for (const span of pendingEncoderSpans) {
+        if (
+          span.encoder === encoder
+          && span.harvested !== true
+          && span.discarded !== true
+        ) {
+          span.discarded = true;
+          encoderSpanDiscardedCount += 1;
+          discardedCount += 1;
+        }
+      }
+      // Do not settle or reuse these slots here. The caller may be reporting
+      // an encoder whose queue submission is ambiguous, so reusing its query
+      // indices before a later successful post-fence harvest could alias live
+      // device writes. Harvest (or destroy) is the only safe release point.
+      return discardedCount;
+    },
+    encoderTimestampProfile,
     stageGpuMs() {
       const totals = {};
-      for (const span of spans) {
+      for (const span of queueSpans) {
         totals[span.stage] = (totals[span.stage] ?? 0) + span.gpuMs;
       }
       return totals;
@@ -382,7 +742,7 @@ export function createSphGpuQueueStageRecorder({
     // reader can take the mean instead of mistaking cadence for cost.
     stageGpuStats() {
       const stats = {};
-      for (const span of spans) {
+      for (const span of queueSpans) {
         const entry = stats[span.stage] ?? (stats[span.stage] = {
           totalMs: 0,
           count: 0,
@@ -396,7 +756,39 @@ export function createSphGpuQueueStageRecorder({
       }
       return stats;
     },
-    spanCount() { return spans.length; },
-    reset() { spans.length = 0; }
+    spanCount() { return queueSpans.length; },
+    encoderSpanCount() { return encoderSpans.length; },
+    reset() {
+      if (pendingEncoderSpans.length > 0 || encoderSpanReadInFlight) {
+        return false;
+      }
+      queueSpans.length = 0;
+      encoderSpans.length = 0;
+      encoderSpanOverflowCount = 0;
+      encoderSpanDiscardedCount = 0;
+      encoderSpanReadFailureCount = 0;
+      if (encoderSpansUsable) {
+        encoderSpanFailureReason = null;
+      }
+      return true;
+    },
+    destroy() {
+      if (destroyed) return false;
+      destroyed = true;
+      timestampQuerySet?.destroy?.();
+      timestampResolveBuffer?.destroy?.();
+      timestampReadBuffer?.destroy?.();
+      timestampQuerySet = null;
+      timestampResolveBuffer = null;
+      timestampReadBuffer = null;
+      pendingEncoderSpans.length = 0;
+      nextEncoderSpanSlot = 0;
+      return true;
+    }
   };
+  Object.defineProperty(recorder, 'encoderSpansSupported', {
+    enumerable: true,
+    get() { return encoderSpansUsable && !destroyed; }
+  });
+  return recorder;
 }

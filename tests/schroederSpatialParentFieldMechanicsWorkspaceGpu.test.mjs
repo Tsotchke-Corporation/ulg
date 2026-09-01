@@ -839,6 +839,46 @@ test('direct external-ledger cache evicts inactive capacity variants by retained
   assert.equal(second.destroy(), true);
 });
 
+test('timestamp-capable direct runtimes are cached by exact recorder identity', () => {
+  const device = fakeDevice();
+  const recorderA = {
+    active: true,
+    encoderSpansSupported: true,
+    beginEncoderSpan() {},
+    endEncoderSpan() {}
+  };
+  const recorderB = {
+    active: true,
+    encoderSpansSupported: true,
+    beginEncoderSpan() {},
+    endEncoderSpan() {}
+  };
+  const options = {
+    parentFieldCapacity: 8,
+    fineFieldCapacity: 8,
+    arenaCount: 1,
+    externalRefluxLedgerRequired: true
+  };
+  const first = directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+    ...options,
+    gpuTimestampRecorder: recorderA
+  });
+  const sameRecorder =
+    directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+      ...options,
+      gpuTimestampRecorder: recorderA
+    });
+  const second = directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+    ...options,
+    gpuTimestampRecorder: recorderB
+  });
+
+  assert.equal(sameRecorder, first);
+  assert.notEqual(second, first);
+  assert.equal(first.destroy(), true);
+  assert.equal(second.destroy(), true);
+});
+
 test('queue-only timing preserves grouped workspace topology while encoder spans split it', async () => {
   const encodePredictorsWithRecorder = async (gpuTimestampRecorder) => {
     const device = fakeDevice();

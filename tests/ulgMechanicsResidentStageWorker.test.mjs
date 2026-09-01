@@ -3931,6 +3931,11 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
         async schroederSameLevelMechanicsRunner(args) {
           observedStepZero.args = args;
           assert.equal(args.gpuTimestampRecorder?.active, true);
+          assert.equal(
+            args.gpuTimestampRecorder.encoderTimestampProfile()
+              .timestampQueryRequested,
+            true
+          );
           await args.gpuTimestampRecorder.measureQueueStage({
             producerId: 'test-two-level:fine-0-p2g',
             stage: 'fine-0-p2g'
@@ -4032,6 +4037,10 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
   assert.equal(
     stepZeroArgs.gpuTimestampRecorder.schema,
     'peercompute.ulg.sph-gpu-queue-stage-recorder.v0'
+  );
+  assert.equal(
+    stepZeroArgs.gpuTimestampRecorder.encoderTimestampProfile().status,
+    'gpu-timestamp-encoder-stage-recorder-destroyed'
   );
   assert.ok(
     mechanics.value.hierarchyStageSummary.residentStageTiming

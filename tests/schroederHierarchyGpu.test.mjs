@@ -1786,6 +1786,52 @@ test('authoritative two-level timing publishes clone-safe queue-stage evidence w
   );
 });
 
+test('authoritative two-level timing publishes exact encoder-stage timestamp attribution', () => {
+  const rawStageGpuMs = {
+    'prepare-fine-transaction': 12.5,
+    'apply-fine-correction': 0.75
+  };
+  const rawStageGpuStats = {
+    'prepare-fine-transaction': {
+      totalMs: 12.5,
+      count: 1,
+      invalidCount: 0,
+      maxMs: 12.5,
+      meanMs: 12.5
+    }
+  };
+  const rawProfile = {
+    schema: 'peercompute.ulg.sph-gpu-encoder-stage-profile.v0',
+    status: 'gpu-timestamp-encoder-stage-summary-ready',
+    measurementMode: 'instrumented-dispatch-granular-nonrepresentative',
+    profiledPassCount: 2,
+    stageGpuMs: rawStageGpuMs,
+    stageGpuStats: rawStageGpuStats
+  };
+  const timing = createSchroederTwoLevelResidentStageTiming({
+    active: true,
+    encoderSpansSupported: true,
+    beginEncoderSpan() {},
+    endEncoderSpan() {},
+    encoderTimestampProfile: () => rawProfile
+  });
+
+  assert.deepEqual(timing.stageGpuMs, rawStageGpuMs);
+  assert.notEqual(timing.stageGpuMs, rawStageGpuMs);
+  assert.equal(timing.gpuTimestampProfile.stageGpuMs, timing.stageGpuMs);
+  assert.deepEqual(
+    timing.gpuTimestampProfile.stageGpuStats,
+    rawStageGpuStats
+  );
+  assert.notEqual(
+    timing.gpuTimestampProfile.stageGpuStats['prepare-fine-transaction'],
+    rawStageGpuStats['prepare-fine-transaction']
+  );
+  assert.equal(timing.queueStageGpuMs, null);
+  assert.equal(timing.queueStageGpuStats, null);
+  structuredClone(timing);
+});
+
 test('Schroeder level estimates model water-to-steam scale migration without 700x particles', () => {
   assert.equal(estimateSchroederLevelDeltaForVolumeRatio(700), 3);
   assert.equal(schroederGridSpacingForLevel({

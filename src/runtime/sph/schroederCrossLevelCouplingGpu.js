@@ -3287,6 +3287,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             execution: registerWorkspace(runtime, execution)
           };
         } catch (error) {
+          gpuTimestampRecorder?.discardEncoderSpans?.(encoder);
           if (execution && runtime.ownsExecution?.(execution)) {
             try {
               if (runtime.isExecutionSubmitted?.(execution)) {
@@ -3322,24 +3323,31 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       schroederSpatialEpochTransaction = null
     }) => {
       const encoder = device.createCommandEncoder();
-      const correctedGridUpdate = runtime.encodeFineCorrection(encoder, execution, {
-        fineGridUpdate,
-        deltaScale: 1,
-        maxCorrectionMPerS: 0,
-        fusedFineSubstepTransaction: fineTransaction,
-        schroederSpatialEpochTransaction,
-        mechanicsMaterialTable,
-        mechanicsMaterialPhaseUpload,
-        ambientPressurePa,
-        phaseVolumePressureScale,
-        phaseVolumeDragScale,
-        phaseVolumeMaxImpulseFraction,
-        phaseVolumeInterfaceTransportRequired:
-          phaseVolumeInterfaceTransportEnabled
-      });
+      let correctedGridUpdate;
+      try {
+        correctedGridUpdate = runtime.encodeFineCorrection(encoder, execution, {
+          fineGridUpdate,
+          deltaScale: 1,
+          maxCorrectionMPerS: 0,
+          fusedFineSubstepTransaction: fineTransaction,
+          schroederSpatialEpochTransaction,
+          mechanicsMaterialTable,
+          mechanicsMaterialPhaseUpload,
+          ambientPressurePa,
+          phaseVolumePressureScale,
+          phaseVolumeDragScale,
+          phaseVolumeMaxImpulseFraction,
+          phaseVolumeInterfaceTransportRequired:
+            phaseVolumeInterfaceTransportEnabled
+        });
+      } catch (error) {
+        gpuTimestampRecorder?.discardEncoderSpans?.(encoder);
+        throw error;
+      }
       try {
         device.queue.submit([encoder.finish()]);
       } catch (error) {
+        gpuTimestampRecorder?.discardEncoderSpans?.(encoder);
         if (
           execution?.fusedFineSubstepTransaction != null
           && typeof runtime.resetUnsubmittedFineCorrection === 'function'
@@ -3403,6 +3411,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             artifact
           };
         } catch (error) {
+          gpuTimestampRecorder?.discardEncoderSpans?.(encoder);
           if (execution && runtime.ownsExecution?.(execution)) {
             try {
               if (runtime.isExecutionSubmitted?.(execution)) {

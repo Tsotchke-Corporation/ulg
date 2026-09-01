@@ -6302,6 +6302,13 @@ test('ULG short resident schedule crosses epoch arena capacity behind one termin
 
 test('ULG resident schedule bounds queued work with non-authoritative 16-step drain checkpoints', async () => {
   const fixture = workerScheduleFixture({ laneSuffix: 'bounded-queue-drain' });
+  const fenceStartRunnerCounts = [];
+  const originalFence =
+    fixture.device.queue.onSubmittedWorkDone.bind(fixture.device.queue);
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    fenceStartRunnerCounts.push(fixture.runnerCalls.length);
+    return originalFence(...args);
+  };
   const stepCount = ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS + 1;
   const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
     schedulePayload(
@@ -6345,14 +6352,110 @@ test('ULG resident schedule bounds queued work with non-authoritative 16-step dr
       + 'satisfied checkpoint (awaited at the NEXT boundary), plus the '
       + 'terminal authority fence'
   );
+  assert.deepEqual(
+    fenceStartRunnerCounts,
+    [0, ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS, stepCount],
+    'the first drain fence starts after the authenticated step-1 epoch but '
+      + 'before mechanics, the next starts after step 16, and the terminal '
+      + 'authority fence starts only after step 17'
+  );
   assertNoWorkerGpuBuffers(result, 'boundedQueueDrainScheduleResult');
   structuredClone(result);
+});
+
+test('ULG canonical schedule at the drain interval has no unused lag seed', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'exact-drain-interval' });
+  const fenceStartRunnerCounts = [];
+  const originalFence =
+    fixture.device.queue.onSubmittedWorkDone.bind(fixture.device.queue);
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    fenceStartRunnerCounts.push(fixture.runnerCalls.length);
+    return originalFence(...args);
+  };
+  const stepCount = ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS;
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(
+        fixture.device,
+        fixture.buffers,
+        fixture.stageOptions
+      ),
+      { stepCount, scheduleId: 'ulg:test:exact-drain-interval' },
+      {
+        laneId: 'ulg:test:exact-drain-interval-lane',
+        stateKey: 'ulg:test:exact-drain-interval-state'
+      }
+    )
+  );
+
+  assert.equal(result.completedStepCount, stepCount);
+  assert.equal(result.queueDrainCheckpointCount, 0);
+  assert.deepEqual(result.queueDrainCheckpoints, []);
+  assert.equal(result.gpuFence.terminalScheduleFence, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.deepEqual(
+    fenceStartRunnerCounts,
+    [stepCount],
+    'an exact-interval schedule never reaches an intermediate boundary, so '
+      + 'only its authoritative terminal fence may start'
+  );
+});
+
+test('ULG canonical lagged drain seeds early and advances at prior boundaries for 33/64 steps', async () => {
+  const interval = ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS;
+  for (const stepCount of [33, 64]) {
+    const fixture = workerScheduleFixture({
+      laneSuffix: `lagged-drain-order-${stepCount}`
+    });
+    const fenceStartRunnerCounts = [];
+    const originalFence =
+      fixture.device.queue.onSubmittedWorkDone.bind(fixture.device.queue);
+    fixture.device.queue.onSubmittedWorkDone = (...args) => {
+      fenceStartRunnerCounts.push(fixture.runnerCalls.length);
+      return originalFence(...args);
+    };
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount,
+          scheduleId: `ulg:test:lagged-drain-order-${stepCount}`
+        },
+        {
+          laneId: `ulg:test:lagged-drain-order-${stepCount}-lane`,
+          stateKey: `ulg:test:lagged-drain-order-${stepCount}-state`
+        }
+      )
+    );
+    const checkpointBoundaries = [];
+    for (let boundary = interval; boundary < stepCount; boundary += interval) {
+      checkpointBoundaries.push(boundary);
+    }
+    assert.equal(result.completedStepCount, stepCount);
+    assert.deepEqual(
+      result.queueDrainCheckpoints.map((entry) => entry.completedStepCount),
+      checkpointBoundaries
+    );
+    assert.deepEqual(
+      fenceStartRunnerCounts,
+      [0, ...checkpointBoundaries, stepCount],
+      `the ${stepCount}-step schedule must seed before mechanics, advance one `
+        + 'lagged fence after every prior boundary, and finish with the '
+        + 'terminal authority fence'
+    );
+  }
 });
 
 test('ULG resident schedule fails closed and poisons the lane when a queue-drain checkpoint rejects', async () => {
   const fixture = workerScheduleFixture({ laneSuffix: 'queue-drain-fail' });
   let submittedWorkDoneCount = 0;
+  const fenceStartRunnerCounts = [];
   fixture.device.queue.onSubmittedWorkDone = () => {
+    fenceStartRunnerCounts.push(fixture.runnerCalls.length);
     submittedWorkDoneCount += 1;
     return Promise.reject(new Error('injected queue-drain checkpoint rejection'));
   };
@@ -6408,6 +6511,12 @@ test('ULG resident schedule fails closed and poisons the lane when a queue-drain
     submittedWorkDoneCount,
     1,
     'a failed checkpoint must not trigger a second blind terminal queue call'
+  );
+  assert.deepEqual(
+    fenceStartRunnerCounts,
+    [0],
+    'the rejected fence was seeded before step-1 mechanics and its rejection '
+      + 'is consumed only at the step-16 checkpoint'
   );
   await assert.rejects(
     runUlgMechanicsResidentStageWorkerSchedulePayload(
@@ -6955,6 +7064,56 @@ test('ULG resident schedule rejects a non-WebGPU stage before terminal authority
       );
       return true;
     }
+  );
+});
+
+test('ULG long canonical cancellation keeps its early drain seed non-authoritative', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'long-cancel-seed' });
+  const laneOptions = {
+    laneId: 'ulg:test:long-cancel-seed-lane',
+    stateKey: 'ulg:test:long-cancel-seed-state'
+  };
+  const scheduleId = 'ulg:test:long-cancel-seed';
+  const requestedStepCount =
+    ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS + 1;
+  const fenceStartRunnerCounts = [];
+  const originalFence =
+    fixture.device.queue.onSubmittedWorkDone.bind(fixture.device.queue);
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    fenceStartRunnerCounts.push(fixture.runnerCalls.length);
+    return originalFence(...args);
+  };
+  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+    schedulePayload(
+      workerSchroederStageContext(
+        fixture.device,
+        fixture.buffers,
+        fixture.stageOptions
+      ),
+      { stepCount: requestedStepCount, scheduleId },
+      laneOptions
+    ),
+    {
+      postProgress: (progress) => {
+        if (progress.stepOrdinal === 1) {
+          cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
+        }
+      }
+    }
+  );
+  assert.equal(result.requestedStepCount, requestedStepCount);
+  assert.equal(result.completedStepCount, 1);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.queueDrainCheckpointCount, 0);
+  assert.deepEqual(result.queueDrainCheckpoints, []);
+  assert.equal(result.gpuFence.terminalScheduleFence, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.gpuFence.completedStepCount, 1);
+  assert.deepEqual(
+    fenceStartRunnerCounts,
+    [0, 1],
+    'the early lag seed never substitutes for the terminal authority fence '
+      + 'when a long requested schedule cancels before its first checkpoint'
   );
 });
 

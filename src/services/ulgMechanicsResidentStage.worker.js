@@ -8921,26 +8921,29 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // step start is main-thread turnaround (commit, verify, re-request).
     let scheduleFirstStepStartedAtMs = null;
     let scheduleLastStepEndedAtMs = null;
-    // Lagged-drain state: the queue fence started at the previous drain
-    // checkpoint (see the checkpoint block below). Seeded immediately so the
-    // first checkpoint awaits a real fence (covering lane seed uploads)
-    // rather than fully draining the newest submissions.
+    // Lagged-drain state: the queue fence started after the first authenticated
+    // canonical epoch, then after each satisfied drain checkpoint (see the
+    // checkpoint block below). The schedule-local state does not have a worker
+    // device yet at this declaration point, so the seed MUST be armed only
+    // after step 1 establishes record.workerDevice. Otherwise the first
+    // checkpoint silently falls back to a fresh fence and drains the newest
+    // sixteen-step window instead of overlapping it.
+    //
     // Tier0 is one atomic K-step submission followed by exactly one worker
-    // terminal fence. The lagged drain seed exists only for the canonical
-    // per-step loop; starting it for Tier0 would add an otherwise invisible
-    // host fence before the atomic submission and contradict the route receipt.
-    let pendingQueueDrainFencePromise = tier0RouteSelected
-      ? null
-      : (() => {
-          try {
-            return state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
-          } catch {
-            return null;
-          }
-        })();
-    if (pendingQueueDrainFencePromise?.catch) {
-      pendingQueueDrainFencePromise.catch(() => {});
-    }
+    // terminal fence. Short canonical schedules never reach a drain boundary,
+    // so neither route gets an otherwise invisible unused seed fence.
+    let pendingQueueDrainFencePromise = null;
+    const startLaggedQueueDrainFence = () => {
+      let fencePromise = null;
+      try {
+        fencePromise =
+          state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
+      } catch {
+        fencePromise = null;
+      }
+      if (fencePromise?.catch) fencePromise.catch(() => {});
+      return fencePromise;
+    };
     let droppedStepSummaryCount = 0;
     let phaseVolumeSurfaceStressRequired = false;
     let phaseVolumeSurfaceStressObservedStepCount = 0;
@@ -9723,6 +9726,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           );
         }
         state.workerDevice = record.workerDevice;
+        if (
+          stepOrdinal === 1
+          && stepCount
+            > ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS
+          && pendingQueueDrainFencePromise == null
+        ) {
+          // The first canonical epoch has now authenticated the exact worker
+          // device. Start the lagged seed before mechanics encodes step 1 so
+          // the step-16 checkpoint waits only for this early boundary instead
+          // of synchronously draining all work through step 16.
+          pendingQueueDrainFencePromise = startLaggedQueueDrainFence();
+        }
         if (terminalRefluxReceiptRequired && !terminalRefluxRingBuffer) {
           terminalRefluxRingBuffer = tagWebGpuBufferDevice(
             state.workerDevice.createBuffer({
@@ -10279,15 +10294,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           // fence starts after the current window's submissions, so awaiting
           // it at the NEXT checkpoint still bounds unfenced work by roughly
           // two intervals while the encode pipeline keeps running.
-          try {
-            pendingQueueDrainFencePromise =
-              state.workerDevice?.queue?.onSubmittedWorkDone?.() ?? null;
-          } catch {
-            pendingQueueDrainFencePromise = null;
-          }
-          if (pendingQueueDrainFencePromise?.catch) {
-            pendingQueueDrainFencePromise.catch(() => {});
-          }
+          pendingQueueDrainFencePromise = startLaggedQueueDrainFence();
         }
         queueDrainCheckpoints.push(checkpoint);
         if (checkpoint.fenceSatisfied !== true) {

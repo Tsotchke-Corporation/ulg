@@ -829,6 +829,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   };
   const result = outputEnvelope({
     backend: 'webgpu',
+    encodedDispatchCount: 2,
     sphParticleState,
     mlsMpmParticleState,
     mechanicsMaterialTable,
@@ -868,6 +869,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     schema: 'peercompute.ulg.mls-mpm-mechanics-refresh-encoder-stage.v0',
     status: 'mechanics-refresh-encoder-stage-ready',
     backend: 'webgpu',
+    encodedDispatchCount: 2,
     readbackMode,
     result,
     mechanicsBuffer: outMechanicsBuffer,

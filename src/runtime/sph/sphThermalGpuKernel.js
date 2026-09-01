@@ -3930,6 +3930,14 @@ export function createSphThermalStepWebGpuEncoderStage({
           unknownSources: ['full-readback-pending']
         })
   });
+  const encodedProposalDispatchCount = Number(
+    matchedTimeThermalProposalStage?.proposalDispatchCount
+    ?? classicThermalProposalStage?.proposalDispatchCount
+    ?? 0
+  );
+  const encodedDispatchCount = encodedProposalDispatchCount + 1;
+  result.encodedProposalDispatchCount = encodedProposalDispatchCount;
+  result.encodedDispatchCount = encodedDispatchCount;
   return {
     schema: 'peercompute.ulg.sph-thermal-encoder-stage.v0',
     status: 'thermal-encoder-stage-ready',
@@ -3937,6 +3945,8 @@ export function createSphThermalStepWebGpuEncoderStage({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     result,
     thermalProposalDiagnostics: result.thermalProposalDiagnostics,
+    encodedProposalDispatchCount,
+    encodedDispatchCount,
     stateBuffer: outStateBuffer,
     thermoBuffer: outThermoBuffer,
     stateBufferByteLength: outStateByteLength,

@@ -39,7 +39,8 @@ function validPlan(primaryCapacity = 3) {
     companionStart: primaryCapacity,
     companionCapacity: primaryCapacity * 3,
     particleCapacity: primaryCapacity * 4,
-    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    phaseCompanionLanesRequired: true
   };
 }
 
@@ -313,7 +314,7 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.equal(stage.result.failClosedPolicy, 'global-layout-copy-through-lineage-local-invalid-copy-through');
   assert.equal(
     stage.result.conservationPolicy,
-    'mass-current-volume-momentum-first-moment-total-energy-with-relative-kinetic-thermalization'
+    'mass-momentum-first-moment-total-energy-with-phase-rest-volume-materialization-and-relative-kinetic-thermalization'
   );
   assert.equal(stage.result.normalHotLoopReadbackFree, true);
   assert.equal(stage.result.fullParticleReadbackPerformed, false);
@@ -366,6 +367,93 @@ test('encoder stage binds one immutable source set and orders global preflight b
   );
 
   stage.cleanupSubmittedWork();
+});
+
+test('retained phase-carrier outputs retire superseded mechanics independently and idempotently', () => {
+  const device = createFakeDevice();
+  const stage = createSphPhaseCarrierTransferWebGpuEncoderStage({
+    ...fakeStageFixture(device, 2),
+    retainOutputParticleBuffers: true
+  });
+  const outputBuffers = {
+    state: stage.result.stateBuffer,
+    thermo: stage.result.thermoBuffer,
+    mechanics: stage.result.mechanicsBuffer
+  };
+  const destroyCounts = { state: 0, thermo: 0, mechanics: 0 };
+  for (const [component, buffer] of Object.entries(outputBuffers)) {
+    const destroy = buffer.destroy.bind(buffer);
+    buffer.destroy = () => {
+      destroyCounts[component] += 1;
+      destroy();
+    };
+  }
+
+  assert.equal(
+    stage.result.destroyOutputParticleBufferComponents({ mechanics: true }),
+    true
+  );
+  assert.deepEqual(destroyCounts, { state: 0, thermo: 0, mechanics: 1 });
+  assert.equal(stage.result.ownsStateBuffer, true);
+  assert.equal(stage.result.ownsThermoBuffer, true);
+  assert.equal(stage.result.ownsMechanicsBuffer, false);
+  assert.equal(outputBuffers.state.destroyed, false);
+  assert.equal(outputBuffers.thermo.destroyed, false);
+  assert.equal(outputBuffers.mechanics.destroyed, true);
+
+  assert.equal(
+    stage.result.destroyOutputParticleBufferComponents({ mechanics: true }),
+    true
+  );
+  assert.deepEqual(destroyCounts, { state: 0, thermo: 0, mechanics: 1 });
+  assert.equal(
+    stage.result.destroyOutputParticleBufferComponents({
+      state: true,
+      thermo: true
+    }),
+    true
+  );
+  assert.deepEqual(destroyCounts, { state: 1, thermo: 1, mechanics: 1 });
+  assert.equal(stage.result.ownsStateBuffer, false);
+  assert.equal(stage.result.ownsThermoBuffer, false);
+  stage.cleanupSubmittedWork();
+});
+
+test('encoder-stage setup failures retire every partial allocation without touching source buffers', () => {
+  for (const fault of ['write', 'pipeline']) {
+    const device = createFakeDevice();
+    const fixture = fakeStageFixture(device, 2);
+    const sourceBuffers = [
+      fixture.sourceStateBuffer,
+      fixture.sourceThermoBuffer,
+      fixture.sourceMechanicsBuffer
+    ];
+    const allocationStart = device.buffers.length;
+    if (fault === 'write') {
+      device.queue.writeBuffer = () => {
+        throw new Error('injected-phase-setup-write-failure');
+      };
+    } else {
+      device.createComputePipeline = () => {
+        throw new Error('injected-phase-setup-pipeline-failure');
+      };
+    }
+
+    assert.throws(
+      () => createSphPhaseCarrierTransferWebGpuEncoderStage(fixture),
+      new RegExp(`injected-phase-setup-${fault}-failure`)
+    );
+    const partialAllocations = device.buffers.slice(allocationStart);
+    assert.ok(partialAllocations.length > 0);
+    assert.equal(
+      partialAllocations.every((buffer) => buffer.destroyed === true),
+      true
+    );
+    assert.equal(
+      sourceBuffers.every((buffer) => buffer.destroyed === false),
+      true
+    );
+  }
 });
 
 test('runner omission defaults to no-full readback and preserves standalone fenced cleanup', async () => {
@@ -620,7 +708,8 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
         companionStart: primaryCapacity,
         companionCapacity: primaryCapacity * 3,
         particleCapacity: primaryCapacity * 4,
-        stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+        stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+        phaseCompanionLanesRequired: true
       });
       const mechanicsTable = {
         schema: mechanicsTableModule.ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA,
@@ -780,9 +869,9 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
       };
 
       const packedSweep = makePackedStates(fractions);
-      // A large but valid source current volume must be partitioned into both
-      // target phases. Constitutive model replacement may change V0, but it
-      // must express the same geometry through the corresponding target J.
+      // Force the first source slot to carry a different constitutive model
+      // and a large deformation. Both target components must materialize in
+      // their own phase rest state rather than importing that incompatible J.
       packedSweep.mechanics[18] = 1000;
       packedSweep.mechanics[20] = 0;
       packedSweep.mechanics[26] = 2;
@@ -967,20 +1056,17 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
     assert.equal(entry.companionPhaseId, 2);
     nearlyEqualVector(entry.primaryFractions, [1, 0, 0, 0]);
     nearlyEqualVector(entry.companionFractions, [0, 1, 0, 0]);
-    nearlyEqual(
-      entry.mechanicsProjection.primaryJ,
-      entry.before.currentVolume * 917 / entry.before.mass
-    );
+    nearlyEqual(entry.mechanicsProjection.primaryJ, 1);
     nearlyEqual(entry.mechanicsProjection.primarySolid, 1);
     nearlyEqual(entry.mechanicsProjection.primaryEos, 1);
-    nearlyEqual(
-      entry.mechanicsProjection.companionJ,
-      entry.before.currentVolume * 1000 / entry.before.mass
-    );
+    nearlyEqual(entry.mechanicsProjection.companionJ, 1);
     nearlyEqual(entry.mechanicsProjection.companionSolid, 0);
     nearlyEqual(entry.mechanicsProjection.companionEos, 1);
     nearlyEqual(entry.after.mass, entry.before.mass);
-    nearlyEqual(entry.after.currentVolume, entry.before.currentVolume);
+    nearlyEqual(
+      entry.after.currentVolume,
+      entry.primaryMass / 917 + entry.companionMass / 1000
+    );
     nearlyEqualVector(entry.after.momentum, entry.before.momentum);
     nearlyEqualVector(entry.after.firstMoment, entry.before.firstMoment);
     nearlyEqual(entry.after.internalEnergy, entry.before.internalEnergy);
@@ -998,9 +1084,16 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
   nearlyEqualVector(native.triple.fractions[1], [0, 1, 0, 0]);
   nearlyEqualVector(native.triple.fractions[2], [0, 0, 1, 0]);
   nearlyEqualVector(native.triple.fractions[3], [0, 0, 0, 0]);
-  nearlyEqualVector(native.triple.currentVolumes, [0.005, 2.505, 7.5]);
+  // Newly materialized solid and liquid components begin undeformed at their
+  // phase rest volumes. The continuing gas component retains its own source J
+  // while its reference volume retracks to the target component mass.
+  nearlyEqualVector(native.triple.mechanicsJ, [1, 1, 1000]);
+  nearlyEqualVector(native.triple.currentVolumes, [3 / 917, 4 / 1000, 3 * 1000 / 0.6]);
   nearlyEqual(native.triple.after.mass, native.triple.before.mass);
-  nearlyEqual(native.triple.after.currentVolume, native.triple.before.currentVolume);
+  nearlyEqual(
+    native.triple.after.currentVolume,
+    3 / 917 + 4 / 1000 + 3 * 1000 / 0.6
+  );
   nearlyEqualVector(native.triple.after.momentum, native.triple.before.momentum);
   nearlyEqualVector(native.triple.after.firstMoment, native.triple.before.firstMoment);
   nearlyEqual(native.triple.after.totalEnergy, native.triple.before.totalEnergy);

@@ -264,8 +264,10 @@ import {
   runMlsMpmMechanicsRefreshWithOptionalWebGpu
 } from './sphMechanicsRefreshGpuKernel.js';
 import {
+  createSphPhaseCarrierTransferWebGpuEncoderStage,
   retainedPhaseCarrierTransferOutputBuffers,
-  runSphPhaseCarrierTransferWebGpu
+  runSphPhaseCarrierTransferWebGpu,
+  validateSphPhaseCarrierPlan
 } from './sphPhaseCarrierTransferGpu.js';
 import {
   destroyReactionOutputAfterFailedMechanicsRefresh,
@@ -14035,6 +14037,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   thermalStepOptions = {},
   mechanicsMaterialTable = null,
   mechanicsRefreshOptions = {},
+  phaseCarrierPlan = null,
+  phaseCarrierTransferOptions = {},
   reactionActivationWatchTable = null,
   reactionActivationMotionEnvelope = null,
   deferContinuationOwnershipTransfer = false,
@@ -14122,14 +14126,67 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
       ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
+  const normalizedSidecarBlockers = uniqueStringList(
+    sidecarFusionPlan?.sidecarBlockers || []
+  );
+  const thermalOnlySidecarFusion = Boolean(
+    normalizedSidecarBlockers.length === 1
+    && normalizedSidecarBlockers[0] === 'thermal-sidecar'
+  );
+  const thermalPhaseCarrierSidecarFusion = Boolean(
+    normalizedSidecarBlockers.length === 2
+    && normalizedSidecarBlockers.includes('thermal-sidecar')
+    && normalizedSidecarBlockers.includes(
+      'phase-carrier-transfer-sidecar'
+    )
+  );
   const useThermalSidecarFusion = Boolean(
     sidecarFusionPlan?.sequenceRunnableWithSidecars === true
-    && sidecarFusionPlan?.sidecarBlockers?.length === 1
-    && sidecarFusionPlan.sidecarBlockers[0] === 'thermal-sidecar'
+    && (thermalOnlySidecarFusion || thermalPhaseCarrierSidecarFusion)
     && thermalMaterialTable
     && mechanicsMaterialTable
   );
-  const sidecarFusionDispatchCount = useThermalSidecarFusion ? count * 2 : 0;
+  const usePhaseCarrierTransferSidecarFusion = Boolean(
+    useThermalSidecarFusion
+    && thermalPhaseCarrierSidecarFusion
+  );
+  if (
+    usePhaseCarrierTransferSidecarFusion
+    && phaseCarrierTransferOptions?.absolutePressureAuthority === true
+  ) {
+    const error = new Error(
+      'Fused phase-carrier transfer cannot claim unresolved absolute-pressure authority'
+    );
+    error.code = 'ERR_MLS_MPM_FUSED_PHASE_PRESSURE_AUTHORITY';
+    error.status = 'fused-phase-carrier-pressure-authority-rejected';
+    throw error;
+  }
+  const runtimePhaseCarrierFamily = exactPhaseCarrierFamilyDescriptors({
+    sphParticleUpload,
+    sphParticleState,
+    mlsMpmParticleUpload,
+    mlsMpmParticleState
+  });
+  const runtimeExactFourLanePhaseCarrierPlan =
+    exactFourLanePhaseCarrierFamilyPlan(runtimePhaseCarrierFamily);
+  if (
+    usePhaseCarrierTransferSidecarFusion
+    && (
+      !runtimeExactFourLanePhaseCarrierPlan
+      || !phaseCarrierPlansEqual(
+        phaseCarrierPlan,
+        runtimeExactFourLanePhaseCarrierPlan
+      )
+    )
+  ) {
+    const error = new Error(
+      'Fused phase-carrier transfer requires one exact four-descriptor four-lane family'
+    );
+    error.code = 'ERR_MLS_MPM_FUSED_PHASE_CARRIER_PLAN';
+    error.status = 'fused-phase-carrier-plan-family-rejected';
+    throw error;
+  }
+  let sidecarFusionDispatchCount = 0;
   const separationMaxPairRestDistanceM = maxSeparationRestDistanceM(
     mlsMpmParticleState?.mechanics,
     particleCount
@@ -14199,6 +14256,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     g2pReconstruction: 0,
     thermalStep: 0,
     reactionStep: 0,
+    phaseCarrierTransfer: 0,
     mechanicsRefresh: 0,
     compactSummary: 0
   };
@@ -14222,28 +14280,28 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const statePingBuffers = [
-    device.createBuffer({
+    tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }),
-    device.createBuffer({
+    }), device),
+    tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    })
+    }), device)
   ];
   const mechanicsPingBuffers = [
-    device.createBuffer({
+    tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }),
-    device.createBuffer({
+    }), device),
+    tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    })
+    }), device)
   ];
   const p2gParamsBuffer = writeGpuBuffer(
     device,
@@ -14350,9 +14408,28 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   let finalSourceThermoBuffer = sphParticleUpload.thermoBuffer;
   let finalSourceMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
   let finalThermalStep = null;
+  let finalPhaseCarrierTransferStep = null;
   let finalMechanicsRefreshStep = null;
   const sidecarEncoderStages = [];
   const sidecarOutputBuffers = [];
+  const sidecarFusionDispatchCounts = {
+    thermalPhase: 0,
+    phaseCarrierTransfer: 0,
+    mechanicsRefresh: 0
+  };
+  const recordSidecarFusionDispatches = (stage, field) => {
+    const encodedDispatchCount = Number(stage?.encodedDispatchCount);
+    if (
+      !Number.isSafeInteger(encodedDispatchCount)
+      || encodedDispatchCount <= 0
+    ) {
+      throw new Error(
+        `Fused ${field} encoder stage did not publish an exact dispatch count`
+      );
+    }
+    sidecarFusionDispatchCounts[field] += encodedDispatchCount;
+    sidecarFusionDispatchCount += encodedDispatchCount;
+  };
   const separationScratchSets = new Set();
   let submittedSeparationTransientBuffers = [];
   let commandSubmitted = false;
@@ -14655,6 +14732,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       if (useThermalSidecarFusion) {
         const thermalStartMs = nowMs();
         const thermalStage = createSphThermalStepWebGpuEncoderStage({
+          ...thermalStepOptions,
           device,
           sphParticleState,
           thermalMaterialTable,
@@ -14664,20 +14742,65 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           boxDimsM: dims,
           dtS: dtSeconds,
           retainOutputParticleBuffers: true,
-          readbackMode: NO_FULL_READBACK_MODE,
-          ...thermalStepOptions
+          readbackMode: NO_FULL_READBACK_MODE
         });
+        sidecarEncoderStages.push(thermalStage);
+        sidecarOutputBuffers.push(
+          thermalStage.stateBuffer,
+          thermalStage.thermoBuffer
+        );
+        recordSidecarFusionDispatches(thermalStage, 'thermalPhase');
         thermalStage.encode(encoder);
         stageMs.thermalStep += Math.max(0, nowMs() - thermalStartMs);
-        sidecarEncoderStages.push(thermalStage);
-        sidecarOutputBuffers.push(thermalStage.stateBuffer, thermalStage.thermoBuffer);
         finalThermalStep = thermalStage.result;
         currentStateBuffer = thermalStage.stateBuffer;
         currentThermoBuffer = thermalStage.thermoBuffer;
         finalThermoBuffer = thermalStage.thermoBuffer;
 
+        if (usePhaseCarrierTransferSidecarFusion) {
+          const phaseCarrierStartMs = nowMs();
+          const phaseCarrierTransferStage =
+            createSphPhaseCarrierTransferWebGpuEncoderStage({
+              ...phaseCarrierTransferOptions,
+              device,
+              sphParticleState,
+              mlsMpmParticleState,
+              thermalMaterialTable,
+              mechanicsMaterialTable,
+              phaseCarrierPlan,
+              sourceStateBuffer: currentStateBuffer,
+              sourceThermoBuffer: currentThermoBuffer,
+              sourceMechanicsBuffer: currentMechanicsBuffer,
+              absolutePressureAuthority: false,
+              retainOutputParticleBuffers: true,
+              readbackMode: NO_FULL_READBACK_MODE
+            });
+          sidecarEncoderStages.push(phaseCarrierTransferStage);
+          sidecarOutputBuffers.push(
+            phaseCarrierTransferStage.stateBuffer,
+            phaseCarrierTransferStage.thermoBuffer,
+            phaseCarrierTransferStage.mechanicsBuffer
+          );
+          recordSidecarFusionDispatches(
+            phaseCarrierTransferStage,
+            'phaseCarrierTransfer'
+          );
+          phaseCarrierTransferStage.encode(encoder);
+          stageMs.phaseCarrierTransfer += Math.max(
+            0,
+            nowMs() - phaseCarrierStartMs
+          );
+          finalPhaseCarrierTransferStep =
+            phaseCarrierTransferStage.result;
+          currentStateBuffer = phaseCarrierTransferStage.stateBuffer;
+          currentThermoBuffer = phaseCarrierTransferStage.thermoBuffer;
+          currentMechanicsBuffer = phaseCarrierTransferStage.mechanicsBuffer;
+          finalThermoBuffer = phaseCarrierTransferStage.thermoBuffer;
+        }
+
         const mechanicsRefreshStartMs = nowMs();
         const mechanicsRefreshStage = createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+          ...mechanicsRefreshOptions,
           device,
           sphParticleState,
           mlsMpmParticleState,
@@ -14686,15 +14809,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           mlsMpmParticleUpload,
           sourceStateBuffer: currentStateBuffer,
           sourceThermoBuffer: currentThermoBuffer,
-          sourceMechanicsBuffer: outMechanicsBuffer,
+          sourceMechanicsBuffer: currentMechanicsBuffer,
           retainOutputParticleBuffers: true,
-          readbackMode: NO_FULL_READBACK_MODE,
-          ...mechanicsRefreshOptions
+          readbackMode: NO_FULL_READBACK_MODE
         });
-        mechanicsRefreshStage.encode(encoder);
-        stageMs.mechanicsRefresh += Math.max(0, nowMs() - mechanicsRefreshStartMs);
         sidecarEncoderStages.push(mechanicsRefreshStage);
         sidecarOutputBuffers.push(mechanicsRefreshStage.mechanicsBuffer);
+        recordSidecarFusionDispatches(
+          mechanicsRefreshStage,
+          'mechanicsRefresh'
+        );
+        mechanicsRefreshStage.encode(encoder);
+        stageMs.mechanicsRefresh += Math.max(0, nowMs() - mechanicsRefreshStartMs);
         finalMechanicsRefreshStep = mechanicsRefreshStage.result;
         currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
       }
@@ -15022,6 +15148,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           thermalStep: finalThermalStep,
           reactionStep: null,
           mechanicsRefreshStep: finalMechanicsRefreshStep,
+          phaseCarrierTransferStep: finalPhaseCarrierTransferStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
           compactSummaryReadbackClassification,
@@ -15069,6 +15196,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           thermalStep: finalThermalStep,
           reactionStep: null,
           mechanicsRefreshStep: finalMechanicsRefreshStep,
+          phaseCarrierTransferStep: finalPhaseCarrierTransferStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
           readCompactSummary: false,
@@ -15164,12 +15292,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schroederActiveNodeFilterStatus: 'superseded-by-canonical-spatial-directory',
       mechanicsRefreshRequested: useThermalSidecarFusion,
       thermalRequested: useThermalSidecarFusion,
+      phaseCarrierTransferRequested:
+        usePhaseCarrierTransferSidecarFusion,
       reactionRequested: false,
       reactionWatchRequested: Boolean(reactionActivationWatchTable),
       sidecarFusionSequence: useThermalSidecarFusion,
       sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
       sidecarFusionStepCount: useThermalSidecarFusion ? count : 0,
       sidecarFusionDispatchCount,
+      sidecarFusionDispatchCounts: {
+        ...sidecarFusionDispatchCounts
+      },
       sidecarFusionPlan: sidecarFusionPlan || null,
       scientificValidation: false,
       sphValidation: false,
@@ -15185,6 +15318,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       thermalStep: finalThermalStep,
       reactionStep: null,
       mechanicsRefreshStep: finalMechanicsRefreshStep,
+      phaseCarrierTransferStep: finalPhaseCarrierTransferStep,
       inputResidentProductMass: null,
       compactGpuSummary,
       dt: dtSeconds,
@@ -15266,14 +15400,29 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount,
       mechanicsDispatchCount: dispatchTopology.totalDispatches,
       sidecarFusionDispatchCount,
+      sidecarFusionDispatchCounts: {
+        ...sidecarFusionDispatchCounts
+      },
       sidecarFusionSequence: useThermalSidecarFusion,
       sidecarFusionRequired: sidecarFusionPlan?.required === true,
       sidecarFusionRunnable: sidecarFusionPlan?.sidecarFusionRunnable === true,
       sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
       sidecarFusionPlanStatus: sidecarFusionPlan?.status ?? null,
-      sidecarFusionStageCount: useThermalSidecarFusion ? 2 : 0,
-      sidecarFusionStageOrder: useThermalSidecarFusion ? ['thermal-phase', 'mechanics-refresh'] : [],
+      sidecarFusionStageCount: useThermalSidecarFusion
+        ? (usePhaseCarrierTransferSidecarFusion ? 3 : 2)
+        : 0,
+      sidecarFusionStageOrder: useThermalSidecarFusion
+        ? [
+            'thermal-phase',
+            ...(usePhaseCarrierTransferSidecarFusion
+              ? ['phase-carrier-transfer']
+              : []),
+            'mechanics-refresh'
+          ]
+        : [],
       thermalSidecarFused: useThermalSidecarFusion,
+      phaseCarrierTransferSidecarFused:
+        usePhaseCarrierTransferSidecarFusion,
       reactionWatchRequested: Boolean(reactionActivationWatchTable),
       reactionWatchEncoded:
         reactionActivationObservationProposal?.ready === true,
@@ -15342,21 +15491,43 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     const retainedSidecarBuffers = new Set([
       finalThermalStep?.stateBuffer,
       finalThermalStep?.thermoBuffer,
+      finalPhaseCarrierTransferStep?.stateBuffer,
+      finalPhaseCarrierTransferStep?.thermoBuffer,
       finalMechanicsRefreshStep?.mechanicsBuffer,
       finalThermoBuffer
     ].filter(Boolean));
-    temporaryBuffers.push(...sidecarOutputBuffers.filter((buffer) => buffer && !retainedSidecarBuffers.has(buffer)));
+    const ownerRetiredSidecarBuffers = new Set([
+      finalPhaseCarrierTransferStep?.mechanicsBuffer
+    ].filter(Boolean));
+    temporaryBuffers.push(...sidecarOutputBuffers.filter((buffer) => (
+      buffer
+      && !retainedSidecarBuffers.has(buffer)
+      && !ownerRetiredSidecarBuffers.has(buffer)
+    )));
     const submittedCleanup = registerFusedResidentSequenceSubmittedCleanup(
       device,
       () => {
         let cleanupFailed = false;
+        if (finalPhaseCarrierTransferStep?.mechanicsBuffer) {
+          try {
+            if (
+              finalPhaseCarrierTransferStep
+                .destroyOutputParticleBufferComponents?.({ mechanics: true })
+                !== true
+            ) cleanupFailed = true;
+          } catch {
+            cleanupFailed = true;
+          }
+        }
         for (const stage of sidecarEncoderStages) {
           try { stage.cleanupSubmittedWork?.(); } catch { cleanupFailed = true; }
         }
         const buffersToDestroy = new Set(temporaryBuffers.filter(Boolean));
         if (!returned) {
           for (const buffer of sidecarOutputBuffers) {
-            if (buffer) buffersToDestroy.add(buffer);
+            if (buffer && !ownerRetiredSidecarBuffers.has(buffer)) {
+              buffersToDestroy.add(buffer);
+            }
           }
           for (const buffer of allCreatedBuffers) {
             if (buffer) buffersToDestroy.add(buffer);
@@ -17494,10 +17665,7 @@ function fusedResidentSequenceSidecarBlockers({
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
   residentProductMass = null,
-  phaseCarrierPlan = null,
-  mlsMpmPhaseCarrierPlan = null,
-  particleCount = null,
-  mlsMpmParticleCount = null,
+  phaseCarrierFamily = null,
   requireLawsQuiescentSingleLanePhaseCarrierPlan = false
 } = {}) {
   const blockers = [];
@@ -17508,22 +17676,16 @@ function fusedResidentSequenceSidecarBlockers({
   if (pressureInterfaceForceRowsBuffer) blockers.push('pressure-interface-force-rows');
   if (pressureInterfaceForceSolver) blockers.push('pressure-interface-force-solver');
   if (residentProductMass) blockers.push('resident-product-mass-sidecar');
-  const lawsQuiescentSingleLanePlanReady =
-    lawsQuiescentSingleLanePhaseCarrierPlanReady(
-      phaseCarrierPlan,
-      particleCount
-    );
+  const lawsQuiescentSingleLanePlanReady = Boolean(
+    phaseCarrierFamily?.exact === true
+    && lawsQuiescentSingleLanePhaseCarrierPlanReady(
+      phaseCarrierFamily.phaseCarrierPlan,
+      phaseCarrierFamily.particleCount
+    )
+  );
   const exactLawsQuiescentFamilyReady = Boolean(
     lawsQuiescentSingleLanePlanReady
-    && lawsQuiescentSingleLanePhaseCarrierPlanReady(
-      mlsMpmPhaseCarrierPlan,
-      mlsMpmParticleCount
-    )
-    && particleCount === mlsMpmParticleCount
-    && lawsQuiescentPhaseCarrierPlansEqual(
-      phaseCarrierPlan,
-      mlsMpmPhaseCarrierPlan
-    )
+    && phaseCarrierFamily?.descriptorCount === 4
   );
   if (
     requireLawsQuiescentSingleLanePhaseCarrierPlan === true
@@ -17531,7 +17693,7 @@ function fusedResidentSequenceSidecarBlockers({
   ) {
     blockers.push('phase-carrier-plan-not-single-lane-quiescent');
   } else if (
-    phaseCarrierPlanReady(phaseCarrierPlan)
+    phaseCarrierFamily?.phaseCarrierPlanObserved === true
     && !lawsQuiescentSingleLanePlanReady
   ) {
     blockers.push('phase-carrier-transfer-sidecar');
@@ -17637,11 +17799,13 @@ function lawsQuiescentSingleLanePhaseCarrierPlanReady(
     && Number.isSafeInteger(exactParticleCount)
     && exactParticleCount > 0
     && lineageCapacity === exactParticleCount
+    && plan.stableLaneAddress
+      === 'phaseLane*phaseLaneStride+lineageIndex'
     && plan.phaseCompanionLanesRequired === false
   );
 }
 
-function lawsQuiescentPhaseCarrierPlansEqual(left, right) {
+function phaseCarrierPlansEqual(left, right) {
   const fields = [
     'schema',
     'status',
@@ -17652,6 +17816,7 @@ function lawsQuiescentPhaseCarrierPlansEqual(left, right) {
     'companionStart',
     'companionCapacity',
     'particleCapacity',
+    'stableLaneAddress',
     'phaseCompanionLanesRequired'
   ];
   return Boolean(
@@ -17659,6 +17824,70 @@ function lawsQuiescentPhaseCarrierPlansEqual(left, right) {
     && right
     && fields.every((field) => left[field] === right[field])
   );
+}
+
+function exactPhaseCarrierFamilyDescriptors({
+  sphParticleUpload = null,
+  sphParticleState = null,
+  mlsMpmParticleUpload = null,
+  mlsMpmParticleState = null
+} = {}) {
+  const descriptors = [
+    sphParticleUpload,
+    sphParticleState,
+    mlsMpmParticleUpload,
+    mlsMpmParticleState
+  ].map((source) => ({
+    phaseCarrierPlan: source?.phaseCarrierPlan ?? null,
+    particleCount: Number(source?.particleCount)
+  }));
+  const phaseCarrierPlanObserved = descriptors.some(
+    ({ phaseCarrierPlan }) => phaseCarrierPlan != null
+  );
+  const complete = descriptors.every(({ phaseCarrierPlan, particleCount }) => (
+    phaseCarrierPlan
+    && typeof phaseCarrierPlan === 'object'
+    && Number.isSafeInteger(particleCount)
+    && particleCount > 0
+  ));
+  const canonicalPlan = complete ? descriptors[0].phaseCarrierPlan : null;
+  const canonicalCount = complete ? descriptors[0].particleCount : null;
+  const exact = Boolean(
+    complete
+    && descriptors.every(({ phaseCarrierPlan, particleCount }) => (
+      particleCount === canonicalCount
+      && phaseCarrierPlansEqual(phaseCarrierPlan, canonicalPlan)
+    ))
+  );
+  return Object.freeze({
+    descriptorCount: descriptors.length,
+    phaseCarrierPlanObserved,
+    complete,
+    exact,
+    phaseCarrierPlan: exact ? canonicalPlan : null,
+    particleCount: exact ? canonicalCount : null
+  });
+}
+
+function exactFourLanePhaseCarrierFamilyPlan(phaseCarrierFamily = null) {
+  if (
+    phaseCarrierFamily?.exact !== true
+    || phaseCarrierFamily.descriptorCount !== 4
+  ) return null;
+  const phaseCarrierPlan = phaseCarrierFamily.phaseCarrierPlan;
+  const particleCount = phaseCarrierFamily.particleCount;
+  const sphAdmission = validateSphPhaseCarrierPlan(
+    phaseCarrierPlan,
+    particleCount
+  );
+  if (
+    sphAdmission.accepted !== true
+    || sphAdmission.phaseLaneCount !== 4
+    || phaseCarrierPlan.phaseCompanionLanesRequired !== true
+    || phaseCarrierPlan.stableLaneAddress
+      !== 'phaseLane*phaseLaneStride+lineageIndex'
+  ) return null;
+  return Object.freeze({ ...phaseCarrierPlan });
 }
 
 function uniqueStringList(values = []) {
@@ -17676,11 +17905,26 @@ function createFusedResidentSidecarFusionPlan({
 } = {}) {
   const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
   const sidecarFusionRequired = requested === true && normalizedSidecarBlockers.length > 0;
-  const thermalSidecarFusionRunnable = Boolean(
+  const thermalOnlySidecarFusionRunnable = Boolean(
     sidecarFusionRequired
     && thermalSidecarFusionAvailable === true
     && normalizedSidecarBlockers.length === 1
     && normalizedSidecarBlockers[0] === 'thermal-sidecar'
+  );
+  const thermalPhaseCarrierSidecarFusionRunnable = Boolean(
+    sidecarFusionRequired
+    && thermalSidecarFusionAvailable === true
+    && normalizedSidecarBlockers.length === 2
+    && normalizedSidecarBlockers.includes('thermal-sidecar')
+    && normalizedSidecarBlockers.includes('phase-carrier-transfer-sidecar')
+  );
+  const sidecarFusionRunnable = Boolean(
+    thermalOnlySidecarFusionRunnable
+    || thermalPhaseCarrierSidecarFusionRunnable
+  );
+  const thermalSidecarFusionRunnable = Boolean(
+    sidecarFusionRunnable
+    && normalizedSidecarBlockers.includes('thermal-sidecar')
   );
   const stages = [];
   const addStage = (stage) => {
@@ -17757,16 +18001,59 @@ function createFusedResidentSidecarFusionPlan({
     });
   }
 
+  if (normalizedSidecarBlockers.includes('phase-carrier-transfer-sidecar')) {
+    addStage({
+      id: 'phase-carrier-transfer',
+      blocker: 'phase-carrier-transfer-sidecar',
+      implementedInCurrentFusedSequence:
+        thermalPhaseCarrierSidecarFusionRunnable,
+      lawNodeId: 'ulg-sph-phase-carrier-transfer-law',
+      orderConstraint:
+        'after-thermal-or-reaction-before-mechanics-refresh',
+      reads: [
+        'sph-particle-state',
+        'sph-thermo-phase',
+        'mls-mpm-mechanics',
+        'thermal-material-table',
+        'mechanics-material-table',
+        'phase-carrier-plan'
+      ],
+      writes: [
+        'sph-particle-state',
+        'sph-thermo-phase',
+        'mls-mpm-mechanics'
+      ],
+      consumesRetainedBuffers: [
+        'thermal-or-reaction-state-buffer',
+        'thermal-or-reaction-thermo-buffer',
+        'g2p-or-reaction-mechanics-buffer'
+      ],
+      producesRetainedBuffers: [
+        'phase-carrier-state-buffer',
+        'phase-carrier-thermo-buffer',
+        'phase-carrier-mechanics-buffer'
+      ],
+      fusionRequirement:
+        'phase-carrier-runner-must-consume-exact-four-lane-plan-and-retain-state-thermo-mechanics'
+    });
+  }
+
   if (
     normalizedSidecarBlockers.includes('thermal-sidecar')
     || normalizedSidecarBlockers.includes('reaction-sidecar')
+    || normalizedSidecarBlockers.includes('phase-carrier-transfer-sidecar')
   ) {
     addStage({
       id: 'mechanics-refresh',
-      blocker: normalizedSidecarBlockers.includes('reaction-sidecar') ? 'reaction-sidecar' : 'thermal-sidecar',
-      implementedInCurrentFusedSequence: thermalSidecarFusionRunnable,
+      blocker: normalizedSidecarBlockers.includes('reaction-sidecar')
+        ? 'reaction-sidecar'
+        : (normalizedSidecarBlockers.includes('phase-carrier-transfer-sidecar')
+            ? 'phase-carrier-transfer-sidecar'
+            : 'thermal-sidecar'),
+      implementedInCurrentFusedSequence: sidecarFusionRunnable,
       lawNodeId: 'ulg-mls-mpm-mechanics-refresh-law',
-      orderConstraint: 'after-thermal-or-reaction-before-next-step-p2g',
+      orderConstraint:
+        'after-thermal-reaction-or-phase-carrier-before-next-step-p2g',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mechanics-material-table'],
       writes: ['mls-mpm-mechanics'],
       consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
@@ -17786,11 +18073,14 @@ function createFusedResidentSidecarFusionPlan({
     'mechanics-g2p',
     ...(stages.some((stage) => stage.id === 'thermal-phase') ? ['thermal-phase'] : []),
     ...(stages.some((stage) => stage.id === 'reaction-product') ? ['reaction-product'] : []),
+    ...(stages.some((stage) => stage.id === 'phase-carrier-transfer')
+      ? ['phase-carrier-transfer']
+      : []),
     ...(stages.some((stage) => stage.id === 'mechanics-refresh') ? ['mechanics-refresh'] : []),
     'resident-compact-summary-or-active-grid-plan'
   ];
   const blockers = sidecarFusionRequired
-    ? (thermalSidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
+    ? (sidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
     : [];
   return {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA,
@@ -17801,10 +18091,13 @@ function createFusedResidentSidecarFusionPlan({
       : 'sidecar-fusion-not-required',
     requested: requested === true,
     required: sidecarFusionRequired,
-    sequenceRunnableWithSidecars: thermalSidecarFusionRunnable,
-    sidecarFusionRunnable: !sidecarFusionRequired || thermalSidecarFusionRunnable,
+    sequenceRunnableWithSidecars: sidecarFusionRunnable,
+    sidecarFusionRunnable: !sidecarFusionRequired || sidecarFusionRunnable,
     thermalSidecarFusionAvailable: thermalSidecarFusionAvailable === true,
     thermalSidecarFusionRunnable,
+    thermalOnlySidecarFusionRunnable,
+    phaseCarrierTransferSidecarFusionRunnable:
+      thermalPhaseCarrierSidecarFusionRunnable,
     stepCount: Math.max(1, Math.round(finiteNumber(stepCount, 1))),
     readbackMode,
     compactSummaryMode: normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
@@ -17816,8 +18109,8 @@ function createFusedResidentSidecarFusionPlan({
     stages,
     requiredStageOrder,
     requiredMechanicsStages: ['mechanics-p2g', 'mechanics-grid-update', 'mechanics-g2p'],
-    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired && !thermalSidecarFusionRunnable,
-    fallbackModeUntilImplemented: sidecarFusionRequired && !thermalSidecarFusionRunnable
+    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired && !sidecarFusionRunnable,
+    fallbackModeUntilImplemented: sidecarFusionRequired && !sidecarFusionRunnable
       ? 'per-step-resident-pass-dag-or-per-step-fused-mechanics-active-grid'
       : null,
     ownershipRules: [
@@ -17842,11 +18135,13 @@ function createFusedResidentSidecarStepEvidence({
   stageBackendSummary = {},
   thermalStep = null,
   reactionStep = null,
+  phaseCarrierTransferStep = null,
   mechanicsRefreshStep = null,
   p2gGridProjection = null,
   gridUpdate = null,
   thermalOutput = {},
   reactionOutput = {},
+  phaseCarrierTransferOutput = {},
   mechanicsRefreshOutput = {}
 } = {}) {
   if (!sidecarFusionPlan?.required) return null;
@@ -17879,12 +18174,30 @@ function createFusedResidentSidecarStepEvidence({
         )
       );
       orderSatisfied = Boolean(stageStatusSummary.g2p);
+    } else if (stage.id === 'phase-carrier-transfer') {
+      sourceStatus = stageStatusSummary.phaseCarrierTransfer ?? null;
+      backend = stageBackendSummary.phaseCarrierTransfer ?? null;
+      executed = Boolean(phaseCarrierTransferStep);
+      retainedOutputSatisfied = Boolean(
+        phaseCarrierTransferOutput.stateBuffer
+        && phaseCarrierTransferOutput.thermoBuffer
+        && phaseCarrierTransferOutput.mechanicsBuffer
+      );
+      orderSatisfied = Boolean(
+        stageStatusSummary.reaction
+        || stageStatusSummary.thermal
+        || stageStatusSummary.g2p
+      );
     } else if (stage.id === 'mechanics-refresh') {
       sourceStatus = stageStatusSummary.mechanicsRefresh ?? null;
       backend = stageBackendSummary.mechanicsRefresh ?? null;
       executed = Boolean(mechanicsRefreshStep);
       retainedOutputSatisfied = Boolean(mechanicsRefreshOutput.mechanicsBuffer);
-      orderSatisfied = Boolean(stageStatusSummary.thermal || stageStatusSummary.reaction);
+      orderSatisfied = Boolean(
+        stageStatusSummary.phaseCarrierTransfer
+        || stageStatusSummary.thermal
+        || stageStatusSummary.reaction
+      );
     } else if (stage.id === 'pressure-interface-grid-force-consumption') {
       sourceStatus = gridUpdate?.pressureInterfaceForceApplicationStatus ?? null;
       backend = stageBackendSummary.gridUpdate ?? null;
@@ -18792,29 +19105,28 @@ export function createMlsMpmResidentStepsComputeTask({
     activeGridDispatchPlanRefreshMode,
     safetyCells: taskStepOptions.activeGridSafetyCells ?? taskStepOptions.fusedActiveGridSafetyCells
   });
+  const phaseCarrierFamily = exactPhaseCarrierFamilyDescriptors({
+    sphParticleUpload: taskStepOptions.sphParticleUpload,
+    sphParticleState: taskStepOptions.sphParticleState,
+    mlsMpmParticleUpload: taskStepOptions.mlsMpmParticleUpload,
+    mlsMpmParticleState: taskStepOptions.mlsMpmParticleState
+  });
   const residentSequenceSidecarBlockers = fusedResidentSequenceSidecarBlockers({
     thermalMaterialTable: taskStepOptions.thermalMaterialTable,
     reactionTable: taskStepOptions.reactionTable,
     pressureInterfaceForceRowsBuffer: taskStepOptions.pressureInterfaceForceRowsBuffer,
     pressureInterfaceForceSolver: taskStepOptions.pressureInterfaceForceSolver,
     residentProductMass: taskStepOptions.residentProductMass ?? taskStepOptions.nextParticleUploads?.residentProductMass ?? null,
-    phaseCarrierPlan: taskStepOptions.sphParticleUpload?.phaseCarrierPlan
-      || taskStepOptions.sphParticleState?.phaseCarrierPlan
-      || null,
-    mlsMpmPhaseCarrierPlan:
-      taskStepOptions.mlsMpmParticleUpload?.phaseCarrierPlan
-      || taskStepOptions.mlsMpmParticleState?.phaseCarrierPlan
-      || null,
-    particleCount: taskStepOptions.sphParticleUpload?.particleCount
-      ?? taskStepOptions.sphParticleState?.particleCount
-      ?? null,
-    mlsMpmParticleCount:
-      taskStepOptions.mlsMpmParticleUpload?.particleCount
-      ?? taskStepOptions.mlsMpmParticleState?.particleCount
-      ?? null,
+    phaseCarrierFamily,
     requireLawsQuiescentSingleLanePhaseCarrierPlan:
       taskStepOptions.requireLawsQuiescentSingleLanePhaseCarrierPlan === true
   });
+  const exactFourLanePhaseCarrierPlan =
+    exactFourLanePhaseCarrierFamilyPlan(phaseCarrierFamily);
+  const phaseCarrierTransferSidecarRequired =
+    residentSequenceSidecarBlockers.includes(
+      'phase-carrier-transfer-sidecar'
+    );
   const thermalSidecarFusionAvailable = Boolean(
     taskStepOptions.fuseThermalSidecarResidentSequence === true
     && taskStepOptions.thermalMaterialTable
@@ -18824,6 +19136,19 @@ export function createMlsMpmResidentStepsComputeTask({
       taskStepOptions.mechanicsRefreshRunner == null
       || taskStepOptions.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
       )
+    && (
+      !phaseCarrierTransferSidecarRequired
+      || (
+        exactFourLanePhaseCarrierPlan
+        && (
+          taskStepOptions.phaseCarrierTransferRunner == null
+          || taskStepOptions.phaseCarrierTransferRunner
+            === runSphPhaseCarrierTransferWebGpu
+        )
+        && taskStepOptions.phaseCarrierTransferOptions
+          ?.absolutePressureAuthority !== true
+      )
+    )
   );
   const ambientBuoyancyExecution =
     resolvePhaseVolumeAmbientBuoyancyExecution({
@@ -32778,11 +33103,13 @@ async function residentStepEnvelope({
     stageBackendSummary,
     thermalStep,
     reactionStep,
+    phaseCarrierTransferStep,
     mechanicsRefreshStep,
     p2gGridProjection,
     gridUpdate,
     thermalOutput,
     reactionOutput,
+    phaseCarrierTransferOutput,
     mechanicsRefreshOutput
   });
   const residentAuthorityLedger = buildMlsMpmResidentStepAuthorityLedger({
@@ -37974,6 +38301,28 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     args.g2pStageRunner ? 'custom-g2p-stage-runner' : null,
     canonicalSpatialIntent ? 'canonical-spatial-single-step-executor-required' : null
   ];
+  const phaseCarrierFamily = exactPhaseCarrierFamilyDescriptors({
+    sphParticleUpload,
+    sphParticleState,
+    mlsMpmParticleUpload,
+    mlsMpmParticleState
+  });
+  const residentSequenceSidecarBlockers =
+    fusedResidentSequenceSidecarBlockers({
+      thermalMaterialTable: args.thermalMaterialTable,
+      reactionTable: args.reactionTable,
+      pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
+      pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
+      residentProductMass,
+      phaseCarrierFamily,
+      requireLawsQuiescentSingleLanePhaseCarrierPlan
+    });
+  const exactFourLanePhaseCarrierPlan =
+    exactFourLanePhaseCarrierFamilyPlan(phaseCarrierFamily);
+  const phaseCarrierTransferSidecarRequired =
+    residentSequenceSidecarBlockers.includes(
+      'phase-carrier-transfer-sidecar'
+    );
   const fusedResidentSequencePreflight = createFusedResidentSequencePreflight({
     requested: Boolean(args.fuseNoFullResidentMechanicsSequence),
     stepCount: count,
@@ -37986,27 +38335,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     requestPerStepFusedNoFullMechanics,
     requestActiveGridFusedNoFullMechanics,
     customRunnerBlockers: fusedSequenceCustomRunnerBlockers,
-    sidecarBlockers: fusedResidentSequenceSidecarBlockers({
-      thermalMaterialTable: args.thermalMaterialTable,
-      reactionTable: args.reactionTable,
-      pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
-      pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
-      residentProductMass,
-      phaseCarrierPlan: sphParticleUpload?.phaseCarrierPlan
-        || sphParticleState?.phaseCarrierPlan
-        || null,
-      mlsMpmPhaseCarrierPlan: mlsMpmParticleUpload?.phaseCarrierPlan
-        || mlsMpmParticleState?.phaseCarrierPlan
-        || null,
-      particleCount: sphParticleUpload?.particleCount
-        ?? sphParticleState?.particleCount
-        ?? null,
-      mlsMpmParticleCount: mlsMpmParticleUpload?.particleCount
-        ?? mlsMpmParticleState?.particleCount
-        ?? null,
-      requireLawsQuiescentSingleLanePhaseCarrierPlan:
-        requireLawsQuiescentSingleLanePhaseCarrierPlan
-    }),
+    sidecarBlockers: residentSequenceSidecarBlockers,
     thermalSidecarFusionAvailable: Boolean(
       args.fuseThermalSidecarResidentSequence !== false
       && args.thermalMaterialTable
@@ -38015,6 +38344,19 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       && (
         args.mechanicsRefreshRunner == null
         || args.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
+      )
+      && (
+        !phaseCarrierTransferSidecarRequired
+        || (
+          exactFourLanePhaseCarrierPlan
+          && (
+            args.phaseCarrierTransferRunner == null
+            || args.phaseCarrierTransferRunner
+              === runSphPhaseCarrierTransferWebGpu
+          )
+          && args.phaseCarrierTransferOptions
+            ?.absolutePressureAuthority !== true
+        )
       )
     ),
     surfaceStressRequired:
@@ -38110,6 +38452,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       thermalStepOptions: args.thermalStepOptions ?? {},
       mechanicsMaterialTable: args.mechanicsMaterialTable,
       mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {},
+      phaseCarrierPlan: exactFourLanePhaseCarrierPlan,
+      phaseCarrierTransferOptions:
+        args.phaseCarrierTransferOptions ?? {},
       reactionActivationWatchTable:
         args.reactionActivationWatchTable ?? null,
       reactionActivationMotionEnvelope:

@@ -185,7 +185,12 @@ function uploadStorageBuffer(device, label, values, extraUsage = 0) {
     values.byteLength,
     GPU_BUFFER_USAGE.COPY_DST | extraUsage
   );
-  if (values.byteLength > 0) device.queue.writeBuffer(buffer, 0, values);
+  try {
+    if (values.byteLength > 0) device.queue.writeBuffer(buffer, 0, values);
+  } catch (error) {
+    try { buffer.destroy?.(); } catch {}
+    throw error;
+  }
   return buffer;
 }
 
@@ -1013,126 +1018,220 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     }
   }
 
-  const closure = createClosureRows(thermalMaterialTable, mechanicsMaterialTable);
-  const closureBuffer = uploadStorageBuffer(
-    device,
-    'ulg-sph-phase-carrier-transfer-closure-rows',
-    closure.values
-  );
-  const evidenceValues = initialEvidence(plan.lineageCapacity);
-  const evidenceBuffer = uploadStorageBuffer(
-    device,
-    'ulg-sph-phase-carrier-transfer-evidence',
+  const setupAllocations = [];
+  const ownSetupAllocation = (buffer) => {
+    if (buffer) setupAllocations.push(buffer);
+    return buffer;
+  };
+  const {
+    closureBuffer,
     evidenceValues,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const stateByteLength = sphParticleState.particleCount
-    * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const thermoByteLength = sphParticleState.particleCount
-    * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const mechanicsByteLength = mlsMpmParticleState.particleCount
-    * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const outStateBuffer = createStorageBuffer(
-    device,
-    'ulg-sph-phase-carrier-transfer-state',
+    evidenceBuffer,
     stateByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const outThermoBuffer = createStorageBuffer(
-    device,
-    'ulg-sph-phase-carrier-transfer-thermo',
     thermoByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const outMechanicsBuffer = createStorageBuffer(
-    device,
-    'ulg-sph-phase-carrier-transfer-mechanics',
     mechanicsByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-phase-carrier-transfer-params',
-    size: 64,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
-    particleCount: sphParticleState.particleCount,
-    plan,
-    closure,
-    absolutePressureAuthority
-  }));
+    outStateBuffer,
+    outThermoBuffer,
+    outMechanicsBuffer,
+    paramsBuffer,
+    preflightPipeline,
+    applyPipeline,
+    preflightBindGroup,
+    applyBindGroup,
+    workgroups
+  } = (() => {
+    try {
+      const closure = createClosureRows(
+        thermalMaterialTable,
+        mechanicsMaterialTable
+      );
+      const closureBuffer = ownSetupAllocation(uploadStorageBuffer(
+        device,
+        'ulg-sph-phase-carrier-transfer-closure-rows',
+        closure.values
+      ));
+      const evidenceValues = initialEvidence(plan.lineageCapacity);
+      const evidenceBuffer = ownSetupAllocation(uploadStorageBuffer(
+        device,
+        'ulg-sph-phase-carrier-transfer-evidence',
+        evidenceValues,
+        GPU_BUFFER_USAGE.COPY_SRC
+      ));
+      const stateByteLength = sphParticleState.particleCount
+        * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+      const thermoByteLength = sphParticleState.particleCount
+        * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+      const mechanicsByteLength = mlsMpmParticleState.particleCount
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+      const outStateBuffer = ownSetupAllocation(createStorageBuffer(
+        device,
+        'ulg-sph-phase-carrier-transfer-state',
+        stateByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      ));
+      const outThermoBuffer = ownSetupAllocation(createStorageBuffer(
+        device,
+        'ulg-sph-phase-carrier-transfer-thermo',
+        thermoByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      ));
+      const outMechanicsBuffer = ownSetupAllocation(createStorageBuffer(
+        device,
+        'ulg-sph-phase-carrier-transfer-mechanics',
+        mechanicsByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      ));
+      const paramsBuffer = ownSetupAllocation(device.createBuffer({
+        label: 'ulg-sph-phase-carrier-transfer-params',
+        size: 64,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      }));
+      device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
+        particleCount: sphParticleState.particleCount,
+        plan,
+        closure,
+        absolutePressureAuthority
+      }));
 
-  const bindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage'),
-    computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'uniform')
-  ];
-  const preflightPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-phase-carrier-transfer.v3.preflight',
-    label: 'ulg-sph-phase-carrier-transfer-preflight',
-    code: sphPhaseCarrierTransferWgsl,
-    entryPoint: 'preflight',
-    bindings
-  });
-  const applyPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-phase-carrier-transfer.v3.apply',
-    label: 'ulg-sph-phase-carrier-transfer-apply',
-    code: sphPhaseCarrierTransferWgsl,
-    entryPoint: 'apply_transfer',
-    bindings
-  });
-  const bindGroupEntries = [
-      { binding: 0, resource: { buffer: sourceStateBuffer } },
-      { binding: 1, resource: { buffer: sourceThermoBuffer } },
-      { binding: 2, resource: { buffer: sourceMechanicsBuffer } },
-      { binding: 3, resource: { buffer: closureBuffer } },
-      { binding: 4, resource: { buffer: outStateBuffer } },
-      { binding: 5, resource: { buffer: outThermoBuffer } },
-      { binding: 6, resource: { buffer: outMechanicsBuffer } },
-      { binding: 7, resource: { buffer: evidenceBuffer } },
-      { binding: 8, resource: { buffer: paramsBuffer } }
-  ];
-  const preflightBindGroup = device.createBindGroup({
-    layout: preflightPipeline.bindGroupLayout,
-    entries: bindGroupEntries
-  });
-  const applyBindGroup = device.createBindGroup({
-    layout: applyPipeline.bindGroupLayout,
-    entries: bindGroupEntries
-  });
-  const workgroups = Math.max(1, Math.ceil(plan.lineageCapacity / 64));
+      const bindings = [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(8, 'uniform')
+      ];
+      const preflightPipeline = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-phase-carrier-transfer.v3.preflight',
+        label: 'ulg-sph-phase-carrier-transfer-preflight',
+        code: sphPhaseCarrierTransferWgsl,
+        entryPoint: 'preflight',
+        bindings
+      });
+      const applyPipeline = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-phase-carrier-transfer.v3.apply',
+        label: 'ulg-sph-phase-carrier-transfer-apply',
+        code: sphPhaseCarrierTransferWgsl,
+        entryPoint: 'apply_transfer',
+        bindings
+      });
+      const bindGroupEntries = [
+        { binding: 0, resource: { buffer: sourceStateBuffer } },
+        { binding: 1, resource: { buffer: sourceThermoBuffer } },
+        { binding: 2, resource: { buffer: sourceMechanicsBuffer } },
+        { binding: 3, resource: { buffer: closureBuffer } },
+        { binding: 4, resource: { buffer: outStateBuffer } },
+        { binding: 5, resource: { buffer: outThermoBuffer } },
+        { binding: 6, resource: { buffer: outMechanicsBuffer } },
+        { binding: 7, resource: { buffer: evidenceBuffer } },
+        { binding: 8, resource: { buffer: paramsBuffer } }
+      ];
+      const preflightBindGroup = device.createBindGroup({
+        layout: preflightPipeline.bindGroupLayout,
+        entries: bindGroupEntries
+      });
+      const applyBindGroup = device.createBindGroup({
+        layout: applyPipeline.bindGroupLayout,
+        entries: bindGroupEntries
+      });
+      return {
+        closureBuffer,
+        evidenceValues,
+        evidenceBuffer,
+        stateByteLength,
+        thermoByteLength,
+        mechanicsByteLength,
+        outStateBuffer,
+        outThermoBuffer,
+        outMechanicsBuffer,
+        paramsBuffer,
+        preflightPipeline,
+        applyPipeline,
+        preflightBindGroup,
+        applyBindGroup,
+        workgroups: Math.max(1, Math.ceil(plan.lineageCapacity / 64))
+      };
+    } catch (error) {
+      const destroyed = new Set();
+      for (const buffer of [...setupAllocations].reverse()) {
+        if (!buffer || destroyed.has(buffer)) continue;
+        try { buffer.destroy?.(); } catch {}
+        destroyed.add(buffer);
+      }
+      throw error;
+    }
+  })();
   let cleaned = false;
   let outputsDestroyed = false;
   let outputDestroyScheduled = false;
   let outputDestroyRelease = null;
+  let result = null;
   const destroyedBuffers = new Set();
   const destroyBufferOnce = (buffer) => {
     if (!buffer || destroyedBuffers.has(buffer)) return;
     buffer.destroy?.();
     destroyedBuffers.add(buffer);
   };
-  const destroyOutputs = () => {
-    if (outputsDestroyed) return;
+  const outputComponentBuffers = Object.freeze({
+    state: outStateBuffer,
+    thermo: outThermoBuffer,
+    mechanics: outMechanicsBuffer
+  });
+  const outputComponentsDestroyed = {
+    state: false,
+    thermo: false,
+    mechanics: false
+  };
+  const destroyOutputComponentsNow = ({
+    state = false,
+    thermo = false,
+    mechanics = false
+  } = {}) => {
+    const requested = { state, thermo, mechanics };
+    if (!Object.values(requested).some((value) => value === true)) {
+      return false;
+    }
     let firstError = null;
-    for (const buffer of [
-      outStateBuffer,
-      outThermoBuffer,
-      outMechanicsBuffer
-    ]) {
-      try {
-        destroyBufferOnce(buffer);
-      } catch (error) {
-        firstError ??= error;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (const [component, buffer] of Object.entries(outputComponentBuffers)) {
+        if (
+          requested[component] !== true
+          || outputComponentsDestroyed[component]
+        ) continue;
+        try {
+          destroyBufferOnce(buffer);
+          outputComponentsDestroyed[component] = true;
+          if (result) {
+            const ownershipField =
+              `owns${component[0].toUpperCase()}${component.slice(1)}Buffer`;
+            result[ownershipField] = false;
+          }
+        } catch (error) {
+          firstError ??= error;
+        }
       }
     }
-    if (firstError) throw firstError;
-    outputsDestroyed = true;
+    outputsDestroyed = Object.values(outputComponentsDestroyed).every(Boolean);
+    const requestedComplete = Object.entries(requested).every(
+      ([component, selected]) => (
+        selected !== true || outputComponentsDestroyed[component] === true
+      )
+    );
+    if (requestedComplete) return true;
+    throw firstError || new Error(
+      'Phase-carrier retained output component destruction was incomplete'
+    );
+  };
+  const destroyOutputs = () => {
+    if (outputsDestroyed) return true;
+    return destroyOutputComponentsNow({
+      state: true,
+      thermo: true,
+      mechanics: true
+    });
   };
   const cleanup = () => {
     if (cleaned) return;
@@ -1158,10 +1257,11 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     if (firstError) throw firstError;
     cleaned = true;
   };
-  const result = {
+  result = {
     schema: ULG_SPH_PHASE_CARRIER_TRANSFER_SCHEMA,
     status: 'phase-carrier-transfer-submitted',
     backend: 'webgpu',
+    encodedDispatchCount: 2,
     particleCount: sphParticleState.particleCount,
     phaseCarrierPlan: { ...phaseCarrierPlan },
     lineageCapacity: plan.lineageCapacity,
@@ -1177,6 +1277,9 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
+    ownsStateBuffer: retainOutputParticleBuffers,
+    ownsThermoBuffer: retainOutputParticleBuffers,
+    ownsMechanicsBuffer: retainOutputParticleBuffers,
     stateBufferByteLength: stateByteLength,
     thermoBufferByteLength: thermoByteLength,
     mechanicsBufferByteLength: mechanicsByteLength,
@@ -1197,7 +1300,10 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
           unknownSources: ['full-readback-pending']
         })),
     failClosedPolicy: 'global-layout-copy-through-lineage-local-invalid-copy-through',
-    conservationPolicy: 'mass-current-volume-momentum-first-moment-total-energy-with-relative-kinetic-thermalization',
+    conservationPolicy: 'mass-momentum-first-moment-total-energy-with-phase-rest-volume-materialization-and-relative-kinetic-thermalization',
+    destroyOutputParticleBufferComponents: retainOutputParticleBuffers
+      ? destroyOutputComponentsNow
+      : null,
     destroyOutputParticleBuffers: retainOutputParticleBuffers
       ? ({ queueOrderedFinalConsumer = null } = {}) => {
           if (outputsDestroyed) return true;
@@ -1272,6 +1378,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   return {
     schema: 'peercompute.ulg.sph-phase-carrier-transfer-encoder-stage.v2',
     status: 'phase-carrier-transfer-encoder-stage-ready',
+    encodedDispatchCount: 2,
     result,
     stateBuffer: outStateBuffer,
     thermoBuffer: outThermoBuffer,
@@ -1294,7 +1401,8 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
       apply.end();
     },
     cleanupSubmittedWork: cleanup,
-    cleanupRetainedOutput: destroyOutputs
+    cleanupRetainedOutput: destroyOutputs,
+    cleanupRetainedOutputComponents: destroyOutputComponentsNow
   };
 }
 

@@ -492,7 +492,8 @@ const SCHROEDER_MECHANICAL_DEFERRED_PARTICLE_PARALLEL_DISPATCH_COUNT =
   + 3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;
 const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
-const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
+export const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA =
+  'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
 
 const ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA = 'peercompute.ulg.mls-mpm-resident-dispatch-topology.v0';
 const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0';

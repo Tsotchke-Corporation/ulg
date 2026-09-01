@@ -187,7 +187,9 @@ import {
   runSchroederFarForceDeltaFusionWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runSphPressureInterfaceStageComputeTask,
-  selectSphReactionActivationWatchTable
+  selectSphReactionActivationWatchTable,
+  summarizeGpuTimestampRecorderQueueStages,
+  ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA
 } from './sphMlsMpmGpuStep.js';
 import {
   claimMlsMpmPostMechanicsContinuation,
@@ -881,6 +883,39 @@ function completeSchroederSubmittedTemporaryCleanup({
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+export function createSchroederTwoLevelResidentStageTiming(
+  gpuTimestampRecorder = null
+) {
+  if (gpuTimestampRecorder?.active !== true) return null;
+  const summary = summarizeGpuTimestampRecorderQueueStages(
+    gpuTimestampRecorder
+  );
+  if (summary.stageGpuMs == null && summary.stageGpuStats == null) return null;
+  return {
+    schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
+    totalMs: null,
+    stageMs: {},
+    // Queue-fence stage windows are diagnostic wall-clock GPU completion
+    // intervals. They deliberately remain separate from timestamp-query pass
+    // spans (`stageGpuMs`) because the former serialize the queue and include
+    // submit latency.
+    stageGpuMs: null,
+    gpuTimestampProfile: null,
+    queueStageGpuMs: summary.stageGpuMs == null
+      ? null
+      : { ...summary.stageGpuMs },
+    queueStageGpuStats: summary.stageGpuStats == null
+      ? null
+      : Object.fromEntries(Object.entries(summary.stageGpuStats).map(
+          ([stage, stats]) => [stage, { ...stats }]
+        )),
+    queueStageGpuSummaryStatus: summary.status,
+    queueStageGpuRecorderSchema: summary.recorderSchema,
+    queueStageGpuRecorderKind: summary.recorderKind,
+    queueStageGpuRecorderCapabilities: { ...summary.capabilities }
+  };
 }
 
 function nextPowerOfTwo(value) {
@@ -21645,6 +21680,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           phaseChangeValidation: false,
           fullPhysicsValidation: false
         }));
+  // A worker-local recorder is created only when the clone-safe profiling flag
+  // is enabled, never on the production hot path.
+  const twoLevelResidentStageTiming = twoLevelAuthoritative
+    ? createSchroederTwoLevelResidentStageTiming(gpuTimestampRecorder)
+    : null;
   // Authoritative two-level mode replaces the resident mechanics with a
   // synthesized resident-step-shaped envelope built from the coupled-step
   // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
@@ -21704,6 +21744,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       sidecars: twoLevelPostMechanicsClosure
         ? 'shared-post-mechanics-closure'
         : 'none-two-level-mechanics-only',
+      ...(twoLevelResidentStageTiming
+        ? { stageTiming: twoLevelResidentStageTiming }
+        : {}),
       postMechanicsClosure: twoLevelPostMechanicsClosure,
       stageMechanicsTrace:
         twoLevelPostMechanicsClosure?.stageMechanicsTrace ?? null,

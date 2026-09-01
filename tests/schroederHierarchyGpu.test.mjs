@@ -261,6 +261,7 @@ import {
   createSchroederPortableSummaryPlan,
   createSchroederSameLevelMechanicsPlan,
   createSchroederTwoLevelCoverageAdmission,
+  createSchroederTwoLevelResidentStageTiming,
   decodeSchroederLawNeighborTraversalDiagnostics,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
@@ -1724,6 +1725,64 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(
     ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
     'peercompute.ulg.schroeder-same-level-mechanics-execution.v0'
+  );
+});
+
+test('authoritative two-level timing publishes clone-safe queue-stage evidence without relabeling pass spans', () => {
+  const queueStageGpuMs = {
+    'fine-0-p2g': 1.25,
+    'terminal-coarse-g2p': 0.75
+  };
+  const queueStageGpuStats = {
+    'fine-0-p2g': {
+      totalMs: 1.25,
+      count: 1,
+      maxMs: 1.25,
+      meanMs: 1.25
+    }
+  };
+  const recorder = {
+    schema: 'peercompute.ulg.test-queue-stage-recorder.v0',
+    recorderKind: 'queue-fence-stage-summary',
+    active: true,
+    encoderSpansSupported: false,
+    measureQueueStage() {},
+    stageGpuMs: () => queueStageGpuMs,
+    stageGpuStats: () => queueStageGpuStats
+  };
+  const timing = createSchroederTwoLevelResidentStageTiming(recorder);
+
+  assert.equal(
+    timing.schema,
+    'peercompute.ulg.mls-mpm-resident-stage-timing.v0'
+  );
+  assert.equal(timing.stageGpuMs, null);
+  assert.equal(timing.gpuTimestampProfile, null);
+  assert.deepEqual(timing.queueStageGpuMs, queueStageGpuMs);
+  assert.deepEqual(timing.queueStageGpuStats, queueStageGpuStats);
+  assert.notEqual(timing.queueStageGpuMs, queueStageGpuMs);
+  assert.notEqual(
+    timing.queueStageGpuStats['fine-0-p2g'],
+    queueStageGpuStats['fine-0-p2g']
+  );
+  assert.equal(
+    timing.queueStageGpuSummaryStatus,
+    'gpu-timestamp-recorder-stage-summary-ready'
+  );
+  assert.equal(
+    timing.queueStageGpuRecorderKind,
+    'queue-fence-stage-summary'
+  );
+  assert.equal(timing.queueStageGpuRecorderCapabilities.measureQueueStage, true);
+  assert.equal(timing.queueStageGpuRecorderCapabilities.encoderSpans, false);
+  structuredClone(timing);
+
+  assert.equal(createSchroederTwoLevelResidentStageTiming(null), null);
+  assert.equal(createSchroederTwoLevelResidentStageTiming({ active: false }), null);
+  assert.equal(
+    createSchroederTwoLevelResidentStageTiming({ active: true }),
+    null,
+    'an active recorder without a queue-summary interface must not fabricate timing'
   );
 });
 

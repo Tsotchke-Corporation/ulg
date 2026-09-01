@@ -3832,6 +3832,9 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
     selectedLevel: 0,
     mechanicsGrid,
     exactNearCellTreeEnabled: false,
+    residentStepOptions: {
+      residentGpuTimestampProfilingRequested: true
+    },
     sphParticleUpload: {
       particleCount,
       stateBuffer: levelAssignment.sourceStateBuffer,
@@ -3922,8 +3925,18 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
         enableTwoLevelMechanics: true,
         twoLevelMechanicsAuthority: 'authoritative',
         twoLevelFineSubstepCount: 3,
+        residentStepOptions: {
+          residentGpuTimestampProfilingRequested: true
+        },
         async schroederSameLevelMechanicsRunner(args) {
           observedStepZero.args = args;
+          assert.equal(args.gpuTimestampRecorder?.active, true);
+          await args.gpuTimestampRecorder.measureQueueStage({
+            producerId: 'test-two-level:fine-0-p2g',
+            stage: 'fine-0-p2g'
+          }, async () => true);
+          const queueStageGpuMs = args.gpuTimestampRecorder.stageGpuMs();
+          const queueStageGpuStats = args.gpuTimestampRecorder.stageGpuStats();
           return {
             status: 'schroeder-same-level-mechanics-completed',
             selectedLevel: 0,
@@ -3933,6 +3946,23 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
               readbackMode: 'no-full-readback',
               stageStatus: { p2g: 'completed', g2p: 'completed' },
               stageBackends: { p2g: 'webgpu', g2p: 'webgpu' },
+              stageTiming: {
+                schema: 'peercompute.ulg.mls-mpm-resident-stage-timing.v0',
+                totalMs: null,
+                stageMs: {},
+                stageGpuMs: null,
+                gpuTimestampProfile: null,
+                queueStageGpuMs,
+                queueStageGpuStats,
+                queueStageGpuSummaryStatus:
+                  'gpu-timestamp-recorder-stage-summary-ready',
+                queueStageGpuRecorderSchema:
+                  args.gpuTimestampRecorder.schema,
+                queueStageGpuRecorderKind:
+                  args.gpuTimestampRecorder.recorderKind,
+                queueStageGpuRecorderCapabilities:
+                  args.gpuTimestampRecorder.capabilities
+              },
               postMechanicsClosure: {
                 schema: 'peercompute.ulg.mls-mpm-post-mechanics-closure.v1',
                 status: 'post-mechanics-closure-complete',
@@ -3999,6 +4029,24 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
   assert.equal(stepZeroArgs.enableTwoLevelMechanics, true);
   assert.equal(stepZeroArgs.twoLevelMechanicsAuthority, 'authoritative');
   assert.equal(stepZeroArgs.twoLevelFineSubstepCount, 3);
+  assert.equal(
+    stepZeroArgs.gpuTimestampRecorder.schema,
+    'peercompute.ulg.sph-gpu-queue-stage-recorder.v0'
+  );
+  assert.ok(
+    mechanics.value.hierarchyStageSummary.residentStageTiming
+      .queueStageGpuMs['fine-0-p2g'] >= 0
+  );
+  assert.equal(
+    mechanics.value.hierarchyStageSummary.residentStageTiming
+      .queueStageGpuStats['fine-0-p2g'].count,
+    1
+  );
+  assert.equal(
+    mechanics.value.hierarchyStageSummary.residentStageTiming
+      .queueStageGpuRecorderKind,
+    'queue-fence-stage-summary'
+  );
   assert.equal(
     stepZeroArgs.residentStepOptions.summaryRunner,
     undefined,
@@ -4173,6 +4221,11 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
     laneOptions
   ));
   const stepOneArgs = observedStepOne.args;
+  assert.equal(
+    stepOneArgs.gpuTimestampRecorder,
+    undefined,
+    'profiling must not create a queue-stage recorder outside two-level mode'
+  );
   assert.equal(stepOneArgs.sphParticleUpload.stateBuffer, nextStateBuffer);
   assert.equal(stepOneArgs.sphParticleUpload.thermoBuffer, nextThermoBuffer);
   assert.equal(stepOneArgs.sphParticleUpload.identityBuffer, nextIdentityBuffer);
@@ -5489,6 +5542,24 @@ test('ULG private resident schedule stage returns bypass public deep transport w
     Object.freeze({ stage: 'private-epoch-end', atMs: 0.25 })
   ]);
   const privateStageGpuMs = Object.freeze({ p2g: 0.125, g2p: 0.25 });
+  const privateQueueStageGpuMs = Object.freeze({
+    'fine-0-p2g': 0.375,
+    'terminal-coarse-g2p': 0.625
+  });
+  const privateQueueStageGpuStats = Object.freeze({
+    'fine-0-p2g': Object.freeze({
+      totalMs: 0.375,
+      count: 1,
+      maxMs: 0.375,
+      meanMs: 0.375
+    }),
+    'terminal-coarse-g2p': Object.freeze({
+      totalMs: 0.625,
+      count: 1,
+      maxMs: 0.625,
+      meanMs: 0.625
+    })
+  });
   const privateGpuTimestampProfile = Object.freeze({
     schema: 'peercompute.ulg.test-gpu-timestamp-profile.v0',
     stageGpuMs: privateStageGpuMs
@@ -5530,6 +5601,22 @@ test('ULG private resident schedule stage returns bypass public deep transport w
       result.residentStep.stageTiming.stageGpuMs = privateStageGpuMs;
       result.residentStep.stageTiming.gpuTimestampProfile =
         privateGpuTimestampProfile;
+      result.residentStep.stageTiming.queueStageGpuMs =
+        privateQueueStageGpuMs;
+      result.residentStep.stageTiming.queueStageGpuStats =
+        privateQueueStageGpuStats;
+      result.residentStep.stageTiming.queueStageGpuSummaryStatus =
+        'gpu-timestamp-recorder-stage-summary-ready';
+      result.residentStep.stageTiming.queueStageGpuRecorderSchema =
+        'peercompute.ulg.sph-gpu-queue-stage-recorder.v0';
+      result.residentStep.stageTiming.queueStageGpuRecorderKind =
+        'queue-fence-stage-summary';
+      result.residentStep.stageTiming.queueStageGpuRecorderCapabilities = {
+        measureQueueStage: true,
+        encoderSpans: false,
+        stageGpuMs: true,
+        stageGpuStats: true
+      };
       result.residentStep.stageMechanicsTrace = privateDisabledStageTrace;
       result.residentStep.canonicalSpatialAuthorityTrace =
         privateDisabledCanonicalTrace;
@@ -5589,6 +5676,25 @@ test('ULG private resident schedule stage returns bypass public deep transport w
         .residentStageTiming.gpuTimestampProfile.stageGpuMs,
       null,
       'the private result must preserve the established timing-alias shape'
+    );
+    assert.deepEqual(
+      result.perStepSummaries.lastStep.hierarchyStageSummary
+        .residentStageTiming.queueStageGpuMs,
+      privateQueueStageGpuMs,
+      'queue-fence timing must retain its distinct clone-safe transport map'
+    );
+    assert.deepEqual(
+      result.perStepSummaries.ring[0].queueStageGpuMs,
+      privateQueueStageGpuMs,
+      'the bounded per-step ring must expose queue-stage attribution'
+    );
+    assert.deepEqual(
+      result.perStepSummaries.ring[0].queueStageGpuStats,
+      privateQueueStageGpuStats
+    );
+    assert.equal(
+      result.perStepSummaries.ring[0].queueStageGpuSummaryStatus,
+      'gpu-timestamp-recorder-stage-summary-ready'
     );
     assert.equal(
       result.perStepSummaries.lastStep.hierarchyStageSummary

@@ -1,4 +1,5 @@
 import {
+  createSphGpuQueueStageRecorder,
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
 } from '../runtime/sph/sphGpuTimestampProfiler.js';
@@ -5410,6 +5411,22 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           )
         })
       : null;
+  // The profiling request is clone-safe, but its recorder cannot cross the
+  // page/worker boundary. Construct the diagnostic recorder beside the worker
+  // device and only for the condition-derived two-level route whose synthetic
+  // resident step otherwise has no pass-level timing owner. This recorder
+  // deliberately serializes measured stages with queue fences, so it must stay
+  // absent from the normal hot path.
+  const twoLevelGpuQueueStageRecorder = Boolean(
+    enableTwoLevelMechanics
+    && residentStepOptions.residentGpuTimestampProfilingRequested === true
+  )
+    ? createSphGpuQueueStageRecorder({
+        device,
+        enabled: true,
+        label: 'ulg-worker-two-level-queue-stage-recorder'
+      })
+    : null;
   let kernelResult = null;
   let successorLeaseReleasePromise = null;
   try {
@@ -5495,6 +5512,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         : {}),
       ...(data.cflFactor != null ? { cflFactor: data.cflFactor } : {}),
       ...(data.readbackMode ? { readbackMode: data.readbackMode } : {}),
+      ...(twoLevelGpuQueueStageRecorder
+        ? { gpuTimestampRecorder: twoLevelGpuQueueStageRecorder }
+        : {}),
       residentStepOptions
     });
   } finally {
@@ -5833,6 +5853,29 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         stageGpuMs: residentStep.stageTiming.stageGpuMs ?? null,
         gpuTimestampProfile:
           residentStep.stageTiming.gpuTimestampProfile ?? null,
+        // Queue-fence timing is intentionally transported under its distinct
+        // contract; it must never be relabeled as timestamp-query stageGpuMs.
+        queueStageGpuMs: residentStep.stageTiming.queueStageGpuMs == null
+          ? null
+          : { ...residentStep.stageTiming.queueStageGpuMs },
+        queueStageGpuStats: residentStep.stageTiming.queueStageGpuStats == null
+          ? null
+          : Object.fromEntries(Object.entries(
+              residentStep.stageTiming.queueStageGpuStats
+            ).map(([stage, stats]) => [stage, { ...stats }])),
+        queueStageGpuSummaryStatus:
+          residentStep.stageTiming.queueStageGpuSummaryStatus ?? null,
+        queueStageGpuRecorderSchema:
+          residentStep.stageTiming.queueStageGpuRecorderSchema ?? null,
+        queueStageGpuRecorderKind:
+          residentStep.stageTiming.queueStageGpuRecorderKind ?? null,
+        queueStageGpuRecorderCapabilities:
+          residentStep.stageTiming.queueStageGpuRecorderCapabilities == null
+            ? null
+            : {
+                ...residentStep.stageTiming
+                  .queueStageGpuRecorderCapabilities
+              },
         compactSummaryRequested:
           residentStep.stageTiming.compactSummaryRequested === true,
         compactSummaryMapAsyncWaitMs: Number.isFinite(
@@ -10220,11 +10263,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           epochStageResult.value?.epochQueueIntervalMs ?? null,
         epochQueueTimeline:
           epochStageResult.value?.epochQueueTimeline ?? null,
-        // Diagnostic-only per-step device timing map (null unless
-        // residentGpuTimestampProfile=1): the contact pass durations plus
-        // the queue:* stage-window timeline for THIS step.
+        // Diagnostic-only per-step device timing maps (null unless
+        // residentGpuTimestampProfile=1). Timestamp-query pass spans and
+        // serialized queue-fence stage windows retain distinct semantics.
         stageGpuMs:
-          hierarchyStageSummary?.residentStageTiming?.stageGpuMs ?? null
+          hierarchyStageSummary?.residentStageTiming?.stageGpuMs ?? null,
+        queueStageGpuMs:
+          hierarchyStageSummary?.residentStageTiming?.queueStageGpuMs ?? null,
+        queueStageGpuStats:
+          hierarchyStageSummary?.residentStageTiming?.queueStageGpuStats ?? null,
+        queueStageGpuSummaryStatus:
+          hierarchyStageSummary?.residentStageTiming
+            ?.queueStageGpuSummaryStatus ?? null
       });
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       armSubmitCensus();

@@ -105,14 +105,20 @@ function fakeEncoder() {
   };
 }
 
-function fakeDevice() {
+function fakeDevice({ explicitLayouts = false } = {}) {
   const buffers = [];
   const pipelines = [];
+  const bindGroupLayouts = [];
+  const pipelineLayouts = [];
+  const bindGroups = [];
   const submissions = [];
   const writes = [];
-  return {
+  const device = {
     buffers,
     pipelines,
+    bindGroupLayouts,
+    pipelineLayouts,
+    bindGroups,
     submissions,
     writes,
     limits: {
@@ -140,13 +146,19 @@ function fakeDevice() {
       const pipeline = {
         ...descriptor,
         getBindGroupLayout(index) {
+          if (descriptor.layout && descriptor.layout !== 'auto') {
+            return descriptor.layout.bindGroupLayouts[index];
+          }
           return { entryPoint: descriptor.compute.entryPoint, index };
         }
       };
       pipelines.push(pipeline);
       return pipeline;
     },
-    createBindGroup(descriptor) { return descriptor; },
+    createBindGroup(descriptor) {
+      bindGroups.push(descriptor);
+      return descriptor;
+    },
     createCommandEncoder() { return fakeEncoder(); },
     queue: {
       writeBuffer(buffer, offset, data) {
@@ -156,6 +168,19 @@ function fakeDevice() {
       onSubmittedWorkDone() { return Promise.resolve(); }
     }
   };
+  if (explicitLayouts) {
+    device.createBindGroupLayout = (descriptor) => {
+      const layout = { ...descriptor };
+      bindGroupLayouts.push(layout);
+      return layout;
+    };
+    device.createPipelineLayout = (descriptor) => {
+      const layout = { ...descriptor };
+      pipelineLayouts.push(layout);
+      return layout;
+    };
+  }
+  return device;
 }
 
 function submittedOwner(value) {
@@ -662,6 +687,53 @@ test('parent-field mechanics rejects devices below the ten-storage-binding floor
     }),
     /requires ten storage bindings/
   );
+});
+
+test('fine-correction base pipelines share one exact explicit layout', () => {
+  const device = fakeDevice({ explicitLayouts: true });
+  const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+    parentFieldCapacity: 1,
+    fineFieldCapacity: 1,
+    arenaCount: 1
+  });
+  const fineEntryPoints = new Set([
+    'begin_fine_velocity_correction',
+    'validate_fine_velocity_correction',
+    'validate_routed_coarse_cfl',
+    'seal_fine_correction_alpha',
+    'prepare_fine_transaction',
+    'apply_fine_velocity_correction',
+    'apply_fine_route_heat',
+    'commit_routed_reflux_rows',
+    'commit_routed_reflux',
+    'finalize_fine_velocity_correction'
+  ]);
+  const finePipelines = device.pipelines.filter(({ compute }) => (
+    fineEntryPoints.has(compute.entryPoint)
+  ));
+  assert.equal(finePipelines.length, fineEntryPoints.size);
+  const [finePipelineLayout] = new Set(
+    finePipelines.map(({ layout }) => layout)
+  );
+  assert.equal(
+    finePipelines.every(({ layout }) => layout === finePipelineLayout),
+    true
+  );
+  assert.notEqual(finePipelineLayout, 'auto');
+  assert.deepEqual(
+    finePipelineLayout.bindGroupLayouts[0].entries.map(({ binding }) => binding),
+    [0, 1, 2, 3, 4, 5, 11]
+  );
+  for (const entryPoint of [
+    'admit_cross_level_phase_volume',
+    'propose_cross_level_phase_volume'
+  ]) {
+    assert.equal(
+      device.pipelines.find(({ compute }) => compute.entryPoint === entryPoint)?.layout,
+      'auto'
+    );
+  }
+  assert.equal(runtime.destroy(), true);
 });
 
 test('high-N workspace splits one allocation into portable storage-binding ranges', () => {

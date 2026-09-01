@@ -182,6 +182,7 @@ const PAIR_SCAN_ELEMENTS_PER_WORKGROUP: u32 = 512u;
 const PAIR_SCAN_MAX_LEVELS: u32 = 4u;
 
 var<workgroup> pair_scan_values: array<vec2<u32>, 512>;
+var<workgroup> pair_scan_live_level_count: u32;
 
 fn pair_load(word: u32) -> u32 {
   return atomicLoad(&pair_control[word]);
@@ -1359,6 +1360,15 @@ fn scan_pair_tail_level(
   local_id: vec3<u32>,
   workgroup_id: vec3<u32>
 ) {
+  if (local_id.x == 0u) {
+    pair_scan_live_level_count = pair_load(PAIR_CONTROL_SCAN_LEVEL_COUNT);
+  }
+  let live_level_count = workgroupUniformLoad(
+    &pair_scan_live_level_count
+  );
+  if (level >= live_level_count) {
+    return;
+  }
   let level_count = pair_scan_level_count(level, true);
   let group_count =
     pair_ceil_groups(level_count, PAIR_SCAN_ELEMENTS_PER_WORKGROUP);

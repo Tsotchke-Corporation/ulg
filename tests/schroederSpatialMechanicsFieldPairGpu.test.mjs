@@ -639,7 +639,9 @@ test('paired mechanics-field construction publishes two exact v5 children from o
     pair.stableOrderProjectionPolicy,
     'gpu-authenticated-dual-predicate-exclusive-scan-stable-scatter'
   );
-  assert.equal(pair.stableOrderProjectionEncodedIndirectDispatchCount, 8);
+  assert.equal(pair.stableOrderProjectionEncodedIndirectDispatchCount, 0);
+  assert.equal(pair.stableOrderProjectionEncodedDirectDispatchCount, 2);
+  assert.equal(pair.stableOrderProjectionEncodedDispatchCount, 2);
   assert.equal(pair.stableOrderProjectionHostCountReadbackRequired, false);
   assert.equal(
     projectionScratch[0].buffer.size,
@@ -669,7 +671,9 @@ test('paired mechanics-field construction publishes two exact v5 children from o
   ]);
   assert.deepEqual(fine.radixSignificantDigitRows, pair.radixSignificantDigitRows);
   assert.deepEqual(coarse.radixSignificantDigitRows, pair.radixSignificantDigitRows);
-  assert.equal(pair.encodedDispatchCount, 68);
+  assert.equal(pair.encodedDispatchCount, 62);
+  assert.equal(pair.encodedDirectDispatchCount, 62);
+  assert.equal(pair.encodedIndirectDispatchCount, 0);
   assert.equal(pair.encodedComputePassCount, 9);
   assert.equal(pair.sharedRadixExecutionCount, 1);
   assert.equal(
@@ -687,13 +691,26 @@ test('paired mechanics-field construction publishes two exact v5 children from o
   const projectionPass = passes.find(({ descriptor }) => (
     descriptor.label?.endsWith('ParallelStableOrderProjection')
   ));
-  assert.equal(projectionPass?.commands.length, 8);
-  const projectionDispatch = runtime.allocationEntries().find(({ role }) => (
-    role === 'mechanics-field-pair-stable-order-projection-dispatch'
-  ))?.buffer;
-  assert.ok(projectionPass.commands.every(({ dispatchIndirect }) => (
-    dispatchIndirect?.buffer === projectionDispatch
+  assert.equal(projectionPass?.commands.length, 2);
+  assert.ok(projectionPass.commands.every(({ dispatch }) => (
+    Array.isArray(dispatch) && dispatch.length === 3
   )));
+  assert.equal(
+    fine.constructionDispatchEvidence.sourceDispatchMode,
+    'host-capacity-bounded-direct-ceiling'
+  );
+  assert.deepEqual(
+    fine.constructionDispatchEvidence.sourceDispatchWorkgroups,
+    [1, 1, 1]
+  );
+  assert.equal(
+    fine.constructionDispatchEvidence.candidateDispatchMode,
+    'host-capacity-bounded-direct-ceiling'
+  );
+  assert.deepEqual(
+    fine.constructionDispatchEvidence.candidateDispatchWorkgroups,
+    [4, 1, 1]
+  );
 
   fixture.markParentsSubmitted();
   assert.equal(runtime.markExecutionSubmitted(coarse), true);
@@ -710,6 +727,74 @@ test('paired mechanics-field construction publishes two exact v5 children from o
   assert.equal(pair.released, true);
   assert.equal(fine.released, true);
   assert.equal(coarse.released, true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('paired construction retains folded indirect dispatches beyond the one-dimensional device ceiling', () => {
+  const device = createFakeDevice({
+    limits: { maxComputeWorkgroupsPerDimension: 8 }
+  });
+  const fixture = createDirectoryV2PairFixture(device, {
+    physicalSourceCapacity: 576,
+    activeSourceCapacity: 576
+  });
+  const runtime = createPairRuntime(device, {
+    maxPhysicalSourceCount: 576,
+    activeSourceCapacity: 576
+  });
+  const { execution: pair, encoder } = encodePair(runtime, device, fixture);
+  const [fine] = pair.mechanicsFieldViews;
+
+  assert.equal(fine.sourceDispatchWorkgroups, null);
+  assert.equal(fine.candidateDispatchWorkgroups, null);
+  assert.equal(
+    fine.constructionDispatchEvidence.sourceDispatchMode,
+    'gpu-authored-folded-indirect'
+  );
+  assert.equal(
+    fine.constructionDispatchEvidence.candidateDispatchMode,
+    'gpu-authored-folded-indirect'
+  );
+  assert.equal(
+    fine.sourceDispatchIndirectBuffer,
+    fixture.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    fine.candidateDispatchIndirectBuffer,
+    fixture.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(pair.stableOrderProjectionEncodedDirectDispatchCount, 1);
+  assert.equal(pair.stableOrderProjectionEncodedIndirectDispatchCount, 3);
+  assert.equal(pair.stableOrderProjectionEncodedDispatchCount, 4);
+  assert.equal(
+    pair.encodedDispatchCount,
+    pair.encodedDirectDispatchCount + pair.encodedIndirectDispatchCount
+  );
+
+  const passes = encoder.events.filter(({ kind }) => kind === 'pass');
+  const emissionPass = passes.find(({ descriptor }) => (
+    descriptor.label?.endsWith('EmitPairCandidates')
+  ));
+  const projectionPass = passes.find(({ descriptor }) => (
+    descriptor.label?.endsWith('ParallelStableOrderProjection')
+  ));
+  const materializePass = passes.find(({ descriptor }) => (
+    descriptor.label?.endsWith('MaterializePairStencilMap')
+  ));
+  const assemblePass = passes.find(({ descriptor }) => (
+    descriptor.label?.endsWith('AssemblePairKeys')
+  ));
+  assert.ok(emissionPass?.commands[0]?.dispatchIndirect);
+  assert.deepEqual(
+    projectionPass?.commands.map((command) => (
+      command.dispatch ? 'direct' : 'indirect'
+    )),
+    ['indirect', 'direct', 'indirect', 'indirect']
+  );
+  assert.ok(materializePass?.commands[0]?.dispatchIndirect);
+  assert.ok(assemblePass?.commands[0]?.dispatchIndirect);
+
+  assert.equal(runtime.releaseExecution(pair, { discardedEncoder: true }), true);
   assert.equal(runtime.destroy(), true);
 });
 
@@ -1137,7 +1222,9 @@ test('all-active P8192 tier retains the exact bounded projection hierarchy', () 
     [221_184, 432]
   );
   assert.equal(runtime.stableOrderProjectionScratchBytes, 1_772_928);
-  assert.equal(runtime.stableOrderProjectionEncodedIndirectDispatchCount, 8);
+  assert.equal(runtime.stableOrderProjectionEncodedIndirectDispatchCount, 1);
+  assert.equal(runtime.stableOrderProjectionEncodedDirectDispatchCount, 3);
+  assert.equal(runtime.stableOrderProjectionEncodedDispatchCount, 4);
   assert.equal(runtime.stableOrderProjectionHostCountReadbackRequired, false);
   assert.equal(runtime.destroy(), true);
 });
@@ -1149,6 +1236,11 @@ test('paired WGSL keeps disjoint monotone levels, material, and solid domains in
       import.meta.url
     ),
     'utf8'
+  );
+  assert.match(
+    source,
+    /fn\s+scan_pair_tail_level\([\s\S]{0,300}workgroupUniformLoad\([\s\S]{0,80}&pair_scan_live_level_count[\s\S]{0,120}level\s*>=\s*live_level_count[\s\S]{0,40}return;/,
+    'direct retained scan ceilings uniformly skip live-inactive levels before barriers'
   );
   assert.match(
     source,
@@ -1455,17 +1547,15 @@ test('paired mechanics-field authority is GPU-only and malformed or one-level in
     assert.equal(Object.hasOwn(child, 'activeSourceCount'), false);
     assert.equal(child.candidateCount, null);
   }
-  const indirectCommands = encoder.events
+  const encodedCommands = encoder.events
     .filter(({ kind }) => kind === 'pass')
-    .flatMap(({ commands }) => commands)
-    .filter(({ dispatchIndirect }) => dispatchIndirect);
-  assert.ok(indirectCommands.length > 0);
-  assert.ok(indirectCommands.every(({ dispatchIndirect }) => (
-    dispatchIndirect.buffer === fixture.activeSourceView.activeSourceViewBuffer
-      || runtime.allocationEntries().some(({ buffer }) => (
-        buffer === dispatchIndirect.buffer
-      ))
-  )));
+    .flatMap(({ commands }) => commands);
+  assert.equal(encodedCommands.length, pair.encodedDispatchCount);
+  assert.ok(encodedCommands.some(({ dispatch }) => dispatch));
+  assert.equal(
+    pair.encodedDispatchCount,
+    pair.encodedDirectDispatchCount + pair.encodedIndirectDispatchCount
+  );
   assert.equal(runtime.releaseExecution(pair.mechanicsFieldViews[1], {
     discardedEncoder: true
   }), true);

@@ -109,6 +109,17 @@ function checkedProduct(left, right, label, max = 0xffff_ffff) {
   return result;
 }
 
+function directCeilingWorkgroups(
+  invocationCapacity,
+  workgroupSize,
+  maxComputeWorkgroupsPerDimension
+) {
+  const groupCount = Math.ceil(invocationCapacity / workgroupSize);
+  return groupCount <= maxComputeWorkgroupsPerDimension
+    ? Object.freeze([groupCount, 1, 1])
+    : null;
+}
+
 function createPairProjectionScanPlan(maxElementCount) {
   const maximum = positiveInteger(
     maxElementCount,
@@ -152,13 +163,10 @@ function createPairProjectionScanPlan(maxElementCount) {
     levelOffsets: Object.freeze(levelOffsets),
     scratchElementCount: elementOffset,
     scratchByteLength,
-    encodedScanDispatchCount: PAIR_PROJECTION_SCAN_MAX_LEVELS,
-    encodedAddDispatchCount: PAIR_PROJECTION_SCAN_MAX_LEVELS - 1,
+    encodedScanDispatchCount: levelCounts.length,
+    encodedAddDispatchCount: Math.max(0, levelCounts.length - 1),
     encodedScatterDispatchCount: 1,
-    encodedIndirectDispatchCount:
-      PAIR_PROJECTION_SCAN_MAX_LEVELS
-      + PAIR_PROJECTION_SCAN_MAX_LEVELS - 1
-      + 1
+    encodedDispatchCount: levelCounts.length * 2
   });
 }
 
@@ -254,7 +262,8 @@ function encodeIndirectPass(
   indirectOffsetBytes,
   label,
   gpuTimestampRecorder,
-  timestampDescriptor
+  timestampDescriptor,
+  directWorkgroups = null
 ) {
   const span = timestampDescriptor
     ? beginTimestampSpan(gpuTimestampRecorder, encoder, timestampDescriptor)
@@ -262,18 +271,22 @@ function encodeIndirectPass(
   const pass = encoder.beginComputePass({ label });
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
-  if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
-    throw new TypeError(
-      'mechanics field pair requires indirect compute dispatch support'
-    );
+  if (directWorkgroups) {
+    pass.dispatchWorkgroups(...directWorkgroups);
+  } else {
+    if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+      throw new TypeError(
+        'mechanics field pair requires indirect compute dispatch support'
+      );
+    }
+    pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffsetBytes);
   }
-  pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffsetBytes);
   pass.end();
   endTimestampSpan(gpuTimestampRecorder, encoder, span);
   return 1;
 }
 
-function encodeGroupedIndirectPass(
+function encodeGroupedDispatchPass(
   encoder,
   commands,
   indirectBuffer,
@@ -283,16 +296,21 @@ function encodeGroupedIndirectPass(
   for (const {
     pipeline,
     bindGroup,
-    indirectOffsetBytes
+    indirectOffsetBytes,
+    directWorkgroups = null
   } of commands) {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
-      throw new TypeError(
-        'mechanics field pair projection requires indirect compute dispatch support'
-      );
+    if (directWorkgroups) {
+      pass.dispatchWorkgroups(...directWorkgroups);
+    } else {
+      if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+        throw new TypeError(
+          'mechanics field pair projection requires indirect compute dispatch support'
+        );
+      }
+      pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffsetBytes);
     }
-    pass.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffsetBytes);
   }
   pass.end();
   return commands.length;
@@ -611,6 +629,34 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
     'device.limits.maxComputeWorkgroupsPerDimension',
     65535
   );
+  const sourceDirectWorkgroups = directCeilingWorkgroups(
+    resolvedActiveSourceCapacity,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+    maxComputeWorkgroupsPerDimension
+  );
+  const candidateDirectWorkgroups = directCeilingWorkgroups(
+    pairCandidateCapacity,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+    maxComputeWorkgroupsPerDimension
+  );
+  const projectionScanDirectWorkgroups = Object.freeze(
+    projectionScanPlan.levelCounts.map((levelCount) => (
+      directCeilingWorkgroups(
+        levelCount,
+        PAIR_PROJECTION_SCAN_ELEMENTS_PER_WORKGROUP,
+        maxComputeWorkgroupsPerDimension
+      )
+    ))
+  );
+  const projectionScatterDirectWorkgroups =
+    projectionScanDirectWorkgroups[0];
+  const projectionEncodedDirectDispatchCount =
+    projectionScanDirectWorkgroups.filter(Boolean).length
+    + Number(projectionScatterDirectWorkgroups !== null);
+  const projectionEncodedIndirectDispatchCount =
+    projectionScanDirectWorkgroups.filter((workgroups) => !workgroups).length
+    + projectionScanPlan.encodedAddDispatchCount
+    + Number(projectionScatterDirectWorkgroups === null);
   for (const [role, bytes] of [
     ['candidate keys', candidateKeyByteLength],
     ['fine stable order', stableOrderByteLength],
@@ -1224,7 +1270,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           stage: 'paired-candidate-emission',
           spanClass: 'same-production-command-encoder',
           ...commonTimestamp
-        }
+        },
+        sourceDirectWorkgroups
       );
       radixUnique = arena.radix.encodeSortUniqueGpuCount(encoder, {
         keyBuffer: arena.candidateKeyBuffer,
@@ -1264,7 +1311,9 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         [2, 5, 6, 9, 10, 13, 14, 17, 18],
         `${label}-arena-${arena.arenaIndex}-prepare-partition-bindings`
       );
-      const scanTailBindings = pipelines.scanTailLevels.map(
+      const scanTailBindings = pipelines.scanTailLevels
+        .slice(0, projectionScanPlan.levelCount)
+        .map(
         (pipelineObject, level) => createBindings(
           pipelineObject,
           resources,
@@ -1272,14 +1321,24 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           `${label}-arena-${arena.arenaIndex}-scan-tail-${level}-bindings`
         )
       );
-      const addTailBindings = pipelines.addTailLevels.map(
-        (pipelineObject, index) => createBindings(
+      const addTailCommands = pipelines.addTailLevels
+        .map((pipelineObject, index) => ({
           pipelineObject,
-          resources,
-          [9, 14, 17],
-          `${label}-arena-${arena.arenaIndex}-add-tail-${2 - index}-bindings`
-        )
-      );
+          level: 2 - index
+        }))
+        .filter(({ level }) => (
+          level < projectionScanPlan.levelCount - 1
+        ))
+        .map(({ pipelineObject, level }) => ({
+          pipelineObject,
+          level,
+          bindGroup: createBindings(
+            pipelineObject,
+            resources,
+            [9, 14, 17],
+            `${label}-arena-${arena.arenaIndex}-add-tail-${level}-bindings`
+          )
+        }));
       const scatterStableOrderBindings = createBindings(
         pipelines.scatterStableOrder,
         resources,
@@ -1330,34 +1389,36 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         null
       );
       const projectionCommands = [
-        ...pipelines.scanTailLevels.map((pipelineObject, level) => ({
-          pipeline: pipelineObject,
-          bindGroup: scanTailBindings[level],
-          indirectOffsetBytes: (
-            PAIR_PROJECTION_SCAN_DISPATCH_BASE_WORDS
-            + level * PAIR_PROJECTION_SCAN_DISPATCH_STRIDE_WORDS
-          ) * UINT32_BYTES
-        })),
-        ...pipelines.addTailLevels.map((pipelineObject, index) => {
-          const level = 2 - index;
-          return {
+        ...pipelines.scanTailLevels
+          .slice(0, projectionScanPlan.levelCount)
+          .map((pipelineObject, level) => ({
             pipeline: pipelineObject,
-            bindGroup: addTailBindings[index],
+            bindGroup: scanTailBindings[level],
+            indirectOffsetBytes: (
+              PAIR_PROJECTION_SCAN_DISPATCH_BASE_WORDS
+              + level * PAIR_PROJECTION_SCAN_DISPATCH_STRIDE_WORDS
+            ) * UINT32_BYTES,
+            directWorkgroups: projectionScanDirectWorkgroups[level]
+          })),
+        ...addTailCommands
+          .map(({ pipelineObject, bindGroup, level }) => ({
+            pipeline: pipelineObject,
+            bindGroup,
             indirectOffsetBytes: (
               PAIR_PROJECTION_SCAN_DISPATCH_BASE_WORDS
               + level * PAIR_PROJECTION_SCAN_DISPATCH_STRIDE_WORDS
               + 3
             ) * UINT32_BYTES
-          };
-        }),
+          })),
         {
           pipeline: pipelines.scatterStableOrder,
           bindGroup: scatterStableOrderBindings,
           indirectOffsetBytes:
-            PAIR_PROJECTION_SCAN_DISPATCH_BASE_WORDS * UINT32_BYTES
+            PAIR_PROJECTION_SCAN_DISPATCH_BASE_WORDS * UINT32_BYTES,
+          directWorkgroups: projectionScatterDirectWorkgroups
         }
       ];
-      encodedDispatchCount += encodeGroupedIndirectPass(
+      encodedDispatchCount += encodeGroupedDispatchPass(
         encoder,
         projectionCommands,
         arena.projectionDispatchBuffer,
@@ -1386,7 +1447,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           stage: 'paired-stencil-map',
           spanClass: 'same-production-command-encoder',
           ...commonTimestamp
-        }
+        },
+        candidateDirectWorkgroups
       );
       encodedDispatchCount += encodeIndirectPass(
         encoder,
@@ -1401,7 +1463,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           stage: 'paired-key-assembly',
           spanClass: 'same-production-command-encoder',
           ...commonTimestamp
-        }
+        },
+        candidateDirectWorkgroups
       );
       encodedDispatchCount += encodeDirectPass(
         encoder,
@@ -1434,6 +1497,22 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           }
         )
       );
+
+      const wrapperEncodedDirectDispatchCount =
+        3
+        + Number(sourceDirectWorkgroups !== null)
+        + projectionEncodedDirectDispatchCount
+        + 2 * Number(candidateDirectWorkgroups !== null);
+      const wrapperEncodedIndirectDispatchCount =
+        Number(sourceDirectWorkgroups === null)
+        + projectionEncodedIndirectDispatchCount
+        + 2 * Number(candidateDirectWorkgroups === null);
+      const encodedDirectDispatchCount =
+        wrapperEncodedDirectDispatchCount
+        + radixUnique.encodedDirectDispatchCount;
+      const encodedIndirectDispatchCount =
+        wrapperEncodedIndirectDispatchCount
+        + radixUnique.encodedIndirectDispatchCount;
 
       const group = {
         arena,
@@ -1488,6 +1567,14 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           expected: activeSourceView.buildOrdinal
         }),
         maxComputeWorkgroupsPerDimension,
+        sourceDispatchMode: sourceDirectWorkgroups
+          ? 'host-capacity-bounded-direct-ceiling'
+          : 'gpu-authored-folded-indirect',
+        sourceDispatchWorkgroups: sourceDirectWorkgroups,
+        candidateDispatchMode: candidateDirectWorkgroups
+          ? 'host-capacity-bounded-direct-ceiling'
+          : 'gpu-authored-folded-indirect',
+        candidateDispatchWorkgroups: candidateDirectWorkgroups,
         authenticatedByGpuFinalizer: true,
         hostActiveCountReadbackRequired: false
       });
@@ -1530,7 +1617,7 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           radixGateCount: 0,
           forceRadixFallbackRequested: false,
           constructionRoutePolicy:
-            'gpu-authenticated-paired-directory-v2-single-gpu-count-radix',
+            'gpu-authenticated-paired-directory-v2-bounded-ceiling-gpu-count-radix',
           directDispatchLinearization:
             'linearGroup=workgroup.x+workgroup.y*dispatchX',
           sourceDispatchWorkgroups: null,
@@ -1558,6 +1645,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
             SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
               * UINT32_BYTES,
           encodedDispatchCount,
+          encodedDirectDispatchCount,
+          encodedIndirectDispatchCount,
           encodedComputePassCount:
             PAIR_PROJECTION_WRAPPER_COMPUTE_PASS_COUNT
             + radixUnique.encodedComputePassCount,
@@ -1647,9 +1736,15 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         stableOrderProjectionScratchBytes:
           projectionScanPlan.scratchByteLength,
         stableOrderProjectionEncodedIndirectDispatchCount:
-          projectionScanPlan.encodedIndirectDispatchCount,
+          projectionEncodedIndirectDispatchCount,
+        stableOrderProjectionEncodedDirectDispatchCount:
+          projectionEncodedDirectDispatchCount,
+        stableOrderProjectionEncodedDispatchCount:
+          projectionScanPlan.encodedDispatchCount,
         stableOrderProjectionHostCountReadbackRequired: false,
         encodedDispatchCount,
+        encodedDirectDispatchCount,
+        encodedIndirectDispatchCount,
         encodedComputePassCount:
           PAIR_PROJECTION_WRAPPER_COMPUTE_PASS_COUNT
           + radixUnique.encodedComputePassCount,
@@ -2191,6 +2286,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
           SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
             * UINT32_BYTES,
         encodedDispatchCount: 2,
+        encodedDirectDispatchCount: 1,
+        encodedIndirectDispatchCount: 1,
         encodedComputePassCount: 1,
         stableOrderProjectionPolicy: 'topology-successor-copy',
         stableOrderProjectionScanLevelCount: 0,
@@ -2273,8 +2370,12 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         stableOrderProjectionScanLevelCount: 0,
         stableOrderProjectionScratchBytes: 0,
         stableOrderProjectionEncodedIndirectDispatchCount: 0,
+        stableOrderProjectionEncodedDirectDispatchCount: 0,
+        stableOrderProjectionEncodedDispatchCount: 0,
         stableOrderProjectionHostCountReadbackRequired: false,
         encodedDispatchCount: 2,
+        encodedDirectDispatchCount: 1,
+        encodedIndirectDispatchCount: 1,
         encodedComputePassCount: 1,
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
@@ -2386,7 +2487,11 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
     stableOrderProjectionScanLevelCounts: projectionScanPlan.levelCounts,
     stableOrderProjectionScratchBytes: projectionScanPlan.scratchByteLength,
     stableOrderProjectionEncodedIndirectDispatchCount:
-      projectionScanPlan.encodedIndirectDispatchCount,
+      projectionEncodedIndirectDispatchCount,
+    stableOrderProjectionEncodedDirectDispatchCount:
+      projectionEncodedDirectDispatchCount,
+    stableOrderProjectionEncodedDispatchCount:
+      projectionScanPlan.encodedDispatchCount,
     stableOrderProjectionHostCountReadbackRequired: false,
     sharedRadixExecutionCount: 1,
     radixSortKeyWordCount: FIELD_RADIX_KEY_WORDS,

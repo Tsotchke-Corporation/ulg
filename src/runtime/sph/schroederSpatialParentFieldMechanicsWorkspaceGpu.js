@@ -144,6 +144,9 @@ const PIPELINE_BINDINGS = Object.freeze({
 });
 const PREDICTOR_PIPELINE_BINDINGS = Object.freeze([0, 1, 2, 3, 4, 5, 11]);
 const TERMINAL_PIPELINE_BINDINGS = Object.freeze([0, 2, 3, 4, 5, 11]);
+const FINE_CORRECTION_PIPELINE_BINDINGS = Object.freeze([
+  0, 1, 2, 3, 4, 5, 11
+]);
 const PREDICTOR_PIPELINE_NAMES = new Set([
   'initialize',
   'registerReflux',
@@ -168,6 +171,18 @@ const TERMINAL_PIPELINE_NAMES = new Set([
   'applyCoarse',
   'commitCoarse',
   'finalizeCoarse'
+]);
+const FINE_CORRECTION_PIPELINE_NAMES = new Set([
+  'beginFine',
+  'validateFine',
+  'validateRoutedCoarse',
+  'sealFineAlpha',
+  'prepareFine',
+  'applyFine',
+  'applyFineHeat',
+  'commitRefluxRows',
+  'commitReflux',
+  'finalizeFine'
 ]);
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
@@ -1523,13 +1538,19 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'terminal-shared',
     TERMINAL_PIPELINE_BINDINGS
   );
+  const fineCorrectionSharedLayout = createSharedLayout(
+    'fine-correction-shared',
+    FINE_CORRECTION_PIPELINE_BINDINGS
+  );
   const pipeline = (name, entryPoint) => device.createComputePipeline({
     label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
     layout: PREDICTOR_PIPELINE_NAMES.has(name)
       ? (predictorSharedLayout?.pipelineLayout ?? 'auto')
       : TERMINAL_PIPELINE_NAMES.has(name)
         ? (terminalSharedLayout?.pipelineLayout ?? 'auto')
-        : 'auto',
+        : FINE_CORRECTION_PIPELINE_NAMES.has(name)
+          ? (fineCorrectionSharedLayout?.pipelineLayout ?? 'auto')
+          : 'auto',
     compute: { module, entryPoint }
   });
   const pipelines = Object.freeze({
@@ -2793,6 +2814,14 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       phaseVolumeDragScale,
       phaseVolumeMaxImpulseFraction
     }));
+    const fineCorrectionGroup = sharedBindGroup(
+      execution,
+      fineCorrectionSharedLayout,
+      FINE_CORRECTION_PIPELINE_BINDINGS,
+      'fine-correction-shared'
+    );
+    const fineCorrectionBindGroup = (pipelineName) =>
+      fineCorrectionGroup ?? bindGroup(execution, pipelineName);
     const correctionStages = [
       ...(phaseVolumeTransportAuthority ? [
         {
@@ -2810,57 +2839,57 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       {
         name: 'validate-fine-correction',
         pipeline: pipelines.validateFine,
-        bindGroup: bindGroup(execution, 'validateFine'),
+        bindGroup: fineCorrectionBindGroup('validateFine'),
         indirectBuffer: ownership.arena.fineIndirectBuffer
       },
       {
         name: 'validate-routed-coarse-cfl',
         pipeline: pipelines.validateRoutedCoarse,
-        bindGroup: bindGroup(execution, 'validateRoutedCoarse'),
+        bindGroup: fineCorrectionBindGroup('validateRoutedCoarse'),
         indirectBuffer: ownership.arena.coarseIndirectBuffer
       },
       {
         name: 'seal-fine-correction-alpha',
         pipeline: pipelines.sealFineAlpha,
-        bindGroup: bindGroup(execution, 'sealFineAlpha')
+        bindGroup: fineCorrectionBindGroup('sealFineAlpha')
       },
       {
         name: 'prepare-fine-transaction',
         pipeline: pipelines.prepareFine,
-        bindGroup: bindGroup(execution, 'prepareFine')
+        bindGroup: fineCorrectionBindGroup('prepareFine')
       },
       {
         name: 'begin-fine-correction',
         pipeline: pipelines.beginFine,
-        bindGroup: bindGroup(execution, 'beginFine')
+        bindGroup: fineCorrectionBindGroup('beginFine')
       },
       {
         name: 'commit-routed-reflux-rows',
         pipeline: pipelines.commitRefluxRows,
-        bindGroup: bindGroup(execution, 'commitRefluxRows'),
+        bindGroup: fineCorrectionBindGroup('commitRefluxRows'),
         indirectBuffer: ownership.arena.coarseIndirectBuffer
       },
       {
         name: 'commit-routed-reflux',
         pipeline: pipelines.commitReflux,
-        bindGroup: bindGroup(execution, 'commitReflux')
+        bindGroup: fineCorrectionBindGroup('commitReflux')
       },
       {
         name: 'apply-fine-route-heat',
         pipeline: pipelines.applyFineHeat,
-        bindGroup: bindGroup(execution, 'applyFineHeat'),
+        bindGroup: fineCorrectionBindGroup('applyFineHeat'),
         indirectBuffer: ownership.arena.fineIndirectBuffer
       },
       {
         name: 'apply-fine-correction',
         pipeline: pipelines.applyFine,
-        bindGroup: bindGroup(execution, 'applyFine'),
+        bindGroup: fineCorrectionBindGroup('applyFine'),
         indirectBuffer: ownership.arena.fineIndirectBuffer
       },
       {
         name: 'finalize-fine-correction',
         pipeline: pipelines.finalizeFine,
-        bindGroup: bindGroup(execution, 'finalizeFine')
+        bindGroup: fineCorrectionBindGroup('finalizeFine')
       }
     ];
     encodeWorkspaceStages(

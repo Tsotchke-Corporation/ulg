@@ -197,6 +197,7 @@ import {
 import {
   createSphReactionMotionEnvelope
 } from '../src/runtime/sph/sphReactionMotionEnvelope.js';
+import { buildSphPhaseDemoState } from '../src/runtime/sphPhaseDemo.js';
 import {
   markSphReactionMotionEnvelopeWatchSubmittedWorkCompleted,
   observeSphReactionMotionEnvelopeWatch
@@ -16069,20 +16070,14 @@ test('MLS-MPM resident steps compute task can opt into thermal sidecar fused seq
 
 test('MLS-MPM phase-carrier sidecar fusion requires one exact four-descriptor family in reference-pressure mode', () => {
   const { options } = noFullReadbackResidentStepFixture();
-  const buffers = manualBuffers({ particleCount: 4 });
-  const phaseCarrierPlan = {
-    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
-    status: 'phase-lane-capacity-ready',
-    lineageCapacity: 1,
-    primaryCapacity: 1,
-    phaseLaneCount: 4,
-    phaseLaneStride: 1,
-    companionStart: 1,
-    companionCapacity: 3,
-    particleCapacity: 4,
-    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
-    phaseCompanionLanesRequired: true
-  };
+  const phaseCarrierPlan = buildSphPhaseDemoState({
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    adaptiveParticleSpacing: false,
+    allowFixtureMaterialProperties: true
+  }).state.phaseCarrierPlan;
+  const particleCount = phaseCarrierPlan.particleCapacity;
+  const buffers = manualBuffers({ particleCount });
   const materialProperties = {
     h2o: {
       molarMassKgPerMol: 0.018,
@@ -16121,12 +16116,12 @@ test('MLS-MPM phase-carrier sidecar fusion requires one exact four-descriptor fa
     },
     sphParticleUpload: {
       ...options.sphParticleUpload,
-      particleCount: 4,
+      particleCount,
       phaseCarrierPlan: { ...phaseCarrierPlan }
     },
     mlsMpmParticleUpload: {
       ...options.mlsMpmParticleUpload,
-      particleCount: 4,
+      particleCount,
       phaseCarrierPlan: { ...phaseCarrierPlan }
     }
   };
@@ -16173,6 +16168,46 @@ test('MLS-MPM phase-carrier sidecar fusion requires one exact four-descriptor fa
     'thermal-sidecar',
     'phase-carrier-transfer-sidecar'
   ]);
+
+  for (const [label, phaseCompanionLanesRequired] of [
+    ['missing', undefined],
+    ['false', false]
+  ]) {
+    const ineligible = createMlsMpmResidentStepsComputeTask({
+      ...common,
+      taskId: `ulg:test:phase-sidecar-required-${label}`,
+      sphParticleState: {
+        ...common.sphParticleState,
+        phaseCarrierPlan: {
+          ...phaseCarrierPlan,
+          phaseCompanionLanesRequired
+        }
+      },
+      mlsMpmParticleState: {
+        ...common.mlsMpmParticleState,
+        phaseCarrierPlan: {
+          ...phaseCarrierPlan,
+          phaseCompanionLanesRequired
+        }
+      },
+      sphParticleUpload: {
+        ...common.sphParticleUpload,
+        phaseCarrierPlan: {
+          ...phaseCarrierPlan,
+          phaseCompanionLanesRequired
+        }
+      },
+      mlsMpmParticleUpload: {
+        ...common.mlsMpmParticleUpload,
+        phaseCarrierPlan: {
+          ...phaseCarrierPlan,
+          phaseCompanionLanesRequired
+        }
+      }
+    }).gpuResidentLane.residentSequenceLaneContract;
+    assert.equal(ineligible.sequenceRunnable, false, label);
+    assert.equal(ineligible.sidecarFusionRunnable, false, label);
+  }
 
   const asymmetricMlsOnly = createMlsMpmResidentStepsComputeTask({
     ...common,

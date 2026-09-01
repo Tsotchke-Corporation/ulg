@@ -158,6 +158,7 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   assert.equal(demo.state.phaseCarrierPlan.companionStart, lineageCapacity);
   assert.equal(demo.state.phaseCarrierPlan.companionCapacity, lineageCapacity * 3);
   assert.equal(demo.state.phaseCarrierPlan.particleCapacity, lineageCapacity * 4);
+  assert.equal(demo.state.phaseCarrierPlan.phaseCompanionLanesRequired, true);
   assert.equal(
     demo.counts.total,
     demo.counts.drop

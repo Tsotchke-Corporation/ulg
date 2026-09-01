@@ -2386,7 +2386,11 @@ function appendPhaseCarrierLanes(particles) {
     companionStart,
     companionCapacity: lineageCapacity * (phaseLaneCount - 1),
     particleCapacity: particles.length,
-    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex'
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    // This plan is emitted only when the active law groups prove that a
+    // carrier may materialize another phase. Keep that authority explicit:
+    // resident fusion gates must not infer it merely from the lane count.
+    phaseCompanionLanesRequired: true
   });
 }
 

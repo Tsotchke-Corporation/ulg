@@ -767,8 +767,117 @@ test('direct external-ledger cache evicts inactive capacity variants by retained
   assert.equal(second.destroy(), true);
 });
 
+test('queue-only timing preserves grouped workspace topology while encoder spans split it', async () => {
+  const encodePredictorsWithRecorder = async (gpuTimestampRecorder) => {
+    const device = fakeDevice();
+    const fixture = exactFixture(device);
+    const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
+      parentFieldCapacity: fixture.parentFieldView.parentFieldCapacity,
+      fineFieldCapacity: fixture.parentFieldView.fineFieldCapacity,
+      arenaCount: 1,
+      gpuTimestampRecorder
+    });
+    const encoder = fakeEncoder();
+    const execution = runtime.encodePredictors(encoder, {
+      parentFieldView: fixture.parentFieldView,
+      fineP2gProjection: fixture.fineProjection,
+      coarseP2gProjection: fixture.coarseProjection,
+      fineSubstepCount: 1,
+      dt: 0.01,
+      gravityMPerS2: [0, -9.80665, 0],
+      boxDimsM: [1, 1, 1]
+    });
+    device.queue.submit([encoder.finish()]);
+    runtime.markPredictorsSubmitted(execution);
+    await runtime.releaseExecutionAfter(execution, Promise.resolve());
+    runtime.destroy();
+    return { encoder, execution };
+  };
+
+  const queueSpanCalls = [];
+  const queueOnly = await encodePredictorsWithRecorder({
+    active: true,
+    encoderSpansSupported: false,
+    beginEncoderSpan(...args) {
+      queueSpanCalls.push(['begin', ...args]);
+      return null;
+    },
+    endEncoderSpan(...args) {
+      queueSpanCalls.push(['end', ...args]);
+    }
+  });
+  assert.equal(
+    queueOnly.encoder.events.filter((event) => event.kind === 'pass').length,
+    1
+  );
+  assert.equal(queueOnly.execution.encodedComputePassCount, 1);
+  assert.deepEqual(queueSpanCalls, []);
+
+  const encoderSpanCalls = [];
+  const encoderSpans = await encodePredictorsWithRecorder({
+    active: true,
+    encoderSpansSupported: true,
+    beginEncoderSpan(_encoder, descriptor) {
+      encoderSpanCalls.push(['begin', descriptor.stage]);
+      return descriptor.stage;
+    },
+    endEncoderSpan(_encoder, span) {
+      encoderSpanCalls.push(['end', span]);
+    }
+  });
+  assert.equal(
+    encoderSpans.encoder.events.filter((event) => event.kind === 'pass').length,
+    9
+  );
+  assert.equal(encoderSpans.execution.encodedComputePassCount, 9);
+  assert.equal(
+    encoderSpanCalls.filter(([kind]) => kind === 'begin').length,
+    9
+  );
+  assert.equal(
+    encoderSpanCalls.filter(([kind]) => kind === 'end').length,
+    9
+  );
+});
+
 test('workspace WGSL has frozen coarse registry, causal affine routes, and sealed energy evidence', () => {
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn begin_fine_velocity_correction/);
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /@compute @workgroup_size\(64\)\s+fn commit_routed_reflux_rows/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn commit_routed_reflux\(\)[\s\S]*fine_commit_scalar_load\(0u\)[\s\S]*fine_commit_scalar_load\(2u\)/
+  );
+  const commitSource = schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      'fn commit_routed_reflux()'
+    ),
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      'fn finalize_fine_velocity_correction()'
+    )
+  );
+  assert.match(
+    commitSource,
+    /reflux_store\(128u, fine_commit_scalar_load\(0u\)\)/
+  );
+  assert.match(
+    commitSource,
+    /reflux_store\(130u, fine_commit_scalar_load\(1u\)\)/
+  );
+  assert.match(
+    commitSource,
+    /reflux_store\(131u, fine_commit_scalar_load\(2u\)\)/
+  );
+  assert.doesNotMatch(
+    commitSource,
+    /bitcast<f32>\(reflux_load\((?:128|130|131)u\)\)/
+  );
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn finalize_fine_velocity_correction\(\)[\s\S]*fine_commit_scalar_load\(3u\)/
+  );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_EMPTY\)/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_VELOCITY\)/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /range_fits/);
@@ -1084,6 +1193,7 @@ test('workspace indirect parent-field kernels flatten two-dimensional dispatch r
     'propose_cross_level_phase_volume',
     'validate_fine_velocity_correction',
     'validate_routed_coarse_cfl',
+    'commit_routed_reflux_rows',
     'apply_fine_route_heat',
     'apply_fine_velocity_correction',
     'validate_coarse_velocity_publish',
@@ -2167,6 +2277,58 @@ test('workspace floating-point CAS reductions scale retries to admitted fields',
   );
 });
 
+test('fine scan fusion restores persisted operands and the legacy f32 fold form', () => {
+  const f32Add = (left, right) => Math.fround(Math.fround(left) + Math.fround(right));
+  const f32Sub = (left, right) => Math.fround(Math.fround(left) - Math.fround(right));
+  const pressure = Object.freeze({
+    sum: 0.22196125984191895,
+    future: 4.70844841003418,
+    prior: 27.733375549316406
+  });
+  const oldPressure = f32Sub(
+    f32Add(pressure.sum, pressure.future),
+    pressure.prior
+  );
+  const regroupedPressure = f32Add(
+    pressure.sum,
+    f32Sub(pressure.future, pressure.prior)
+  );
+  assert.notEqual(oldPressure, regroupedPressure);
+
+  const prepareSource = schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      'fn prepare_fine_transaction()'
+    ),
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
+      'fn commit_routed_reflux_rows('
+    )
+  );
+  assert.match(
+    prepareSource,
+    /committed_fine_pressure_compensation\s*\+ sealed_next_field_pressure - prior_pressure/
+  );
+  assert.match(
+    prepareSource,
+    /committed_coarse_drag_heat\s*\+ sealed_future_coarse_drag_heat - prior_coarse_drag_heat/
+  );
+  assert.match(
+    prepareSource,
+    /ws_store\(impulse_row \+ 14u, bitcast<u32>\(next_field_pressure\)\)[\s\S]*let sealed_next_field_pressure = bitcast<f32>\(\s*ws_load\(impulse_row \+ 14u\)\s*\)/
+  );
+  assert.match(
+    prepareSource,
+    /ws_store\(\s*proposal_base \+ 15u,[\s\S]*bitcast<u32>\(future_coarse_drag_heat\)[\s\S]*let sealed_future_coarse_drag_heat = bitcast<f32>\(\s*ws_load\(proposal_base \+ 15u\)\s*\)/
+  );
+  assert.doesNotMatch(
+    prepareSource,
+    /committed_fine_pressure_compensation\s*\+ \(sealed_next_field_pressure - prior_pressure\)/
+  );
+  assert.doesNotMatch(
+    prepareSource,
+    /committed_coarse_drag_heat\s*\+ \(sealed_future_coarse_drag_heat - prior_coarse_drag_heat\)/
+  );
+});
+
 test('workspace runtime stages predictors and terminal branches without encode-time buffers', async () => {
   const device = fakeDevice();
   const fixture = exactFixture(device);
@@ -2858,6 +3020,121 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
         return {
           words: new Uint32Array(bytes),
           floats: new Float32Array(bytes)
+        };
+      };
+      const runAtomicFoldBarrierProbe = async () => {
+        const rowCount = 2048;
+        const legacyFutureOffset = 4;
+        const fusedFutureOffset = legacyFutureOffset + rowCount;
+        const words = new Uint32Array(fusedFutureOffset + rowCount);
+        const floatWord = new Float32Array(1);
+        const uintWord = new Uint32Array(floatWord.buffer);
+        const bitsOf = (value) => {
+          floatWord[0] = Math.fround(value);
+          return uintWord[0];
+        };
+        const prior = Math.fround(5.128190876364458e34);
+        const share = Math.fround(2.5062171511525255e27);
+        const future = Math.fround(prior + share);
+        words[1] = bitsOf(prior);
+        words[2] = bitsOf(share);
+        const byteLength = words.byteLength;
+        const buffer = device.createBuffer({
+          label: 'native-parent-mechanics-atomic-fold-barrier',
+          size: byteLength,
+          usage: GPUBufferUsage.STORAGE
+            | GPUBufferUsage.COPY_DST
+            | GPUBufferUsage.COPY_SRC
+        });
+        device.queue.writeBuffer(buffer, 0, words);
+        const module = device.createShaderModule({
+          label: 'native-parent-mechanics-atomic-fold-barrier-wgsl',
+          code: `
+            @group(0) @binding(0)
+            var<storage, read_write> values: array<atomic<u32>>;
+
+            @compute @workgroup_size(1)
+            fn produce_legacy_futures() {
+              let prior = bitcast<f32>(atomicLoad(&values[1]));
+              let share = bitcast<f32>(atomicLoad(&values[2]));
+              for (var row = 0u; row < 2048u; row = row + 1u) {
+                atomicStore(&values[4u + row], bitcast<u32>(prior + share));
+              }
+            }
+
+            @compute @workgroup_size(1)
+            fn fold_legacy_scan() {
+              let prior = bitcast<f32>(atomicLoad(&values[1]));
+              var folded = 0.0;
+              for (var row = 0u; row < 2048u; row = row + 1u) {
+                let sealed = bitcast<f32>(atomicLoad(&values[4u + row]));
+                folded = folded + sealed - prior;
+              }
+              atomicStore(&values[0], bitcast<u32>(folded));
+            }
+
+            @compute @workgroup_size(1)
+            fn fold_fused_scan() {
+              let prior = bitcast<f32>(atomicLoad(&values[1]));
+              let share = bitcast<f32>(atomicLoad(&values[2]));
+              var folded = 0.0;
+              for (var row = 0u; row < 2048u; row = row + 1u) {
+                let future = prior + share;
+                atomicStore(&values[2052u + row], bitcast<u32>(future));
+                let sealed = bitcast<f32>(
+                  atomicLoad(&values[2052u + row])
+                );
+                folded = folded + sealed - prior;
+              }
+              atomicStore(&values[1], bitcast<u32>(folded));
+            }
+          `
+        });
+        const entryPoints = [
+          'produce_legacy_futures',
+          'fold_legacy_scan',
+          'fold_fused_scan'
+        ];
+        const pipelines = [];
+        for (const entryPoint of entryPoints) {
+          pipelines.push(await device.createComputePipelineAsync({
+            label: `native-parent-mechanics-${entryPoint}-pipeline`,
+            layout: 'auto',
+            compute: { module, entryPoint }
+          }));
+        }
+        const bindGroups = pipelines.map((pipeline, index) => (
+          device.createBindGroup({
+            label: `native-parent-mechanics-atomic-fold-barrier-bind-group-${index}`,
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer } }]
+          })
+        ));
+        const encoder = device.createCommandEncoder();
+        for (let index = 0; index < pipelines.length; index += 1) {
+          const pass = encoder.beginComputePass();
+          pass.setPipeline(pipelines[index]);
+          pass.setBindGroup(0, bindGroups[index]);
+          pass.dispatchWorkgroups(1);
+          pass.end();
+        }
+        device.queue.submit([encoder.finish()]);
+        const read = await readWords(
+          buffer,
+          byteLength,
+          'native-parent-mechanics-atomic-fold-barrier-readback'
+        );
+        buffer.destroy();
+        return {
+          legacyBits: read.words[0],
+          fusedBits: read.words[1],
+          legacyFirstFutureBits: read.words[legacyFutureOffset],
+          legacyLastFutureBits:
+            read.words[legacyFutureOffset + rowCount - 1],
+          fusedFirstFutureBits: read.words[fusedFutureOffset],
+          fusedLastFutureBits:
+            read.words[fusedFutureOffset + rowCount - 1],
+          expectedFutureBits: bitsOf(future)
         };
       };
       // A capture is deliberately a GPU-only copy.  M2 queues these while the
@@ -3902,8 +4179,13 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           + (postCoarseReflux.floats[117] - terminalReflux.floats[117]);
         const coarseMeasuredParticleHeat = postCoarseReflux.floats[84]
           - terminalReflux.floats[84];
+        const atomicFoldBarrierProbe = await runAtomicFoldBarrierProbe();
         const result = {
           status: 'm2-complete',
+          atomicFoldBarrierProbe,
+          fineEncodedDispatchCount: fineWorkspace.execution.encodedDispatchCount,
+          fineEncodedComputePassCount:
+            fineWorkspace.execution.encodedComputePassCount,
           workspaceFlags: terminalWorkspace.words[2],
           workspacePhase: terminalWorkspace.words[36],
           workspaceInvalidCounts: Array.from(terminalWorkspace.words.slice(37, 42)),
@@ -4695,6 +4977,33 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
       1024 * 2 ** -24 * (Math.abs(left) + Math.abs(right))
     );
     assert.equal(native.status, 'm2-complete', native.reason || JSON.stringify(native));
+    assert.equal(
+      native.atomicFoldBarrierProbe.fusedBits,
+      native.atomicFoldBarrierProbe.legacyBits,
+      JSON.stringify(native.atomicFoldBarrierProbe)
+    );
+    assert.equal(
+      native.atomicFoldBarrierProbe.legacyFirstFutureBits,
+      native.atomicFoldBarrierProbe.expectedFutureBits,
+      JSON.stringify(native.atomicFoldBarrierProbe)
+    );
+    assert.equal(
+      native.atomicFoldBarrierProbe.legacyLastFutureBits,
+      native.atomicFoldBarrierProbe.expectedFutureBits,
+      JSON.stringify(native.atomicFoldBarrierProbe)
+    );
+    assert.equal(
+      native.atomicFoldBarrierProbe.fusedFirstFutureBits,
+      native.atomicFoldBarrierProbe.expectedFutureBits,
+      JSON.stringify(native.atomicFoldBarrierProbe)
+    );
+    assert.equal(
+      native.atomicFoldBarrierProbe.fusedLastFutureBits,
+      native.atomicFoldBarrierProbe.expectedFutureBits,
+      JSON.stringify(native.atomicFoldBarrierProbe)
+    );
+    assert.equal(native.fineEncodedDispatchCount, 19, JSON.stringify(native));
+    assert.equal(native.fineEncodedComputePassCount, 2, JSON.stringify(native));
     assert.equal(native.workspaceFlags, 3, JSON.stringify(native));
     assert.equal(
       native.workspacePhase,

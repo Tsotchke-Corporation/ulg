@@ -596,6 +596,18 @@ fn fine_stage_store(index: u32, value: u32) {
   ws_store(fine_stage_address(index), value);
 }
 
+// Fine-impulse row zero's raw channel decomposition is dead once preparation
+// has sealed every future fine/coarse row. Reuse words 8..11 for exact scalar
+// folds that later commit/finalize stages previously recomputed by rescanning
+// the full live fields.
+fn fine_commit_scalar_load(index: u32) -> u32 {
+  return ws_load(params.fine_impulse_offset + 8u + index);
+}
+
+fn fine_commit_scalar_store(index: u32, value: u32) {
+  ws_store(params.fine_impulse_offset + 8u + index, value);
+}
+
 fn ws_reject(flags: u32, counter_word: u32) {
   atomicOr(&workspace[2u], STATUS_FAIL_CLOSED | flags);
   if (counter_word < WORKSPACE_HEADER_WORDS) {
@@ -4933,12 +4945,18 @@ fn prepare_fine_transaction() {
   var assigned_fine_causal_heat = 0.0;
   var projected_total_heat_sum = 0.0;
   var projected_max_specific_heat = 0.0;
+  var committed_fine_pressure_compensation = 0.0;
+  var committed_fine_drag_heat = 0.0;
+  var projected_fine_pressure_compensation = 0.0;
   for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
     let impulse_row = params.fine_impulse_offset
       + fine_field * FINE_IMPULSE_WORDS;
     let state = fine_load(30u) + fine_field * ROW_WORDS;
     let state_active = fine_load(state + 7u) != 0u;
     if (!state_active) {
+      let accumulator = fine_load(28u)
+        + fine_field * FIELD_ACCUMULATOR_WORDS;
+      let prior_pressure = bitcast<f32>(fine_load(accumulator + 3u));
       ws_store(impulse_row, 0u);
       ws_store(impulse_row + 1u, 0u);
       ws_store(impulse_row + 2u, 0u);
@@ -4949,6 +4967,30 @@ fn prepare_fine_transaction() {
       for (var word = 8u; word < FINE_IMPULSE_WORDS; word = word + 1u) {
         ws_store(impulse_row + word, 0u);
       }
+      // Atomic materialization preserves the old cross-dispatch rounding
+      // boundary; WGSL otherwise permits reassociation through future-prior.
+      let sealed_next_field_pressure = bitcast<f32>(
+        ws_load(impulse_row + 14u)
+      );
+      let sealed_drag_share = bitcast<f32>(ws_load(impulse_row + 15u));
+      let next_committed_fine_pressure_compensation =
+        committed_fine_pressure_compensation
+          + sealed_next_field_pressure - prior_pressure;
+      let next_committed_fine_drag_heat =
+        committed_fine_drag_heat + sealed_drag_share;
+      let next_projected_fine_pressure_compensation =
+        projected_fine_pressure_compensation + sealed_next_field_pressure;
+      if (!finite_f32(next_committed_fine_pressure_compensation)
+          || !finite_f32(next_committed_fine_drag_heat)
+          || !finite_f32(next_projected_fine_pressure_compensation)) {
+        reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
+        return;
+      }
+      committed_fine_pressure_compensation =
+        next_committed_fine_pressure_compensation;
+      committed_fine_drag_heat = next_committed_fine_drag_heat;
+      projected_fine_pressure_compensation =
+        next_projected_fine_pressure_compensation;
       continue;
     }
     let mass = bitcast<f32>(fine_load(state));
@@ -5053,6 +5095,15 @@ fn prepare_fine_transaction() {
     let next_field_route = share;
     let next_field_pressure = prior_pressure + pressure_share;
     let next_local_count = prior_local_count + select(0u, 1u, has_share);
+    // The old commit/finalize scans observed these values only after an
+    // atomic storage round trip in a later dispatch. Retain that optimizer
+    // and rounding boundary while fusing their folds into preparation.
+    ws_store(impulse_row + 14u, bitcast<u32>(next_field_pressure));
+    ws_store(impulse_row + 15u, bitcast<u32>(drag_share));
+    let sealed_next_field_pressure = bitcast<f32>(
+      ws_load(impulse_row + 14u)
+    );
+    let sealed_drag_share = bitcast<f32>(ws_load(impulse_row + 15u));
     let next_assigned = assigned_fine_heat + share;
     let next_assigned_pressure =
       assigned_fine_pressure_compensation + pressure_share;
@@ -5060,6 +5111,13 @@ fn prepare_fine_transaction() {
     let next_assigned_causal =
       assigned_fine_causal_heat + causal_share;
     let next_projected_total = projected_total_heat_sum + next_field_total;
+    let next_committed_fine_pressure_compensation =
+      committed_fine_pressure_compensation
+        + sealed_next_field_pressure - prior_pressure;
+    let next_committed_fine_drag_heat =
+      committed_fine_drag_heat + sealed_drag_share;
+    let next_projected_fine_pressure_compensation =
+      projected_fine_pressure_compensation + sealed_next_field_pressure;
     let specific_heat = next_field_total / mass;
     if (!finite_f32(share) || share < 0.0
         || !finite_f32(pressure_share)
@@ -5077,6 +5135,9 @@ fn prepare_fine_transaction() {
         || !finite_f32(next_field_route) || next_field_route < 0.0
         || !finite_f32(next_field_pressure)
         || !finite_f32(next_projected_total)
+        || !finite_f32(next_committed_fine_pressure_compensation)
+        || !finite_f32(next_committed_fine_drag_heat)
+        || !finite_f32(next_projected_fine_pressure_compensation)
         || !finite_f32(specific_heat) || specific_heat < 0.0
         || (has_share && (
           prior_local_count == 0xffffffffu
@@ -5091,6 +5152,11 @@ fn prepare_fine_transaction() {
     assigned_fine_drag_heat = next_assigned_drag;
     assigned_fine_causal_heat = next_assigned_causal;
     projected_total_heat_sum = next_projected_total;
+    committed_fine_pressure_compensation =
+      next_committed_fine_pressure_compensation;
+    committed_fine_drag_heat = next_committed_fine_drag_heat;
+    projected_fine_pressure_compensation =
+      next_projected_fine_pressure_compensation;
     projected_max_specific_heat = max(
       projected_max_specific_heat, specific_heat
     );
@@ -5103,8 +5169,6 @@ fn prepare_fine_transaction() {
     ws_store(impulse_row + 5u, bitcast<u32>(next_field_total));
     ws_store(impulse_row + 6u, bitcast<u32>(next_field_route));
     ws_store(impulse_row + 7u, next_local_count);
-    ws_store(impulse_row + 14u, bitcast<u32>(next_field_pressure));
-    ws_store(impulse_row + 15u, bitcast<u32>(drag_share));
   }
   let assigned_tolerance = max(
     8.0 * 1.175494351e-38,
@@ -5168,6 +5232,7 @@ fn prepare_fine_transaction() {
   var assigned_coarse_pressure_compensation = 0.0;
   var assigned_coarse_drag_heat = 0.0;
   var future_coarse_pressure_compensation_sum = 0.0;
+  var committed_coarse_drag_heat = 0.0;
   for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
     let proposal_base = params.route_proposal_offset
       + coarse_field * ROUTE_WORDS;
@@ -5246,11 +5311,27 @@ fn prepare_fine_transaction() {
     }
     let future_coarse_pressure_compensation =
       bitcast<f32>(reflux_load(row + 16u)) + pressure_share;
+    let prior_coarse_drag_heat = bitcast<f32>(reflux_load(row + 17u));
+    let future_coarse_drag_heat = prior_coarse_drag_heat + drag_share;
+    // Match the old commit scan's atomic storage observation before folding
+    // the future-minus-prior delta into the sealed header scalar.
+    ws_store(
+      proposal_base + 15u,
+      bitcast<u32>(future_coarse_drag_heat)
+    );
+    let sealed_future_coarse_drag_heat = bitcast<f32>(
+      ws_load(proposal_base + 15u)
+    );
     let next_future_coarse_pressure_compensation_sum =
       future_coarse_pressure_compensation_sum
         + future_coarse_pressure_compensation;
+    let next_committed_coarse_drag_heat = committed_coarse_drag_heat
+      + sealed_future_coarse_drag_heat - prior_coarse_drag_heat;
     if (!finite_f32(future_coarse_pressure_compensation)
-        || !finite_f32(next_future_coarse_pressure_compensation_sum)) {
+        || !finite_f32(future_coarse_drag_heat)
+        || future_coarse_drag_heat < 0.0
+        || !finite_f32(next_future_coarse_pressure_compensation_sum)
+        || !finite_f32(next_committed_coarse_drag_heat)) {
       reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
       return;
     }
@@ -5260,6 +5341,7 @@ fn prepare_fine_transaction() {
       assigned_coarse_drag_heat + drag_share;
     future_coarse_pressure_compensation_sum =
       next_future_coarse_pressure_compensation_sum;
+    committed_coarse_drag_heat = next_committed_coarse_drag_heat;
     ws_store(proposal_base, bitcast<u32>(existing.x + applied.x));
     ws_store(proposal_base + 1u, bitcast<u32>(existing.y + applied.y));
     ws_store(proposal_base + 2u, bitcast<u32>(existing.z + applied.z));
@@ -5281,12 +5363,6 @@ fn prepare_fine_transaction() {
     ws_store(
       proposal_base + 14u,
       bitcast<u32>(future_coarse_pressure_compensation)
-    );
-    ws_store(
-      proposal_base + 15u,
-      bitcast<u32>(
-        bitcast<f32>(reflux_load(row + 17u)) + drag_share
-      )
     );
     ws_store(proposal_base + 7u, ordinal + 1u);
   }
@@ -5310,6 +5386,25 @@ fn prepare_fine_transaction() {
       || abs(assigned_coarse_drag_heat - coarse_drag_heat)
         > coarse_drag_assignment_tolerance) {
     reflux_reject(REFLUX_ENERGY_REJECTED);
+    return;
+  }
+  // Apply the materialized legacy-form field folds to the live ledger headers
+  // before the field claim. Sealing these final bit patterns here keeps the
+  // post-claim header commit store-only and makes every nonfinite/negative
+  // result reject while the live field is still recoverable.
+  let future_fine_cross_level_pressure_compensation =
+    bitcast<f32>(reflux_load(128u))
+      + committed_fine_pressure_compensation;
+  let future_fine_cross_level_drag_heat =
+    bitcast<f32>(reflux_load(130u)) + committed_fine_drag_heat;
+  let future_coarse_cross_level_drag_heat =
+    bitcast<f32>(reflux_load(131u)) + committed_coarse_drag_heat;
+  if (!finite_f32(future_fine_cross_level_pressure_compensation)
+      || !finite_f32(future_fine_cross_level_drag_heat)
+      || future_fine_cross_level_drag_heat < 0.0
+      || !finite_f32(future_coarse_cross_level_drag_heat)
+      || future_coarse_cross_level_drag_heat < 0.0) {
+    reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
     return;
   }
   // Stage the exact future ledger header and fine receipt tuple. Index 0..31
@@ -5372,10 +5467,60 @@ fn prepare_fine_transaction() {
   );
   // Row zero has one additional sealed word after route staging.
   ws_store(params.route_proposal_offset + 6u, next_measurement_contribution_count);
+  fine_commit_scalar_store(
+    0u,
+    bitcast<u32>(future_fine_cross_level_pressure_compensation)
+  );
+  fine_commit_scalar_store(
+    1u,
+    bitcast<u32>(future_fine_cross_level_drag_heat)
+  );
+  fine_commit_scalar_store(
+    2u,
+    bitcast<u32>(future_coarse_cross_level_drag_heat)
+  );
+  fine_commit_scalar_store(
+    3u,
+    bitcast<u32>(projected_fine_pressure_compensation)
+  );
   ws_store(68u, bitcast<u32>(min(route_cfl_alpha, causal_alpha)));
   // Preparation token is last. begin_fine_velocity_correction will not claim
   // the field unless every projected persistent/physical word is sealed.
   ws_store(67u, ordinal + 1u);
+}
+
+@compute @workgroup_size(64)
+fn commit_routed_reflux_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let ordinal = params.fine_substep_ordinal;
+  if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
+      || ws_load(67u) != ordinal + 1u
+      || !fine_admitted(
+        FIELD_EMPTY,
+        params.fine_correction_output_mutation_ordinal
+      )
+      || !fine_receipt_admitted(
+        FIELD_RECEIPT_HEAT_BUILDING,
+        params.fine_correction_output_mutation_ordinal
+      )
+      || reflux_load(8u) != ordinal
+      || reflux_load(15u) != ordinal) {
+    return;
+  }
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  if (coarse_field >= ws_load(22u)) { return; }
+  let proposal = params.route_proposal_offset + coarse_field * ROUTE_WORDS;
+  let row = reflux_row(coarse_field);
+  reflux_store(row + 5u, ws_load(proposal));
+  reflux_store(row + 6u, ws_load(proposal + 1u));
+  reflux_store(row + 7u, ws_load(proposal + 2u));
+  reflux_store(row + 13u, ws_load(proposal + 3u));
+  reflux_store(row + 9u, ws_load(proposal + 4u));
+  reflux_store(row + 15u, ws_load(proposal + 5u));
+  reflux_store(row + 16u, ws_load(proposal + 14u));
+  reflux_store(row + 17u, ws_load(proposal + 15u));
 }
 
 @compute @workgroup_size(1)
@@ -5394,41 +5539,6 @@ fn commit_routed_reflux() {
       || reflux_load(8u) != ordinal
       || reflux_load(15u) != ordinal) {
     return;
-  }
-  var fine_pressure_compensation = 0.0;
-  var fine_drag_heat = 0.0;
-  for (
-    var fine_field = 0u;
-    fine_field < ws_load(21u);
-    fine_field = fine_field + 1u
-  ) {
-    let impulse_row = params.fine_impulse_offset
-      + fine_field * FINE_IMPULSE_WORDS;
-    let accumulator =
-      fine_load(28u) + fine_field * FIELD_ACCUMULATOR_WORDS;
-    fine_pressure_compensation =
-      fine_pressure_compensation
-      + bitcast<f32>(ws_load(impulse_row + 14u))
-      - bitcast<f32>(fine_load(accumulator + 3u));
-    fine_drag_heat =
-      fine_drag_heat + bitcast<f32>(ws_load(impulse_row + 15u));
-  }
-  var coarse_drag_heat = 0.0;
-  for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
-    let proposal = params.route_proposal_offset + coarse_field * ROUTE_WORDS;
-    let row = reflux_row(coarse_field);
-    coarse_drag_heat =
-      coarse_drag_heat
-      + bitcast<f32>(ws_load(proposal + 15u))
-      - bitcast<f32>(reflux_load(row + 17u));
-    reflux_store(row + 5u, ws_load(proposal));
-    reflux_store(row + 6u, ws_load(proposal + 1u));
-    reflux_store(row + 7u, ws_load(proposal + 2u));
-    reflux_store(row + 13u, ws_load(proposal + 3u));
-    reflux_store(row + 9u, ws_load(proposal + 4u));
-    reflux_store(row + 15u, ws_load(proposal + 5u));
-    reflux_store(row + 16u, ws_load(proposal + 14u));
-    reflux_store(row + 17u, ws_load(proposal + 15u));
   }
   reflux_store(16u, fine_stage_load(0u));
   reflux_store(17u, fine_stage_load(1u));
@@ -5451,28 +5561,13 @@ fn commit_routed_reflux() {
   reflux_store(93u, fine_stage_load(18u));
   reflux_store(112u, fine_stage_load(19u));
   reflux_store(116u, fine_stage_load(20u));
-  reflux_store(
-    128u,
-    bitcast<u32>(
-      bitcast<f32>(reflux_load(128u)) + fine_pressure_compensation
-    )
-  );
+  reflux_store(128u, fine_commit_scalar_load(0u));
   reflux_store(
     129u,
     ws_load(params.route_proposal_offset + 12u)
   );
-  reflux_store(
-    130u,
-    bitcast<u32>(
-      bitcast<f32>(reflux_load(130u)) + fine_drag_heat
-    )
-  );
-  reflux_store(
-    131u,
-    bitcast<u32>(
-      bitcast<f32>(reflux_load(131u)) + coarse_drag_heat
-    )
-  );
+  reflux_store(130u, fine_commit_scalar_load(1u));
+  reflux_store(131u, fine_commit_scalar_load(2u));
   reflux_store(132u, ws_load(params.route_proposal_offset + 8u));
   reflux_store(133u, ws_load(params.route_proposal_offset + 9u));
   reflux_store(134u, ws_load(params.route_proposal_offset + 10u));
@@ -5520,18 +5615,7 @@ fn finalize_fine_velocity_correction() {
   fine_store(receipt + 13u, fine_stage_load(24u));
   fine_store(receipt + 14u, ws_load(50u));
   fine_store(receipt + 15u, ws_load(48u));
-  var pressure_compensation = 0.0;
-  for (
-    var fine_field = 0u;
-    fine_field < ws_load(21u);
-    fine_field = fine_field + 1u
-  ) {
-    let accumulator =
-      fine_load(28u) + fine_field * FIELD_ACCUMULATOR_WORDS;
-    pressure_compensation =
-      pressure_compensation
-        + bitcast<f32>(fine_load(accumulator + 3u));
-  }
+  let pressure_compensation = bitcast<f32>(fine_commit_scalar_load(3u));
   fine_store(receipt + 16u, bitcast<u32>(pressure_compensation));
   fine_store(receipt + 17u, bitcast<u32>(pressure_compensation));
   fine_store(59u, FIELD_VELOCITY);

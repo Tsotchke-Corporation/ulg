@@ -28,6 +28,7 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import { sphGpuIdentityValueMaxForBuffer } from './sphGpuBuffers.js';
 import {
   createSchroederSpatialMechanicsFieldPairLifecycle
 } from './schroederSpatialMechanicsFieldPairLifecycle.js';
@@ -59,6 +60,32 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+
+function significantNibblesForMaximum(maximum, fallback = 8) {
+  if (!Number.isInteger(maximum) || maximum < 0 || maximum > 0xffff_ffff) {
+    return fallback;
+  }
+  return Math.max(
+    1,
+    Math.ceil(Math.max(1, Math.floor(Math.log2(Math.max(1, maximum))) + 1) / 4)
+  );
+}
+
+function mechanicsFieldPairSignificantDigitRows(
+  combinedNodeSpan,
+  identityBuffer
+) {
+  const maximumCombinedNode = Math.max(0, Number(combinedNodeSpan) - 1);
+  const combinedNodeNibbles = significantNibblesForMaximum(maximumCombinedNode);
+  const continuityDomainNibbles = significantNibblesForMaximum(
+    sphGpuIdentityValueMaxForBuffer(identityBuffer)
+  );
+  return Object.freeze([
+    ...Array.from({ length: continuityDomainNibbles }, (_, index) => index),
+    ...Array.from({ length: 7 }, (_, index) => 8 + index),
+    ...Array.from({ length: combinedNodeNibbles }, (_, index) => 16 + index)
+  ]);
+}
 
 function integer(value, label, min = 0, max = 0xffff_ffff) {
   const number = Number(value);
@@ -1104,6 +1131,10 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         maxElementCount: pairCandidateCapacity,
         keyWordCount: FIELD_RADIX_KEY_WORDS,
         keyStrideWords: FIELD_RADIX_KEY_WORDS,
+        significantDigitRows: mechanicsFieldPairSignificantDigitRows(
+          combinedNodeSpan,
+          identityBuffer
+        ),
         generationId: plans[0].generationId,
         consumerWorkgroupSize:
           SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
@@ -1382,6 +1413,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
             'stable-radix-equal-key-preserves-particle-stencil-candidate-order',
           ownsStableCandidateOrderBuffer: false,
           radixSortKeyWordCount: FIELD_RADIX_KEY_WORDS,
+          radixPassCount: radixUnique.radixPassCount,
+          radixSignificantDigitRows: radixUnique.significantDigitRows,
           radixHistogramScanMode: radixUnique.histogramScanMode,
           routeControlBuffer: null,
           routeControlWordLength: 0,
@@ -1486,6 +1519,8 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         mechanicsFieldViews: Object.freeze(children),
         sharedRadixExecutionCount: 1,
         radixSortKeyWordCount: FIELD_RADIX_KEY_WORDS,
+        radixPassCount: radixUnique.radixPassCount,
+        radixSignificantDigitRows: radixUnique.significantDigitRows,
         pairCandidateCapacity,
         candidateCount: null,
         candidateCountAuthority: Object.freeze({

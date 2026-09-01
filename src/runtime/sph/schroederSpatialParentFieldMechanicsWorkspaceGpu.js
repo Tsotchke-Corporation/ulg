@@ -116,6 +116,7 @@ const PIPELINE_BINDINGS = Object.freeze({
   prepareFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   applyFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   applyFineHeat: Object.freeze([0, 1, 3, 4, 5, 11]),
+  commitRefluxRows: Object.freeze([0, 1, 3, 4, 5, 11]),
   commitReflux: Object.freeze([0, 1, 3, 4, 5, 11]),
   // Fine finalization now settles cross-level phase-volume routes, which
   // reads the coarse mechanics field view (2).
@@ -1275,6 +1276,17 @@ function encodeGroupedStages(encoder, stages, label) {
   pass.end();
 }
 
+function gpuTimestampEncoderSpansSupported(gpuTimestampRecorder) {
+  return gpuTimestampRecorder?.encoderSpansSupported !== false
+    && typeof gpuTimestampRecorder?.beginEncoderSpan === 'function'
+    && typeof gpuTimestampRecorder?.endEncoderSpan === 'function';
+}
+
+function gpuTimestampEncoderSpansActive(gpuTimestampRecorder) {
+  return gpuTimestampRecorder?.active === true
+    && gpuTimestampEncoderSpansSupported(gpuTimestampRecorder);
+}
+
 export function createSchroederCrossLevelRefluxLedgerGpu(device, {
   parentFieldCapacity,
   coarseFieldCapacity = parentFieldCapacity,
@@ -1413,9 +1425,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     throw new TypeError('externalRefluxLedgerRequired must be a boolean');
   }
   const workspaceTimestampSpansActive = () =>
-    gpuTimestampRecorder?.active === true
-    && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
-    && typeof gpuTimestampRecorder.endEncoderSpan === 'function';
+    gpuTimestampEncoderSpansActive(gpuTimestampRecorder);
   const layout = createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     parentFieldCapacity,
     fineFieldCapacity
@@ -1539,6 +1549,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     prepareFine: pipeline('prepareFine', 'prepare_fine_transaction'),
     applyFine: pipeline('applyFine', 'apply_fine_velocity_correction'),
     applyFineHeat: pipeline('applyFineHeat', 'apply_fine_route_heat'),
+    commitRefluxRows:
+      pipeline('commitRefluxRows', 'commit_routed_reflux_rows'),
     commitReflux: pipeline('commitReflux', 'commit_routed_reflux'),
     finalizeFine: pipeline('finalizeFine', 'finalize_fine_velocity_correction'),
     admitCrossLevelPhaseVolume:
@@ -2781,78 +2793,80 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       phaseVolumeDragScale,
       phaseVolumeMaxImpulseFraction
     }));
-    if (phaseVolumeTransportAuthority) {
-      encodeDirect(
-        encoder,
-        pipelines.admitCrossLevelPhaseVolume,
-        bindGroup(execution, 'admitCrossLevelPhaseVolume'),
-        `${label}AdmitCrossLevelPhaseVolume`
-      );
-      encodeIndirect(
-        encoder,
-        pipelines.proposeCrossLevelPhaseVolume,
-        bindGroup(execution, 'proposeCrossLevelPhaseVolume'),
-        ownership.arena.fineIndirectBuffer,
-        `${label}ProposeCrossLevelPhaseVolume`
-      );
-    }
-    encodeIndirect(
+    const correctionStages = [
+      ...(phaseVolumeTransportAuthority ? [
+        {
+          name: 'admit-cross-level-phase-volume',
+          pipeline: pipelines.admitCrossLevelPhaseVolume,
+          bindGroup: bindGroup(execution, 'admitCrossLevelPhaseVolume')
+        },
+        {
+          name: 'propose-cross-level-phase-volume',
+          pipeline: pipelines.proposeCrossLevelPhaseVolume,
+          bindGroup: bindGroup(execution, 'proposeCrossLevelPhaseVolume'),
+          indirectBuffer: ownership.arena.fineIndirectBuffer
+        }
+      ] : []),
+      {
+        name: 'validate-fine-correction',
+        pipeline: pipelines.validateFine,
+        bindGroup: bindGroup(execution, 'validateFine'),
+        indirectBuffer: ownership.arena.fineIndirectBuffer
+      },
+      {
+        name: 'validate-routed-coarse-cfl',
+        pipeline: pipelines.validateRoutedCoarse,
+        bindGroup: bindGroup(execution, 'validateRoutedCoarse'),
+        indirectBuffer: ownership.arena.coarseIndirectBuffer
+      },
+      {
+        name: 'seal-fine-correction-alpha',
+        pipeline: pipelines.sealFineAlpha,
+        bindGroup: bindGroup(execution, 'sealFineAlpha')
+      },
+      {
+        name: 'prepare-fine-transaction',
+        pipeline: pipelines.prepareFine,
+        bindGroup: bindGroup(execution, 'prepareFine')
+      },
+      {
+        name: 'begin-fine-correction',
+        pipeline: pipelines.beginFine,
+        bindGroup: bindGroup(execution, 'beginFine')
+      },
+      {
+        name: 'commit-routed-reflux-rows',
+        pipeline: pipelines.commitRefluxRows,
+        bindGroup: bindGroup(execution, 'commitRefluxRows'),
+        indirectBuffer: ownership.arena.coarseIndirectBuffer
+      },
+      {
+        name: 'commit-routed-reflux',
+        pipeline: pipelines.commitReflux,
+        bindGroup: bindGroup(execution, 'commitReflux')
+      },
+      {
+        name: 'apply-fine-route-heat',
+        pipeline: pipelines.applyFineHeat,
+        bindGroup: bindGroup(execution, 'applyFineHeat'),
+        indirectBuffer: ownership.arena.fineIndirectBuffer
+      },
+      {
+        name: 'apply-fine-correction',
+        pipeline: pipelines.applyFine,
+        bindGroup: bindGroup(execution, 'applyFine'),
+        indirectBuffer: ownership.arena.fineIndirectBuffer
+      },
+      {
+        name: 'finalize-fine-correction',
+        pipeline: pipelines.finalizeFine,
+        bindGroup: bindGroup(execution, 'finalizeFine')
+      }
+    ];
+    encodeWorkspaceStages(
       encoder,
-      pipelines.validateFine,
-      bindGroup(execution, 'validateFine'),
-      ownership.arena.fineIndirectBuffer,
-      `${label}ValidateFineCorrection`
-    );
-    encodeIndirect(
-      encoder,
-      pipelines.validateRoutedCoarse,
-      bindGroup(execution, 'validateRoutedCoarse'),
-      ownership.arena.coarseIndirectBuffer,
-      `${label}ValidateRoutedCoarseCfl`
-    );
-    encodeDirect(
-      encoder,
-      pipelines.sealFineAlpha,
-      bindGroup(execution, 'sealFineAlpha'),
-      `${label}SealFineCorrectionAlpha`
-    );
-    encodeDirect(
-      encoder,
-      pipelines.prepareFine,
-      bindGroup(execution, 'prepareFine'),
-      `${label}PrepareFineTransaction`
-    );
-    encodeDirect(
-      encoder,
-      pipelines.beginFine,
-      bindGroup(execution, 'beginFine'),
-      `${label}BeginFineCorrection`
-    );
-    encodeDirect(
-      encoder,
-      pipelines.commitReflux,
-      bindGroup(execution, 'commitReflux'),
-      `${label}CommitRoutedReflux`
-    );
-    encodeIndirect(
-      encoder,
-      pipelines.applyFineHeat,
-      bindGroup(execution, 'applyFineHeat'),
-      ownership.arena.fineIndirectBuffer,
-      `${label}ApplyFineRouteHeat`
-    );
-    encodeIndirect(
-      encoder,
-      pipelines.applyFine,
-      bindGroup(execution, 'applyFine'),
-      ownership.arena.fineIndirectBuffer,
-      `${label}ApplyFineCorrection`
-    );
-    encodeDirect(
-      encoder,
-      pipelines.finalizeFine,
-      bindGroup(execution, 'finalizeFine'),
-      `${label}FinalizeFineCorrection`
+      correctionStages,
+      `${label}FineCorrectionSequence`
     );
     ownership.phase = 'fine-correction-encoded';
     ownership.terminalEncoded = true;
@@ -2956,10 +2970,11 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     }
     execution.deltaScale = Number(deltaScale);
     execution.maxCorrectionMPerS = Number(maxCorrectionMPerS);
-    const correctionDispatchCount =
-      phaseVolumeTransportAuthority ? 11 : 9;
+    const correctionDispatchCount = correctionStages.length;
     execution.encodedDispatchCount += correctionDispatchCount;
-    execution.encodedComputePassCount += correctionDispatchCount;
+    execution.encodedComputePassCount += workspaceTimestampSpansActive()
+      ? correctionDispatchCount
+      : 1;
     return correctedGridUpdate;
   }
 
@@ -4463,7 +4478,7 @@ export function directSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     fineCapacity,
     resolvedArenaCount,
     externalRefluxLedgerRequired ? 'external' : 'local',
-    typeof gpuTimestampRecorder?.beginEncoderSpan === 'function'
+    gpuTimestampEncoderSpansSupported(gpuTimestampRecorder)
       ? 'timestamp-capable'
       : 'production'
   ].join(':');

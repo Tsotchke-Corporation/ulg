@@ -640,6 +640,16 @@ test('paired mechanics-field construction publishes two exact v5 children from o
     'published dispatch count covers the exact command topology'
   );
   assert.equal(pair.radixSortKeyWordCount, 3);
+  assert.equal(pair.radixPassCount, 16);
+  assert.deepEqual(pair.radixSignificantDigitRows, [
+    0, 1, 2, 3, 4, 5, 6, 7,
+    8, 9, 10, 11, 12, 13, 14,
+    16
+  ]);
+  assert.deepEqual(fine.radixSignificantDigitRows, pair.radixSignificantDigitRows);
+  assert.deepEqual(coarse.radixSignificantDigitRows, pair.radixSignificantDigitRows);
+  assert.equal(pair.encodedDispatchCount, 68);
+  assert.equal(pair.encodedComputePassCount, 9);
   assert.equal(pair.sharedRadixExecutionCount, 1);
   assert.equal(
     pair.candidateCountAuthority.buffer,

@@ -1690,6 +1690,34 @@ test('fine transaction projects rows in parallel before one canonical seal', () 
   const fineSource = entrySource('project_prepare_fine_rows');
   const coarseSource = entrySource('project_prepare_coarse_rows');
   const sealSource = entrySource('prepare_fine_transaction');
+  const helperSource = (beginName, endName) => source.slice(
+    source.indexOf(`fn ${beginName}(`),
+    source.indexOf(`fn ${endName}(`)
+  );
+  const preflightSource = helperSource(
+    'prepare_fine_transaction_preflight',
+    'prepare_fine_validation_and_local_fold'
+  );
+  const fineFoldSource = helperSource(
+    'prepare_fine_validation_and_local_fold',
+    'prepare_fine_projection_channel'
+  );
+  const fineProjectionFoldSource = helperSource(
+    'prepare_fine_projection_channel',
+    'prepare_coarse_validation'
+  );
+  const coarseValidationSource = helperSource(
+    'prepare_coarse_validation',
+    'prepare_coarse_projection_channel'
+  );
+  const coarseFoldSource = helperSource(
+    'prepare_coarse_projection_channel',
+    'publish_prepare_channel_failure'
+  );
+  const failureSource = helperSource(
+    'publish_prepare_channel_failure',
+    'prepare_fine_transaction'
+  );
 
   assert.match(beginSource, /@compute @workgroup_size\(1\)/);
   assert.match(
@@ -1793,25 +1821,67 @@ test('fine transaction projects rows in parallel before one canonical seal', () 
     /ws_store\(proposal_base, bitcast<u32>\(applied\.x\)\)[\s\S]*ws_store\(proposal_base \+ 11u, proposal_count\)/
   );
 
-  const fineFold = sealSource.indexOf(
-    'for (var fine_field = 0u; fine_field < ws_load(21u);'
+  assert.match(sealSource, /@compute @workgroup_size\(64\)/);
+  assert.match(
+    sealSource,
+    /@builtin\(local_invocation_index\) lane: u32[\s\S]*@builtin\(num_workgroups\) workgroup_count: vec3<u32>/
+  );
+  assert.equal([...sealSource.matchAll(/workgroupUniformLoad\(/g)].length, 2);
+  assert.match(
+    sealSource,
+    /lane <= 14u[\s\S]*prepare_fine_projection_channel\(channel\)[\s\S]*lane == 32u[\s\S]*prepare_coarse_validation\(\)[\s\S]*lane >= 33u && lane <= 45u[\s\S]*prepare_coarse_projection_channel\(channel\)/
+  );
+  assert.match(
+    fineFoldSource,
+    /for \(var fine_field = 0u; fine_field < fine_count; fine_field = fine_field \+ 1u\)/
+  );
+  assert.match(
+    fineProjectionFoldSource,
+    /for \(var fine_field = 0u; fine_field < fine_count; fine_field = fine_field \+ 1u\)/
+  );
+  assert.match(
+    coarseValidationSource,
+    /for \(var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field \+ 1u\)/
+  );
+  assert.match(
+    coarseFoldSource,
+    /for \(var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field \+ 1u\)/
+  );
+  assert.doesNotMatch(
+    fineFoldSource + fineProjectionFoldSource + coarseValidationSource
+      + coarseFoldSource,
+    /atomic(?:Add|Min|Max|Exchange|CompareExchangeWeak)\(/
   );
   const evidenceGate = sealSource.indexOf(
     'let measured_mass_residual = bitcast<f32>(fine_stage_load(4u))'
   );
-  const coarseFold = sealSource.indexOf(
-    'for (var coarse_field = 0u; coarse_field < ws_load(22u);'
-  );
-  assert.ok(fineFold >= 0 && evidenceGate > fineFold && coarseFold > evidenceGate);
+  assert.ok(evidenceGate >= 0);
   assert.match(
-    sealSource,
+    preflightSource,
     /if \(!fine_transaction_started\(\)\) \{[\s\S]*ws_reject\(STATUS_INVALID_SOURCE \| STATUS_INVALID_ROUTE, 37u\)/
   );
-  assert.equal(
-    [...sealSource.matchAll(
-      /fine_transaction_row_token\([01]u, (?:fine|coarse)_field\)\) \{\s*ws_reject\(STATUS_INVALID_SOURCE \| STATUS_INVALID_ROUTE, 37u\)/g
-    )].length,
-    2
+  assert.match(
+    fineFoldSource,
+    /fine_transaction_row_token\(0u, fine_field\)[\s\S]*return 1u/
+  );
+  assert.match(
+    coarseValidationSource,
+    /fine_transaction_row_token\(1u, coarse_field\)[\s\S]*return 1u/
+  );
+  assert.ok(
+    failureSource.indexOf('if (fine_failure != 0u)')
+      < failureSource.indexOf('if (coarse_failure != 0u)'),
+    'every fine failure must retain precedence over every coarse failure'
+  );
+  const fineAggregateGate = sealSource.indexOf(
+    'if (local_contribution_sum != fine_load(receipt + 7u)'
+  );
+  const delayedCoarsePublish = sealSource.lastIndexOf(
+    'prepare_channel_u32[2u]'
+  );
+  assert.ok(
+    fineAggregateGate >= 0 && delayedCoarsePublish > fineAggregateGate,
+    'staged coarse failure must publish after every fine aggregate gate'
   );
   assert.match(
     sealSource,
@@ -1978,14 +2048,21 @@ test('workspace channel-energy closure uses pre-cancellation operation condition
     );
   }
   const prepareSource = source
-    .split('fn prepare_fine_transaction()')[1]
+    .split('fn prepare_fine_transaction(')[1]
     .split('@compute')[0];
-  assert.equal(
-    [...prepareSource.matchAll(
-      /projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH\) \{\s*reflux_reject\(REFLUX_ENERGY_REJECTED\)/g
-    )].length,
-    2
+  const prepareValidationSource = source.slice(
+    source.indexOf('fn prepare_fine_validation_and_local_fold('),
+    source.indexOf('@compute', source.indexOf('fn prepare_fine_transaction('))
   );
+  assert.match(
+    prepareValidationSource,
+    /TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH\) \{\s*return 9u;[\s\S]*TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH\) \{\s*return 6u;/
+  );
+  assert.match(
+    prepareValidationSource,
+    /case 9u: \{ reflux_reject\(REFLUX_ENERGY_REJECTED\); \}[\s\S]*case 6u: \{ reflux_reject\(REFLUX_ENERGY_REJECTED\); \}/
+  );
+  assert.doesNotMatch(prepareSource, /TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH/);
   assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
 
   const f32 = Math.fround;
@@ -2087,8 +2164,11 @@ test('workspace signed receipt closure uses operation-conditioned reductions', (
     .split('fn independent_reduction_operation_count(')[1]
     .split('fn dot_product_conditioning(')[0];
   const fineSource = source
-    .split('fn prepare_fine_transaction() {')[1]
+    .split('fn prepare_fine_transaction(')[1]
     .split('@compute')[0];
+  const fineFoldSource = source
+    .split('fn prepare_fine_validation_and_local_fold(')[1]
+    .split('fn prepare_fine_projection_channel(')[0];
   const commitSource = source
     .split('fn commit_routed_reflux() {')[1]
     .split('@compute')[0];
@@ -2173,15 +2253,15 @@ test('workspace signed receipt closure uses operation-conditioned reductions', (
     );
   }
   assert.match(
-    fineSource,
+    fineFoldSource,
     /local_pressure_internal_compensation_sum_abs\s*=\s*next_local_pressure_internal_compensation_sum_abs/
   );
   assert.match(
-    fineSource,
+    fineFoldSource,
     /local_ambient_impulse_sum_abs\s*=\s*next_local_ambient_impulse_sum_abs/
   );
   assert.match(
-    fineSource,
+    fineFoldSource,
     /local_ambient_external_work_sum_abs\s*=\s*next_local_ambient_external_work_sum_abs/
   );
   assertConditioned(
@@ -2425,8 +2505,16 @@ test('workspace route CFL solver intersects cumulative feasible alpha intervals'
     /successor_prior\s*=\s*[^;]*(?:proposal|phase_impulse)/
   );
   const prepareSource = source
-    .split('fn prepare_fine_transaction()')[1]
+    .split('fn prepare_fine_transaction(')[1]
     .split('@compute')[0];
+  const prepareValidationSource = source.slice(
+    source.indexOf('fn prepare_fine_validation_and_local_fold('),
+    source.indexOf('@compute', source.indexOf('fn prepare_fine_transaction('))
+  );
+  const prepareFamilySource = source.slice(
+    source.indexOf('fn prepare_fine_transaction_preflight('),
+    source.indexOf('@compute', source.indexOf('fn prepare_fine_transaction('))
+  );
   const fineProjectionSource = source
     .split('fn project_prepare_fine_rows(')[1]
     .split('@compute')[0];
@@ -2453,7 +2541,7 @@ test('workspace route CFL solver intersects cumulative feasible alpha intervals'
     /velocity_endpoint_within_physical_audit\(|velocity_magnitude_ratio\(/
   );
   assert.equal(
-    [...prepareSource.matchAll(
+    [...prepareValidationSource.matchAll(
       /projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT/g
     )].length,
     2
@@ -2531,18 +2619,18 @@ test('workspace route CFL solver intersects cumulative feasible alpha intervals'
     /ws_reject\(STATUS_CFL_REJECTED, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED\);\s*publish_cfl_interval_seal_reject_trace\(/
   );
   assert.equal(
-    [...prepareSource.matchAll(/prepare_reject\(REFLUX_NONFINITE, [1-6]u\)/g)]
+    [...prepareFamilySource.matchAll(/prepare_reject\(REFLUX_NONFINITE, [1-6]u\)/g)]
       .length,
     6
   );
   assert.equal(
-    [...prepareSource.matchAll(
+    [...prepareFamilySource.matchAll(
       /prepare_reject\(REFLUX_CFL_REJECTED, (?:10[12]|201)u\)/g
     )].length,
     3
   );
   assert.doesNotMatch(
-    prepareSource,
+    prepareFamilySource,
     /prepare_reject\(REFLUX_CFL_REJECTED, (?:103|203)u\)/
   );
   assert.doesNotMatch(source, /0xf00[1-5]000[1-6]u/);
@@ -2929,7 +3017,7 @@ test('fine scan fusion restores persisted operands and the legacy f32 fold form'
 
   const prepareSource = schroederSpatialParentFieldMechanicsWorkspaceWgsl.slice(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
-      'fn prepare_fine_transaction()'
+      'fn prepare_fine_transaction('
     ),
     schroederSpatialParentFieldMechanicsWorkspaceWgsl.indexOf(
       'fn commit_routed_reflux_rows('

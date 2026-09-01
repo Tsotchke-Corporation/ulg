@@ -5067,8 +5067,15 @@ fn apply_fine_velocity_correction(
   atomicAdd(&workspace[46u], 1u);
 }
 
-@compute @workgroup_size(1)
-fn prepare_fine_transaction() {
+// The preparation seal owns several independent, canonically ordered f32
+// folds. One lane retains the accumulator/status walk while adjacent lanes
+// fold the projected scalar channels. Every lane still visits rows in the
+// original 0..N-1 order; this is channel parallelism, not a reassociating
+// tree reduction.
+var<workgroup> prepare_channel_f32: array<f32, 38>;
+var<workgroup> prepare_channel_u32: array<u32, 9>;
+
+fn prepare_fine_transaction_preflight() -> bool {
   if (!workspace_admitted(PHASE_PREDICTORS) || !reflux_accumulating()
       || !fine_admitted(
         FIELD_VELOCITY,
@@ -5078,11 +5085,11 @@ fn prepare_fine_transaction() {
         FIELD_RECEIPT_HEAT_BUILDING,
         params.fine_correction_expected_mutation_ordinal
       )) {
-    return;
+    return false;
   }
   if (!fine_transaction_started()) {
     ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
-    return;
+    return false;
   }
   let route_cfl_alpha = bitcast<f32>(ws_load(84u));
   let causal_alpha = bitcast<f32>(ws_load(85u));
@@ -5101,13 +5108,13 @@ fn prepare_fine_transaction() {
       || reflux_load(97u) != ordinal
       || reflux_load(111u) != ordinal + 1u) {
     reflux_reject(REFLUX_PHASE_REJECTED);
-    return;
+    return false;
   }
   if ((route_cfl_alpha < 1.0 - 3.8146973e-6
         || causal_alpha < 1.0 - 3.8146973e-6)
       && reflux_load(10u) == 0xffffffffu) {
     reflux_reject(REFLUX_OVERFLOW);
-    return;
+    return false;
   }
 
   let receipt = fine_receipt_offset();
@@ -5123,46 +5130,9 @@ fn prepare_fine_transaction() {
       || bitcast<u32>(local_pressure_internal_compensation)
         != bitcast<u32>(published_pressure_internal_compensation)) {
     reflux_reject(REFLUX_NONFINITE | REFLUX_ENERGY_REJECTED);
-    return;
+    return false;
   }
 
-  var fine_energy_delta = 0.0;
-  var coarse_virtual_energy_delta = 0.0;
-  var fine_pressure_energy_delta = 0.0;
-  var coarse_pressure_energy_delta = 0.0;
-  var fine_drag_energy_delta = 0.0;
-  var coarse_drag_energy_delta = 0.0;
-  var fine_causal_energy_delta = 0.0;
-  var coarse_causal_energy_delta = 0.0;
-  var fine_pressure_weight = 0.0;
-  var coarse_pressure_weight = 0.0;
-  var fine_drag_weight = 0.0;
-  var coarse_drag_weight = 0.0;
-  var fine_causal_weight = 0.0;
-  var coarse_causal_weight = 0.0;
-  var last_fine_causal = INVALID_INDEX;
-  var last_fine_pressure = INVALID_INDEX;
-  var last_fine_drag = INVALID_INDEX;
-  var last_coarse_pressure = INVALID_INDEX;
-  var last_coarse_drag = INVALID_INDEX;
-  var max_pou_residual = 0.0;
-  var max_first_moment_residual = 0.0;
-  var pou_sum_abs = 0.0;
-  var first_moment_sum_abs = 0.0;
-  var max_fine_cfl_ratio = 0.0;
-  var route_recipient_count = 0u;
-  var local_contribution_sum = 0u;
-  var local_heat_sum = 0.0;
-  var local_pressure_internal_compensation_sum = 0.0;
-  var local_pressure_internal_compensation_sum_abs = 0.0;
-  var local_ambient_impulse_sum = vec3<f32>(0.0);
-  var local_ambient_impulse_sum_abs = vec3<f32>(0.0);
-  var local_ambient_external_work_sum = 0.0;
-  var local_ambient_external_work_sum_abs = 0.0;
-  var applied_fine_impulse = vec3<f32>(0.0);
-  var applied_coarse_impulse = vec3<f32>(0.0);
-  var applied_fine_angular = vec3<f32>(0.0);
-  var applied_coarse_angular = vec3<f32>(0.0);
   let fine_spacing = bitcast<f32>(fine_load(23u));
   let fine_vmax = params.cfl_factor * fine_spacing
     / max(params.fine_dt, 1.0e-12);
@@ -5171,18 +5141,29 @@ fn prepare_fine_transaction() {
   if (!(fine_vmax > 0.0) || !finite_f32(fine_vmax)
       || !(coarse_vmax > 0.0) || !finite_f32(coarse_vmax)) {
     reflux_reject(REFLUX_NONFINITE | REFLUX_CFL_REJECTED);
-    return;
+    return false;
   }
+  return true;
+}
 
-  // Validate every sealed fine impulse and every future field-sidecar update
-  // before touching persistent ledger state.
-  for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
+// Preserve the old fine-row failure order and all receipt-side left folds in
+// lane zero. Projected impulse/energy channels are folded by sibling lanes.
+fn prepare_fine_validation_and_local_fold() -> u32 {
+  var local_contribution_sum = 0u;
+  var local_heat_sum = 0.0;
+  var local_pressure_internal_compensation_sum = 0.0;
+  var local_pressure_internal_compensation_sum_abs = 0.0;
+  var local_ambient_impulse_sum = vec3<f32>(0.0);
+  var local_ambient_impulse_sum_abs = vec3<f32>(0.0);
+  var local_ambient_external_work_sum = 0.0;
+  var local_ambient_external_work_sum_abs = 0.0;
+  let fine_count = ws_load(21u);
+  for (var fine_field = 0u; fine_field < fine_count; fine_field = fine_field + 1u) {
     let impulse_row = params.fine_impulse_offset
       + fine_field * FINE_IMPULSE_WORDS;
     if (ws_load(impulse_row + 15u)
         != fine_transaction_row_token(0u, fine_field)) {
-      ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
-      return;
+      return 1u;
     }
     let projection_status = ws_load(impulse_row + 14u);
     let accumulator = fine_load(28u)
@@ -5239,8 +5220,7 @@ fn prepare_fine_transaction() {
         || !finite_f32(next_local_ambient_external_work_sum)
         || !finite_f32(next_local_ambient_external_work_sum_abs)
         || next_local_ambient_external_work_sum_abs < 0.0) {
-      reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_NONFINITE);
-      return;
+      return 2u;
     }
     local_contribution_sum = local_contribution_sum + local_count;
     local_heat_sum = local_heat_sum + prior_total;
@@ -5265,90 +5245,291 @@ fn prepare_fine_transaction() {
           || ambient_impulse_y != 0.0
           || ambient_impulse_z != 0.0
           || ambient_work != 0.0) {
-        reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_PHASE_REJECTED);
-        return;
+        return 3u;
       }
       continue;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_ROUTE_PHASE) {
-      reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_PHASE_REJECTED);
-      return;
+      return 3u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE) {
-      prepare_reject(REFLUX_NONFINITE, 1u);
-      return;
+      return 4u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE) {
-      prepare_reject(REFLUX_NONFINITE, 2u);
-      return;
+      return 5u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT) {
-      ws_reject(STATUS_CFL_REJECTED, 86u);
-      prepare_reject(REFLUX_CFL_REJECTED, 101u);
-      return;
+      return 6u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_DELTA) {
-      ws_reject(STATUS_CFL_REJECTED, 86u);
-      prepare_reject(REFLUX_CFL_REJECTED, 102u);
-      return;
+      return 7u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE) {
-      prepare_reject(REFLUX_NONFINITE, 3u);
-      return;
+      return 8u;
     }
     if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH) {
-      reflux_reject(REFLUX_ENERGY_REJECTED);
-      return;
+      return 9u;
     }
     if (projection_status != TRANSACTION_PROJECTION_STATUS_READY) {
-      reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED);
-      return;
+      return 10u;
     }
-    let applied = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 3u)),
-      bitcast<f32>(ws_load(impulse_row + 4u)),
-      bitcast<f32>(ws_load(impulse_row + 5u))
-    );
-    let applied_angular = vec3<f32>(
-      bitcast<f32>(ws_load(impulse_row + 6u)),
-      bitcast<f32>(ws_load(impulse_row + 7u)),
-      bitcast<f32>(ws_load(impulse_row + 8u))
-    );
-    let delta = bitcast<f32>(ws_load(impulse_row + 9u));
-    let pressure_delta = bitcast<f32>(ws_load(impulse_row + 10u));
-    let drag_delta = bitcast<f32>(ws_load(impulse_row + 11u));
-    let causal_delta = bitcast<f32>(ws_load(impulse_row + 12u));
-    let cfl_ratio = bitcast<f32>(ws_load(impulse_row + 13u));
-    max_fine_cfl_ratio = max(max_fine_cfl_ratio, cfl_ratio);
-    applied_fine_impulse = applied_fine_impulse + applied;
-    applied_fine_angular = applied_fine_angular + applied_angular;
-    fine_energy_delta = fine_energy_delta + delta;
-    fine_pressure_energy_delta =
-      fine_pressure_energy_delta + pressure_delta;
-    fine_drag_energy_delta = fine_drag_energy_delta + drag_delta;
-    fine_causal_energy_delta = fine_causal_energy_delta + causal_delta;
-    let pressure_weight = abs(pressure_delta);
-    let drag_weight = abs(drag_delta);
-    let causal_weight = abs(causal_delta);
-    fine_pressure_weight = fine_pressure_weight + pressure_weight;
-    fine_drag_weight = fine_drag_weight + drag_weight;
-    fine_causal_weight = fine_causal_weight + causal_weight;
-    if (pressure_weight > 0.0) {
-      last_fine_pressure = fine_field;
-    }
-    if (drag_weight > 0.0) {
-      last_fine_drag = fine_field;
-    }
-    if (causal_weight > 0.0) {
-      last_fine_causal = fine_field;
-    }
-    if (drag_weight > 0.0 || causal_weight > 0.0) {
-      if (fine_load(accumulator + 1u) == 0xffffffffu) {
-        reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
-        return;
-      }
+    let drag_weight = abs(bitcast<f32>(ws_load(impulse_row + 11u)));
+    let causal_weight = abs(bitcast<f32>(ws_load(impulse_row + 12u)));
+    if ((drag_weight > 0.0 || causal_weight > 0.0)
+        && local_count == 0xffffffffu) {
+      return 11u;
     }
   }
+  prepare_channel_f32[0u] = local_heat_sum;
+  prepare_channel_f32[1u] = local_pressure_internal_compensation_sum;
+  prepare_channel_f32[2u] = local_pressure_internal_compensation_sum_abs;
+  prepare_channel_f32[3u] = local_ambient_impulse_sum.x;
+  prepare_channel_f32[4u] = local_ambient_impulse_sum.y;
+  prepare_channel_f32[5u] = local_ambient_impulse_sum.z;
+  prepare_channel_f32[6u] = local_ambient_impulse_sum_abs.x;
+  prepare_channel_f32[7u] = local_ambient_impulse_sum_abs.y;
+  prepare_channel_f32[8u] = local_ambient_impulse_sum_abs.z;
+  prepare_channel_f32[9u] = local_ambient_external_work_sum;
+  prepare_channel_f32[10u] = local_ambient_external_work_sum_abs;
+  prepare_channel_u32[3u] = local_contribution_sum;
+  return 0u;
+}
+
+fn prepare_fine_projection_channel(channel: u32) -> vec2<u32> {
+  var folded = 0.0;
+  var last_recipient = INVALID_INDEX;
+  let fine_count = ws_load(21u);
+  var source_word = 3u + channel;
+  if (channel >= 11u) {
+    source_word = channel - 1u;
+  }
+  for (var fine_field = 0u; fine_field < fine_count; fine_field = fine_field + 1u) {
+    let state = fine_load(30u) + fine_field * ROW_WORDS;
+    if (fine_load(state + 7u) == 0u) { continue; }
+    let impulse_row = params.fine_impulse_offset
+      + fine_field * FINE_IMPULSE_WORDS;
+    let raw = bitcast<f32>(ws_load(impulse_row + source_word));
+    let value = select(raw, abs(raw), channel >= 11u);
+    folded = select(folded + value, max(folded, value), channel == 10u);
+    if (channel >= 11u && value > 0.0) {
+      last_recipient = fine_field;
+    }
+  }
+  return vec2<u32>(bitcast<u32>(folded), last_recipient);
+}
+
+fn prepare_coarse_validation() -> u32 {
+  let coarse_count = ws_load(22u);
+  for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
+    let proposal_base = params.route_proposal_offset
+      + coarse_field * ROUTE_WORDS;
+    if (ws_load(proposal_base + 15u)
+        != fine_transaction_row_token(1u, coarse_field)) {
+      return 1u;
+    }
+    let projection_status = ws_load(proposal_base + 14u);
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE) {
+      return 2u;
+    }
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT) {
+      return 3u;
+    }
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE) {
+      return 4u;
+    }
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE) {
+      return 5u;
+    }
+    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH) {
+      return 6u;
+    }
+    if (projection_status != TRANSACTION_PROJECTION_STATUS_READY) {
+      return 7u;
+    }
+  }
+  return 0u;
+}
+
+fn prepare_coarse_projection_channel(channel: u32) -> vec2<u32> {
+  var folded = 0.0;
+  var last_recipient = INVALID_INDEX;
+  let coarse_count = ws_load(22u);
+  var source_word = channel;
+  if (channel >= 10u) {
+    source_word = channel - 3u;
+  }
+  for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
+    let proposal_base = params.route_proposal_offset
+      + coarse_field * ROUTE_WORDS;
+    let raw = bitcast<f32>(ws_load(proposal_base + source_word));
+    let value = select(raw, abs(raw), channel >= 10u);
+    folded = folded + value;
+    if ((channel == 10u || channel == 11u) && value > 0.0) {
+      last_recipient = coarse_field;
+    }
+  }
+  return vec2<u32>(bitcast<u32>(folded), last_recipient);
+}
+
+fn publish_prepare_channel_failure(fine_failure: u32, coarse_failure: u32) -> bool {
+  if (fine_failure != 0u) {
+    switch fine_failure {
+      case 1u: { ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u); }
+      case 2u: { reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_NONFINITE); }
+      case 3u: { reflux_reject(REFLUX_ROUTE_REJECTED | REFLUX_PHASE_REJECTED); }
+      case 4u: { prepare_reject(REFLUX_NONFINITE, 1u); }
+      case 5u: { prepare_reject(REFLUX_NONFINITE, 2u); }
+      case 6u: {
+        ws_reject(STATUS_CFL_REJECTED, 86u);
+        prepare_reject(REFLUX_CFL_REJECTED, 101u);
+      }
+      case 7u: {
+        ws_reject(STATUS_CFL_REJECTED, 86u);
+        prepare_reject(REFLUX_CFL_REJECTED, 102u);
+      }
+      case 8u: { prepare_reject(REFLUX_NONFINITE, 3u); }
+      case 9u: { reflux_reject(REFLUX_ENERGY_REJECTED); }
+      case 10u: { reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED); }
+      default: { reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW); }
+    }
+    return false;
+  }
+  if (coarse_failure != 0u) {
+    switch coarse_failure {
+      case 1u: { ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u); }
+      case 2u: { reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW); }
+      case 3u: {
+        ws_reject(STATUS_CFL_REJECTED, 86u);
+        prepare_reject(REFLUX_CFL_REJECTED, 201u);
+      }
+      case 4u: { reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW); }
+      case 5u: { prepare_reject(REFLUX_NONFINITE, 5u); }
+      case 6u: { reflux_reject(REFLUX_ENERGY_REJECTED); }
+      default: { reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED); }
+    }
+    return false;
+  }
+  return true;
+}
+
+@compute @workgroup_size(64)
+fn prepare_fine_transaction(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  if (lane == 0u) {
+    prepare_channel_u32[0u] = select(
+      0u,
+      1u,
+      all(workgroup_count == vec3<u32>(1u))
+        && prepare_fine_transaction_preflight()
+    );
+  }
+  let preflight_admitted = workgroupUniformLoad(&prepare_channel_u32[0u]);
+  if (preflight_admitted == 0u) { return; }
+
+  if (lane == 0u) {
+    prepare_channel_u32[1u] = prepare_fine_validation_and_local_fold();
+  } else if (lane <= 14u) {
+    let channel = lane - 1u;
+    let result = prepare_fine_projection_channel(channel);
+    prepare_channel_f32[11u + channel] = bitcast<f32>(result.x);
+    if (channel == 11u) { prepare_channel_u32[4u] = result.y; }
+    if (channel == 12u) { prepare_channel_u32[5u] = result.y; }
+    if (channel == 13u) { prepare_channel_u32[6u] = result.y; }
+  } else if (lane == 32u) {
+    prepare_channel_u32[2u] = prepare_coarse_validation();
+  } else if (lane >= 33u && lane <= 45u) {
+    let channel = lane - 33u;
+    let result = prepare_coarse_projection_channel(channel);
+    prepare_channel_f32[25u + channel] = bitcast<f32>(result.x);
+    if (channel == 10u) { prepare_channel_u32[7u] = result.y; }
+    if (channel == 11u) { prepare_channel_u32[8u] = result.y; }
+  }
+  workgroupBarrier();
+  if (lane == 0u) {
+    prepare_channel_u32[0u] = select(
+      0u,
+      1u,
+      publish_prepare_channel_failure(
+        prepare_channel_u32[1u],
+        0u
+      )
+    );
+  }
+  let channels_admitted = workgroupUniformLoad(&prepare_channel_u32[0u]);
+  if (channels_admitted == 0u || lane != 0u) { return; }
+
+  let route_cfl_alpha = bitcast<f32>(ws_load(84u));
+  let causal_alpha = bitcast<f32>(ws_load(85u));
+  let ordinal = params.fine_substep_ordinal;
+  let receipt = fine_receipt_offset();
+  let local_heat = bitcast<f32>(fine_load(receipt + 8u));
+  let local_pressure_internal_compensation =
+    bitcast<f32>(fine_load(receipt + 16u));
+
+  let fine_energy_delta = prepare_channel_f32[17u];
+  let coarse_virtual_energy_delta = prepare_channel_f32[31u];
+  let fine_pressure_energy_delta = prepare_channel_f32[18u];
+  let coarse_pressure_energy_delta = prepare_channel_f32[32u];
+  let fine_drag_energy_delta = prepare_channel_f32[19u];
+  let coarse_drag_energy_delta = prepare_channel_f32[33u];
+  let fine_causal_energy_delta = prepare_channel_f32[20u];
+  let coarse_causal_energy_delta = prepare_channel_f32[34u];
+  let fine_pressure_weight = prepare_channel_f32[22u];
+  let coarse_pressure_weight = prepare_channel_f32[35u];
+  let fine_drag_weight = prepare_channel_f32[23u];
+  let coarse_drag_weight = prepare_channel_f32[36u];
+  let fine_causal_weight = prepare_channel_f32[24u];
+  let coarse_causal_weight = prepare_channel_f32[37u];
+  let last_fine_causal = prepare_channel_u32[6u];
+  let last_fine_pressure = prepare_channel_u32[4u];
+  let last_fine_drag = prepare_channel_u32[5u];
+  let last_coarse_pressure = prepare_channel_u32[7u];
+  let last_coarse_drag = prepare_channel_u32[8u];
+  var max_pou_residual = 0.0;
+  var max_first_moment_residual = 0.0;
+  var pou_sum_abs = 0.0;
+  var first_moment_sum_abs = 0.0;
+  let max_fine_cfl_ratio = prepare_channel_f32[21u];
+  var route_recipient_count = 0u;
+  let local_contribution_sum = prepare_channel_u32[3u];
+  let local_heat_sum = prepare_channel_f32[0u];
+  let local_pressure_internal_compensation_sum = prepare_channel_f32[1u];
+  let local_pressure_internal_compensation_sum_abs = prepare_channel_f32[2u];
+  let local_ambient_impulse_sum = vec3<f32>(
+    prepare_channel_f32[3u],
+    prepare_channel_f32[4u],
+    prepare_channel_f32[5u]
+  );
+  let local_ambient_impulse_sum_abs = vec3<f32>(
+    prepare_channel_f32[6u],
+    prepare_channel_f32[7u],
+    prepare_channel_f32[8u]
+  );
+  let local_ambient_external_work_sum = prepare_channel_f32[9u];
+  let local_ambient_external_work_sum_abs = prepare_channel_f32[10u];
+  let applied_fine_impulse = vec3<f32>(
+    prepare_channel_f32[11u],
+    prepare_channel_f32[12u],
+    prepare_channel_f32[13u]
+  );
+  let applied_coarse_impulse = vec3<f32>(
+    prepare_channel_f32[25u],
+    prepare_channel_f32[26u],
+    prepare_channel_f32[27u]
+  );
+  let applied_fine_angular = vec3<f32>(
+    prepare_channel_f32[14u],
+    prepare_channel_f32[15u],
+    prepare_channel_f32[16u]
+  );
+  let applied_coarse_angular = vec3<f32>(
+    prepare_channel_f32[28u],
+    prepare_channel_f32[29u],
+    prepare_channel_f32[30u]
+  );
+
   let fine_signed_reduction_count = independent_reduction_operation_count(
     ws_load(21u)
   );
@@ -5463,78 +5644,14 @@ fn prepare_fine_transaction() {
     reflux_reject(REFLUX_ENERGY_REJECTED | REFLUX_PHASE_REJECTED);
     return;
   }
-
-  // Validate cumulative coarse impulse, virtual cross-work, contribution
-  // counts, and the persistent per-recipient heat-weight slot.
-  for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
-    let proposal_base = params.route_proposal_offset
-      + coarse_field * ROUTE_WORDS;
-    if (ws_load(proposal_base + 15u)
-        != fine_transaction_row_token(1u, coarse_field)) {
-      ws_reject(STATUS_INVALID_SOURCE | STATUS_INVALID_ROUTE, 37u);
-      return;
-    }
-    let projection_status = ws_load(proposal_base + 14u);
-    if (projection_status == TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE) {
-      reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
-      return;
-    }
-    if (projection_status == TRANSACTION_PROJECTION_STATUS_CFL_ENDPOINT) {
-      ws_reject(STATUS_CFL_REJECTED, 86u);
-      prepare_reject(REFLUX_CFL_REJECTED, 201u);
-      return;
-    }
-    if (projection_status == TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE) {
-      reflux_reject(REFLUX_NONFINITE | REFLUX_OVERFLOW);
-      return;
-    }
-    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_NONFINITE) {
-      prepare_reject(REFLUX_NONFINITE, 5u);
-      return;
-    }
-    if (projection_status == TRANSACTION_PROJECTION_STATUS_ENERGY_MISMATCH) {
-      reflux_reject(REFLUX_ENERGY_REJECTED);
-      return;
-    }
-    if (projection_status != TRANSACTION_PROJECTION_STATUS_READY) {
-      reflux_reject(REFLUX_PHASE_REJECTED | REFLUX_ROUTE_REJECTED);
-      return;
-    }
-    let applied = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base)),
-      bitcast<f32>(ws_load(proposal_base + 1u)),
-      bitcast<f32>(ws_load(proposal_base + 2u))
-    );
-    let applied_angular = vec3<f32>(
-      bitcast<f32>(ws_load(proposal_base + 3u)),
-      bitcast<f32>(ws_load(proposal_base + 4u)),
-      bitcast<f32>(ws_load(proposal_base + 5u))
-    );
-    let delta = bitcast<f32>(ws_load(proposal_base + 6u));
-    let pressure_delta = bitcast<f32>(ws_load(proposal_base + 7u));
-    let drag_delta = bitcast<f32>(ws_load(proposal_base + 8u));
-    let causal_delta = bitcast<f32>(ws_load(proposal_base + 9u));
-    let pressure_weight = abs(pressure_delta);
-    let drag_weight = abs(drag_delta);
-    let causal_weight = abs(causal_delta);
-    coarse_virtual_energy_delta = coarse_virtual_energy_delta + delta;
-    coarse_pressure_energy_delta =
-      coarse_pressure_energy_delta + pressure_delta;
-    coarse_drag_energy_delta =
-      coarse_drag_energy_delta + drag_delta;
-    coarse_causal_energy_delta =
-      coarse_causal_energy_delta + causal_delta;
-    applied_coarse_impulse = applied_coarse_impulse + applied;
-    applied_coarse_angular = applied_coarse_angular + applied_angular;
-    coarse_pressure_weight = coarse_pressure_weight + pressure_weight;
-    coarse_drag_weight = coarse_drag_weight + drag_weight;
-    coarse_causal_weight = coarse_causal_weight + causal_weight;
-    if (pressure_weight > 0.0) {
-      last_coarse_pressure = coarse_field;
-    }
-    if (drag_weight > 0.0) {
-      last_coarse_drag = coarse_field;
-    }
+  // Coarse validation was computed alongside the fine row folds, but its
+  // rejection remains sequenced after every fine aggregate gate so the
+  // canonical fine-before-coarse failure precedence is unchanged.
+  if (!publish_prepare_channel_failure(
+      0u,
+      prepare_channel_u32[2u]
+    )) {
+    return;
   }
 
   let applied_momentum_residual =

@@ -18,6 +18,7 @@ export const ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA =
 export const ULG_WORKER_OFFSCREEN_RENDER_ROWS_INPUT_TRANSPORT =
   'main-thread-compact-render-row-transfer';
 export const ULG_WORKER_OFFSCREEN_RENDER_ROW_PARTICLE_STRIDE_FLOATS = 8;
+const ULG_WORKER_OFFSCREEN_GAS_PHASE_ID = 3;
 export const ULG_WORKER_OFFSCREEN_RETAINED_GPU_BUFFER_HANDOFF_SCHEMA =
   'peercompute.ulg.worker-offscreen-retained-gpubuffer-handoff.v0';
 export const ULG_WORKER_OFFSCREEN_RETAINED_GPU_BUFFER_TRANSPORT =
@@ -228,6 +229,16 @@ function positiveNumber(value, fallback = 1) {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizePresentationBoxDimsM(value = null) {
+  if (!(Array.isArray(value) || ArrayBuffer.isView(value)) || value.length !== 3) {
+    return null;
+  }
+  const dims = Array.from(value, Number);
+  return dims.every((entry) => Number.isFinite(entry) && entry > 0)
+    ? dims
+    : null;
 }
 
 function arrayLikeLength(value) {
@@ -461,6 +472,7 @@ export function packUlgWorkerOffscreenRenderRowsPayload({
   positionsM = null,
   colorsRgb = null,
   particleRadiiM = null,
+  particlePhaseIds = null,
   alpha = 0.92,
   fallbackColorRgb = [1, 1, 1],
   fallbackRadiusM = 0.02,
@@ -476,18 +488,28 @@ export function packUlgWorkerOffscreenRenderRowsPayload({
   );
   const hasColors = arrayLikeLength(colorsRgb) >= particleCount * 3;
   const hasRadii = arrayLikeLength(particleRadiiM) >= particleCount;
+  const hasPhaseIds = arrayLikeLength(particlePhaseIds) >= particleCount;
   for (let particleIndex = 0; particleIndex < particleCount; particleIndex += 1) {
     const sourceOffset = particleIndex * 3;
     const targetOffset = particleIndex * ULG_WORKER_OFFSCREEN_RENDER_ROW_PARTICLE_STRIDE_FLOATS;
     particleRows[targetOffset + 0] = readArrayLikeNumber(positionsM, sourceOffset + 0);
     particleRows[targetOffset + 1] = readArrayLikeNumber(positionsM, sourceOffset + 1);
     particleRows[targetOffset + 2] = readArrayLikeNumber(positionsM, sourceOffset + 2);
-    particleRows[targetOffset + 3] = Math.max(
+    const radiusM = Math.max(
       0,
       hasRadii
         ? readArrayLikeNumber(particleRadiiM, particleIndex, fallbackRadiusM)
         : finiteNumber(fallbackRadiusM, 0.02)
     );
+    const phaseId = hasPhaseIds
+      ? readArrayLikeNumber(particlePhaseIds, particleIndex, 0)
+      : 0;
+    const vaporLike = Math.abs(phaseId - ULG_WORKER_OFFSCREEN_GAS_PHASE_ID) < 0.5;
+    // Signed radius is presentation-only metadata shared by both the direct
+    // compact-row renderer and its worker-resident copy producer. Exact gas
+    // rows take the depth-tested/non-depth-writing pass; plasma and condensed
+    // phases retain normal depth writes. Zero-radius dormant rows stay hidden.
+    particleRows[targetOffset + 3] = vaporLike && radiusM > 0 ? -radiusM : radiusM;
     particleRows[targetOffset + 4] = Math.max(0, Math.min(1, hasColors
       ? readArrayLikeNumber(colorsRgb, sourceOffset + 0, fallbackColorRgb[0] ?? 1)
       : finiteNumber(fallbackColorRgb[0], 1)));
@@ -1309,9 +1331,11 @@ export function createUlgWorkerOffscreenPresentationBridge({
     },
     drawRenderRows({
       sphStep = null,
+      boxDimsM = null,
       positionsM = null,
       colorsRgb = null,
       particleRadiiM = null,
+      particlePhaseIds = null,
       viewProjectionMatrix = null,
       alpha = 0.92,
       fallbackColorRgb = [1, 1, 1],
@@ -1341,6 +1365,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         positionsM,
         colorsRgb,
         particleRadiiM,
+        particlePhaseIds,
         alpha,
         fallbackColorRgb,
         fallbackRadiusM
@@ -1354,6 +1379,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         });
       }
       const viewProjection = normalizeViewProjectionMatrix(viewProjectionMatrix);
+      const presentationBoxDimsM = normalizePresentationBoxDimsM(boxDimsM);
       const inputTransferBytes = payload.byteLength + viewProjection.byteLength;
       this.worker.postMessage?.({
         type: 'draw-render-rows',
@@ -1365,6 +1391,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         particleCount: payload.particleCount,
         strideFloats: payload.strideFloats,
         viewProjectionMatrix: viewProjection,
+        boxDimsM: presentationBoxDimsM,
         width: size.backingWidth,
         height: size.backingHeight,
         cssWidth: size.cssWidth,
@@ -1390,9 +1417,11 @@ export function createUlgWorkerOffscreenPresentationBridge({
     },
     drawResidentRenderProducer({
       sphStep = null,
+      boxDimsM = null,
       positionsM = null,
       colorsRgb = null,
       particleRadiiM = null,
+      particlePhaseIds = null,
       sourceCacheKey = null,
       viewProjectionMatrix = null,
       alpha = 0.92,
@@ -1438,6 +1467,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         });
       }
       const viewProjection = normalizeViewProjectionMatrix(viewProjectionMatrix);
+      const presentationBoxDimsM = normalizePresentationBoxDimsM(boxDimsM);
       let sourceCacheReusable = Boolean(
         normalizedSourceCacheKey
         && this.residentRenderProducerSourceCacheKey === normalizedSourceCacheKey
@@ -1451,6 +1481,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
             positionsM,
             colorsRgb,
             particleRadiiM,
+            particlePhaseIds,
             alpha,
             fallbackColorRgb,
             fallbackRadiusM
@@ -1493,6 +1524,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         strideFloats,
         sourceRowsByteLength: sourceByteLength,
         viewProjectionMatrix: viewProjection,
+        boxDimsM: presentationBoxDimsM,
         width: size.backingWidth,
         height: size.backingHeight,
         cssWidth: size.cssWidth,
@@ -1538,6 +1570,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     },
     drawResidentParticleStateProducer({
       sphStep = null,
+      boxDimsM = null,
       sphParticleState = null,
       materialColorRows = null,
       sourceCacheKey = null,
@@ -1596,6 +1629,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
             `fallbackRadius:${finiteNumber(fallbackRadiusM, 0.02)}`
           ].join('|');
       const viewProjection = normalizeViewProjectionMatrix(viewProjectionMatrix);
+      const presentationBoxDimsM = normalizePresentationBoxDimsM(boxDimsM);
       const sourceCacheReusable = Boolean(
         normalizedSourceCacheKey
         && this.residentParticleStateProducerCacheKey === normalizedSourceCacheKey
@@ -1672,6 +1706,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
           finiteNumber(fallbackColorRgb?.[2], 1)
         ],
         viewProjectionMatrix: viewProjection,
+        boxDimsM: presentationBoxDimsM,
         width: size.backingWidth,
         height: size.backingHeight,
         cssWidth: size.cssWidth,
@@ -2409,6 +2444,42 @@ export function createUlgWorkerOffscreenPresentationBridge({
             sourceStageId: contentReceipt.sourceStageId ?? null,
             retainedParticleStateStatus:
               contentReceipt.retainedParticleStateStatus ?? null,
+            ...(typeof contentReceipt.presentationGeometry === 'string'
+              ? {
+                  presentationGeometry: contentReceipt.presentationGeometry,
+                  particleImpostorShape:
+                    contentReceipt.particleImpostorShape ?? null,
+                  particleImpostorPassCount: Math.max(
+                    0,
+                    Math.floor(Number(contentReceipt.particleImpostorPassCount) || 0)
+                  ),
+                  projectiveParticleSizing:
+                    contentReceipt.projectiveParticleSizing === true,
+                  particleDepthModel:
+                    contentReceipt.particleDepthModel ?? null,
+                  depthAttachmentFormat:
+                    contentReceipt.depthAttachmentFormat ?? null,
+                  depthAttachmentReady:
+                    contentReceipt.depthAttachmentReady === true,
+                  condensedDepthTestEnabled:
+                    contentReceipt.condensedDepthTestEnabled === true,
+                  condensedDepthWriteEnabled:
+                    contentReceipt.condensedDepthWriteEnabled === true,
+                  vaporDepthTestEnabled:
+                    contentReceipt.vaporDepthTestEnabled === true,
+                  vaporDepthWriteEnabled:
+                    contentReceipt.vaporDepthWriteEnabled === true,
+                  boxWireframeDrawCount: Math.max(
+                    0,
+                    Math.floor(Number(contentReceipt.boxWireframeDrawCount) || 0)
+                  ),
+                  boxDimsM: normalizePresentationBoxDimsM(
+                    contentReceipt.boxDimsM
+                  ),
+                  sameDevicePresentation:
+                    contentReceipt.sameDevicePresentation === true
+                }
+              : {}),
             ...(typeof contentReceipt.residentSchedulePresentationMode === 'string'
               ? {
                   residentSchedulePresentationMode:

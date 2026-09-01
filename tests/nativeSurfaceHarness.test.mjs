@@ -1390,6 +1390,25 @@ test('resident material interface uses compact active-candidate readback', () =>
   );
 });
 
+test('worker projective sphere sizing uses the largest screen-space singular value', () => {
+  const largestProjectedRadiusPx = (dx, dy, dz) => {
+    const rowXX = dx[0] ** 2 + dy[0] ** 2 + dz[0] ** 2;
+    const rowXY = dx[0] * dx[1] + dy[0] * dy[1] + dz[0] * dz[1];
+    const rowYY = dx[1] ** 2 + dy[1] ** 2 + dz[1] ** 2;
+    const eigenGap = Math.sqrt(Math.max(
+      0,
+      (rowXX - rowYY) ** 2 + 4 * rowXY ** 2
+    ));
+    return Math.sqrt(Math.max(0.5 * (rowXX + rowYY + eigenGap), 0));
+  };
+
+  assert.equal(largestProjectedRadiusPx([12, 0], [0, 12], [0, 0]), 12);
+  assert.equal(largestProjectedRadiusPx([9, 0], [0, 4], [0, 0]), 9);
+  assert.ok(Math.abs(
+    largestProjectedRadiusPx([3, 4], [4, -3], [0, 0]) - 5
+  ) < 1e-12);
+});
+
 test('worker offscreen presentation path requires transferred canvas ownership', () => {
   const bridgeSource = readRepoFile('src/visualization/offscreenPresentationBridge.js');
   const workerSource = readRepoFile('src/services/ulgOffscreenRender.worker.js');
@@ -1436,9 +1455,22 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   );
   assert.match(
     workerSource,
-    /particle\.positionRadius\.w <= 0\.0[\s\S]*?particle\.color\.a <= 0\.0/,
-    'the shared quad renderer must reject zero-radius or transparent particle rows'
+    /let belongsToPass = \(vaporPass && signedRadiusM < 0\.0\)[\s\S]*?\|\| \(!vaporPass && signedRadiusM > 0\.0\)/,
+    'the shared renderer must route signed condensed/vapor radii without preset branches'
   );
+  assert.match(workerSource, /fn projectiveRadiusPx/);
+  assert.match(workerSource, /let largestEigenvalue = 0\.5 \* \(rowXX \+ rowYY \+ eigenGap\)/);
+  assert.doesNotMatch(workerSource, /return sqrt\(dot\(dx, dx\) \+ dot\(dy, dy\) \+ dot\(dz, dz\)\)/);
+  assert.match(workerSource, /let vaporLike = abs\(phaseId - \$\{GAS_PHASE_ID\}\.0\) < 0\.5/);
+  assert.match(workerSource, /outputParticles\[index\]\.positionRadius = source\.positionRadius/);
+  assert.match(bridgeSource, /particleRows\[targetOffset \+ 3\] = vaporLike && radiusM > 0 \? -radiusM : radiusM/);
+  assert.match(workerSource, /radiusSquared > 1\.0[\s\S]*?discard/);
+  assert.match(workerSource, /WORKER_PRESENTATION_DEPTH_FORMAT = 'depth24plus'/);
+  assert.match(workerSource, /depthWriteEnabled: true[\s\S]*?depthCompare: 'less-equal'/);
+  assert.match(workerSource, /depthWriteEnabled: false[\s\S]*?depthCompare: 'less-equal'/);
+  assert.match(workerSource, /primitive: \{ topology: 'line-list' \}/);
+  assert.match(workerSource, /pass\.draw\(24, 1, 0, 0\)/);
+  assert.match(workerSource, /presentationGeometry: 'sphere-impostor-depth-fallback'/);
   assert.match(bridgeSource, /main-thread-compact-render-row-transfer/);
   assert.match(bridgeSource, /reuseSourceCache/);
   assert.match(bridgeSource, /source-cache-reused/);

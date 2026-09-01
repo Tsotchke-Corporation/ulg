@@ -3244,7 +3244,10 @@ function workerResidentRenderProducerNumericSourceKeyPart(label, value) {
   return `${label}:${length}:${hash.h1.toString(36)}:${hash.h2.toString(36)}`;
 }
 
-function workerResidentRenderProducerSourceCacheKey(decoded = null) {
+function workerResidentRenderProducerSourceCacheKey(
+  decoded = null,
+  particlePhaseIds = null
+) {
   const positionsM = decoded?.positionsM || null;
   const positionLength = positionsM && Number.isFinite(Number(positionsM.length))
     ? Math.max(0, Math.floor(Number(positionsM.length)))
@@ -3254,7 +3257,8 @@ function workerResidentRenderProducerSourceCacheKey(decoded = null) {
     'peercompute.ulg.worker-resident-render-producer-source-cache.v0',
     workerResidentRenderProducerNumericSourceKeyPart('positionsM', positionsM),
     workerResidentRenderProducerNumericSourceKeyPart('colorsRgb', decoded?.colorsRgb || null),
-    workerResidentRenderProducerNumericSourceKeyPart('particleRadiiM', decoded?.particleRadiiM || null)
+    workerResidentRenderProducerNumericSourceKeyPart('particleRadiiM', decoded?.particleRadiiM || null),
+    workerResidentRenderProducerNumericSourceKeyPart('particlePhaseIds', particlePhaseIds)
   ].join('|');
 }
 
@@ -14841,7 +14845,10 @@ function normalizedSphSceneCameraVector(value) {
 export function resolveSphSceneCameraPose({
   boxDimsM = [10, 10, 10],
   positionNormalized = null,
-  targetNormalized = null
+  targetNormalized = null,
+  fovYDegrees = 46,
+  aspect = 1,
+  fitMargin = 1.08
 } = {}) {
   const dimensions = (
     (Array.isArray(boxDimsM) || ArrayBuffer.isView(boxDimsM))
@@ -14870,11 +14877,8 @@ export function resolveSphSceneCameraPose({
   }
   const positionM = position.map((entry, index) => entry * dimensions[index]);
   const targetM = target.map((entry, index) => entry * dimensions[index]);
-  const separationM = Math.hypot(
-    positionM[0] - targetM[0],
-    positionM[1] - targetM[1],
-    positionM[2] - targetM[2]
-  );
+  const viewBack = positionM.map((entry, index) => entry - targetM[index]);
+  const separationM = Math.hypot(...viewBack);
   if (!(separationM > Math.max(refEdgeM * 1e-6, 1e-9))) {
     return Object.freeze({
       status: 'legacy-whole-box-camera',
@@ -14884,12 +14888,100 @@ export function resolveSphSceneCameraPose({
       targetNormalized: null
     });
   }
+  // A normalized pose defines composition (focus + view direction), not a
+  // licence to crop the physical domain. Fit all eight box corners against
+  // the actual vertical FOV and viewport aspect, moving only along the same
+  // view ray. This keeps every preset on one geometry-derived camera policy;
+  // no scenario identifier or hand-tuned absolute distance participates.
+  const forward = viewBack.map((entry) => -entry / separationM);
+  const worldUp = Math.abs(forward[1]) < 0.999
+    ? [0, 1, 0]
+    : [0, 0, 1];
+  const cross = (a, b) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]
+  ];
+  const normalize = (vector) => {
+    const length = Math.hypot(...vector);
+    return length > 0 ? vector.map((entry) => entry / length) : [1, 0, 0];
+  };
+  const right = normalize(cross(forward, worldUp));
+  const up = normalize(cross(right, forward));
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const resolvedFovYDegrees = Math.min(179, Math.max(1, Number(fovYDegrees) || 46));
+  const resolvedAspect = Math.max(1e-6, Number(aspect) || 1);
+  const resolvedFitMargin = Math.max(1, Number(fitMargin) || 1.08);
+  const tanY = Math.tan((resolvedFovYDegrees * Math.PI / 180) / 2);
+  const tanX = tanY * resolvedAspect;
+  let fittedDistanceM = separationM;
+  for (const x of [0, dimensions[0]]) {
+    for (const y of [0, dimensions[1]]) {
+      for (const z of [0, dimensions[2]]) {
+        const relative = [x - targetM[0], y - targetM[1], z - targetM[2]];
+        const forwardOffsetM = dot(relative, forward);
+        fittedDistanceM = Math.max(
+          fittedDistanceM,
+          resolvedFitMargin * Math.abs(dot(relative, right)) / tanX - forwardOffsetM,
+          resolvedFitMargin * Math.abs(dot(relative, up)) / tanY - forwardOffsetM
+        );
+      }
+    }
+  }
+  const fittedPositionM = targetM.map(
+    (entry, index) => entry - forward[index] * fittedDistanceM
+  );
   return Object.freeze({
-    status: 'box-normalized-camera',
-    positionM: Object.freeze(positionM),
+    status: fittedDistanceM > separationM + refEdgeM * 1e-9
+      ? 'box-normalized-camera-fitted'
+      : 'box-normalized-camera',
+    positionM: Object.freeze(fittedPositionM),
     targetM: Object.freeze(targetM),
     positionNormalized: Object.freeze(position),
-    targetNormalized: Object.freeze(target)
+    targetNormalized: Object.freeze(target),
+    viewForward: Object.freeze(forward),
+    viewRight: Object.freeze(right),
+    viewUp: Object.freeze(up),
+    desiredDistanceM: separationM,
+    fittedDistanceM,
+    fovYDegrees: resolvedFovYDegrees,
+    aspect: resolvedAspect,
+    fitMargin: resolvedFitMargin,
+    fitPolicy: 'eight-corner-fov-aspect-domain-fit'
+  });
+}
+
+export function applySphPresentationCanvasOwnership({
+  mainCanvas = null,
+  workerCanvasVisible = false
+} = {}) {
+  const workerOwnsVisibleFrame = Boolean(workerCanvasVisible);
+  if (!mainCanvas?.style) {
+    return Object.freeze({
+      status: 'presentation-main-canvas-unavailable',
+      workerCanvasVisible: workerOwnsVisibleFrame,
+      mainCanvasComposited: null,
+      mainCanvasOpacity: null
+    });
+  }
+  // Keep the native canvas in the input/layout tree so OrbitControls still
+  // receives pointer events through the worker canvas (which is pointer-event
+  // transparent), but remove its pixels from composition while a complete
+  // worker frame owns display. This prevents a committed native isosurface
+  // from ghosting behind transparent live-preview particles and still lets a
+  // CSS environment/background show through the worker's transparent clear.
+  mainCanvas.style.opacity = workerOwnsVisibleFrame ? '0' : '1';
+  mainCanvas.setAttribute?.(
+    'data-ulg-presentation-compositor-owner',
+    workerOwnsVisibleFrame ? 'worker' : 'main-native'
+  );
+  return Object.freeze({
+    status: workerOwnsVisibleFrame
+      ? 'presentation-worker-canvas-exclusively-composited'
+      : 'presentation-main-native-canvas-composited',
+    workerCanvasVisible: workerOwnsVisibleFrame,
+    mainCanvasComposited: !workerOwnsVisibleFrame,
+    mainCanvasOpacity: mainCanvas.style.opacity
   });
 }
 
@@ -15136,10 +15228,12 @@ export function createSphPhaseScene(container, {
   // a box-normalized presentation pose; this changes only the view, never the
   // simulation geometry or its world-space authority.
   const center = new Three.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
-  const sceneCameraPose = resolveSphSceneCameraPose({
+  let sceneCameraPose = resolveSphSceneCameraPose({
     boxDimsM: dims,
     positionNormalized: cameraPositionNormalized,
-    targetNormalized: cameraTargetNormalized
+    targetNormalized: cameraTargetNormalized,
+    fovYDegrees: camera.fov,
+    aspect: camera.aspect
   });
   const cameraTarget = new Three.Vector3(...sceneCameraPose.targetM);
   camera.position.set(...sceneCameraPose.positionM);
@@ -15367,6 +15461,15 @@ export function createSphPhaseScene(container, {
     const nextStatus = status || workerOffscreenPresentationBridge?.status || null;
     scene.userData.sphWorkerOffscreenPresentation = nextStatus;
     renderer.userData.sphWorkerOffscreenPresentation = nextStatus;
+    const canvasOwnership = applySphPresentationCanvasOwnership({
+      mainCanvas: renderer.domElement,
+      workerCanvasVisible: Boolean(
+        nextStatus?.displayOwner === 'worker'
+        && nextStatus?.displayCanvasVisible === true
+      )
+    });
+    scene.userData.sphPresentationCanvasOwnership = canvasOwnership;
+    renderer.userData.sphPresentationCanvasOwnership = canvasOwnership;
     if (nextStatus?.workerOffscreenRenderRows) {
       publishWorkerOffscreenRenderRowsStatus(nextStatus.workerOffscreenRenderRows);
     }
@@ -16568,6 +16671,7 @@ export function createSphPhaseScene(container, {
     );
     const commonDrawOptions = {
       viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      boxDimsM: [...dims],
       // Display arbitration: fresh row/producer draws carry the sim step so
       // the worker can reject presenting anything older than what is
       // already on screen.
@@ -16580,6 +16684,9 @@ export function createSphPhaseScene(container, {
         ? `worker-owned-resident-render-producer:${reason}`
         : reason
     };
+    const particlePhaseIds = !canUseResidentParticleStateProducer && Array.isArray(decoded?.rows)
+      ? decoded.rows.map((row) => row?.phaseId)
+      : null;
     const residentParticleStateColorRows = canUseResidentParticleStateProducer
       ? workerResidentParticleStateProducerColorRows(decoded, {
           sphParticleState,
@@ -16606,8 +16713,9 @@ export function createSphPhaseScene(container, {
           positionsM,
           colorsRgb: decoded.colorsRgb || null,
           particleRadiiM: decoded.particleRadiiM || null,
+          particlePhaseIds,
           sourceCacheKey: useResidentProducer
-            ? workerResidentRenderProducerSourceCacheKey(decoded)
+            ? workerResidentRenderProducerSourceCacheKey(decoded, particlePhaseIds)
             : null,
           ...commonDrawOptions
         });
@@ -17023,6 +17131,7 @@ export function createSphPhaseScene(container, {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.target.copy(cameraTarget);
+  let sceneCameraUserInteracted = false;
   let nativeSurfaceCameraDirty = true;
   let nativeSurfaceStateDirty = true;
   // Native candidate presentation must never guess whether OrbitControls is
@@ -17071,6 +17180,7 @@ export function createSphPhaseScene(container, {
   }
 
   controls.addEventListener?.('start', () => {
+    sceneCameraUserInteracted = true;
     updateNativeSurfaceCameraInteraction({
       active: true,
       event: 'start'
@@ -51436,6 +51546,24 @@ fn main(
     const h = viewport.height;
     const pixelRatio = resolveSphScenePixelRatio(window.devicePixelRatio);
     camera.aspect = viewport.aspect;
+    if (
+      !sceneCameraUserInteracted
+      && sceneCameraPose.positionNormalized
+      && sceneCameraPose.targetNormalized
+    ) {
+      sceneCameraPose = resolveSphSceneCameraPose({
+        boxDimsM: dims,
+        positionNormalized: sceneCameraPose.positionNormalized,
+        targetNormalized: sceneCameraPose.targetNormalized,
+        fovYDegrees: camera.fov,
+        aspect: camera.aspect
+      });
+      camera.position.set(...sceneCameraPose.positionM);
+      cameraTarget.set(...sceneCameraPose.targetM);
+      controls.target.copy(cameraTarget);
+      camera.lookAt(cameraTarget);
+      scene.userData.sphSceneCameraPose = sceneCameraPose;
+    }
     camera.updateProjectionMatrix();
     const currentPixelRatio = renderer.getPixelRatio?.() ?? null;
     const rendererResizeRequired = rendererCanvasResizeRequired({
@@ -52178,6 +52306,7 @@ fn main(
         `colors:${materialColorRows.length}`
       ].join('|'),
       viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      boxDimsM: [...dims],
       radiusScalePx: Math.max(48, Math.min(240, backingMinPx * 0.14)),
       fallbackPointSizePx: Math.max(3, Math.min(8, backingMinPx * 0.008)),
       minPointSizePx: 2,

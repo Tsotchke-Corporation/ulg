@@ -40,6 +40,8 @@ const RESIDENT_STAGE_OUTPUT_RENDER_REQUEST_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0';
 const RENDER_ROW_PARTICLE_STRIDE_FLOATS = 8;
 const RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS = 8;
+const WORKER_PRESENTATION_DEPTH_FORMAT = 'depth24plus';
+const GAS_PHASE_ID = 3;
 const TEXTURE_RENDER_ATTACHMENT = 0x10;
 const BUFFER_USAGE_COPY_DST = 0x08;
 const BUFFER_USAGE_UNIFORM = 0x40;
@@ -93,10 +95,19 @@ function resetPresentedSphStep() {
 }
 let disposed = false;
 let renderRowsPipeline = null;
+let renderRowsVaporPipeline = null;
 let renderRowsBindGroupLayout = null;
 let renderRowsParticleBuffer = null;
 let renderRowsParticleBufferByteLength = 0;
 let renderRowsUniformBuffer = null;
+let renderDepthTexture = null;
+let renderDepthView = null;
+let renderDepthTextureWidth = 0;
+let renderDepthTextureHeight = 0;
+let renderBoxPipeline = null;
+let renderBoxBindGroupLayout = null;
+let renderBoxUniformBuffer = null;
+let renderBoxBindGroup = null;
 let renderRowsStatus = null;
 let residentRenderProducerPipeline = null;
 let residentRenderProducerBindGroupLayout = null;
@@ -450,13 +461,24 @@ function unconfigureCanvas({ reason = 'dispose' } = {}) {
 function destroyRenderRowsResources() {
   renderRowsParticleBuffer?.destroy?.();
   renderRowsUniformBuffer?.destroy?.();
+  renderDepthTexture?.destroy?.();
+  renderBoxUniformBuffer?.destroy?.();
   residentRenderProducerSourceBuffer?.destroy?.();
   residentRenderProducerParamsBuffer?.destroy?.();
   renderRowsPipeline = null;
+  renderRowsVaporPipeline = null;
   renderRowsBindGroupLayout = null;
   renderRowsParticleBuffer = null;
   renderRowsUniformBuffer = null;
   renderRowsParticleBufferByteLength = 0;
+  renderDepthTexture = null;
+  renderDepthView = null;
+  renderDepthTextureWidth = 0;
+  renderDepthTextureHeight = 0;
+  renderBoxPipeline = null;
+  renderBoxBindGroupLayout = null;
+  renderBoxUniformBuffer = null;
+  renderBoxBindGroup = null;
   residentRenderProducerPipeline = null;
   residentRenderProducerBindGroupLayout = null;
   residentRenderProducerSourceBuffer = null;
@@ -1206,21 +1228,24 @@ function createResidentScheduleCandidateDrawLoop({
           sphStep: candidate.version.nextStep,
           residentScheduleCandidatePresentation: true,
           ...candidateReceiptFields(admission, candidate),
-          width: request.width ?? canvas?.width ?? 1,
-          height: request.height ?? canvas?.height ?? 1,
-          cssWidth: request.cssWidth ?? cssWidth,
-          cssHeight: request.cssHeight ?? cssHeight,
-          pixelRatio: request.pixelRatio ?? pixelRatio,
+          // A schedule can outlive a viewport resize. Presentation geometry
+          // is camera-current, so it must also use the worker's current
+          // backing/CSS dimensions rather than snapping the canvas and depth
+          // texture back to the dimensions captured at schedule dispatch.
+          width: canvas?.width ?? request.width ?? 1,
+          height: canvas?.height ?? request.height ?? 1,
+          cssWidth,
+          cssHeight,
+          pixelRatio,
           backgroundColor: request.backgroundColor || backgroundColor,
-          // Preview mode clears opaque: the worker canvas sits above the
-          // main canvas whose committed isosurface only updates per
-          // schedule; a transparent clear composites live particles over
-          // that stale surface ("ghost surface that never clears").
-          clearAlpha: livePreviewMode
-            ? 1
-            : (Number.isFinite(Number(request.clearAlpha))
-              ? Number(request.clearAlpha)
-              : clearAlpha),
+          // The worker is an overlay above the scene/environment canvas.
+          // Worker-owned resident presentation removes the page-side stale
+          // particle surface, and this renderer now supplies its own box, so
+          // the preview must remain transparent to preserve the environment
+          // instead of hiding it behind an opaque presentation canvas.
+          clearAlpha: Number.isFinite(Number(request.clearAlpha))
+            ? Number(request.clearAlpha)
+            : clearAlpha,
           reason: `${reason}:resident-schedule-candidate`
         });
         if (
@@ -1879,7 +1904,7 @@ async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
 
 function createRenderRowsShaderModule() {
   return device.createShaderModule({
-    label: 'ulg-offscreen-render-rows-shader',
+    label: 'ulg-offscreen-projective-sphere-impostor-shader',
     code: `
 struct Particle {
   positionRadius: vec4<f32>,
@@ -1901,7 +1926,9 @@ struct Params {
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
-  @location(0) color: vec4<f32>,
+  @location(0) quadUv: vec2<f32>,
+  @location(1) color: vec4<f32>,
+  @location(2) @interpolate(flat) vaporClass: f32,
 };
 
 fn quadCorner(vertexIndex: u32) -> vec2<f32> {
@@ -1915,23 +1942,84 @@ fn quadCorner(vertexIndex: u32) -> vec2<f32> {
   return corner;
 }
 
-@vertex
-fn vsMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOut {
-  let particle = particles[instanceIndex];
-  let clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
+fn hiddenVertex() -> VertexOut {
   var out: VertexOut;
+  out.position = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  out.quadUv = vec2<f32>(2.0);
+  out.color = vec4<f32>(0.0);
+  out.vaporClass = 0.0;
+  return out;
+}
+
+fn projectedAxisOffsetPx(
+  centerClip: vec4<f32>,
+  axisClip: vec4<f32>
+) -> vec2<f32> {
+  if (centerClip.w <= 0.0001 || axisClip.w <= 0.0001) {
+    return vec2<f32>(0.0);
+  }
+  let deltaNdc = axisClip.xy / axisClip.w - centerClip.xy / centerClip.w;
+  return deltaNdc * max(params.canvasSizePx, vec2<f32>(1.0)) * 0.5;
+}
+
+fn projectiveRadiusPx(
+  centerM: vec3<f32>,
+  radiusM: f32,
+  centerClip: vec4<f32>
+) -> f32 {
+  let dx = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(radiusM, 0.0, 0.0), 1.0)
+  );
+  let dy = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(0.0, radiusM, 0.0), 1.0)
+  );
+  let dz = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(0.0, 0.0, radiusM), 1.0)
+  );
+  // The three projected axis offsets are the columns of a 2x3 screen-space
+  // Jacobian. A sphere projects to the ellipse defined by that Jacobian; its
+  // outer radius is the largest singular value, not the Frobenius norm (which
+  // overstates a centered sphere by sqrt(2)). Compute the largest eigenvalue
+  // of A*A^T directly so physical radius remains truthful at every view.
+  let rowXX = dx.x * dx.x + dy.x * dy.x + dz.x * dz.x;
+  let rowXY = dx.x * dx.y + dy.x * dy.y + dz.x * dz.y;
+  let rowYY = dx.y * dx.y + dy.y * dy.y + dz.y * dz.y;
+  let eigenGap = sqrt(max(
+    0.0,
+    (rowXX - rowYY) * (rowXX - rowYY) + 4.0 * rowXY * rowXY
+  ));
+  let largestEigenvalue = 0.5 * (rowXX + rowYY + eigenGap);
+  return sqrt(max(largestEigenvalue, 0.0));
+}
+
+fn buildVertex(
+  vertexIndex: u32,
+  instanceIndex: u32,
+  vaporPass: bool
+) -> VertexOut {
+  let particle = particles[instanceIndex];
+  let signedRadiusM = particle.positionRadius.w;
+  let belongsToPass = (vaporPass && signedRadiusM < 0.0)
+    || (!vaporPass && signedRadiusM > 0.0);
+  var clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
   if (
     clip.w <= 0.0001
-    || particle.positionRadius.w <= 0.0
+    || !belongsToPass
     || particle.color.a <= 0.0
   ) {
-    out.position = vec4<f32>(2.0, 2.0, 1.0, 1.0);
-    out.color = vec4<f32>(0.0);
-    return out;
+    return hiddenVertex();
   }
   let corner = quadCorner(vertexIndex);
-  let pointSizePx = clamp(
-    max(particle.positionRadius.w * params.radiusScalePx, params.fallbackPointSizePx),
+  let radiusM = abs(signedRadiusM);
+  var pointSizePx = projectiveRadiusPx(particle.positionRadius.xyz, radiusM, clip);
+  if (pointSizePx <= 0.0001) {
+    pointSizePx = max(radiusM * params.radiusScalePx, params.fallbackPointSizePx);
+  }
+  pointSizePx = clamp(
+    pointSizePx,
     params.minPointSizePx,
     params.maxPointSizePx
   );
@@ -1940,21 +2028,64 @@ fn vsMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) inst
     (pointSizePx / max(params.canvasSizePx.y, 1.0)) * 2.0
   );
   let ndc = (clip.xy / clip.w) + ndcOffset;
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  var out: VertexOut;
   out.position = vec4<f32>(ndc * clip.w, clip.z, clip.w);
+  out.quadUv = corner;
   out.color = particle.color;
+  out.vaporClass = select(0.0, 1.0, vaporPass);
   return out;
+}
+
+@vertex
+fn vsCondensed(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32
+) -> VertexOut {
+  return buildVertex(vertexIndex, instanceIndex, false);
+}
+
+@vertex
+fn vsVapor(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32
+) -> VertexOut {
+  return buildVertex(vertexIndex, instanceIndex, true);
 }
 
 @fragment
 fn fsMain(input: VertexOut) -> @location(0) vec4<f32> {
-  return input.color;
+  let radiusSquared = dot(input.quadUv, input.quadUv);
+  if (radiusSquared > 1.0) {
+    discard;
+  }
+  let sphereNormal = normalize(vec3<f32>(
+    input.quadUv,
+    sqrt(max(0.0, 1.0 - radiusSquared))
+  ));
+  let light = normalize(vec3<f32>(-0.36, 0.52, 0.77));
+  let diffuse = 0.34 + 0.66 * max(dot(sphereNormal, light), 0.0);
+  let rim = pow(1.0 - max(sphereNormal.z, 0.0), 2.0) * 0.16;
+  let condensedEdge = 1.0 - smoothstep(0.90, 1.0, radiusSquared);
+  let vaporEdge = 1.0 - smoothstep(0.18, 1.0, radiusSquared);
+  let edge = mix(condensedEdge, vaporEdge, input.vaporClass);
+  let vaporOpacity = mix(1.0, 0.68, input.vaporClass);
+  return vec4<f32>(
+    input.color.rgb * (diffuse + rim),
+    input.color.a * edge * vaporOpacity
+  );
 }
 `
   });
 }
 
 function ensureRenderRowsPipeline() {
-  if (renderRowsPipeline && renderRowsBindGroupLayout && renderRowsUniformBuffer) {
+  if (
+    renderRowsPipeline
+    && renderRowsVaporPipeline
+    && renderRowsBindGroupLayout
+    && renderRowsUniformBuffer
+  ) {
     return;
   }
   const shaderModule = createRenderRowsShaderModule();
@@ -1978,11 +2109,11 @@ function ensureRenderRowsPipeline() {
     bindGroupLayouts: [renderRowsBindGroupLayout]
   });
   renderRowsPipeline = device.createRenderPipeline({
-    label: 'ulg-offscreen-render-rows-pipeline',
+    label: 'ulg-offscreen-condensed-sphere-impostor-pipeline',
     layout: pipelineLayout,
     vertex: {
       module: shaderModule,
-      entryPoint: 'vsMain'
+      entryPoint: 'vsCondensed'
     },
     fragment: {
       module: shaderModule,
@@ -2006,6 +2137,47 @@ function ensureRenderRowsPipeline() {
     },
     primitive: {
       topology: 'triangle-list'
+    },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: true,
+      depthCompare: 'less-equal'
+    }
+  });
+  renderRowsVaporPipeline = device.createRenderPipeline({
+    label: 'ulg-offscreen-vapor-sphere-impostor-pipeline',
+    layout: pipelineLayout,
+    vertex: {
+      module: shaderModule,
+      entryPoint: 'vsVapor'
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fsMain',
+      targets: [{
+        format,
+        blend: {
+          color: {
+            srcFactor: 'src-alpha',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          },
+          alpha: {
+            srcFactor: 'one',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          }
+        },
+        writeMask: self.GPUColorWrite?.ALL ?? 0xF
+      }]
+    },
+    primitive: {
+      topology: 'triangle-list'
+    },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: false,
+      depthCompare: 'less-equal'
     }
   });
   renderRowsUniformBuffer = device.createBuffer({
@@ -2014,6 +2186,220 @@ function ensureRenderRowsPipeline() {
     usage: gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
       | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
   });
+}
+
+function ensureWorkerPresentationDepthView() {
+  const width = Math.max(1, Number(canvas?.width) || 1);
+  const height = Math.max(1, Number(canvas?.height) || 1);
+  if (
+    renderDepthTexture
+    && renderDepthView
+    && renderDepthTextureWidth === width
+    && renderDepthTextureHeight === height
+  ) {
+    return renderDepthView;
+  }
+  renderDepthTexture?.destroy?.();
+  renderDepthTexture = device.createTexture({
+    label: 'ulg-offscreen-presentation-depth',
+    size: [width, height, 1],
+    format: WORKER_PRESENTATION_DEPTH_FORMAT,
+    usage: self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT
+  });
+  renderDepthView = renderDepthTexture.createView();
+  renderDepthTextureWidth = width;
+  renderDepthTextureHeight = height;
+  return renderDepthView;
+}
+
+function ensureWorkerPresentationBoxPipeline() {
+  if (
+    renderBoxPipeline
+    && renderBoxBindGroupLayout
+    && renderBoxUniformBuffer
+    && renderBoxBindGroup
+  ) {
+    return;
+  }
+  const shaderModule = device.createShaderModule({
+    label: 'ulg-offscreen-presentation-box-wireframe-shader',
+    code: `
+struct BoxParams {
+  viewProjection: mat4x4<f32>,
+  dimsM: vec4<f32>,
+  color: vec4<f32>,
+};
+
+struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> params: BoxParams;
+
+const BOX_EDGES = array<vec3<f32>, 24>(
+  vec3<f32>(0., 0., 0.), vec3<f32>(1., 0., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 0., 1.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(0., 0., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 0., 0.),
+  vec3<f32>(0., 1., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 1., 0.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(1., 1., 1.), vec3<f32>(0., 1., 1.),
+  vec3<f32>(0., 1., 1.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(0., 0., 0.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 1., 1.)
+);
+
+@vertex
+fn vsMain(@builtin(vertex_index) index: u32) -> VertexOut {
+  let corner = BOX_EDGES[index] * params.dimsM.xyz;
+  var clip = params.viewProjection * vec4<f32>(corner, 1.0);
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  if (clip.w <= 0.0001) {
+    clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  }
+  var out: VertexOut;
+  out.position = clip;
+  out.color = params.color;
+  return out;
+}
+
+@fragment
+fn fsMain(input: VertexOut) -> @location(0) vec4<f32> {
+  return input.color;
+}
+`
+  });
+  renderBoxBindGroupLayout = device.createBindGroupLayout({
+    label: 'ulg-offscreen-presentation-box-wireframe-bind-group-layout',
+    entries: [{
+      binding: 0,
+      visibility: gpuShaderStage('VERTEX', SHADER_STAGE_VERTEX),
+      buffer: { type: 'uniform' }
+    }]
+  });
+  renderBoxPipeline = device.createRenderPipeline({
+    label: 'ulg-offscreen-presentation-box-wireframe-pipeline',
+    layout: device.createPipelineLayout({
+      label: 'ulg-offscreen-presentation-box-wireframe-pipeline-layout',
+      bindGroupLayouts: [renderBoxBindGroupLayout]
+    }),
+    vertex: { module: shaderModule, entryPoint: 'vsMain' },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fsMain',
+      targets: [{
+        format,
+        blend: {
+          color: {
+            srcFactor: 'src-alpha',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          },
+          alpha: {
+            srcFactor: 'one',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          }
+        },
+        writeMask: self.GPUColorWrite?.ALL ?? 0xF
+      }]
+    },
+    primitive: { topology: 'line-list' },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: false,
+      depthCompare: 'less-equal'
+    }
+  });
+  renderBoxUniformBuffer = device.createBuffer({
+    label: 'ulg-offscreen-presentation-box-wireframe-uniforms',
+    size: 24 * Float32Array.BYTES_PER_ELEMENT,
+    usage: gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
+      | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
+  });
+  renderBoxBindGroup = device.createBindGroup({
+    label: 'ulg-offscreen-presentation-box-wireframe-bind-group',
+    layout: renderBoxBindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: renderBoxUniformBuffer } }]
+  });
+}
+
+function normalizeWorkerPresentationBoxDims(value) {
+  if (!(Array.isArray(value) || ArrayBuffer.isView(value)) || value.length !== 3) {
+    return null;
+  }
+  const dims = Array.from(value, Number);
+  return dims.every((entry) => Number.isFinite(entry) && entry > 0)
+    ? dims
+    : null;
+}
+
+function workerPresentationRenderPassDescriptor() {
+  return {
+    colorAttachments: [{
+      view: context.getCurrentTexture().createView(),
+      clearValue: colorToClearValue(backgroundColor, clearAlpha),
+      loadOp: 'clear',
+      storeOp: 'store'
+    }],
+    depthStencilAttachment: {
+      view: ensureWorkerPresentationDepthView(),
+      depthClearValue: 1,
+      depthLoadOp: 'clear',
+      depthStoreOp: 'discard'
+    }
+  };
+}
+
+function drawWorkerPresentationParticles(pass, bindGroup, particleCount) {
+  pass.setPipeline(renderRowsPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(6, particleCount, 0, 0);
+  pass.setPipeline(renderRowsVaporPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(6, particleCount, 0, 0);
+}
+
+function drawWorkerPresentationBox(pass, viewProjection, boxDimsM) {
+  const dims = normalizeWorkerPresentationBoxDims(boxDimsM);
+  if (!dims) return null;
+  ensureWorkerPresentationBoxPipeline();
+  const params = new Float32Array(24);
+  params.set(viewProjection, 0);
+  params[16] = dims[0];
+  params[17] = dims[1];
+  params[18] = dims[2];
+  params[20] = 0.36;
+  params[21] = 0.82;
+  params[22] = 0.74;
+  params[23] = 0.82;
+  device.queue.writeBuffer(renderBoxUniformBuffer, 0, params);
+  pass.setPipeline(renderBoxPipeline);
+  pass.setBindGroup(0, renderBoxBindGroup);
+  pass.draw(24, 1, 0, 0);
+  return dims;
+}
+
+function workerPresentationGeometryReceipt(boxDimsM) {
+  return {
+    presentationGeometry: 'sphere-impostor-depth-fallback',
+    particleImpostorShape: 'projective-circular-lit-disc',
+    particleImpostorPassCount: 2,
+    projectiveParticleSizing: true,
+    particleDepthModel: 'center-plane-depth',
+    depthAttachmentFormat: WORKER_PRESENTATION_DEPTH_FORMAT,
+    depthAttachmentReady: Boolean(renderDepthTexture && renderDepthView),
+    condensedDepthTestEnabled: true,
+    condensedDepthWriteEnabled: true,
+    vaporDepthTestEnabled: true,
+    vaporDepthWriteEnabled: false,
+    boxWireframeDrawCount: boxDimsM ? 1 : 0,
+    boxDimsM: boxDimsM ? [...boxDimsM] : null,
+    sameDevicePresentation: true
+  };
 }
 
 function ensureRenderRowsParticleBuffer(byteLength) {
@@ -2061,10 +2447,10 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
   let source = sourceParticles[index];
-  outputParticles[index].positionRadius = vec4<f32>(
-    source.positionRadius.xyz,
-    max(source.positionRadius.w, 0.000001)
-  );
+  // Preserve the signed presentation radius packed by the shared bridge.
+  // Negative means exact gas (depth-tested/non-depth-writing); zero remains a
+  // deliberately hidden dormant row. This producer never changes physics.
+  outputParticles[index].positionRadius = source.positionRadius;
   outputParticles[index].color = vec4<f32>(
     clamp(source.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)),
     clamp(source.color.a, 0.0, 1.0)
@@ -2229,11 +2615,21 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
   if (smoothingLengthM > 0.0) {
     radiusM = min(radiusM, smoothingLengthM * 12.0);
   }
+  // A signed visual radius is worker-local presentation metadata. It lets
+  // one generic producer route exact gas through a depth-tested,
+  // non-depth-writing pass while plasma and condensed carriers retain normal
+  // depth writes; the physical state/thermo buffers remain untouched.
+  let vaporLike = abs(phaseId - ${GAS_PHASE_ID}.0) < 0.5;
+  let signedRadiusM = select(
+    max(radiusM, 0.000001),
+    -max(radiusM, 0.000001),
+    vaporLike
+  );
   outputParticles[index].positionRadius = vec4<f32>(
     stateRows[stateOffset + 0u],
     stateRows[stateOffset + 1u],
     stateRows[stateOffset + 2u],
-    max(radiusM, 0.000001)
+    signedRadiusM
   );
   let color = materialPhaseColor(materialId, phaseId);
   outputParticles[index].color = vec4<f32>(color.rgb, color.a * clamp(params.values.y, 0.0, 1.0));
@@ -2430,17 +2826,13 @@ function drawRenderRows(data) {
     ]
   });
   const encoder = device.createCommandEncoder({ label: 'ulg-offscreen-render-rows-encoder' });
-  const pass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  pass.setPipeline(renderRowsPipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.draw(6, particleCount, 0, 0);
+  const pass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(pass, bindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    pass,
+    viewProjection,
+    data.boxDimsM
+  );
   pass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -2464,6 +2856,7 @@ function drawRenderRows(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,
@@ -2607,17 +3000,13 @@ function drawResidentRenderProducer(data) {
   computePass.setBindGroup(0, producerBindGroup);
   computePass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
   computePass.end();
-  const renderPass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  renderPass.setPipeline(renderRowsPipeline);
-  renderPass.setBindGroup(0, renderBindGroup);
-  renderPass.draw(6, particleCount, 0, 0);
+  const renderPass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(renderPass, renderBindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    renderPass,
+    viewProjection,
+    data.boxDimsM
+  );
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -2655,6 +3044,7 @@ function drawResidentRenderProducer(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,
@@ -2883,17 +3273,13 @@ function drawResidentParticleStateProducer(data) {
   computePass.setBindGroup(0, producerBindGroup);
   computePass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
   computePass.end();
-  const renderPass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  renderPass.setPipeline(renderRowsPipeline);
-  renderPass.setBindGroup(0, renderBindGroup);
-  renderPass.draw(6, particleCount, 0, 0);
+  const renderPass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(renderPass, renderBindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    renderPass,
+    viewProjection,
+    data.boxDimsM
+  );
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -3001,6 +3387,7 @@ function drawResidentParticleStateProducer(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,

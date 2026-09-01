@@ -55,6 +55,23 @@ const COMMITTED_CANDIDATE_RECEIPT_FIELDS = Object.freeze({
   terminalFenceAuthorityAdmissionReady: true
 });
 
+const IMPOSTOR_PRESENTATION_RECEIPT_FIELDS = Object.freeze({
+  presentationGeometry: 'sphere-impostor-depth-fallback',
+  particleImpostorShape: 'projective-circular-lit-disc',
+  particleImpostorPassCount: 2,
+  projectiveParticleSizing: true,
+  particleDepthModel: 'center-plane-depth',
+  depthAttachmentFormat: 'depth24plus',
+  depthAttachmentReady: true,
+  condensedDepthTestEnabled: true,
+  condensedDepthWriteEnabled: true,
+  vaporDepthTestEnabled: true,
+  vaporDepthWriteEnabled: false,
+  boxWireframeDrawCount: 1,
+  boxDimsM: [12, 8, 6],
+  sameDevicePresentation: true
+});
+
 test('worker offscreen presentation capability is fail-closed around transferred canvas ownership', () => {
   const notRequested = resolveUlgWorkerOffscreenPresentationCapability({
     requested: false,
@@ -364,7 +381,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
       sourceStageId: 'schroederSameLevelMechanics',
-      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+      ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
     }
   });
   assert.equal(
@@ -392,7 +410,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
       sourceStageId: 'schroederSameLevelMechanics',
-      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+      ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
     }
   });
   assert.equal(canvas.style.visibility, 'hidden');
@@ -413,6 +432,7 @@ test('worker offscreen display ownership hides native non-owner and reveals only
 
   const drawStatus = bridge.drawRenderRows({
     sphStep: 12,
+    boxDimsM: [4, 5, 6],
     positionsM: new Float32Array([0, 0, 0]),
     colorsRgb: new Float32Array([1, 1, 1]),
     particleRadiiM: new Float32Array([0.05]),
@@ -420,6 +440,7 @@ test('worker offscreen display ownership hides native non-owner and reveals only
   });
   assert.equal(drawStatus.particleCount, 1);
   assert.equal(worker.messages.at(-1)?.data?.displayOwnerEpoch, 8);
+  assert.deepEqual(worker.messages.at(-1)?.data?.boxDimsM, [4, 5, 6]);
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
@@ -504,7 +525,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
       sourceStageId: 'schroederSameLevelMechanics',
-      retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+      ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -524,7 +546,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
     producerSourceKind: 'worker-retained-resident-stage-output',
     producerSourceTransport: 'worker-retained-resident-stage-output',
     sourceStageId: 'schroederSameLevelMechanics',
-    retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+    retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+    ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
   });
 
   // A page-side legacy draw may arrive after the newer worker candidate and
@@ -630,6 +653,7 @@ test('worker offscreen render rows pack compact transferable particle rows', () 
     positionsM: new Float32Array([1, 2, 3, 4, 5, 6]),
     colorsRgb: new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
     particleRadiiM: new Float32Array([0.07, 0.08]),
+    particlePhaseIds: new Float32Array([3, 4]),
     alpha: 0.75
   });
 
@@ -640,9 +664,10 @@ test('worker offscreen render rows pack compact transferable particle rows', () 
   assert.equal(payload.strideFloats, ULG_WORKER_OFFSCREEN_RENDER_ROW_PARTICLE_STRIDE_FLOATS);
   assert.equal(payload.particleRows.length, 16);
   assert.equal(payload.particleRows[0], 1);
-  assert.equal(payload.particleRows[3].toFixed(2), '0.07');
+  assert.equal(payload.particleRows[3].toFixed(2), '-0.07');
   assert.equal(payload.particleRows[7], 0.75);
   assert.equal(payload.particleRows[8], 4);
+  assert.equal(payload.particleRows[11].toFixed(2), '0.08');
   assert.equal(payload.byteLength, payload.particleRows.byteLength);
 });
 
@@ -701,9 +726,11 @@ test('worker-owned resident render producer reuses worker source cache on repeat
   assert.equal(worker.messages[0]?.data?.type, 'init-offscreen-presentation');
 
   const drawInput = {
+    boxDimsM: [4, 5, 6],
     positionsM: new Float32Array([0, 0, 0, 1, 0, 0]),
     colorsRgb: new Float32Array([1, 0, 0, 0, 1, 0]),
     particleRadiiM: new Float32Array([0.05, 0.05]),
+    particlePhaseIds: new Float32Array([3, 4]),
     sourceCacheKey: 'source:a',
     viewProjectionMatrix: new Float32Array(16).fill(0)
   };
@@ -713,7 +740,10 @@ test('worker-owned resident render producer reuses worker source cache on repeat
   drawInput.viewProjectionMatrix[15] = 1;
 
   const uploaded = bridge.drawResidentRenderProducer(drawInput);
-  const reused = bridge.drawResidentRenderProducer(drawInput);
+  const reused = bridge.drawResidentRenderProducer({
+    ...drawInput,
+    boxDimsM: [7, 8, 9]
+  });
   const firstDraw = worker.messages[1]?.data;
   const secondDraw = worker.messages[2]?.data;
 
@@ -723,6 +753,9 @@ test('worker-owned resident render producer reuses worker source cache on repeat
   assert.equal(firstDraw.sourceCacheStatus, 'source-cache-uploaded');
   assert.equal(firstDraw.sourceRowsPacked, true);
   assert.ok(firstDraw.sourceParticleRows instanceof Float32Array);
+  assert.equal(firstDraw.sourceParticleRows[3].toFixed(2), '-0.05');
+  assert.equal(firstDraw.sourceParticleRows[11].toFixed(2), '0.05');
+  assert.deepEqual(firstDraw.boxDimsM, [4, 5, 6]);
   assert.equal(uploaded.sourceTransferBytes, 64);
 
   assert.equal(secondDraw.schema, ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA);
@@ -730,6 +763,7 @@ test('worker-owned resident render producer reuses worker source cache on repeat
   assert.equal(secondDraw.sourceCacheStatus, 'source-cache-reused');
   assert.equal(secondDraw.sourceRowsPacked, false);
   assert.equal(secondDraw.sourceParticleRows, undefined);
+  assert.deepEqual(secondDraw.boxDimsM, [7, 8, 9]);
   assert.equal(reused.sourceCacheHit, true);
   assert.equal(reused.sourceRowsPacked, false);
   assert.equal(reused.sourceTransferBytes, 0);
@@ -806,6 +840,7 @@ test('worker-owned resident particle-state producer imports state once then reus
     0.2, 0.4, 0.6, 1
   ]);
   const firstStatus = bridge.drawResidentParticleStateProducer({
+    boxDimsM: [4, 5, 6],
     sphParticleState,
     materialColorRows,
     sourceCacheKey: 'resident-state:a',
@@ -814,6 +849,7 @@ test('worker-owned resident particle-state producer imports state once then reus
     viewProjectionMatrix
   });
   const secondStatus = bridge.drawResidentParticleStateProducer({
+    boxDimsM: [7, 8, 9],
     sphParticleState,
     materialColorRows,
     sourceCacheKey: 'resident-state:a',
@@ -835,6 +871,7 @@ test('worker-owned resident particle-state producer imports state once then reus
   assert.equal(firstDraw.sourceCacheKeyStrategy, 'step-time');
   assert.equal(firstDraw.sourceCpuStateStale, false);
   assert.equal(firstDraw.sourceCacheMissReason, 'source-cache-empty');
+  assert.deepEqual(firstDraw.boxDimsM, [4, 5, 6]);
   assert.equal(firstStatus.sourceStateTransferBytes, 192);
   assert.equal(firstStatus.sourceTransferBytes, 0);
   assert.equal(firstStatus.sourceCacheKeyStrategy, 'step-time');
@@ -846,6 +883,7 @@ test('worker-owned resident particle-state producer imports state once then reus
   assert.equal(secondDraw.sourceState, undefined);
   assert.equal(secondDraw.sourceThermo, undefined);
   assert.equal(secondDraw.materialColorRows, undefined);
+  assert.deepEqual(secondDraw.boxDimsM, [7, 8, 9]);
   assert.equal(secondStatus.sourceCacheHit, true);
   assert.equal(secondStatus.sourceCacheKeyStrategy, 'step-time');
   assert.equal(secondStatus.sourceCacheMissReason, null);

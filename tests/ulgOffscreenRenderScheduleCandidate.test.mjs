@@ -14,12 +14,27 @@ import {
 // exported handlers (the W3 test seams) can be driven directly in node with a
 // fake WebGPU device — no browser, no GPU.
 const postedMessages = [];
+const fakeGpuRecords = {
+  shaderModules: [],
+  renderPipelines: [],
+  computePipelines: [],
+  textures: [],
+  renderPasses: [],
+  computePasses: [],
+  draws: [],
+  submits: [],
+  writes: []
+};
 const fakeSelf = {
   onmessage: null,
   postMessage(data) {
     postedMessages.push(data);
   },
   performance: { now: () => Date.now() },
+  GPUBufferUsage: { COPY_DST: 0x08, UNIFORM: 0x40, STORAGE: 0x80 },
+  GPUTextureUsage: { RENDER_ATTACHMENT: 0x10 },
+  GPUShaderStage: { VERTEX: 0x1, FRAGMENT: 0x2, COMPUTE: 0x4 },
+  GPUColorWrite: { ALL: 0xF },
   navigator: {}
 };
 globalThis.self = fakeSelf;
@@ -27,11 +42,84 @@ globalThis.self = fakeSelf;
 const workerModule = await import('../src/services/ulgOffscreenRender.worker.js');
 
 const fakeDevice = {
-  createCommandEncoder: () => ({
-    beginRenderPass: () => ({ end() {} }),
-    finish: () => ({})
-  }),
-  queue: { submit() {} },
+  createShaderModule(descriptor) {
+    const module = { descriptor, label: descriptor?.label ?? null };
+    fakeGpuRecords.shaderModules.push(module);
+    return module;
+  },
+  createBindGroupLayout: (descriptor) => ({ descriptor }),
+  createPipelineLayout: (descriptor) => ({ descriptor }),
+  createRenderPipeline(descriptor) {
+    const pipeline = { descriptor, label: descriptor?.label ?? null };
+    fakeGpuRecords.renderPipelines.push(pipeline);
+    return pipeline;
+  },
+  createComputePipeline(descriptor) {
+    const pipeline = { descriptor, label: descriptor?.label ?? null };
+    fakeGpuRecords.computePipelines.push(pipeline);
+    return pipeline;
+  },
+  createBuffer(descriptor) {
+    return {
+      descriptor,
+      label: descriptor?.label ?? null,
+      size: descriptor?.size ?? 0,
+      destroyed: false,
+      destroy() { this.destroyed = true; }
+    };
+  },
+  createTexture(descriptor) {
+    const texture = {
+      descriptor,
+      label: descriptor?.label ?? null,
+      destroyed: false,
+      createView: () => ({ texture }),
+      destroy() { this.destroyed = true; }
+    };
+    fakeGpuRecords.textures.push(texture);
+    return texture;
+  },
+  createBindGroup: (descriptor) => ({ descriptor }),
+  createCommandEncoder(descriptor = {}) {
+    const encoded = { descriptor, renderPasses: [], computePasses: [] };
+    return {
+      beginComputePass(passDescriptor = {}) {
+        let activePipeline = null;
+        const record = { descriptor: passDescriptor, dispatches: [] };
+        encoded.computePasses.push(record);
+        fakeGpuRecords.computePasses.push(record);
+        return {
+          setPipeline(pipeline) { activePipeline = pipeline; },
+          setBindGroup() {},
+          dispatchWorkgroups(...args) {
+            record.dispatches.push({ pipeline: activePipeline, args });
+          },
+          end() {}
+        };
+      },
+      beginRenderPass(passDescriptor = {}) {
+        let activePipeline = null;
+        const record = { descriptor: passDescriptor, draws: [] };
+        encoded.renderPasses.push(record);
+        fakeGpuRecords.renderPasses.push(record);
+        return {
+          setPipeline(pipeline) { activePipeline = pipeline; },
+          setBindGroup() {},
+          draw(...args) {
+            const draw = { pipeline: activePipeline, args, pass: record };
+            record.draws.push(draw);
+            fakeGpuRecords.draws.push(draw);
+          },
+          end() {}
+        };
+      },
+      finish: () => encoded
+    };
+  },
+  queue: {
+    submit(commandBuffers) { fakeGpuRecords.submits.push(commandBuffers); },
+    writeBuffer(...args) { fakeGpuRecords.writes.push(args); }
+  },
   lost: new Promise(() => {})
 };
 let fakeCanvasConfigureCount = 0;
@@ -81,6 +169,29 @@ async function flushUntil(predicate, { tries = 50 } = {}) {
   return predicate();
 }
 
+async function ensureFakePresentationReady() {
+  if (postedMessages.some(
+    (message) => message?.status === 'worker-offscreen-presentation-ready'
+  )) return;
+  fakeSelf.onmessage({
+    data: {
+      type: 'init-offscreen-presentation',
+      canvas: fakeCanvas,
+      width: 8,
+      height: 8,
+      cssWidth: 8,
+      cssHeight: 8,
+      pixelRatio: 1,
+      backgroundColor: '#000000',
+      clearAlpha: 0
+    }
+  });
+  const ready = await flushUntil(() => postedMessages.some(
+    (message) => message?.status === 'worker-offscreen-presentation-ready'
+  ));
+  assert.equal(ready, true, 'presentation worker never reported ready on the fake device');
+}
+
 function scheduleEpochIdentity(stepOrdinal, { storageGeneration = 7 } = {}) {
   return {
     storageGeneration,
@@ -127,23 +238,7 @@ test('presentation worker schedule verb fails closed before the WebGPU device ex
 
 test('presentation worker initializes on a synthetic WebGPU device through the message path', async () => {
   assert.equal(typeof fakeSelf.onmessage, 'function');
-  fakeSelf.onmessage({
-    data: {
-      type: 'init-offscreen-presentation',
-      canvas: fakeCanvas,
-      width: 8,
-      height: 8,
-      cssWidth: 8,
-      cssHeight: 8,
-      pixelRatio: 1,
-      backgroundColor: '#000000',
-      clearAlpha: 0
-    }
-  });
-  const ready = await flushUntil(() => postedMessages.some(
-    (message) => message?.status === 'worker-offscreen-presentation-ready'
-  ));
-  assert.equal(ready, true, 'presentation worker never reported ready on the fake device');
+  await ensureFakePresentationReady();
   assert.equal(
     requestedDeviceDescriptor?.requiredLimits?.maxStorageBuffersPerShaderStage,
     RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
@@ -152,6 +247,7 @@ test('presentation worker initializes on a synthetic WebGPU device through the m
 });
 
 test('presentation worker reuses an unchanged canvas configuration and reconfigures only on resize', async () => {
+  await ensureFakePresentationReady();
   const configureCountAfterInit = fakeCanvasConfigureCount;
   assert.equal(configureCountAfterInit, 1);
 
@@ -235,6 +331,7 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
 });
 
 test('presentation worker schedule verb injects its own device, drives the W2 schedule driver, and emits versioned candidates', async () => {
+  await ensureFakePresentationReady();
   const candidateCountBefore = candidateMessages().length;
   const statsBefore = workerModule.presentationResidentScheduleCandidateMailbox.stats();
   let capturedPayload = null;
@@ -357,6 +454,7 @@ test('presentation worker schedule verb injects its own device, drives the W2 sc
 });
 
 test('resident schedule candidates stay telemetry-only until exact committed admission', async () => {
+  await ensureFakePresentationReady();
   let retainedResolveCount = 0;
   let retainedResolveArgs = null;
   const terminalFence = {
@@ -416,6 +514,25 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
       };
     }
   };
+  const retainedRenderRequest = {
+    enabled: true,
+    sourceStageId: 'schroederSameLevelMechanics',
+    particleCount: 1,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    stateByteLength: 32,
+    thermoByteLength: 48,
+    colorRowCount: 1,
+    colorRowsByteLength: 32,
+    materialColorRows: new Float32Array(8),
+    viewProjectionMatrix: new Float32Array(16),
+    boxDimsM: [12, 8, 6],
+    width: 8,
+    height: 8,
+    cssWidth: 8,
+    cssHeight: 8,
+    pixelRatio: 1
+  };
   await workerModule.runResidentScheduleOnPresentationDevice(
     {
       payload: {
@@ -430,19 +547,8 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
         context: {
           ulgMechanicsResidentStageWorker: {
             common: {
-              presentationWorkerRenderRetainedStageOutput: {
-                enabled: true,
-                sourceStageId: 'schroederSameLevelMechanics',
-                particleCount: 1,
-                stateStrideFloats: 8,
-                thermoStrideFloats: 12,
-                stateByteLength: 32,
-                thermoByteLength: 48,
-                colorRowCount: 1,
-                colorRowsByteLength: 32,
-                materialColorRows: new Float32Array(8),
-                viewProjectionMatrix: new Float32Array(16)
-              }
+              presentationWorkerRenderRetainedStageOutput:
+                retainedRenderRequest
             }
           }
         }
@@ -521,6 +627,10 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
   );
   assert.equal(retainedResolveCount, 0);
 
+  // Arm the camera-redraw closure only after the schedule has finished, so
+  // the telemetry-only assertions above still prove that uncommitted
+  // progress cannot resolve retained buffers.
+  retainedRenderRequest.residentScheduleLivePreview = true;
   const admitted = workerModule.presentCommittedResidentScheduleCandidate(
     exactAdmission
   );
@@ -530,9 +640,116 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
     stateKey: 'ulg:test:state-committed-draw',
     sourceStageId: 'schroederSameLevelMechanics'
   });
+  assert.equal(
+    admitted.status,
+    'worker-offscreen-resident-particle-state-producer-rendered'
+  );
   assert.equal(admitted.stateManagerCommittedPresentation, true);
   assert.equal(admitted.scheduleId, 'ulg:test:sched-committed-draw');
   assert.equal(admitted.stepOrdinal, 1);
+  assert.equal(admitted.presentationGeometry, 'sphere-impostor-depth-fallback');
+  assert.equal(admitted.particleImpostorShape, 'projective-circular-lit-disc');
+  assert.equal(admitted.projectiveParticleSizing, true);
+  assert.equal(admitted.depthAttachmentFormat, 'depth24plus');
+  assert.equal(admitted.depthAttachmentReady, true);
+  assert.equal(admitted.condensedDepthWriteEnabled, true);
+  assert.equal(admitted.vaporDepthWriteEnabled, false);
+  assert.equal(admitted.boxWireframeDrawCount, 1);
+  assert.deepEqual(admitted.boxDimsM, [12, 8, 6]);
+
+  const condensedPipeline = fakeGpuRecords.renderPipelines.find(
+    (pipeline) => pipeline.label === 'ulg-offscreen-condensed-sphere-impostor-pipeline'
+  );
+  const vaporPipeline = fakeGpuRecords.renderPipelines.find(
+    (pipeline) => pipeline.label === 'ulg-offscreen-vapor-sphere-impostor-pipeline'
+  );
+  const boxPipeline = fakeGpuRecords.renderPipelines.find(
+    (pipeline) => pipeline.label === 'ulg-offscreen-presentation-box-wireframe-pipeline'
+  );
+  assert.deepEqual(condensedPipeline?.descriptor?.depthStencil, {
+    format: 'depth24plus',
+    depthWriteEnabled: true,
+    depthCompare: 'less-equal'
+  });
+  assert.deepEqual(vaporPipeline?.descriptor?.depthStencil, {
+    format: 'depth24plus',
+    depthWriteEnabled: false,
+    depthCompare: 'less-equal'
+  });
+  assert.equal(boxPipeline?.descriptor?.primitive?.topology, 'line-list');
+  assert.equal(boxPipeline?.descriptor?.depthStencil?.depthWriteEnabled, false);
+  const particleRenderPass = fakeGpuRecords.renderPasses.findLast(
+    (pass) => pass.draws.some((draw) => draw.pipeline === condensedPipeline)
+  );
+  assert.equal(particleRenderPass?.descriptor?.depthStencilAttachment?.depthClearValue, 1);
+  assert.equal(particleRenderPass?.descriptor?.depthStencilAttachment?.depthStoreOp, 'discard');
+  assert.ok(particleRenderPass.draws.some(
+    (draw) => draw.pipeline === condensedPipeline && draw.args[0] === 6 && draw.args[1] === 2
+  ));
+  assert.ok(particleRenderPass.draws.some(
+    (draw) => draw.pipeline === vaporPipeline && draw.args[0] === 6 && draw.args[1] === 2
+  ));
+  assert.ok(particleRenderPass.draws.some(
+    (draw) => draw.pipeline === boxPipeline && draw.args[0] === 24
+  ));
+  const impostorShader = fakeGpuRecords.shaderModules.find(
+    (module) => module.label === 'ulg-offscreen-projective-sphere-impostor-shader'
+  )?.descriptor?.code;
+  const producerShader = fakeGpuRecords.shaderModules.find(
+    (module) => module.label === 'ulg-offscreen-resident-particle-state-producer-shader'
+  )?.descriptor?.code;
+  assert.match(impostorShader, /radiusSquared > 1\.0/);
+  assert.match(impostorShader, /fn projectiveRadiusPx/);
+  assert.match(impostorShader, /fn vsCondensed/);
+  assert.match(impostorShader, /fn vsVapor/);
+  assert.match(producerShader, /let signedRadiusM = select/);
+  assert.match(producerShader, /let vaporLike = abs\(phaseId - 3\.0\) < 0\.5/);
+  assert.deepEqual(
+    [1, 2, 3, 4].map((phaseId) => Math.abs(phaseId - 3) < 0.5),
+    [false, false, true, false],
+    'only gas phase 3 belongs to the non-depth-writing vapor pass'
+  );
+
+  const messagesBeforeResize = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'resize',
+      width: 29,
+      height: 17,
+      cssWidth: 29,
+      cssHeight: 17,
+      pixelRatio: 1,
+      reason: 'test-live-preview-resize'
+    }
+  });
+  assert.equal(await flushUntil(() => postedMessages
+    .slice(messagesBeforeResize)
+    .some((message) => message?.reason === 'test-live-preview-resize')), true);
+  const messagesBeforeCameraRedraw = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'update-preview-view-projection',
+      viewProjectionMatrix: new Float32Array(16),
+      reason: 'test-live-preview-camera-after-resize'
+    }
+  });
+  assert.equal(await flushUntil(() => postedMessages
+    .slice(messagesBeforeCameraRedraw)
+    .some((message) => (
+      message?.workerOffscreenRenderRows?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && message.workerOffscreenRenderRows.frameCount > admitted.frameCount
+    ))), true, 'camera update did not redraw the retained preview');
+  const resizedCameraReceipt = postedMessages
+    .slice(messagesBeforeCameraRedraw)
+    .map((message) => message?.workerOffscreenRenderRows)
+    .findLast((receipt) => receipt?.status
+      === 'worker-offscreen-resident-particle-state-producer-rendered');
+  assert.equal(resizedCameraReceipt.canvasWidth, 29);
+  assert.equal(resizedCameraReceipt.canvasHeight, 17);
+  assert.equal(fakeCanvas.width, 29);
+  assert.equal(fakeCanvas.height, 17);
+  assert.equal(retainedResolveCount, 2, 'camera redraw should resolve the retained source once');
 
   const replay = workerModule.presentCommittedResidentScheduleCandidate(
     exactAdmission
@@ -541,7 +758,7 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
     replay.status,
     'worker-offscreen-committed-resident-schedule-presentation-blocked'
   );
-  assert.equal(retainedResolveCount, 1, 'committed admission must draw at most once');
+  assert.equal(retainedResolveCount, 2, 'replayed admission must not add another retained draw');
 
   const nextTerminalFence = {
     ...terminalFence,
@@ -600,7 +817,8 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
                 colorRowCount: 1,
                 colorRowsByteLength: 32,
                 materialColorRows: new Float32Array(8),
-                viewProjectionMatrix: new Float32Array(16)
+                viewProjectionMatrix: new Float32Array(16),
+                boxDimsM: [12, 8, 6]
               }
             }
           }
@@ -625,7 +843,7 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
     terminalFence: nextTerminalFence
   };
   workerModule.presentCommittedResidentScheduleCandidate(nextAdmission);
-  assert.equal(retainedResolveCount, 2);
+  assert.equal(retainedResolveCount, 3);
 
 });
 
@@ -656,7 +874,12 @@ test('exact rendered terminal preview promotes to committed authority without re
     status: 'worker-offscreen-resident-particle-state-producer-rendered',
     stateManagerCommittedPresentation: false,
     residentSchedulePresentationMode: 'uncommitted-live-preview',
-    workerLocalRenderRowsProduced: true
+    workerLocalRenderRowsProduced: true,
+    presentationGeometry: 'sphere-impostor-depth-fallback',
+    depthAttachmentFormat: 'depth24plus',
+    depthAttachmentReady: true,
+    boxWireframeDrawCount: 1,
+    boxDimsM: [12, 8, 6]
   };
   const promoted = workerModule.resolveCommittedResidentSchedulePreviewPromotion({
     admission,
@@ -671,6 +894,10 @@ test('exact rendered terminal preview promotes to committed authority without re
     promoted.residentSchedulePresentationMode,
     'committed-terminal-live-preview-promotion'
   );
+  assert.equal(promoted.presentationGeometry, 'sphere-impostor-depth-fallback');
+  assert.equal(promoted.depthAttachmentReady, true);
+  assert.equal(promoted.boxWireframeDrawCount, 1);
+  assert.deepEqual(promoted.boxDimsM, [12, 8, 6]);
   assert.equal(
     workerModule.resolveCommittedResidentSchedulePreviewPromotion({
       admission,
@@ -700,6 +927,7 @@ test('exact rendered terminal preview promotes to committed authority without re
 });
 
 test('presentation worker schedule verb skips candidates truthfully when no epoch identity exists', async () => {
+  await ensureFakePresentationReady();
   const candidateCountBefore = candidateMessages().length;
   const statsBefore = workerModule.presentationResidentScheduleCandidateMailbox.stats();
   const fakeRunner = {
@@ -738,6 +966,7 @@ test('presentation worker schedule verb skips candidates truthfully when no epoc
 });
 
 test('presentation worker schedule verb reports driver failures fail-closed', async () => {
+  await ensureFakePresentationReady();
   const fakeRunner = {
     async runUlgMechanicsResidentStageWorkerSchedulePayload() {
       const error = new Error(
@@ -788,6 +1017,7 @@ test('presentation worker cancel verb forwards to the W2 cancel entry', async ()
 });
 
 test('presentation worker message loop dispatches the schedule and cancel verbs through the real mechanics module', async () => {
+  await ensureFakePresentationReady();
   // Cancel with an unknown id: the real W2 cancel entry answers
   // 'resident-schedule-not-active' without needing any device.
   const cancelCountBefore = postedMessages.filter(
@@ -835,6 +1065,7 @@ test('presentation worker message loop dispatches the schedule and cancel verbs 
 });
 
 test('presentation worker disposes its active canvas configuration exactly once', async () => {
+  await ensureFakePresentationReady();
   let fakeDeviceDestroyCount = 0;
   let fakeWorkerCloseCount = 0;
   fakeDevice.destroy = () => {

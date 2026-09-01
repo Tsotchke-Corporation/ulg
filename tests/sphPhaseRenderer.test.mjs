@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import * as THREE from 'three';
 import { blackbodyColorSrgb } from '../src/runtime/material/radiationClosure.js';
 import {
+  applySphPresentationCanvasOwnership,
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
@@ -915,7 +916,7 @@ test('SPH scene background color defaults to dark navy and normalizes URL hex va
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
 });
 
-test('SPH scene camera pose exposes a normalized contact band without changing legacy scenes', () => {
+test('SPH scene camera pose fits normalized compositions to the full box without changing legacy scenes', () => {
   const legacy = resolveSphSceneCameraPose({ boxDimsM: [3, 3, 3] });
   assert.equal(legacy.status, 'legacy-whole-box-camera');
   assert.deepEqual(legacy.positionM.map((entry) => Number(entry.toFixed(2))), [4.05, 3.15, 4.95]);
@@ -926,13 +927,47 @@ test('SPH scene camera pose exposes a normalized contact band without changing l
   const contactBand = resolveSphSceneCameraPose({
     boxDimsM: [3, 3, 3],
     positionNormalized: '0.78,0.31,1.55',
-    targetNormalized: '0.50,0.31,0.50'
+    targetNormalized: '0.50,0.31,0.50',
+    fovYDegrees: 46,
+    aspect: 16 / 9
   });
-  assert.equal(contactBand.status, 'box-normalized-camera');
-  assert.deepEqual(contactBand.positionM.map((entry) => Number(entry.toFixed(2))), [2.34, 0.93, 4.65]);
+  assert.match(contactBand.status, /^box-normalized-camera(?:-fitted)?$/);
   assert.deepEqual(contactBand.targetM.map((entry) => Number(entry.toFixed(2))), [1.5, 0.93, 1.5]);
   assert.deepEqual(contactBand.positionNormalized, [0.78, 0.31, 1.55]);
   assert.deepEqual(contactBand.targetNormalized, [0.5, 0.31, 0.5]);
+  assert.equal(contactBand.fitPolicy, 'eight-corner-fov-aspect-domain-fit');
+  assert.ok(contactBand.fittedDistanceM >= contactBand.desiredDistanceM);
+
+  const assertBoxFits = ({ boxDimsM, aspect }) => {
+    const pose = resolveSphSceneCameraPose({
+      boxDimsM,
+      positionNormalized: [0.8, 0.45, 1.6],
+      targetNormalized: [0.5, 0.3, 0.5],
+      fovYDegrees: 46,
+      aspect,
+      fitMargin: 1.08
+    });
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const tanY = Math.tan((pose.fovYDegrees * Math.PI / 180) / 2);
+    const tanX = tanY * pose.aspect;
+    for (const x of [0, boxDimsM[0]]) {
+      for (const y of [0, boxDimsM[1]]) {
+        for (const z of [0, boxDimsM[2]]) {
+          const relative = [
+            x - pose.targetM[0],
+            y - pose.targetM[1],
+            z - pose.targetM[2]
+          ];
+          const depth = pose.fittedDistanceM + dot(relative, pose.viewForward);
+          assert.ok(depth > 0);
+          assert.ok(Math.abs(dot(relative, pose.viewRight)) / (depth * tanX) <= 1 / pose.fitMargin + 1e-12);
+          assert.ok(Math.abs(dot(relative, pose.viewUp)) / (depth * tanY) <= 1 / pose.fitMargin + 1e-12);
+        }
+      }
+    }
+  };
+  assertBoxFits({ boxDimsM: [12, 12, 12], aspect: 1536 / 900 });
+  assertBoxFits({ boxDimsM: [3, 7, 11], aspect: 9 / 16 });
   assert.equal(resolveSphSceneCameraPose({
     boxDimsM: [3, 3, 3],
     positionNormalized: '0.5,0.5,0.5',
@@ -943,6 +978,35 @@ test('SPH scene camera pose exposes a normalized contact band without changing l
     positionNormalized: 'not,a,pose',
     targetNormalized: '0.5,0.5,0.5'
   }).status, 'legacy-whole-box-camera');
+});
+
+test('SPH presentation ownership removes stale native pixels only for a visible worker frame', () => {
+  const attributes = new Map();
+  const mainCanvas = {
+    style: { opacity: '1', pointerEvents: 'auto' },
+    setAttribute(name, value) {
+      attributes.set(name, value);
+    }
+  };
+
+  const worker = applySphPresentationCanvasOwnership({
+    mainCanvas,
+    workerCanvasVisible: true
+  });
+  assert.equal(worker.status, 'presentation-worker-canvas-exclusively-composited');
+  assert.equal(worker.mainCanvasComposited, false);
+  assert.equal(mainCanvas.style.opacity, '0');
+  assert.equal(mainCanvas.style.pointerEvents, 'auto');
+  assert.equal(attributes.get('data-ulg-presentation-compositor-owner'), 'worker');
+
+  const native = applySphPresentationCanvasOwnership({
+    mainCanvas,
+    workerCanvasVisible: false
+  });
+  assert.equal(native.status, 'presentation-main-native-canvas-composited');
+  assert.equal(native.mainCanvasComposited, true);
+  assert.equal(mainCanvas.style.opacity, '1');
+  assert.equal(attributes.get('data-ulg-presentation-compositor-owner'), 'main-native');
 });
 
 test('SPH scene dark-lab lighting suppresses incident light while preserving emission', () => {

@@ -26,6 +26,19 @@ import {
   SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED,
@@ -4994,6 +5007,32 @@ const MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
 const MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY >>> 0}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER >>> 0}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED}u;
+const MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED}u;
 const THERMAL_PAIR_RELAXATION_LIMIT: f32 = 0.25;
 // A pair visit reports whether the exact reciprocal proposal needs to replay
 // it. The budget path still visits every authenticated candidate and counts
@@ -5608,6 +5647,137 @@ fn thermal_mechanical_interface_receipt_admitted() -> bool {
       <= (available_words - row_base) / MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
 }
 
+fn thermal_mechanical_interface_index_hash(
+  peer_index: u32,
+  slot_count: u32
+) -> u32 {
+  return (peer_index * MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER)
+    % max(slot_count, 1u);
+}
+
+// Receipt v3 keeps its source offsets and signed-area rows authoritative even
+// when the optional cursor hash cannot fit. Authenticate the index as a
+// separate receipt so a capacity edge or malformed table only selects the
+// original linear lookup; it never rejects valid mechanical contact physics.
+fn thermal_mechanical_interface_index_admitted() -> bool {
+  if (!thermal_mechanical_interface_receipt_pair_admitted()) {
+    return false;
+  }
+  let particle_count = thermal_params.particle_count;
+  let total = mechanical_interface_receipt[13u];
+  let offset_words = particle_count + 1u;
+  let prefix_words = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS + offset_words;
+  let available_words = arrayLength(&mechanical_interface_receipt);
+  if (
+    prefix_words > available_words
+    || total > (available_words - prefix_words) /
+      (
+        MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+          + MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW
+      )
+  ) { return false; }
+  let expected_index_base = prefix_words
+    + total * MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+  let expected_slot_count = total
+    * MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  return mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD
+    ] == MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM
+    && mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD
+    ] == expected_index_base
+    && mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD
+    ] == expected_slot_count
+    && mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+    ] == particle_count
+    && mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+    ] == total
+    && mechanical_interface_receipt[
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD
+    ] == (
+      MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY
+        | MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED
+    )
+    && (
+      mechanical_interface_receipt[
+        MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD
+      ] & MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
+    ) == 0u
+    && expected_index_base <= available_words
+    && expected_slot_count <= available_words - expected_index_base;
+}
+
+fn thermal_mechanical_interface_lookup_index(
+  self_index: u32,
+  other_index: u32
+) -> ThermalMechanicalInterfaceLookup {
+  var result = thermal_mechanical_interface_unproven();
+  if (!thermal_mechanical_interface_index_admitted()) { return result; }
+  let offset_base = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS;
+  let begin = mechanical_interface_receipt[offset_base + self_index];
+  let end = mechanical_interface_receipt[offset_base + self_index + 1u];
+  let total = mechanical_interface_receipt[13u];
+  if (begin > end || end > total) { return result; }
+  let degree = end - begin;
+  if (degree == 0u) { return thermal_mechanical_interface_miss(); }
+  let index_base = mechanical_interface_receipt[
+    MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD
+  ];
+  let table_begin = index_base
+    + begin * MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  let slot_count = degree
+    * MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  let available_words = arrayLength(&mechanical_interface_receipt);
+  if (
+    table_begin > available_words
+    || slot_count > available_words - table_begin
+  ) { return result; }
+  let row_base = offset_base + thermal_params.particle_count + 1u;
+  var slot = thermal_mechanical_interface_index_hash(
+    other_index,
+    slot_count
+  );
+  for (var probe = 0u; probe < slot_count; probe = probe + 1u) {
+    let receipt_cursor = mechanical_interface_receipt[table_begin + slot];
+    if (receipt_cursor == MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY) {
+      return thermal_mechanical_interface_miss();
+    }
+    if (receipt_cursor < begin || receipt_cursor >= end) { return result; }
+    let row = row_base
+      + receipt_cursor * MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+    if (row + 1u >= available_words) { return result; }
+    let peer_index = mechanical_interface_receipt[row];
+    let signed_area_m2 = bitcast<f32>(
+      mechanical_interface_receipt[row + 1u]
+    );
+    if (
+      peer_index >= thermal_params.particle_count
+      || peer_index == self_index
+      || !ss_exact_near_finite(signed_area_m2)
+    ) { return result; }
+    if (peer_index == other_index) {
+      result.receipt_cursor = receipt_cursor;
+      result.cache_state = THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR;
+      if (signed_area_m2 > 0.0) {
+        result.classified = 1u;
+        result.effective_face_area_m2 = signed_area_m2;
+      } else if (signed_area_m2 < 0.0) {
+        result.classified = 1u;
+      }
+      return result;
+    }
+    slot = slot + 1u;
+    if (slot == slot_count) { slot = 0u; }
+  }
+  // A valid 50%-load table must expose an empty sentinel for an absent peer.
+  // Exhaustion therefore proves corruption, not absence; preserve correctness
+  // by declining the optional route and letting the caller scan the core rows.
+  return result;
+}
+
 // Resolve one source-directed row without searching. The thermal CSR stores
 // this global receipt-row ordinal only after the budget pass has found the
 // same row through the authoritative linear lookup. Rechecking the source
@@ -5676,6 +5846,14 @@ fn thermal_mechanical_interface_lookup(
     || self_index >= thermal_params.particle_count
     || other_index >= thermal_params.particle_count
   ) { return result; }
+  let indexed_result = thermal_mechanical_interface_lookup_index(
+    self_index,
+    other_index
+  );
+  if (
+    indexed_result.cache_state
+      != THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN
+  ) { return indexed_result; }
   let offset_base = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS;
   let begin = mechanical_interface_receipt[offset_base + self_index];
   let end = mechanical_interface_receipt[offset_base + self_index + 1u];
@@ -9935,6 +10113,10 @@ function resolveMechanicalContactInterfaceReceipt({
       === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
     && receipt.rowWords
       === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+    && receipt.indexAlgorithm
+      === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE
+    && receipt.indexSlotsPerPublishedRow
+      === SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW
     && receipt.sourceThermoBuffer === thermoBuffer
     && webGpuBufferMatchesDevice(receipt.buffer, device)
   );
@@ -10462,7 +10644,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   });
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-budget.v24.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-budget.v25.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-budget',
     code: thermalProposalWgsl,
     entryPoint: 'budget',
@@ -10486,7 +10668,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-proposal.v25.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-proposal.v26.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-proposal',
     code: thermalProposalWgsl,
     entryPoint: 'propose',
@@ -10511,7 +10693,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   const zeroActiveProjectionFinalizePipeline = directoryV2
     ? createCachedExplicitComputePipeline(device, {
         cacheKey:
-          `ulg-schroeder-spatial-thermal-zero-active-finalize.v3.${directoryAbiCacheKey}`,
+          `ulg-schroeder-spatial-thermal-zero-active-finalize.v4.${directoryAbiCacheKey}`,
         label: 'ulg-schroeder-spatial-thermal-zero-active-finalize',
         code: thermalProposalWgsl,
         entryPoint: 'finalize_zero_active_projection',
@@ -10555,7 +10737,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     candidateCsrEnabled
       ? createCachedExplicitComputePipeline(device, {
           cacheKey:
-            `ulg-schroeder-spatial-thermal-csr-${suffix}.v8.${directoryAbiCacheKey}`,
+            `ulg-schroeder-spatial-thermal-csr-${suffix}.v9.${directoryAbiCacheKey}`,
           label: `ulg-schroeder-spatial-thermal-csr-${suffix}`,
           code: thermalProposalWgsl,
           entryPoint,
@@ -11493,7 +11675,7 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     treeBudgetPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: `ulg-native-test-s9d4-thermal-tree-shadow-budget.${
         observed ? 'observed' : 'unobserved'
-      }.v3`,
+      }.v4`,
       label: 'ulg-native-test-s9d4-thermal-tree-shadow-budget',
       code,
       entryPoint: 'budget',
@@ -11502,7 +11684,7 @@ export function armSchroederSpatialThermalTreeShadowForNativeTest({
     treeProposalPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: `ulg-native-test-s9d4-thermal-tree-shadow-proposal.${
         observed ? 'observed' : 'unobserved'
-      }.v3`,
+      }.v4`,
       label: 'ulg-native-test-s9d4-thermal-tree-shadow-proposal',
       code,
       entryPoint: 'propose',
@@ -11721,7 +11903,7 @@ export function armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
       pipelines[field] = createCachedExplicitComputePipeline(device, {
         cacheKey: `ulg-native-test-s9d5-thermal-source-cell-${label}.${
           observed ? 'observed' : 'unobserved'
-        }.v3.${sourceCapacity}.${cellCapacity}.${nodeCapacity}`,
+        }.v4.${sourceCapacity}.${cellCapacity}.${nodeCapacity}`,
         label: `ulg-native-test-s9d5-thermal-source-cell-${label}`,
         code,
         entryPoint,
@@ -11895,14 +12077,14 @@ export function armSchroederSpatialThermalExhaustiveShadowForNativeTest({
     computeBufferBinding(15, 'read-only-storage')
   ];
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget.v3',
+    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget.v4',
     label: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-budget',
     code,
     entryPoint: 'budget',
     bindings: traversalBindings
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal.v3',
+    cacheKey: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal.v4',
     label: 'ulg-native-test-s9d4-thermal-exhaustive-shadow-proposal',
     code,
     entryPoint: 'propose',

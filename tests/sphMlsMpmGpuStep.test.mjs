@@ -33,6 +33,10 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
@@ -1414,6 +1418,9 @@ function canonicalMechanicalProposalFixture({
   const sourceCountBuffer = makeBuffer(`${labelPrefix}-source-counts`);
   const sourceOffsetBuffer = makeBuffer(`${labelPrefix}-source-offsets`);
   const appendStagingBuffer = makeBuffer(`${labelPrefix}-append-staging`);
+  const interfaceReceiptBuffer = makeBuffer(
+    `${labelPrefix}-matching-constraint-interface-receipt`
+  );
   const directedPeerBuffer = makeBuffer(`${labelPrefix}-directed-peers`);
   const scratchStateABuffer = makeBuffer(`${labelPrefix}-scratch-a`);
   const scratchStateBBuffer = makeBuffer(`${labelPrefix}-scratch-b`);
@@ -1428,7 +1435,7 @@ function canonicalMechanicalProposalFixture({
     traversalCount: SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT
   });
   const contactGraph = Object.freeze({
-    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v9',
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v10',
     status: 'schroeder-spatial-mechanical-pair-graph-prepared',
     selectedLevel: 0,
     directedPairCapacity: 4,
@@ -1437,9 +1444,9 @@ function canonicalMechanicalProposalFixture({
     sourceCountBuffer,
     sourceOffsetBuffer,
     appendStagingBuffer,
-    interfaceReceiptBuffer: appendStagingBuffer,
+    interfaceReceiptBuffer,
     interfaceReceiptSchema:
-      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2',
+      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v3',
     directedPeerBuffer,
     scratchStateABuffer,
     scratchStateBBuffer,
@@ -1456,7 +1463,7 @@ function canonicalMechanicalProposalFixture({
   });
   const contactInterfaceReceipt = Object.freeze({
     schema:
-      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2',
+      'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v3',
     status: 'schroeder-spatial-mechanical-interface-receipt-deferred',
     ready: true,
     generation,
@@ -1465,7 +1472,13 @@ function canonicalMechanicalProposalFixture({
     supportEpoch: generation.execution.supportEpoch,
     selectedLevel: 0,
     particleCount,
-    buffer: appendStagingBuffer,
+    buffer: interfaceReceiptBuffer,
+    headerWords: SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+    rowWords: SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+    indexAlgorithm:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE,
+    indexSlotsPerPublishedRow:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
     fullParticleReadbackPerformed: false,
     hostSummaryReadbackPerformed: false,
     failClosed: true,
@@ -1525,6 +1538,7 @@ function canonicalMechanicalProposalFixture({
     sourceCountBuffer,
     sourceOffsetBuffer,
     appendStagingBuffer,
+    interfaceReceiptBuffer,
     directedPeerBuffer,
     scratchStateABuffer,
     scratchStateBBuffer,

@@ -33,7 +33,22 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_FAILURE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGE,
   SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_BUILDING,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED,
@@ -75,7 +90,7 @@ export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_SCHEMA =
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_BUFFER_SCHEMA =
   'peercompute.ulg.schroeder-spatial-mechanical-proposal-buffer.v3';
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v2';
+  'peercompute.ulg.schroeder-spatial-mechanical-interface-receipt.v3';
 export const ULG_SCHROEDER_SPATIAL_CONSUMER_GPU_EVIDENCE_SCHEMA =
   'peercompute.ulg.schroeder-spatial-consumer-gpu-evidence.v3';
 export const SCHROEDER_SPATIAL_MECHANICAL_PROPOSAL_STATUS =
@@ -239,7 +254,8 @@ export const SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT = 1;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_BYTES_DEFAULT =
   16 * 1024 * 1024;
 export const SCHROEDER_SPATIAL_MECHANICAL_MIN_DIRECTED_PAIRS_PER_PARTICLE = 16;
-const MATCHING_CONSTRAINT_ROW_WORDS = 4;
+const MATCHING_CONSTRAINT_ROW_WORDS =
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR;
 const MATCHING_CONSTRAINT_BYTES_PER_DIRECTED_PAIR =
   MATCHING_CONSTRAINT_ROW_WORDS * Float32Array.BYTES_PER_ELEMENT;
 
@@ -17719,6 +17735,34 @@ const INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
 const INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+const INTERFACE_RECEIPT_INDEX_ALGORITHM: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE}u;
+const INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD}u;
+const INTERFACE_RECEIPT_INDEX_BASE_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD}u;
+const INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD}u;
+const INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD}u;
+const INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD}u;
+const INTERFACE_RECEIPT_INDEX_STATUS_WORD: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD}u;
+const INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW}u;
+const INTERFACE_RECEIPT_INDEX_EMPTY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY >>> 0}u;
+const INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER >>> 0}u;
+const INTERFACE_RECEIPT_INDEX_STATUS_BUILDING: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_BUILDING}u;
+const INTERFACE_RECEIPT_INDEX_STATUS_READY: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY}u;
+const INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED}u;
+const INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED}u;
 
 fn interface_receipt_finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823466e+38;
@@ -17941,7 +17985,7 @@ fn interface_receipt_pair_value(
   self_index: u32,
   other_index: u32
 ) -> f32 {
-  // Receipt v2 refines the already-authenticated mechanical CSR; it does not
+  // Receipt v3 refines the already-authenticated mechanical CSR; it does not
   // claim a second, complete AABB neighbor traversal. The broad mixed-law
   // envelope contains the campaign's staggered face candidates while keeping
   // receipt materialization O(E) in the retained directed graph.
@@ -18084,6 +18128,64 @@ fn interface_receipt_static_header_valid() -> bool {
       == atomicLoad(&graph_control[12u]);
 }
 
+fn interface_receipt_index_hash(peer_index: u32, slot_count: u32) -> u32 {
+  return (peer_index * INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER)
+    % max(slot_count, 1u);
+}
+
+fn interface_receipt_index_static_header_valid() -> bool {
+  if (!interface_receipt_static_header_valid()) { return false; }
+  let total = atomicLoad(&interface_receipt[13u]);
+  let offset_words = mechanical_params.particle_count + 1u;
+  let prefix_words = INTERFACE_RECEIPT_HEADER_WORDS + offset_words;
+  let available_words = arrayLength(&interface_receipt);
+  if (
+    prefix_words > available_words
+    || total > (available_words - prefix_words) /
+      (INTERFACE_RECEIPT_ROW_WORDS + INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW)
+  ) { return false; }
+  let expected_index_base = prefix_words
+    + total * INTERFACE_RECEIPT_ROW_WORDS;
+  let expected_slot_count = total * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  return atomicLoad(
+      &interface_receipt[INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD]
+    ) == INTERFACE_RECEIPT_INDEX_ALGORITHM
+    && atomicLoad(&interface_receipt[INTERFACE_RECEIPT_INDEX_BASE_WORD])
+      == expected_index_base
+    && atomicLoad(&interface_receipt[INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD])
+      == expected_slot_count
+    && expected_index_base <= available_words
+    && expected_slot_count <= available_words - expected_index_base;
+}
+
+fn interface_receipt_index_insert(
+  begin: u32,
+  end: u32,
+  peer_index: u32,
+  receipt_cursor: u32
+) -> bool {
+  let degree = end - begin;
+  let slot_count = degree * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  if (degree == 0u || slot_count == 0u) { return false; }
+  let index_base = atomicLoad(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_BASE_WORD]
+  );
+  let table_begin = index_base
+    + begin * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  var slot = interface_receipt_index_hash(peer_index, slot_count);
+  for (var probe = 0u; probe < slot_count; probe = probe + 1u) {
+    let table_index = table_begin + slot;
+    let resident_cursor = atomicLoad(&interface_receipt[table_index]);
+    if (resident_cursor == INTERFACE_RECEIPT_INDEX_EMPTY) {
+      atomicStore(&interface_receipt[table_index], receipt_cursor);
+      return true;
+    }
+    if (resident_cursor == receipt_cursor) { return true; }
+    slot = (slot + 1u) % slot_count;
+  }
+  return false;
+}
+
 @compute @workgroup_size(1)
 fn initialize_contact_interface_receipt(
   @builtin(global_invocation_id) global_id: vec3<u32>
@@ -18096,6 +18198,15 @@ fn initialize_contact_interface_receipt(
   let layout_valid = total <= mechanical_params.directed_pair_capacity
     && prefix_words <= available_words
     && total <= (available_words - prefix_words) / INTERFACE_RECEIPT_ROW_WORDS;
+  let index_layout_valid = layout_valid
+    && total <= (available_words - prefix_words) /
+      (INTERFACE_RECEIPT_ROW_WORDS + INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW);
+  var index_base = 0u;
+  var index_slot_count = 0u;
+  if (index_layout_valid) {
+    index_base = prefix_words + total * INTERFACE_RECEIPT_ROW_WORDS;
+    index_slot_count = total * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+  }
   atomicStore(
     &interface_receipt[0u],
     ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC >>> 0}u
@@ -18132,6 +18243,35 @@ fn initialize_contact_interface_receipt(
       layout_valid
     )
   );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD],
+    INTERFACE_RECEIPT_INDEX_ALGORITHM
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_BASE_WORD],
+    index_base
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD],
+    index_slot_count
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD],
+    0u
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD],
+    0u
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+    select(
+      INTERFACE_RECEIPT_INDEX_STATUS_READY
+        | INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED,
+      INTERFACE_RECEIPT_INDEX_STATUS_BUILDING,
+      index_layout_valid
+    )
+  );
 }
 
 @compute @workgroup_size(64)
@@ -18155,6 +18295,10 @@ fn materialize_contact_interface_receipt(
       &interface_receipt[15u],
       INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
     );
+    atomicOr(
+      &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+      INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
+    );
     return;
   }
   let total = atomicLoad(&interface_receipt[13u]);
@@ -18164,6 +18308,10 @@ fn materialize_contact_interface_receipt(
     atomicOr(
       &interface_receipt[15u],
       INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    );
+    atomicOr(
+      &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+      INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
     );
     return;
   }
@@ -18176,6 +18324,24 @@ fn materialize_contact_interface_receipt(
     );
   }
   let row_base = offset_base + mechanical_params.particle_count + 1u;
+  var index_building = interface_receipt_index_static_header_valid()
+    && atomicLoad(&interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD])
+      == INTERFACE_RECEIPT_INDEX_STATUS_BUILDING;
+  let degree = end - begin;
+  if (index_building) {
+    let index_base = atomicLoad(
+      &interface_receipt[INTERFACE_RECEIPT_INDEX_BASE_WORD]
+    );
+    let table_begin = index_base
+      + begin * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+    let slot_count = degree * INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+    for (var slot = 0u; slot < slot_count; slot = slot + 1u) {
+      atomicStore(
+        &interface_receipt[table_begin + slot],
+        INTERFACE_RECEIPT_INDEX_EMPTY
+      );
+    }
+  }
   for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
     let peer_index = csr_peers[cursor];
     let pair_value = interface_receipt_pair_value(
@@ -18187,13 +18353,49 @@ fn materialize_contact_interface_receipt(
         &interface_receipt[15u],
         INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
       );
+      atomicOr(
+        &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+        INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
+      );
       return;
     }
     let row = row_base + cursor * INTERFACE_RECEIPT_ROW_WORDS;
     atomicStore(&interface_receipt[row], peer_index);
     atomicStore(&interface_receipt[row + 1u], bitcast<u32>(pair_value));
+    if (
+      index_building
+      && !interface_receipt_index_insert(
+        begin,
+        end,
+        peer_index,
+        cursor
+      )
+    ) {
+      atomicOr(
+        &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+        INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
+      );
+      index_building = false;
+    }
   }
-  atomicAdd(&interface_receipt[14u], end - begin);
+  if (index_building) {
+    atomicAdd(
+      &interface_receipt[
+        INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+      ],
+      1u
+    );
+    atomicAdd(
+      &interface_receipt[
+        INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+      ],
+      degree
+    );
+  }
+  // This core-row counter is the final per-source publication operation. Seal
+  // cannot admit either the base receipt or its optional index until every
+  // preceding row, slot, and index counter write is visible.
+  atomicAdd(&interface_receipt[14u], degree);
 }
 
 @compute @workgroup_size(1)
@@ -18227,11 +18429,30 @@ fn seal_contact_interface_receipt(
     ) == mechanical_params.particle_count
     && (atomicLoad(&graph_control[15u]) & required_stages)
       == required_stages;
+  let index_admitted = admitted
+    && interface_receipt_index_static_header_valid()
+    && atomicLoad(&interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD])
+      == INTERFACE_RECEIPT_INDEX_STATUS_BUILDING
+    && atomicLoad(
+      &interface_receipt[
+        INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+      ]
+    ) == mechanical_params.particle_count
+    && atomicLoad(
+      &interface_receipt[
+        INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+      ]
+    ) == atomicLoad(&interface_receipt[13u]);
   if (!admitted) {
     atomicStore(
       &interface_receipt[15u],
       INTERFACE_RECEIPT_STATUS_READY
         | INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+    );
+    atomicStore(
+      &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+      INTERFACE_RECEIPT_INDEX_STATUS_READY
+        | INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
     );
     return;
   }
@@ -18243,6 +18464,16 @@ fn seal_contact_interface_receipt(
   atomicStore(
     &interface_receipt[15u],
     INTERFACE_RECEIPT_STATUS_READY | INTERFACE_RECEIPT_STATUS_ADMITTED
+  );
+  atomicStore(
+    &interface_receipt[INTERFACE_RECEIPT_INDEX_STATUS_WORD],
+    select(
+      INTERFACE_RECEIPT_INDEX_STATUS_READY
+        | INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED,
+      INTERFACE_RECEIPT_INDEX_STATUS_READY
+        | INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED,
+      index_admitted
+    )
   );
 }
 `;
@@ -18865,6 +19096,9 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     solverBudget
   );
   const budgetKey = (cacheKey) => `${cacheKey}.${solverBudget.cacheKey}`;
+  const pairGraphAbiKey = (cacheKey) => (
+    `${cacheKey}.pair-graph-v${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_CONTROL_VERSION}`
+  );
   const mechanicalBuildWgsl = mechanicalBuildWgslForVariant(
     mechanicalProjectionVariant,
     directoryAbiVersion
@@ -19034,7 +19268,9 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     directoryAbiVersion,
     diagnosticTrace: Boolean(diagnosticTrace),
     initialize: {
-      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v11',
+      cacheKey: pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v12'
+      ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-initialize',
       code: schroederSpatialMechanicalGraphControlWgsl,
       entryPoint: 'initialize_contact_graph',
@@ -19060,28 +19296,36 @@ export function schroederSpatialMechanicalPipelineDescriptors({
       bindings: buildBindings
     },
     finalizeCounts: {
-      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v11',
+      cacheKey: pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts.v12'
+      ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-finalize-counts',
       code: schroederSpatialMechanicalGraphControlWgsl,
       entryPoint: 'finalize_contact_graph_counts',
       bindings: controlBindings
     },
     scatter: {
-      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v11',
+      cacheKey: pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr.v12'
+      ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-scatter-csr',
       code: schroederSpatialMechanicalGraphControlWgsl,
       entryPoint: 'scatter_contact_graph_csr',
       bindings: controlBindings
     },
     validate: {
-      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v12',
+      cacheKey: pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v13'
+      ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr',
       code: schroederSpatialMechanicalGraphControlWgsl,
       entryPoint: 'validate_contact_graph_csr',
       bindings: controlBindings
     },
     index: {
-      cacheKey: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v7',
+      cacheKey: pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v8'
+      ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-index-csr',
       code: schroederSpatialMechanicalGraphControlWgsl,
       entryPoint: 'index_contact_graph_csr',
@@ -19261,7 +19505,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     initializeInterfaceReceipt: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v5'
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize.v6'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
       code: solverBudgetWgsl.interfaceReceipt,
@@ -19270,7 +19514,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     materializeInterfaceReceipt: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v5'
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize.v6'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
       code: solverBudgetWgsl.interfaceReceipt,
@@ -19279,7 +19523,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     sealInterfaceReceipt: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v5'
+        'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal.v6'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal',
       code: solverBudgetWgsl.interfaceReceipt,
@@ -19287,30 +19531,36 @@ export function schroederSpatialMechanicalPipelineDescriptors({
       bindings: interfaceReceiptBindings
     },
     publish: {
-      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-publish.v11'),
+      cacheKey: budgetKey(pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-proposal-publish.v12'
+      )),
       label: 'ulg-schroeder-spatial-mechanical-proposal-publish',
       code: solverBudgetWgsl.apply,
       entryPoint: 'publish_contact_proposal',
       bindings: applyBindings
     },
     zeroContactComplete: {
-      cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v8'
-      ),
+      cacheKey: budgetKey(pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete.v9'
+      )),
       label: 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete',
       code: solverBudgetWgsl.apply,
       entryPoint: 'complete_zero_contact_proposal',
       bindings: applyBindings
     },
     seal: {
-      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-seal.v11'),
+      cacheKey: budgetKey(pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-proposal-seal.v12'
+      )),
       label: 'ulg-schroeder-spatial-mechanical-proposal-seal',
       code: solverBudgetWgsl.apply,
       entryPoint: 'seal_contact_proposal',
       bindings: applyBindings
     },
     commit: {
-      cacheKey: budgetKey('ulg-schroeder-spatial-mechanical-proposal-commit.v11'),
+      cacheKey: budgetKey(pairGraphAbiKey(
+        'ulg-schroeder-spatial-mechanical-proposal-commit.v12'
+      )),
       label: 'ulg-schroeder-spatial-mechanical-proposal-commit',
       code: solverBudgetWgsl.apply,
       entryPoint: 'commit_contact_proposal',
@@ -20503,7 +20753,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 4, resource: { buffer: pool.directedPeerBuffer } },
     { binding: 5, resource: { buffer: pool.sourceOffsetBuffer } },
     { binding: 6, resource: { buffer: pool.graphControlBuffer } },
-    { binding: 7, resource: { buffer: pool.appendStagingBuffer } },
+    { binding: 7, resource: { buffer: pool.matchingConstraintBuffer } },
     { binding: 8, resource: { buffer: paramsBuffer } },
     { binding: 9, resource: { buffer: spatialSourceBuffer } }
   ];
@@ -20708,7 +20958,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     sourceOffsetBuffer: pool.sourceOffsetBuffer,
     appendStagingBuffer: pool.appendStagingBuffer,
     directedPeerBuffer: pool.directedPeerBuffer,
-    interfaceReceiptBuffer: pool.appendStagingBuffer,
+    interfaceReceiptBuffer: pool.matchingConstraintBuffer,
     interfaceReceiptSchema:
       ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA,
     interfaceReceiptHeaderWords:
@@ -20754,12 +21004,20 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     selectedLevel: immutableSelectedLevel,
     particleCount,
     directedPairCapacity: pool.directedPairCapacity,
-    buffer: pool.appendStagingBuffer,
+    buffer: pool.matchingConstraintBuffer,
     bufferAliasRole:
-      'post-scatter-mechanical-append-staging-interface-receipt',
+      'post-verification-mechanical-matching-constraint-interface-receipt',
+    bufferAliasLifetime:
+      'matching-constraints-through-final-residual-and-diagnostic-verification-then-interface-receipt-through-thermal-consumer-release',
     headerWords:
       SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS,
     rowWords: SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
+    indexAlgorithm:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE,
+    indexSlotsPerPublishedRow:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
+    indexPolicy:
+      'optional-source-local-50-percent-load-cursor-hash-independent-fail-closed-linear-fallback',
     signedAreaPolicy:
       'positive-active-area-negative-inactive-interface-zero-non-interface',
     sourceThermoBuffer: authority.thermoBuffer,
@@ -20860,7 +21118,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     sourceOffsetBuffer: pool.sourceOffsetBuffer,
     appendStagingBuffer: pool.appendStagingBuffer,
     directedPeerBuffer: pool.directedPeerBuffer,
-    interfaceReceiptBuffer: pool.appendStagingBuffer,
+    interfaceReceiptBuffer: pool.matchingConstraintBuffer,
     interfaceReceiptSchema:
       ULG_SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_SCHEMA,
     interfaceReceiptHeaderWords:
@@ -21884,7 +22142,9 @@ export function schroederSpatialMechanicalProposalMatchesContract(
     && contactInterfaceReceipt.ready === true
     && contactInterfaceReceipt.generation === generation
     && contactInterfaceReceipt.device === device
-    && contactInterfaceReceipt.buffer === proposal.appendStagingBuffer
+    && contactInterfaceReceipt.buffer === proposal.interfaceReceiptBuffer
+    && proposal.contactGraph?.interfaceReceiptBuffer
+      === proposal.interfaceReceiptBuffer
     && contactInterfaceReceipt.generationId === proposal.generationId
     && contactInterfaceReceipt.supportEpoch === proposal.supportEpoch
     && contactInterfaceReceipt.selectedLevel === proposal.selectedLevel

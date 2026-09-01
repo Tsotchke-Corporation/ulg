@@ -77,12 +77,25 @@ test('descriptor factory produces complete budget-keyed descriptors', () => {
   // Fixed-key control pipelines keep their exact historical cache keys.
   assert.equal(
     table.initialize.cacheKey,
-    'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v11'
+    'ulg-schroeder-spatial-mechanical-contact-graph-initialize.v12.pair-graph-v10'
   );
   assert.equal(
     table.index.cacheKey,
-    'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v7'
+    'ulg-schroeder-spatial-mechanical-contact-graph-index-csr.v8.pair-graph-v10'
   );
+  for (const descriptor of [
+    table.initialize,
+    table.finalizeCounts,
+    table.scatter,
+    table.validate,
+    table.index,
+    table.publish,
+    table.zeroContactComplete,
+    table.seal,
+    table.commit
+  ]) {
+    assert.match(descriptor.cacheKey, /\.pair-graph-v10(?:\.|$)/);
+  }
   // Variant-keyed build pipelines carry the projection variant and ABI.
   assert.equal(
     table.reduction.cacheKey,

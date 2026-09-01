@@ -1822,6 +1822,50 @@ test('native mounted iron/ice impact contact diagnostic', {
           | pairGraphAbi
             .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED
         );
+        const indexBaseWord = interfaceReceipt[
+          pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD
+        ];
+        const indexSlotCount = interfaceReceipt[
+          pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD
+        ];
+        const indexStatusFlags = interfaceReceipt[
+          pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD
+        ];
+        const expectedIndexBaseWord = rowBase + publishedRowCount * rowWords;
+        const expectedIndexSlotCount = publishedRowCount
+          * pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+        const indexLayoutFits = expectedIndexBaseWord
+          + expectedIndexSlotCount <= interfaceReceipt.length;
+        const indexAdmittedStatus = (
+          pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY
+          | pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED
+        );
+        const indexAdmitted = Boolean(
+          statusFlags === admittedStatus
+          && indexLayoutFits
+          && interfaceReceipt[
+            pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD
+          ] === pairGraphAbi
+            .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE
+          && indexBaseWord === expectedIndexBaseWord
+          && indexSlotCount === expectedIndexSlotCount
+          && interfaceReceipt[
+            pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+          ] === particleCount
+          && interfaceReceipt[
+            pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+          ] === publishedRowCount
+          && indexStatusFlags === indexAdmittedStatus
+        );
         const base = {
           headerWords,
           rowWords,
@@ -1832,6 +1876,11 @@ test('native mounted iron/ice impact contact diagnostic', {
           materializedRowCount,
           statusFlags,
           admitted: statusFlags === admittedStatus,
+          indexBaseWord,
+          indexSlotCount,
+          indexStatusFlags,
+          indexLayoutFits,
+          indexAdmitted,
           rowBoundsValid: false,
           rowBoundsReason: null,
           invalidOffsetIndex: null,
@@ -1866,7 +1915,9 @@ test('native mounted iron/ice impact contact diagnostic', {
         }
         if (
           !Number.isSafeInteger(headerWords)
-          || headerWords < 16
+          || headerWords
+            !== pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
           || !Number.isSafeInteger(rowWords)
           || rowWords < 2
           || !Number.isSafeInteger(particleCount)
@@ -1938,6 +1989,11 @@ test('native mounted iron/ice impact contact diagnostic', {
           materializedRowCount: interfaceReceipt[14] ?? null,
           statusFlags: interfaceReceipt[15] ?? null,
           admitted: contactInterfaceReceiptLayout.admitted,
+          indexBaseWord: contactInterfaceReceiptLayout.indexBaseWord,
+          indexSlotCount: contactInterfaceReceiptLayout.indexSlotCount,
+          indexStatusFlags: contactInterfaceReceiptLayout.indexStatusFlags,
+          indexLayoutFits: contactInterfaceReceiptLayout.indexLayoutFits,
+          indexAdmitted: contactInterfaceReceiptLayout.indexAdmitted,
           rowBoundsValid: contactInterfaceReceiptLayout.rowBoundsValid,
           rowBoundsReason: contactInterfaceReceiptLayout.rowBoundsReason,
           invalidOffsetIndex:
@@ -3448,6 +3504,49 @@ test('native mounted iron/ice impact contact diagnostic', {
               }
             }
           }
+          const indexBaseWord = profiledInterfaceReceiptSnapshots[
+            receiptBase + pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD
+          ] ?? 0;
+          const indexSlotCount = profiledInterfaceReceiptSnapshots[
+            receiptBase + pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD
+          ] ?? 0;
+          const indexStatusFlags = profiledInterfaceReceiptSnapshots[
+            receiptBase + pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD
+          ] ?? 0;
+          const expectedIndexBaseWord = headerWords + particleCount + 1
+            + publishedRowCount * rowWords;
+          const expectedIndexSlotCount = publishedRowCount
+            * pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+          const indexAdmitted = Boolean(
+            layoutValid
+            && receiptBase + expectedIndexBaseWord + expectedIndexSlotCount
+              <= receiptEnd
+            && profiledInterfaceReceiptSnapshots[
+              receiptBase + pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD
+            ] === pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE
+            && indexBaseWord === expectedIndexBaseWord
+            && indexSlotCount === expectedIndexSlotCount
+            && profiledInterfaceReceiptSnapshots[
+              receiptBase + pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+            ] === particleCount
+            && profiledInterfaceReceiptSnapshots[
+              receiptBase + pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+            ] === publishedRowCount
+            && indexStatusFlags === (
+              pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY
+              | pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED
+            )
+          );
           return {
             magic:
               profiledInterfaceReceiptSnapshots[receiptBase] ?? null,
@@ -3463,6 +3562,10 @@ test('native mounted iron/ice impact contact diagnostic', {
                 .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED
             ),
             layoutValid,
+            indexBaseWord,
+            indexSlotCount,
+            indexStatusFlags,
+            indexAdmitted,
             feH2oActiveDirectedRowCount,
             feH2oActiveDirectedFaceAreaM2,
             feH2oLiveActiveDirectedRowCount,
@@ -4453,6 +4556,11 @@ test('native mounted iron/ice impact contact diagnostic', {
     true,
     JSON.stringify(native.contactInterfaceReceipt)
   );
+  assert.equal(
+    native.contactInterfaceReceipt.indexAdmitted,
+    true,
+    JSON.stringify(native.contactInterfaceReceipt)
+  );
   assert.ok(
     native.proposal.publishedDirectedPairCount > 0,
     JSON.stringify(native)
@@ -4492,6 +4600,11 @@ test('native mounted iron/ice impact contact diagnostic', {
     );
     assert.equal(
       checkpoint.contactInterfaceReceipt.admitted,
+      true,
+      JSON.stringify(checkpoint)
+    );
+    assert.equal(
+      checkpoint.contactInterfaceReceipt.indexAdmitted,
       true,
       JSON.stringify(checkpoint)
     );

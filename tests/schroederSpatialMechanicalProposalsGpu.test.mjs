@@ -3097,6 +3097,26 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     schroederSpatialMechanicalInterfaceReceiptWgsl,
     /let impact_face = interface_receipt_face_at_delta\([\s\S]*return impact_face\.area_m2/
   );
+  assert.match(
+    schroederSpatialMechanicalInterfaceReceiptWgsl,
+    /fn interface_receipt_index_static_header_valid\([\s\S]*INTERFACE_RECEIPT_ROW_WORDS \+ INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW[\s\S]*expected_index_base[\s\S]*expected_slot_count/
+  );
+  assert.match(
+    schroederSpatialMechanicalInterfaceReceiptWgsl,
+    /fn interface_receipt_index_insert\([\s\S]*interface_receipt_index_hash\(peer_index, slot_count\)[\s\S]*INTERFACE_RECEIPT_INDEX_EMPTY[\s\S]*atomicStore\(&interface_receipt\[table_index\], receipt_cursor\)/
+  );
+  assert.match(
+    schroederSpatialMechanicalInterfaceReceiptWgsl,
+    /fn initialize_contact_interface_receipt\([\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_WORD[\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_BUILDING[\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_READY[\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED/
+  );
+  assert.match(
+    schroederSpatialMechanicalInterfaceReceiptWgsl,
+    /fn materialize_contact_interface_receipt\([\s\S]*table_begin[\s\S]*INTERFACE_RECEIPT_INDEX_EMPTY[\s\S]*interface_receipt_index_insert\([\s\S]*INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD[\s\S]*INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD/
+  );
+  assert.match(
+    schroederSpatialMechanicalInterfaceReceiptWgsl,
+    /fn seal_contact_interface_receipt\([\s\S]*let index_admitted = admitted[\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_WORD[\s\S]*INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED/
+  );
   const wgslFunctionSource = (name) => {
     const start = schroederSpatialMechanicalGraphSolverWgsl.indexOf(
       `fn ${name}(`
@@ -5418,6 +5438,22 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
     first.matchingConstraintByteLength,
     matchingConstraintBuffer.size
   );
+  assert.equal(first.interfaceReceiptBuffer, matchingConstraintBuffer);
+  assert.equal(
+    first.contactGraph.interfaceReceiptBuffer,
+    matchingConstraintBuffer
+  );
+  assert.equal(
+    first.contactInterfaceReceipt.buffer,
+    matchingConstraintBuffer
+  );
+  assert.notEqual(first.interfaceReceiptBuffer, first.appendStagingBuffer);
+  assert.equal(first.contactInterfaceReceipt.indexAlgorithm, 1);
+  assert.equal(first.contactInterfaceReceipt.indexSlotsPerPublishedRow, 2);
+  assert.match(
+    first.contactInterfaceReceipt.bufferAliasLifetime,
+    /matching-constraints.*thermal-consumer/
+  );
   assert.equal(
     first.totalRetainedGraphByteLength,
     first.retainedGraphByteLength
@@ -5603,6 +5639,21 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
     'ulg-schroeder-spatial-mechanical-proposal-commit',
     'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal'
   ]);
+  for (const receiptLabel of [
+    'ulg-schroeder-spatial-mechanical-contact-interface-receipt-initialize',
+    'ulg-schroeder-spatial-mechanical-contact-interface-receipt-materialize',
+    'ulg-schroeder-spatial-mechanical-contact-interface-receipt-seal'
+  ]) {
+    const receiptDispatch = fixture.device.dispatches.find(
+      ({ pipeline }) => pipeline?.label === receiptLabel
+    );
+    assert.equal(
+      receiptDispatch?.bindGroup?.entries?.find(
+        ({ binding }) => binding === 7
+      )?.resource?.buffer,
+      matchingConstraintBuffer
+    );
+  }
   const zeroContactDispatch = fixture.device.dispatches.find(
     ({ pipeline }) => pipeline?.label
       === 'ulg-schroeder-spatial-mechanical-proposal-zero-contact-complete'

@@ -776,6 +776,22 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
+    /fn thermal_mechanical_interface_index_admitted\([\s\S]*?MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD[\s\S]*?MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD[\s\S]*?MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD[\s\S]*?MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn thermal_mechanical_interface_lookup_index\([\s\S]*?thermal_mechanical_interface_index_hash\([\s\S]*?MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY[\s\S]*?thermal_mechanical_interface_miss\(\)[\s\S]*?receipt_cursor < begin[\s\S]*?peer_index == other_index[\s\S]*?THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn thermal_mechanical_interface_lookup\([\s\S]*?thermal_mechanical_interface_lookup_index\([\s\S]*?THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN[\s\S]*?for \(var cursor = begin; cursor < end;/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /A valid 50%-load table must expose an empty sentinel[\s\S]*letting the caller scan the core rows/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
     /encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT[\s\S]*?thermal_mechanical_interface_lookup_cursor\([\s\S]*?thermal_visit_fused_pair_cached\([\s\S]*?mechanical_interface_cache/
   );
   assert.match(

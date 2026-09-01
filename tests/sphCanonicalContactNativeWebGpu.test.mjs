@@ -1092,6 +1092,157 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
               JSON.stringify(interfaceReceipt)
             }; control=${Array.from(graphControl)}`
           );
+          const interfaceReceiptIndexFits =
+            interfaceReceiptRowBase
+              + interfaceReceiptPublishedRows * (
+                interfaceReceiptRowWords
+                  + pairGraphAbi
+                    .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW
+              )
+            <= interfaceReceiptWords.length;
+          const interfaceReceiptIndexStatus = interfaceReceiptHeader[
+            pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD
+          ];
+          const interfaceReceiptIndexAdmitted =
+            !interfaceReceiptExpectedFailClosed
+            && interfaceReceiptIndexFits;
+          const interfaceReceiptExpectedIndexStatus =
+            pairGraphAbi
+              .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY
+            | (
+              interfaceReceiptIndexAdmitted
+                ? pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED
+                : pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED
+            );
+          requireTrue(
+            interfaceReceiptIndexStatus === interfaceReceiptExpectedIndexStatus,
+            `${name}: optional interface cursor index status drifted: ${
+              JSON.stringify({
+                interfaceReceiptIndexStatus,
+                interfaceReceiptExpectedIndexStatus,
+                interfaceReceiptIndexFits,
+                interfaceReceiptHeader
+              })
+            }`
+          );
+          let interfaceReceiptIndex = {
+            admitted: interfaceReceiptIndexAdmitted,
+            status: interfaceReceiptIndexStatus,
+            baseWord: 0,
+            slotCount: 0,
+            verifiedRowCount: 0,
+            verifiedMissCount: 0
+          };
+          if (interfaceReceiptIndexAdmitted) {
+            const indexBaseWord = interfaceReceiptHeader[
+              pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD
+            ];
+            const indexSlotCount = interfaceReceiptHeader[
+              pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD
+            ];
+            requireTrue(
+              interfaceReceiptHeader[
+                pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD
+              ] === pairGraphAbi
+                .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE
+                && indexBaseWord
+                  === interfaceReceiptRowBase
+                    + interfaceReceiptPublishedRows * interfaceReceiptRowWords
+                && indexSlotCount
+                  === interfaceReceiptPublishedRows
+                    * pairGraphAbi
+                      .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW
+                && interfaceReceiptHeader[
+                  pairGraphAbi
+                    .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD
+                ] === packed.particleCount
+                && interfaceReceiptHeader[
+                  pairGraphAbi
+                    .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD
+                ] === interfaceReceiptPublishedRows,
+              `${name}: admitted interface cursor index header drifted: ${
+                JSON.stringify(interfaceReceiptHeader)
+              }`
+            );
+            const lookupInterfaceCursor = (selfIndex, otherIndex) => {
+              const begin = interfaceReceiptWords[
+                interfaceReceiptHeaderWords + selfIndex
+              ];
+              const end = interfaceReceiptWords[
+                interfaceReceiptHeaderWords + selfIndex + 1
+              ];
+              const sourceSlotCount = (end - begin)
+                * pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+              if (sourceSlotCount === 0) return { state: 'miss' };
+              const tableBegin = indexBaseWord
+                + begin * pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW;
+              let slot = (Math.imul(
+                otherIndex,
+                pairGraphAbi
+                  .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER
+              ) >>> 0) % sourceSlotCount;
+              for (let probe = 0; probe < sourceSlotCount; probe += 1) {
+                const cursor = interfaceReceiptWords[tableBegin + slot];
+                if (
+                  cursor
+                    === pairGraphAbi
+                      .SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY
+                ) return { state: 'miss' };
+                if (cursor < begin || cursor >= end) {
+                  return { state: 'malformed', cursor };
+                }
+                const rowOffset = interfaceReceiptRowBase
+                  + cursor * interfaceReceiptRowWords;
+                if (interfaceReceiptWords[rowOffset] === otherIndex) {
+                  return { state: 'cursor', cursor };
+                }
+                slot = (slot + 1) % sourceSlotCount;
+              }
+              return { state: 'malformed' };
+            };
+            let verifiedRowCount = 0;
+            let verifiedMissCount = 0;
+            for (const row of interfaceReceiptRows) {
+              const lookup = lookupInterfaceCursor(
+                row.selfIndex,
+                row.otherIndex
+              );
+              requireTrue(
+                lookup.state === 'cursor',
+                `${name}: interface cursor index failed row lookup: ${
+                  JSON.stringify({ row, lookup })
+                }`
+              );
+              verifiedRowCount += 1;
+            }
+            for (let selfIndex = 0; selfIndex < packed.particleCount; selfIndex += 1) {
+              const lookup = lookupInterfaceCursor(selfIndex, selfIndex);
+              requireTrue(
+                lookup.state === 'miss',
+                `${name}: interface cursor index did not certify absent self row: ${
+                  JSON.stringify({ selfIndex, lookup })
+                }`
+              );
+              verifiedMissCount += 1;
+            }
+            interfaceReceiptIndex = {
+              admitted: true,
+              status: interfaceReceiptIndexStatus,
+              baseWord: indexBaseWord,
+              slotCount: indexSlotCount,
+              verifiedRowCount,
+              verifiedMissCount
+            };
+          }
+          interfaceReceipt.index = interfaceReceiptIndex;
           let sweptSeparatedPositiveRowCount = 0;
           let expectedUniquePositiveFaceAreaM2 = 0;
           for (const row of interfaceReceiptRows) {
@@ -1828,6 +1979,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
             ...(aggregateRecordSummary ? { aggregateRecordSummary } : {}),
             interfaceReceiptSummary: {
               header: interfaceReceipt.header,
+              index: interfaceReceipt.index,
               positiveRowCount: interfaceReceipt.positiveRowCount,
               negativeRowCount: interfaceReceipt.negativeRowCount,
               zeroRowCount: interfaceReceipt.zeroRowCount,

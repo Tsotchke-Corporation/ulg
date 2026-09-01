@@ -1,8 +1,8 @@
 export const ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v9';
+  'peercompute.ulg.schroeder-spatial-mechanical-pair-graph.v10';
 
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_MAGIC = 0x4d50_4731;
-export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 9;
+export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_VERSION = 10;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_CONTROL_WORDS = 130;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_EVIDENCE_WORDS = 48;
 // The matching-cleanup control buffer holds one fixed 12-word header plus
@@ -51,8 +51,8 @@ export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_WORDS = 3;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_DIRECTED_ROW_WORDS = 1;
 export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_MAGIC =
   0x4d49_5231;
-export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION = 2;
-export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS = 16;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION = 3;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS = 22;
 export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS = 2;
 export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_BUILDING =
   1 << 0;
@@ -62,6 +62,45 @@ export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED =
   1 << 2;
 export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED =
   1 << 3;
+// Receipt v3 phase-reuses the four-word-per-directed-edge matching-constraint
+// arena after its final residual/diagnostic reader. The core source offsets
+// and {peer,signedArea} rows remain independently authoritative. When the
+// remaining arena can also retain two cursor slots per published row, these
+// words publish a source-local 50%-load exact hash for later thermal lookup.
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE = 1;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW = 2;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR = 4;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_EMPTY = 0xffff_ffff;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_HASH_MULTIPLIER = 2654435761;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD = 16;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_BASE_WORD = 17;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOT_COUNT_WORD = 18;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_COMPLETED_SOURCE_COUNT_WORD = 19;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_INSERTED_CURSOR_COUNT_WORD = 20;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_WORD = 21;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_BUILDING =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_BUILDING;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_READY =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_ADMITTED =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED;
+export const
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_STATUS_FAIL_CLOSED =
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STATE_ROW_WORDS = 8;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCALE_ROW_WORDS = 4;
 export const SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_ENERGY_ROW_WORDS = 8;
@@ -687,15 +726,22 @@ function minimumInterfaceReceiptDirectedCapacity(particleCapacity) {
     SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
       + particleCapacity + 1;
   const maximumPublished = maximumPhysicalDirectedPairs(particleCapacity);
-  const capacity = receiptPrefixWords <= maximumPublished
-    ? receiptPrefixWords
+  const denseCapacity = Math.ceil(
+    receiptPrefixWords
+      / (
+        SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR
+          - SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+      )
+  );
+  const capacity = denseCapacity <= maximumPublished
+    ? denseCapacity
     : Math.ceil(
         (
           receiptPrefixWords
             + maximumPublished
               * SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
         )
-          / SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_WORDS
+          / SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR
       );
   if (capacity < 1 || capacity > UINT32_MAX) {
     throw new RangeError(
@@ -799,11 +845,28 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     resolvedDirectedPairCapacity,
     maximumPhysicalDirectedPairs(resolvedParticleCapacity)
   );
-  const interfaceReceiptWordLength =
+  const interfaceReceiptPrefixWordLength =
     SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS
-      + resolvedParticleCapacity + 1
+      + resolvedParticleCapacity + 1;
+  const interfaceReceiptBaseWordLength =
+    interfaceReceiptPrefixWordLength
       + interfaceReceiptMaximumPublishedRows
         * SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+  const interfaceReceiptWordLength = checkedMultiply(
+    resolvedDirectedPairCapacity,
+    SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR,
+    'mechanical contact interface receipt arena word length'
+  );
+  const interfaceReceiptMaximumIndexedRows = Math.min(
+    interfaceReceiptMaximumPublishedRows,
+    Math.floor(
+      (interfaceReceiptWordLength - interfaceReceiptPrefixWordLength)
+        / (
+          SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+            + SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW
+        )
+    )
+  );
   const interfaceReceipt = Object.freeze({
     role: 'mechanical-contact-interface-receipt',
     wordLength: interfaceReceiptWordLength,
@@ -811,20 +874,34 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     storageBinding: true,
     indirect: false,
     aliased: true,
-    aliasOf: appendStaging.role,
+    externalPhaseAlias: true,
+    aliasOf: 'mechanical-matching-constraint-arena',
     aliasWordOffset: 0,
     aliasByteOffset: 0,
+    aliasLifetime:
+      'matching-constraints-through-final-residual-and-diagnostic-verification-then-interface-receipt-through-thermal-consumer-release',
+    prefixWordLength: interfaceReceiptPrefixWordLength,
+    baseWordLength: interfaceReceiptBaseWordLength,
+    arenaWordsPerDirectedPair:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR,
+    indexSlotsPerPublishedRow:
+      SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_SLOTS_PER_ROW,
     maximumPublishedRows: interfaceReceiptMaximumPublishedRows,
+    maximumIndexedRows: interfaceReceiptMaximumIndexedRows,
     fullDirectedCapacity:
-      interfaceReceiptMaximumPublishedRows === resolvedDirectedPairCapacity
+      interfaceReceiptMaximumPublishedRows === resolvedDirectedPairCapacity,
+    fullPublishedRangeIndexed:
+      interfaceReceiptMaximumIndexedRows
+        === interfaceReceiptMaximumPublishedRows
   });
-  if (interfaceReceipt.wordLength > appendStaging.wordLength) {
+  if (interfaceReceiptBaseWordLength > interfaceReceipt.wordLength) {
     throw new RangeError(
-      `mechanical contact interface receipt word length `
-      + `${interfaceReceipt.wordLength} exceeds aliased append-staging word `
-      + `length ${appendStaging.wordLength}`
+      `mechanical contact interface receipt base word length `
+      + `${interfaceReceiptBaseWordLength} exceeds phase-reused matching-constraint `
+      + `arena word length ${interfaceReceipt.wordLength}`
     );
   }
+  validateBufferLimits([interfaceReceipt], resolvedDeviceLimits);
   const bufferLayouts = Object.freeze({
     control,
     evidence,
@@ -890,8 +967,13 @@ export function createSchroederSpatialMechanicalPairGraphLayout({
     interfaceReceiptRowWords:
       SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
     interfaceReceiptMaximumPublishedRows,
+    interfaceReceiptMaximumIndexedRows,
+    interfaceReceiptPrefixWordLength,
+    interfaceReceiptBaseWordLength,
     interfaceReceiptWordLength,
-    interfaceReceiptAliasedToAppendStaging: true,
+    interfaceReceiptAliasedToAppendStaging: false,
+    interfaceReceiptAliasedToMatchingConstraintArena: true,
+    interfaceReceiptAliasLifetime: interfaceReceipt.aliasLifetime,
     proposalHeaderWords:
       SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_PROPOSAL_HEADER_WORDS,
     proposalRowWords:
@@ -1027,6 +1109,24 @@ export function createSchroederSpatialMechanicalPairGraphCapacityPlan({
       resolvedDeviceLimits.maxStorageBufferBindingSize
         / (SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_STAGING_ROW_WORDS
           * UINT32_BYTES)
+    ),
+    interfaceReceiptArenaU32Words: Math.floor(
+      UINT32_MAX
+        / SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR
+    ),
+    interfaceReceiptArenaMaxBufferSize: Math.floor(
+      resolvedDeviceLimits.maxBufferSize
+        / (
+          SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR
+            * UINT32_BYTES
+        )
+    ),
+    interfaceReceiptArenaMaxStorageBufferBindingSize: Math.floor(
+      resolvedDeviceLimits.maxStorageBufferBindingSize
+        / (
+          SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ARENA_WORDS_PER_DIRECTED_PAIR
+            * UINT32_BYTES
+        )
     ),
     directedPeerMaxBufferSize: Math.floor(
       resolvedDeviceLimits.maxBufferSize

@@ -11,6 +11,7 @@ import {
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_FINE_IMPULSE_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARENT_TO_COARSE_ORDINAL_ENCODING,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES,
   SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ROUTE_WORDS,
   ULG_SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_SCHEMA,
@@ -617,6 +618,14 @@ test('parent-field mechanics ABI reserves predictors plus phase-separated causal
   assert.equal(layout.cflIntervalWords, 1);
   assert.equal(layout.parentToCoarseOrdinalOffsetWords, 704);
   assert.equal(layout.parentToCoarseOrdinalPaddingWords, 24);
+  assert.equal(
+    layout.parentToCoarseOrdinalEncoding,
+    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARENT_TO_COARSE_ORDINAL_ENCODING
+  );
+  assert.equal(
+    layout.parentToCoarseOrdinalEncoding,
+    'zero-absent-u32-max-minus-ordinal-v1'
+  );
   assert.equal(layout.workspaceBindingWordLength, 704);
   assert.equal(layout.workspaceBindingByteLength, 2816);
   assert.equal(layout.parentToCoarseOrdinalByteOffset, 2816);
@@ -689,13 +698,80 @@ test('parent-field mechanics rejects devices below the ten-storage-binding floor
   );
 });
 
-test('fine-correction and phase-admission pipelines share exact explicit layouts', () => {
+test('workspace pipeline families share exact explicit layouts', () => {
   const device = fakeDevice({ explicitLayouts: true });
   const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     parentFieldCapacity: 1,
     fineFieldCapacity: 1,
     arenaCount: 1
   });
+  const predictorEntryPoints = new Set([
+    'initialize_parent_field_workspace',
+    'begin_reflux_coarse_registry',
+    'claim_reflux_coarse_registry_rows',
+    'register_reflux_coarse_registry_rows',
+    'seal_reflux_coarse_registry',
+    'restrict_fine_field_state',
+    'finalize_fine_parent_baseline',
+    'inject_coarse_native_state',
+    'validate_reflux_coarse_registry_mass_rows',
+    'update_parent_field_predictors',
+    'contact_parent_field_predictors',
+    'seal_parent_field_predictors'
+  ]);
+  const predictorPipelines = device.pipelines.filter(({ compute }) => (
+    predictorEntryPoints.has(compute.entryPoint)
+  ));
+  assert.equal(predictorPipelines.length, predictorEntryPoints.size);
+  const [predictorPipelineLayout] = new Set(
+    predictorPipelines.map(({ layout }) => layout)
+  );
+  assert.equal(
+    predictorPipelines.every(({ layout }) => layout === predictorPipelineLayout),
+    true
+  );
+  assert.notEqual(predictorPipelineLayout, 'auto');
+  assert.deepEqual(
+    predictorPipelineLayout.bindGroupLayouts[0].entries.map(
+      ({ binding }) => binding
+    ),
+    [0, 1, 2, 3, 4, 5, 11]
+  );
+  const terminalEntryPoints = new Set([
+    'initialize_coarse_terminal_workspace',
+    'begin_coarse_terminal_registry',
+    'claim_coarse_terminal_registry_rows',
+    'register_coarse_terminal_registry_rows',
+    'seal_coarse_terminal_registry',
+    'seal_coarse_terminal_workspace',
+    'begin_coarse_terminal_validation',
+    'begin_coarse_velocity_publish',
+    'validate_coarse_velocity_publish',
+    'seal_coarse_velocity_publish',
+    'prepare_coarse_transaction',
+    'apply_coarse_reflux_rows',
+    'apply_coarse_velocity_publish',
+    'commit_coarse_reflux',
+    'finalize_coarse_velocity_publish'
+  ]);
+  const terminalPipelines = device.pipelines.filter(({ compute }) => (
+    terminalEntryPoints.has(compute.entryPoint)
+  ));
+  assert.equal(terminalPipelines.length, terminalEntryPoints.size);
+  const [terminalPipelineLayout] = new Set(
+    terminalPipelines.map(({ layout }) => layout)
+  );
+  assert.equal(
+    terminalPipelines.every(({ layout }) => layout === terminalPipelineLayout),
+    true
+  );
+  assert.notEqual(terminalPipelineLayout, 'auto');
+  assert.deepEqual(
+    terminalPipelineLayout.bindGroupLayouts[0].entries.map(
+      ({ binding }) => binding
+    ),
+    [0, 2, 3, 4, 5, 11]
+  );
   const fineEntryPoints = new Set([
     'begin_fine_velocity_correction',
     'validate_fine_velocity_correction',
@@ -968,16 +1044,16 @@ test('queue-only timing preserves grouped workspace topology while encoder spans
   });
   assert.equal(
     encoderSpans.encoder.events.filter((event) => event.kind === 'pass').length,
-    9
+    12
   );
-  assert.equal(encoderSpans.execution.encodedComputePassCount, 9);
+  assert.equal(encoderSpans.execution.encodedComputePassCount, 12);
   assert.equal(
     encoderSpanCalls.filter(([kind]) => kind === 'begin').length,
-    9
+    12
   );
   assert.equal(
     encoderSpanCalls.filter(([kind]) => kind === 'end').length,
-    9
+    12
   );
 });
 
@@ -1022,7 +1098,10 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_EMPTY\)/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fine_store\(59u, FIELD_VELOCITY\)/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /range_fits/);
-  assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn register_reflux_coarse_registry/);
+  assert.match(
+    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+    /fn register_reflux_coarse_registry_rows/
+  );
   assert.doesNotMatch(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /reflux_load\(60u\) != params\.generation_id/
@@ -1031,7 +1110,7 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
     [...schroederSpatialParentFieldMechanicsWorkspaceWgsl.matchAll(
       /reflux_store\(60u, params\.generation_id\)/g
     )].length,
-    2
+    1
   );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn evaluate_causal_route/);
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn scatter_causal_route_proposal/);
@@ -1327,12 +1406,149 @@ test('workspace temporal coarse sidecar is authenticated, recycled, and predicto
   assert.doesNotMatch(fineValidatorSource, /temporal_coarse|successor_state/);
 });
 
+test('reflux registries use deterministic parallel claims and fail-closed coverage', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const between = (start, end) => {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex + start.length);
+    assert.notEqual(startIndex, -1, `missing ${start}`);
+    assert.notEqual(endIndex, -1, `missing ${end}`);
+    return source.slice(startIndex, endIndex);
+  };
+  const entrySource = (entryPoint) => {
+    const functionBegin = source.indexOf(`fn ${entryPoint}(`);
+    assert.notEqual(functionBegin, -1, `missing ${entryPoint}`);
+    const begin = source.lastIndexOf('@compute', functionBegin);
+    const end = source.indexOf('@compute', functionBegin + entryPoint.length);
+    return source.slice(begin, end === -1 ? source.length : end);
+  };
+
+  const reverseMapSource = between(
+    'fn parent_to_coarse_load(',
+    'fn finite_f32('
+  );
+  assert.match(
+    reverseMapSource,
+    /select\(INVALID_INDEX, INVALID_INDEX - encoded, encoded != 0u\)/
+  );
+  assert.match(
+    reverseMapSource,
+    /select\(0u, INVALID_INDEX - value, value != INVALID_INDEX\)/
+  );
+  assert.doesNotMatch(
+    source,
+    /parent_to_coarse_store\(parent, INVALID_INDEX\)/
+  );
+
+  const beginSource = between('fn begin_registry(', 'fn record_registry_workgroup_coverage(');
+  assert.match(beginSource, /registry_scratch_fits\(\)/);
+  assert.match(
+    beginSource,
+    /params\.fine_substep_ordinal <= params\.fine_substep_count[\s\S]*params\.fine_substep_ordinal == params\.fine_substep_count[\s\S]*terminal/
+  );
+  assert.match(
+    beginSource,
+    /ws_load\(66u\) == parent_view\[68u\][\s\S]*ws_load\(68u\) == parent_view\[70u\]/
+  );
+  assert.match(
+    beginSource,
+    /REGISTRY_CLAIM_COVERAGE_WORD, 0u[\s\S]*REGISTRY_ROW_COVERAGE_WORD, 0u/
+  );
+  assert.ok(
+    beginSource.lastIndexOf('REGISTRY_TOKEN_WORD')
+      > beginSource.lastIndexOf('REGISTRY_ROW_COVERAGE_WORD'),
+    'registry token must publish after both coverage counters initialize'
+  );
+
+  const claimSource = between('fn claim_registry_rows(', 'fn register_registry_rows(');
+  assert.match(claimSource, /registry_coarse_dispatch_matches\(workgroup_count\)/);
+  assert.match(claimSource, /REGISTRY_CLAIM_COVERAGE_WORD/);
+  assert.match(
+    claimSource,
+    /atomicMax\(\s*&parent_to_coarse_ordinals\[parent\],\s*INVALID_INDEX - coarse_field/
+  );
+  assert.doesNotMatch(claimSource, /ws_reject\(|reflux_reject\(/);
+  const coverageSource = between(
+    'fn record_registry_workgroup_coverage(',
+    'fn claim_registry_rows('
+  );
+  assert.match(coverageSource, /local_id\.x != 0u/);
+  assert.match(
+    coverageSource,
+    /min\(64u, ws_load\(22u\) - coarse_field\)/
+  );
+
+  const rowSource = between('fn register_registry_rows(', 'fn seal_registry(');
+  assert.match(rowSource, /REGISTRY_ROW_COVERAGE_WORD/);
+  assert.match(
+    rowSource,
+    /parent_to_coarse_load\(parent\) != coarse_field[\s\S]*terminal && reflux_load\(row \+ 14u\) != 1u/
+  );
+  assert.match(
+    rowSource,
+    /REGISTRY_FROZEN_KEY_FAILURE_WORD[\s\S]*for \(var word = 4u; word < REFLUX_ROW_WORDS/
+  );
+  assert.doesNotMatch(rowSource, /ws_reject\(|reflux_reject\(/);
+
+  const sealSource = between('fn seal_registry(', '@compute @workgroup_size(1)\nfn begin_reflux_coarse_registry');
+  assert.match(
+    sealSource,
+    /REGISTRY_CLAIM_COVERAGE_WORD\) != coarse_count[\s\S]*REGISTRY_ROW_COVERAGE_WORD\) != coarse_count/
+  );
+  assert.match(sealSource, /if \(!terminal && frozen_key < structural\)/);
+  assert.match(sealSource, /atomicAdd\(&reflux_ledger\[13u\], 1u\)/);
+  assert.ok(
+    sealSource.indexOf('first_failure')
+      < sealSource.indexOf('reflux_store(60u, params.generation_id)'),
+    'registry generation may publish only after deterministic failure sealing'
+  );
+  assert.doesNotMatch(sealSource, /\bfor\s*\(|\bloop\s*\{/);
+
+  for (const entryPoint of [
+    'claim_reflux_coarse_registry_rows',
+    'register_reflux_coarse_registry_rows',
+    'claim_coarse_terminal_registry_rows',
+    'register_coarse_terminal_registry_rows',
+    'validate_reflux_coarse_registry_mass_rows'
+  ]) {
+    const rowEntrySource = entrySource(entryPoint);
+    assert.match(rowEntrySource, /@compute @workgroup_size\(64\)/);
+    assert.match(
+      rowEntrySource,
+      /@builtin\(num_workgroups\) workgroup_count: vec3<u32>/
+    );
+  }
+  for (const entryPoint of [
+    'begin_reflux_coarse_registry',
+    'seal_reflux_coarse_registry',
+    'begin_coarse_terminal_registry',
+    'seal_coarse_terminal_registry'
+  ]) {
+    assert.match(entrySource(entryPoint), /@compute @workgroup_size\(1\)/);
+  }
+
+  const massRejectSource = between(
+    'fn reject_reflux_registry_mass_once()',
+    '@compute @workgroup_size(64)\nfn validate_reflux_coarse_registry_mass_rows'
+  );
+  assert.match(massRejectSource, /atomicExchange\(&workspace\[87u\], 1u\)/);
+  assert.doesNotMatch(massRejectSource, /ws_reject\(/);
+  const massSource = entrySource('validate_reflux_coarse_registry_mass_rows');
+  assert.match(massSource, /reject_reflux_registry_mass_once\(\)/);
+  assert.doesNotMatch(massSource, /\bfor\s*\(|\bloop\s*\{|ws_reject\(/);
+});
+
 test('workspace indirect parent-field kernels flatten two-dimensional dispatch rows', () => {
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /fn indirect_row_index\(\s*id: vec3<u32>,\s*workgroup_count: vec3<u32>\s*\) -> u32 \{\s*return id\.x \+ id\.y \* workgroup_count\.x \* 64u;\s*\}/
   );
   const indirectEntryPoints = [
+    'claim_reflux_coarse_registry_rows',
+    'register_reflux_coarse_registry_rows',
+    'claim_coarse_terminal_registry_rows',
+    'register_coarse_terminal_registry_rows',
+    'validate_reflux_coarse_registry_mass_rows',
     'restrict_fine_field_state',
     'finalize_fine_parent_baseline',
     'inject_coarse_native_state',
@@ -2775,6 +2991,7 @@ test('workspace runtime stages predictors and terminal branches without encode-t
     boxDimsM: [1, 1, 1]
   });
   assert.equal(device.buffers.length, retainedBufferCount);
+  assert.equal(fineExecution.encodedDispatchCount, 12);
   assert.deepEqual(
     predictorEncoder.events.filter((event) => event.kind === 'copy')
       .map((event) => event.sourceOffset),
@@ -2788,6 +3005,33 @@ test('workspace runtime stages predictors and terminal branches without encode-t
   const predictorPasses = predictorEncoder.events.filter(
     (event) => event.kind === 'pass'
   );
+  assert.deepEqual(
+    predictorPasses[0].commands.map(({ pipeline }) => pipeline.compute.entryPoint),
+    [
+      'initialize_parent_field_workspace',
+      'begin_reflux_coarse_registry',
+      'claim_reflux_coarse_registry_rows',
+      'register_reflux_coarse_registry_rows',
+      'seal_reflux_coarse_registry',
+      'restrict_fine_field_state',
+      'finalize_fine_parent_baseline',
+      'inject_coarse_native_state',
+      'validate_reflux_coarse_registry_mass_rows',
+      'update_parent_field_predictors',
+      'contact_parent_field_predictors',
+      'seal_parent_field_predictors'
+    ]
+  );
+  assert.deepEqual(
+    predictorPasses[0].commands.map((command) => 'indirect' in command),
+    [false, false, true, true, false, true, true, true, true, true, true, false]
+  );
+  for (const commandIndex of [2, 3, 8]) {
+    assert.equal(
+      predictorPasses[0].commands[commandIndex].indirect.buffer,
+      fineExecution.coarseIndirectBuffer
+    );
+  }
   const initializeEntries = predictorPasses[0].bindGroups[0].value.entries;
   assert.equal(initializeEntries.some(({ binding }) => binding === 11), false);
   assert.equal(
@@ -3759,6 +4003,292 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           fineTruncated,
           coarseTruncated,
           complete
+        };
+      };
+      const runRegistryCoverageProbe = async () => {
+        const rowCount = 130;
+        const mapOffset = 16;
+        const wordLength = mapOffset + rowCount;
+        const generationSentinel = 0x13579bdf;
+        const committedGeneration = 0x2468ace0;
+        const module = device.createShaderModule({
+          label: 'native-parent-mechanics-registry-coverage-wgsl',
+          code: `
+            @group(0) @binding(0)
+            var<storage, read_write> values: array<atomic<u32>>;
+
+            const INVALID: u32 = 0xffffffffu;
+            const ROW_COUNT: u32 = 130u;
+            const MAP_OFFSET: u32 = 16u;
+
+            fn row_index(
+              id: vec3<u32>,
+              groups: vec3<u32>
+            ) -> u32 {
+              return id.x + id.y * groups.x * 64u;
+            }
+
+            fn token() -> u32 {
+              return 0x52470001u
+                | select(0u, 0x00008000u, atomicLoad(&values[1]) != 0u);
+            }
+
+            fn started() -> bool {
+              return atomicLoad(&values[2]) == token();
+            }
+
+            fn decoded_parent(parent: u32) -> u32 {
+              let encoded = atomicLoad(&values[MAP_OFFSET + parent]);
+              return select(INVALID, INVALID - encoded, encoded != 0u);
+            }
+
+            fn record_coverage(
+              address: u32,
+              row: u32,
+              local_id: vec3<u32>
+            ) {
+              if (local_id.x == 0u && row < ROW_COUNT) {
+                atomicAdd(&values[address], min(64u, ROW_COUNT - row));
+              }
+            }
+
+            @compute @workgroup_size(1)
+            fn begin_registry_probe() {
+              atomicStore(&values[2], 0u);
+              atomicStore(&values[3], INVALID);
+              atomicStore(&values[4], INVALID);
+              atomicStore(&values[5], 0u);
+              atomicStore(&values[6], 0u);
+              atomicStore(&values[8], 0u);
+              atomicStore(&values[9], 0u);
+              atomicStore(&values[10], 0u);
+              atomicStore(&values[2], token());
+            }
+
+            @compute @workgroup_size(64)
+            fn claim_registry_probe(
+              @builtin(global_invocation_id) id: vec3<u32>,
+              @builtin(local_invocation_id) local_id: vec3<u32>,
+              @builtin(num_workgroups) groups: vec3<u32>
+            ) {
+              if (!started() || !all(groups == vec3<u32>(2u, 2u, 1u))) {
+                return;
+              }
+              let row = row_index(id, groups);
+              record_coverage(5u, row, local_id);
+              if (row >= ROW_COUNT) { return; }
+              var parent = row;
+              if (atomicLoad(&values[0]) == 1u && row == 1u) {
+                parent = 0u;
+              }
+              atomicMax(&values[MAP_OFFSET + parent], INVALID - row);
+            }
+
+            @compute @workgroup_size(64)
+            fn register_registry_probe(
+              @builtin(global_invocation_id) id: vec3<u32>,
+              @builtin(local_invocation_id) local_id: vec3<u32>,
+              @builtin(num_workgroups) groups: vec3<u32>
+            ) {
+              if (!started() || !all(groups == vec3<u32>(2u, 2u, 1u))) {
+                return;
+              }
+              let row = row_index(id, groups);
+              record_coverage(6u, row, local_id);
+              if (row >= ROW_COUNT) { return; }
+              let mode = atomicLoad(&values[0]);
+              var parent = row;
+              if (mode == 1u && row == 1u) { parent = 0u; }
+              if (decoded_parent(parent) != row
+                  || (mode == 3u && row == 17u)) {
+                atomicMin(&values[3], row);
+                return;
+              }
+              if (mode == 2u && row == 17u) {
+                atomicMin(&values[4], row);
+              }
+            }
+
+            @compute @workgroup_size(1)
+            fn seal_registry_probe() {
+              if (!started() || atomicLoad(&values[5]) != ROW_COUNT
+                  || atomicLoad(&values[6]) != ROW_COUNT) {
+                atomicAdd(&values[8], 1u);
+                return;
+              }
+              let structural = atomicLoad(&values[3]);
+              let frozen = atomicLoad(&values[4]);
+              if (min(structural, frozen) != INVALID) {
+                if (atomicLoad(&values[1]) == 0u && frozen < structural) {
+                  atomicAdd(&values[9], 1u);
+                }
+                atomicAdd(&values[8], 1u);
+                return;
+              }
+              atomicStore(&values[7], 0x2468ace0u);
+            }
+
+            @compute @workgroup_size(64)
+            fn validate_registry_mass_probe(
+              @builtin(global_invocation_id) id: vec3<u32>,
+              @builtin(num_workgroups) groups: vec3<u32>
+            ) {
+              let row = row_index(id, groups);
+              if (!all(groups == vec3<u32>(2u, 2u, 1u))
+                  || row >= ROW_COUNT || atomicLoad(&values[0]) != 4u
+                  || (row != 17u && row != 18u)) {
+                return;
+              }
+              let prior = atomicExchange(&values[10], 1u);
+              if (prior == 0u) { atomicAdd(&values[8], 1u); }
+            }
+          `
+        });
+        const entryPoints = [
+          'begin_registry_probe',
+          'claim_registry_probe',
+          'register_registry_probe',
+          'seal_registry_probe',
+          'validate_registry_mass_probe'
+        ];
+        const pipelines = [];
+        for (const entryPoint of entryPoints) {
+          pipelines.push(await device.createComputePipelineAsync({
+            label: `native-parent-mechanics-registry-coverage-${entryPoint}`,
+            layout: 'auto',
+            compute: { module, entryPoint }
+          }));
+        }
+        const indirect = (label, dimensions) => {
+          const buffer = device.createBuffer({
+            label,
+            size: 3 * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+          });
+          device.queue.writeBuffer(buffer, 0, new Uint32Array(dimensions));
+          return buffer;
+        };
+        const fullIndirect = indirect(
+          'native-parent-mechanics-registry-coverage-full-indirect',
+          [2, 2, 1]
+        );
+        const truncatedIndirect = indirect(
+          'native-parent-mechanics-registry-coverage-truncated-indirect',
+          [1, 1, 1]
+        );
+        const runCase = async ({
+          label,
+          mode = 0,
+          terminal = false,
+          claimIndirect = fullIndirect,
+          rowIndirect = fullIndirect,
+          validateMass = false
+        }) => {
+          const initial = new Uint32Array(wordLength);
+          initial[0] = mode;
+          initial[1] = terminal ? 1 : 0;
+          initial[7] = generationSentinel;
+          const buffer = device.createBuffer({
+            label: `native-parent-mechanics-registry-coverage-${label}`,
+            size: initial.byteLength,
+            usage: GPUBufferUsage.STORAGE
+              | GPUBufferUsage.COPY_DST
+              | GPUBufferUsage.COPY_SRC
+          });
+          device.queue.writeBuffer(buffer, 0, initial);
+          const bindGroups = pipelines.map((pipeline, index) => (
+            device.createBindGroup({
+              label:
+                `native-parent-mechanics-registry-coverage-${label}-bind-${index}`,
+              layout: pipeline.getBindGroupLayout(0),
+              entries: [{ binding: 0, resource: { buffer } }]
+            })
+          ));
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginComputePass({
+            label: `native-parent-mechanics-registry-coverage-${label}-pass`
+          });
+          pass.setPipeline(pipelines[0]);
+          pass.setBindGroup(0, bindGroups[0]);
+          pass.dispatchWorkgroups(1);
+          pass.setPipeline(pipelines[1]);
+          pass.setBindGroup(0, bindGroups[1]);
+          pass.dispatchWorkgroupsIndirect(claimIndirect, 0);
+          pass.setPipeline(pipelines[2]);
+          pass.setBindGroup(0, bindGroups[2]);
+          pass.dispatchWorkgroupsIndirect(rowIndirect, 0);
+          pass.setPipeline(pipelines[3]);
+          pass.setBindGroup(0, bindGroups[3]);
+          pass.dispatchWorkgroups(1);
+          if (validateMass) {
+            pass.setPipeline(pipelines[4]);
+            pass.setBindGroup(0, bindGroups[4]);
+            pass.dispatchWorkgroupsIndirect(fullIndirect, 0);
+          }
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          const read = await readWords(
+            buffer,
+            initial.byteLength,
+            `native-parent-mechanics-registry-coverage-${label}-readback`
+          );
+          buffer.destroy();
+          return {
+            structuralFailure: read.words[3],
+            frozenKeyFailure: read.words[4],
+            claimCoverage: read.words[5],
+            rowCoverage: read.words[6],
+            generation: read.words[7],
+            rejectionCount: read.words[8],
+            keyMismatchCount: read.words[9],
+            massRejectLatch: read.words[10],
+            parentZeroRaw: read.words[mapOffset],
+            parentOneRaw: read.words[mapOffset + 1]
+          };
+        };
+        const complete = await runCase({ label: 'complete' });
+        const claimTruncated = await runCase({
+          label: 'claim-truncated',
+          claimIndirect: truncatedIndirect
+        });
+        const rowTruncated = await runCase({
+          label: 'row-truncated',
+          rowIndirect: truncatedIndirect
+        });
+        const duplicate = await runCase({ label: 'duplicate', mode: 1 });
+        const frozenPredictor = await runCase({
+          label: 'frozen-predictor',
+          mode: 2
+        });
+        const frozenTerminal = await runCase({
+          label: 'frozen-terminal',
+          mode: 2,
+          terminal: true
+        });
+        const terminalMassMissing = await runCase({
+          label: 'terminal-mass-missing',
+          mode: 3,
+          terminal: true
+        });
+        const massOnce = await runCase({
+          label: 'mass-once',
+          mode: 4,
+          validateMass: true
+        });
+        fullIndirect.destroy();
+        truncatedIndirect.destroy();
+        return {
+          rowCount,
+          generationSentinel,
+          committedGeneration,
+          complete,
+          claimTruncated,
+          rowTruncated,
+          duplicate,
+          frozenPredictor,
+          frozenTerminal,
+          terminalMassMissing,
+          massOnce
         };
       };
       // A capture is deliberately a GPU-only copy.  M2 queues these while the
@@ -4805,13 +5335,16 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
           - terminalReflux.floats[84];
         const atomicFoldBarrierProbe = await runAtomicFoldBarrierProbe();
         const projectionCoverageProbe = await runProjectionCoverageProbe();
+        const registryCoverageProbe = await runRegistryCoverageProbe();
         const result = {
           status: 'm2-complete',
           atomicFoldBarrierProbe,
           projectionCoverageProbe,
+          registryCoverageProbe,
           fineEncodedDispatchCount: fineWorkspace.execution.encodedDispatchCount,
           fineEncodedComputePassCount:
             fineWorkspace.execution.encodedComputePassCount,
+          terminalEncodedDispatchCount: terminalExecution.encodedDispatchCount,
           workspaceFlags: terminalWorkspace.words[2],
           workspacePhase: terminalWorkspace.words[36],
           workspaceInvalidCounts: Array.from(terminalWorkspace.words.slice(37, 42)),
@@ -5645,7 +6178,62 @@ test('native parent-field mechanics admits sparse v2 fields before coupling', {
       reflux: native.projectionCoverageProbe.committedReflux,
       rejected: 0
     }, JSON.stringify(native.projectionCoverageProbe));
-    assert.equal(native.fineEncodedDispatchCount, 22, JSON.stringify(native));
+    const registryProbe = native.registryCoverageProbe;
+    assert.deepEqual(
+      [registryProbe.complete.claimCoverage, registryProbe.complete.rowCoverage],
+      [registryProbe.rowCount, registryProbe.rowCount],
+      JSON.stringify(registryProbe)
+    );
+    assert.equal(
+      registryProbe.complete.generation,
+      registryProbe.committedGeneration,
+      JSON.stringify(registryProbe)
+    );
+    assert.equal(registryProbe.complete.rejectionCount, 0);
+    assert.equal(registryProbe.complete.parentZeroRaw, 0xffffffff);
+    assert.equal(registryProbe.complete.parentOneRaw, 0xfffffffe);
+    assert.deepEqual(
+      [
+        registryProbe.claimTruncated.claimCoverage,
+        registryProbe.claimTruncated.rowCoverage,
+        registryProbe.claimTruncated.generation,
+        registryProbe.claimTruncated.rejectionCount
+      ],
+      [0, registryProbe.rowCount, registryProbe.generationSentinel, 1],
+      JSON.stringify(registryProbe)
+    );
+    assert.deepEqual(
+      [
+        registryProbe.rowTruncated.claimCoverage,
+        registryProbe.rowTruncated.rowCoverage,
+        registryProbe.rowTruncated.generation,
+        registryProbe.rowTruncated.rejectionCount
+      ],
+      [registryProbe.rowCount, 0, registryProbe.generationSentinel, 1],
+      JSON.stringify(registryProbe)
+    );
+    assert.equal(registryProbe.duplicate.structuralFailure, 1);
+    assert.equal(registryProbe.duplicate.parentZeroRaw, 0xffffffff);
+    assert.equal(registryProbe.duplicate.parentOneRaw, 0);
+    assert.equal(registryProbe.duplicate.rejectionCount, 1);
+    assert.equal(registryProbe.duplicate.keyMismatchCount, 0);
+    assert.equal(registryProbe.frozenPredictor.frozenKeyFailure, 17);
+    assert.equal(registryProbe.frozenPredictor.rejectionCount, 1);
+    assert.equal(registryProbe.frozenPredictor.keyMismatchCount, 1);
+    assert.equal(registryProbe.frozenTerminal.frozenKeyFailure, 17);
+    assert.equal(registryProbe.frozenTerminal.rejectionCount, 1);
+    assert.equal(registryProbe.frozenTerminal.keyMismatchCount, 0);
+    assert.equal(registryProbe.terminalMassMissing.structuralFailure, 17);
+    assert.equal(registryProbe.terminalMassMissing.rejectionCount, 1);
+    assert.equal(registryProbe.terminalMassMissing.keyMismatchCount, 0);
+    assert.equal(
+      registryProbe.massOnce.generation,
+      registryProbe.committedGeneration
+    );
+    assert.equal(registryProbe.massOnce.massRejectLatch, 1);
+    assert.equal(registryProbe.massOnce.rejectionCount, 1);
+    assert.equal(native.fineEncodedDispatchCount, 25, JSON.stringify(native));
+    assert.equal(native.terminalEncodedDispatchCount, 15, JSON.stringify(native));
     assert.equal(native.fineEncodedComputePassCount, 2, JSON.stringify(native));
     assert.equal(native.workspaceFlags, 3, JSON.stringify(native));
     assert.equal(

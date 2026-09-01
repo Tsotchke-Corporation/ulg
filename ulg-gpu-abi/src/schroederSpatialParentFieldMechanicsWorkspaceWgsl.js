@@ -316,6 +316,13 @@ const PHASE_ADMISSION_FINE_PRESSURE_WORD: u32 = 3u;
 const PHASE_ADMISSION_COARSE_REGISTRY_WORD: u32 = 4u;
 const PHASE_ADMISSION_COARSE_MOMENT_WORD: u32 = 5u;
 const PHASE_ADMISSION_COARSE_PRESSURE_WORD: u32 = 6u;
+const REGISTRY_SCRATCH_WORDS: u32 = 8u;
+const REGISTRY_TOKEN_WORD: u32 = 0u;
+const REGISTRY_STRUCTURAL_FAILURE_WORD: u32 = 1u;
+const REGISTRY_FROZEN_KEY_FAILURE_WORD: u32 = 2u;
+const REGISTRY_INITIALIZE_WORD: u32 = 3u;
+const REGISTRY_CLAIM_COVERAGE_WORD: u32 = 4u;
+const REGISTRY_ROW_COVERAGE_WORD: u32 = 5u;
 const TRANSACTION_PROJECTION_STATUS_READY: u32 = 0u;
 const TRANSACTION_PROJECTION_STATUS_INPUT_NONFINITE: u32 = 1u;
 const TRANSACTION_PROJECTION_STATUS_VELOCITY_NONFINITE: u32 = 2u;
@@ -337,10 +344,12 @@ fn coarse_store(word: u32, value: u32) { atomicStore(&coarse_view[word], value);
 fn reflux_load(word: u32) -> u32 { return atomicLoad(&reflux_ledger[word]); }
 fn reflux_store(word: u32, value: u32) { atomicStore(&reflux_ledger[word], value); }
 fn parent_to_coarse_load(parent: u32) -> u32 {
-  return atomicLoad(&parent_to_coarse_ordinals[parent]);
+  let encoded = atomicLoad(&parent_to_coarse_ordinals[parent]);
+  return select(INVALID_INDEX, INVALID_INDEX - encoded, encoded != 0u);
 }
 fn parent_to_coarse_store(parent: u32, value: u32) {
-  atomicStore(&parent_to_coarse_ordinals[parent], value);
+  let encoded = select(0u, INVALID_INDEX - value, value != INVALID_INDEX);
+  atomicStore(&parent_to_coarse_ordinals[parent], encoded);
 }
 
 fn finite_f32(value: f32) -> bool {
@@ -1574,53 +1583,273 @@ fn initialize_coarse_terminal_workspace() {
   ws_store(2u, READY_ADMITTED);
 }
 
-@compute @workgroup_size(1)
-fn register_reflux_coarse_registry() {
+// Registry construction runs before restriction materializes the baseline.
+// Reuse the first baseline row as dispatch-private integer scratch; the whole
+// workspace (including the split reverse-map binding) is zero-cleared by the
+// host before initialization, and finalize_fine_parent_baseline overwrites
+// this row before any physical baseline consumer can observe it.
+fn registry_scratch_fits() -> bool {
+  return arrayLength(&workspace) >= WORKSPACE_HEADER_WORDS
+    && params.required_words >= WORKSPACE_HEADER_WORDS
+    && params.required_words <= arrayLength(&workspace)
+    && params.baseline_offset >= WORKSPACE_HEADER_WORDS
+    && range_fits(
+      params.baseline_offset,
+      REGISTRY_SCRATCH_WORDS,
+      params.required_words
+    )
+    && ws_load(26u) == params.baseline_offset;
+}
+
+fn registry_scratch_address(word: u32) -> u32 {
+  return params.baseline_offset + word;
+}
+
+fn registry_scratch_load(word: u32) -> u32 {
+  return ws_load(registry_scratch_address(word));
+}
+
+fn registry_scratch_store(word: u32, value: u32) {
+  ws_store(registry_scratch_address(word), value);
+}
+
+fn registry_token(terminal: bool) -> u32 {
+  return 0x52470000u
+    | select(0u, 0x00008000u, terminal)
+    | ((params.fine_substep_ordinal + 1u) & 0x000000ffu);
+}
+
+fn registry_coarse_dispatch_shape_admitted(count: u32) -> bool {
+  let dispatch_x = parent_view[68u];
+  let dispatch_y = parent_view[69u];
+  let dispatch_z = parent_view[70u];
+  if (count == 0u) {
+    return dispatch_x == 0u && dispatch_y == 0u && dispatch_z == 0u;
+  }
+  let group_count = (count - 1u) / 64u + 1u;
+  if (dispatch_x == 0u || dispatch_x > group_count || dispatch_z != 1u) {
+    return false;
+  }
+  return dispatch_y == (group_count - 1u) / dispatch_x + 1u;
+}
+
+fn registry_coarse_dispatch_matches(
+  workgroup_count: vec3<u32>
+) -> bool {
+  return all(workgroup_count == vec3<u32>(
+    parent_view[68u],
+    parent_view[69u],
+    parent_view[70u]
+  ));
+}
+
+fn registry_started(terminal: bool) -> bool {
+  return workspace_admitted(PHASE_BUILDING)
+    && registry_scratch_fits()
+    && registry_scratch_load(REGISTRY_TOKEN_WORD)
+      == registry_token(terminal);
+}
+
+fn reject_reflux_registry(flags: u32) {
+  ws_reject(STATUS_INVALID_REGISTRY, 87u);
+  reflux_reject(flags);
+}
+
+fn begin_registry(terminal: bool) {
   if (!workspace_admitted(PHASE_BUILDING)) { return; }
   let coarse_count = ws_load(22u);
   let ledger_phase = reflux_load(59u);
-  if (coarse_count == 0u || coarse_count > params.reflux_capacity
-      || (ledger_phase != REFLUX_PHASE_ALLOCATED
-          && ledger_phase != REFLUX_PHASE_ACCUMULATING)) {
-    ws_reject(STATUS_INVALID_REGISTRY, 87u);
-    reflux_reject(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
+  let ordinal_valid = select(
+    params.fine_substep_ordinal <= params.fine_substep_count,
+    params.fine_substep_ordinal == params.fine_substep_count,
+    terminal
+  );
+  if (coarse_count == 0u || coarse_count >= INVALID_INDEX
+      || coarse_count > params.reflux_capacity || !ordinal_valid) {
+    reject_reflux_registry(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
     return;
   }
-  for (var parent = 0u; parent < ws_load(23u); parent = parent + 1u) {
-    parent_to_coarse_store(parent, INVALID_INDEX);
-  }
-  let initialize = ledger_phase == REFLUX_PHASE_ALLOCATED;
-  if (!initialize && reflux_load(4u) != coarse_count) {
-    ws_reject(STATUS_INVALID_REGISTRY, 87u);
-    reflux_reject(REFLUX_KEY_REJECTED);
-    return;
-  }
-  for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    if (parent >= ws_load(23u) || !coarse_parent_key_matches(coarse_field, parent)
-        || parent_to_coarse_load(parent) != INVALID_INDEX) {
-      ws_reject(STATUS_INVALID_REGISTRY, 87u);
-      reflux_reject(REFLUX_KEY_REJECTED);
+  let initialize = !terminal && ledger_phase == REFLUX_PHASE_ALLOCATED;
+  if (terminal) {
+    if (!reflux_accumulating() || reflux_load(4u) != coarse_count) {
+      reject_reflux_registry(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
       return;
     }
-    let row = reflux_row(coarse_field);
-    for (var word = 0u; word < 4u; word = word + 1u) {
-      let key_word = coarse_key(coarse_field, word);
-      if (initialize) {
-        reflux_store(row + word, key_word);
-      } else if (reflux_load(row + word) != key_word) {
-        atomicAdd(&reflux_ledger[13u], 1u);
-        ws_reject(STATUS_INVALID_REGISTRY, 87u);
-        reflux_reject(REFLUX_KEY_REJECTED);
-        return;
-      }
+  } else {
+    if (ledger_phase != REFLUX_PHASE_ALLOCATED
+        && ledger_phase != REFLUX_PHASE_ACCUMULATING) {
+      reject_reflux_registry(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
+      return;
     }
+    if (!initialize && reflux_load(4u) != coarse_count) {
+      reject_reflux_registry(REFLUX_KEY_REJECTED);
+      return;
+    }
+  }
+  let dispatch_mirrors_admitted =
+    ws_load(66u) == parent_view[68u]
+    && ws_load(67u) == parent_view[69u]
+    && ws_load(68u) == parent_view[70u];
+  if (!registry_scratch_fits()
+      || registry_scratch_load(REGISTRY_TOKEN_WORD) != 0u
+      || !dispatch_mirrors_admitted
+      || !registry_coarse_dispatch_shape_admitted(coarse_count)) {
+    reject_reflux_registry(REFLUX_KEY_REJECTED);
+    return;
+  }
+  registry_scratch_store(REGISTRY_STRUCTURAL_FAILURE_WORD, INVALID_INDEX);
+  registry_scratch_store(REGISTRY_FROZEN_KEY_FAILURE_WORD, INVALID_INDEX);
+  registry_scratch_store(
+    REGISTRY_INITIALIZE_WORD,
+    select(0u, 1u, initialize)
+  );
+  registry_scratch_store(REGISTRY_CLAIM_COVERAGE_WORD, 0u);
+  registry_scratch_store(REGISTRY_ROW_COVERAGE_WORD, 0u);
+  registry_scratch_store(6u, 0u);
+  registry_scratch_store(7u, 0u);
+  // Publish last so neither parallel row pass can observe partial scratch.
+  registry_scratch_store(REGISTRY_TOKEN_WORD, registry_token(terminal));
+}
+
+fn record_registry_workgroup_coverage(
+  word: u32,
+  coarse_field: u32,
+  local_id: vec3<u32>
+) {
+  if (local_id.x != 0u || coarse_field >= ws_load(22u)) { return; }
+  atomicAdd(
+    &workspace[registry_scratch_address(word)],
+    min(64u, ws_load(22u) - coarse_field)
+  );
+}
+
+fn claim_registry_rows(
+  terminal: bool,
+  coarse_field: u32,
+  local_id: vec3<u32>,
+  workgroup_count: vec3<u32>
+) {
+  if (!registry_started(terminal)
+      || !registry_coarse_dispatch_matches(workgroup_count)) {
+    return;
+  }
+  record_registry_workgroup_coverage(
+    REGISTRY_CLAIM_COVERAGE_WORD,
+    coarse_field,
+    local_id
+  );
+  if (coarse_field >= ws_load(22u)) { return; }
+  let parent = parent_view[parent_view[54u] + coarse_field];
+  if (parent >= ws_load(23u)
+      || !coarse_parent_key_matches(coarse_field, parent)) {
+    atomicMin(
+      &workspace[registry_scratch_address(
+        REGISTRY_STRUCTURAL_FAILURE_WORD
+      )],
+      coarse_field
+    );
+    return;
+  }
+  // The largest inverted value is the smallest ordinal. A duplicate parent
+  // therefore retains the exact first-row precedence of the former scan.
+  atomicMax(
+    &parent_to_coarse_ordinals[parent],
+    INVALID_INDEX - coarse_field
+  );
+}
+
+fn register_registry_rows(
+  terminal: bool,
+  coarse_field: u32,
+  local_id: vec3<u32>,
+  workgroup_count: vec3<u32>
+) {
+  if (!registry_started(terminal)
+      || !registry_coarse_dispatch_matches(workgroup_count)) {
+    return;
+  }
+  record_registry_workgroup_coverage(
+    REGISTRY_ROW_COVERAGE_WORD,
+    coarse_field,
+    local_id
+  );
+  if (coarse_field >= ws_load(22u)) { return; }
+  let parent = parent_view[parent_view[54u] + coarse_field];
+  let row = reflux_row(coarse_field);
+  if (parent >= ws_load(23u)
+      || !coarse_parent_key_matches(coarse_field, parent)
+      || parent_to_coarse_load(parent) != coarse_field
+      || (terminal && reflux_load(row + 14u) != 1u)) {
+    atomicMin(
+      &workspace[registry_scratch_address(
+        REGISTRY_STRUCTURAL_FAILURE_WORD
+      )],
+      coarse_field
+    );
+    return;
+  }
+  let initialize = registry_scratch_load(REGISTRY_INITIALIZE_WORD) == 1u;
+  for (var word = 0u; word < 4u; word = word + 1u) {
+    let key_word = coarse_key(coarse_field, word);
     if (initialize) {
-      for (var word = 4u; word < REFLUX_ROW_WORDS; word = word + 1u) {
-        reflux_store(row + word, 0u);
-      }
+      reflux_store(row + word, key_word);
+    } else if (reflux_load(row + word) != key_word) {
+      atomicMin(
+        &workspace[registry_scratch_address(
+          REGISTRY_FROZEN_KEY_FAILURE_WORD
+        )],
+        coarse_field
+      );
+      return;
     }
-    parent_to_coarse_store(parent, coarse_field);
+  }
+  if (initialize) {
+    for (var word = 4u; word < REFLUX_ROW_WORDS; word = word + 1u) {
+      reflux_store(row + word, 0u);
+    }
+  }
+}
+
+fn seal_registry(terminal: bool) {
+  if (!workspace_admitted(PHASE_BUILDING)) { return; }
+  if (!registry_scratch_fits()
+      || registry_scratch_load(REGISTRY_TOKEN_WORD)
+        != registry_token(terminal)) {
+    reject_reflux_registry(REFLUX_KEY_REJECTED);
+    return;
+  }
+  let coarse_count = ws_load(22u);
+  if (registry_scratch_load(REGISTRY_CLAIM_COVERAGE_WORD) != coarse_count
+      || registry_scratch_load(REGISTRY_ROW_COVERAGE_WORD) != coarse_count) {
+    reject_reflux_registry(REFLUX_KEY_REJECTED);
+    return;
+  }
+  let initialize = registry_scratch_load(REGISTRY_INITIALIZE_WORD) == 1u;
+  let ledger_phase = reflux_load(59u);
+  if ((terminal && (initialize || !reflux_accumulating()
+          || reflux_load(4u) != coarse_count))
+      || (!terminal && (
+        (initialize && ledger_phase != REFLUX_PHASE_ALLOCATED)
+        || (!initialize && (ledger_phase != REFLUX_PHASE_ACCUMULATING
+          || reflux_load(4u) != coarse_count))
+      ))) {
+    reject_reflux_registry(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
+    return;
+  }
+  let structural = registry_scratch_load(
+    REGISTRY_STRUCTURAL_FAILURE_WORD
+  );
+  let frozen_key = registry_scratch_load(
+    REGISTRY_FROZEN_KEY_FAILURE_WORD
+  );
+  let first_failure = min(structural, frozen_key);
+  if (first_failure != INVALID_INDEX) {
+    // The source scan checked structure before frozen keys within each row.
+    if (!terminal && frozen_key < structural) {
+      atomicAdd(&reflux_ledger[13u], 1u);
+    }
+    reject_reflux_registry(REFLUX_KEY_REJECTED);
+    return;
   }
   if (initialize) {
     reflux_store(4u, coarse_count);
@@ -1628,73 +1857,109 @@ fn register_reflux_coarse_registry() {
     reflux_store(2u, REFLUX_READY_ADMITTED);
   }
   // A macro reuses the frozen keyed registry across private E_j generations.
-  // Rotate only its generation provenance after every key has been verified;
-  // a new generation id is not itself a registry mismatch.
+  // Rotate only after both full parallel passes have authenticated coverage.
   reflux_store(60u, params.generation_id);
 }
 
 @compute @workgroup_size(1)
-fn register_coarse_terminal_registry() {
-  if (!workspace_admitted(PHASE_BUILDING) || !reflux_accumulating()) {
-    return;
-  }
-  let coarse_count = ws_load(22u);
-  if (coarse_count == 0u || coarse_count > params.reflux_capacity
-      || reflux_load(4u) != coarse_count) {
-    ws_reject(STATUS_INVALID_REGISTRY, 87u);
-    reflux_reject(REFLUX_KEY_REJECTED | REFLUX_PHASE_REJECTED);
-    return;
-  }
-  for (var parent = 0u; parent < ws_load(23u); parent = parent + 1u) {
-    parent_to_coarse_store(parent, INVALID_INDEX);
-  }
-  for (var coarse_field = 0u; coarse_field < coarse_count; coarse_field = coarse_field + 1u) {
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    let row = reflux_row(coarse_field);
-    if (parent >= ws_load(23u)
-        || !coarse_parent_key_matches(coarse_field, parent)
-        || parent_to_coarse_load(parent) != INVALID_INDEX
-        || reflux_load(row + 14u) != 1u) {
-      ws_reject(STATUS_INVALID_REGISTRY, 87u);
-      reflux_reject(REFLUX_KEY_REJECTED);
-      return;
-    }
-    for (var word = 0u; word < 4u; word = word + 1u) {
-      if (reflux_load(row + word) != coarse_key(coarse_field, word)) {
-        ws_reject(STATUS_INVALID_REGISTRY, 87u);
-        reflux_reject(REFLUX_KEY_REJECTED);
-        return;
-      }
-    }
-    parent_to_coarse_store(parent, coarse_field);
-  }
-  reflux_store(60u, params.generation_id);
+fn begin_reflux_coarse_registry() {
+  begin_registry(false);
+}
+
+@compute @workgroup_size(64)
+fn claim_reflux_coarse_registry_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  claim_registry_rows(false, coarse_field, local_id, workgroup_count);
+}
+
+@compute @workgroup_size(64)
+fn register_reflux_coarse_registry_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  register_registry_rows(false, coarse_field, local_id, workgroup_count);
 }
 
 @compute @workgroup_size(1)
-fn validate_reflux_coarse_registry_mass() {
-  if (!workspace_admitted(PHASE_BUILDING) || !reflux_accumulating()) { return; }
-  for (var coarse_field = 0u; coarse_field < ws_load(22u); coarse_field = coarse_field + 1u) {
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    let state = params.coarse_state_offset + parent * ROW_WORDS;
-    let mass = state_load(state, 0u);
-    let row = reflux_row(coarse_field);
-    if (!(mass > 0.0) || !finite_f32(mass)) {
-      ws_reject(STATUS_INVALID_REGISTRY, 87u);
-      reflux_reject(REFLUX_KEY_REJECTED);
+fn seal_reflux_coarse_registry() {
+  seal_registry(false);
+}
+
+@compute @workgroup_size(1)
+fn begin_coarse_terminal_registry() {
+  begin_registry(true);
+}
+
+@compute @workgroup_size(64)
+fn claim_coarse_terminal_registry_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  claim_registry_rows(true, coarse_field, local_id, workgroup_count);
+}
+
+@compute @workgroup_size(64)
+fn register_coarse_terminal_registry_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  register_registry_rows(true, coarse_field, local_id, workgroup_count);
+}
+
+@compute @workgroup_size(1)
+fn seal_coarse_terminal_registry() {
+  seal_registry(true);
+}
+
+fn reject_reflux_registry_mass_once() {
+  let prior = atomicExchange(&workspace[87u], 1u);
+  if (prior == 0u) {
+    atomicOr(
+      &workspace[2u],
+      STATUS_FAIL_CLOSED | STATUS_INVALID_REGISTRY
+    );
+    reflux_reject(REFLUX_KEY_REJECTED);
+  }
+}
+
+@compute @workgroup_size(64)
+fn validate_reflux_coarse_registry_mass_rows(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  if (!workspace_admitted(PHASE_BUILDING) || !reflux_accumulating()
+      || !registry_coarse_dispatch_matches(workgroup_count)
+      || coarse_field >= ws_load(22u)) {
+    return;
+  }
+  let parent = parent_view[parent_view[54u] + coarse_field];
+  let state = params.coarse_state_offset + parent * ROW_WORDS;
+  let mass = state_load(state, 0u);
+  let row = reflux_row(coarse_field);
+  if (!(mass > 0.0) || !finite_f32(mass)) {
+    reject_reflux_registry_mass_once();
+    return;
+  }
+  if ((reflux_load(row + 14u) & 1u) == 0u) {
+    reflux_store(row + 4u, bitcast<u32>(mass));
+    reflux_store(row + 14u, 1u);
+  } else {
+    let frozen_mass = bitcast<f32>(reflux_load(row + 4u));
+    let tolerance = 3.8146973e-6 * max(1.0, abs(frozen_mass));
+    if (!finite_f32(frozen_mass) || abs(mass - frozen_mass) > tolerance) {
+      reject_reflux_registry_mass_once();
       return;
-    }
-    if ((reflux_load(row + 14u) & 1u) == 0u) {
-      reflux_store(row + 4u, bitcast<u32>(mass));
-      reflux_store(row + 14u, 1u);
-    } else {
-      let frozen_mass = bitcast<f32>(reflux_load(row + 4u));
-      let tolerance = 3.8146973e-6 * max(1.0, abs(frozen_mass));
-      if (!finite_f32(frozen_mass) || abs(mass - frozen_mass) > tolerance) {
-        ws_reject(STATUS_INVALID_REGISTRY, 87u);
-        reflux_reject(REFLUX_KEY_REJECTED);
-        return;
-      }
     }
   }
 }

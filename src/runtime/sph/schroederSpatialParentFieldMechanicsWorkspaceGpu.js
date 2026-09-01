@@ -105,11 +105,14 @@ const PHASE_ADMISSION_PIPELINE_BINDINGS = Object.freeze([
 
 const PIPELINE_BINDINGS = Object.freeze({
   initialize: Object.freeze([0, 1, 2, 3, 4, 5]),
-  registerReflux: Object.freeze([0, 2, 3, 4, 5, 11]),
+  beginRegisterReflux: Object.freeze([0, 3, 4, 5, 11]),
+  claimRegisterRefluxRows: Object.freeze([0, 2, 3, 4, 5, 11]),
+  registerRefluxRows: Object.freeze([0, 2, 3, 4, 5, 11]),
+  sealRegisterReflux: Object.freeze([3, 4, 5, 11]),
   restrictFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   finalizeBaseline: Object.freeze([3, 4, 5, 11]),
   injectCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
-  validateRegistry: Object.freeze([0, 3, 4, 5, 11]),
+  validateRegistryRows: Object.freeze([0, 3, 4, 5, 11]),
   updatePredictors: Object.freeze([0, 3, 4, 5, 11]),
   contactPredictors: Object.freeze([0, 3, 4, 5, 11]),
   sealPredictors: Object.freeze([1, 2, 3, 4, 5, 11]),
@@ -142,7 +145,10 @@ const PIPELINE_BINDINGS = Object.freeze({
   proposeCrossLevelPhaseVolume:
     Object.freeze([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]),
   initializeTerminal: Object.freeze([0, 2, 3, 4, 5]),
-  registerTerminal: Object.freeze([0, 2, 3, 4, 5, 11]),
+  beginRegisterTerminal: Object.freeze([0, 3, 4, 5, 11]),
+  claimRegisterTerminalRows: Object.freeze([0, 2, 3, 4, 5, 11]),
+  registerTerminalRows: Object.freeze([0, 2, 3, 4, 5, 11]),
+  sealRegisterTerminal: Object.freeze([3, 4, 5, 11]),
   sealTerminal: Object.freeze([0, 2, 3, 4, 5, 11]),
   prevalidateCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
   beginCoarse: Object.freeze([0, 2, 3, 4, 5, 11]),
@@ -161,18 +167,24 @@ const FINE_CORRECTION_PIPELINE_BINDINGS = Object.freeze([
 ]);
 const PREDICTOR_PIPELINE_NAMES = new Set([
   'initialize',
-  'registerReflux',
+  'beginRegisterReflux',
+  'claimRegisterRefluxRows',
+  'registerRefluxRows',
+  'sealRegisterReflux',
   'restrictFine',
   'finalizeBaseline',
   'injectCoarse',
-  'validateRegistry',
+  'validateRegistryRows',
   'updatePredictors',
   'contactPredictors',
   'sealPredictors'
 ]);
 const TERMINAL_PIPELINE_NAMES = new Set([
   'initializeTerminal',
-  'registerTerminal',
+  'beginRegisterTerminal',
+  'claimRegisterTerminalRows',
+  'registerTerminalRows',
+  'sealRegisterTerminal',
   'sealTerminal',
   'prevalidateCoarse',
   'validateCoarse',
@@ -1582,11 +1594,25 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   });
   const pipelines = Object.freeze({
     initialize: pipeline('initialize', 'initialize_parent_field_workspace'),
-    registerReflux: pipeline('registerReflux', 'register_reflux_coarse_registry'),
+    beginRegisterReflux:
+      pipeline('beginRegisterReflux', 'begin_reflux_coarse_registry'),
+    claimRegisterRefluxRows: pipeline(
+      'claimRegisterRefluxRows',
+      'claim_reflux_coarse_registry_rows'
+    ),
+    registerRefluxRows: pipeline(
+      'registerRefluxRows',
+      'register_reflux_coarse_registry_rows'
+    ),
+    sealRegisterReflux:
+      pipeline('sealRegisterReflux', 'seal_reflux_coarse_registry'),
     restrictFine: pipeline('restrictFine', 'restrict_fine_field_state'),
     finalizeBaseline: pipeline('finalizeBaseline', 'finalize_fine_parent_baseline'),
     injectCoarse: pipeline('injectCoarse', 'inject_coarse_native_state'),
-    validateRegistry: pipeline('validateRegistry', 'validate_reflux_coarse_registry_mass'),
+    validateRegistryRows: pipeline(
+      'validateRegistryRows',
+      'validate_reflux_coarse_registry_mass_rows'
+    ),
     updatePredictors: pipeline('updatePredictors', 'update_parent_field_predictors'),
     contactPredictors: pipeline('contactPredictors', 'contact_parent_field_predictors'),
     sealPredictors: pipeline('sealPredictors', 'seal_parent_field_predictors'),
@@ -1626,7 +1652,18 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     proposeCrossLevelPhaseVolume:
       pipeline('proposeCrossLevelPhaseVolume', 'propose_cross_level_phase_volume'),
     initializeTerminal: pipeline('initializeTerminal', 'initialize_coarse_terminal_workspace'),
-    registerTerminal: pipeline('registerTerminal', 'register_coarse_terminal_registry'),
+    beginRegisterTerminal:
+      pipeline('beginRegisterTerminal', 'begin_coarse_terminal_registry'),
+    claimRegisterTerminalRows: pipeline(
+      'claimRegisterTerminalRows',
+      'claim_coarse_terminal_registry_rows'
+    ),
+    registerTerminalRows: pipeline(
+      'registerTerminalRows',
+      'register_coarse_terminal_registry_rows'
+    ),
+    sealRegisterTerminal:
+      pipeline('sealRegisterTerminal', 'seal_coarse_terminal_registry'),
     sealTerminal: pipeline('sealTerminal', 'seal_coarse_terminal_workspace'),
     prevalidateCoarse: pipeline('prevalidateCoarse', 'begin_coarse_terminal_validation'),
     beginCoarse: pipeline('beginCoarse', 'begin_coarse_velocity_publish'),
@@ -2432,8 +2469,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         parentIndirectBuffer: arena.parentIndirectBuffer,
         fineIndirectBuffer: arena.fineIndirectBuffer,
         coarseIndirectBuffer: arena.coarseIndirectBuffer,
-        encodedDispatchCount: 9,
-        encodedComputePassCount: workspaceTimestampSpansActive() ? 9 : 1,
+        encodedDispatchCount: 12,
+        encodedComputePassCount: workspaceTimestampSpansActive() ? 12 : 1,
         retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
@@ -2518,9 +2555,26 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           bindGroup: predictorBindGroup('initialize')
         },
         {
+          name: 'begin-register-reflux-keys',
+          pipeline: pipelines.beginRegisterReflux,
+          bindGroup: predictorBindGroup('beginRegisterReflux')
+        },
+        {
+          name: 'claim-register-reflux-keys',
+          pipeline: pipelines.claimRegisterRefluxRows,
+          bindGroup: predictorBindGroup('claimRegisterRefluxRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
           name: 'register-reflux-keys',
-          pipeline: pipelines.registerReflux,
-          bindGroup: predictorBindGroup('registerReflux')
+          pipeline: pipelines.registerRefluxRows,
+          bindGroup: predictorBindGroup('registerRefluxRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'seal-register-reflux-keys',
+          pipeline: pipelines.sealRegisterReflux,
+          bindGroup: predictorBindGroup('sealRegisterReflux')
         },
         {
           name: 'restrict-fine',
@@ -2542,8 +2596,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         },
         {
           name: 'validate-registry',
-          pipeline: pipelines.validateRegistry,
-          bindGroup: predictorBindGroup('validateRegistry')
+          pipeline: pipelines.validateRegistryRows,
+          bindGroup: predictorBindGroup('validateRegistryRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
         },
         {
           name: 'update-predictors',
@@ -3350,8 +3405,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         parentIndirectBuffer: arena.parentIndirectBuffer,
         fineIndirectBuffer: arena.fineIndirectBuffer,
         coarseIndirectBuffer: arena.coarseIndirectBuffer,
-        encodedDispatchCount: 12,
-        encodedComputePassCount: workspaceTimestampSpansActive() ? 12 : 1,
+        encodedDispatchCount: 15,
+        encodedComputePassCount: workspaceTimestampSpansActive() ? 15 : 1,
         retainedGpuBufferBytes,
         gpuBufferCreationCountDuringEncode: 0,
         bufferAllocationCountDuringEncode: 0,
@@ -3502,9 +3557,26 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
           bindGroup: terminalBindGroup('initializeTerminal')
         },
         {
+          name: 'begin-register-terminal',
+          pipeline: pipelines.beginRegisterTerminal,
+          bindGroup: terminalBindGroup('beginRegisterTerminal')
+        },
+        {
+          name: 'claim-register-terminal',
+          pipeline: pipelines.claimRegisterTerminalRows,
+          bindGroup: terminalBindGroup('claimRegisterTerminalRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
           name: 'register-terminal',
-          pipeline: pipelines.registerTerminal,
-          bindGroup: terminalBindGroup('registerTerminal')
+          pipeline: pipelines.registerTerminalRows,
+          bindGroup: terminalBindGroup('registerTerminalRows'),
+          indirectBuffer: arena.coarseIndirectBuffer
+        },
+        {
+          name: 'seal-register-terminal',
+          pipeline: pipelines.sealRegisterTerminal,
+          bindGroup: terminalBindGroup('sealRegisterTerminal')
         },
         {
           name: 'seal-terminal-workspace',

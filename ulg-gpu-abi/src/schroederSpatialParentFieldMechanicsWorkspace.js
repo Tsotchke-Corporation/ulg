@@ -13,6 +13,8 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARAMS_BYTES = 3
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ATOMIC_SCALE = 65536;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_BINDING_ALIGNMENT_WORDS =
   64;
+export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARENT_TO_COARSE_ORDINAL_ENCODING =
+  'zero-absent-u32-max-minus-ordinal-v1';
 
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_READY = 1 << 0;
 export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_STATUS_ADMITTED = 1 << 1;
@@ -169,6 +171,8 @@ export const SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_ABI = Object.fre
     'nonnegative-grid-kinetic-loss-deposited-through-transpose-g2p',
   refluxEvidence:
     'keyed-equal-opposite-linear-angular-momentum-pressure-drag-and-total-energy-ledger',
+  parentToCoarseOrdinalEncoding:
+    SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARENT_TO_COARSE_ORDINAL_ENCODING,
   thirdLevel: 'forbidden'
 });
 
@@ -309,6 +313,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceLayout({
     parentToCoarseOrdinalOffsetWords,
     parentToCoarseOrdinalPaddingWords,
     parentToCoarseOrdinalWords: capacity,
+    parentToCoarseOrdinalEncoding:
+      SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_PARENT_TO_COARSE_ORDINAL_ENCODING,
     workspaceBindingWordLength: parentToCoarseOrdinalOffsetWords,
     workspaceBindingByteLength:
       parentToCoarseOrdinalOffsetWords * Uint32Array.BYTES_PER_ELEMENT,

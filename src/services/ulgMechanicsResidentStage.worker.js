@@ -5915,8 +5915,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     mechanicsFieldConstructionMode:
       kernelResult.mechanicsFieldConstructionMode ?? null,
     lawQueueStatus: kernelResult.lawQueueStatus ?? null,
+    lawQueueConsumerStatus:
+      kernelResult.lawQueueConsumerStatus ?? null,
     lawNeighborCandidateStatus:
       kernelResult.lawNeighborCandidateStatus ?? null,
+    lawNeighborCandidateConsumerStatus:
+      kernelResult.lawNeighborCandidateConsumerStatus ?? null,
     crossLevelCouplingStatus:
       kernelResult.crossLevelCouplingStatus ?? null,
     conservativeTransferStatus:

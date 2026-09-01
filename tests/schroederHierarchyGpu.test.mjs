@@ -8706,6 +8706,71 @@ test('Schroeder default closure advances actual resident motion exactly once', a
   );
 });
 
+test('canonical exact-near consumers suppress legacy law-neighbor producers', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  buffers.sphParticleState.stateStrideBytes =
+    8 * Float32Array.BYTES_PER_ELEMENT;
+  buffers.sphParticleState.thermoStrideBytes =
+    12 * Float32Array.BYTES_PER_ELEMENT;
+  buffers.mlsMpmParticleState.mechanicsStrideBytes =
+    MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+    * Float32Array.BYTES_PER_ELEMENT;
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount: 3,
+    storageGeneration: 5,
+    physicsTick: 7,
+    positionEpoch: 13,
+    topologyEpoch: 17,
+    chartEpoch: 19,
+    levelEpoch: 23,
+    supportEpoch: 29,
+    prefix: 'canonical-exact-near-law-neighbor-supersession'
+  });
+  await assert.rejects(
+    () => runSchroederSameLevelMechanicsWebGpu({
+      device,
+      ...buffers,
+      ...uploads,
+      selectedLevel: 0,
+      baseGridSpacingM: 0.25,
+      enableActiveNodeIndex: true,
+      enableActiveNodeSortedIndex: false,
+      activeNodeSortedIndexPolicyMode:
+        SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_FORCE_MODE,
+      enableLawQueue: true,
+      enableLawNeighborCandidates: true,
+      enableCrossLevelCoupling: false,
+      enablePressureInterfaceOwnerScope: false,
+      spatialTransitionPolicy:
+        SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC,
+      spatialTopologyTransitionRunner: async () => {
+        throw new Error('stop after canonical resident liveness proof');
+      },
+      activeNodeIndexRunner: null,
+      activeNodeSortedIndexRunner: null,
+      lawNeighborCandidateRunner: null
+    }),
+    /stop after canonical resident liveness proof/
+  );
+
+  assert.equal(
+    device.createdBuffers.some((buffer) => (
+      buffer.label === 'ulg-schroeder-law-queue-out'
+    )),
+    true,
+    'the canonical queue remains the dynamic-law activation carrier'
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => (
+      String(buffer.label).includes('law-neighbor-candidates')
+      || String(buffer.label).includes('active-node-index')
+      || String(buffer.label).includes('active-node-sorted-index')
+    )),
+    false
+  );
+});
+
 test('Schroeder conservative closure invalidates epochs without compact transition readback', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });

@@ -294,8 +294,12 @@ async function readWorkerOwnedResidentLaneSnapshot(page) {
           mechanicsFieldPairV2Enabled:
             hierarchy.mechanicsFieldPairV2Enabled ?? null,
           lawQueueStatus: hierarchy.lawQueueStatus ?? null,
+          lawQueueConsumerStatus:
+            hierarchy.lawQueueConsumerStatus ?? null,
           lawNeighborCandidateStatus:
             hierarchy.lawNeighborCandidateStatus ?? null,
+          lawNeighborCandidateConsumerStatus:
+            hierarchy.lawNeighborCandidateConsumerStatus ?? null,
           residentStageStatus: hierarchy.residentStageStatus || null,
           residentStageBackends: hierarchy.residentStageBackends || null,
           phaseVolumeMigrationStatus:
@@ -5068,8 +5072,12 @@ test.describe('SPH Pixel-class mobile resident liveness', () => {
         mechanicsLevelCount: 1,
         twoLevelMechanicsEnabled: false,
         lawQueueStatus: 'schroeder-law-queue-submitted',
+        lawQueueConsumerStatus:
+          'law-queue-retained-as-canonical-dynamic-law-activation-carrier',
         lawNeighborCandidateStatus:
-          'schroeder-law-neighbor-candidates-submitted',
+          'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers',
+        lawNeighborCandidateConsumerStatus:
+          'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates',
         thermalRequested: true,
         reactionRequested: expectReaction,
         fullParticleReadbackFree: true
@@ -5331,8 +5339,12 @@ test.describe('SPH Pixel-class mobile resident liveness', () => {
               mechanicsFieldPairV2Enabled:
                 hierarchy.mechanicsFieldPairV2Enabled ?? null,
               lawQueueStatus: hierarchy.lawQueueStatus ?? null,
+              lawQueueConsumerStatus:
+                hierarchy.lawQueueConsumerStatus ?? null,
               lawNeighborCandidateStatus:
                 hierarchy.lawNeighborCandidateStatus ?? null,
+              lawNeighborCandidateConsumerStatus:
+                hierarchy.lawNeighborCandidateConsumerStatus ?? null,
               residentStageStatus: hierarchy.residentStageStatus || null,
               residentStageBackends: hierarchy.residentStageBackends || null,
               staticGpuTableUploadStatus:
@@ -10547,7 +10559,12 @@ test('SPH phase reactive product history remains worker-retained across schedule
       mechanicsLevelCount: 1,
       twoLevelMechanicsEnabled: false,
       lawQueueStatus: 'schroeder-law-queue-submitted',
-      lawNeighborCandidateStatus: 'schroeder-law-neighbor-candidates-submitted',
+      lawQueueConsumerStatus:
+        'law-queue-retained-as-canonical-dynamic-law-activation-carrier',
+      lawNeighborCandidateStatus:
+        'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers',
+      lawNeighborCandidateConsumerStatus:
+        'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates',
       thermalRequested: true,
       reactionRequested: true,
       fullParticleReadbackFree: true

@@ -7983,9 +7983,15 @@ async function runBrowserProbe({
                   lawQueueStatus:
                     steps.workerOwnedResidentLane.hierarchyStageSummary
                       .lawQueueStatus ?? null,
+                  lawQueueConsumerStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .lawQueueConsumerStatus ?? null,
                   lawNeighborCandidateStatus:
                     steps.workerOwnedResidentLane.hierarchyStageSummary
                       .lawNeighborCandidateStatus ?? null,
+                  lawNeighborCandidateConsumerStatus:
+                    steps.workerOwnedResidentLane.hierarchyStageSummary
+                      .lawNeighborCandidateConsumerStatus ?? null,
                   crossLevelCouplingStatus:
                     steps.workerOwnedResidentLane.hierarchyStageSummary
                       .crossLevelCouplingStatus ?? null,

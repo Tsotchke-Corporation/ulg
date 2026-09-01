@@ -39077,7 +39077,10 @@ fn main(
             phaseVolumeDiagnosticSummary:
               result.phaseVolumeDiagnosticSummary ?? null,
             lawQueueStatus: result.lawQueueStatus ?? null,
+            lawQueueConsumerStatus: result.lawQueueConsumerStatus ?? null,
             lawNeighborCandidateStatus: result.lawNeighborCandidateStatus ?? null,
+            lawNeighborCandidateConsumerStatus:
+              result.lawNeighborCandidateConsumerStatus ?? null,
             pressureInterfaceOwnerScopeStatus:
               result.pressureInterfaceOwnerScopeStatus ?? null,
             pressureInterfaceOwnerScopeEligible:

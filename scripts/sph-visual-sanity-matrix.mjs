@@ -2037,11 +2037,18 @@ export function evaluateWorkerOwnedSsFrameworkEvidence(scenario, probe) {
       ) {
         blockers.push('reaction-law-path-unproven');
       }
+      const canonicalExactNearLocalLawPath = Boolean(
+        hierarchy?.lawNeighborCandidateStatus
+          === 'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers'
+        && hierarchy?.lawNeighborCandidateConsumerStatus
+          === 'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates'
+        && hierarchy?.lawQueueConsumerStatus
+          === 'law-queue-retained-as-canonical-dynamic-law-activation-carrier'
+      );
       if (
         Number(hierarchy?.mechanicsLevelCount) < 1
         || hierarchy?.lawQueueStatus !== 'schroeder-law-queue-submitted'
-        || hierarchy?.lawNeighborCandidateStatus
-          !== 'schroeder-law-neighbor-candidates-submitted'
+        || !canonicalExactNearLocalLawPath
       ) {
         blockers.push('local-law-queue-path-unproven');
       }

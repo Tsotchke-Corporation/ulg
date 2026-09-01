@@ -229,8 +229,12 @@ function workerOwnedVisualMetric(overrides = {}) {
           twoLevelAuthoritativeCommitVerified: false,
           mechanicsFieldPairV2Enabled: false,
           lawQueueStatus: 'schroeder-law-queue-submitted',
+          lawQueueConsumerStatus:
+            'law-queue-retained-as-canonical-dynamic-law-activation-carrier',
           lawNeighborCandidateStatus:
-            'schroeder-law-neighbor-candidates-submitted',
+            'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers',
+          lawNeighborCandidateConsumerStatus:
+            'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates',
           residentStageStatus: {
             thermal: 'thermal-step-executed',
             reaction: 'missing'

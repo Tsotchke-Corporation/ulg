@@ -919,9 +919,15 @@ function syntheticPassingTimeline(scenario) {
       lawQueueStatus: twoLevel
         ? 'disabled-local-law-queue'
         : 'schroeder-law-queue-submitted',
+      lawQueueConsumerStatus: twoLevel
+        ? 'disabled-local-law-queue'
+        : 'law-queue-retained-as-canonical-dynamic-law-activation-carrier',
       lawNeighborCandidateStatus: twoLevel
         ? 'disabled-local-law-queue'
-        : 'schroeder-law-neighbor-candidates-submitted',
+        : 'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers',
+      lawNeighborCandidateConsumerStatus: twoLevel
+        ? 'disabled-local-law-queue'
+        : 'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates',
       residentStageStatus: {
         thermal: 'thermal-step-executed',
         reaction: reaction ? 'reaction-step-executed' : 'missing'

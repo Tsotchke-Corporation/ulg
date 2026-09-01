@@ -17195,17 +17195,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       'runSchroederSameLevelMechanicsWebGpu requires a pressureInterfaceStageRunner function when owner-scope pressure is enabled'
     );
   }
-  if (enableActiveNodeIndex && typeof activeNodeIndexRunner !== 'function') {
-    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeIndexRunner function');
-  }
-  if (enableActiveNodeSortedIndex && typeof activeNodeSortedIndexRunner !== 'function') {
-    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeSortedIndexRunner function');
-  }
   if (enableLawQueue && typeof lawQueueRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a lawQueueRunner function');
-  }
-  if (enableLawQueue && enableLawNeighborCandidates && typeof lawNeighborCandidateRunner !== 'function') {
-    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a lawNeighborCandidateRunner function');
   }
   if (enableCrossLevelCoupling && typeof crossLevelCouplingRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelCouplingRunner function');
@@ -19183,6 +19174,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     'spatial-epoch-transaction-mount',
     { mounted: Boolean(spatialEpochTransaction) }
   );
+  // The canonical resident runner consumes exact-near pairs directly from
+  // this authenticated transaction. Its pressure/contact path rejects legacy
+  // law-neighbour rows, and canonical reaction discovery quarantines them.
+  // Once that consumer capability is present, producing a second fixed-budget
+  // neighbour family (plus its two private indexes) is dead work, not a
+  // fallback. Keep the law queue itself: it is the node-scoped carrier for the
+  // dynamic-law activation mask, while the exact-near transaction owns pair
+  // discovery.
+  const canonicalExactNearSupersedesLegacyLawNeighbors = Boolean(
+    spatialEpochTransaction
+    && residentRunnerExactNearConsumerAware
+  );
+  const activeNodeIndexSuperseded = Boolean(
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    && enableActiveNodeIndex
+  );
   if (twoLevelAuthoritative) {
     twoLevelCanonicalEpochController =
       createSchroederTwoLevelCanonicalEpochController({
@@ -19368,7 +19375,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   //
   // Row-shape mismatch stays loud rather than silent: the law-neighbour runner
   // throws if `activeNodeIndex.activeNodeCount !== activeNodeCount`.
-  const resolvedActiveNodeIndex = !enableActiveNodeIndex
+  if (
+    !canonicalExactNearSupersedesLegacyLawNeighbors
+    && enableActiveNodeIndex
+    && typeof activeNodeIndexRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeIndexRunner function');
+  }
+  const resolvedActiveNodeIndex = canonicalExactNearSupersedesLegacyLawNeighbors
+    || !enableActiveNodeIndex
     ? null
     : activeNodeIndex || await activeNodeIndexRunner({
       device,
@@ -19383,7 +19398,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           === SCHROEDER_NO_FULL_READBACK_MODE
     });
   registerHierarchyArtifacts('active-node-index', resolvedActiveNodeIndex, activeNodeIndex);
-  const activeNodeSortedIndexSelection = createSchroederActiveNodeSortedIndexSelection({
+  const requestedActiveNodeSortedIndexSelection = createSchroederActiveNodeSortedIndexSelection({
     activeNodeSortedIndex,
     // Same over-broad Slice 6 gate as the bucket index above, removed for the
     // same reason and with the same measurement. With both gone and the sorted
@@ -19399,7 +19414,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     lawNeighborTraversalPolicyMode,
     lawNeighborTraversalDiagnosticCounters,
     lawNeighborCandidates,
-    activeNodeIndexEnabled: Boolean(resolvedActiveNodeIndex),
+    activeNodeIndexEnabled: Boolean(
+      resolvedActiveNodeIndex
+      || (
+        canonicalExactNearSupersedesLegacyLawNeighbors
+        && enableActiveNodeIndex
+      )
+    ),
     activeNodeIndexBucketCount: resolvedActiveNodeIndex?.bucketCount ?? activeNodeIndexBucketCount ?? 0,
     lawQueueCount: resolvedActiveNodeList.activeNodeCount,
     candidateBudget: lawNeighborCandidateBudget,
@@ -19407,10 +19428,45 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     bucketPressureRatioThreshold: lawNeighborTraversalPolicyBucketPressureRatioThreshold,
     sortedRadixTraversalAvailable
   });
+  const activeNodeSortedIndexSuperseded = Boolean(
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    && requestedActiveNodeSortedIndexSelection.selected
+  );
+  const activeNodeSortedIndexSelection = canonicalExactNearSupersedesLegacyLawNeighbors
+    ? {
+        ...requestedActiveNodeSortedIndexSelection,
+        requestedSelectionStatus:
+          requestedActiveNodeSortedIndexSelection.status,
+        requestedBuildReason:
+          requestedActiveNodeSortedIndexSelection.buildReason,
+        requestedTraversalIndexMode:
+          requestedActiveNodeSortedIndexSelection.selectedTraversalIndexMode,
+        supersededByCanonicalExactNearConsumers: true,
+        status: activeNodeSortedIndexSuperseded
+          ? 'active-node-sorted-index-policy-superseded-by-canonical-exact-near-consumers'
+          : requestedActiveNodeSortedIndexSelection.status,
+        selected: false,
+        shouldBuild: false,
+        buildReason: activeNodeSortedIndexSuperseded
+          ? 'canonical-exact-near-consumers-require-no-legacy-law-neighbor-index'
+          : requestedActiveNodeSortedIndexSelection.buildReason,
+        sortedRadixIndexStatus: activeNodeSortedIndexSuperseded
+          ? 'sorted-radix-active-node-index-superseded-by-canonical-exact-near-consumers'
+          : requestedActiveNodeSortedIndexSelection.sortedRadixIndexStatus,
+        sortedRadixBuildTrigger: null,
+        sortedRadixBuildAllowedByPolicy: false,
+        selectedTraversalIndexMode: null,
+        sortedRadixEscalationTrigger: null,
+        sortedRadixIndexRequired: false,
+        sortedRadixTraversalAvailable: false
+      }
+    : requestedActiveNodeSortedIndexSelection;
   if (activeNodeSortedIndexSelection.shouldBuild && typeof activeNodeSortedIndexRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeSortedIndexRunner function');
   }
-  const resolvedActiveNodeSortedIndex = !activeNodeSortedIndexSelection.selected
+  const resolvedActiveNodeSortedIndex =
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    || !activeNodeSortedIndexSelection.selected
     ? null
     : activeNodeSortedIndex || await activeNodeSortedIndexRunner({
       device,
@@ -19442,7 +19498,24 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
     });
   registerHierarchyArtifacts('law-queue', resolvedLawQueue, lawQueue);
-  const resolvedLawNeighborCandidates = twoLevelAuthoritative
+  const lawNeighborCandidatesSuperseded = Boolean(
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    && !twoLevelAuthoritative
+    && resolvedLawQueue
+    && enableLawNeighborCandidates
+  );
+  if (
+    !canonicalExactNearSupersedesLegacyLawNeighbors
+    && !twoLevelAuthoritative
+    && resolvedLawQueue
+    && enableLawNeighborCandidates
+    && typeof lawNeighborCandidateRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a lawNeighborCandidateRunner function');
+  }
+  const resolvedLawNeighborCandidates =
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    || twoLevelAuthoritative
     || !resolvedLawQueue
     || !enableLawNeighborCandidates
     ? null
@@ -21314,10 +21387,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && resolvedSpatialEpochGeneration.execution.queryGeometryEvidence
       === resolvedSpatialEpochGeneration.execution.exactNearQueryProfile
   );
-  const pressureInterfaceOwnerScopeSupersededByExactNearProposal = Boolean(
-    spatialEpochTransaction
-    && residentRunnerExactNearConsumerAware
-  );
+  const pressureInterfaceOwnerScopeSupersededByExactNearProposal =
+    canonicalExactNearSupersedesLegacyLawNeighbors;
   const pressureInterfaceOwnerScopeEligibilityBlockers = [
     !enablePressureInterfaceOwnerScope && 'owner-scope-disabled',
     pressureInterfaceOwnerScopeSupersededByExactNearProposal
@@ -22679,10 +22750,23 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     activeNodeSortedIndexSelection: {
       policyMode: activeNodeSortedIndexSelection.policyMode,
       status: activeNodeSortedIndexSelection.status,
+      requestedSelectionStatus:
+        activeNodeSortedIndexSelection.requestedSelectionStatus ?? null,
+      requestedBuildReason:
+        activeNodeSortedIndexSelection.requestedBuildReason ?? null,
+      requestedTraversalIndexMode:
+        activeNodeSortedIndexSelection.requestedTraversalIndexMode ?? null,
+      supersededByCanonicalExactNearConsumers:
+        activeNodeSortedIndexSelection
+          .supersededByCanonicalExactNearConsumers === true,
       selected: activeNodeSortedIndexSelection.selected,
       shouldBuild: activeNodeSortedIndexSelection.shouldBuild,
       suppliedRetainedIndex: activeNodeSortedIndexSelection.suppliedRetainedIndex,
       buildReason: activeNodeSortedIndexSelection.buildReason,
+      sortedRadixBuildTrigger:
+        activeNodeSortedIndexSelection.sortedRadixBuildTrigger,
+      sortedRadixBuildAllowedByPolicy:
+        activeNodeSortedIndexSelection.sortedRadixBuildAllowedByPolicy,
       forcedByUseCaseConfig: activeNodeSortedIndexSelection.forcedByUseCaseConfig,
       forcedByLegacyFlag: activeNodeSortedIndexSelection.forcedByLegacyFlag,
       forcedByTraversalPolicy: activeNodeSortedIndexSelection.forcedByTraversalPolicy,
@@ -23601,32 +23685,54 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       resolvedActiveNodeList.phaseVolumeAssignmentOverlayFullParticleReadbackRequired === true,
     phaseVolumeLevelSelectionSource: resolvedActiveNodeList.phaseVolumeLevelSelectionSource
       ?? 'configured-selected-schroeder-level',
-    activeNodeIndexStatus: resolvedActiveNodeIndex?.status ?? 'disabled-active-node-index',
+    activeNodeIndexStatus: resolvedActiveNodeIndex?.status ?? (
+      activeNodeIndexSuperseded
+        ? 'schroeder-active-node-index-superseded-by-canonical-exact-near-consumers'
+        : 'disabled-active-node-index'
+    ),
     activeNodeSortedIndexPolicyStatus: activeNodeSortedIndexSelection.status,
     activeNodeSortedIndexPolicyMode: activeNodeSortedIndexSelection.policyMode,
     activeNodeSortedIndexBuildReason: activeNodeSortedIndexSelection.buildReason,
-    activeNodeSortedIndexStatus: resolvedActiveNodeSortedIndex?.status ?? 'disabled-active-node-sorted-index',
+    activeNodeSortedIndexStatus: resolvedActiveNodeSortedIndex?.status ?? (
+      activeNodeSortedIndexSuperseded
+        ? 'schroeder-active-node-sorted-index-superseded-by-canonical-exact-near-consumers'
+        : 'disabled-active-node-sorted-index'
+    ),
     activeNodeSortedIndexConsumerStatus: resolvedLawNeighborCandidates?.activeNodeSortedIndexEnabled
       ? 'active-node-sorted-radix-index-consumed-by-law-neighbor-traversal'
       : (resolvedActiveNodeSortedIndex
         ? 'active-node-sorted-radix-index-available-not-yet-consumed'
-        : 'disabled-active-node-sorted-index'),
+        : (activeNodeSortedIndexSuperseded
+          ? 'active-node-sorted-index-not-produced-canonical-exact-near-consumers'
+          : 'disabled-active-node-sorted-index')),
     activeNodeIndexConsumerStatus: resolvedLawNeighborCandidates?.activeNodeIndexConsumerStatus
       ?? (resolvedActiveNodeIndex
         ? 'active-node-index-available-not-yet-authoritative-for-law-neighbor-traversal'
-        : 'disabled-active-node-index'),
+        : (activeNodeIndexSuperseded
+          ? 'active-node-index-not-produced-canonical-exact-near-consumers'
+          : 'disabled-active-node-index')),
     lawQueueStatus: resolvedLawQueue?.status ?? 'disabled-local-law-queue',
     lawQueueConsumerStatus: resolvedLawQueue
       ? (resolvedLawNeighborCandidates
         ? 'law-queue-consumed-by-law-neighbor-candidates-and-forwarded-to-resident-backend'
-        : 'law-queue-submitted-not-yet-consumed-by-reaction-contact-interface')
+        : (canonicalExactNearSupersedesLegacyLawNeighbors
+          ? 'law-queue-retained-as-canonical-dynamic-law-activation-carrier'
+          : 'law-queue-submitted-not-yet-consumed-by-reaction-contact-interface'))
       : 'disabled-local-law-queue',
     lawNeighborCandidateStatus: resolvedLawNeighborCandidates?.status ?? (
-      resolvedLawQueue ? 'disabled-law-neighbor-candidates' : 'disabled-local-law-queue'
+      !resolvedLawQueue
+        ? 'disabled-local-law-queue'
+        : (lawNeighborCandidatesSuperseded
+        ? 'schroeder-law-neighbor-candidates-superseded-by-canonical-exact-near-consumers'
+        : 'disabled-law-neighbor-candidates')
     ),
     lawNeighborCandidateConsumerStatus: resolvedLawNeighborCandidates
       ? 'law-neighbor-candidates-forwarded-to-resident-backend'
-      : (resolvedLawQueue ? 'disabled-law-neighbor-candidates' : 'disabled-local-law-queue'),
+      : (!resolvedLawQueue
+        ? 'disabled-local-law-queue'
+        : (lawNeighborCandidatesSuperseded
+          ? 'canonical-exact-near-consumers-reject-legacy-law-neighbor-candidates'
+          : 'disabled-law-neighbor-candidates')),
     farAggregateCandidateStatus: resolvedFarAggregateCandidates?.status ?? (
       resolvedHierarchyAggregateNode ? 'disabled-far-aggregate-candidates' : 'disabled-hierarchy-aggregate-node-reduction'
     ),

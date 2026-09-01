@@ -99,11 +99,17 @@ test('descriptor factory produces complete budget-keyed descriptors', () => {
   // Variant-keyed build pipelines carry the projection variant and ABI.
   assert.equal(
     table.reduction.cacheKey,
-    'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.aggregate.directory-v1.v12'
+    'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.aggregate.directory-v1.v13'
   );
   assert.equal(
     table.materialize.cacheKey,
     'ulg-schroeder-spatial-mechanical-contact-graph-traversal.aggregate.directory-v1.v16'
+  );
+  assert.match(table.solverMeasure.cacheKey, /measure-runtime\.v3\./);
+  assert.match(table.solverSolve.cacheKey, /solve-runtime\.v3\./);
+  assert.match(
+    table.solverAllocateEnergy.cacheKey,
+    /energy-allocate-runtime\.v3\./
   );
   // Budget-compiled pipelines carry the sealed j{n}.p{n} suffix.
   const budgetSuffix = `.${SCHROEDER_SPATIAL_MECHANICAL_BATCH_SOLVER_BUDGET.cacheKey}`;

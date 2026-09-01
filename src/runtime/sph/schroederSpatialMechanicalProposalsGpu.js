@@ -4189,6 +4189,42 @@ fn reduce_support(@builtin(global_invocation_id) global_id: vec3<u32>) {
         ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
       );
     }
+  } else if (mechanically_dormant) {
+    // Dormant phase-carrier rows never own graph edges, but Jacobi still
+    // carries their epoch-ball trust through the same sealed row counts as
+    // active particles.  Preserve the exact raw-source geometry they used
+    // before the phase-local cache alias; descriptor bit 0 intentionally
+    // remains clear so a dormant row can never authorize a contact pair.
+    let support_base = mechanical_graph_support_row_base(particle_index);
+    let diameter_m = mechanical_graph_cbrt(volume);
+    let epoch_position = mechanical_graph_epoch_position(particle_index);
+    if (
+      !ss_exact_near_finite(diameter_m)
+      || !all(vec3<bool>(
+        ss_exact_near_finite(epoch_position.x),
+        ss_exact_near_finite(epoch_position.y),
+        ss_exact_near_finite(epoch_position.z)
+      ))
+    ) {
+      atomicOr(
+        &graph_control[14u],
+        ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+      );
+    } else {
+      atomicStore(&global_support_bits[support_base], bitcast<u32>(diameter_m));
+      atomicStore(
+        &global_support_bits[support_base + 4u],
+        bitcast<u32>(epoch_position.x)
+      );
+      atomicStore(
+        &global_support_bits[support_base + 5u],
+        bitcast<u32>(epoch_position.y)
+      );
+      atomicStore(
+        &global_support_bits[support_base + 6u],
+        bitcast<u32>(epoch_position.z)
+      );
+    }
   }
   if (source_rank == 0u) {
     if (
@@ -5652,6 +5688,21 @@ fn validate_contact_graph_csr(
     }
   }
   if (source_valid) {
+    // Graph construction no longer needs the per-row build metadata after
+    // reciprocal CSR validation. Compact the immutable Jacobi geometry into
+    // one aligned vec4 at row words 2..5: epoch xyz followed by diameter.
+    // The solver can then consume one coalesced load per endpoint instead of
+    // re-reading volume and three separately addressed epoch words per law.
+    let support_base = ${MECHANICAL_SUPPORT_HEADER_WORDS}u
+      + self_index * ${MECHANICAL_SUPPORT_ROW_WORDS}u;
+    let diameter_bits = atomicLoad(&global_support_bits[support_base]);
+    let epoch_x_bits = atomicLoad(&global_support_bits[support_base + 4u]);
+    let epoch_y_bits = atomicLoad(&global_support_bits[support_base + 5u]);
+    let epoch_z_bits = atomicLoad(&global_support_bits[support_base + 6u]);
+    atomicStore(&global_support_bits[support_base + 2u], epoch_x_bits);
+    atomicStore(&global_support_bits[support_base + 3u], epoch_y_bits);
+    atomicStore(&global_support_bits[support_base + 4u], epoch_z_bits);
+    atomicStore(&global_support_bits[support_base + 5u], diameter_bits);
     atomicAdd(&graph_control[16u], 1u);
   }
   if (self_index == 0u) {
@@ -5689,7 +5740,7 @@ ${mechanicalSolverInputStateReadWriteDeclarationWgsl}
 @group(0) @binding(6) var<storage, read> source_offsets: array<u32>;
 @group(0) @binding(7) var<storage, read_write> particle_scales: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> graph_control: array<atomic<u32>>;
-@group(0) @binding(9) var<storage, read> spatial_source_rows: array<f32>;
+@group(0) @binding(9) var<storage, read> spatial_source_rows: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read_write> traversal_evidence: array<atomic<u32>>;
 @group(0) @binding(11) var<uniform> mechanical_params: MechanicalProposalParams;
 @group(0) @binding(12) var<storage, read_write> energy_ledger: array<vec4<f32>>;
@@ -6160,12 +6211,51 @@ fn mechanical_solver_source_row_base(index: u32) -> u32 {
 }
 
 fn mechanical_solver_epoch_position(index: u32) -> vec3<f32> {
-  let base = mechanical_solver_source_row_base(index);
-  return vec3<f32>(
-    spatial_source_rows[base + 12u],
-    spatial_source_rows[base + 13u],
-    spatial_source_rows[base + 14u]
-  );
+  let source_vec4_base = mechanical_solver_source_row_base(index) / 4u;
+  return spatial_source_rows[source_vec4_base + 3u].xyz;
+}
+
+// The graph support reduction has already authenticated and materialized the
+// immutable diameter/epoch geometry for every active endpoint and dormant
+// trust carrier. CSR validation compacts it to one aligned vec4 per row.
+// Jacobi pipelines bind that support buffer at binding 9, while cleanup and
+// terminal verification bind the original 16-float source rows there.
+const MECHANICAL_JACOBI_GEOMETRY_VEC4_OFFSET: u32 =
+  ${((MECHANICAL_SUPPORT_HEADER_WORDS + 2) / 4) >>> 0}u;
+const MECHANICAL_JACOBI_GEOMETRY_VEC4_STRIDE: u32 =
+  ${(MECHANICAL_SUPPORT_ROW_WORDS / 4) >>> 0}u;
+
+fn mechanical_solver_jacobi_cache_header_valid() -> bool {
+  var required_vec4_count = MECHANICAL_JACOBI_GEOMETRY_VEC4_OFFSET;
+  if (mechanical_params.particle_count > 0u) {
+    required_vec4_count = MECHANICAL_JACOBI_GEOMETRY_VEC4_OFFSET
+      + (mechanical_params.particle_count - 1u)
+        * MECHANICAL_JACOBI_GEOMETRY_VEC4_STRIDE
+      + 1u;
+  }
+  return arrayLength(&spatial_source_rows) >= required_vec4_count
+    && bitcast<u32>(spatial_source_rows[0u].w)
+      == mechanical_params.particle_count;
+}
+
+fn mechanical_solver_jacobi_geometry(
+  index: u32
+) -> vec4<f32> {
+  if (index >= mechanical_params.particle_count) {
+    return vec4<f32>(0.0);
+  }
+  return spatial_source_rows[
+    MECHANICAL_JACOBI_GEOMETRY_VEC4_OFFSET
+      + index * MECHANICAL_JACOBI_GEOMETRY_VEC4_STRIDE
+  ];
+}
+
+fn mechanical_solver_jacobi_geometry_valid(
+  geometry: vec4<f32>
+) -> bool {
+  return mechanical_solver_finite3(geometry.xyz)
+    && mechanical_solver_finite(geometry.w)
+    && geometry.w > 0.0;
 }
 
 fn mechanical_solver_selected(index: u32) -> bool {
@@ -6676,7 +6766,9 @@ fn mechanical_solver_pair_response(
 fn mechanical_solver_pair(
   self_index: u32,
   other_index: u32,
-  include_soft: bool
+  include_soft: bool,
+  self_geometry: vec4<f32>,
+  other_geometry: vec4<f32>
 ) -> MechanicalPairResidual {
   if (
     self_index >= mechanical_params.particle_count
@@ -6708,16 +6800,14 @@ fn mechanical_solver_pair(
   }
   let self_pos_mass = input_state[self_index * 2u];
   let other_pos_mass = input_state[other_index * 2u];
-  let self_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
-  let other_volume = max(source_mechanics[other_index * 8u + 4u].w, 0.0);
   if (
     self_pos_mass.w <= 0.0
     || other_pos_mass.w <= 0.0
-    || self_volume <= 0.0
-    || other_volume <= 0.0
   ) { return mechanical_solver_zero_pair(1u); }
-  let self_diameter = mechanical_solver_cbrt(self_volume);
-  let other_diameter = mechanical_solver_cbrt(other_volume);
+  // The sealed graph admits only mechanically active endpoints, and every
+  // row was authenticated before CSR validation compacted this geometry.
+  let self_diameter = self_geometry.w;
+  let other_diameter = other_geometry.w;
   let rest_distance = 0.5 * (self_diameter + other_diameter);
   let delta = self_pos_mass.xyz - other_pos_mass.xyz;
   var distance_m = length(delta);
@@ -6731,8 +6821,7 @@ fn mechanical_solver_pair(
     if (distance_m > 1.0e-9) {
       soft_normal = delta / distance_m;
     } else {
-      let soft_epoch_delta = mechanical_solver_epoch_position(self_index)
-        - mechanical_solver_epoch_position(other_index);
+      let soft_epoch_delta = self_geometry.xyz - other_geometry.xyz;
       let soft_epoch_distance = length(soft_epoch_delta);
       soft_normal = select(
         mechanical_solver_coincidence_normal(self_index, other_index),
@@ -6754,8 +6843,7 @@ fn mechanical_solver_pair(
       include_soft
     );
   }
-  let epoch_delta = mechanical_solver_epoch_position(self_index)
-    - mechanical_solver_epoch_position(other_index);
+  let epoch_delta = self_geometry.xyz - other_geometry.xyz;
   let finite_volume_contact = mechanical_solver_finite_volume_contact(
     self_index,
     other_index,
@@ -6839,10 +6927,12 @@ fn mechanical_energy_iteration_stage_bit(iteration: u32) -> u32 {
     .ENERGY_ITERATIONS_8_15}u;
 }
 
-fn mechanical_solver_wall_projection_bound(self_index: u32) -> f32 {
+fn mechanical_solver_wall_projection_bound_for_diameter(
+  self_index: u32,
+  diameter_m: f32
+) -> f32 {
   let position = input_state[self_index * 2u].xyz;
-  let volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
-  var clearance = 0.5 * mechanical_solver_cbrt(volume);
+  var clearance = 0.5 * diameter_m;
   if (mechanical_params.grid_spacing_m > 0.0) {
     clearance = min(clearance, 0.5 * mechanical_params.grid_spacing_m);
   }
@@ -6856,6 +6946,14 @@ fn mechanical_solver_wall_projection_bound(self_index: u32) -> f32 {
   let lower = vec3<f32>(clearance);
   let upper = max(lower, mechanical_params.box_dims_m - lower);
   return length(clamp(position, lower, upper) - position);
+}
+
+fn mechanical_solver_wall_projection_bound(self_index: u32) -> f32 {
+  let volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
+  return mechanical_solver_wall_projection_bound_for_diameter(
+    self_index,
+    mechanical_solver_cbrt(volume)
+  );
 }
 
 fn mechanical_measure_iteration(
@@ -6890,6 +6988,13 @@ fn mechanical_measure_iteration(
     );
     return;
   }
+  if (!mechanical_solver_jacobi_cache_header_valid()) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+    return;
+  }
   if (!mechanical_solver_selected(self_index)) {
     particle_scales[self_index] = vec4<f32>(1.0);
     atomicAdd(
@@ -6909,6 +7014,15 @@ fn mechanical_measure_iteration(
     );
     return;
   }
+  let self_geometry = mechanical_solver_jacobi_geometry(self_index);
+  let self_mass = input_state[self_index * 2u].w;
+  if (!mechanical_solver_jacobi_geometry_valid(self_geometry)) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+    return;
+  }
   var barrier_dx_triangle_sum_m = 0.0;
   var soft_dx_triangle_sum_m = 0.0;
   var position_dx_sum_m = vec3<f32>(0.0);
@@ -6922,13 +7036,16 @@ fn mechanical_measure_iteration(
   var max_position_residual_m = 0.0;
   var max_position_violation_ratio = 0.0;
   var max_velocity_residual_m_per_s = 0.0;
-  let self_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
+  let self_diameter_m = self_geometry.w;
   for (var cursor = begin; cursor < end; cursor = cursor + 1u) {
     let other_index = mechanical_solver_peer_index(csr_peers[cursor]);
+    let other_geometry = mechanical_solver_jacobi_geometry(other_index);
     let pair = mechanical_solver_pair(
       self_index,
       other_index,
-      include_soft
+      include_soft,
+      self_geometry,
+      other_geometry
     );
     if (pair.valid == 0u) {
       atomicOr(
@@ -6943,13 +7060,9 @@ fn mechanical_measure_iteration(
     );
     if (pair.active_pair == 0u) { continue; }
     if (pair.unilateral == 1u) {
-      let other_volume = max(
-        source_mechanics[other_index * 8u + 4u].w,
-        0.0
-      );
       let rest_distance_m = 0.5 * (
-        mechanical_solver_cbrt(self_volume)
-          + mechanical_solver_cbrt(other_volume)
+        self_diameter_m
+          + other_geometry.w
       );
       let position_tolerance_m = max(
         1.0e-5,
@@ -6980,7 +7093,6 @@ fn mechanical_measure_iteration(
       length(pair_position_dx_m)
     );
     if (dot(pair.velocity_normal, pair.velocity_normal) > 0.5) {
-      let self_mass = input_state[self_index * 2u].w;
       let other_mass = input_state[other_index * 2u].w;
       let self_inverse_mass = 1.0 / max(self_mass, 1.0e-30);
       let other_inverse_mass = 1.0 / max(other_mass, 1.0e-30);
@@ -7001,13 +7113,15 @@ fn mechanical_measure_iteration(
         + inverse_mass_share * direction.z * direction.z;
     }
   }
-  let self_diameter_m = mechanical_solver_cbrt(self_volume);
   let initial_displacement_m = length(
     input_state[self_index * 2u].xyz
-      - mechanical_solver_epoch_position(self_index)
+      - self_geometry.xyz
   );
   let current_wall_projection_m =
-    mechanical_solver_wall_projection_bound(self_index);
+    mechanical_solver_wall_projection_bound_for_diameter(
+      self_index,
+      self_diameter_m
+    );
   let position_trust_capacity_m = select(
     ${SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS}.0
       * self_diameter_m
@@ -7235,6 +7349,13 @@ fn mechanical_solve_iteration(
     );
     return;
   }
+  if (!mechanical_solver_jacobi_cache_header_valid()) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+    return;
+  }
   if (!mechanical_solver_selected(self_index) || pos_mass.w <= 0.0) {
     atomicAdd(
       &graph_control[mechanical_solve_count_word(iteration)],
@@ -7247,6 +7368,14 @@ fn mechanical_solve_iteration(
         mechanical_iteration_stage_bit(iteration)
       );
     }
+    return;
+  }
+  let self_geometry = mechanical_solver_jacobi_geometry(self_index);
+  if (!mechanical_solver_jacobi_geometry_valid(self_geometry)) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
     return;
   }
   let begin = source_offsets[self_index];
@@ -7266,7 +7395,14 @@ fn mechanical_solve_iteration(
     let encoded_peer = csr_peers[cursor];
     if (mechanical_solver_edge_inactive(encoded_peer)) { continue; }
     let other_index = mechanical_solver_peer_index(encoded_peer);
-    let pair = mechanical_solver_pair(self_index, other_index, include_soft);
+    let other_geometry = mechanical_solver_jacobi_geometry(other_index);
+    let pair = mechanical_solver_pair(
+      self_index,
+      other_index,
+      include_soft,
+      self_geometry,
+      other_geometry
+    );
     if (pair.valid == 0u) {
       atomicOr(
         &graph_control[14u],
@@ -7320,10 +7456,10 @@ fn mechanical_solve_iteration(
   var position = pos_mass.xyz + dx;
   let contact_velocity = vel_u.xyz + dv;
   var velocity = contact_velocity;
-  let rest_volume = max(source_mechanics[self_index * 8u + 4u].w, 0.0);
   var wall_clearance = 0.0;
-  if (rest_volume > 0.0) {
-    wall_clearance = 0.5 * mechanical_solver_cbrt(rest_volume);
+  let self_diameter_m = self_geometry.w;
+  if (self_diameter_m > 0.0) {
+    wall_clearance = 0.5 * self_diameter_m;
     if (mechanical_params.grid_spacing_m > 0.0) {
       wall_clearance = min(
         wall_clearance,
@@ -7489,9 +7625,17 @@ fn mechanical_solve_iteration(
 fn mechanical_energy_effective_pair_dv(
   self_index: u32,
   other_index: u32,
-  include_soft: bool
+  include_soft: bool,
+  self_geometry: vec4<f32>,
+  other_geometry: vec4<f32>
 ) -> vec3<f32> {
-  let pair = mechanical_solver_pair(self_index, other_index, include_soft);
+  let pair = mechanical_solver_pair(
+    self_index,
+    other_index,
+    include_soft,
+    self_geometry,
+    other_geometry
+  );
   if (pair.valid == 0u) {
     atomicOr(
       &graph_control[14u],
@@ -7507,12 +7651,16 @@ fn mechanical_energy_effective_pair_dv(
 fn mechanical_edge_linear_loss(
   low_index: u32,
   high_index: u32,
-  include_soft: bool
+  include_soft: bool,
+  low_geometry: vec4<f32>,
+  high_geometry: vec4<f32>
 ) -> MechanicalEdgeLinearLoss {
   let low_pair_dv = mechanical_energy_effective_pair_dv(
     low_index,
     high_index,
-    include_soft
+    include_soft,
+    low_geometry,
+    high_geometry
   );
   if (atomicLoad(&graph_control[14u]) != 0u) {
     return MechanicalEdgeLinearLoss(0.0, 0u);
@@ -7559,9 +7707,24 @@ fn mechanical_allocate_energy_iteration(
     );
     return;
   }
+  if (!mechanical_solver_jacobi_cache_header_valid()) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+    return;
+  }
   let energy_base = mechanical_energy_base(self_index);
   let pos_mass = input_state[self_index * 2u];
   let vel_u = input_state[self_index * 2u + 1u];
+  let self_geometry = mechanical_solver_jacobi_geometry(self_index);
+  if (!mechanical_solver_jacobi_geometry_valid(self_geometry)) {
+    atomicOr(
+      &graph_control[14u],
+      ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u
+    );
+    return;
+  }
   let budget = energy_ledger[energy_base];
   var cumulative = energy_ledger[energy_base + 1u];
   var linear_loss_share_j = 0.0;
@@ -7582,10 +7745,13 @@ fn mechanical_allocate_energy_iteration(
       let encoded_peer = csr_peers[cursor];
       if (mechanical_solver_edge_inactive(encoded_peer)) { continue; }
       let peer_index = mechanical_solver_peer_index(encoded_peer);
+      let peer_geometry = mechanical_solver_jacobi_geometry(peer_index);
       let self_pair = mechanical_solver_pair(
         self_index,
         peer_index,
-        include_soft
+        include_soft,
+        self_geometry,
+        peer_geometry
       );
       if (self_pair.valid == 0u) {
         atomicOr(
@@ -7606,10 +7772,18 @@ fn mechanical_allocate_energy_iteration(
       let high_index = max(self_index, peer_index);
       let low_pos_mass = input_state[low_index * 2u];
       let high_pos_mass = input_state[high_index * 2u];
+      var low_geometry = self_geometry;
+      var high_geometry = peer_geometry;
+      if (self_index != low_index) {
+        low_geometry = peer_geometry;
+        high_geometry = self_geometry;
+      }
       let edge = mechanical_edge_linear_loss(
         low_index,
         high_index,
-        include_soft
+        include_soft,
+        low_geometry,
+        high_geometry
       );
       if (edge.valid == 0u) { return; }
       let edge_heat_fraction = max(
@@ -7640,8 +7814,7 @@ fn mechanical_allocate_energy_iteration(
   let prior_position_trust_m = particle_scales[self_index].w;
   let spent_position_trust_m = length(realized_position_dx_m);
   let next_epoch_displacement_m = length(
-    output_state[self_index * 2u].xyz
-      - mechanical_solver_epoch_position(self_index)
+    output_state[self_index * 2u].xyz - self_geometry.xyz
   );
   let position_trust_tolerance = max(
     ${SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M},
@@ -19280,7 +19453,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
       cacheKey:
         `ulg-schroeder-spatial-mechanical-contact-graph-support-reduction.${
           mechanicalProjectionVariant
-        }.directory-v${directoryAbiVersion}.v12`,
+        }.directory-v${directoryAbiVersion}.v13`,
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-support-reduction',
       code: mechanicalBuildWgsl,
       entryPoint: 'reduce_support',
@@ -19315,7 +19488,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     validate: {
       cacheKey: pairGraphAbiKey(
-        'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v13'
+        'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr.v14'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-validate-csr',
       code: schroederSpatialMechanicalGraphControlWgsl,
@@ -19333,7 +19506,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     solverMeasure: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v2'
+        'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime.v3'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime',
       code: solverBudgetWgsl.solver,
@@ -19342,7 +19515,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     solverSolve: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v2'
+        'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime.v3'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-solve-runtime',
       code: solverBudgetWgsl.solver,
@@ -19351,7 +19524,7 @@ export function schroederSpatialMechanicalPipelineDescriptors({
     },
     solverAllocateEnergy: {
       cacheKey: budgetKey(
-        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v2'
+        'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime.v3'
       ),
       label: 'ulg-schroeder-spatial-mechanical-contact-graph-energy-allocate-runtime',
       code: solverBudgetWgsl.solver,
@@ -20586,7 +20759,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     inputStateBuffer,
     outputStateBuffer,
     mechanicsBuffer,
-    traversalControlBuffer = evidenceBuffer
+    traversalControlBuffer = evidenceBuffer,
+    solverSpatialRowsBuffer = spatialSourceBuffer
   ) => [
     { binding: 0, resource: { buffer: inputStateBuffer } },
     { binding: 1, resource: { buffer: outputStateBuffer } },
@@ -20597,7 +20771,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     { binding: 6, resource: { buffer: pool.sourceOffsetBuffer } },
     { binding: 7, resource: { buffer: pool.scaleBuffer } },
     { binding: 8, resource: { buffer: pool.graphControlBuffer } },
-    { binding: 9, resource: { buffer: spatialSourceBuffer } },
+    { binding: 9, resource: { buffer: solverSpatialRowsBuffer } },
     { binding: 10, resource: { buffer: traversalControlBuffer } },
     { binding: 11, resource: { buffer: paramsBuffer } },
     { binding: 12, resource: { buffer: pool.energyLedgerBuffer } }
@@ -20608,7 +20782,13 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     mechanicsBuffer,
     iteration
   ) => [
-    ...solverEntries(inputStateBuffer, outputStateBuffer, mechanicsBuffer),
+    ...solverEntries(
+      inputStateBuffer,
+      outputStateBuffer,
+      mechanicsBuffer,
+      evidenceBuffer,
+      supportBuffer
+    ),
     {
       binding: 16,
       resource: {

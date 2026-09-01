@@ -4256,6 +4256,138 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   );
   assert.match(pairLawSource,
     /if \(overlap <= 0\.0\) \{ return mechanical_solver_zero_pair\(1u\); \}/);
+  const jacobiHeaderSource = wgslFunctionSource(
+    'mechanical_solver_jacobi_cache_header_valid'
+  );
+  assert.match(
+    jacobiHeaderSource,
+    /required_vec4_count[\s\S]*mechanical_params\.particle_count - 1u[\s\S]*MECHANICAL_JACOBI_GEOMETRY_VEC4_STRIDE[\s\S]*arrayLength\(&spatial_source_rows\) >= required_vec4_count[\s\S]*bitcast<u32>\(spatial_source_rows\[0u\]\.w\)[\s\S]*mechanical_params\.particle_count/
+  );
+  const jacobiGeometrySource = wgslFunctionSource(
+    'mechanical_solver_jacobi_geometry'
+  );
+  assert.match(
+    jacobiGeometrySource,
+    /return spatial_source_rows\[[\s\S]*MECHANICAL_JACOBI_GEOMETRY_VEC4_OFFSET[\s\S]*index \* MECHANICAL_JACOBI_GEOMETRY_VEC4_STRIDE/
+  );
+  assert.match(
+    wgslFunctionSource('mechanical_solver_jacobi_geometry_valid'),
+    /mechanical_solver_finite3\(geometry\.xyz\)[\s\S]*mechanical_solver_finite\(geometry\.w\)[\s\S]*geometry\.w > 0\.0/
+  );
+  assert.match(
+    schroederSpatialMechanicalGraphControlWgsl,
+    /fn validate_contact_graph_csr[\s\S]*if \(source_valid\) \{[\s\S]*support_base \+ 2u\], epoch_x_bits[\s\S]*support_base \+ 3u\], epoch_y_bits[\s\S]*support_base \+ 4u\], epoch_z_bits[\s\S]*support_base \+ 5u\], diameter_bits/
+  );
+  const reduceSupportStart = schroederSpatialMechanicalProposalWgsl.indexOf(
+    'fn reduce_support('
+  );
+  const reduceSupportEnd = schroederSpatialMechanicalProposalWgsl.indexOf(
+    '\n@compute',
+    reduceSupportStart + 1
+  );
+  const reduceSupportSource = schroederSpatialMechanicalProposalWgsl.slice(
+    reduceSupportStart,
+    reduceSupportEnd
+  );
+  const dormantSupportStart = reduceSupportSource.indexOf(
+    '} else if (mechanically_dormant) {'
+  );
+  const dormantSupportEnd = reduceSupportSource.indexOf(
+    '\n  if (source_rank == 0u)',
+    dormantSupportStart
+  );
+  const dormantSupportSource = reduceSupportSource.slice(
+    dormantSupportStart,
+    dormantSupportEnd
+  );
+  assert.match(
+    dormantSupportSource,
+    /mechanical_graph_cbrt\(volume\)[\s\S]*mechanical_graph_epoch_position\(particle_index\)[\s\S]*global_support_bits\[support_base\][\s\S]*global_support_bits\[support_base \+ 4u\][\s\S]*global_support_bits\[support_base \+ 6u\]/
+  );
+  assert.doesNotMatch(
+    dormantSupportSource,
+    /global_support_bits\[support_base \+ 3u\]/
+  );
+  const cachedPairSource = wgslFunctionSource('mechanical_solver_pair');
+  assert.match(
+    cachedPairSource,
+    /let self_diameter = self_geometry\.w[\s\S]*let other_diameter = other_geometry\.w[\s\S]*self_geometry\.xyz[\s\S]*other_geometry\.xyz/
+  );
+  assert.doesNotMatch(
+    cachedPairSource,
+    /source_mechanics|mechanical_solver_cbrt|mechanical_solver_epoch_position\(|mechanical_solver_jacobi_geometry\(/
+  );
+  const cachedMeasureSource = wgslFunctionSource(
+    'mechanical_measure_iteration'
+  );
+  assert.match(
+    cachedMeasureSource,
+    /mechanical_solver_jacobi_cache_header_valid\(\)[\s\S]*let self_geometry = mechanical_solver_jacobi_geometry\(self_index\)[\s\S]*mechanical_solver_jacobi_geometry_valid\(self_geometry\)[\s\S]*let other_geometry = mechanical_solver_jacobi_geometry\(other_index\)[\s\S]*self_geometry,[\s\S]*other_geometry[\s\S]*self_geometry\.xyz[\s\S]*mechanical_solver_wall_projection_bound_for_diameter/
+  );
+  assert.doesNotMatch(
+    cachedMeasureSource,
+    /source_mechanics|mechanical_solver_cbrt|mechanical_solver_epoch_position\(|self_mass <= 0\.0/
+  );
+  assert.equal(
+    (cachedMeasureSource.match(
+      /mechanical_solver_jacobi_geometry\(self_index\)/g
+    ) || []).length,
+    1
+  );
+  assert.equal(
+    (cachedMeasureSource.match(
+      /mechanical_solver_jacobi_geometry\(other_index\)/g
+    ) || []).length,
+    1
+  );
+  const cachedSolveSource = wgslFunctionSource('mechanical_solve_iteration');
+  assert.match(
+    cachedSolveSource,
+    /mechanical_solver_jacobi_cache_header_valid\(\)[\s\S]*let self_geometry = mechanical_solver_jacobi_geometry\(self_index\)[\s\S]*mechanical_solver_jacobi_geometry_valid\(self_geometry\)[\s\S]*let other_geometry = mechanical_solver_jacobi_geometry\(other_index\)[\s\S]*self_geometry,[\s\S]*other_geometry[\s\S]*self_geometry\.w/
+  );
+  assert.doesNotMatch(
+    cachedSolveSource,
+    /source_mechanics|mechanical_solver_cbrt|mechanical_solver_epoch_position\(/
+  );
+  assert.equal(
+    (cachedSolveSource.match(
+      /mechanical_solver_jacobi_geometry\(self_index\)/g
+    ) || []).length,
+    1
+  );
+  assert.equal(
+    (cachedSolveSource.match(
+      /mechanical_solver_jacobi_geometry\(other_index\)/g
+    ) || []).length,
+    1
+  );
+  const cachedEnergySource = wgslFunctionSource(
+    'mechanical_allocate_energy_iteration'
+  );
+  assert.match(
+    cachedEnergySource,
+    /mechanical_solver_jacobi_cache_header_valid\(\)[\s\S]*let self_geometry = mechanical_solver_jacobi_geometry\(self_index\)[\s\S]*mechanical_solver_jacobi_geometry_valid\(self_geometry\)[\s\S]*let peer_geometry = mechanical_solver_jacobi_geometry\(peer_index\)[\s\S]*self_geometry,[\s\S]*peer_geometry[\s\S]*low_geometry,[\s\S]*high_geometry[\s\S]*let next_epoch_displacement_m = length\([\s\S]*self_geometry\.xyz/
+  );
+  assert.doesNotMatch(
+    cachedEnergySource,
+    /source_mechanics|mechanical_solver_cbrt|mechanical_solver_epoch_position\(/
+  );
+  assert.equal(
+    (cachedEnergySource.match(
+      /mechanical_solver_jacobi_geometry\(self_index\)/g
+    ) || []).length,
+    1
+  );
+  assert.equal(
+    (cachedEnergySource.match(
+      /mechanical_solver_jacobi_geometry\(peer_index\)/g
+    ) || []).length,
+    1
+  );
+  assert.match(
+    wgslFunctionSource('initialize_matching_cleanup_constraints'),
+    /mechanical_solver_epoch_position\(low_index\)[\s\S]*mechanical_solver_epoch_position\(high_index\)/
+  );
   assert.ok((schroederSpatialMechanicalGraphSolverWgsl.match(
     /active_pair == 0u\) \{ continue; \}/g
   ) || []).length >= 4);
@@ -4600,11 +4732,34 @@ test('level-assignment spatial sources use SS-authenticated identity and level s
       === 'ulg-schroeder-spatial-mechanical-contact-graph-measure-runtime'
   );
   assert.ok(solverDispatch);
+  const supportBuffer = fixture.device.buffers.find(
+    ({ label }) => label
+      === 'ulg-schroeder-spatial-mechanical-global-support-bound-0'
+  );
+  assert.ok(supportBuffer);
   assert.equal(
     solverDispatch.bindGroup.entries.find(({ binding }) => binding === 9)
       ?.resource?.buffer,
-    fixture.spatialSource.assignmentBuffer
+    supportBuffer
   );
+  for (const rawSpatialLabel of [
+    'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
+    'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner',
+    'ulg-schroeder-spatial-mechanical-matching-cleanup-restore-trust',
+    'ulg-schroeder-spatial-mechanical-contact-energy-verify',
+    'ulg-schroeder-spatial-mechanical-contact-residual-verify'
+  ]) {
+    const rawSpatialDispatch = fixture.device.dispatches.find(
+      ({ pipeline }) => pipeline?.label === rawSpatialLabel
+    );
+    assert.ok(rawSpatialDispatch);
+    assert.equal(
+      rawSpatialDispatch.bindGroup.entries.find(
+        ({ binding }) => binding === 9
+      )?.resource?.buffer,
+      fixture.spatialSource.assignmentBuffer
+    );
+  }
 
   assert.equal(proposal.releaseAfterSubmittedWork(), true);
   assert.equal(await proposal.releasePromise, true);
@@ -5698,6 +5853,10 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
     runtimeSolverDispatches.length,
     3 * SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS
   );
+  assert.ok(runtimeSolverDispatches.every(({ bindGroup: group }) => (
+    group?.entries?.find(({ binding }) => binding === 9)
+      ?.resource?.buffer === supportBuffer
+  )));
   for (
     let iteration = 0;
     iteration < SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS;

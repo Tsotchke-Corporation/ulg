@@ -16,9 +16,9 @@ import {
 } from '../src/services/workerResidentScheduleTaskYielder.js';
 
 export const SPH_PRESET_THROUGHPUT_MATRIX_SCHEMA =
-  'peercompute.ulg.sph-preset-throughput-matrix.v0';
+  'peercompute.ulg.sph-preset-throughput-matrix.v1';
 export const SPH_PRESET_THROUGHPUT_SCENARIO_SCHEMA =
-  'peercompute.ulg.sph-preset-throughput-scenario.v0';
+  'peercompute.ulg.sph-preset-throughput-scenario.v1';
 
 const DEFAULT_BASE_URL = 'https://127.0.0.1:5173';
 const DEFAULT_OUTPUT = '/tmp/ulg-sph-preset-throughput-matrix.json';
@@ -33,8 +33,16 @@ const DEFAULT_MIN_REALTIME_FACTOR = 1;
 const TIER0_PRESET_IDS = new Set(['bulk-water', 'water-realtime']);
 
 function finiteNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function safeNonNegativeInteger(value) {
+  const number = finiteNumber(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function nonNegativeInteger(value, fallback) {
@@ -58,6 +66,153 @@ function mean(values) {
   return finite.reduce((sum, value) => sum + value, 0) / finite.length;
 }
 
+function scheduleOrdinal(scheduleId) {
+  const match = /:schedule:(\d+)$/.exec(String(scheduleId || ''));
+  if (!match) return null;
+  const ordinal = Number(match[1]);
+  return Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal : null;
+}
+
+function committedSampleKey(sample) {
+  const pageTimeOriginMs = finiteNumber(sample?.pageTimeOriginMs);
+  const laneId = nonEmptyString(sample?.laneId);
+  const stateKey = nonEmptyString(sample?.stateKey);
+  const scheduleId = nonEmptyString(sample?.scheduleId);
+  if (pageTimeOriginMs == null || !laneId || !stateKey || !scheduleId) {
+    return null;
+  }
+  return JSON.stringify([pageTimeOriginMs, laneId, stateKey, scheduleId]);
+}
+
+function committedSampleEvidence(sample) {
+  return JSON.stringify({
+    authorityCommitCompletedAtMs: finiteNumber(
+      sample?.workerLanePageTiming?.authorityCommitCompletedAtMs
+    ),
+    workerLanePageTiming: sample?.workerLanePageTiming ?? null,
+    laneCompletedStepTotal:
+      safeNonNegativeInteger(sample?.laneCompletedStepTotal),
+    laneSimTimeS: finiteNumber(sample?.laneSimTimeS),
+    executionRoute: sample?.executionRoute ?? null,
+    fullParticleReadbackFree: sample?.fullParticleReadbackFree === true,
+    workerLaneContinuationReady:
+      sample?.workerLaneContinuationReady === true,
+    committedPresentationReady: sample?.committedPresentationReady === true,
+    runtimeError: sample?.runtimeError ?? null,
+    controlPlaneYieldReceipt: sample?.controlPlaneYieldReceipt ?? null
+  });
+}
+
+function normalizeCommittedSamples(samples) {
+  const normalized = [];
+  const observedByKey = new Map();
+  let duplicateSampleCount = 0;
+  let conflictingCommitSampleDetected = false;
+  for (const sample of samples) {
+    const key = committedSampleKey(sample);
+    if (key == null || !observedByKey.has(key)) {
+      normalized.push(sample);
+      if (key != null) {
+        observedByKey.set(key, committedSampleEvidence(sample));
+      }
+      continue;
+    }
+    if (observedByKey.get(key) === committedSampleEvidence(sample)) {
+      duplicateSampleCount += 1;
+    } else {
+      conflictingCommitSampleDetected = true;
+    }
+  }
+  return {
+    normalized,
+    duplicateSampleCount,
+    conflictingCommitSampleDetected
+  };
+}
+
+function pageAuthorityPhaseOrderReady(sample) {
+  const timing = sample?.workerLanePageTiming;
+  const ordered = [
+    finiteNumber(timing?.scheduleFunctionEnteredAtMs),
+    finiteNumber(timing?.scheduleDispatchPostedAtMs),
+    finiteNumber(timing?.scheduleTerminalReceivedAtMs),
+    finiteNumber(timing?.authorityCommitCompletedAtMs),
+    finiteNumber(timing?.laneExecutionReturnedAtMs)
+  ];
+  return ordered.every((value) => value != null && value >= 0)
+    && ordered.every((value, index) => (
+      index === 0 || value >= ordered[index - 1]
+    ));
+}
+
+function throughputInterval(previous, current) {
+  const previousScheduleOrdinal = scheduleOrdinal(previous.scheduleId);
+  const currentScheduleOrdinal = scheduleOrdinal(current.scheduleId);
+  const schedulesAdjacent = previousScheduleOrdinal != null
+    && currentScheduleOrdinal === previousScheduleOrdinal + 1;
+  const currentFirstStepStartedAtMs = finiteNumber(
+    current.scheduleFirstStepStartedAtMs
+  );
+  const previousResultAssembledAtMs = finiteNumber(
+    previous.resultAssembledAtMs
+  );
+  const workerTurnaroundMs = schedulesAdjacent
+    && currentFirstStepStartedAtMs != null
+    && previousResultAssembledAtMs != null
+    ? currentFirstStepStartedAtMs - previousResultAssembledAtMs
+    : null;
+  const previousAuthorityCommitAtMs = finiteNumber(
+    previous?.workerLanePageTiming?.authorityCommitCompletedAtMs
+  );
+  const authorityCommitAtMs = finiteNumber(
+    current?.workerLanePageTiming?.authorityCommitCompletedAtMs
+  );
+  const previousCapturedAtMs = finiteNumber(previous.capturedAtMs);
+  const capturedAtMs = finiteNumber(current.capturedAtMs);
+  const previousSimTimeS = finiteNumber(previous.laneSimTimeS);
+  const simTimeS = finiteNumber(current.laneSimTimeS);
+  const previousStepTotal = safeNonNegativeInteger(
+    previous.laneCompletedStepTotal
+  );
+  const stepTotal = safeNonNegativeInteger(current.laneCompletedStepTotal);
+  const authorityCommitDeltaMs = previousAuthorityCommitAtMs != null
+    && authorityCommitAtMs != null
+    ? authorityCommitAtMs - previousAuthorityCommitAtMs
+    : null;
+  const capturedWallDeltaMs = previousCapturedAtMs != null
+    && capturedAtMs != null
+    ? capturedAtMs - previousCapturedAtMs
+    : null;
+  const simTimeDeltaS = previousSimTimeS != null && simTimeS != null
+    ? simTimeS - previousSimTimeS
+    : null;
+  const stepDelta = previousStepTotal != null && stepTotal != null
+    ? stepTotal - previousStepTotal
+    : null;
+  return {
+    previousScheduleId: previous.scheduleId ?? null,
+    scheduleId: current.scheduleId ?? null,
+    previousScheduleOrdinal,
+    scheduleOrdinal: currentScheduleOrdinal,
+    schedulesAdjacent,
+    wallDeltaMs: authorityCommitDeltaMs,
+    authorityCommitDeltaMs,
+    capturedWallDeltaMs,
+    simTimeDeltaS,
+    stepDelta,
+    workerTurnaroundMs,
+    previousPostComputeMs: finiteNumber(previous.lastResidentPostComputeMs)
+  };
+}
+
+function throughputIntervals(samples) {
+  const intervals = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    intervals.push(throughputInterval(samples[index - 1], samples[index]));
+  }
+  return intervals;
+}
+
 export function expectedSphPresetExecutionRoute(presetId) {
   return TIER0_PRESET_IDS.has(String(presetId))
     ? 'tier0-fused-resident-sequence'
@@ -78,10 +233,98 @@ function routeEvidenceIsReadbackFree(sample) {
   return route.fullParticleReadbackPerformed === false;
 }
 
+function controlPlaneYieldReceiptReady(receipt, expectedRoute) {
+  const scheduledYieldOpportunityCount = safeNonNegativeInteger(
+    receipt?.scheduledYieldOpportunityCount
+  );
+  const yieldRequestCount = safeNonNegativeInteger(
+    receipt?.yieldRequestCount
+  );
+  const completedYieldCount = safeNonNegativeInteger(
+    receipt?.completedYieldCount
+  );
+  const messageChannelYieldCount = safeNonNegativeInteger(
+    receipt?.messageChannelYieldCount
+  );
+  const timerFallbackYieldCount = safeNonNegativeInteger(
+    receipt?.timerFallbackYieldCount
+  );
+  const ownedPortCount = safeNonNegativeInteger(receipt?.ownedPortCount);
+  const closedPortCount = safeNonNegativeInteger(receipt?.closedPortCount);
+  const totalWaitMs = finiteNumber(receipt?.totalWaitMs);
+  const commonReady = Boolean(
+    receipt?.schema
+      === ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+    && typeof receipt?.status === 'string'
+    && typeof receipt?.mode === 'string'
+    && typeof receipt?.mechanism === 'string'
+    && typeof receipt?.messageChannelCreated === 'boolean'
+    && receipt?.portsClosed === true
+    && scheduledYieldOpportunityCount != null
+    && yieldRequestCount != null
+    && completedYieldCount != null
+    && yieldRequestCount === completedYieldCount
+    && completedYieldCount === scheduledYieldOpportunityCount
+    && messageChannelYieldCount != null
+    && timerFallbackYieldCount != null
+    && messageChannelYieldCount + timerFallbackYieldCount
+      === completedYieldCount
+    && ownedPortCount != null
+    && closedPortCount === ownedPortCount
+    && totalWaitMs != null
+    && totalWaitMs >= 0
+  );
+  if (!commonReady) return false;
+  if (expectedRoute === 'tier0-fused-resident-sequence') {
+    return receipt.status
+        === 'worker-resident-schedule-control-plane-yield-not-required'
+      && receipt.mode === 'none'
+      && receipt.mechanism === 'none-atomic-tier0'
+      && scheduledYieldOpportunityCount === 0
+      && receipt.messageChannelCreated === false
+      && ownedPortCount === 0
+      && totalWaitMs === 0;
+  }
+  if (scheduledYieldOpportunityCount === 0) {
+    return receipt.status
+        === 'worker-resident-schedule-control-plane-yield-not-required'
+      && receipt.mode === 'none'
+      && receipt.mechanism === 'none-single-step-canonical'
+      && receipt.messageChannelCreated === false
+      && ownedPortCount === 0
+      && totalWaitMs === 0;
+  }
+  if (
+    receipt.status !== 'worker-resident-schedule-control-plane-yielder-closed'
+  ) {
+    return false;
+  }
+  if (receipt.mode === 'message-channel') {
+    return receipt.mechanism === 'message-channel-task'
+      && receipt.messageChannelCreated === true
+      && messageChannelYieldCount === completedYieldCount
+      && timerFallbackYieldCount === 0;
+  }
+  if (receipt.mode === 'message-channel-with-timer-fallback') {
+    return receipt.mechanism
+        === 'message-channel-task-with-timer-fallback'
+      && receipt.messageChannelCreated === true
+      && messageChannelYieldCount > 0
+      && timerFallbackYieldCount > 0;
+  }
+  if (receipt.mode === 'timer-fallback') {
+    return receipt.mechanism === 'timer-task-fallback'
+      && messageChannelYieldCount === 0
+      && timerFallbackYieldCount === completedYieldCount;
+  }
+  return false;
+}
+
 export function evaluateSphPresetThroughputSamples({
   presetId,
   samples = [],
   warmupCommitCount = DEFAULT_WARMUP_COMMIT_COUNT,
+  sampleIntervalCount = DEFAULT_SAMPLE_INTERVAL_COUNT,
   minRealtimeFactor = DEFAULT_MIN_REALTIME_FACTOR
 } = {}) {
   const expectedRoute = expectedSphPresetExecutionRoute(presetId);
@@ -89,54 +332,163 @@ export function evaluateSphPresetThroughputSamples({
     warmupCommitCount,
     DEFAULT_WARMUP_COMMIT_COUNT
   );
-  const measured = samples.slice(Math.min(warmup, samples.length));
-  const first = measured[0] ?? null;
-  const last = measured.at(-1) ?? null;
-  const wallDeltaS = first && last
-    ? Math.max(0, (Number(last.capturedAtMs) - Number(first.capturedAtMs)) / 1000)
-    : 0;
-  const simTimeDeltaS = first && last
-    ? Math.max(0, Number(last.laneSimTimeS) - Number(first.laneSimTimeS))
-    : 0;
-  const stepDelta = first && last
-    ? Math.max(
-        0,
-        Number(last.laneCompletedStepTotal)
-          - Number(first.laneCompletedStepTotal)
+  const observedSamples = Array.isArray(samples) ? samples : [];
+  const {
+    normalized,
+    duplicateSampleCount,
+    conflictingCommitSampleDetected
+  } = normalizeCommittedSamples(observedSamples);
+  const measured = normalized.slice(Math.min(warmup, normalized.length));
+  const requestedIntervalCount = positiveInteger(
+    sampleIntervalCount,
+    DEFAULT_SAMPLE_INTERVAL_COUNT
+  );
+  const integrityIntervals = throughputIntervals(normalized);
+  const intervals = throughputIntervals(measured);
+  const cohortIdentities = normalized.map((sample) => ({
+    pageTimeOriginMs: finiteNumber(sample?.pageTimeOriginMs),
+    laneId: nonEmptyString(sample?.laneId),
+    stateKey: nonEmptyString(sample?.stateKey)
+  }));
+  const cohort = cohortIdentities[0] ?? null;
+  const cohortStable = normalized.length >= 1
+    && cohort?.pageTimeOriginMs != null
+    && cohort.pageTimeOriginMs > 0
+    && cohort?.laneId != null
+    && cohort?.stateKey != null
+    && cohort.stateKey === `${cohort.laneId}:state`
+    && cohortIdentities.every((identity) => (
+      identity.pageTimeOriginMs === cohort.pageTimeOriginMs
+      && identity.laneId === cohort.laneId
+      && identity.stateKey === cohort.stateKey
+    ));
+  const normalizedScheduleIds = normalized.map(
+    (sample) => nonEmptyString(sample?.scheduleId)
+  );
+  const normalizedScheduleOrdinals = normalizedScheduleIds.map(
+    scheduleOrdinal
+  );
+  const scheduleIdentityReady = normalized.length >= 1
+    && normalizedScheduleIds.every(Boolean)
+    && new Set(normalizedScheduleIds).size === normalizedScheduleIds.length
+    && normalized.every((sample, index) => (
+      normalizedScheduleIds[index]?.startsWith(`${sample?.laneId}:schedule:`)
+      && normalizedScheduleOrdinals[index] != null
+      && (
+        index === 0
+        || normalizedScheduleOrdinals[index]
+          > normalizedScheduleOrdinals[index - 1]
       )
-    : 0;
-  const realTimeFactor = wallDeltaS > 0 ? simTimeDeltaS / wallDeltaS : null;
-  const physicsStepsPerSecond = wallDeltaS > 0 ? stepDelta / wallDeltaS : null;
-  const intervals = [];
-  for (let index = 1; index < measured.length; index += 1) {
-    const previous = measured[index - 1];
-    const current = measured[index];
-    const workerTurnaroundMs = Number.isFinite(
-      Number(current.scheduleFirstStepStartedAtMs)
-    ) && Number.isFinite(Number(previous.resultAssembledAtMs))
-      ? Number(current.scheduleFirstStepStartedAtMs)
-        - Number(previous.resultAssembledAtMs)
-      : null;
-    intervals.push({
-      previousScheduleId: previous.scheduleId ?? null,
-      scheduleId: current.scheduleId ?? null,
-      wallDeltaMs:
-        Number(current.capturedAtMs) - Number(previous.capturedAtMs),
-      simTimeDeltaS:
-        Number(current.laneSimTimeS) - Number(previous.laneSimTimeS),
-      stepDelta:
-        Number(current.laneCompletedStepTotal)
-          - Number(previous.laneCompletedStepTotal),
-      workerTurnaroundMs,
-      previousPostComputeMs:
-        finiteNumber(previous.lastResidentPostComputeMs)
-    });
+    ));
+  const pageAuthorityPhaseOrderValid = normalized.length >= 1
+    && normalized.every(pageAuthorityPhaseOrderReady);
+  const requestedIntervalCountReady = intervals.length >= requestedIntervalCount;
+  const authorityHistoryReady = normalized.length >= 2
+    && integrityIntervals.every((interval) => (
+      interval.authorityCommitDeltaMs != null
+      && interval.authorityCommitDeltaMs > 0
+    ));
+  const authorityCadenceReady = requestedIntervalCountReady
+    && intervals.every((interval) => (
+      interval.authorityCommitDeltaMs != null
+      && interval.authorityCommitDeltaMs > 0
+    ));
+  const capturedCadenceReady = requestedIntervalCountReady
+    && intervals.every((interval) => (
+      interval.capturedWallDeltaMs != null
+      && interval.capturedWallDeltaMs > 0
+    ));
+  const counterResetDetected = integrityIntervals.some((interval) => (
+    (interval.stepDelta != null && interval.stepDelta < 0)
+    || (interval.simTimeDeltaS != null && interval.simTimeDeltaS < 0)
+  ));
+  const progressSnapshotsReady = normalized.length >= 2
+    && normalized.every((sample) => (
+      safeNonNegativeInteger(sample?.laneCompletedStepTotal) != null
+      && finiteNumber(sample?.laneSimTimeS) != null
+      && sample.laneSimTimeS >= 0
+    ));
+  const progressCountersReady = requestedIntervalCountReady
+    && progressSnapshotsReady
+    && integrityIntervals.every((interval) => (
+      Number.isSafeInteger(interval.stepDelta)
+      && interval.stepDelta > 0
+      && Number.isFinite(interval.simTimeDeltaS)
+      && interval.simTimeDeltaS > 0
+    ));
+  const timingFailureReasons = [];
+  if (!requestedIntervalCountReady) {
+    timingFailureReasons.push('insufficient-measured-authority-intervals');
   }
-  const routes = measured.map((sample) => sample?.executionRoute?.route ?? null);
-  const routeMatched = measured.length >= 2
+  if (!cohortStable) {
+    timingFailureReasons.push('page-lane-authority-cohort-invalid');
+  }
+  if (!scheduleIdentityReady) {
+    timingFailureReasons.push('schedule-identity-invalid');
+  }
+  if (conflictingCommitSampleDetected) {
+    timingFailureReasons.push('conflicting-commit-sample');
+  }
+  if (!pageAuthorityPhaseOrderValid) {
+    timingFailureReasons.push('page-authority-phase-order-invalid');
+  }
+  if (!authorityHistoryReady) {
+    timingFailureReasons.push('authority-commit-history-invalid');
+  }
+  if (!authorityCadenceReady) {
+    timingFailureReasons.push('authority-commit-cadence-invalid');
+  }
+  if (!progressCountersReady) {
+    timingFailureReasons.push('lane-progress-counters-invalid');
+  }
+  if (counterResetDetected) {
+    timingFailureReasons.push('lane-progress-counter-reset');
+  }
+  const timingReady = timingFailureReasons.length === 0;
+  const authorityWallDeltaMs = authorityCadenceReady
+    ? finiteNumber(
+        measured.at(-1)?.workerLanePageTiming?.authorityCommitCompletedAtMs
+      ) - finiteNumber(
+        measured[0]?.workerLanePageTiming?.authorityCommitCompletedAtMs
+      )
+    : null;
+  const wallDeltaS = authorityWallDeltaMs != null
+    ? authorityWallDeltaMs / 1000
+    : null;
+  const capturedWallDeltaMs = capturedCadenceReady
+    ? finiteNumber(measured.at(-1)?.capturedAtMs)
+      - finiteNumber(measured[0]?.capturedAtMs)
+    : null;
+  const capturedWallDeltaS = capturedWallDeltaMs != null
+    ? capturedWallDeltaMs / 1000
+    : null;
+  const simTimeDeltaS = progressCountersReady
+    ? finiteNumber(measured.at(-1)?.laneSimTimeS)
+      - finiteNumber(measured[0]?.laneSimTimeS)
+    : null;
+  const stepDelta = progressCountersReady
+    ? safeNonNegativeInteger(measured.at(-1)?.laneCompletedStepTotal)
+      - safeNonNegativeInteger(measured[0]?.laneCompletedStepTotal)
+    : null;
+  const realTimeFactor = wallDeltaS > 0 && simTimeDeltaS != null
+    ? simTimeDeltaS / wallDeltaS
+    : null;
+  const physicsStepsPerSecond = wallDeltaS > 0 && stepDelta != null
+    ? stepDelta / wallDeltaS
+    : null;
+  const capturedRealTimeFactor = capturedWallDeltaS > 0
+    && simTimeDeltaS != null
+    ? simTimeDeltaS / capturedWallDeltaS
+    : null;
+  const capturedPhysicsStepsPerSecond = capturedWallDeltaS > 0
+    && stepDelta != null
+    ? stepDelta / capturedWallDeltaS
+    : null;
+  const routes = normalized.map((sample) => sample?.executionRoute?.route ?? null);
+  const routeMatched = normalized.length >= 2
     && routes.every((route) => route === expectedRoute);
-  const terminalAuthorityReady = measured.length >= 2
-    && measured.every((sample) => (
+  const terminalAuthorityReady = normalized.length >= 2
+    && normalized.every((sample) => (
       sample?.workerLaneContinuationReady === true
       && sample?.executionRoute?.terminalFenceSatisfied === true
       && (
@@ -145,35 +497,20 @@ export function evaluateSphPresetThroughputSamples({
       )
       && sample?.committedPresentationReady === true
     ));
-  const readbackFree = measured.length >= 2
-    && measured.every(routeEvidenceIsReadbackFree);
-  const noRuntimeErrors = measured.length >= 2
-    && measured.every((sample) => sample?.runtimeError == null);
+  const readbackFree = normalized.length >= 2
+    && normalized.every(routeEvidenceIsReadbackFree);
+  const noRuntimeErrors = normalized.length >= 2
+    && normalized.every((sample) => sample?.runtimeError == null);
+  const controlPlaneYieldEvidenceReceipts = normalized.map(
+    (sample) => sample?.controlPlaneYieldReceipt ?? null
+  );
   const controlPlaneYieldReceipts = measured.map(
     (sample) => sample?.controlPlaneYieldReceipt ?? null
   );
-  const controlPlaneYieldEvidenceReady = measured.length >= 2
-    && controlPlaneYieldReceipts.every((receipt) => (
-      receipt?.schema
-        === ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
-      && receipt.portsClosed === true
-      && Number.isSafeInteger(receipt.completedYieldCount)
-      && receipt.completedYieldCount >= 0
-      && Number.isSafeInteger(receipt.yieldRequestCount)
-      && receipt.yieldRequestCount === receipt.completedYieldCount
-      && Number.isSafeInteger(receipt.messageChannelYieldCount)
-      && receipt.messageChannelYieldCount >= 0
-      && Number.isSafeInteger(receipt.timerFallbackYieldCount)
-      && receipt.timerFallbackYieldCount >= 0
-      && receipt.messageChannelYieldCount + receipt.timerFallbackYieldCount
-        === receipt.completedYieldCount
-      && Number.isSafeInteger(receipt.ownedPortCount)
-      && receipt.ownedPortCount >= 0
-      && Number.isSafeInteger(receipt.closedPortCount)
-      && receipt.closedPortCount === receipt.ownedPortCount
-      && Number.isFinite(receipt.totalWaitMs)
-      && receipt.totalWaitMs >= 0
-    ));
+  const controlPlaneYieldEvidenceReady = normalized.length >= 2
+    && controlPlaneYieldEvidenceReceipts.every(
+      (receipt) => controlPlaneYieldReceiptReady(receipt, expectedRoute)
+    );
   const controlPlaneYieldMechanisms = Object.freeze([
     ...new Set(
       controlPlaneYieldReceipts
@@ -189,8 +526,10 @@ export function evaluateSphPresetThroughputSamples({
   const meanControlPlaneYieldWaitPerBoundaryMs = mean(
     controlPlaneYieldReceipts.map((receipt) => {
       const waitMs = finiteNumber(receipt?.totalWaitMs);
-      const completedYieldCount = Number(receipt?.completedYieldCount);
-      if (waitMs == null || !Number.isSafeInteger(completedYieldCount)) {
+      const completedYieldCount = safeNonNegativeInteger(
+        receipt?.completedYieldCount
+      );
+      if (waitMs == null || completedYieldCount == null) {
         return null;
       }
       return completedYieldCount > 0 ? waitMs / completedYieldCount : 0;
@@ -203,12 +542,12 @@ export function evaluateSphPresetThroughputSamples({
   const realTimePassed = Number.isFinite(realTimeFactor)
     && realTimeFactor >= threshold;
   const passed = Boolean(
-    measured.length >= 2
-    && stepDelta > 0
+    timingReady
     && routeMatched
     && terminalAuthorityReady
     && readbackFree
     && noRuntimeErrors
+    && controlPlaneYieldEvidenceReady
     && realTimePassed
   );
   return Object.freeze({
@@ -217,13 +556,48 @@ export function evaluateSphPresetThroughputSamples({
     presetId: String(presetId || ''),
     expectedRoute,
     warmupCommitCount: warmup,
-    measuredCommitCount: measured.length,
+    requestedIntervalCount,
+    observedSampleCount: observedSamples.length,
+    observedCommitEndpointCount: normalized.length,
+    duplicateSampleCount,
+    conflictingCommitSampleDetected,
+    measuredCommitEndpointCount: measured.length,
     measuredIntervalCount: intervals.length,
+    requestedIntervalCountReady,
+    timingBasis: 'page-authority-commit',
+    authorityEvidenceScope:
+      'observed-commit-endpoints-with-cumulative-lane-progress',
+    timingReady,
+    timingFailureReasons: Object.freeze(timingFailureReasons),
+    cohortStable,
+    scheduleIdentityReady,
+    pageAuthorityPhaseOrderValid,
+    authorityHistoryReady,
+    authorityCadenceReady,
+    capturedCadenceReady,
+    progressCountersReady,
+    counterResetDetected,
+    pageTimeOriginMs: cohortStable ? cohort.pageTimeOriginMs : null,
+    laneId: cohortStable ? cohort.laneId : null,
+    stateKey: cohortStable ? cohort.stateKey : null,
+    firstMeasuredAuthorityCommitCompletedAtMs: authorityCadenceReady
+      ? finiteNumber(
+          measured[0]?.workerLanePageTiming?.authorityCommitCompletedAtMs
+        )
+      : null,
+    lastMeasuredAuthorityCommitCompletedAtMs: authorityCadenceReady
+      ? finiteNumber(
+          measured.at(-1)?.workerLanePageTiming?.authorityCommitCompletedAtMs
+        )
+      : null,
     wallDeltaS,
+    capturedWallDeltaS,
     simTimeDeltaS,
     stepDelta,
     realTimeFactor,
     physicsStepsPerSecond,
+    capturedRealTimeFactor,
+    capturedPhysicsStepsPerSecond,
     minimumRealtimeFactor: threshold,
     realTimePassed,
     routeMatched,
@@ -279,6 +653,7 @@ async function compactPageSnapshot(page) {
       ?? null;
     return {
       capturedAtMs: performance.now(),
+      pageTimeOriginMs: performance.timeOrigin,
       documentUrl: location.href,
       playText:
         document.querySelector('#sph-play')?.textContent?.trim() ?? null,
@@ -286,6 +661,9 @@ async function compactPageSnapshot(page) {
         document.querySelector('#sph-play')?.disabled === true,
       laneCompletedStepTotal: lane?.laneCompletedStepTotal ?? 0,
       laneSimTimeS: lane?.laneSimTimeS ?? 0,
+      laneId: lane?.laneId ?? null,
+      stateKey: lane?.stateKey ?? null,
+      laneSeededThisSchedule: lane?.laneSeededThisSchedule === true,
       scheduleId: lane?.scheduleId ?? null,
       scheduleFunctionEnteredAtMs:
         lane?.scheduleFunctionEnteredAtMs ?? null,
@@ -482,6 +860,7 @@ async function runPreset({
     presetId: entry.id,
     samples,
     warmupCommitCount,
+    sampleIntervalCount,
     minRealtimeFactor
   });
   await context.close();
@@ -557,6 +936,7 @@ async function main() {
     baseUrl,
     headless,
     policy: {
+      timingBasis: 'page-authority-commit',
       warmupCommitCount,
       sampleIntervalCount,
       minimumRealtimeFactor: minRealtimeFactor,
@@ -586,8 +966,12 @@ async function main() {
         presetId: scenario.presetId,
         status: scenario.status,
         route: scenario.evaluation.expectedRoute,
+        timingBasis: scenario.evaluation.timingBasis,
+        timingReady: scenario.evaluation.timingReady,
         realTimeFactor: scenario.evaluation.realTimeFactor,
         physicsStepsPerSecond: scenario.evaluation.physicsStepsPerSecond,
+        capturedRealTimeFactor:
+          scenario.evaluation.capturedRealTimeFactor,
         meanWorkerTurnaroundMs:
           scenario.evaluation.meanWorkerTurnaroundMs,
         meanPostComputeMs: scenario.evaluation.meanPostComputeMs,

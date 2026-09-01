@@ -151,6 +151,15 @@ import {
   ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
   createSchroederFusedTerminalRefluxReceiptTarget
 } from '../runtime/sph/schroederFusedFineSubstepGpu.js';
+import {
+  ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA,
+  createWorkerResidentScheduleControlPlaneTaskYielder,
+  workerResidentScheduleControlPlaneYieldNotRequiredReceipt
+} from './workerResidentScheduleTaskYielder.js';
+
+export {
+  ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+};
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
@@ -6995,10 +7004,6 @@ function releaseWorkerResidentScheduleUnconsumedStepEpoch(record, stepSeal, {
   return { required: true, confirmed, scheduled };
 }
 
-async function yieldWorkerResidentScheduleControlPlane() {
-  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
-}
-
 function workerResidentScheduleNowMs() {
   return typeof globalThis.performance?.now === 'function'
     ? globalThis.performance.now()
@@ -7717,6 +7722,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   }
   let terminalRefluxRingBuffer = null;
   let terminalRefluxReceiptRequired = false;
+  let scheduleControlPlaneTaskYielder = null;
   const terminalRefluxExpectations = [];
   try {
     const baseContext = workerContext(payload);
@@ -9009,6 +9015,21 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let failedQueueDrainCheckpoint = null;
     let scheduleLoopError = null;
     let scheduleGpuWorkMayHaveBeenSubmitted = false;
+    const scheduledControlPlaneYieldOpportunityCount = tier0RouteSelected
+      ? 0
+      : Math.max(0, stepCount - 1);
+    let controlPlaneYieldReceipt =
+      workerResidentScheduleControlPlaneYieldNotRequiredReceipt({
+        tier0RouteSelected,
+        stepCount
+      });
+    if (scheduledControlPlaneYieldOpportunityCount > 0) {
+      scheduleControlPlaneTaskYielder =
+        createWorkerResidentScheduleControlPlaneTaskYielder({
+          scheduledYieldOpportunityCount:
+            scheduledControlPlaneYieldOpportunityCount
+        });
+    }
     try {
       if (tier0RouteSelected) {
         tier0ExecutionAttempted = true;
@@ -9623,12 +9644,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
         if (stepOrdinal > 1) {
-          await yieldWorkerResidentScheduleControlPlane();
+          await scheduleControlPlaneTaskYielder.yieldTask(stepOrdinal);
         }
         if (
           state.cancelRequested
           && !(phaseCarrierOneToFourAdopted && completedStepCount === 0)
         ) {
+          scheduleControlPlaneTaskYielder?.observeCancellation(stepOrdinal);
           cancelled = true;
           break;
         }
@@ -10292,6 +10314,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       }
     } catch (error) {
       scheduleLoopError = error;
+    } finally {
+      if (scheduleControlPlaneTaskYielder) {
+        controlPlaneYieldReceipt = scheduleControlPlaneTaskYielder.close();
+      }
     }
     if (submitBurstOpened) {
       // Close before any terminal fence so the last window's held work is
@@ -10908,6 +10934,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         });
       }
       if (scheduleLoopError.residentScheduleError) {
+        scheduleLoopError.residentScheduleError.controlPlaneYieldReceipt =
+          controlPlaneYieldReceipt;
         scheduleLoopError.residentScheduleError.terminalGpuFence =
           terminalGpuFence;
         scheduleLoopError.residentScheduleError.terminalGpuFenceSatisfied =
@@ -10942,6 +10970,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           })
         }
       );
+      error.residentScheduleError.controlPlaneYieldReceipt =
+        controlPlaneYieldReceipt;
       error.residentScheduleError.terminalGpuFence = terminalGpuFence;
       error.residentScheduleError.terminalGpuFenceSatisfied = false;
       throw error;
@@ -10977,6 +11007,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           })
         }
       );
+      error.residentScheduleError.controlPlaneYieldReceipt =
+        controlPlaneYieldReceipt;
       error.residentScheduleError.terminalGpuFence = terminalGpuFence;
       error.residentScheduleError.terminalGpuFenceSatisfied = true;
       error.residentScheduleError.authorityAdmissionReady = false;
@@ -11074,6 +11106,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             })
           }
         );
+        scheduleError.residentScheduleError.controlPlaneYieldReceipt =
+          controlPlaneYieldReceipt;
         scheduleError.residentScheduleError.terminalGpuFence =
           terminalGpuFence;
         throw scheduleError;
@@ -11190,6 +11224,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           })
         }
       );
+      error.residentScheduleError.controlPlaneYieldReceipt =
+        controlPlaneYieldReceipt;
       error.residentScheduleError.terminalGpuFence = terminalGpuFence;
       error.residentScheduleError.twoLevelMechanicsEvidence =
         twoLevelMechanicsEvidence;
@@ -11558,6 +11594,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       requestedStepCount: stepCount,
       completedStepCount,
       cancelled,
+      controlPlaneYieldReceipt,
       // Worker-clock phase stamps (see declaration): consecutive schedule
       // results on one lane share this clock, so the inter-schedule
       // turnaround is directly computable from them.
@@ -11624,6 +11661,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       gpuFence: terminalGpuFence
     };
   } finally {
+    // The loop-level finally closes before terminal result/error assembly so
+    // its receipt can prove cleanup. This outer idempotent close also covers
+    // any future control-flow path inserted between allocation and that loop.
+    scheduleControlPlaneTaskYielder?.close();
+    scheduleControlPlaneTaskYielder = null;
     const terminalLane = retainedLanes.get(laneKey)?.schroederLane ?? null;
     if (terminalLane?.residentStepOptions) {
       delete terminalLane.residentStepOptions[

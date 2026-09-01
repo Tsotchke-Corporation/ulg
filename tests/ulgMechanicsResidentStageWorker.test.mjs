@@ -27,6 +27,7 @@ import {
 import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT,
+  ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS,
   ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY,
   ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
@@ -119,6 +120,48 @@ import {
 import {
   createReferenceMaterialClosures
 } from '../src/runtime/material/materialClosures.js';
+
+const NATIVE_MESSAGE_CHANNEL = globalThis.MessageChannel;
+
+function instrumentResidentScheduleMessageChannels(testContext) {
+  const previousMessageChannel = globalThis.MessageChannel;
+  const stats = {
+    constructionCount: 0,
+    port1CloseCount: 0,
+    port2CloseCount: 0
+  };
+  class InstrumentedMessageChannel {
+    constructor() {
+      stats.constructionCount += 1;
+      const channel = new NATIVE_MESSAGE_CHANNEL();
+      this.port1 = {
+        get onmessage() { return channel.port1.onmessage; },
+        set onmessage(handler) { channel.port1.onmessage = handler; },
+        get onmessageerror() { return channel.port1.onmessageerror; },
+        set onmessageerror(handler) {
+          channel.port1.onmessageerror = handler;
+        },
+        start() { channel.port1.start(); },
+        close() {
+          stats.port1CloseCount += 1;
+          channel.port1.close();
+        }
+      };
+      this.port2 = {
+        postMessage(...args) { channel.port2.postMessage(...args); },
+        close() {
+          stats.port2CloseCount += 1;
+          channel.port2.close();
+        }
+      };
+    }
+  }
+  globalThis.MessageChannel = InstrumentedMessageChannel;
+  testContext.after(() => {
+    globalThis.MessageChannel = previousMessageChannel;
+  });
+  return stats;
+}
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -5007,7 +5050,8 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
   }
 });
 
-test('ULG resident stage worker runs a batched resident schedule with a fresh sealed epoch per step', async () => {
+test('ULG resident stage worker runs a batched resident schedule with a fresh sealed epoch per step', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const fixture = workerScheduleFixture({ laneSuffix: 'batch' });
   fixture.stageOptions.schroederSameLevelMechanics.residentStepOptions = {
     mechanicsMaterialTable: {
@@ -5037,6 +5081,36 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
   assert.equal(result.cancelled, false);
   assert.equal(result.requestedStepCount, 3);
   assert.equal(result.completedStepCount, 3);
+  assert.equal(
+    result.controlPlaneYieldReceipt.schema,
+    ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+  );
+  assert.equal(result.controlPlaneYieldReceipt.mode, 'message-channel');
+  assert.equal(
+    result.controlPlaneYieldReceipt.mechanism,
+    'message-channel-task'
+  );
+  assert.equal(
+    result.controlPlaneYieldReceipt.scheduledYieldOpportunityCount,
+    2
+  );
+  assert.equal(result.controlPlaneYieldReceipt.yieldRequestCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.completedYieldCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.messageChannelCreated, true);
+  assert.equal(result.controlPlaneYieldReceipt.messageChannelYieldCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.timerFallbackYieldCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.ownedPortCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.closedPortCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.portsClosed, true);
+  assert.equal(messageChannelStats.constructionCount, 1);
+  assert.equal(messageChannelStats.port1CloseCount, 1);
+  assert.equal(messageChannelStats.port2CloseCount, 1);
+  assert.equal(result.controlPlaneYieldReceipt.firstBeforeStepOrdinal, 2);
+  assert.equal(result.controlPlaneYieldReceipt.lastBeforeStepOrdinal, 3);
+  assert.equal(
+    result.controlPlaneYieldReceipt.cancellationObservedAfterYield,
+    false
+  );
   assert.equal(
     result.queueDrainIntervalSteps,
     ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS
@@ -5358,6 +5432,45 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
     fixture.runnerCalls[2].spatialEpochGeneration.execution.positionEpoch,
     19
   );
+});
+
+test('ULG one-step canonical resident schedule has no control-plane yield boundary', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
+  const fixture = workerScheduleFixture({ laneSuffix: 'one-step-no-yield' });
+  const laneOptions = {
+    laneId: 'ulg:test:one-step-no-yield-lane',
+    stateKey: 'ulg:test:one-step-no-yield-state'
+  };
+  try {
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        { stepCount: 1, scheduleId: 'ulg:test:one-step-no-yield' },
+        laneOptions
+      )
+    );
+    assert.equal(result.completedStepCount, 1);
+    assert.equal(
+      result.controlPlaneYieldReceipt.mechanism,
+      'none-single-step-canonical'
+    );
+    assert.equal(
+      result.controlPlaneYieldReceipt.scheduledYieldOpportunityCount,
+      0
+    );
+    assert.equal(result.controlPlaneYieldReceipt.yieldRequestCount, 0);
+    assert.equal(result.controlPlaneYieldReceipt.completedYieldCount, 0);
+    assert.equal(result.controlPlaneYieldReceipt.portsClosed, true);
+    assert.equal(messageChannelStats.constructionCount, 0);
+    assert.equal(messageChannelStats.port1CloseCount, 0);
+    assert.equal(messageChannelStats.port2CloseCount, 0);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
 });
 
 test('ULG private resident schedule stage returns bypass public deep transport walks', async () => {
@@ -5999,6 +6112,15 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
       assert.equal(evidence?.exactCflFactorCount, 2);
       assert.equal(evidence?.firstCflFactorMismatchStepOrdinal, 2);
       assert.equal(evidence?.coverageComplete, false);
+      assert.equal(
+        error?.residentScheduleError?.controlPlaneYieldReceipt
+          ?.completedYieldCount,
+        2
+      );
+      assert.equal(
+        error?.residentScheduleError?.controlPlaneYieldReceipt?.portsClosed,
+        true
+      );
       return true;
     }
   );
@@ -6836,7 +6958,8 @@ test('ULG resident schedule rejects a non-WebGPU stage before terminal authority
   );
 });
 
-test('ULG resident stage worker schedule cancellation finishes the in-flight step and leaves the lane usable', async () => {
+test('ULG resident stage worker schedule cancellation finishes the in-flight step and leaves the lane usable', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const fixture = workerScheduleFixture({ laneSuffix: 'cancel' });
   const laneOptions = {
     laneId: 'ulg:test:schroeder-schedule-cancel-lane',
@@ -6849,25 +6972,41 @@ test('ULG resident stage worker schedule cancellation finishes the in-flight ste
     false
   );
   const progressEnvelopes = [];
-  const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
-    schedulePayload(
-      workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
-      { stepCount: 3, scheduleId },
-      laneOptions
-    ),
-    {
-      postProgress: (progress) => {
-        progressEnvelopes.push(progress);
-        if (progress.stepOrdinal === 1) {
-          setTimeout(() => {
-            const ack = cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
-            assert.equal(ack.cancelRequested, true);
-            assert.equal(ack.scheduleId, scheduleId);
-          }, 0);
+  const cancellationChannel = new NATIVE_MESSAGE_CHANNEL();
+  let cancellationAck = null;
+  cancellationChannel.port1.onmessage = () => {
+    cancellationAck = cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
+  };
+  cancellationChannel.port1.start?.();
+  let result;
+  try {
+    result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        { stepCount: 3, scheduleId },
+        laneOptions
+      ),
+      {
+        postProgress: (progress) => {
+          progressEnvelopes.push(progress);
+          if (progress.stepOrdinal === 1) {
+            // Queue the cancel on another local unshipped MessagePort before
+            // the schedule posts its own next-step MessageChannel yield.
+            cancellationChannel.port2.postMessage(null);
+          }
         }
       }
-    }
-  );
+    );
+  } finally {
+    cancellationChannel.port1.close();
+    cancellationChannel.port2.close();
+  }
+  assert.equal(cancellationAck?.cancelRequested, true);
+  assert.equal(cancellationAck?.scheduleId, scheduleId);
   assert.equal(result.status, 'worker-resident-schedule-cancelled');
   assert.equal(result.cancelled, true);
   // The in-flight step completes, then a real task yield admits the queued
@@ -6875,6 +7014,29 @@ test('ULG resident stage worker schedule cancellation finishes the in-flight ste
   assert.equal(result.completedStepCount, 1);
   assert.equal(result.completedStepCount, fixture.runnerCalls.length);
   assert.equal(result.completedStepCount, progressEnvelopes.length);
+  assert.equal(
+    result.controlPlaneYieldReceipt.scheduledYieldOpportunityCount,
+    2
+  );
+  assert.equal(result.controlPlaneYieldReceipt.yieldRequestCount, 1);
+  assert.equal(result.controlPlaneYieldReceipt.completedYieldCount, 1);
+  assert.equal(result.controlPlaneYieldReceipt.messageChannelYieldCount, 1);
+  assert.equal(result.controlPlaneYieldReceipt.timerFallbackYieldCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.firstBeforeStepOrdinal, 2);
+  assert.equal(result.controlPlaneYieldReceipt.lastBeforeStepOrdinal, 2);
+  assert.equal(
+    result.controlPlaneYieldReceipt.cancellationObservedAfterYield,
+    true
+  );
+  assert.equal(
+    result.controlPlaneYieldReceipt.cancellationObservedBeforeStepOrdinal,
+    2
+  );
+  assert.equal(result.controlPlaneYieldReceipt.closedPortCount, 2);
+  assert.equal(result.controlPlaneYieldReceipt.portsClosed, true);
+  assert.equal(messageChannelStats.constructionCount, 1);
+  assert.equal(messageChannelStats.port1CloseCount, 1);
+  assert.equal(messageChannelStats.port2CloseCount, 1);
   assert.equal(result.perStepSummaries.ring.length, result.completedStepCount);
   assert.equal(
     result.finalEpochIdentity.positionEpoch,
@@ -6990,32 +7152,55 @@ test('ULG partial cancellation emits only unmeasured watch uncertainty and burns
       providerKind: 'worker-lane-assignment-only',
       classifierOptions
     });
-    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
-      schedulePayload(
-        workerSchroederStageContext(device, buffers, {
-          schroederSpatialEpoch: epochOptions,
-          schroederSameLevelMechanics: mechanicsOptions
-        }),
+    const cancellationChannel = new MessageChannel();
+    let cancellationAck = null;
+    cancellationChannel.port1.onmessage = () => {
+      cancellationAck =
+        cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
+    };
+    cancellationChannel.port1.start?.();
+    let result;
+    try {
+      result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: epochOptions,
+            schroederSameLevelMechanics: mechanicsOptions
+          }),
+          {
+            stepCount: 3,
+            scheduleId,
+            targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+          },
+          laneOptions
+        ),
         {
-          stepCount: 3,
-          scheduleId,
-          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
-        },
-        laneOptions
-      ),
-      {
-        postProgress(progress) {
-          if (progress.stepOrdinal === 1) {
-            setTimeout(() => {
-              cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId);
-            }, 0);
+          postProgress(progress) {
+            if (progress.stepOrdinal === 1) {
+              cancellationChannel.port2.postMessage(null);
+            }
           }
         }
-      }
-    );
+      );
+    } finally {
+      cancellationChannel.port1.close();
+      cancellationChannel.port2.close();
+    }
+    assert.equal(cancellationAck?.cancelRequested, true);
     assert.equal(result.status, 'worker-resident-schedule-cancelled');
     assert.equal(result.cancelled, true);
     assert.equal(result.completedStepCount, 1);
+    assert.equal(result.controlPlaneYieldReceipt.yieldRequestCount, 1);
+    assert.equal(result.controlPlaneYieldReceipt.completedYieldCount, 1);
+    assert.equal(
+      result.controlPlaneYieldReceipt.cancellationObservedAfterYield,
+      true
+    );
+    assert.equal(
+      result.controlPlaneYieldReceipt.cancellationObservedBeforeStepOrdinal,
+      2
+    );
+    assert.equal(result.controlPlaneYieldReceipt.portsClosed, true);
     const observation = result.nextScheduleLawActivationObservation;
     assert.equal(observation.observationSucceeded, false);
     assert.equal(observation.uncertainty, true);
@@ -7137,7 +7322,8 @@ test('ULG partial cancellation emits only unmeasured watch uncertainty and burns
   }
 });
 
-test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage error and stays consistent', async () => {
+test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage error and stays consistent', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const fixture = workerScheduleFixture({ laneSuffix: 'fail', failAtStep: 2 });
   const laneOptions = {
     laneId: 'ulg:test:schroeder-schedule-fail-lane',
@@ -7168,6 +7354,15 @@ test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage
       assert.equal(detail.terminalGpuFence.fenceSatisfied, true);
       assert.equal(detail.terminalGpuFence.completedStepCount, 1);
       assert.equal(detail.terminalGpuFenceSatisfied, true);
+      assert.equal(
+        detail.controlPlaneYieldReceipt.schema,
+        ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+      );
+      assert.equal(detail.controlPlaneYieldReceipt.yieldRequestCount, 1);
+      assert.equal(detail.controlPlaneYieldReceipt.completedYieldCount, 1);
+      assert.equal(detail.controlPlaneYieldReceipt.messageChannelYieldCount, 1);
+      assert.equal(detail.controlPlaneYieldReceipt.closedPortCount, 2);
+      assert.equal(detail.controlPlaneYieldReceipt.portsClosed, true);
       assertNoWorkerGpuBuffers(detail, 'residentScheduleError');
       structuredClone(detail);
       return true;
@@ -7176,6 +7371,9 @@ test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage
   assert.equal(progressEnvelopes.length, 1);
   assert.equal(fixture.runnerCalls.length, 2);
   assert.equal(fixture.device.queue.submittedWorkDoneCount, 1);
+  assert.equal(messageChannelStats.constructionCount, 1);
+  assert.equal(messageChannelStats.port1CloseCount, 1);
+  assert.equal(messageChannelStats.port2CloseCount, 1);
 
   // A follow-up single 'run-resident-stage' epoch message on the same lane
   // still works: the aborted schedule left no pinned unconsumed epoch.
@@ -7203,6 +7401,50 @@ test('ULG resident stage worker schedule aborts fail-closed on a mid-batch stage
     followUp.value.levelAssignmentSource,
     'stage-option-level-assignment-with-worker-retained-particle-buffers'
   );
+});
+
+test('ULG canonical schedule closes its unused yielder after a first-step stage failure', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'first-step-fail',
+    failAtStep: 1
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:first-step-fail-lane',
+    stateKey: 'ulg:test:first-step-fail-state'
+  };
+  try {
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(
+            fixture.device,
+            fixture.buffers,
+            fixture.stageOptions
+          ),
+          { stepCount: 3, scheduleId: 'ulg:test:first-step-fail' },
+          laneOptions
+        )
+      ),
+      (error) => {
+        const receipt = error.residentScheduleError?.controlPlaneYieldReceipt;
+        assert.equal(error.residentScheduleError?.stepOrdinal, 1);
+        assert.equal(receipt?.scheduledYieldOpportunityCount, 2);
+        assert.equal(receipt?.yieldRequestCount, 0);
+        assert.equal(receipt?.completedYieldCount, 0);
+        assert.equal(receipt?.messageChannelCreated, true);
+        assert.equal(receipt?.closedPortCount, 2);
+        assert.equal(receipt?.portsClosed, true);
+        assert.equal(receipt?.cancellationObservedAfterYield, false);
+        return true;
+      }
+    );
+    assert.equal(messageChannelStats.constructionCount, 1);
+    assert.equal(messageChannelStats.port1CloseCount, 1);
+    assert.equal(messageChannelStats.port2CloseCount, 1);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
 });
 
 test('ULG resident stage worker schedule fails closed when a step does not advance the epoch identity', async () => {
@@ -7267,7 +7509,8 @@ test('ULG resident stage worker schedule fails closed when a step does not advan
   assert.equal(followUp.value.status, 'worker-schroeder-spatial-epoch-retained');
 });
 
-test('ULG resident stage worker schedule rejects a failed terminal queue fence', async () => {
+test('ULG resident stage worker schedule rejects a failed terminal queue fence', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const fixture = workerScheduleFixture({ laneSuffix: 'terminal-fence-fail' });
   fixture.device.queue.onSubmittedWorkDone = () => Promise.reject(
     new Error('injected terminal queue fence rejection')
@@ -7280,7 +7523,7 @@ test('ULG resident stage worker schedule rejects a failed terminal queue fence',
           fixture.buffers,
           fixture.stageOptions
         ),
-        { stepCount: 1, scheduleId: 'ulg:test:schedule-terminal-fence-fail' },
+        { stepCount: 2, scheduleId: 'ulg:test:schedule-terminal-fence-fail' },
         {
           laneId: 'ulg:test:schedule-terminal-fence-fail-lane',
           stateKey: 'ulg:test:schedule-terminal-fence-fail-state'
@@ -7304,9 +7547,35 @@ test('ULG resident stage worker schedule rejects a failed terminal queue fence',
         error.residentScheduleError?.terminalGpuFence?.queueCompletionErrorMessage,
         /injected terminal queue fence rejection/
       );
+      assert.equal(
+        error.residentScheduleError?.controlPlaneYieldReceipt
+          ?.yieldRequestCount,
+        1
+      );
+      assert.equal(
+        error.residentScheduleError?.controlPlaneYieldReceipt
+          ?.completedYieldCount,
+        1
+      );
+      assert.equal(
+        error.residentScheduleError?.controlPlaneYieldReceipt
+          ?.messageChannelYieldCount,
+        1
+      );
+      assert.equal(
+        error.residentScheduleError?.controlPlaneYieldReceipt?.closedPortCount,
+        2
+      );
+      assert.equal(
+        error.residentScheduleError?.controlPlaneYieldReceipt?.portsClosed,
+        true
+      );
       return true;
     }
   );
+  assert.equal(messageChannelStats.constructionCount, 1);
+  assert.equal(messageChannelStats.port1CloseCount, 1);
+  assert.equal(messageChannelStats.port2CloseCount, 1);
   await assert.rejects(
     runUlgMechanicsResidentStageWorkerSchedulePayload(
       schedulePayload(
@@ -7865,7 +8134,8 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
   });
 });
 
-test('ULG worker schedule selects Tier0 from the first contact-free seed receipt and adopts one exact fused terminal family', async () => {
+test('ULG worker schedule selects Tier0 from the first contact-free seed receipt and adopts one exact fused terminal family', async (t) => {
+  const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const device = createFakeGpuDevice();
   const originalQueueSubmit = device.queue.submit.bind(device.queue);
   let exactZeroTier0WatchPending = true;
@@ -8068,6 +8338,30 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
   assert.equal(result.status, 'worker-resident-schedule-completed');
   assert.equal(result.completedStepCount, stepCount);
   assert.equal(result.cancelled, false);
+  assert.equal(
+    result.controlPlaneYieldReceipt.schema,
+    ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+  );
+  assert.equal(
+    result.controlPlaneYieldReceipt.status,
+    'worker-resident-schedule-control-plane-yield-not-required'
+  );
+  assert.equal(result.controlPlaneYieldReceipt.mode, 'none');
+  assert.equal(
+    result.controlPlaneYieldReceipt.mechanism,
+    'none-atomic-tier0'
+  );
+  assert.equal(result.controlPlaneYieldReceipt.yieldRequestCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.completedYieldCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.messageChannelCreated, false);
+  assert.equal(result.controlPlaneYieldReceipt.messageChannelYieldCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.timerFallbackYieldCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.ownedPortCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.closedPortCount, 0);
+  assert.equal(result.controlPlaneYieldReceipt.portsClosed, true);
+  assert.equal(messageChannelStats.constructionCount, 0);
+  assert.equal(messageChannelStats.port1CloseCount, 0);
+  assert.equal(messageChannelStats.port2CloseCount, 0);
   assert.equal(
     outerRouteAdmission.route,
     'tier0-fused-resident-sequence'

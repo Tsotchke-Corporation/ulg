@@ -5,6 +5,30 @@ import {
   evaluateSphPresetThroughputSamples,
   expectedSphPresetExecutionRoute
 } from '../scripts/sph-preset-throughput-matrix.mjs';
+import {
+  ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+} from '../src/services/workerResidentScheduleTaskYielder.js';
+
+function controlPlaneYieldReceipt(overrides = {}) {
+  return {
+    schema:
+      ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA,
+    status: 'worker-resident-schedule-control-plane-yield-not-required',
+    mode: 'none',
+    mechanism: 'none-atomic-tier0',
+    scheduledYieldOpportunityCount: 0,
+    yieldRequestCount: 0,
+    completedYieldCount: 0,
+    messageChannelCreated: false,
+    messageChannelYieldCount: 0,
+    timerFallbackYieldCount: 0,
+    ownedPortCount: 0,
+    closedPortCount: 0,
+    portsClosed: true,
+    totalWaitMs: 0,
+    ...overrides
+  };
+}
 
 function tier0Sample(index, overrides = {}) {
   return {
@@ -19,6 +43,7 @@ function tier0Sample(index, overrides = {}) {
     workerLaneContinuationReady: true,
     committedPresentationReady: true,
     runtimeError: null,
+    controlPlaneYieldReceipt: controlPlaneYieldReceipt(),
     executionRoute: {
       route: 'tier0-fused-resident-sequence',
       terminalFenceSatisfied: true,
@@ -72,6 +97,13 @@ test('throughput evaluator measures simulation time per wall time after warmup',
   assert.equal(result.routeMatched, true);
   assert.equal(result.terminalAuthorityReady, true);
   assert.equal(result.readbackFree, true);
+  assert.equal(result.controlPlaneYieldEvidenceReady, true);
+  assert.deepEqual(
+    result.controlPlaneYieldMechanisms,
+    ['none-atomic-tier0']
+  );
+  assert.equal(result.meanControlPlaneYieldWaitMs, 0);
+  assert.equal(result.meanControlPlaneYieldWaitPerBoundaryMs, 0);
   assert.equal(result.meanWorkerTurnaroundMs, 16);
   assert.equal(result.meanPostComputeMs, 16);
 });
@@ -112,6 +144,19 @@ test('throughput evaluator fails closed on a wrong route or readback', () => {
 
 test('canonical authority uses the full worker-lane predicate instead of a Tier0-only route field', () => {
   const canonicalSample = (index, overrides = {}) => tier0Sample(index, {
+    controlPlaneYieldReceipt: controlPlaneYieldReceipt({
+      status: 'worker-resident-schedule-control-plane-yielder-closed',
+      mode: 'message-channel',
+      mechanism: 'message-channel-task',
+      scheduledYieldOpportunityCount: 15,
+      yieldRequestCount: 15,
+      completedYieldCount: 15,
+      messageChannelCreated: true,
+      messageChannelYieldCount: 15,
+      ownedPortCount: 2,
+      closedPortCount: 2,
+      totalWaitMs: 30
+    }),
     executionRoute: {
       route: 'canonical-schroeder',
       terminalFenceSatisfied: true,
@@ -132,6 +177,13 @@ test('canonical authority uses the full worker-lane predicate instead of a Tier0
   assert.equal(passed.routeMatched, true);
   assert.equal(passed.terminalAuthorityReady, true);
   assert.equal(passed.readbackFree, true);
+  assert.equal(passed.controlPlaneYieldEvidenceReady, true);
+  assert.deepEqual(
+    passed.controlPlaneYieldMechanisms,
+    ['message-channel-task']
+  );
+  assert.equal(passed.meanControlPlaneYieldWaitMs, 30);
+  assert.equal(passed.meanControlPlaneYieldWaitPerBoundaryMs, 2);
   assert.equal(passed.status, 'pass');
 
   const missingLaneAuthority = canonicalSample(2, {

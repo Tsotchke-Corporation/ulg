@@ -11,6 +11,9 @@ import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
+import {
+  ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+} from '../src/services/workerResidentScheduleTaskYielder.js';
 
 export const SPH_PRESET_THROUGHPUT_MATRIX_SCHEMA =
   'peercompute.ulg.sph-preset-throughput-matrix.v0';
@@ -146,6 +149,53 @@ export function evaluateSphPresetThroughputSamples({
     && measured.every(routeEvidenceIsReadbackFree);
   const noRuntimeErrors = measured.length >= 2
     && measured.every((sample) => sample?.runtimeError == null);
+  const controlPlaneYieldReceipts = measured.map(
+    (sample) => sample?.controlPlaneYieldReceipt ?? null
+  );
+  const controlPlaneYieldEvidenceReady = measured.length >= 2
+    && controlPlaneYieldReceipts.every((receipt) => (
+      receipt?.schema
+        === ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA
+      && receipt.portsClosed === true
+      && Number.isSafeInteger(receipt.completedYieldCount)
+      && receipt.completedYieldCount >= 0
+      && Number.isSafeInteger(receipt.yieldRequestCount)
+      && receipt.yieldRequestCount === receipt.completedYieldCount
+      && Number.isSafeInteger(receipt.messageChannelYieldCount)
+      && receipt.messageChannelYieldCount >= 0
+      && Number.isSafeInteger(receipt.timerFallbackYieldCount)
+      && receipt.timerFallbackYieldCount >= 0
+      && receipt.messageChannelYieldCount + receipt.timerFallbackYieldCount
+        === receipt.completedYieldCount
+      && Number.isSafeInteger(receipt.ownedPortCount)
+      && receipt.ownedPortCount >= 0
+      && Number.isSafeInteger(receipt.closedPortCount)
+      && receipt.closedPortCount === receipt.ownedPortCount
+      && Number.isFinite(receipt.totalWaitMs)
+      && receipt.totalWaitMs >= 0
+    ));
+  const controlPlaneYieldMechanisms = Object.freeze([
+    ...new Set(
+      controlPlaneYieldReceipts
+        .map((receipt) => receipt?.mechanism ?? null)
+        .filter(Boolean)
+    )
+  ]);
+  const meanControlPlaneYieldWaitMs = mean(
+    controlPlaneYieldReceipts.map(
+      (receipt) => finiteNumber(receipt?.totalWaitMs)
+    )
+  );
+  const meanControlPlaneYieldWaitPerBoundaryMs = mean(
+    controlPlaneYieldReceipts.map((receipt) => {
+      const waitMs = finiteNumber(receipt?.totalWaitMs);
+      const completedYieldCount = Number(receipt?.completedYieldCount);
+      if (waitMs == null || !Number.isSafeInteger(completedYieldCount)) {
+        return null;
+      }
+      return completedYieldCount > 0 ? waitMs / completedYieldCount : 0;
+    })
+  );
   const threshold = positiveNumber(
     minRealtimeFactor,
     DEFAULT_MIN_REALTIME_FACTOR
@@ -180,6 +230,10 @@ export function evaluateSphPresetThroughputSamples({
     terminalAuthorityReady,
     readbackFree,
     noRuntimeErrors,
+    controlPlaneYieldEvidenceReady,
+    controlPlaneYieldMechanisms,
+    meanControlPlaneYieldWaitMs,
+    meanControlPlaneYieldWaitPerBoundaryMs,
     meanWorkerTurnaroundMs: mean(
       intervals.map((interval) => interval.workerTurnaroundMs)
     ),
@@ -245,6 +299,9 @@ async function compactPageSnapshot(page) {
       workerLanePageTiming: lane?.workerLanePageTiming == null
         ? null
         : { ...lane.workerLanePageTiming },
+      controlPlaneYieldReceipt: lane?.controlPlaneYieldReceipt == null
+        ? null
+        : { ...lane.controlPlaneYieldReceipt },
       executionRoute: route == null ? null : { ...route },
       fullParticleReadbackPerformed:
         execution?.fullParticleReadbackPerformed === true,

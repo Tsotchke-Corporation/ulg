@@ -54087,6 +54087,9 @@ fn main(
         requestedStepCount: result.requestedStepCount ?? null,
         completedStepCount: result.completedStepCount ?? null,
         cancelled: result.cancelled === true,
+        controlPlaneYieldReceipt: result.controlPlaneYieldReceipt
+          ? { ...result.controlPlaneYieldReceipt }
+          : null,
         // Worker-clock schedule phase stamps (inter-schedule turnaround
         // diagnosis; same clock across a lane's consecutive results).
         scheduleFunctionEnteredAtMs:

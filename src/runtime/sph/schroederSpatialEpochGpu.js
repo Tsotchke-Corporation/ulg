@@ -71,7 +71,8 @@ import {
   createSchroederSpatialMechanicsFieldViewGpu
 } from './schroederSpatialMechanicsFieldViewGpu.js';
 import {
-  createSchroederSpatialMechanicsFieldPairGpu
+  createSchroederSpatialMechanicsFieldPairGpu,
+  schroederSpatialMechanicsFieldPairAdjacentPredecessorMatches
 } from './schroederSpatialMechanicsFieldPairGpu.js';
 import {
   createSchroederSpatialPhaseVolumeMomentGpu
@@ -4140,14 +4141,6 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       ? []
       : Array.from(mechanicsFieldTopologyPredecessors);
   if (
-    resolvedMechanicsFieldTopologyPredecessors.length > 0
-    && mechanicsFieldPairV2Enabled
-  ) {
-    throw new TypeError(
-      'mechanics-field topology successor reuse is incompatible with paired-v2 construction'
-    );
-  }
-  if (
     resolvedMechanicsFieldTopologyPredecessors.some(
       (predecessor) => !predecessor || !Number.isInteger(predecessor.selectedLevel)
     )
@@ -4804,6 +4797,85 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         mechanicsLevelSpecs,
         resolvedParticleIdentityStrideWords
       );
+      const pairTopologyPredecessors = mechanicsLevelViews.map(
+        (levelView) => resolvedMechanicsFieldTopologyPredecessors.find(
+          (predecessor) => (
+            predecessor.selectedLevel === levelView.selectedLevel
+          )
+        ) ?? null
+      );
+      const pairTopologySuccessorRequested =
+        resolvedMechanicsFieldTopologyPredecessors.length > 0;
+      let pairTopologySuccessorEligible = false;
+      if (pairTopologySuccessorRequested) {
+        const predecessorPair = pairTopologyPredecessors[0]?.pairExecution;
+        const predecessorChildren = predecessorPair?.mechanicsFieldViews;
+        const exactPairedPredecessor =
+          resolvedMechanicsFieldTopologyPredecessors.length === 2
+          && pairTopologyPredecessors.every(Boolean)
+          && Array.isArray(predecessorChildren)
+          && predecessorChildren.length === 2
+          && pairTopologyPredecessors.every((predecessor, index) => (
+            predecessor.pairExecution === predecessorPair
+            && predecessorChildren[index] === predecessor
+            && predecessor.selectedLevel
+              === mechanicsLevelViews[index].selectedLevel
+          ));
+        if (!exactPairedPredecessor) {
+          const error = new TypeError(
+            'paired mechanics-field topology reuse requires one exact two-child predecessor'
+          );
+          error.code =
+            'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_TOPOLOGY_PREDECESSOR';
+          throw error;
+        }
+        // A depleted three-arena runtime can rotate while its predecessor is
+        // still draining. Copy is intentionally same-runtime only; an exact
+        // predecessor owned by the prior runtime falls back atomically to the
+        // ordinary paired build in the replacement runtime.
+        pairTopologySuccessorEligible =
+          predecessorPair.ownerRuntime === mechanicsFieldPairRuntime;
+        if (!pairTopologySuccessorEligible) {
+          const predecessorRuntime = predecessorPair.ownerRuntime;
+          const drainingRecord = [
+            ...entry.mechanicsFieldPairDrainingRuntimes
+          ].find((record) => (
+            record.runtime === predecessorRuntime
+            && record.destroyed !== true
+            && record.retirementConfirmed !== true
+            && record.executions.includes(predecessorPair)
+            && entry.mechanicsFieldPairRuntimes.get(record.key)
+              === mechanicsFieldPairRuntime
+          ));
+          const exactDrainingPredecessor =
+            drainingRecord != null
+            && schroederSpatialMechanicsFieldPairAdjacentPredecessorMatches({
+              predecessorPair,
+              topologyPredecessors: pairTopologyPredecessors,
+              parentMechanicsViews: mechanicsLevelViews.map(
+                (levelView) => levelView.mechanicsView
+              ),
+              identityBuffer: particleIdentityBuffer,
+              sourceCount: source.sourceCount,
+              sourceRowLayoutId: source.sourceRowLayoutId,
+              identityStrideWords: resolvedParticleIdentityStrideWords
+            })
+            && predecessorRuntime?.ownsExecution?.(predecessorPair) === true
+            && predecessorRuntime?.isExecutionSubmitted?.(
+              predecessorPair
+            ) === true
+            && predecessorPair.submitPerformed === true
+            && predecessorPair.released !== true;
+          if (!exactDrainingPredecessor) {
+            const error = new TypeError(
+              'paired mechanics-field topology predecessor is not an exact draining-runtime owner'
+            );
+            error.code =
+              'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_TOPOLOGY_PREDECESSOR';
+            throw error;
+          }
+        }
+      }
       const mechanicsFieldPairTimestampSpan =
         gpuTimestampRecorder?.active === true
         && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
@@ -4821,7 +4893,12 @@ export function runSchroederSpatialEpochGenerationWebGpu({
               physicsSubstep: source.physicsSubstep
             })
           : null;
-      mechanicsFieldPairExecution = mechanicsFieldPairRuntime.encode(encoder, {
+      mechanicsFieldPairExecution = mechanicsFieldPairRuntime[
+        pairTopologySuccessorEligible ? 'encodeTopologySuccessor' : 'encode'
+      ](encoder, {
+        ...(pairTopologySuccessorEligible
+          ? { topologyPredecessors: pairTopologyPredecessors }
+          : {}),
         sourceBuffer: source.sourceBuffer || source.activeNodeBuffer,
         identityBuffer: particleIdentityBuffer,
         sourceCount: source.sourceCount,
@@ -5238,6 +5315,20 @@ export function runSchroederSpatialEpochGenerationWebGpu({
             === 'conservative-successor-copy'
         )
       ).length,
+      mechanicsFieldTopologySuccessorValidationStatus:
+        mechanicsLevelViews.some((levelView) => (
+          levelView.mechanicsFieldView?.topologyConstructionMode
+            === 'conservative-successor-copy'
+        ))
+          ? 'gpu-pending-until-field-header-admission'
+          : 'not-requested',
+      mechanicsFieldTopologySuccessorFailurePolicy:
+        mechanicsLevelViews.some((levelView) => (
+          levelView.mechanicsFieldView?.topologyConstructionMode
+            === 'conservative-successor-copy'
+        ))
+          ? 'fail-closed-no-silent-topology-rebuild'
+          : null,
       mechanicsFieldConstructionMode: mechanicsFieldPairExecution
         ? 'paired-v2-shared-radix'
         : (mechanicsLevelViews.some(

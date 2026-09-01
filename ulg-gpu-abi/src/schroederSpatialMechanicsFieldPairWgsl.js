@@ -105,6 +105,9 @@ struct MechanicsFieldPairParams {
 @group(0) @binding(16) var<storage, read_write> coarse_stable_order: array<u32>;
 @group(0) @binding(17) var<storage, read_write> pair_tail_scan: array<vec2<u32>>;
 @group(0) @binding(18) var<storage, read_write> pair_projection_dispatch: array<u32>;
+@group(0) @binding(19) var<storage, read> predecessor_fine_field: array<u32>;
+@group(0) @binding(20) var<storage, read> predecessor_coarse_field: array<u32>;
+@group(0) @binding(21) var<storage, read> predecessor_active_source_view: array<u32>;
 
 const FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
 const FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
@@ -140,6 +143,7 @@ const ACTIVE_SOURCE_MISSING: u32 = 0xffffffffu;
 const ACTIVE_SOURCE_COUNT_WORD: u32 = 18u;
 const ACTIVE_SOURCE_CANDIDATE_COUNT_WORD: u32 = 43u;
 const ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD: u32 = 48u;
+const ACTIVE_SOURCE_PHYSICAL_DISPATCH_WORD: u32 = 54u;
 const ACTIVE_SOURCE_COMPLETION_WORD: u32 = 30u;
 const ACTIVE_SOURCE_SEAL_WORD: u32 = 47u;
 
@@ -708,6 +712,215 @@ fn pair_quadratic_weight_at(fraction: f32, offset: i32) -> f32 {
   }
   let value = fraction - 0.5;
   return 0.5 * value * value;
+}
+
+fn pair_successor_field_load(level_ordinal: u32, word: u32) -> u32 {
+  return select(coarse_load(word), fine_load(word), level_ordinal == 0u);
+}
+
+fn pair_predecessor_field_load(level_ordinal: u32, word: u32) -> u32 {
+  return select(
+    predecessor_coarse_field[word],
+    predecessor_fine_field[word],
+    level_ordinal == 0u
+  );
+}
+
+fn pair_successor_descriptor_zero(level_ordinal: u32, source_index: u32) -> bool {
+  let descriptor_offset = select(
+    params.coarse_descriptor_offset_words,
+    params.fine_descriptor_offset_words,
+    level_ordinal == 0u
+  ) + source_index * FIELD_DESCRIPTOR_WORDS;
+  for (var word = 0u; word < FIELD_DESCRIPTOR_WORDS; word = word + 1u) {
+    if (pair_successor_field_load(level_ordinal, descriptor_offset + word) != 0u) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn pair_successor_descriptor_inactive(
+  level_ordinal: u32,
+  source_index: u32
+) -> bool {
+  let descriptor_offset = select(
+    params.coarse_descriptor_offset_words,
+    params.fine_descriptor_offset_words,
+    level_ordinal == 0u
+  ) + source_index * FIELD_DESCRIPTOR_WORDS;
+  for (var word = 0u; word < 4u; word = word + 1u) {
+    if (pair_successor_field_load(level_ordinal, descriptor_offset + word) != 0u) {
+      return false;
+    }
+  }
+  for (var word = 4u; word < 31u; word = word + 1u) {
+    if (
+      pair_successor_field_load(level_ordinal, descriptor_offset + word)
+        != FIELD_INVALID_KEY
+    ) {
+      return false;
+    }
+  }
+  return pair_successor_field_load(level_ordinal, descriptor_offset + 31u)
+    == 0u;
+}
+
+fn pair_successor_active_mapping_matches(source_index: u32) -> bool {
+  if (
+    source_index >= params.source_count
+    || arrayLength(&predecessor_active_source_view)
+      != arrayLength(&active_source_view)
+    || arrayLength(&active_source_view) < ACTIVE_SOURCE_HEADER_WORDS
+  ) {
+    return false;
+  }
+  let current_reverse = active_source_view[26u] + source_index;
+  let predecessor_reverse = predecessor_active_source_view[26u] + source_index;
+  if (
+    current_reverse >= arrayLength(&active_source_view)
+    || predecessor_reverse >= arrayLength(&predecessor_active_source_view)
+  ) {
+    return false;
+  }
+  let current_active = active_source_view[current_reverse];
+  let predecessor_active = predecessor_active_source_view[predecessor_reverse];
+  if (current_active != predecessor_active) {
+    return false;
+  }
+  if (current_active == ACTIVE_SOURCE_MISSING) {
+    return true;
+  }
+  let active_count = active_source_view[ACTIVE_SOURCE_COUNT_WORD];
+  let current_forward = active_source_view[25u] + current_active;
+  let predecessor_forward = predecessor_active_source_view[25u] + current_active;
+  return current_active < active_count
+    && current_forward < arrayLength(&active_source_view)
+    && predecessor_forward < arrayLength(&predecessor_active_source_view)
+    && active_source_view[current_forward] == source_index
+    && predecessor_active_source_view[predecessor_forward] == source_index;
+}
+
+fn pair_successor_level_stencil_matches(
+  level_ordinal: u32,
+  source_index: u32
+) -> bool {
+  let reverse = active_source_view[26u] + source_index;
+  let active_ordinal = active_source_view[reverse];
+  if (active_ordinal == ACTIVE_SOURCE_MISSING) {
+    return pair_successor_descriptor_zero(level_ordinal, source_index);
+  }
+  if (
+    !pair_source_admitted(source_index)
+    || !pair_spatial_membership_admitted(source_index)
+  ) {
+    return false;
+  }
+  let row = source_index * params.source_stride_floats;
+  let selected_level = select(
+    params.coarse_selected_level,
+    params.fine_selected_level,
+    level_ordinal == 0u
+  );
+  let classified_level = i32(round(source_rows[row]));
+  if (classified_level != selected_level) {
+    return pair_successor_descriptor_inactive(
+      level_ordinal,
+      source_index
+    );
+  }
+  let spacing = select(
+    params.coarse_grid_spacing_m,
+    params.fine_grid_spacing_m,
+    level_ordinal == 0u
+  );
+  let inv_spacing = select(
+    params.coarse_inv_grid_spacing_m,
+    params.fine_inv_grid_spacing_m,
+    level_ordinal == 0u
+  );
+  if (bitcast<u32>(source_rows[row + 1u]) != bitcast<u32>(spacing)) {
+    return false;
+  }
+  let descriptor_offset = select(
+    params.coarse_descriptor_offset_words,
+    params.fine_descriptor_offset_words,
+    level_ordinal == 0u
+  ) + source_index * FIELD_DESCRIPTOR_WORDS;
+  let family = u32(round(source_rows[row + 8u]));
+  let material = u32(round(source_rows[row + 9u]));
+  let identity = particle_identity[source_index * params.identity_stride_words];
+  let continuity = select(0u, identity, family == 1u);
+  if (
+    pair_successor_field_load(level_ordinal, descriptor_offset) != family
+    || pair_successor_field_load(level_ordinal, descriptor_offset + 1u) != material
+    || pair_successor_field_load(level_ordinal, descriptor_offset + 2u) != continuity
+    || pair_successor_field_load(level_ordinal, descriptor_offset + 3u) != 1u
+    || pair_successor_field_load(level_ordinal, descriptor_offset + 31u) != 0u
+  ) {
+    return false;
+  }
+  let position = vec3<f32>(
+    source_rows[row + 12u],
+    source_rows[row + 13u],
+    source_rows[row + 14u]
+  );
+  let grid_position = position * inv_spacing;
+  let base = vec3<i32>(floor(grid_position - vec3<f32>(0.5)));
+  let fraction = grid_position - vec3<f32>(base);
+  let field_count = pair_successor_field_load(level_ordinal, 34u);
+  let key_offset = select(
+    params.coarse_key_offset_words,
+    params.fine_key_offset_words,
+    level_ordinal == 0u
+  );
+  let node_count = select(
+    params.coarse_grid_node_count,
+    params.fine_grid_node_count,
+    level_ordinal == 0u
+  );
+  var ordinal = 0u;
+  for (var ox = 0i; ox < 3i; ox = ox + 1i) {
+    for (var oy = 0i; oy < 3i; oy = oy + 1i) {
+      for (var oz = 0i; oz < 3i; oz = oz + 1i) {
+        let descriptor_word = descriptor_offset + 4u + ordinal;
+        ordinal = ordinal + 1u;
+        let support_weight =
+          pair_quadratic_weight_at(fraction.x, ox)
+          * pair_quadratic_weight_at(fraction.y, oy)
+          * pair_quadratic_weight_at(fraction.z, oz);
+        let node = pair_grid_index(
+          level_ordinal,
+          base.x + ox,
+          base.y + oy,
+          base.z + oz
+        );
+        let field_index = pair_successor_field_load(
+          level_ordinal,
+          descriptor_word
+        );
+        if (support_weight == 0.0 || node >= node_count) {
+          if (field_index != FIELD_INVALID_KEY) {
+            return false;
+          }
+          continue;
+        }
+        if (field_index >= field_count) {
+          return false;
+        }
+        let key = key_offset + field_index * FIELD_KEY_WORDS;
+        if (
+          pair_successor_field_load(level_ordinal, key) != node
+          || pair_successor_field_load(level_ordinal, key + 1u) != family
+          || pair_successor_field_load(level_ordinal, key + 2u) != material
+          || pair_successor_field_load(level_ordinal, key + 3u) != continuity
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 fn pair_write_invalid_candidate(candidate_index: u32) {
@@ -1884,6 +2097,311 @@ fn pair_publish_field(level_ordinal: u32, field_count: u32) {
     coarse_store(FIELD_DISPATCH_OFFSET_WORDS + 2u, dispatch_z);
     coarse_store(63u, 0u);
   }
+}
+
+fn pair_predecessor_active_source_admitted() -> bool {
+  let words = arrayLength(&predecessor_active_source_view);
+  if (
+    words != arrayLength(&active_source_view)
+    || words < ACTIVE_SOURCE_HEADER_WORDS
+  ) {
+    return false;
+  }
+  let status = predecessor_active_source_view[2u];
+  return predecessor_active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && predecessor_active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_READY_ADMITTED) == ACTIVE_SOURCE_READY_ADMITTED
+    && (status & ACTIVE_SOURCE_REJECTED_MASK) == 0u
+    && predecessor_active_source_view[3u] + 1u == params.generation_id
+    && predecessor_active_source_view[4u] == params.device_ordinal
+    && predecessor_active_source_view[5u] == params.lane_ordinal
+    && predecessor_active_source_view[6u] + 1u == params.lease_token
+    && predecessor_active_source_view[7u] == params.source_family_id
+    && predecessor_active_source_view[8u] + 1u == params.storage_generation
+    && predecessor_active_source_view[9u] == params.physics_tick
+    && predecessor_active_source_view[10u] + 1u == params.physics_substep
+    && predecessor_active_source_view[11u] + 1u == params.position_epoch
+    && predecessor_active_source_view[12u] == params.topology_epoch
+    && predecessor_active_source_view[13u] == params.chart_epoch
+    && predecessor_active_source_view[14u] == params.level_epoch
+    && predecessor_active_source_view[15u] == params.support_epoch
+    && predecessor_active_source_view[16u] == params.source_count
+    && predecessor_active_source_view[17u] == params.source_capacity
+    && predecessor_active_source_view[18u]
+      == active_source_view[ACTIVE_SOURCE_COUNT_WORD]
+    && predecessor_active_source_view[19u] == active_source_view[19u]
+    && predecessor_active_source_view[20u] == active_source_view[20u]
+    && predecessor_active_source_view[23u] == params.source_row_layout_id
+    && predecessor_active_source_view[24u] == params.source_stride_floats
+    && predecessor_active_source_view[25u] == active_source_view[25u]
+    && predecessor_active_source_view[26u] == active_source_view[26u]
+    && predecessor_active_source_view[27u] == active_source_view[27u]
+    && predecessor_active_source_view[29u] + 1u == params.completion_ordinal
+    && predecessor_active_source_view[30u] + 1u == params.completion_ordinal
+    && predecessor_active_source_view[43u]
+      == active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD]
+    && predecessor_active_source_view[44u] == active_source_view[44u]
+    && predecessor_active_source_view[47u] != 0u;
+}
+
+fn pair_topology_predecessor_admitted(level_ordinal: u32) -> bool {
+  let fine = level_ordinal == 0u;
+  let words = select(
+    arrayLength(&predecessor_coarse_field),
+    arrayLength(&predecessor_fine_field),
+    fine
+  );
+  let successor_words = select(
+    arrayLength(&coarse_field),
+    arrayLength(&fine_field),
+    fine
+  );
+  let capacity_words = select(
+    params.coarse_capacity_words,
+    params.fine_capacity_words,
+    fine
+  );
+  let selected_level = select(
+    params.coarse_selected_level,
+    params.fine_selected_level,
+    fine
+  );
+  let grid_node_count = select(
+    params.coarse_grid_node_count,
+    params.fine_grid_node_count,
+    fine
+  );
+  let nx = select(params.coarse_grid_nx, params.fine_grid_nx, fine);
+  let ny = select(params.coarse_grid_ny, params.fine_grid_ny, fine);
+  let nz = select(params.coarse_grid_nz, params.fine_grid_nz, fine);
+  let shift = select(params.coarse_grid_shift, params.fine_grid_shift, fine);
+  let spacing = select(
+    bitcast<u32>(params.coarse_grid_spacing_m),
+    bitcast<u32>(params.fine_grid_spacing_m),
+    fine
+  );
+  let descriptor_offset = select(
+    params.coarse_descriptor_offset_words,
+    params.fine_descriptor_offset_words,
+    fine
+  );
+  let key_offset = select(
+    params.coarse_key_offset_words,
+    params.fine_key_offset_words,
+    fine
+  );
+  let accumulator_offset = select(
+    params.coarse_accumulator_offset_words,
+    params.fine_accumulator_offset_words,
+    fine
+  );
+  let state_offset = select(
+    params.coarse_state_offset_words,
+    params.fine_state_offset_words,
+    fine
+  );
+  let field_capacity = select(
+    params.coarse_field_capacity,
+    params.fine_field_capacity,
+    fine
+  );
+  let parent_capacity = select(
+    params.coarse_parent_node_capacity,
+    params.fine_parent_node_capacity,
+    fine
+  );
+  let status = pair_predecessor_field_load(level_ordinal, 2u);
+  let field_count = pair_predecessor_field_load(level_ordinal, 34u);
+  let consumer_groups = pair_group_count(field_count);
+  let dispatch_x = pair_dispatch_x(consumer_groups);
+  let dispatch_y = pair_dispatch_y(consumer_groups, dispatch_x);
+  let dispatch_z = select(0u, 1u, field_count > 0u);
+  return words == capacity_words
+    && successor_words == capacity_words
+    && pair_predecessor_field_load(level_ordinal, 0u) == FIELD_MAGIC
+    && pair_predecessor_field_load(level_ordinal, 1u) == FIELD_VERSION
+    && (status & (FIELD_STATUS_READY | FIELD_STATUS_ADMITTED))
+      == (FIELD_STATUS_READY | FIELD_STATUS_ADMITTED)
+    && (status & (FIELD_STATUS_FAIL_CLOSED
+      | FIELD_STATUS_INVALID_SOURCE
+      | FIELD_STATUS_CAPACITY_OVERFLOW)) == 0u
+    && pair_predecessor_field_load(level_ordinal, 3u) + 1u
+      == params.generation_id
+    && pair_predecessor_field_load(level_ordinal, 4u) == params.device_ordinal
+    && pair_predecessor_field_load(level_ordinal, 5u) == params.lane_ordinal
+    && pair_predecessor_field_load(level_ordinal, 6u) + 1u
+      == params.lease_token
+    && pair_predecessor_field_load(level_ordinal, 7u)
+      == params.source_family_id
+    && pair_predecessor_field_load(level_ordinal, 8u) + 1u
+      == params.storage_generation
+    && pair_predecessor_field_load(level_ordinal, 9u) == params.physics_tick
+    && pair_predecessor_field_load(level_ordinal, 10u) + 1u
+      == params.physics_substep
+    && pair_predecessor_field_load(level_ordinal, 11u) + 1u
+      == params.position_epoch
+    && pair_predecessor_field_load(level_ordinal, 12u) == params.topology_epoch
+    && pair_predecessor_field_load(level_ordinal, 13u) == params.chart_epoch
+    && pair_predecessor_field_load(level_ordinal, 14u) == params.level_epoch
+    && pair_predecessor_field_load(level_ordinal, 15u) == params.support_epoch
+    && pair_predecessor_field_load(level_ordinal, 16u) == params.source_count
+    && bitcast<i32>(pair_predecessor_field_load(level_ordinal, 17u))
+      == selected_level
+    && pair_predecessor_field_load(level_ordinal, 18u) == grid_node_count
+    && pair_predecessor_field_load(level_ordinal, 19u) == nx
+    && pair_predecessor_field_load(level_ordinal, 20u) == ny
+    && pair_predecessor_field_load(level_ordinal, 21u) == nz
+    && pair_predecessor_field_load(level_ordinal, 22u) == shift
+    && pair_predecessor_field_load(level_ordinal, 23u) == spacing
+    && pair_predecessor_field_load(level_ordinal, 24u) == descriptor_offset
+    && pair_predecessor_field_load(level_ordinal, 25u) == FIELD_DESCRIPTOR_WORDS
+    && pair_predecessor_field_load(level_ordinal, 26u) == key_offset
+    && pair_predecessor_field_load(level_ordinal, 27u) == FIELD_KEY_WORDS
+    && pair_predecessor_field_load(level_ordinal, 28u) == accumulator_offset
+    && pair_predecessor_field_load(level_ordinal, 29u) == FIELD_ACCUMULATOR_WORDS
+    && pair_predecessor_field_load(level_ordinal, 30u) == state_offset
+    && pair_predecessor_field_load(level_ordinal, 31u) == FIELD_STATE_WORDS
+    && pair_predecessor_field_load(level_ordinal, 32u) == field_capacity
+    && pair_predecessor_field_load(level_ordinal, 33u)
+      == active_source_view[ACTIVE_SOURCE_CANDIDATE_COUNT_WORD]
+    && field_count <= field_capacity
+    && pair_predecessor_field_load(level_ordinal, 35u) == 0u
+    && pair_predecessor_field_load(level_ordinal, 37u) == 0u
+    && pair_predecessor_field_load(level_ordinal, 39u)
+      == params.source_row_layout_id
+    && pair_predecessor_field_load(level_ordinal, 40u)
+      == params.identity_stride_words
+    && pair_predecessor_field_load(level_ordinal, 42u) == capacity_words
+    && pair_predecessor_field_load(level_ordinal, 44u) == dispatch_x
+    && pair_predecessor_field_load(level_ordinal, 45u) == dispatch_y
+    && pair_predecessor_field_load(level_ordinal, 46u) == dispatch_z
+    && pair_predecessor_field_load(level_ordinal, 47u) == PARENT_MAGIC
+    && pair_predecessor_field_load(level_ordinal, 48u) == PARENT_VERSION
+    && pair_predecessor_field_load(level_ordinal, 49u) == parent_capacity
+    && pair_predecessor_field_load(level_ordinal, 50u) + 1u
+      == params.generation_id
+    && pair_predecessor_field_load(level_ordinal, 54u) == params.source_count
+    && pair_predecessor_field_load(level_ordinal, 55u) == 1u
+    && pair_predecessor_field_load(level_ordinal, 56u) == 1u
+    && pair_predecessor_field_load(level_ordinal, 57u) == 1u
+    && pair_predecessor_field_load(level_ordinal, 58u) == 0u
+    && pair_predecessor_field_load(level_ordinal, 60u) == dispatch_x
+    && pair_predecessor_field_load(level_ordinal, 61u) == dispatch_y
+    && pair_predecessor_field_load(level_ordinal, 62u) == dispatch_z
+    && capacity_words == state_offset
+      + field_capacity * (FIELD_STATE_WORDS + FIELD_PRESSURE_WORDS);
+}
+
+fn pair_publish_topology_successor(level_ordinal: u32) {
+  let fine = level_ordinal == 0u;
+  let parent_capacity = select(
+    params.coarse_parent_node_capacity,
+    params.fine_parent_node_capacity,
+    fine
+  );
+  if (fine) {
+    fine_store(2u, FIELD_STATUS_READY | FIELD_STATUS_ADMITTED);
+    fine_store(3u, params.generation_id);
+    fine_store(4u, params.device_ordinal);
+    fine_store(5u, params.lane_ordinal);
+    fine_store(6u, params.lease_token);
+    fine_store(7u, params.source_family_id);
+    fine_store(8u, params.storage_generation);
+    fine_store(9u, params.physics_tick);
+    fine_store(10u, params.physics_substep);
+    fine_store(11u, params.position_epoch);
+    fine_store(12u, params.topology_epoch);
+    fine_store(13u, params.chart_epoch);
+    fine_store(14u, params.level_epoch);
+    fine_store(15u, params.support_epoch);
+    fine_store(38u, params.completion_ordinal);
+    fine_store(43u, 0u);
+    fine_store(47u, PARENT_MAGIC);
+    fine_store(48u, PARENT_VERSION);
+    fine_store(49u, parent_capacity);
+    fine_store(50u, params.generation_id);
+    fine_store(59u, 0u);
+    fine_store(63u, 0u);
+  } else {
+    coarse_store(2u, FIELD_STATUS_READY | FIELD_STATUS_ADMITTED);
+    coarse_store(3u, params.generation_id);
+    coarse_store(4u, params.device_ordinal);
+    coarse_store(5u, params.lane_ordinal);
+    coarse_store(6u, params.lease_token);
+    coarse_store(7u, params.source_family_id);
+    coarse_store(8u, params.storage_generation);
+    coarse_store(9u, params.physics_tick);
+    coarse_store(10u, params.physics_substep);
+    coarse_store(11u, params.position_epoch);
+    coarse_store(12u, params.topology_epoch);
+    coarse_store(13u, params.chart_epoch);
+    coarse_store(14u, params.level_epoch);
+    coarse_store(15u, params.support_epoch);
+    coarse_store(38u, params.completion_ordinal);
+    coarse_store(43u, 0u);
+    coarse_store(47u, PARENT_MAGIC);
+    coarse_store(48u, PARENT_VERSION);
+    coarse_store(49u, parent_capacity);
+    coarse_store(50u, params.generation_id);
+    coarse_store(59u, 0u);
+    coarse_store(63u, 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn validate_pair_topology_successor(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let source_index = pair_linear_invocation(
+    local_id,
+    workgroup_id,
+    active_source_view[ACTIVE_SOURCE_PHYSICAL_DISPATCH_WORD]
+  );
+  if (source_index >= params.source_count) {
+    return;
+  }
+  if (source_index == 0u) {
+    let common_admitted = pair_active_source_view_admitted()
+      && pair_predecessor_active_source_admitted()
+      && pair_spatial_directory_admitted();
+    pair_store(
+      PAIR_CONTROL_BUILD_SEAL,
+      select(0u, params.completion_ordinal, common_admitted)
+    );
+  }
+  if (
+    !pair_successor_active_mapping_matches(source_index)
+    || !pair_successor_level_stencil_matches(0u, source_index)
+    || !pair_successor_level_stencil_matches(1u, source_index)
+  ) {
+    atomicAdd(&pair_control[PAIR_CONTROL_INVALID_KEY_COUNT], 1u);
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_pair_topology_successor() {
+  let admitted = pair_load(PAIR_CONTROL_BUILD_SEAL)
+      == params.completion_ordinal
+    && pair_load(PAIR_CONTROL_INVALID_KEY_COUNT) == 0u
+    && pair_parent_admitted(0u)
+    && pair_parent_admitted(1u)
+    && pair_topology_predecessor_admitted(0u)
+    && pair_topology_predecessor_admitted(1u)
+    && pair_field_layout_admitted(0u)
+    && pair_field_layout_admitted(1u);
+  if (!admitted) {
+    let topology_invalid_count = pair_load(
+      PAIR_CONTROL_INVALID_KEY_COUNT
+    );
+    fine_store(35u, topology_invalid_count);
+    coarse_store(35u, topology_invalid_count);
+    pair_reject_field(0u, FIELD_STATUS_INVALID_SOURCE);
+    pair_reject_field(1u, FIELD_STATUS_INVALID_SOURCE);
+    return;
+  }
+  pair_publish_topology_successor(0u);
+  pair_publish_topology_successor(1u);
 }
 
 @compute @workgroup_size(1)

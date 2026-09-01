@@ -16,22 +16,56 @@ export function createSchroederSpatialMechanicsFieldPairLifecycle({
   const publicationRetirementOwnership = new WeakMap();
 
   function registerExecutionGroup(group) {
+    group.registeredSourceBuffer = group.pairExecution.sourceBuffer;
+    group.registeredIdentityBuffer = group.pairExecution.identityBuffer;
+    group.registeredActiveSourceView = group.pairExecution.activeSourceView;
+    group.registeredActiveSourceViewBuffer =
+      group.pairExecution.activeSourceViewBuffer;
+    group.registeredActiveSourceViewByteLength = Number(
+      group.pairExecution.activeSourceView?.layout?.byteLength
+    );
     artifactGroups.set(group.pairExecution, group);
     for (const child of group.children) artifactGroups.set(child, group);
   }
 
   function rawGroupFor(artifact) {
     const group = artifactGroups.get(artifact);
+    const exactChildren = Array.isArray(group?.pairExecution?.mechanicsFieldViews)
+      && group.pairExecution.mechanicsFieldViews.length === 2
+      && group.children?.length === 2
+      && group.children.every((child, levelOrdinal) => (
+        group.pairExecution.mechanicsFieldViews[levelOrdinal] === child
+        && child?.pairExecution === group.pairExecution
+        && child?.fieldViewBuffer === group.arena.fieldViewBuffers[levelOrdinal]
+        && child?.stableCandidateOrderBuffer
+          === group.arena.stableOrderBuffers[levelOrdinal]
+        && child?.candidateKeyBuffer === group.arena.candidateKeyBuffer
+        && child?.sourceBuffer === group.registeredSourceBuffer
+        && child?.identityBuffer === group.registeredIdentityBuffer
+        && child?.activeSourceView === group.registeredActiveSourceView
+        && child?.activeSourceViewBuffer
+          === group.registeredActiveSourceViewBuffer
+      ));
     if (
       !group
       || group.released
       || group.arena.inUse !== true
       || group.arena.token !== group.token
+      || !exactChildren
+      || group.pairExecution.sourceBuffer !== group.registeredSourceBuffer
+      || group.pairExecution.identityBuffer !== group.registeredIdentityBuffer
+      || group.pairExecution.activeSourceView
+        !== group.registeredActiveSourceView
+      || group.pairExecution.activeSourceViewBuffer
+        !== group.registeredActiveSourceViewBuffer
+      || group.registeredActiveSourceView?.activeSourceViewBuffer
+        !== group.registeredActiveSourceViewBuffer
+      || Number(group.registeredActiveSourceView?.layout?.byteLength)
+        !== group.registeredActiveSourceViewByteLength
       || (
         artifact !== group.pairExecution
         && (
           !group.children.includes(artifact)
-          || artifact?.candidateKeyBuffer !== group.arena.candidateKeyBuffer
         )
       )
       || artifact?.ownerRuntime !== getRuntime()
@@ -857,7 +891,7 @@ export function createSchroederSpatialMechanicsFieldPairLifecycle({
         'mechanics field pair release requires both child states to be idle'
       );
     }
-    if (!radixReleased) {
+    if (group.ownsRadixExecution && !radixReleased) {
       group.arena.radix.releaseExecution(
         group.radixUnique,
         { discardedEncoder: true }
@@ -873,8 +907,9 @@ export function createSchroederSpatialMechanicsFieldPairLifecycle({
         'queue-ordered mechanics field pair release requires submitted idle child states'
       );
     }
-    const radixReleased =
-      group.arena.radix.releaseExecutionQueueOrdered?.(group.radixUnique);
+    const radixReleased = group.ownsRadixExecution
+      ? group.arena.radix.releaseExecutionQueueOrdered?.(group.radixUnique)
+      : true;
     if (radixReleased !== true) {
       throw new Error(
         'queue-ordered mechanics field pair radix owner did not confirm release'
@@ -910,10 +945,12 @@ export function createSchroederSpatialMechanicsFieldPairLifecycle({
     group.releaseInFlight = true;
     let radixRelease;
     try {
-      radixRelease = group.arena.radix.releaseExecutionAfter(
-        group.radixUnique,
-        fence
-      );
+      radixRelease = group.ownsRadixExecution
+        ? group.arena.radix.releaseExecutionAfter(
+            group.radixUnique,
+            fence
+          )
+        : Promise.resolve(fence).then(() => true);
     } catch (error) {
       group.retirementAttempt = null;
       group.releaseInFlight = false;
@@ -978,9 +1015,12 @@ export function createSchroederSpatialMechanicsFieldPairLifecycle({
         && group.submitted
         && !group.retirementAttempt
         && allChildStateIdle(group)
-        && group.arena.radix.canReleaseExecutionQueueOrdered?.(
-          group.radixUnique
-        ) === true
+        && (
+          group.ownsRadixExecution !== true
+          || group.arena.radix.canReleaseExecutionQueueOrdered?.(
+            group.radixUnique
+          ) === true
+        )
       );
     } catch {
       return false;

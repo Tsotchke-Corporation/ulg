@@ -2840,6 +2840,146 @@ test('direct arena-depth selection keys the runtime and configures every owned v
   );
 });
 
+test('paired rollover rejects a stale draining sibling and rebuilds from the exact adjacent pair', async () => {
+  const device = createFakeDevice();
+  const baseAssignment = createDirectSpatialLevelAssignment(device);
+  const particleIdentityBuffer = device.createBuffer({
+    label: 'paired-rollover-stale-sibling-identity',
+    size: baseAssignment.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const mechanicsLevels = [
+    {
+      selectedLevel: 0,
+      mechanicsGrid: {
+        gridNodeCount: 512,
+        gridDims: [8, 8, 8],
+        gridShift: 2,
+        gridSpacingM: 0.25
+      }
+    },
+    {
+      selectedLevel: 1,
+      mechanicsGrid: {
+        gridNodeCount: 125,
+        gridDims: [5, 5, 5],
+        gridShift: 2,
+        gridSpacingM: 0.5
+      }
+    }
+  ];
+  const build = (ordinal, topologyPredecessors = null) => (
+    runSchroederSpatialEpochGenerationWebGpu({
+      device,
+      levelAssignment: {
+        ...baseAssignment,
+        storageGeneration: baseAssignment.storageGeneration + ordinal,
+        physicsSubstep: baseAssignment.physicsSubstep + ordinal,
+        positionEpoch: baseAssignment.positionEpoch + ordinal
+      },
+      particleCount: baseAssignment.particleCount,
+      particleIdentityBuffer,
+      particleIdentityStrideWords: 1,
+      directArenaCount: 4,
+      mechanicsLevels,
+      mechanicsFieldPairV2Enabled: true,
+      mechanicsFieldTopologyPredecessors: topologyPredecessors,
+      phaseVolumeSidecarsEnabled: false,
+      exactNearCellTreeEnabled: false
+    })
+  );
+
+  const permanentlyRetirePairThenRelease = async (generation, ordinal) => {
+    assert.equal(generation.ready, true, generation.reason);
+    const runtime = generation.mechanicsFieldPairRuntime;
+    const field = generation.mechanicsFieldPair.mechanicsFieldViews[0];
+    const state = runtime.stateMutationState(field);
+    runtime.quarantineCurrentStateArtifact(field, {
+      mutationOrdinal: state.ordinal,
+      stateEncoding: state.encoding,
+      reason: new Error(`intentional paired rollover depletion ${ordinal}`)
+    });
+    assert.equal(await runtime.retireQuarantinedExecutionAfter(field), true);
+    assert.equal(
+      releaseSchroederSpatialEpochGenerationAfterQueue(generation, device),
+      true
+    );
+    assert.equal(await generation.releasePromise, true);
+  };
+
+  const first = build(0);
+  const drainingRuntime = first.mechanicsFieldPairRuntime;
+  await permanentlyRetirePairThenRelease(first, 1);
+  const second = build(1);
+  assert.equal(second.mechanicsFieldPairRuntime, drainingRuntime);
+  await permanentlyRetirePairThenRelease(second, 2);
+
+  const stale = build(2);
+  const adjacent = build(3);
+  const retained = [stale, adjacent];
+  assert.equal(retained.every((generation) => generation.ready), true);
+  assert.equal(
+    retained.every((generation) => (
+      generation.mechanicsFieldPairRuntime === drainingRuntime
+    )),
+    true
+  );
+  assert.equal(drainingRuntime.retiredArenaCount(), 2);
+  assert.equal(drainingRuntime.activeExecutionCount(), 2);
+  assert.equal(drainingRuntime.availableArenaCount(), 0);
+
+  const staleSibling = stale.mechanicsFieldPair.mechanicsFieldViews;
+  const rejected = build(4, staleSibling);
+  assert.equal(rejected.ready, false);
+  assert.equal(
+    rejected.errorCode,
+    'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_TOPOLOGY_PREDECESSOR'
+  );
+  const entry = stale.directRuntimeEntry;
+  assert.equal(entry.mechanicsFieldPairDrainingRuntimes.size, 1);
+  const [drainingRecord] = entry.mechanicsFieldPairDrainingRuntimes;
+  assert.equal(drainingRecord.runtime, drainingRuntime);
+  assert.equal(drainingRecord.executions.includes(stale.mechanicsFieldPair), true);
+  assert.equal(drainingRecord.executions.includes(adjacent.mechanicsFieldPair), true);
+
+  const rebuilt = build(4, adjacent.mechanicsFieldPair.mechanicsFieldViews);
+  assert.equal(rebuilt.ready, true, rebuilt.reason);
+  assert.notEqual(rebuilt.mechanicsFieldPairRuntime, drainingRuntime);
+  assert.equal(rebuilt.mechanicsFieldTopologySuccessorCount, 0);
+  assert.equal(rebuilt.mechanicsFieldPair.sharedRadixExecutionCount, 1);
+  const rebuiltPassLabels = device.submissions.at(-1)[0].events
+    .filter(({ kind }) => kind === 'pass')
+    .map(({ descriptor }) => descriptor.label ?? '');
+  assert.equal(
+    rebuiltPassLabels.some((label) => (
+      label.endsWith('ValidateAndFinalizeTopologySuccessor')
+    )),
+    false
+  );
+  assert.equal(entry.mechanicsFieldPairDrainingRuntimes.size, 1);
+  assert.equal(drainingRuntime.activeExecutionCount(), 2);
+
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(stale, device),
+    true
+  );
+  assert.equal(await stale.releasePromise, true);
+  assert.equal(entry.mechanicsFieldPairDrainingRuntimes.size, 1);
+  assert.equal(drainingRuntime.activeExecutionCount(), 1);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(adjacent, device),
+    true
+  );
+  assert.equal(await adjacent.releasePromise, true);
+  assert.equal(await drainingRecord.completionPromise, true);
+  assert.equal(entry.mechanicsFieldPairDrainingRuntimes.size, 0);
+  assert.equal(
+    releaseSchroederSpatialEpochGenerationAfterQueue(rebuilt, device),
+    true
+  );
+  assert.equal(await rebuilt.releasePromise, true);
+});
+
 test('generation retirement permanently retires an already-quarantined mechanics field', async () => {
   const device = createFakeDevice();
   const { generation } = createFullTwoLevelSpatialGeneration(device);

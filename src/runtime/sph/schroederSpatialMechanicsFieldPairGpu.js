@@ -13,6 +13,7 @@ import {
   ULG_SCHROEDER_SPATIAL_MECHANICS_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsView.js';
 import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
   validateSchroederSpatialActiveSourceViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import {
@@ -51,8 +52,9 @@ const PAIR_PROJECTION_SCAN_DISPATCH_STRIDE_WORDS = 6;
 const PAIR_PROJECTION_DISPATCH_WORDS =
   PAIR_PROJECTION_SCAN_MAX_LEVELS
   * PAIR_PROJECTION_SCAN_DISPATCH_STRIDE_WORDS;
-const PAIR_PROJECTION_PIPELINE_COUNT = 14;
+const PAIR_PROJECTION_PIPELINE_COUNT = 16;
 const PAIR_PROJECTION_WRAPPER_COMPUTE_PASS_COUNT = 7;
+const ACTIVE_SOURCE_PHYSICAL_SOURCE_COUNT_WORD = 16;
 const GPU_BUFFER_USAGE = {
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
@@ -393,6 +395,102 @@ function lineageMatches(left, right) {
   ].every((field) => Object.is(left?.[field], right?.[field]));
 }
 
+function successorLineageMatches(predecessor, successor) {
+  return predecessor?.generationId < 0xffff_ffff
+    && successor?.generationId === predecessor.generationId + 1
+    && predecessor?.leaseToken < 0xffff_ffff
+    && successor?.leaseToken === predecessor.leaseToken + 1
+    && predecessor?.storageGeneration < 0xffff_ffff
+    && successor?.storageGeneration === predecessor.storageGeneration + 1
+    && predecessor?.physicsSubstep < 0xffff_ffff
+    && successor?.physicsSubstep === predecessor.physicsSubstep + 1
+    && predecessor?.positionEpoch < 0xffff_ffff
+    && successor?.positionEpoch === predecessor.positionEpoch + 1
+    && predecessor?.completionOrdinal < 0xffff_ffff
+    && successor?.completionOrdinal === predecessor.completionOrdinal + 1
+    && successor?.deviceOrdinal === predecessor.deviceOrdinal
+    && successor?.laneOrdinal === predecessor.laneOrdinal
+    && successor?.sourceFamilyId === predecessor.sourceFamilyId
+    && successor?.physicsTick === predecessor.physicsTick
+    && successor?.topologyEpoch === predecessor.topologyEpoch
+    && successor?.chartEpoch === predecessor.chartEpoch
+    && successor?.levelEpoch === predecessor.levelEpoch
+    && successor?.supportEpoch === predecessor.supportEpoch;
+}
+
+/**
+ * Prove that a submitted pair is the exact adjacent topology predecessor of
+ * two freshly encoded compact mechanics parents. This predicate deliberately
+ * excludes runtime ownership so a cache rollover can authenticate a pair in
+ * its exact draining runtime before choosing an ordinary rebuild.
+ */
+export function schroederSpatialMechanicsFieldPairAdjacentPredecessorMatches({
+  predecessorPair,
+  topologyPredecessors,
+  parentMechanicsViews,
+  identityBuffer,
+  sourceCount,
+  sourceRowLayoutId,
+  identityStrideWords
+} = {}) {
+  const predecessors = Array.from(topologyPredecessors || []);
+  const parents = Array.from(parentMechanicsViews || []);
+  const children = predecessorPair?.mechanicsFieldViews;
+  if (
+    predecessors.length !== 2
+    || parents.length !== 2
+    || !Array.isArray(children)
+    || children.length !== 2
+    || predecessorPair?.schema
+      !== ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_PAIR_SCHEMA
+    || predecessorPair.status
+      !== 'schroeder-spatial-mechanics-field-pair-gpu-build-submitted'
+    || predecessorPair.submitPerformed !== true
+    || predecessorPair.released === true
+    || predecessorPair.identityBuffer !== identityBuffer
+    || predecessorPair.sourceCount !== sourceCount
+    || !lineageMatches(predecessors[0], predecessors[1])
+    || !lineageMatches(parents[0], parents[1])
+  ) {
+    return false;
+  }
+  return predecessors.every((predecessor, levelOrdinal) => {
+    const parent = parents[levelOrdinal];
+    const predecessorGridDims = Array.from(predecessor?.gridDims || []);
+    const parentGridDims = Array.from(parent?.gridDims || []);
+    return children[levelOrdinal] === predecessor
+      && predecessor?.pairExecution === predecessorPair
+      && predecessor.status
+        === 'schroeder-spatial-mechanics-field-view-gpu-build-submitted'
+      && predecessor.submitPerformed === true
+      && predecessor.released !== true
+      && predecessor.identityBuffer === identityBuffer
+      && predecessor.sourceCount === sourceCount
+      && predecessor.sourceCapacity
+        === parent?.spatialExecution?.layout?.physicalSourceCapacity
+      && predecessor.activeSourceCapacity
+        === parent?.activeSourceView?.activeSourceCapacity
+      && predecessor.identityStrideWords === identityStrideWords
+      && predecessor.sourceRowLayoutId === sourceRowLayoutId
+      && predecessor.selectedLevel === parent?.selectedLevel
+      && predecessor.gridNodeCount === parent?.gridNodeCount
+      && predecessor.gridShift === parent?.gridShift
+      && Object.is(predecessor.gridSpacingM, parent?.gridSpacingM)
+      && predecessorGridDims.length === 3
+      && parentGridDims.length === 3
+      && predecessorGridDims.every(
+        (value, axis) => value === parentGridDims[axis]
+      )
+      && predecessor.generationId === predecessorPair.generationId
+      && predecessor.completionOrdinal === predecessorPair.completionOrdinal
+      && predecessor.spatialExecution === predecessorPair.spatialExecution
+      && predecessor.activeSourceView === predecessorPair.activeSourceView
+      && predecessor.activeSourceViewBuffer
+        === predecessorPair.activeSourceViewBuffer
+      && successorLineageMatches(predecessor, parent);
+  });
+}
+
 /**
  * Build two field-v5 dictionaries with one exact ActiveSource-sized radix.
  */
@@ -565,7 +663,15 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
       'materialize_pair_stencil_indices'
     ),
     assemble: pipeline('assemble', 'assemble_pair_field_keys'),
-    finalize: pipeline('finalize', 'finalize_pair_fields')
+    finalize: pipeline('finalize', 'finalize_pair_fields'),
+    validateTopologySuccessor: pipeline(
+      'validate-topology-successor',
+      'validate_pair_topology_successor'
+    ),
+    finalizeTopologySuccessor: pipeline(
+      'finalize-topology-successor',
+      'finalize_pair_topology_successor'
+    )
   });
   const deviceId = webGpuDeviceId(device);
   let runtime = null;
@@ -1333,6 +1439,7 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
         arena,
         token,
         radixUnique,
+        ownsRadixExecution: true,
         pairExecution: null,
         children: null,
         submitted: false,
@@ -1589,6 +1696,630 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
     }
   }
 
+  function encodeTopologySuccessor(encoder, {
+    topologyPredecessors,
+    sourceBuffer,
+    identityBuffer,
+    sourceCount,
+    sourceRowLayoutId,
+    identityStrideWords: requestedIdentityStrideWords =
+      resolvedIdentityStrideWords,
+    levelViews,
+    gpuTimestampRecorder = null,
+    timestampMetadata = {}
+  } = {}) {
+    assertEncoder(encoder);
+    if (typeof encoder.copyBufferToBuffer !== 'function') {
+      throw new TypeError(
+        'mechanics field pair topology successor requires GPU buffer-copy support'
+      );
+    }
+    if (destroyed) {
+      throw new Error('mechanics field pair runtime is destroyed');
+    }
+    if (deviceLossObserved) {
+      const error = new Error(
+        'mechanics field pair runtime observed device loss'
+      );
+      error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_DEVICE_LOST';
+      throw error;
+    }
+    if (!sourceBuffer || !webGpuBufferMatchesDevice(sourceBuffer, device)) {
+      throw new TypeError(
+        'mechanics field pair successor sourceBuffer must belong to the runtime device'
+      );
+    }
+    if (!identityBuffer || !webGpuBufferMatchesDevice(identityBuffer, device)) {
+      throw new TypeError(
+        'mechanics field pair successor identityBuffer must belong to the runtime device'
+      );
+    }
+    const resolvedSourceCount = positiveInteger(
+      sourceCount,
+      'sourceCount',
+      resolvedMaxSourceCount
+    );
+    const resolvedStride = positiveInteger(
+      requestedIdentityStrideWords,
+      'identityStrideWords',
+      16
+    );
+    if (resolvedStride !== resolvedIdentityStrideWords) {
+      throw new RangeError(
+        'mechanics field pair successor identity stride does not match the retained runtime'
+      );
+    }
+    if (!Array.isArray(levelViews) || levelViews.length !== 2) {
+      throw new TypeError(
+        'levelViews must contain exact fine and coarse mechanics parents'
+      );
+    }
+    const selectedLevels = levelViews.map((view, levelOrdinal) => integer(
+      view?.selectedLevel,
+      `levelViews[${levelOrdinal}].selectedLevel`,
+      -0x8000_0000,
+      0x7fff_ffff
+    ));
+    if (selectedLevels[0] === selectedLevels[1]) {
+      throw new RangeError(
+        'paired mechanics field successor selected levels must be distinct'
+      );
+    }
+    const firstParent = levelViews[0]?.parentMechanicsView;
+    if (!firstParent) {
+      throw new TypeError('levelViews[0].parentMechanicsView is required');
+    }
+    const plans = templatePlans.map((template, levelOrdinal) => (
+      createSchroederSpatialMechanicsFieldViewPlan({
+        sourceCount: resolvedSourceCount,
+        sourceCapacity: resolvedMaxSourceCount,
+        activeSourceCapacity: resolvedActiveSourceCapacity,
+        sourceAuthorityVersion:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_SOURCE_AUTHORITY_V2,
+        sourceRowLayoutId,
+        identityStrideWords: resolvedStride,
+        selectedLevel: selectedLevels[levelOrdinal],
+        gridNodeCount: template.gridNodeCount,
+        gridDims: template.gridDims,
+        gridShift: template.gridShift,
+        gridSpacingM: template.gridSpacingM,
+        generationId: firstParent.generationId,
+        deviceOrdinal: firstParent.deviceOrdinal,
+        laneOrdinal: firstParent.laneOrdinal,
+        leaseToken: firstParent.leaseToken,
+        sourceFamilyId: firstParent.sourceFamilyId,
+        storageGeneration: firstParent.storageGeneration,
+        physicsTick: firstParent.physicsTick,
+        physicsSubstep: firstParent.physicsSubstep,
+        positionEpoch: firstParent.positionEpoch,
+        topologyEpoch: firstParent.topologyEpoch,
+        chartEpoch: firstParent.chartEpoch,
+        levelEpoch: firstParent.levelEpoch,
+        supportEpoch: firstParent.supportEpoch,
+        completionOrdinal: firstParent.completionOrdinal
+      })
+    ));
+    const parents = levelViews.map((view) => view?.parentMechanicsView);
+    const admissions = parents.map((parent, levelOrdinal) => admitParent(
+      parent,
+      plans[levelOrdinal],
+      {
+        sourceBuffer,
+        sourceCount: resolvedSourceCount,
+        sourceRowLayoutId
+      }
+    ));
+    if (
+      !lineageMatches(parents[0], parents[1])
+      || admissions[0].spatial !== admissions[1].spatial
+      || admissions[0].activeSourceView !== admissions[1].activeSourceView
+      || admissions[0].authority !== admissions[1].authority
+    ) {
+      throw new TypeError(
+        'paired successor parents must project one exact spatial generation'
+      );
+    }
+    const spatialExecution = admissions[0].spatial;
+    const activeSourceView = admissions[0].activeSourceView;
+    const activeSourceCountAuthority = admissions[0].authority;
+    const requiredSourceBytes =
+      resolvedSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT;
+    const requiredIdentityBytes =
+      resolvedSourceCount * resolvedStride * UINT32_BYTES;
+    if (Number(sourceBuffer.size) < requiredSourceBytes) {
+      throw new RangeError(
+        'mechanics field pair successor sourceBuffer is smaller than the admitted family'
+      );
+    }
+    if (Number(identityBuffer.size) < requiredIdentityBytes) {
+      throw new RangeError(
+        'mechanics field pair successor identityBuffer is smaller than the admitted family'
+      );
+    }
+    const suppliedPredecessors = Array.from(topologyPredecessors || []);
+    const predecessorByLevel = new Map(suppliedPredecessors.map(
+      (predecessor) => [predecessor?.selectedLevel, predecessor]
+    ));
+    const predecessors = selectedLevels.map((selectedLevel) => (
+      predecessorByLevel.get(selectedLevel) ?? null
+    ));
+    const predecessorPair = predecessors[0]?.pairExecution ?? null;
+    let predecessorPairOwned = false;
+    let predecessorPairSubmitted = false;
+    let predecessorPairRetiring = true;
+    let predecessorStates = [];
+    try {
+      predecessorPairOwned = lifecycle.ownsExecution(predecessorPair) === true;
+      predecessorPairSubmitted =
+        lifecycle.isExecutionSubmitted(predecessorPair) === true;
+      predecessorPairRetiring =
+        lifecycle.isExecutionRetirementInFlight(predecessorPair) === true;
+      predecessorStates = predecessors.map((predecessor) => (
+        lifecycle.stateMutationState(predecessor)
+      ));
+    } catch {
+      predecessorPairOwned = false;
+      predecessorPairSubmitted = false;
+      predecessorPairRetiring = true;
+      predecessorStates = [];
+    }
+    const predecessorActiveSourceView = predecessorPair?.activeSourceView;
+    const predecessorActiveSourceViewBuffer =
+      predecessorPair?.activeSourceViewBuffer;
+    const predecessorChildren = predecessorPair?.mechanicsFieldViews;
+    const stableOrderBytes = pairCandidateCapacity * UINT32_BYTES;
+    const predecessorAdmitted =
+      suppliedPredecessors.length === 2
+      && predecessorByLevel.size === 2
+      && predecessors.every(Boolean)
+      && predecessorPair?.schema
+        === ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_PAIR_SCHEMA
+      && predecessorPairOwned
+      && predecessorPairSubmitted
+      && !predecessorPairRetiring
+      && predecessorPair.submitPerformed === true
+      && predecessorPair.released !== true
+      && predecessorPair.identityBuffer === identityBuffer
+      && predecessorPair.sourceCount === resolvedSourceCount
+      && predecessorPair.sourceCapacity === resolvedMaxSourceCount
+      && predecessorPair.activeSourceCapacity === resolvedActiveSourceCapacity
+      && Array.isArray(predecessorChildren)
+      && predecessorChildren.length === 2
+      && predecessorChildren.every(
+        (child, levelOrdinal) => child === predecessors[levelOrdinal]
+      )
+      && predecessorStates.length === 2
+      && predecessorStates.every((state) => (
+        state.pending === false && state.quarantined === false
+      ))
+      && predecessorActiveSourceView?.activeSourceCapacity
+        === resolvedActiveSourceCapacity
+      && predecessorActiveSourceViewBuffer
+        === predecessorActiveSourceView?.activeSourceViewBuffer
+      && webGpuBufferMatchesDevice(predecessorActiveSourceViewBuffer, device)
+      && Number(predecessorActiveSourceViewBuffer?.size)
+        === Number(activeSourceView.activeSourceViewBuffer?.size)
+      && predecessors.every((predecessor, levelOrdinal) => {
+        const plan = plans[levelOrdinal];
+        const predecessorGridDims = Array.from(
+          predecessor?.gridDims || []
+        );
+        return predecessor?.ownerRuntime === runtime
+          && predecessor.pairExecution === predecessorPair
+          && predecessor.submitPerformed === true
+          && predecessor.released !== true
+          && predecessor.identityBuffer === identityBuffer
+          && predecessor.sourceCount === resolvedSourceCount
+          && predecessor.sourceCapacity === resolvedMaxSourceCount
+          && predecessor.activeSourceCapacity === resolvedActiveSourceCapacity
+          && predecessor.identityStrideWords === resolvedStride
+          && predecessor.sourceRowLayoutId === sourceRowLayoutId
+          && predecessor.selectedLevel === plan.selectedLevel
+          && predecessor.gridNodeCount === plan.gridNodeCount
+          && predecessor.gridShift === plan.gridShift
+          && Object.is(predecessor.gridSpacingM, plan.gridSpacingM)
+          && predecessorGridDims.length === 3
+          && predecessorGridDims.every(
+            (value, axis) => value === plan.gridDims[axis]
+          )
+          && predecessor.layout?.byteLength === plan.layout.byteLength
+          && predecessor.layout?.accumulatorOffsetWords
+            === plan.layout.accumulatorOffsetWords
+          && predecessor.stableCandidateOrderBuffer
+          && webGpuBufferMatchesDevice(
+            predecessor.stableCandidateOrderBuffer,
+            device
+          )
+          && Number(predecessor.stableCandidateOrderBuffer.size)
+            >= stableOrderBytes
+          && successorLineageMatches(predecessor, parents[levelOrdinal]);
+      });
+    if (!predecessorAdmitted) {
+      const error = new TypeError(
+        'mechanics field pair topology successor requires one exact submitted paired predecessor'
+      );
+      error.code =
+        'ERR_SCHROEDER_MECHANICS_FIELD_PAIR_TOPOLOGY_PREDECESSOR';
+      throw error;
+    }
+
+    const { arena, token } = acquireArena();
+    try {
+      encoder.clearBuffer(arena.pairControlBuffer);
+      for (let levelOrdinal = 0; levelOrdinal < 2; levelOrdinal += 1) {
+        const topologyBytes =
+          plans[levelOrdinal].layout.accumulatorOffsetWords * UINT32_BYTES;
+        encoder.copyBufferToBuffer(
+          predecessors[levelOrdinal].fieldViewBuffer,
+          0,
+          arena.fieldViewBuffers[levelOrdinal],
+          0,
+          topologyBytes
+        );
+        encoder.clearBuffer(
+          arena.fieldViewBuffers[levelOrdinal],
+          topologyBytes,
+          plans[levelOrdinal].layout.byteLength - topologyBytes
+        );
+        encoder.copyBufferToBuffer(
+          predecessors[levelOrdinal].stableCandidateOrderBuffer,
+          0,
+          arena.stableOrderBuffers[levelOrdinal],
+          0,
+          stableOrderBytes
+        );
+      }
+      device.queue.writeBuffer(
+        arena.paramsBuffer,
+        0,
+        createPairParamsData(
+          plans,
+          parents,
+          pairCandidateCapacity,
+          combinedNodeSpan,
+          {
+            sourceCount: resolvedSourceCount,
+            sourceCapacity: resolvedMaxSourceCount,
+            sourceRowLayoutId,
+            identityStrideWords: resolvedStride,
+            maxComputeWorkgroupsPerDimension
+          }
+        )
+      );
+      const resources = new Map([
+        [0, { buffer: sourceBuffer, offset: 0, size: requiredSourceBytes }],
+        [1, { buffer: identityBuffer, offset: 0, size: requiredIdentityBytes }],
+        [3, { buffer: arena.fieldViewBuffers[0] }],
+        [4, { buffer: arena.fieldViewBuffers[1] }],
+        [7, { buffer: parents[0].mechanicsViewBuffer }],
+        [8, { buffer: parents[1].mechanicsViewBuffer }],
+        [9, { buffer: arena.paramsBuffer }],
+        [12, {
+          buffer: spatialExecution.directoryBuffer,
+          offset: 0,
+          size: spatialExecution.layout.byteLength
+        }],
+        [13, {
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offset: 0,
+          size: activeSourceView.layout.byteLength
+        }],
+        [14, { buffer: arena.pairControlBuffer }],
+        [19, { buffer: predecessors[0].fieldViewBuffer }],
+        [20, { buffer: predecessors[1].fieldViewBuffer }],
+        [21, {
+          buffer: predecessorActiveSourceViewBuffer,
+          offset: 0,
+          size: predecessorActiveSourceView.layout.byteLength
+        }]
+      ]);
+      const validateBindings = createBindings(
+        pipelines.validateTopologySuccessor,
+        resources,
+        [0, 1, 3, 4, 9, 12, 13, 14, 21],
+        `${label}-arena-${arena.arenaIndex}-validate-topology-successor-bindings`
+      );
+      const finalizeBindings = createBindings(
+        pipelines.finalizeTopologySuccessor,
+        resources,
+        [3, 4, 7, 8, 9, 13, 14, 19, 20],
+        `${label}-arena-${arena.arenaIndex}-finalize-topology-successor-bindings`
+      );
+      const timestampSpan = beginTimestampSpan(
+        gpuTimestampRecorder,
+        encoder,
+        {
+          producerId:
+            'schroeder-spatial-mechanics-field-pair-topology-successor',
+          stage: 'paired-topology-successor-validate-and-finalize',
+          spanClass: 'same-production-command-encoder',
+          generationId: plans[0].generationId,
+          predecessorGenerationId: predecessors[0].generationId,
+          selectedLevels,
+          sourceCount: plans[0].sourceCount,
+          ...timestampMetadata
+        }
+      );
+      const pass = encoder.beginComputePass({
+        label: `${label}ValidateAndFinalizeTopologySuccessor`
+      });
+      pass.setPipeline(pipelines.validateTopologySuccessor);
+      pass.setBindGroup(0, validateBindings);
+      if (typeof pass.dispatchWorkgroupsIndirect !== 'function') {
+        throw new TypeError(
+          'mechanics field pair topology validation requires indirect dispatch support'
+        );
+      }
+      pass.dispatchWorkgroupsIndirect(
+        activeSourceView.activeSourceViewBuffer,
+        activeSourceView.physicalDispatchOffsetBytes
+      );
+      pass.setPipeline(pipelines.finalizeTopologySuccessor);
+      pass.setBindGroup(0, finalizeBindings);
+      pass.dispatchWorkgroups(1, 1, 1);
+      pass.end();
+      endTimestampSpan(gpuTimestampRecorder, encoder, timestampSpan);
+
+      const stableCandidateOrderCountAuthority = Object.freeze({
+        buffer: activeSourceView.activeSourceViewBuffer,
+        offsetWords: 43,
+        sealOffsetWords: 30,
+        expectedSeal: activeSourceView.buildOrdinal
+      });
+      const constructionDispatchEvidence = Object.freeze({
+        workgroupSize:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+        linearization: 'linearGroup=workgroup.x+workgroup.y*dispatchX',
+        sourceWorkIdentity: 'gpu-active-ordinal',
+        sourceInvocationCountAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: 18
+        }),
+        candidateInvocationCountAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: 43
+        }),
+        generationSealAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: 30,
+          expected: activeSourceView.buildOrdinal
+        }),
+        maxComputeWorkgroupsPerDimension,
+        authenticatedByGpuFinalizer: true,
+        hostActiveCountReadbackRequired: false,
+        topologySuccessorCopy: true,
+        currentStencilValidatedOnGpu: true,
+        predecessorGenerationId: predecessors[0].generationId
+      });
+      const topologyValidationDispatchEvidence = Object.freeze({
+        workgroupSize:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE,
+        linearization: 'linearGroup=workgroup.x+workgroup.y*dispatchX',
+        sourceWorkIdentity: 'gpu-physical-source-row',
+        sourceInvocationCountAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: ACTIVE_SOURCE_PHYSICAL_SOURCE_COUNT_WORD
+        }),
+        sourceDispatchShapeAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords:
+            SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
+          wordLength: 3
+        }),
+        sourceDispatchIndirectBuffer:
+          activeSourceView.activeSourceViewBuffer,
+        sourceDispatchIndirectOffsetBytes:
+          activeSourceView.physicalDispatchOffsetBytes,
+        currentStencilValidatedOnGpu: true,
+        predecessorActiveSourceMappingValidatedOnGpu: true,
+        generationSealAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: 30,
+          expected: activeSourceView.buildOrdinal
+        }),
+        hostPhysicalCountReadbackRequired: false
+      });
+      const group = {
+        arena,
+        token,
+        radixUnique: null,
+        ownsRadixExecution: false,
+        pairExecution: null,
+        children: null,
+        submitted: false,
+        released: false,
+        releaseInFlight: false,
+        retirementAttempt: null,
+        deviceLossEvidence: null,
+        completionPromise: null,
+        resolveCompletion: null,
+        mutations: [0, 1].map(() => ({
+          ordinal: 0,
+          encoding: 0,
+          operation: 'topology-successor-ready',
+          pending: null,
+          publicationLock: null,
+          quarantined: false,
+          quarantineReason: null
+        }))
+      };
+      group.completionPromise = new Promise((resolve) => {
+        group.resolveCompletion = resolve;
+      });
+      const children = plans.map((plan, levelOrdinal) => ({
+        ...predecessors[levelOrdinal],
+        ...plan,
+        schema: ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
+        status: 'schroeder-spatial-mechanics-field-view-gpu-encoded',
+        deviceId,
+        arenaIndex: arena.arenaIndex,
+        arenaGeneration: token.serial,
+        sourceBuffer,
+        identityBuffer,
+        parentMechanicsView: parents[levelOrdinal],
+        physicalSourceCount: plan.sourceCount,
+        spatialExecution,
+        directoryBuffer: spatialExecution.directoryBuffer,
+        activeSourceView,
+        activeSourceViewBuffer: activeSourceView.activeSourceViewBuffer,
+        activeSourceCountAuthority,
+        candidateKeyBuffer: arena.candidateKeyBuffer,
+        stableCandidateOrderBuffer: arena.stableOrderBuffers[levelOrdinal],
+        stableCandidateOrderCount: null,
+        stableCandidateOrderCountAuthority,
+        ownsStableCandidateOrderBuffer: false,
+        radixPassCount: 0,
+        radixSignificantDigitRows: Object.freeze([]),
+        radixHistogramScanMode: 'topology-successor-copy',
+        constructionRoutePolicy:
+          'gpu-authenticated-paired-directory-v2-topology-successor-copy',
+        sourceDispatchWorkgroups: null,
+        candidateDispatchWorkgroups: null,
+        sourceDispatchIndirectBuffer:
+          activeSourceView.activeSourceViewBuffer,
+        sourceDispatchIndirectOffsetBytes:
+          activeSourceView.activeDispatchOffsetBytes,
+        candidateDispatchIndirectBuffer:
+          activeSourceView.activeSourceViewBuffer,
+        candidateDispatchIndirectOffsetBytes:
+          activeSourceView.candidateDispatchOffsetBytes,
+        constructionDispatchEvidence,
+        topologyValidationDispatchEvidence,
+        fieldViewBuffer: arena.fieldViewBuffers[levelOrdinal],
+        indirectDispatchBuffer: arena.fieldViewBuffers[levelOrdinal],
+        indirectDispatchOffsetBytes:
+          SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
+            * UINT32_BYTES,
+        encodedDispatchCount: 2,
+        encodedComputePassCount: 1,
+        stableOrderProjectionPolicy: 'topology-successor-copy',
+        stableOrderProjectionScanLevelCount: 0,
+        stableOrderProjectionScratchBytes: 0,
+        stableOrderProjectionHostCountReadbackRequired: false,
+        retainedGpuBufferBytes,
+        computeDispatchScaling:
+          'gpu-authenticated-coarse-topology-copy-and-occupied-field-count',
+        gpuBufferCreationCountDuringEncode: 0,
+        bufferAllocationCountDuringEncode: 0,
+        readbackPerformed: false,
+        submitPerformed: false,
+        topologyConstructionMode: 'conservative-successor-copy',
+        topologyPredecessorGenerationId: predecessors[levelOrdinal].generationId,
+        topologyValidationAdmission:
+          'gpu-pending-until-field-header-admission',
+        topologyValidationFailurePolicy:
+          'fail-closed-no-silent-topology-rebuild'
+      }));
+      for (const [levelOrdinal, child] of children.entries()) {
+        Object.defineProperty(child, 'ownerRuntime', {
+          value: runtime,
+          enumerable: false
+        });
+        Object.defineProperty(child, 'released', {
+          get: () => group.released,
+          enumerable: true
+        });
+        Object.defineProperty(child, 'quarantineReason', {
+          get: () => group.mutations[levelOrdinal].quarantineReason,
+          enumerable: true
+        });
+        Object.defineProperties(child, {
+          stateMutationOrdinal: {
+            get: () => group.mutations[levelOrdinal].ordinal,
+            enumerable: true
+          },
+          stateMutationEncoding: {
+            get: () => group.mutations[levelOrdinal].encoding,
+            enumerable: true
+          },
+          stateMutationOperation: {
+            get: () => group.mutations[levelOrdinal].operation,
+            enumerable: true
+          }
+        });
+      }
+      const pairExecution = {
+        ...predecessorPair,
+        schema: ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_PAIR_SCHEMA,
+        status: 'schroeder-spatial-mechanics-field-pair-gpu-encoded',
+        deviceId,
+        arenaIndex: arena.arenaIndex,
+        arenaGeneration: token.serial,
+        sourceBuffer,
+        identityBuffer,
+        sourceCount: resolvedSourceCount,
+        sourceCapacity: resolvedMaxSourceCount,
+        activeSourceCapacity: resolvedActiveSourceCapacity,
+        generationId: plans[0].generationId,
+        completionOrdinal: plans[0].completionOrdinal,
+        spatialExecution,
+        activeSourceView,
+        activeSourceViewBuffer: activeSourceView.activeSourceViewBuffer,
+        mechanicsFieldViews: Object.freeze(children),
+        sharedRadixExecutionCount: 0,
+        radixSortKeyWordCount: FIELD_RADIX_KEY_WORDS,
+        candidateCount: null,
+        candidateCountAuthority: Object.freeze({
+          buffer: activeSourceView.activeSourceViewBuffer,
+          offsetWords: 43,
+          multiplier: 1,
+          sealOffsetWords: 30,
+          expectedSeal: activeSourceView.buildOrdinal
+        }),
+        radixPassCount: 0,
+        radixSignificantDigitRows: Object.freeze([]),
+        childStableOrderProjectionCount: 2,
+        stableOrderProjectionPolicy: 'topology-successor-copy',
+        stableOrderProjectionScanLevelCount: 0,
+        stableOrderProjectionScratchBytes: 0,
+        stableOrderProjectionEncodedIndirectDispatchCount: 0,
+        stableOrderProjectionHostCountReadbackRequired: false,
+        encodedDispatchCount: 2,
+        encodedComputePassCount: 1,
+        gpuBufferCreationCountDuringEncode: 0,
+        bufferAllocationCountDuringEncode: 0,
+        readbackPerformed: false,
+        submitPerformed: false,
+        submissionOwnership: 'caller',
+        topologyConstructionMode: 'conservative-successor-copy',
+        topologyPredecessorGenerationId: predecessorPair.generationId,
+        topologyCurrentStencilValidation: 'gpu-physical-source-row-exact',
+        topologyValidationAdmission:
+          'gpu-pending-until-field-header-admission',
+        topologyValidationFailurePolicy:
+          'fail-closed-no-silent-topology-rebuild',
+        topologyValidationDispatchEvidence
+      };
+      Object.defineProperty(pairExecution, 'ownerRuntime', {
+        value: runtime,
+        enumerable: false
+      });
+      Object.defineProperty(pairExecution, 'released', {
+        get: () => group.released,
+        enumerable: true
+      });
+      Object.defineProperty(pairExecution, 'quarantineReason', {
+        get: () => group.mutations
+          .map((mutation) => mutation.quarantineReason)
+          .find((reason) => reason != null) ?? null,
+        enumerable: true
+      });
+      for (const child of children) {
+        Object.defineProperty(child, 'pairExecution', {
+          value: pairExecution,
+          enumerable: true
+        });
+      }
+      group.pairExecution = pairExecution;
+      group.children = children;
+      lifecycle.registerExecutionGroup(group);
+      return pairExecution;
+    } catch (error) {
+      releaseArena(arena, token);
+      throw error;
+    }
+  }
+
   let lifecycle;
   try {
     lifecycle = createSchroederSpatialMechanicsFieldPairLifecycle({
@@ -1665,6 +2396,7 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
     pipelineCount: totalPipelineCount,
     retainedGpuBufferBytes,
     encode,
+    encodeTopologySuccessor,
     ownsExecution: lifecycle.ownsExecution,
     markExecutionSubmitted: lifecycle.markExecutionSubmitted,
     isExecutionSubmitted: lifecycle.isExecutionSubmitted,

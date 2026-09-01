@@ -1249,6 +1249,27 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     assert.equal(result.canonicalEpochControllerSummary.publishedEpochCount, 0);
     assert.equal(result.canonicalEpochControllerSummary.proposalBuildCount, 0);
     assert.equal(
+      result.canonicalEpochControllerSummary.mechanicsFieldPairV2Enabled,
+      true
+    );
+    assert.deepEqual(
+      result.canonicalEpochControllerSummary.mechanicsFieldConstructionModes,
+      Array.from(
+        { length: ratio + 1 },
+        () => 'paired-v2-shared-radix'
+      )
+    );
+    assert.equal(
+      result.canonicalEpochControllerSummary
+        .mechanicsFieldTopologySuccessorCount,
+      0
+    );
+    assert.deepEqual(
+      result.canonicalEpochControllerSummary
+        .mechanicsFieldTopologySuccessorCountByEpoch,
+      Array.from({ length: ratio + 1 }, () => 0)
+    );
+    assert.equal(
       result.internalEnergyTransferStatus,
       'nonnegative-reflux-kinetic-loss-deposited-by-transpose-g2p'
     );
@@ -1415,6 +1436,16 @@ test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid updat
     result.canonicalEpochControllerSummary
       .phaseVolumeInterfaceTransportEnabled,
     true
+  );
+  assert.equal(
+    result.canonicalEpochControllerSummary
+      .mechanicsFieldTopologySuccessorCount,
+    0
+  );
+  assert.deepEqual(
+    result.canonicalEpochControllerSummary
+      .mechanicsFieldTopologySuccessorCountByEpoch,
+    [0, 0]
   );
   assert.deepEqual(result.phaseVolumeInterfaceTransport, {
     enabled: true,

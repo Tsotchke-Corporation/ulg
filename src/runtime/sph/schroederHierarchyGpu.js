@@ -15666,6 +15666,9 @@ export function createSchroederTwoLevelCanonicalEpochController({
           fusedPrivate
           && epochKind === 'mechanics'
           && prior.terminal !== true
+          // Paired-v2 has an exact GPU validator, but no same-encoder
+          // conditional rebuild yet. A changed stencil would otherwise be
+          // discovered only after downstream consumers are already encoded.
           && mechanicsFieldPairV2Enabled !== true
           && topologyPredecessors.length === 2
           && priorMechanicsFields.length === 2

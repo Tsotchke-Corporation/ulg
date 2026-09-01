@@ -15,6 +15,7 @@ import {
   validateSchroederSpatialMechanicsFieldViewDescriptor
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS,
   ULG_SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_SCHEMA,
   createSchroederSpatialActiveSourceViewLayout
 } from '../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
@@ -175,6 +176,22 @@ function createFakeEncoder() {
   const events = [];
   return {
     events,
+    copyBufferToBuffer(
+      source,
+      sourceOffset,
+      destination,
+      destinationOffset,
+      size
+    ) {
+      events.push({
+        kind: 'copy',
+        source,
+        sourceOffset,
+        destination,
+        destinationOffset,
+        size
+      });
+    },
     clearBuffer(buffer, offset = 0, size = null) {
       events.push({ kind: 'clear', buffer, offset, size });
     },
@@ -296,14 +313,17 @@ function createDirectoryV2PairFixture(device, {
   physicalSourceCount = 4,
   physicalSourceCapacity = 8,
   activeSourceCapacity = physicalSourceCapacity,
-  buildOrdinal = 37
+  buildOrdinal = 37,
+  suppliedSourceBuffer = null,
+  suppliedIdentityBuffer = null,
+  identityOverrides = {}
 } = {}) {
-  const sourceBuffer = createOwnedTestBuffer(device, {
+  const sourceBuffer = suppliedSourceBuffer ?? createOwnedTestBuffer(device, {
     label: 'mechanics-field-pair-source',
     size: physicalSourceCount * 16 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   });
-  const identityBuffer = createOwnedTestBuffer(device, {
+  const identityBuffer = suppliedIdentityBuffer ?? createOwnedTestBuffer(device, {
     label: 'mechanics-field-pair-identity',
     size: physicalSourceCount * UINT32_BYTES,
     usage: 128
@@ -321,7 +341,8 @@ function createDirectoryV2PairFixture(device, {
     topologyEpoch: 19,
     chartEpoch: 23,
     levelEpoch: 29,
-    supportEpoch: 31
+    supportEpoch: 31,
+    ...identityOverrides
   });
   const activeLayout = createSchroederSpatialActiveSourceViewLayout({
     physicalSourceCapacity,
@@ -692,6 +713,302 @@ test('paired mechanics-field construction publishes two exact v5 children from o
   assert.equal(runtime.destroy(), true);
 });
 
+test('paired topology successor copies both immutable fields and orders, validates current stencils, and owns no radix execution', async () => {
+  const device = createFakeDevice();
+  const predecessorFixture = createDirectoryV2PairFixture(device);
+  const runtime = createPairRuntime(device, { arenaCount: 2 });
+  const { execution: predecessor } = encodePair(
+    runtime,
+    device,
+    predecessorFixture
+  );
+  predecessorFixture.markParentsSubmitted();
+  assert.equal(runtime.markExecutionSubmitted(predecessor), true);
+
+  const successorSourceBuffer = createOwnedTestBuffer(device, {
+    label: 'mechanics-field-pair-successor-source',
+    size: predecessorFixture.physicalSourceCount
+      * 16 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const successorFixture = createDirectoryV2PairFixture(device, {
+    physicalSourceCount: predecessorFixture.physicalSourceCount,
+    physicalSourceCapacity: 8,
+    activeSourceCapacity: 8,
+    buildOrdinal: 38,
+    suppliedSourceBuffer: successorSourceBuffer,
+    suppliedIdentityBuffer: predecessorFixture.identityBuffer,
+    identityOverrides: {
+      generationId: 42,
+      leaseToken: 6,
+      storageGeneration: 12,
+      physicsSubstep: 1,
+      positionEpoch: 18
+    }
+  });
+  const successorOptions = {
+    topologyPredecessors: predecessor.mechanicsFieldViews,
+    sourceBuffer: successorFixture.sourceBuffer,
+    identityBuffer: successorFixture.identityBuffer,
+    sourceCount: successorFixture.physicalSourceCount,
+    sourceRowLayoutId:
+      SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
+    identityStrideWords: 1,
+    levelViews: successorFixture.levelViews
+  };
+  const originalFineGridDims = predecessor.mechanicsFieldViews[0].gridDims;
+  predecessor.mechanicsFieldViews[0].gridDims = [];
+  assert.throws(
+    () => runtime.encodeTopologySuccessor(
+      device.createCommandEncoder(),
+      successorOptions
+    ),
+    /one exact submitted paired predecessor/
+  );
+  predecessor.mechanicsFieldViews[0].gridDims = originalFineGridDims;
+  const encoder = device.createCommandEncoder();
+  const successor = runtime.encodeTopologySuccessor(
+    encoder,
+    successorOptions
+  );
+
+  assert.equal(
+    successor.topologyConstructionMode,
+    'conservative-successor-copy'
+  );
+  assert.equal(
+    successor.topologyCurrentStencilValidation,
+    'gpu-physical-source-row-exact'
+  );
+  assert.equal(
+    successor.topologyValidationAdmission,
+    'gpu-pending-until-field-header-admission'
+  );
+  assert.equal(
+    successor.topologyValidationFailurePolicy,
+    'fail-closed-no-silent-topology-rebuild'
+  );
+  assert.equal(successor.sharedRadixExecutionCount, 0);
+  assert.equal(successor.radixPassCount, 0);
+  assert.equal(successor.encodedDispatchCount, 2);
+  assert.equal(successor.encodedComputePassCount, 1);
+  assert.equal(successor.stableOrderProjectionScanLevelCount, 0);
+  assert.equal(successor.stableOrderProjectionScratchBytes, 0);
+  assert.equal(successor.mechanicsFieldViews.length, 2);
+  assert.equal(
+    successor.candidateCountAuthority.buffer,
+    successorFixture.activeSourceView.activeSourceViewBuffer
+  );
+  assert.notEqual(
+    successor.candidateCountAuthority.buffer,
+    predecessor.candidateCountAuthority.buffer
+  );
+  assert.equal(
+    successor.candidateCountAuthority.expectedSeal,
+    successorFixture.activeSourceView.buildOrdinal
+  );
+  const copies = encoder.events.filter(({ kind }) => kind === 'copy');
+  assert.equal(copies.length, 4);
+  for (let levelOrdinal = 0; levelOrdinal < 2; levelOrdinal += 1) {
+    const child = successor.mechanicsFieldViews[levelOrdinal];
+    const predecessorChild = predecessor.mechanicsFieldViews[levelOrdinal];
+    assert.equal(child.topologyConstructionMode, 'conservative-successor-copy');
+    assert.equal(
+      child.topologyPredecessorGenerationId,
+      predecessorChild.generationId
+    );
+    assert.notEqual(child.fieldViewBuffer, predecessorChild.fieldViewBuffer);
+    assert.notEqual(
+      child.stableCandidateOrderBuffer,
+      predecessorChild.stableCandidateOrderBuffer
+    );
+    assert.deepEqual(runtime.stateMutationState(child), {
+      ordinal: 0,
+      encoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+      operation: 'topology-successor-ready',
+      pending: false,
+      publicationLocked: false,
+      quarantined: false
+    });
+    const topologyCopy = copies[levelOrdinal * 2];
+    assert.equal(topologyCopy.source, predecessorChild.fieldViewBuffer);
+    assert.equal(topologyCopy.destination, child.fieldViewBuffer);
+    assert.equal(
+      topologyCopy.size,
+      child.layout.accumulatorOffsetWords * UINT32_BYTES
+    );
+    const orderCopy = copies[levelOrdinal * 2 + 1];
+    assert.equal(orderCopy.source, predecessorChild.stableCandidateOrderBuffer);
+    assert.equal(orderCopy.destination, child.stableCandidateOrderBuffer);
+  }
+  const successorPass = encoder.events.find(({ kind, descriptor }) => (
+    kind === 'pass'
+    && descriptor.label?.endsWith('ValidateAndFinalizeTopologySuccessor')
+  ));
+  assert.equal(successorPass.commands.length, 2);
+  assert.equal(
+    successorPass.commands[0].dispatchIndirect.buffer,
+    successorFixture.activeSourceView.activeSourceViewBuffer
+  );
+  assert.equal(
+    successorPass.commands[0].dispatchIndirect.byteOffset,
+    successorFixture.activeSourceView.physicalDispatchOffsetBytes
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence.sourceWorkIdentity,
+    'gpu-physical-source-row'
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence
+      .sourceInvocationCountAuthority.offsetWords,
+    16
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence
+      .sourceDispatchShapeAuthority.offsetWords,
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_PHYSICAL_DISPATCH_OFFSET_WORDS
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence
+      .sourceDispatchIndirectBuffer,
+    successorPass.commands[0].dispatchIndirect.buffer
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence
+      .sourceDispatchIndirectOffsetBytes,
+    successorPass.commands[0].dispatchIndirect.byteOffset
+  );
+  assert.equal(
+    successor.topologyValidationDispatchEvidence
+      .predecessorActiveSourceMappingValidatedOnGpu,
+    true
+  );
+  assert.equal(
+    Object.isFrozen(successor.topologyValidationDispatchEvidence),
+    true
+  );
+  for (const child of successor.mechanicsFieldViews) {
+    assert.equal(
+      child.topologyValidationDispatchEvidence,
+      successor.topologyValidationDispatchEvidence
+    );
+  }
+  assert.deepEqual(successorPass.commands[1].dispatch, [1, 1, 1]);
+
+  successorFixture.markParentsSubmitted();
+  assert.equal(runtime.markExecutionSubmitted(successor), true);
+  for (const child of successor.mechanicsFieldViews) {
+    assert.equal(
+      validateSchroederSpatialMechanicsFieldViewDescriptor(child).admitted,
+      true
+    );
+  }
+  assert.equal(runtime.releaseExecutionQueueOrdered(successor), true);
+  assert.equal(await runtime.releaseExecutionAfter(predecessor), true);
+  assert.equal(runtime.destroy(), true);
+});
+
+test('paired ownership rejects forged field or stable-order topology copy sources', async () => {
+  const device = createFakeDevice();
+  const fixture = createDirectoryV2PairFixture(device);
+  const runtime = createPairRuntime(device);
+  const { execution: pair } = encodePair(runtime, device, fixture);
+  fixture.markParentsSubmitted();
+  runtime.markExecutionSubmitted(pair);
+  const child = pair.mechanicsFieldViews[0];
+  const originalOrder = child.stableCandidateOrderBuffer;
+  child.stableCandidateOrderBuffer = createOwnedTestBuffer(device, {
+    label: 'forged-paired-stable-order',
+    size: originalOrder.size,
+    usage: 128
+  });
+  assert.equal(runtime.ownsExecution(pair), false);
+  assert.equal(runtime.ownsExecution(child), false);
+  child.stableCandidateOrderBuffer = originalOrder;
+  assert.equal(runtime.ownsExecution(pair), true);
+
+  const originalField = child.fieldViewBuffer;
+  child.fieldViewBuffer = createOwnedTestBuffer(device, {
+    label: 'forged-paired-field-view',
+    size: originalField.size,
+    usage: 128
+  });
+  assert.equal(runtime.isExecutionSubmitted(pair), false);
+  child.fieldViewBuffer = originalField;
+  assert.equal(runtime.isExecutionSubmitted(pair), true);
+
+  const originalSourceBuffer = pair.sourceBuffer;
+  const forgedSourceBuffer = createOwnedTestBuffer(device, {
+    label: 'forged-paired-source',
+    size: originalSourceBuffer.size,
+    usage: 128
+  });
+  pair.sourceBuffer = forgedSourceBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.sourceBuffer = forgedSourceBuffer;
+  }
+  assert.equal(runtime.ownsExecution(pair), false);
+  pair.sourceBuffer = originalSourceBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.sourceBuffer = originalSourceBuffer;
+  }
+  assert.equal(runtime.ownsExecution(pair), true);
+
+  const originalIdentityBuffer = pair.identityBuffer;
+  const forgedIdentityBuffer = createOwnedTestBuffer(device, {
+    label: 'forged-paired-identity',
+    size: originalIdentityBuffer.size,
+    usage: 128
+  });
+  pair.identityBuffer = forgedIdentityBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.identityBuffer = forgedIdentityBuffer;
+  }
+  assert.equal(runtime.isExecutionSubmitted(pair), false);
+  pair.identityBuffer = originalIdentityBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.identityBuffer = originalIdentityBuffer;
+  }
+  assert.equal(runtime.isExecutionSubmitted(pair), true);
+
+  const originalActiveSourceView = pair.activeSourceView;
+  const originalActiveSourceViewBuffer = pair.activeSourceViewBuffer;
+  const originalActiveSourceLayout = originalActiveSourceView.layout;
+  originalActiveSourceView.layout = {
+    ...originalActiveSourceLayout,
+    byteLength: originalActiveSourceLayout.byteLength + 4
+  };
+  assert.equal(runtime.ownsExecution(pair), false);
+  originalActiveSourceView.layout = originalActiveSourceLayout;
+  assert.equal(runtime.ownsExecution(pair), true);
+  const forgedActiveSourceViewBuffer = createOwnedTestBuffer(device, {
+    label: 'forged-paired-active-source',
+    size: originalActiveSourceViewBuffer.size,
+    usage: 128
+  });
+  const forgedActiveSourceView = {
+    ...originalActiveSourceView,
+    activeSourceViewBuffer: forgedActiveSourceViewBuffer
+  };
+  pair.activeSourceView = forgedActiveSourceView;
+  pair.activeSourceViewBuffer = forgedActiveSourceViewBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.activeSourceView = forgedActiveSourceView;
+    pairedChild.activeSourceViewBuffer = forgedActiveSourceViewBuffer;
+  }
+  assert.equal(runtime.ownsExecution(pair), false);
+  assert.equal(runtime.isExecutionSubmitted(child), false);
+  pair.activeSourceView = originalActiveSourceView;
+  pair.activeSourceViewBuffer = originalActiveSourceViewBuffer;
+  for (const pairedChild of pair.mechanicsFieldViews) {
+    pairedChild.activeSourceView = originalActiveSourceView;
+    pairedChild.activeSourceViewBuffer = originalActiveSourceViewBuffer;
+  }
+  assert.equal(runtime.ownsExecution(pair), true);
+  assert.equal(await runtime.releaseExecutionAfter(pair), true);
+  assert.equal(runtime.destroy(), true);
+});
+
 test('parallel projection retains one exact partition timestamp span across its bounded passes', () => {
   const device = createFakeDevice();
   const fixture = createDirectoryV2PairFixture(device);
@@ -861,6 +1178,11 @@ test('paired WGSL keeps disjoint monotone levels, material, and solid domains in
     source,
     /active_count\s*\*\s*27u/,
     'canonical active ordinals are expanded once to the exact A×27 radix input'
+  );
+  assert.match(
+    source,
+    /let\s+topology_invalid_count\s*=\s*pair_load\([\s\S]{0,80}PAIR_CONTROL_INVALID_KEY_COUNT[\s\S]{0,160}fine_store\(35u,\s*topology_invalid_count\)[\s\S]{0,80}coarse_store\(35u,\s*topology_invalid_count\)/,
+    'successor rejection publishes its physical-row mismatch count without overwriting ordinary rejection diagnostics'
   );
   assert.match(
     source,
@@ -2970,7 +3292,7 @@ test('native WebGPU executes isolated and production sparse paired fields with e
                 mechanicsGrid
               })
             ),
-            directArenaCount: 1,
+            directArenaCount: 2,
             mechanicsFieldPairV2Enabled: true,
             phaseVolumeSidecarsEnabled: false,
             exactNearCellTreeEnabled: false
@@ -3229,6 +3551,88 @@ test('native WebGPU executes isolated and production sparse paired fields with e
             };
           }
         );
+        const movedPhysicalSource = sparseActivePhysical.find(
+          (physicalSource) => (physicalSource & 1) === 0
+        );
+        if (!Number.isInteger(movedPhysicalSource)) {
+          throw new Error('native successor fixture lacks an active fine row');
+        }
+        const movedRow = movedPhysicalSource * 16;
+        sparseSourceRows[movedRow + 12] = 0.8;
+        sparseSourceRows[movedRow + 13] = 0.8;
+        sparseSourceRows[movedRow + 14] = 0.8;
+        device.queue.writeBuffer(
+          sparseSourceBuffer,
+          movedRow * Float32Array.BYTES_PER_ELEMENT,
+          sparseSourceRows.subarray(movedRow, movedRow + 16)
+        );
+        const movedLevelAssignment = {
+          ...sparseLevelAssignment,
+          storageGeneration: sparseLevelAssignment.storageGeneration + 1,
+          physicsSubstep: sparseLevelAssignment.physicsSubstep + 1,
+          positionEpoch: sparseLevelAssignment.positionEpoch + 1
+        };
+        const movedGeneration =
+          spatialModule.runSchroederSpatialEpochGenerationWebGpu({
+            device,
+            levelAssignment: movedLevelAssignment,
+            particleCount: sparsePhysicalSourceCount,
+            particleIdentityBuffer: sparseIdentityBuffer,
+            particleIdentityStrideWords: 1,
+            activeSourceCapacity: sparseActiveSourceCount,
+            mechanicsLevels: sparseGrids.map(
+              (mechanicsGrid, selectedLevel) => ({
+                selectedLevel,
+                mechanicsGrid
+              })
+            ),
+            directArenaCount: 2,
+            mechanicsFieldPairV2Enabled: true,
+            mechanicsFieldTopologyPredecessors: productionChildren,
+            phaseVolumeSidecarsEnabled: false,
+            exactNearCellTreeEnabled: false
+          });
+        if (movedGeneration.ready !== true || movedGeneration.selected !== true) {
+          throw new Error(
+            'moved-cell successor generation rejected on the host: '
+              + `${movedGeneration.status}: `
+              + `${movedGeneration.reason || 'no reason'}`
+          );
+        }
+        await device.queue.onSubmittedWorkDone();
+        const movedFieldHeaders = await Promise.all(
+          movedGeneration.mechanicsLevelViews.map(
+            (levelView, levelOrdinal) => readWords(
+              levelView.mechanicsFieldView.fieldViewBuffer,
+              64 * Uint32Array.BYTES_PER_ELEMENT,
+              `native-pair-moved-successor-${levelOrdinal}-header`
+            )
+          )
+        );
+        const movedSuccessorSummary = {
+          hostGenerationReady: movedGeneration.ready,
+          topologySuccessorCount:
+            movedGeneration.mechanicsFieldTopologySuccessorCount,
+          topologyValidationStatus:
+            movedGeneration.mechanicsFieldTopologySuccessorValidationStatus,
+          topologyFailurePolicy:
+            movedGeneration.mechanicsFieldTopologySuccessorFailurePolicy,
+          constructionModes: movedGeneration.mechanicsLevelViews.map(
+            (levelView) => (
+              levelView.mechanicsFieldView.topologyConstructionMode
+            )
+          ),
+          fieldStatuses: movedFieldHeaders.map((words) => words[2]),
+          invalidCounts: movedFieldHeaders.map((words) => words[35]),
+          failClosed: movedFieldHeaders.every((words) => (
+            (words[2]
+              & fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED)
+                !== 0
+            && (words[2]
+              & fieldAbi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED)
+                === 0
+          ))
+        };
         const productionPairStatusBeforeRelease = productionPair.status;
         const productionRuntimeActiveBeforeRelease =
           productionGeneration.mechanicsFieldPairRuntime
@@ -3238,8 +3642,14 @@ test('native WebGPU executes isolated and production sparse paired fields with e
             productionGeneration,
             device
           );
+        const movedReleaseScheduled =
+          spatialModule.releaseSchroederSpatialEpochGenerationAfterQueue(
+            movedGeneration,
+            device
+          );
         const productionReleaseCompleted =
           await productionGeneration.releasePromise;
+        const movedReleaseCompleted = await movedGeneration.releasePromise;
         summary.production = {
           physicalSourceCount: sparsePhysicalSourceCount,
           activeSourceCount: activeViewWords[18],
@@ -3274,6 +3684,11 @@ test('native WebGPU executes isolated and production sparse paired fields with e
           runtimeActiveBeforeRelease:
             productionRuntimeActiveBeforeRelease,
           children: productionChildSummaries,
+          movedCellSuccessor: {
+            ...movedSuccessorSummary,
+            releaseScheduled: movedReleaseScheduled,
+            releaseCompleted: movedReleaseCompleted
+          },
           releaseScheduled: productionReleaseScheduled,
           releaseCompleted: productionReleaseCompleted,
           pairReleased: productionPair.released,
@@ -3554,7 +3969,7 @@ test('native WebGPU executes isolated and production sparse paired fields with e
   );
   assert.equal(production.parentFieldHeader[30], 4_500 * 27);
   assert.equal(production.parentFieldHeader[31], 4_500 * 27);
-  assert.equal(production.runtimeActiveBeforeRelease, 1);
+  assert.equal(production.runtimeActiveBeforeRelease, 2);
   assert.equal(production.children.length, 2);
   let admittedDescriptorCount = 0;
   for (const [levelOrdinal, child] of production.children.entries()) {
@@ -3598,6 +4013,27 @@ test('native WebGPU executes isolated and production sparse paired fields with e
     admittedDescriptorCount += child.admittedDescriptorCount;
   }
   assert.equal(admittedDescriptorCount, 4_500);
+  assert.equal(production.movedCellSuccessor.hostGenerationReady, true);
+  assert.equal(production.movedCellSuccessor.topologySuccessorCount, 2);
+  assert.equal(
+    production.movedCellSuccessor.topologyValidationStatus,
+    'gpu-pending-until-field-header-admission'
+  );
+  assert.equal(
+    production.movedCellSuccessor.topologyFailurePolicy,
+    'fail-closed-no-silent-topology-rebuild'
+  );
+  assert.deepEqual(
+    production.movedCellSuccessor.constructionModes,
+    ['conservative-successor-copy', 'conservative-successor-copy']
+  );
+  assert.equal(production.movedCellSuccessor.failClosed, true);
+  assert.equal(
+    production.movedCellSuccessor.invalidCounts.every((count) => count > 0),
+    true
+  );
+  assert.equal(production.movedCellSuccessor.releaseScheduled, true);
+  assert.equal(production.movedCellSuccessor.releaseCompleted, true);
   assert.equal(production.releaseScheduled, true);
   assert.equal(production.releaseCompleted, true);
   assert.equal(production.pairReleased, true);

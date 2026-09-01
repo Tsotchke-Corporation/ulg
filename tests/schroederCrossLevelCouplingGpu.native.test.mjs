@@ -671,6 +671,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           if (mechanicsFieldRuntimeInstrumentation.has(runtime)) continue;
           const original = {
             encode: runtime.encode,
+            encodeTopologySuccessor: runtime.encodeTopologySuccessor,
             markExecutionSubmitted: runtime.markExecutionSubmitted,
             releaseExecution: runtime.releaseExecution,
             releaseExecutionAfter: runtime.releaseExecutionAfter,
@@ -709,6 +710,40 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               throw error;
             }
           };
+          if (typeof original.encodeTopologySuccessor === 'function') {
+            runtime.encodeTopologySuccessor = (...args) => {
+              const event = {
+                type: 'encode-topology-successor',
+                ordinal: ++mechanicsFieldEventOrdinal,
+                ratio: activeDiagnosticRatio,
+                runtimeId: runtimeRecord.runtimeId,
+                runtimeKey,
+                activeBefore: runtime.activeExecutionCount?.() ?? null,
+                usableBefore: runtime.usableArenaCount?.() ?? null,
+                succeeded: false,
+                errorCode: null
+              };
+              mechanicsFieldEvents.push(event);
+              try {
+                const execution = original.encodeTopologySuccessor(...args);
+                event.succeeded = true;
+                event.arenaIndex = execution?.arenaIndex ?? null;
+                event.activeAfter = runtime.activeExecutionCount?.() ?? null;
+                registerMechanicsFieldExecution(
+                  entry,
+                  runtime,
+                  execution,
+                  'instrumented-topology-successor'
+                );
+                return execution;
+              } catch (error) {
+                event.activeAfter = runtime.activeExecutionCount?.() ?? null;
+                event.errorCode = error?.code ?? null;
+                event.errorMessage = error?.message ?? String(error);
+                throw error;
+              }
+            };
+          }
           runtime.markExecutionSubmitted = (execution, ...args) => {
             const record = registerMechanicsFieldExecution(
               entry,
@@ -2058,6 +2093,19 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               result.canonicalEpochControllerSummary.privateAdvancedEpochCount,
             publishedEpochCount:
               result.canonicalEpochControllerSummary.publishedEpochCount,
+            mechanicsFieldTopologySuccessorCount:
+              result.canonicalEpochControllerSummary
+                .mechanicsFieldTopologySuccessorCount,
+            mechanicsFieldTopologySuccessorCountByEpoch: [
+              ...result.canonicalEpochControllerSummary
+                .mechanicsFieldTopologySuccessorCountByEpoch
+            ],
+            mechanicsFieldTopologySuccessorEncodeCount:
+              mechanicsFieldEvents.filter((event) => (
+                event.type === 'encode-topology-successor'
+                && event.ratio === ratio
+                && event.succeeded === true
+              )).length,
             workspaceBuildCount:
               result.parentFieldMechanicsWorkspaceBuildCount,
             fineCorrectionCount:
@@ -2251,6 +2299,23 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       operationCount: result.operationCount,
       epochCount: result.epochCount,
       workspaceBuildCount: result.workspaceBuildCount,
+      mechanicsFieldTopologySuccessorCount:
+        result.mechanicsFieldTopologySuccessorCount,
+      mechanicsFieldTopologySuccessorCountByEpoch:
+        result.mechanicsFieldTopologySuccessorCountByEpoch,
+      mechanicsFieldTopologySuccessorEncodeCount:
+        result.mechanicsFieldTopologySuccessorEncodeCount,
+      fieldHeaders: result.gridUpdateDiagnostics.map((diagnostic) => ({
+        kind: diagnostic.kind,
+        status: diagnostic.fieldHeaderWords[2],
+        generationId: diagnostic.fieldHeaderWords[3],
+        sourceFamilyId: diagnostic.fieldHeaderWords[7],
+        fieldCount: diagnostic.fieldHeaderWords[34],
+        invalidCount: diagnostic.fieldHeaderWords[35],
+        completionOrdinal: diagnostic.fieldHeaderWords[38],
+        dispatch: diagnostic.fieldHeaderWords.slice(44, 47),
+        parentCompletionOrdinal: diagnostic.fieldHeaderWords[50]
+      })),
       finalVelocityRows: [
         result.finalState.slice(4, 7),
         result.finalState.slice(12, 15)
@@ -2320,6 +2385,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   }
   for (const result of native.ratios) {
     const ratio = result.ratio;
+    const expectedTopologySuccessors = Array.from(
+      { length: ratio + 1 },
+      () => 0
+    );
     assert.deepEqual(result.counts, {
       p2g: 2 * ratio + 1,
       gridUpdate: ratio + 1,
@@ -2333,6 +2402,31 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
     assert.equal(result.fineCorrectionCount, ratio);
     assert.equal(result.coarseTerminalCount, 1);
     assert.equal(result.coarsePublishCount, 0);
+    assert.deepEqual(
+      result.mechanicsFieldTopologySuccessorCountByEpoch,
+      expectedTopologySuccessors
+    );
+    assert.equal(
+      result.mechanicsFieldTopologySuccessorCount,
+      expectedTopologySuccessors.reduce((sum, count) => sum + count, 0)
+    );
+    assert.equal(
+      result.mechanicsFieldTopologySuccessorEncodeCount,
+      0
+    );
+    assert.equal(result.gridUpdateDiagnostics.length, ratio + 1);
+    for (const diagnostic of result.gridUpdateDiagnostics) {
+      assert.equal(
+        diagnostic.fieldHeaderWords[2],
+        3,
+        `r=${ratio} ${diagnostic.kind} mechanics field was not admitted`
+      );
+      assert.equal(
+        diagnostic.fieldHeaderWords[35],
+        0,
+        `r=${ratio} ${diagnostic.kind} mechanics field reported invalid rows`
+      );
+    }
     assert.equal(result.finalState.every(Number.isFinite), true);
     assert.equal(
       result.finalStateChanged,

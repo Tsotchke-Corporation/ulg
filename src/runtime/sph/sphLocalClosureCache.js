@@ -528,6 +528,7 @@ function reactionRecordFromDiscovery(reactionDiscovery, materialProperties = {},
       reactions: reactionDiscovery.reactions || [],
       productClosures,
       note: reactionDiscovery.note || null,
+      emptyCatalogAuthority: reactionDiscovery.emptyCatalogAuthority || null,
       cache: {
         ...(reactionDiscovery.cache || {}),
         cacheStatus: 'persistent-record-source'

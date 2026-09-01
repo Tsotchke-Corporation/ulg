@@ -1195,6 +1195,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sep',
   'sepVel',
   'reactionProductReserveMinimumLiveFraction',
+  'reactionProductReserveExactDiscovery',
   'contactSolver',
   'contactJacobiIterations',
   'contactCleanupPasses',
@@ -4924,6 +4925,7 @@ function reactionRecordFromDiscovery(reactionDiscovery, materialProperties = {})
       reactions: reactionDiscovery.reactions || [],
       productClosures,
       note: reactionDiscovery.note || null,
+      emptyCatalogAuthority: reactionDiscovery.emptyCatalogAuthority || null,
       cache: {
         ...(reactionDiscovery.cache || {}),
         cacheStatus: 'persistent-record-source'
@@ -6954,6 +6956,7 @@ export async function mountSphPhaseDemoOverlay({
     'sep',
     'sepVel',
     'reactionProductReserveMinimumLiveFraction',
+    'reactionProductReserveExactDiscovery',
     'reactionActivationPolicy',
     'hydroInit',
     'residentStepsPerSchedule',
@@ -7463,6 +7466,14 @@ export async function mountSphPhaseDemoOverlay({
   const initialReactionProductReserveMinimumLiveFraction = numericUrlOption(
     'reactionProductReserveMinimumLiveFraction',
     { max: 1 }
+  );
+  const initialReactionProductReserveExactDiscoveryRaw =
+    initialHash.get('reactionProductReserveExactDiscovery')
+    ?? initialQuery.get('reactionProductReserveExactDiscovery')
+    ?? initialScenarioRuntime.reactionProductReserveExactDiscovery;
+  const initialReactionProductReserveExactDiscovery = booleanUrlParam(
+    initialReactionProductReserveExactDiscoveryRaw,
+    false
   );
   // Contact-solver knobs. Absent params stay null so the scene's interactive
   // preset (16 Jacobi rounds, 512 cleanup passes) applies; out-of-range
@@ -8590,6 +8601,15 @@ export async function mountSphPhaseDemoOverlay({
         String(initialReactionProductReserveMinimumLiveFraction)
       );
     }
+    if (
+      initialReactionProductReserveExactDiscoveryRaw != null
+      && initialReactionProductReserveExactDiscoveryRaw !== ''
+    ) {
+      q.set(
+        'reactionProductReserveExactDiscovery',
+        initialReactionProductReserveExactDiscovery ? '1' : '0'
+      );
+    }
     if (initialHydrostaticInitialization != null) {
       q.set('hydroInit', initialHydrostaticInitialization ? '1' : '0');
     }
@@ -8830,6 +8850,8 @@ export async function mountSphPhaseDemoOverlay({
       mechanics: mechanicsModeFromControls(),
       reactionProductReserveMinimumLiveFraction:
         initialReactionProductReserveMinimumLiveFraction,
+      reactionProductReserveExactDiscovery:
+        initialReactionProductReserveExactDiscovery,
       // Authoritative dynamic activation begins with a genuinely dormant
       // reaction writer set. The requested checkbox remains independently
       // true and the discovered reaction catalog is handed to the scene,

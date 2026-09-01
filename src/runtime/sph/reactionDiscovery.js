@@ -55,6 +55,50 @@ const ENERGY_MODEL_HF = 'sto-3g-rhf-uhf';
 const ENERGY_MODEL_ALL_ELEMENT = 'atomic-kohn-sham-tight-binding-v0';
 export const REACTION_DISCOVERY_CACHE_RECORD_SCHEMA = 'peercompute.ulg.reaction-discovery-cache-record.v0';
 export const REACTION_DISCOVERY_CACHE_KEY_SCHEMA = 'peercompute.ulg.reaction-discovery-cache-key.v0';
+export const REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA =
+  'peercompute.ulg.reaction-discovery-empty-catalog-authority.v0';
+const REACTION_DISCOVERY_EVALUATION_VERSION =
+  'reaction-discovery-evaluation-with-empty-catalog-authority-v0';
+
+function reactionDiscoveryEmptyCatalogAuthority(status, reason) {
+  return Object.freeze({
+    schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+    status,
+    reason
+  });
+}
+
+function setReactionDiscoveryEmptyCatalogAuthority(result, status, reason) {
+  result.emptyCatalogAuthority = reactionDiscoveryEmptyCatalogAuthority(
+    status,
+    reason
+  );
+  return result;
+}
+
+function reactionDiscoveryHasCurrentEmptyCatalogAuthority(result) {
+  const authority = result?.emptyCatalogAuthority;
+  if (
+    !Array.isArray(result?.reactions)
+    || authority?.schema !== REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA
+    || !['conclusive-empty', 'indeterminate', 'non-empty'].includes(authority.status)
+    || typeof authority.reason !== 'string'
+    || authority.reason.length === 0
+  ) {
+    return false;
+  }
+  return result.reactions.length > 0
+    ? authority.status === 'non-empty'
+    : authority.status !== 'non-empty';
+}
+
+export function reactionDiscoveryProvesEmptyCatalog(result) {
+  return Array.isArray(result?.reactions)
+    && result.reactions.length === 0
+    && result.emptyCatalogAuthority?.schema
+      === REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA
+    && result.emptyCatalogAuthority.status === 'conclusive-empty';
+}
 
 const atom = (Z, x, y, z) => ({ Z, position: [x, y, z] });
 const speciesInBasis = (species) => species.atoms.every((a) => a.Z <= BASIS_MAX_Z);
@@ -159,6 +203,7 @@ export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
     strictEnergetics: options.strictEnergetics === true,
+    reactionDiscoveryEvaluationVersion: REACTION_DISCOVERY_EVALUATION_VERSION,
     sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT,
     standardFormationEnthalpyFingerprint: STANDARD_FORMATION_ENTHALPY_FINGERPRINT
   });
@@ -166,22 +211,30 @@ export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
 
 function cloneDiscoveryResult(result) {
   if (!result) return result;
+  const emptyCatalogAuthority = result.emptyCatalogAuthority
+    ? Object.freeze({ ...result.emptyCatalogAuthority })
+    : null;
   return {
     ...result,
     reactions: (result.reactions || []).map((reaction) => ({ ...reaction })),
     productClosures: { ...(result.productClosures || {}) },
+    emptyCatalogAuthority,
     cache: result.cache ? { ...result.cache } : null
   };
 }
 
 function discoveryRecordHasCurrentStoichiometry(record) {
-  return (record?.result?.reactions || []).every((reaction) => (
-    !reaction?.stoichiometry
-    || (
-      Array.isArray(reaction.stoichiometry.reactants)
-      && Array.isArray(reaction.stoichiometry.products)
-    )
-  ));
+  return reactionDiscoveryHasCurrentEmptyCatalogAuthority(record?.result)
+    && record.result.productClosures != null
+    && typeof record.result.productClosures === 'object'
+    && !Array.isArray(record.result.productClosures)
+    && (record?.result?.reactions || []).every((reaction) => (
+      !reaction?.stoichiometry
+      || (
+        Array.isArray(reaction.stoichiometry.reactants)
+        && Array.isArray(reaction.stoichiometry.products)
+      )
+    ));
 }
 
 function canonicalElementSymbol(key) {
@@ -890,7 +943,9 @@ export function discoverReactionNetwork(materialKeys, options = {}) {
       pairDiagnostics.push({
         pair,
         cacheKey: discovery.cache?.cacheKey || null,
+        cacheEvaluationOrigin: discovery.cache?.evaluationOrigin || null,
         reactionCount: discovery.reactions?.length || 0,
+        emptyCatalogAuthority: discovery.emptyCatalogAuthority || null,
         reactionIdentities: reactionIdentities.sort(compareCanonicalText),
         blockers: [...(discovery.blockers || [])].sort(compareCanonicalText),
         blockedProduct: discovery.blockedReactionCandidate?.product || null,
@@ -905,6 +960,24 @@ export function discoverReactionNetwork(materialKeys, options = {}) {
   const productClosures = Object.fromEntries(
     [...productClosureByKey.entries()].sort(([a], [b]) => compareCanonicalText(a, b))
   );
+  const emptyCatalogAuthority = reactions.length > 0
+    ? reactionDiscoveryEmptyCatalogAuthority(
+      'non-empty',
+      'at-least-one-distinct-material-pair-produced-a-reaction'
+    )
+    : pairDiagnostics.every((diagnostic) => (
+      diagnostic.emptyCatalogAuthority?.status === 'conclusive-empty'
+    ))
+      ? reactionDiscoveryEmptyCatalogAuthority(
+        'conclusive-empty',
+        pairDiagnostics.length === 0
+          ? 'no-distinct-material-pairs'
+          : 'every-distinct-material-pair-is-conclusively-empty'
+      )
+      : reactionDiscoveryEmptyCatalogAuthority(
+        'indeterminate',
+        'at-least-one-distinct-material-pair-is-inconclusive'
+      );
   return {
     schema: REACTION_NETWORK_DISCOVERY_SCHEMA,
     materials,
@@ -912,6 +985,7 @@ export function discoverReactionNetwork(materialKeys, options = {}) {
     reactions,
     productClosures,
     pairDiagnostics,
+    emptyCatalogAuthority,
     note: `${reactions.length} unique reaction${reactions.length === 1 ? '' : 's'} discovered across ${pairDiagnostics.length} material pair${pairDiagnostics.length === 1 ? '' : 's'}`
   };
 }
@@ -921,9 +995,11 @@ export function discoverReactions(keyA, keyB, options = {}) {
   // demo's most expensive synchronous step, and the normal demo path always supplies material
   // properties. Supplying those properties must strengthen the cache key, not disable caching.
   const cacheKey = createReactionDiscoveryCacheKey(keyA, keyB, options);
+  const forceFreshEvaluation = options.forceFreshEvaluation === true;
   const providedRecord = options.reactionDiscoveryCacheRecord || options.cachedReactionDiscoveryRecord || null;
   if (
-    providedRecord?.schema === REACTION_DISCOVERY_CACHE_RECORD_SCHEMA
+    !forceFreshEvaluation
+    && providedRecord?.schema === REACTION_DISCOVERY_CACHE_RECORD_SCHEMA
     && providedRecord.cacheKey === cacheKey
     && discoveryRecordHasCurrentStoichiometry(providedRecord)
     && providedRecord.result
@@ -940,7 +1016,7 @@ export function discoverReactions(keyA, keyB, options = {}) {
     discoveryCache.set(cacheKey, cloneDiscoveryResult(fromRecord));
     return fromRecord;
   }
-  if (discoveryCache.has(cacheKey)) {
+  if (!forceFreshEvaluation && discoveryCache.has(cacheKey)) {
     const cached = cloneDiscoveryResult(discoveryCache.get(cacheKey));
     cached.cache = {
       ...(cached.cache || {}),
@@ -953,7 +1029,12 @@ export function discoverReactions(keyA, keyB, options = {}) {
   result.cache = {
     schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
     cacheKey,
-    cacheStatus: 'derived-cache-miss',
+    cacheStatus: forceFreshEvaluation
+      ? 'forced-fresh-derived-cache-refresh'
+      : 'derived-cache-miss',
+    evaluationOrigin: 'fresh-derived',
+    evaluationVersion: REACTION_DISCOVERY_EVALUATION_VERSION,
+    forceFreshEvaluation,
     materialPropertiesHash: options.materialProperties
       ? materialPropertiesCacheDigest(options.materialProperties)
       : null,
@@ -971,15 +1052,30 @@ export function discoverReactions(keyA, keyB, options = {}) {
 
 function discoverReactionsUncached(keyA, keyB, options = {}) {
   const result = { reactions: [], productClosures: {}, note: null };
-  if (keyA === keyB) { result.note = 'same material on both blocks: no reaction'; return result; }
+  if (keyA === keyB) {
+    result.note = 'same material on both blocks: no reaction';
+    return setReactionDiscoveryEmptyCatalogAuthority(
+      result,
+      'conclusive-empty',
+      'identical-material-pair'
+    );
+  }
   const ca = materialComposition(keyA, options);
   const cb = materialComposition(keyB, options);
-  if (!ca || !cb) { result.note = 'unknown material'; return result; }
+  if (!ca || !cb) {
+    result.note = 'unknown material';
+    return setReactionDiscoveryEmptyCatalogAuthority(
+      result,
+      'indeterminate',
+      'material-composition-unresolved'
+    );
+  }
   requireCompositionFirstPrinciples(keyA, ca, options);
   requireCompositionFirstPrinciples(keyB, cb, options);
 
   const pairs = [[keyA, ca, keyB, cb], [keyB, cb, keyA, ca]];
   let rx = null;
+  const evaluationBlockers = [];
 
   // General candidate layer: formula parsing + atom-balanced stoichiometric families. This handles
   // arbitrary element/formula pairs such as Li/H2O, Cs/H2O, Na/Cl2, and Al/O2 without relying on the
@@ -1003,7 +1099,16 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     }
   }
   // Fallback: simplest combined binary molecule from the two element sets (conservative).
-  if (!rx && !strictEnergeticsBlocker) rx = combinatorialReaction(keyA, ca, keyB, cb, options);
+  if (!rx && !strictEnergeticsBlocker) {
+    rx = combinatorialReaction(
+      keyA,
+      ca,
+      keyB,
+      cb,
+      options,
+      evaluationBlockers
+    );
+  }
 
   if (
     rx
@@ -1018,7 +1123,12 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     result.note = strictEnergeticsBlocker
       ? `${keyA}+${keyB} blocked: ${strictEnergeticsBlocker.blockedReason}; ${strictEnergeticsBlocker.blockedEnergeticsStatus}`
       : `no reaction family or candidate found for ${keyA}+${keyB}`;
-    result.blockers = strictEnergeticsBlocker ? [strictEnergeticsBlocker.blockedEnergeticsStatus] : [];
+    result.blockers = [
+      ...(strictEnergeticsBlocker
+        ? [strictEnergeticsBlocker.blockedEnergeticsStatus]
+        : []),
+      ...evaluationBlockers
+    ];
     result.blockedReactionCandidate = strictEnergeticsBlocker ? {
       product: strictEnergeticsBlocker.productKey,
       energyModel: strictEnergeticsBlocker.energyModel,
@@ -1026,7 +1136,17 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
       sedenionScope: strictEnergeticsBlocker.sedenionScope ?? strictEnergeticsBlocker.stoichiometry?.sedenionScope ?? null,
       reason: strictEnergeticsBlocker.blockedReason
     } : null;
-    return result;
+    return setReactionDiscoveryEmptyCatalogAuthority(
+      result,
+      strictEnergeticsBlocker || evaluationBlockers.length > 0
+        ? 'indeterminate'
+        : 'conclusive-empty',
+      strictEnergeticsBlocker
+        ? 'candidate-blocked-by-unresolved-energetics'
+        : evaluationBlockers.length > 0
+        ? 'candidate-evaluation-incomplete'
+        : 'no-reaction-family-or-candidate'
+    );
   }
   if (options.strictEnergetics === true && rx.stoichiometry?.provisionalEnergeticsStatus) {
     result.note = `${keyA}+${keyB} blocked: strict energetics rejects provisional heuristic reaction energy; needs-refined-thermochemistry`;
@@ -1038,11 +1158,19 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
       sedenionScope: rx.sedenionScope ?? rx.stoichiometry?.sedenionScope ?? null,
       reason: 'strict energetics rejects provisional heuristic reaction energy'
     };
-    return result;
+    return setReactionDiscoveryEmptyCatalogAuthority(
+      result,
+      'indeterminate',
+      'candidate-blocked-by-strict-energetics'
+    );
   }
   if (!(rx.specificEnthalpyJPerKg < 0)) {
     result.note = `${keyA}+${keyB} is endothermic (ΔH=${rx.dHHa.toFixed(3)} Ha): no spontaneous reaction`;
-    return result;
+    return setReactionDiscoveryEmptyCatalogAuthority(
+      result,
+      'conclusive-empty',
+      'derived-reaction-is-not-exothermic'
+    );
   }
 
   // Activation is reaction-family-specific. Active metal + water no longer uses the metal melting
@@ -1081,6 +1209,11 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     sedenionScope: rx.sedenionScope ?? rx.stoichiometry?.sedenionScope ?? null,
     stoichiometry: rx.stoichiometry ?? null
   });
+  setReactionDiscoveryEmptyCatalogAuthority(
+    result,
+    'non-empty',
+    'reaction-catalog-contains-executable-entry'
+  );
   const energySource = rx.stoichiometry?.thermochemicalReference
     ? 'reference thermochemistry'
     : (rx.stoichiometry?.provisionalEnergeticsStatus
@@ -1094,7 +1227,14 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
 // Form one combined molecule from a single formula unit of each reactant and react if it is clearly
 // more stable than the separated reactant molecules. Gated to metal+nonmetal compound formation so
 // it can't fire for like-with-like (atoms→cluster always looks exothermic against isolated atoms).
-function combinatorialReaction(keyA, ca, keyB, cb, options = {}) {
+function combinatorialReaction(
+  keyA,
+  ca,
+  keyB,
+  cb,
+  options = {},
+  evaluationBlockers = []
+) {
   const hasMetal = ca.role === 'metal' || cb.role === 'metal';
   const hasNonmetal = ca.role === 'nonmetal' || cb.role === 'nonmetal' || ca.role === 'water' || cb.role === 'water';
   if (!hasMetal || !hasNonmetal) return null;
@@ -1105,9 +1245,19 @@ function combinatorialReaction(keyA, ca, keyB, cb, options = {}) {
   const product = { atoms: geometry, multiplicity: multiplicityForElectrons(geometry.reduce((sum, a) => sum + a.Z, 0)) };
   const model = energyModelForSpecies(product, ca.species, cb.species);
   let eProduct;
-  try { eProduct = speciesEnergyHa(product, model); } catch { return null; }
+  try {
+    eProduct = speciesEnergyHa(product, model);
+  } catch {
+    evaluationBlockers.push('combinatorial-product-energy-unresolved');
+    return null;
+  }
   let eReact;
-  try { eReact = speciesEnergyHa(ca.species, model) + speciesEnergyHa(cb.species, model); } catch { return null; }
+  try {
+    eReact = speciesEnergyHa(ca.species, model) + speciesEnergyHa(cb.species, model);
+  } catch {
+    evaluationBlockers.push('combinatorial-reactant-energy-unresolved');
+    return null;
+  }
   const dHHa = eProduct - eReact;
   if (!(dHHa < -0.02)) return null; // require a clearly exothermic compound
   const productMolarMass = Object.entries(counts).reduce((a, [Z, n]) => a + n * atomicMassKg(Number(Z)) * AVOGADRO, 0);

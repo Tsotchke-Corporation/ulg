@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createReactionDiscoveryCacheKey } from '../src/runtime/sph/reactionDiscovery.js';
+import {
+  REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+  clearReactionDiscoveryCache,
+  createReactionDiscoveryCacheKey,
+  discoverReactions
+} from '../src/runtime/sph/reactionDiscovery.js';
 import {
   SPH_LOCAL_CACHE_LOOKUP_SCHEMA,
   createPeerClosureCacheWrite,
@@ -103,6 +108,11 @@ function fakeReactionDiscovery(cacheKey, {
       },
       h2: { properties: materialProperties.h2 }
     },
+    emptyCatalogAuthority: {
+      schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+      status: 'non-empty',
+      reason: 'test-reaction-catalog-is-non-empty'
+    },
     cache: {
       cacheKey,
       cacheStatus: 'derived-cache-miss',
@@ -140,7 +150,21 @@ test('SPH local closure cache lookup runs from snapshots and returns reusable ma
   const options = applySphLocalCacheLookupToOptions({ dropMaterial: 'Na', baseMaterial: 'h2o' }, lookup);
   assert.equal(options.closures.Na.properties.formula, 'Na');
   assert.equal(options.reactionDiscoveryCacheRecord.cacheKey, cacheKey);
+  assert.deepEqual(
+    options.reactionDiscoveryCacheRecord.result.emptyCatalogAuthority,
+    {
+      schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+      status: 'non-empty',
+      reason: 'test-reaction-catalog-is-non-empty'
+    }
+  );
   assert.equal(options.cachedProductClosures.h2.properties.formula, 'H2');
+  clearReactionDiscoveryCache();
+  const restoredDiscovery = discoverReactions('Na', 'h2o', {
+    materialProperties: lookupMaterialProperties,
+    reactionDiscoveryCacheRecord: options.reactionDiscoveryCacheRecord
+  });
+  assert.equal(restoredDiscovery.cache.cacheStatus, 'persistent-cache-hit');
 });
 
 test('SPH local closure cache persistence prepares material and reaction snapshots off the UI path', () => {

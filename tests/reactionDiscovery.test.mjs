@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+  REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
   REACTION_NETWORK_DISCOVERY_SCHEMA,
   clearReactionDiscoveryCache,
   createReactionDiscoveryCacheKey,
   discoverReactionNetwork,
   discoverReactions,
-  reactionDiscoveryCacheInfo
+  reactionDiscoveryCacheInfo,
+  reactionDiscoveryProvesEmptyCatalog
 } from '../src/runtime/sph/reactionDiscovery.js';
 import {
   createReferenceAnchoredMaterialClosure,
@@ -230,6 +232,8 @@ test('strict energetics accepts phase-explicit reference rows and rejects uncove
   assert.equal(salt.blockedReactionCandidate.sedenionScope.status, 'sedenion-period-proxy-no-zero-divisor-path');
   assert.deepEqual(salt.blockedReactionCandidate.sedenionScope.blockers, ['element-to-sedenion-state-bijection-not-derived']);
   assert.match(salt.note, /strict energetics rejects provisional/);
+  assert.equal(salt.emptyCatalogAuthority.status, 'indeterminate');
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(salt), false);
 });
 
 test('heavy-element oxygen reactions switch to the all-element molecular solver while Fe water is blocked', () => {
@@ -245,11 +249,96 @@ test('heavy-element oxygen reactions switch to the all-element molecular solver 
   assert.equal(water.reactions.length, 0);
   assert.match(water.note, /no reaction family or candidate/);
   assert.doesNotMatch(water.note, /basis|Z/);
+  assert.deepEqual(water.emptyCatalogAuthority, {
+    schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+    status: 'conclusive-empty',
+    reason: 'no-reaction-family-or-candidate'
+  });
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(water), true);
 });
 
 test('identical materials on both blocks do not react', () => {
-  assert.equal(discoverReactions('h2o', 'h2o').reactions.length, 0);
-  assert.equal(discoverReactions('Na', 'Na').reactions.length, 0);
+  const water = discoverReactions('h2o', 'h2o');
+  const sodium = discoverReactions('Na', 'Na');
+  assert.equal(water.reactions.length, 0);
+  assert.equal(sodium.reactions.length, 0);
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(water), true);
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(sodium), true);
+});
+
+test('unresolved material composition cannot authorize an empty reaction catalog', () => {
+  const result = discoverReactions('unknownium', 'h2o');
+  assert.equal(result.reactions.length, 0);
+  assert.equal(result.emptyCatalogAuthority.status, 'indeterminate');
+  assert.equal(
+    result.emptyCatalogAuthority.reason,
+    'material-composition-unresolved'
+  );
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(result), false);
+});
+
+test('malformed or contradictory persisted empty-catalog records are rederived', () => {
+  const cacheKey = createReactionDiscoveryCacheKey('h2o', 'h2o');
+  const authority = {
+    schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+    status: 'conclusive-empty',
+    reason: 'forged-empty-catalog'
+  };
+  const records = [
+    {
+      schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+      cacheKey,
+      result: {
+        productClosures: {},
+        emptyCatalogAuthority: authority
+      }
+    },
+    {
+      schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+      cacheKey,
+      result: {
+        reactions: [{ a: 'h2o', b: 'h2o', product: 'forged' }],
+        productClosures: {},
+        emptyCatalogAuthority: authority
+      }
+    }
+  ];
+
+  for (const reactionDiscoveryCacheRecord of records) {
+    clearReactionDiscoveryCache();
+    const result = discoverReactions('h2o', 'h2o', {
+      reactionDiscoveryCacheRecord
+    });
+    assert.equal(result.cache.cacheStatus, 'derived-cache-miss');
+    assert.equal(result.reactions.length, 0);
+    assert.equal(
+      result.emptyCatalogAuthority.reason,
+      'identical-material-pair'
+    );
+    assert.equal(reactionDiscoveryProvesEmptyCatalog(result), true);
+  }
+});
+
+test('forced-fresh reaction discovery bypasses valid memory and persistent caches', () => {
+  clearReactionDiscoveryCache();
+  const first = discoverReactions('h2o', 'h2o');
+  const reactionDiscoveryCacheRecord = {
+    schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+    cacheKey: first.cache.cacheKey,
+    result: first
+  };
+  const forced = discoverReactions('h2o', 'h2o', {
+    reactionDiscoveryCacheRecord,
+    forceFreshEvaluation: true
+  });
+
+  assert.equal(
+    forced.cache.cacheStatus,
+    'forced-fresh-derived-cache-refresh'
+  );
+  assert.equal(forced.cache.evaluationOrigin, 'fresh-derived');
+  assert.equal(forced.cache.forceFreshEvaluation, true);
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(forced), true);
 });
 
 test('multi-material reaction discovery canonicalizes materials and evaluates every distinct pair', () => {
@@ -269,6 +358,8 @@ test('multi-material reaction discovery canonicalizes materials and evaluates ev
   assert.ok(result.reactions.some((reaction) => reaction.product === 'na2o'));
   assert.ok(result.productClosures.naoh);
   assert.ok(result.productClosures.na2o);
+  assert.equal(result.emptyCatalogAuthority.status, 'non-empty');
+  assert.equal(reactionDiscoveryProvesEmptyCatalog(result), false);
 });
 
 test('multi-material reaction discovery merges equivalent stoichiometries and is input-order independent', () => {
@@ -350,11 +441,12 @@ test('material-property-backed reaction discovery caches memory and persisted re
   clearReactionDiscoveryCache();
   const restored = discoverReactions('Na', 'h2o', {
     ...options,
-    reactionDiscoveryCacheRecord: record
+    reactionDiscoveryCacheRecord: JSON.parse(JSON.stringify(record))
   });
   assert.equal(restored.cache.cacheStatus, 'persistent-cache-hit');
   assert.equal(restored.cache.cacheKey, expectedCacheKey);
   assert.equal(restored.reactions[0].product, first.reactions[0].product);
+  assert.equal(Object.isFrozen(restored.emptyCatalogAuthority), true);
   assert.equal(reactionDiscoveryCacheInfo().size, 1);
 
   const staleRecord = {
@@ -379,4 +471,20 @@ test('material-property-backed reaction discovery caches memory and persisted re
   });
   assert.equal(refreshed.cache.cacheStatus, 'derived-cache-miss');
   assert.deepEqual(refreshed.reactions[0].stoichiometry.products.map((term) => term.formula), ['NaOH', 'H2']);
+
+  const {
+    emptyCatalogAuthority: _legacyMissingAuthority,
+    ...legacyResult
+  } = first;
+  clearReactionDiscoveryCache();
+  const refreshedLegacy = discoverReactions('Na', 'h2o', {
+    ...options,
+    reactionDiscoveryCacheRecord: {
+      schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+      cacheKey: first.cache.cacheKey,
+      result: legacyResult
+    }
+  });
+  assert.equal(refreshedLegacy.cache.cacheStatus, 'derived-cache-miss');
+  assert.equal(refreshedLegacy.emptyCatalogAuthority.status, 'non-empty');
 });

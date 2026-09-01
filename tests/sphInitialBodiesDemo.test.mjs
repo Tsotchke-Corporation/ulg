@@ -362,6 +362,36 @@ test('initialBodies honors the scenario reserve floor before phase-lane expansio
   assert.equal(demo.reactionProductReservePlan.slotCount, reserve);
 });
 
+test('initialBodies prunes product rows only after every material pair is conclusively empty', () => {
+  const driver = createSphPhaseDemo({
+    initialBodies: THREE_RECTANGULAR_BODIES,
+    allowFixtureMaterialProperties: true,
+    allowReducedProductProperties: true,
+    mechanics: 'mlsmpm',
+    reactionProductReserveExactDiscovery: true
+  });
+
+  assert.deepEqual(driver.demo.reactionDiscovery.materials, ['fe', 'h2o']);
+  assert.equal(driver.demo.reactionDiscovery.pairCount, 1);
+  assert.equal(driver.demo.reactionDiscovery.reactions.length, 0);
+  assert.equal(
+    driver.demo.reactionDiscovery.pairDiagnostics[0].cacheEvaluationOrigin,
+    'fresh-derived'
+  );
+  assert.equal(
+    driver.demo.reactionDiscovery.emptyCatalogAuthority.status,
+    'conclusive-empty'
+  );
+  assert.equal(driver.demo.counts.live, 38);
+  assert.equal(driver.demo.counts.spareProductSlots, 0);
+  assert.equal(driver.demo.counts.phaseCompanionSlots, 114);
+  assert.equal(driver.demo.counts.total, 152);
+  assert.equal(
+    driver.demo.reactionProductReservePlan.reserveBasis,
+    'exact-empty-reaction-discovery'
+  );
+});
+
 test('initialBodies omits permanently dormant reaction-product rows for one-material MLS-MPM scenes', () => {
   const demo = buildSphPhaseDemoState({
     initialBodies: container([

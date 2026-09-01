@@ -39,7 +39,11 @@ import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
 import { elementMaterialClosure } from './material/elementClosures.js';
 import { zForSymbol } from './electronicStructure/periodicTable.js';
 import { reactiveStep } from './sph/reactiveChemistry.js';
-import { discoverReactionNetwork, discoverReactions } from './sph/reactionDiscovery.js';
+import {
+  discoverReactionNetwork,
+  discoverReactions,
+  reactionDiscoveryProvesEmptyCatalog
+} from './sph/reactionDiscovery.js';
 import {
   normalizeSphInitialBodies,
   preflightSphInitialBodiesForSimulation
@@ -102,6 +106,9 @@ const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
 const REACTION_PRODUCT_RESERVE_TERM_MULTIPLIER = 2;
 const DEFAULT_REACTION_PRODUCT_RESERVE_LIVE_FRACTION = 0.25;
 const MAX_REACTION_PRODUCT_RESERVE_MINIMUM_LIVE_FRACTION = 1;
+const REACTION_PRODUCT_RESERVE_EXACT_DISCOVERY_AUTHORITY = Symbol(
+  'reaction-product-reserve-exact-discovery-authority'
+);
 const PHASE_VOLUME_EXPANSIVE_PHASE_NAMES = new Set(['gas', 'vapor', 'vapour', 'plasma']);
 const DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA = 2e-3;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
@@ -135,14 +142,74 @@ function reactionProductReserveTermMultiplierForMaterials(materialKeys = []) {
     : 0;
 }
 
+function reactionProductReserveMaterialSetKey(materialKeys = []) {
+  return JSON.stringify([...new Set(
+    materialKeys
+      .map((key) => String(key ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  )].sort());
+}
+
+function exactReactionCountFromReserveAuthority(authority, materialKeys) {
+  if (
+    authority?.authority !== REACTION_PRODUCT_RESERVE_EXACT_DISCOVERY_AUTHORITY
+    || authority.materialSetKey
+      !== reactionProductReserveMaterialSetKey(materialKeys)
+  ) {
+    return null;
+  }
+  return authority.reactionCount;
+}
+
+function reactionProductReserveMaterialKeysForDemo(demo) {
+  return demo.initialBodies
+    ? demo.initialBodies.bodies.map((body) => body.material)
+    : [demo.dropMaterial, demo.baseMaterial];
+}
+
+function reactionDiscoveryCatalogCacheIdentity(discovery) {
+  if (Array.isArray(discovery?.pairDiagnostics)) {
+    return JSON.stringify(discovery.pairDiagnostics.map((diagnostic) => [
+      diagnostic.pair,
+      diagnostic.cacheKey
+    ]));
+  }
+  return discovery?.cache?.cacheKey || null;
+}
+
+function reactionDiscoveryCatalogHasFreshEvaluationLineage(discovery) {
+  if (Array.isArray(discovery?.pairDiagnostics)) {
+    return discovery.pairDiagnostics.length > 0
+      && discovery.pairDiagnostics.every((diagnostic) => (
+        diagnostic.cacheEvaluationOrigin === 'fresh-derived'
+      ));
+  }
+  return discovery?.cache?.evaluationOrigin === 'fresh-derived';
+}
+
 function reactionProductReservePlan({
   liveParticleCount,
   materialKeys = [],
-  minimumLiveFraction = null
+  minimumLiveFraction = null,
+  exactDiscoveredReactionCount = null
 } = {}) {
   const liveCount = Math.max(0, Math.round(Number(liveParticleCount) || 0));
-  const termMultiplier =
-    reactionProductReserveTermMultiplierForMaterials(materialKeys);
+  const materialSetKey = reactionProductReserveMaterialSetKey(materialKeys);
+  if (
+    exactDiscoveredReactionCount != null
+    && (
+      !Number.isSafeInteger(exactDiscoveredReactionCount)
+      || exactDiscoveredReactionCount < 0
+    )
+  ) {
+    throw new RangeError(
+      'exactDiscoveredReactionCount must be a non-negative safe integer'
+    );
+  }
+  const exactDiscoveryProvedEmpty = exactDiscoveredReactionCount === 0;
+  const termMultiplier = exactDiscoveryProvedEmpty
+    ? 0
+    : reactionProductReserveTermMultiplierForMaterials(materialKeys);
   let requestedMinimumLiveFraction = null;
   if (minimumLiveFraction != null && minimumLiveFraction !== '') {
     const value = Number(minimumLiveFraction);
@@ -170,7 +237,13 @@ function reactionProductReservePlan({
       ? 'reaction-product-reserve-ready'
       : 'reaction-product-reserve-not-required',
     liveParticleCount: liveCount,
+    materialSetKey,
     productTermMultiplier: termMultiplier,
+    reserveBasis: exactDiscoveryProvedEmpty
+      ? 'exact-empty-reaction-discovery'
+      : 'conservative-initial-material-set',
+    exactDiscoveredReactionCount,
+    exactDiscoveryProvedEmpty,
     defaultLiveFraction: DEFAULT_REACTION_PRODUCT_RESERVE_LIVE_FRACTION,
     requestedMinimumLiveFraction,
     defaultSlotCount,
@@ -2326,6 +2399,7 @@ function buildSphInitialBodiesDemoState({
   initialBodies,
   initialTargetNeighborCount,
   reactionProductReserveMinimumLiveFraction,
+  reactionProductReserveAuthority,
   mechanics,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
@@ -2431,7 +2505,11 @@ function buildSphInitialBodiesDemoState({
   const reactionProductReserve = reactionProductReservePlan({
     liveParticleCount: liveParticles.length,
     materialKeys: normalizedInitialBodies.bodies.map((body) => body.material),
-    minimumLiveFraction: reactionProductReserveMinimumLiveFraction
+    minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
+    exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
+      reactionProductReserveAuthority,
+      normalizedInitialBodies.bodies.map((body) => body.material)
+    )
   });
   const spareProductSlotCount = gpuResidentMechanics
     ? reactionProductReserve.slotCount
@@ -2622,7 +2700,7 @@ function buildSphInitialBodiesDemoState({
  * density of its material's stable phase at its role temperature. Reduced resolution so the CPU
  * reference carrier runs interactively.
  */
-export function buildSphPhaseDemoState({
+function buildSphPhaseDemoStateWithReserveAuthority({
   scenario = createSphPhaseScenario(),
   physicalLawGroups = null,
   closures = null,
@@ -2648,7 +2726,7 @@ export function buildSphPhaseDemoState({
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
   ironBaseHeightM
-} = {}) {
+} = {}, reactionProductReserveAuthority = null) {
   if (initialBodies != null) {
     return buildSphInitialBodiesDemoState({
       scenario,
@@ -2659,6 +2737,7 @@ export function buildSphPhaseDemoState({
       initialBodies,
       initialTargetNeighborCount,
       reactionProductReserveMinimumLiveFraction,
+      reactionProductReserveAuthority,
       mechanics,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
@@ -2952,7 +3031,11 @@ export function buildSphPhaseDemoState({
   const reactionProductReserve = reactionProductReservePlan({
     liveParticleCount: all.length,
     materialKeys: [dropMaterial, baseMaterial],
-    minimumLiveFraction: reactionProductReserveMinimumLiveFraction
+    minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
+    exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
+      reactionProductReserveAuthority,
+      [dropMaterial, baseMaterial]
+    )
   });
   const spareProductSlotCount = gpuResidentMechanics
     ? reactionProductReserve.slotCount
@@ -3079,6 +3162,10 @@ export function buildSphPhaseDemoState({
     reactionProductReservePlan: reactionProductReserve,
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
+}
+
+export function buildSphPhaseDemoState(options = {}) {
+  return buildSphPhaseDemoStateWithReserveAuthority(options);
 }
 
 /**
@@ -5808,17 +5895,104 @@ function computeDerivedDemoPreflight(demo) {
  * Create the demo driver: preflight + a reduced-resolution CPU reference carrier stepper.
  */
 export function createSphPhaseDemo(options = {}) {
-  const demo = buildSphPhaseDemoState(options);
-  if (!demo.allowFixtureMaterialProperties) {
-    requireFirstPrinciplesMaterialMap(demo.materialProperties, {
+  const mechanics = options.mechanics ?? 'mlsmpm';
+  const requireInitialMaterialAuthority = (candidateDemo) => {
+    if (candidateDemo.allowFixtureMaterialProperties) return;
+    requireFirstPrinciplesMaterialMap(candidateDemo.materialProperties, {
       context: 'createSphPhaseDemo.initial-materials',
       allowedFallbackSources: [
         'material-property-reference-bank',
         ...(options.allowReducedProductProperties === true ? ['reactant-packed-product-closure'] : [])
       ]
     });
+  };
+  const discoverDemoReactionCatalog = (candidateDemo, {
+    forceFreshEvaluation = false,
+    allowProvidedCacheRecords = true
+  } = {}) => {
+    const discoveryOptions = {
+      materialProperties: candidateDemo.materialProperties,
+      productClosures: options.productClosures,
+      cachedProductClosures: options.cachedProductClosures,
+      allowFixtureMaterialProperties: candidateDemo.allowFixtureMaterialProperties,
+      allowReducedProductProperties: options.allowReducedProductProperties === true
+        || candidateDemo.allowFixtureMaterialProperties,
+      forceFreshEvaluation,
+      ...(allowProvidedCacheRecords
+        ? {
+            reactionDiscoveryCacheRecord: options.reactionDiscoveryCacheRecord,
+            cachedReactionDiscoveryRecord: options.cachedReactionDiscoveryRecord
+          }
+        : {})
+    };
+    return candidateDemo.initialBodies
+      ? discoverReactionNetwork(
+        candidateDemo.initialBodies.bodies.map((body) => body.material),
+        discoveryOptions
+      )
+      : discoverReactions(
+        candidateDemo.dropMaterial,
+        candidateDemo.baseMaterial,
+        discoveryOptions
+      );
+  };
+
+  let demo = buildSphPhaseDemoState(options);
+  requireInitialMaterialAuthority(demo);
+  let prefetchedReactionDiscovery = null;
+  if (
+    options.reactionProductReserveExactDiscovery === true
+    && mechanics !== 'sph'
+    && demo.counts.spareProductSlots > 0
+  ) {
+    prefetchedReactionDiscovery = discoverDemoReactionCatalog(demo, {
+      forceFreshEvaluation: true,
+      allowProvidedCacheRecords: false
+    });
+    if (
+      reactionDiscoveryProvesEmptyCatalog(prefetchedReactionDiscovery)
+      && reactionDiscoveryCatalogHasFreshEvaluationLineage(
+        prefetchedReactionDiscovery
+      )
+    ) {
+      const provedMaterialSetKey = reactionProductReserveMaterialSetKey(
+        reactionProductReserveMaterialKeysForDemo(demo)
+      );
+      const provedReactionCatalogCacheIdentity =
+        reactionDiscoveryCatalogCacheIdentity(prefetchedReactionDiscovery);
+      demo = buildSphPhaseDemoStateWithReserveAuthority(options, Object.freeze({
+        authority: REACTION_PRODUCT_RESERVE_EXACT_DISCOVERY_AUTHORITY,
+        materialSetKey: provedMaterialSetKey,
+        reactionCount: 0
+      }));
+      requireInitialMaterialAuthority(demo);
+      if (
+        reactionProductReserveMaterialSetKey(
+          reactionProductReserveMaterialKeysForDemo(demo)
+        ) !== provedMaterialSetKey
+        || demo.reactionProductReservePlan.exactDiscoveryProvedEmpty !== true
+      ) {
+        throw new Error(
+          'Exact reaction-product reserve proof no longer matches the rebuilt material set'
+        );
+      }
+      prefetchedReactionDiscovery = discoverDemoReactionCatalog(demo, {
+        allowProvidedCacheRecords: false
+      });
+      if (
+        !reactionDiscoveryProvesEmptyCatalog(prefetchedReactionDiscovery)
+        || !reactionDiscoveryCatalogHasFreshEvaluationLineage(
+          prefetchedReactionDiscovery
+        )
+        || reactionDiscoveryCatalogCacheIdentity(prefetchedReactionDiscovery)
+          !== provedReactionCatalogCacheIdentity
+      ) {
+        throw new Error(
+          'Exact reaction-product reserve proof did not survive final topology allocation'
+        );
+      }
+    }
   }
-  const mechanics = options.mechanics ?? 'mlsmpm';
   const physicalLawGroups = normalizeSphPhysicalLawGroups(options.physicalLawGroups);
   const surfaceTensionLawAdmission = resolveSphSurfaceTensionLawAdmission({
     mechanics,
@@ -6131,22 +6305,8 @@ export function createSphPhaseDemo(options = {}) {
   // the activation temperature the reactant particles become the product and release the derived heat
   // (→ temperature → phase change / steam → expansion). Any derived product-compound closure is
   // registered into materialProperties so the product renders and carries thermodynamics.
-  const discoveryOptions = {
-    materialProperties: demo.materialProperties,
-    reactionDiscoveryCacheRecord: options.reactionDiscoveryCacheRecord,
-    cachedReactionDiscoveryRecord: options.cachedReactionDiscoveryRecord,
-    productClosures: options.productClosures,
-    cachedProductClosures: options.cachedProductClosures,
-    allowFixtureMaterialProperties: demo.allowFixtureMaterialProperties,
-    allowReducedProductProperties: options.allowReducedProductProperties === true
-      || demo.allowFixtureMaterialProperties
-  };
-  const discovery = demo.initialBodies
-    ? discoverReactionNetwork(
-      demo.initialBodies.bodies.map((body) => body.material),
-      discoveryOptions
-    )
-    : discoverReactions(demo.dropMaterial, demo.baseMaterial, discoveryOptions);
+  const discovery = prefetchedReactionDiscovery
+    ?? discoverDemoReactionCatalog(demo);
   const discoveredReactions = discovery.reactions;
   for (const [key, closure] of Object.entries(discovery.productClosures)) {
     if (!demo.allowFixtureMaterialProperties && options.allowReducedProductProperties !== true) {

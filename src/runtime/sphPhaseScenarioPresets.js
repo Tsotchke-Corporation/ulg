@@ -216,7 +216,12 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // Surface stress is mechanics-field authoritative. Keep the direct
       // ?scenario=iron-ice-quench route on the canonical spatial authority
       // instead of admitting lawst and then rejecting its first P2G batch.
-      ss: '1'
+      ss: '1',
+      // Fe/H2O discovery is conclusively empty. Ask the driver's two-pass
+      // startup to prove that fact before final topology allocation, then
+      // omit product-placement rows which no reaction in this mounted catalog
+      // can consume. Reactive presets retain their conservative reserve.
+      reactionProductReserveExactDiscovery: '1'
     },
     validation: {
       // The refined initial-rate screen crosses one-carrier vapor demand near

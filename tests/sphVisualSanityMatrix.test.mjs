@@ -1385,6 +1385,11 @@ test('standard canned scenarios use worker-owned SS with a native surface consum
       scenario.presetId === 'sodium-water' ? '1' : null,
       `${scenario.label} must keep the enlarged product reserve sodium-only`
     );
+    assert.equal(
+      url.searchParams.get('reactionProductReserveExactDiscovery'),
+      scenario.presetId === 'iron-ice-quench' ? '1' : null,
+      `${scenario.label} must keep exact empty-catalog reserve pruning iron-only`
+    );
   }
   assert.equal(
     STANDARD_SCENARIOS.find((scenario) => scenario.presetId === 'sodium-water')

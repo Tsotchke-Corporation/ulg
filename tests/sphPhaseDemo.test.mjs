@@ -31,6 +31,11 @@ import {
   buildMlsMpmGpuParticleBuffers,
   decodeMlsMpmGpuParticleRows
 } from '../src/runtime/sph/sphGpuBuffers.js';
+import {
+  REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+  REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+  createReactionDiscoveryCacheKey
+} from '../src/runtime/sph/reactionDiscovery.js';
 
 function near(actual, expected, tolerance = 1e-6) {
   assert.ok(
@@ -261,6 +266,102 @@ test('demo product reserve can provision one full live cohort without changing t
       reactionProductReserveMinimumLiveFraction: 1.01
     }),
     /must be finite in \[0, 1\]/
+  );
+});
+
+test('driver prunes product rows only after conclusive empty reaction discovery', () => {
+  const common = {
+    allowFixtureMaterialProperties: true,
+    allowReducedProductProperties: true,
+    adaptiveParticleSpacing: false,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    mechanics: 'mlsmpm',
+    reactionProductReserveExactDiscovery: true
+  };
+  const unprovedState = buildSphPhaseDemoState({
+    ...common,
+    dropMaterial: 'fe',
+    baseMaterial: 'h2o'
+  });
+  assert.equal(unprovedState.counts.spareProductSlots, 16);
+  assert.equal(
+    unprovedState.reactionProductReservePlan.exactDiscoveryProvedEmpty,
+    false
+  );
+
+  const ironWater = createSphPhaseDemo({
+    ...common,
+    dropMaterial: 'fe',
+    baseMaterial: 'h2o'
+  });
+  assert.equal(ironWater.demo.reactionDiscovery.reactions.length, 0);
+  assert.equal(
+    ironWater.demo.reactionDiscovery.emptyCatalogAuthority.status,
+    'conclusive-empty'
+  );
+  assert.equal(ironWater.demo.counts.spareProductSlots, 0);
+  assert.equal(ironWater.demo.counts.phaseCompanionSlots, 6);
+  assert.equal(ironWater.demo.counts.total, 8);
+  assert.equal(
+    ironWater.demo.reactionProductReservePlan.reserveBasis,
+    'exact-empty-reaction-discovery'
+  );
+  assert.equal(
+    ironWater.demo.reactionProductReservePlan.exactDiscoveryProvedEmpty,
+    true
+  );
+  assert.equal(
+    ironWater.demo.reactionDiscovery.cache.evaluationOrigin,
+    'fresh-derived'
+  );
+
+  const sodiumSeed = buildSphPhaseDemoState({
+    ...common,
+    dropMaterial: 'na',
+    baseMaterial: 'h2o'
+  });
+  const forgedEmptyCacheKey = createReactionDiscoveryCacheKey('na', 'h2o', {
+    materialProperties: sodiumSeed.materialProperties,
+    allowFixtureMaterialProperties: true,
+    allowReducedProductProperties: true
+  });
+
+  const sodiumWater = createSphPhaseDemo({
+    ...common,
+    dropMaterial: 'na',
+    baseMaterial: 'h2o',
+    reactionDiscoveryCacheRecord: {
+      schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+      cacheKey: forgedEmptyCacheKey,
+      result: {
+        reactions: [],
+        productClosures: {},
+        emptyCatalogAuthority: {
+          schema: REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA,
+          status: 'conclusive-empty',
+          reason: 'forged-empty-reactive-catalog'
+        }
+      }
+    }
+  });
+  assert.equal(sodiumWater.demo.reactionDiscovery.reactions.length, 1);
+  assert.equal(
+    sodiumWater.demo.reactionDiscovery.emptyCatalogAuthority.status,
+    'non-empty'
+  );
+  assert.equal(sodiumWater.demo.counts.spareProductSlots, 16);
+  assert.equal(
+    sodiumWater.demo.reactionProductReservePlan.reserveBasis,
+    'conservative-initial-material-set'
+  );
+  assert.equal(
+    sodiumWater.demo.reactionProductReservePlan.exactDiscoveryProvedEmpty,
+    false
+  );
+  assert.equal(
+    sodiumWater.demo.reactionDiscovery.cache.cacheStatus,
+    'forced-fresh-derived-cache-refresh'
   );
 });
 

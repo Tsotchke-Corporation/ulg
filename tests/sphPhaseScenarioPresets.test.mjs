@@ -256,10 +256,12 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
   assert.equal(quench.controls.lawst, '1');
   assert.deepEqual(selectKeys(quench.runtime, [
     'sceneLengthScale',
-    'wallModel'
+    'wallModel',
+    'reactionProductReserveExactDiscovery'
   ]), {
     sceneLengthScale: '0.014',
-    wallModel: 'adiabatic'
+    wallModel: 'adiabatic',
+    reactionProductReserveExactDiscovery: '1'
   });
   assert.equal(quench.validation.batches, 16);
   assert.equal(quench.validation.timeoutMs, 1200000);

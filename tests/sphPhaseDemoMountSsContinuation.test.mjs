@@ -95,6 +95,10 @@ test('reaction activation defaults to shadow without conflating the reactions ch
 
 test('mounted reaction activation policy is URL-bound and provisions a dormant authoritative catalog', () => {
   assert.equal(SPH_PHASE_URL_PARAM_KEYS.includes('reactionActivationPolicy'), true);
+  assert.equal(
+    SPH_PHASE_URL_PARAM_KEYS.includes('reactionProductReserveExactDiscovery'),
+    true
+  );
   const source = readFileSync(
     new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
     'utf8'
@@ -106,6 +110,14 @@ test('mounted reaction activation policy is URL-bound and provisions a dormant a
   assert.match(
     source,
     /physicalLawGroups:\s*physicalLawGroupsForInitialExecutionFromControls\(\),/
+  );
+  assert.match(
+    source,
+    /reactionProductReserveExactDiscovery:\s*initialReactionProductReserveExactDiscovery,/
+  );
+  assert.match(
+    source,
+    /emptyCatalogAuthority:\s*reactionDiscovery\.emptyCatalogAuthority \|\| null,/
   );
   assert.match(
     source,

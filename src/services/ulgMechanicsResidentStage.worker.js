@@ -6129,6 +6129,14 @@ const SCHROEDER_EPOCH_ADVANCING_IDENTITY_WORD_FIELDS = Object.freeze([
 const activeWorkerResidentScheduleByLaneKey = new Map();
 const activeWorkerResidentScheduleByCancelKey = new Map();
 const WORKER_RESIDENT_SCHEDULE_FENCE_DEFERRAL_TOKEN = Object.freeze({});
+const WORKER_RESIDENT_SCHEDULE_PRIVATE_STAGE_RESULT_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-private-stage-result.v0';
+const WORKER_RESIDENT_SCHEDULE_PRIVATE_RETURN_STAGE_IDS = Object.freeze(
+  new Set([
+    SCHROEDER_SPATIAL_EPOCH_STAGE_ID,
+    SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+  ])
+);
 let workerResidentScheduleOrdinal = 1;
 
 function workerResidentScheduleError(reason, detail = null, {
@@ -6155,6 +6163,156 @@ function workerResidentScheduleError(reason, detail = null, {
     laneState
   };
   return error;
+}
+
+function privateWorkerResidentScheduleStageRefDescriptors(
+  stageId,
+  rawResult = null
+) {
+  if (stageId === SCHROEDER_SPATIAL_EPOCH_STAGE_ID) {
+    return [
+      [
+        rawResult?.directoryBufferRef,
+        'epochGeneration.execution.directoryBuffer'
+      ],
+      [
+        rawResult?.sourceBufferRef,
+        'epochGeneration.execution.sourceBuffer'
+      ],
+      [
+        rawResult?.levelAssignmentBufferRef,
+        'levelAssignment.assignmentBuffer'
+      ]
+    ];
+  }
+  if (stageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID) {
+    return [
+      [
+        rawResult?.postStep?.stateBufferRef,
+        'nextParticleUploads.sphParticleUpload.stateBuffer'
+      ],
+      [
+        rawResult?.postStep?.thermoBufferRef,
+        'nextParticleUploads.sphParticleUpload.thermoBuffer'
+      ],
+      [
+        rawResult?.postStep?.identityBufferRef,
+        'nextParticleUploads.sphParticleUpload.identityBuffer'
+      ],
+      [
+        rawResult?.postStep?.mechanicsBufferRef,
+        'nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer'
+      ]
+    ];
+  }
+  return [];
+}
+
+function privateWorkerResidentScheduleStageResult({
+  stageId,
+  rawResult,
+  record,
+  payload,
+  callLaneKey,
+  activeSchedule,
+  workerQueueFence
+} = {}) {
+  const laneId = normalizeString(
+    payload?.lease?.laneId ?? payload?.lane?.laneId,
+    null
+  );
+  const stateKey = normalizeString(
+    payload?.lease?.stateKey ?? payload?.lane?.stateKey,
+    null
+  );
+  if (
+    !activeSchedule
+    || activeSchedule.laneKey !== callLaneKey
+    || record?.key !== callLaneKey
+    || !WORKER_RESIDENT_SCHEDULE_PRIVATE_RETURN_STAGE_IDS.has(stageId)
+  ) {
+    throw workerResidentScheduleError(
+      'schedule-private-stage-authority-invalid',
+      `${stageId || 'unknown-stage'} is not owned by the active worker schedule lane`,
+      {
+        scheduleId: activeSchedule?.scheduleId ?? null,
+        stageId
+      }
+    );
+  }
+  const retainedBufferRefs = [];
+  for (const [descriptor, expectedPath] of
+    privateWorkerResidentScheduleStageRefDescriptors(stageId, rawResult)) {
+    if (
+      descriptor?.schema
+        !== 'peercompute.ulg.worker-retained-buffer-ref.v0'
+      || descriptor.stageId !== stageId
+      || descriptor.path !== expectedPath
+      || normalizeString(descriptor.ref, null) == null
+      || record.retainedBuffers.has(descriptor.ref) !== true
+    ) {
+      throw workerResidentScheduleError(
+        'schedule-private-stage-retained-ref-invalid',
+        `${stageId} did not retain its exact ${expectedPath} descriptor`,
+        {
+          scheduleId: activeSchedule.scheduleId,
+          stageId
+        }
+      );
+    }
+    retainedBufferRefs.push(descriptor.ref);
+  }
+  const exactRetainedBufferRefs = [...new Set(retainedBufferRefs)];
+  const privateStageReceipt = Object.freeze({
+    schema: WORKER_RESIDENT_SCHEDULE_PRIVATE_STAGE_RESULT_SCHEMA,
+    status: 'worker-resident-schedule-private-stage-result-ready',
+    stageId,
+    scheduleId: activeSchedule.scheduleId,
+    laneId,
+    stateKey,
+    cloneableResultReturned: false,
+    copyBudgetComputed: false,
+    gasPressureTransportGraphInspected: false,
+    retainedRefEnumeration: 'canonical-stage-descriptors',
+    retainedBufferRefCount: exactRetainedBufferRefs.length,
+    retainedBufferRegistryEntryCount: record.retainedBuffers.size
+  });
+  const commonValue = {
+    schema: rawResult?.schema ?? null,
+    status: rawResult?.status ?? null,
+    backend: rawResult?.backend ?? null,
+    readbackMode: rawResult?.readbackMode ?? null,
+    gpuFence: rawResult?.gpuFence ?? workerQueueFence ?? null,
+    workerResidentStage: privateStageReceipt
+  };
+  const value = stageId === SCHROEDER_SPATIAL_EPOCH_STAGE_ID
+    ? {
+        ...commonValue,
+        epochQueueIntervalMs: rawResult?.epochQueueIntervalMs ?? null,
+        epochQueueTimeline: rawResult?.epochQueueTimeline ?? null,
+        epochSeal: rawResult?.epochSeal ?? null,
+        epochStepOrdinal: rawResult?.epochStepOrdinal ?? null,
+        levelAssignmentSource: rawResult?.levelAssignmentSource ?? null
+      }
+    : {
+        ...commonValue,
+        epochConsumed: rawResult?.epochConsumed === true,
+        epochReleaseScheduled: rawResult?.epochReleaseScheduled === true,
+        epochReleaseMode: rawResult?.epochReleaseMode ?? null,
+        residentStepSummary: rawResult?.residentStepSummary ?? null,
+        hierarchyStageSummary: rawResult?.hierarchyStageSummary ?? null,
+        postStep: rawResult?.postStep ?? null
+      };
+  return {
+    value,
+    retainedBufferRefs: exactRetainedBufferRefs,
+    gpuFence:
+      rawResult?.gpuFence
+      || rawResult?.gpuFenceReport
+      || workerQueueFence
+      || null,
+    privateWorkerResidentScheduleStage: privateStageReceipt
+  };
 }
 
 function workerResidentScheduleEpochIdentity(seal = null) {
@@ -6866,8 +7024,39 @@ function poisonWorkerResidentScheduleLane(record, detail = null) {
 function requireWorkerResidentScheduleDeferredStageAdmission(result, {
   scheduleId,
   stepOrdinal,
-  stageId
+  stageId,
+  laneId,
+  stateKey
 } = {}) {
+  const privateStage = result?.privateWorkerResidentScheduleStage ?? null;
+  const expectedRetainedBufferRefCount =
+    stageId === SCHROEDER_SPATIAL_EPOCH_STAGE_ID ? 3 : 4;
+  if (
+    privateStage?.schema
+      !== WORKER_RESIDENT_SCHEDULE_PRIVATE_STAGE_RESULT_SCHEMA
+    || privateStage.status
+      !== 'worker-resident-schedule-private-stage-result-ready'
+    || privateStage.stageId !== stageId
+    || privateStage.scheduleId !== scheduleId
+    || privateStage.laneId !== laneId
+    || privateStage.stateKey !== stateKey
+    || privateStage.cloneableResultReturned !== false
+    || privateStage.copyBudgetComputed !== false
+    || privateStage.gasPressureTransportGraphInspected !== false
+    || privateStage.retainedRefEnumeration
+      !== 'canonical-stage-descriptors'
+    || privateStage.retainedBufferRefCount
+      !== (result?.retainedBufferRefs?.length ?? -1)
+    || privateStage.retainedBufferRefCount
+      !== expectedRetainedBufferRefCount
+    || result?.value?.workerResidentStage !== privateStage
+  ) {
+    throw workerResidentScheduleError(
+      'schedule-private-stage-result-missing',
+      `${stageId || 'unknown-stage'} did not return the exact private schedule stage result`,
+      { scheduleId, stepOrdinal, stageId }
+    );
+  }
   const fence = result?.gpuFence || result?.value?.gpuFence || null;
   if (
     result?.value?.backend !== 'webgpu'
@@ -9473,7 +9662,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         requireWorkerResidentScheduleDeferredStageAdmission(epochStageResult, {
           scheduleId,
           stepOrdinal,
-          stageId: SCHROEDER_SPATIAL_EPOCH_STAGE_ID
+          stageId: SCHROEDER_SPATIAL_EPOCH_STAGE_ID,
+          laneId,
+          stateKey
         });
         if (!record.workerDevice) {
           throw workerResidentScheduleError(
@@ -9628,7 +9819,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           {
             scheduleId,
             stepOrdinal,
-            stageId: SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
+            stageId: SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID,
+            laneId,
+            stateKey
           }
         );
         if (record.workerDevice !== state.workerDevice) {
@@ -9757,25 +9950,83 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       lastMechanicsStageResult = mechanicsStageResult;
       const rawHierarchyStageSummary =
         mechanicsStageResult.value?.hierarchyStageSummary ?? null;
-      // cloneableValue() preserves object identity to detect cycles. The raw
-      // worker stage intentionally aliases these diagnostic receipts between
-      // residentStepSummary and hierarchyStageSummary, so the latter copy is
-      // represented as null after structured-clone sanitization. The schedule
-      // publishes only hierarchyStageSummary; restore those two exact compact
-      // receipts from the first (resident-step) occurrence instead of
-      // silently reporting that tracing never ran.
+      // Private schedule stage results preserve the compact raw summary.
+      // Keep the reconstruction as a compatibility guard for older/public
+      // cloneable stage envelopes, where repeated diagnostic receipt aliases
+      // can be represented as null by cycle-safe transport sanitization.
+      const surfaceStressSubmissionWasTransportAlias = Boolean(
+        rawHierarchyStageSummary?.phaseVolumeSurfaceStressSubmission
+        && rawHierarchyStageSummary.phaseVolumeSurfaceStressSubmission
+          === residentStepSummary?.phaseVolumeSurfaceStressSubmission
+      );
+      const rawResidentStageTiming =
+        rawHierarchyStageSummary?.residentStageTiming ?? null;
+      const stageGpuTimingWasTransportAlias = Boolean(
+        rawResidentStageTiming?.stageGpuMs
+        && rawResidentStageTiming.gpuTimestampProfile?.stageGpuMs
+          === rawResidentStageTiming.stageGpuMs
+      );
+      const stageMechanicsTraceWasTransportAlias = Boolean(
+        rawHierarchyStageSummary?.stageMechanicsTrace
+        && rawHierarchyStageSummary.stageMechanicsTrace
+          === residentStepSummary?.stageMechanicsTrace
+      );
+      const canonicalSpatialTraceWasTransportAlias = Boolean(
+        rawHierarchyStageSummary?.canonicalSpatialAuthorityTrace
+        && rawHierarchyStageSummary.canonicalSpatialAuthorityTrace
+          === residentStepSummary?.canonicalSpatialAuthorityTrace
+      );
+      const stageMechanicsTraceRequested =
+        rawHierarchyStageSummary?.stageMechanicsTraceRequested === true;
       const hierarchyStageSummary = rawHierarchyStageSummary
-        && rawHierarchyStageSummary.stageMechanicsTraceRequested === true
+        && (
+          stageMechanicsTraceRequested
+          || surfaceStressSubmissionWasTransportAlias
+          || stageGpuTimingWasTransportAlias
+          || stageMechanicsTraceWasTransportAlias
+          || canonicalSpatialTraceWasTransportAlias
+        )
         ? {
             ...rawHierarchyStageSummary,
-            stageMechanicsTrace:
-              rawHierarchyStageSummary.stageMechanicsTrace
-              ?? residentStepSummary?.stageMechanicsTrace
-              ?? null,
+            // Preserve the established schedule-boundary shape: the public
+            // cycle-safe stage transport visited residentStepSummary first,
+            // so this repeated receipt was null in hierarchyStageSummary.
+            phaseVolumeSurfaceStressSubmission:
+              surfaceStressSubmissionWasTransportAlias
+                ? null
+                : rawHierarchyStageSummary
+                  .phaseVolumeSurfaceStressSubmission,
+            residentStageTiming: stageGpuTimingWasTransportAlias
+              ? {
+                  ...rawResidentStageTiming,
+                  gpuTimestampProfile: {
+                    ...rawResidentStageTiming.gpuTimestampProfile,
+                    // The former cycle-safe public transport visited this
+                    // map first through residentStageTiming.stageGpuMs. Keep
+                    // its repeated occurrence null at the schedule boundary.
+                    stageGpuMs: null
+                  }
+                }
+              : rawResidentStageTiming,
+            stageMechanicsTrace: stageMechanicsTraceWasTransportAlias
+              ? stageMechanicsTraceRequested
+                ? residentStepSummary?.stageMechanicsTrace ?? null
+                : null
+              : rawHierarchyStageSummary.stageMechanicsTrace
+                ?? (stageMechanicsTraceRequested
+                  ? residentStepSummary?.stageMechanicsTrace
+                  : null)
+                ?? null,
             canonicalSpatialAuthorityTrace:
-              rawHierarchyStageSummary.canonicalSpatialAuthorityTrace
-              ?? residentStepSummary?.canonicalSpatialAuthorityTrace
-              ?? null
+              canonicalSpatialTraceWasTransportAlias
+                ? stageMechanicsTraceRequested
+                  ? residentStepSummary?.canonicalSpatialAuthorityTrace ?? null
+                  : null
+                : rawHierarchyStageSummary.canonicalSpatialAuthorityTrace
+                  ?? (stageMechanicsTraceRequested
+                    ? residentStepSummary?.canonicalSpatialAuthorityTrace
+                    : null)
+                  ?? null
           }
         : rawHierarchyStageSummary;
       lastStepSummary = {
@@ -12531,6 +12782,23 @@ export async function runUlgMechanicsResidentStageWorkerPayload(
     error.code = 'ERR_ULG_WORKER_RESIDENT_SCHEDULE_LANE_BUSY';
     throw error;
   }
+  if (
+    residentScheduleFenceDeferralAuthorized
+    && (
+      !activeSchedule
+      || activeSchedule.laneKey !== callLaneKey
+      || !WORKER_RESIDENT_SCHEDULE_PRIVATE_RETURN_STAGE_IDS.has(stageId)
+    )
+  ) {
+    throw workerResidentScheduleError(
+      'schedule-private-stage-authority-invalid',
+      `${stageId || 'unknown-stage'} is not an active canonical schedule stage`,
+      {
+        scheduleId: activeSchedule?.scheduleId ?? null,
+        stageId
+      }
+    );
+  }
   const existingRecord = retainedLanes.get(callLaneKey) || null;
   if (existingRecord?.residentSchedulePoison) {
     const error = new Error(
@@ -12782,6 +13050,22 @@ export async function runUlgMechanicsResidentStageWorkerPayload(
     record
   });
   record.stageResults[stageId] = rawResult;
+  if (residentScheduleFenceDeferralAuthorized) {
+    // These two direct schedule calls never cross postMessage. Their runners
+    // already registered the exact bounded buffer descriptors above, and the
+    // schedule publishes only its own compact progress/terminal receipts.
+    // Avoid the public transport path's defensive gas-authority graph walk,
+    // deep clone, copy-budget construction, and recursive ref discovery.
+    return privateWorkerResidentScheduleStageResult({
+      stageId,
+      rawResult,
+      record,
+      payload,
+      callLaneKey,
+      activeSchedule,
+      workerQueueFence
+    });
+  }
   const exactGasPressureAuthoritySource =
     exactGasPressureAuthoritySourceFromResult(rawResult)
     || exactGasPressureAuthoritySourceFromResult(

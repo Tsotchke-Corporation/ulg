@@ -3839,6 +3839,11 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
   assert.ok(epoch.retainedBufferRefs.includes(epoch.value.directoryBufferRef.ref));
   assert.ok(epoch.retainedBufferRefs.includes(epoch.value.levelAssignmentBufferRef.ref));
   assert.equal(epoch.value.workerResidentStage.stageId, 'schroederSpatialEpoch');
+  assert.equal(
+    epoch.value.workerResidentStage.cloneableResultReturned,
+    true,
+    'standalone stages must retain the public clone-safe transport envelope'
+  );
   assert.equal(epoch.value.gpuFence.fenceSatisfied, true);
   assertNoWorkerGpuBuffers(epoch, 'epoch');
   structuredClone(epoch.value);
@@ -4019,6 +4024,11 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
   assert.ok(mechanics.retainedBufferRefs.includes(
     mechanics.value.postStep.stateBufferRef.ref
   ));
+  assert.equal(
+    mechanics.value.workerResidentStage.cloneableResultReturned,
+    true,
+    'standalone mechanics must retain the public clone-safe transport envelope'
+  );
   assert.equal(mechanics.value.gpuFence.fenceSatisfied, true);
   assertNoWorkerGpuBuffers(mechanics, 'mechanics');
   structuredClone(mechanics.value);
@@ -5350,6 +5360,153 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
   );
 });
 
+test('ULG private resident schedule stage returns bypass public deep transport walks', async () => {
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'private-stage-transport'
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:private-stage-transport-lane',
+    stateKey: 'ulg:test:private-stage-transport-state'
+  };
+  const baseMechanicsRunner =
+    fixture.stageOptions.schroederSameLevelMechanics
+      .schroederSameLevelMechanicsRunner;
+  const privateEpochQueueTimeline = Object.freeze([
+    Object.freeze({ stage: 'private-epoch-start', atMs: 0 }),
+    Object.freeze({ stage: 'private-epoch-end', atMs: 0.25 })
+  ]);
+  const privateStageGpuMs = Object.freeze({ p2g: 0.125, g2p: 0.25 });
+  const privateGpuTimestampProfile = Object.freeze({
+    schema: 'peercompute.ulg.test-gpu-timestamp-profile.v0',
+    stageGpuMs: privateStageGpuMs
+  });
+  const privateDisabledStageTrace = Object.freeze({
+    schema: 'peercompute.ulg.sph-stage-mechanics-trace.v0',
+    status: 'stage-mechanics-trace-disabled',
+    stages: Object.freeze([])
+  });
+  const privateDisabledCanonicalTrace = Object.freeze({
+    schema: 'peercompute.ulg.test-canonical-authority-trace.v0',
+    status: 'canonical-spatial-authority-trace-disabled',
+    stages: Object.freeze([])
+  });
+  fixture.stageOptions.schroederSpatialEpoch.residentStepOptions = {
+    residentGpuTimestampProfilingRequested: true
+  };
+  fixture.stageOptions.schroederSpatialEpoch
+    .schroederSpatialEpochGenerationRunner = async (args) => {
+      const generation =
+        await runSchroederSpatialEpochGenerationWebGpu(args);
+      generation.readGenerationQueueTimeline = async () =>
+        privateEpochQueueTimeline;
+      return generation;
+    };
+  let probeArmed = true;
+  let publicTransportWalkCount = 0;
+  const privateOnlySummary = { status: 'private-stage-summary' };
+  Object.defineProperty(privateOnlySummary, 'publicTransportWalkProbe', {
+    enumerable: true,
+    get() {
+      if (probeArmed) publicTransportWalkCount += 1;
+      return 'must-not-be-walked';
+    }
+  });
+  fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner = async (args) => {
+      const result = await baseMechanicsRunner(args);
+      result.residentStep.stageTiming.stageGpuMs = privateStageGpuMs;
+      result.residentStep.stageTiming.gpuTimestampProfile =
+        privateGpuTimestampProfile;
+      result.residentStep.stageMechanicsTrace = privateDisabledStageTrace;
+      result.residentStep.canonicalSpatialAuthorityTrace =
+        privateDisabledCanonicalTrace;
+      return {
+        ...result,
+        currentSchroederSpatialEpochGenerationSummary: () =>
+          privateOnlySummary
+      };
+    };
+  const progressEnvelopes = [];
+
+  try {
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount: 1,
+          scheduleId: 'ulg:test:private-stage-transport-schedule'
+        },
+        laneOptions
+      ),
+      {
+        postProgress: (progress) => progressEnvelopes.push(progress)
+      }
+    );
+
+    assert.equal(result.status, 'worker-resident-schedule-completed');
+    assert.equal(
+      publicTransportWalkCount,
+      0,
+      'private internal stage results must not enter the public deep clone/ref walk'
+    );
+    assert.equal(progressEnvelopes.length, 1);
+    assert.equal(
+      progressEnvelopes[0].stepSummary.epochRetainedBufferRefs.length,
+      3
+    );
+    assert.equal(progressEnvelopes[0].stepSummary.retainedBufferRefs.length, 4);
+    assert.equal(result.retainedBufferRefs.length, 4);
+    assert.strictEqual(
+      result.perStepSummaries.ring[0].epochQueueTimeline,
+      privateEpochQueueTimeline,
+      'the private epoch result must bypass the public clone transport'
+    );
+    assert.strictEqual(
+      result.perStepSummaries.lastStep.hierarchyStageSummary
+        .residentStageTiming.stageGpuMs,
+      privateStageGpuMs,
+      'the primary profiled stage timing map must remain intact'
+    );
+    assert.equal(
+      result.perStepSummaries.lastStep.hierarchyStageSummary
+        .residentStageTiming.gpuTimestampProfile.stageGpuMs,
+      null,
+      'the private result must preserve the established timing-alias shape'
+    );
+    assert.equal(
+      result.perStepSummaries.lastStep.hierarchyStageSummary
+        .stageMechanicsTrace,
+      null,
+      'an unrequested disabled trace must retain the legacy alias shape'
+    );
+    assert.equal(
+      result.perStepSummaries.lastStep.hierarchyStageSummary
+        .canonicalSpatialAuthorityTrace,
+      null,
+      'an unrequested canonical trace alias must retain the legacy shape'
+    );
+    assertNoWorkerGpuBuffers(progressEnvelopes[0], 'privateStageProgress');
+    assertNoWorkerGpuBuffers(result, 'privateStageScheduleResult');
+    structuredClone(progressEnvelopes[0]);
+    structuredClone(result);
+    assert.equal(
+      publicTransportWalkCount,
+      0,
+      'private-only raw diagnostics must not leak into published schedule receipts'
+    );
+  } finally {
+    probeArmed = false;
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'private schedule stage transport test complete'
+    });
+  }
+});
+
 test('ULG resident stage worker blocks compact export from a short explicit identity buffer', async () => {
   const fixture = workerScheduleFixture({ laneSuffix: 'short-identity' });
   const laneOptions = {
@@ -5572,6 +5729,14 @@ test('ULG resident schedule aggregates exact surface-stress evidence without ret
   assert.equal(exactEvidence.firstIncompleteStepOrdinal, null);
   assert.equal(exactEvidence.finalSubmissionStepOrdinal, 3);
   assert.equal(exactEvidence.finalSubmission.dispatchCount, 18);
+  assert.equal(
+    exact.perStepSummaries.lastStep.hierarchyStageSummary
+      .phaseVolumeSurfaceStressSubmission,
+    null,
+    'private stage transport must preserve the established cycle-alias shape'
+  );
+  assertNoWorkerGpuBuffers(exact, 'surfaceStressExactSchedule');
+  structuredClone(exact);
 
   const inexact = await run({
     laneSuffix: 'surface-stress-inexact',
@@ -5583,6 +5748,8 @@ test('ULG resident schedule aggregates exact surface-stress evidence without ret
   assert.equal(inexactEvidence.submissionEvidenceComplete, false);
   assert.equal(inexactEvidence.firstIncompleteStepOrdinal, 2);
   assert.equal(inexactEvidence.finalSubmissionStepOrdinal, 3);
+  assertNoWorkerGpuBuffers(inexact, 'surfaceStressInexactSchedule');
+  structuredClone(inexact);
 });
 
 test('ULG resident schedule two-level evidence remains complete beyond the summary ring', async () => {
@@ -5677,6 +5844,8 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
     exactEvidence.terminalRefluxReceipt.status,
     'terminal-reflux-schedule-receipt-admitted'
   );
+  assertNoWorkerGpuBuffers(exact, 'twoLevelExactSchedule');
+  structuredClone(exact);
 
   await assert.rejects(
     run({
@@ -5700,6 +5869,11 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
         receipt?.firstRejectedDiagnostic?.mutationRollbackCount,
         1
       );
+      assertNoWorkerGpuBuffers(
+        error.residentScheduleError,
+        'twoLevelRejectedScheduleError'
+      );
+      structuredClone(error.residentScheduleError);
       return true;
     }
   );

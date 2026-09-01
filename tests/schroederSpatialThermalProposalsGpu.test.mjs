@@ -29,6 +29,7 @@ import {
   SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS,
   SCHROEDER_SPATIAL_THERMAL_CSR_DEFAULT_ROW_STRIDE,
   SCHROEDER_SPATIAL_THERMAL_CSR_MAGIC,
+  SCHROEDER_SPATIAL_THERMAL_CSR_MECHANICAL_CURSOR_BIT,
   SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STATE_WRITING,
   SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STRIDE_WORD,
   SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK,
@@ -39,6 +40,8 @@ import {
   SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_INVALID,
   SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW,
   SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY,
+  SCHROEDER_SPATIAL_THERMAL_CSR_SKIPPED_MEMBER_BIT,
+  SCHROEDER_SPATIAL_THERMAL_CSR_VALUE_MASK,
   SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT,
   SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
   SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS,
@@ -402,12 +405,18 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
     'peercompute.ulg.schroeder-spatial-thermal-candidate-csr.v1'
   );
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_MAGIC, 0x5443_5331);
-  assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_VERSION, 5);
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_VERSION, 6);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS, 8);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STRIDE_WORD, 4);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD, 7);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_DEFAULT_ROW_STRIDE, 1025);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STATE_WRITING, 0xffff_ffff);
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_SKIPPED_MEMBER_BIT, 0x8000_0000);
+  assert.equal(
+    SCHROEDER_SPATIAL_THERMAL_CSR_MECHANICAL_CURSOR_BIT,
+    0x4000_0000
+  );
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_VALUE_MASK, 0x3fff_ffff);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY, 1);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_INVALID, 2);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW, 4);
@@ -675,7 +684,9 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     /if \(interface_pair\) \{[\s\S]*interface_resistance_k_per_w[\s\S]*1\.0 \/ interface_resistance_k_per_w[\s\S]*\} else \{[\s\S]*thermal_harmonic_mean_positive\([\s\S]*contact_area_m2 \/ conduction_path_m/
   );
   const pairLaw = schroederSpatialThermalProposalWgsl.slice(
-    schroederSpatialThermalProposalWgsl.indexOf('fn thermal_visit_fused_pair('),
+    schroederSpatialThermalProposalWgsl.indexOf(
+      'fn thermal_visit_fused_pair_cached('
+    ),
     schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle(')
   );
   assert.match(
@@ -753,11 +764,23 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /fn thermal_visit_fused_pair\([\s\S]*?\) -> u32 \{[\s\S]*?other_index == self_index[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_SELF[\s\S]*?other_pos_mass\.w <= 0\.0[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?distance_squared_m2[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?conduction_hit[\s\S]*?radiation_hit[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_REPLAY/
+    /fn thermal_visit_fused_pair_cached\([\s\S]*?mechanical_interface_cache[\s\S]*?\) -> ThermalPairVisitOutcome \{[\s\S]*?other_index == self_index[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_SELF[\s\S]*?other_pos_mass\.w <= 0\.0[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?distance_squared_m2[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?conduction_hit[\s\S]*?radiation_hit[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_REPLAY/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,
-    /let thermal_pair_visit_outcome = thermal_visit_fused_pair\([\s\S]*?\);[\s\S]*?thermal_pair_visit_outcome[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?thermal_csr_add_skipped_member_count\([\s\S]*?1u[\s\S]*?else if \(!thermal_csr_capture_candidate\(/
+    /let thermal_pair_visit = thermal_visit_fused_pair_cached\([\s\S]*?thermal_mechanical_interface_unproven\(\)[\s\S]*?thermal_pair_visit\.outcome[\s\S]*?THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY[\s\S]*?thermal_csr_add_skipped_member_count\([\s\S]*?THERMAL_MECHANICAL_INTERFACE_CACHE_MISS[\s\S]*?THERMAL_CSR_MECHANICAL_CURSOR_BIT[\s\S]*?thermal_csr_capture_candidate\(/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn thermal_mechanical_interface_lookup_cursor\([\s\S]*?receipt_cursor < begin[\s\S]*?receipt_cursor >= end[\s\S]*?peer_index == self_index[\s\S]*?!ss_exact_near_finite\(signed_area_m2\)[\s\S]*?result\.admitted = 1u/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT[\s\S]*?thermal_mechanical_interface_lookup_cursor\([\s\S]*?thermal_visit_fused_pair_cached\([\s\S]*?mechanical_interface_cache/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn validate_thermal_csr_rows\([\s\S]*?thermal_prepare_pair_authority_flags\(local_invocation_index\)[\s\S]*?THERMAL_CSR_MECHANICAL_CURSOR_BIT[\s\S]*?thermal_mechanical_interface_lookup_cursor\(/
   );
   assert.match(
     schroederSpatialThermalProposalWgsl,

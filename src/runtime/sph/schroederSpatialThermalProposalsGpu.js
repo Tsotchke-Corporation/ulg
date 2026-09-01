@@ -171,10 +171,11 @@ export const SCHROEDER_SPATIAL_THERMAL_CSR_MAGIC = 0x5443_5331;
 // Word seven is a diagnostic-only route receipt.  It is intentionally part of
 // the authenticated control header so a benchmark can distinguish a sealed
 // receipt that was actually replayed from one that still took the safe exact
-// directory rewalk.  Version five also authenticates the expanded terminal
-// accounting contract: ordinary exact visits proven to have no thermal effect
-// may be represented by the terminal count rather than a raw peer word.
-export const SCHROEDER_SPATIAL_THERMAL_CSR_VERSION = 5;
+// directory rewalk. Version six also authenticates the one-word directed
+// mechanical-interface cursor cache: bit 30 distinguishes an exact receipt
+// cursor from an untagged peer whose lookup was proven to miss, while bit 31
+// remains reserved for the terminal skipped-member count.
+export const SCHROEDER_SPATIAL_THERMAL_CSR_VERSION = 6;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_CONTROL_WORDS = 8;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STRIDE_WORD = 4;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_WORD = 6;
@@ -184,7 +185,8 @@ export const SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD = 7;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_DEFAULT_ROW_STRIDE = 1025;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STATE_WRITING = 0xffff_ffff;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_SKIPPED_MEMBER_BIT = 0x8000_0000;
-export const SCHROEDER_SPATIAL_THERMAL_CSR_VALUE_MASK = 0x7fff_ffff;
+export const SCHROEDER_SPATIAL_THERMAL_CSR_MECHANICAL_CURSOR_BIT = 0x4000_0000;
+export const SCHROEDER_SPATIAL_THERMAL_CSR_VALUE_MASK = 0x3fff_ffff;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY = 1;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_INVALID = 2;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_OVERFLOW = 4;
@@ -4290,7 +4292,7 @@ const thermalCandidateCsrCaptureCandidateWgsl = /* wgsl */ `
               // or a defensive malformed-state path. Self stays raw because
               // it never increments the candidate count in the first place.
               if (
-                thermal_pair_visit_outcome
+                thermal_pair_visit.outcome
                   == THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY
               ) {
                 if (!thermal_csr_add_skipped_member_count(
@@ -4300,14 +4302,42 @@ const thermalCandidateCsrCaptureCandidateWgsl = /* wgsl */ `
                   thermal_csr_capture = false;
                   thermal_csr_capture_abandoned = true;
                 }
-              } else if (!thermal_csr_capture_candidate(
-                thermal_csr_capture_row,
-                &thermal_csr_capture_record_count,
-                other_index,
-                false
-              )) {
-                thermal_csr_capture = false;
-                thermal_csr_capture_abandoned = true;
+              } else {
+                var encoded_candidate = other_index;
+                var cache_encodable = false;
+                if (
+                  thermal_pair_visit.mechanical_interface_cache_state
+                    == THERMAL_MECHANICAL_INTERFACE_CACHE_MISS
+                  && other_index <= THERMAL_CSR_VALUE_MASK
+                ) {
+                  // An untagged peer is an exact cached miss. Replay must not
+                  // repeat the receipt-row search for this record.
+                  cache_encodable = true;
+                } else if (
+                  thermal_pair_visit.mechanical_interface_cache_state
+                    == THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR
+                  && thermal_pair_visit.mechanical_interface_receipt_cursor
+                    <= THERMAL_CSR_VALUE_MASK
+                ) {
+                  encoded_candidate = THERMAL_CSR_MECHANICAL_CURSOR_BIT
+                    | thermal_pair_visit.mechanical_interface_receipt_cursor;
+                  cache_encodable = true;
+                }
+                if (
+                  !cache_encodable
+                  || !thermal_csr_capture_candidate(
+                    thermal_csr_capture_row,
+                    &thermal_csr_capture_record_count,
+                    encoded_candidate,
+                    false
+                  )
+                ) {
+                  // An unproven result or an unencodable cursor may not turn
+                  // into a cached miss. Abandon the optional receipt so the
+                  // reciprocal pass performs the exact live directory walk.
+                  thermal_csr_capture = false;
+                  thermal_csr_capture_abandoned = true;
+                }
               }
             }
             // ULG_THERMAL_CANDIDATE_CSR_CAPTURE_CANDIDATE_END
@@ -4348,7 +4378,8 @@ const thermalCandidateCsrExactTraversalPrefixWgsl = /* wgsl */ `  if (
         );
         if ((encoded_peer & THERMAL_CSR_SKIPPED_MEMBER_BIT) != 0u) {
           if (
-            csr_seen_skipped_member_count
+            (encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT) != 0u
+            || csr_seen_skipped_member_count
             || csr_cursor + 1u != csr_range.end
           ) {
             malformed = true;
@@ -4372,14 +4403,32 @@ const thermalCandidateCsrExactTraversalPrefixWgsl = /* wgsl */ `  if (
           csr_seen_skipped_member_count = true;
           continue;
         }
-        if (encoded_peer >= thermal_params.particle_count) {
+        var other_index = encoded_peer & THERMAL_CSR_VALUE_MASK;
+        var mechanical_interface_cache = thermal_mechanical_interface_miss();
+        if ((encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT) != 0u) {
+          let cursor_lookup = thermal_mechanical_interface_lookup_cursor(
+            particle_index,
+            other_index
+          );
+          if (cursor_lookup.admitted == 0u) {
+            malformed = true;
+            break;
+          }
+          other_index = cursor_lookup.peer_index;
+          mechanical_interface_cache = ThermalMechanicalInterfaceLookup(
+            cursor_lookup.classified,
+            cursor_lookup.effective_face_area_m2,
+            encoded_peer & THERMAL_CSR_VALUE_MASK,
+            THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR
+          );
+        } else if (other_index >= thermal_params.particle_count) {
           malformed = true;
           break;
         }
-        thermal_visit_fused_pair(
+        thermal_visit_fused_pair_cached(
           budget_mode,
           particle_index,
-          encoded_peer,
+          other_index,
           self_pos_mass.xyz,
           self_mass,
           self_temperature,
@@ -4398,7 +4447,8 @@ const thermalCandidateCsrExactTraversalPrefixWgsl = /* wgsl */ `  if (
           &radiation_candidate_visit_count,
           &conduction_mask_hit_count,
           &radiation_mask_hit_count,
-          &local_count_overflow
+          &local_count_overflow,
+          mechanical_interface_cache
         );
       }
       if (!csr_seen_skipped_member_count) {
@@ -4456,6 +4506,7 @@ const THERMAL_CSR_STATUS_WORD: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_WORD
 const THERMAL_CSR_ROUTE_WORD: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD}u;
 const THERMAL_CSR_ROW_STATE_WRITING: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROW_STATE_WRITING}u;
 const THERMAL_CSR_SKIPPED_MEMBER_BIT: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_SKIPPED_MEMBER_BIT}u;
+const THERMAL_CSR_MECHANICAL_CURSOR_BIT: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_MECHANICAL_CURSOR_BIT}u;
 const THERMAL_CSR_VALUE_MASK: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_VALUE_MASK}u;
 const THERMAL_CSR_STATUS_READY: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_READY}u;
 const THERMAL_CSR_STATUS_INVALID: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_INVALID}u;
@@ -4602,6 +4653,13 @@ fn thermal_csr_capture_candidate(
     thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
     return false;
   }
+  if (
+    is_terminal_skipped_member
+    && (encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT) != 0u
+  ) {
+    thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
+    return false;
+  }
   if (*capture_record_count >= capture_row.stride) {
     thermal_csr_mark_status(
       THERMAL_CSR_STATUS_INVALID | THERMAL_CSR_STATUS_OVERFLOW
@@ -4684,8 +4742,10 @@ fn thermal_csr_source_range(source_index: u32) -> ThermalCsrRange {
 
 @compute @workgroup_size(64)
 fn validate_thermal_csr_rows(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_index) local_invocation_index: u32
 ) {
+  thermal_prepare_pair_authority_flags(local_invocation_index);
   let source_index = global_id.x;
   if (!thermal_csr_header_admitted()) {
     if (source_index == 0u) {
@@ -4727,8 +4787,42 @@ fn validate_thermal_csr_rows(
             + source_index * row_stride + row_state - 1u
         ]
       );
-      if ((terminal_peer & THERMAL_CSR_SKIPPED_MEMBER_BIT) == 0u) {
+      if (
+        (terminal_peer & THERMAL_CSR_SKIPPED_MEMBER_BIT) == 0u
+        || (terminal_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT) != 0u
+      ) {
         thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
+      } else {
+        let row_base = source_index * row_stride;
+        for (
+          var record_ordinal = 0u;
+          record_ordinal + 1u < row_state;
+          record_ordinal = record_ordinal + 1u
+        ) {
+          let encoded_peer = atomicLoad(
+            &thermal_csr_control_and_peers[
+              THERMAL_CSR_CONTROL_WORDS + row_base + record_ordinal
+            ]
+          );
+          if ((encoded_peer & THERMAL_CSR_SKIPPED_MEMBER_BIT) != 0u) {
+            thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
+            break;
+          }
+          let value = encoded_peer & THERMAL_CSR_VALUE_MASK;
+          if ((encoded_peer & THERMAL_CSR_MECHANICAL_CURSOR_BIT) != 0u) {
+            let cursor_lookup = thermal_mechanical_interface_lookup_cursor(
+              source_index,
+              value
+            );
+            if (cursor_lookup.admitted == 0u) {
+              thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
+              break;
+            }
+          } else if (value >= thermal_params.particle_count) {
+            thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
+            break;
+          }
+        }
       }
     }
   }
@@ -4791,7 +4885,27 @@ function stripThermalMechanicalInterfaceReceiptWgsl(source) {
   const inertLookup = /* wgsl */ `struct ThermalMechanicalInterfaceLookup {
   classified: u32,
   effective_face_area_m2: f32,
+  receipt_cursor: u32,
+  cache_state: u32,
 };
+
+fn thermal_mechanical_interface_unproven() -> ThermalMechanicalInterfaceLookup {
+  return ThermalMechanicalInterfaceLookup(
+    0u,
+    0.0,
+    0u,
+    THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN
+  );
+}
+
+fn thermal_mechanical_interface_miss() -> ThermalMechanicalInterfaceLookup {
+  return ThermalMechanicalInterfaceLookup(
+    0u,
+    0.0,
+    0u,
+    THERMAL_MECHANICAL_INTERFACE_CACHE_MISS
+  );
+}
 
 fn thermal_mechanical_interface_receipt_admitted() -> bool {
   return false;
@@ -4803,7 +4917,12 @@ fn thermal_mechanical_interface_lookup(
 ) -> ThermalMechanicalInterfaceLookup {
   _ = self_index;
   _ = other_index;
-  return ThermalMechanicalInterfaceLookup(0u, 0.0);
+  return ThermalMechanicalInterfaceLookup(
+    0u,
+    0.0,
+    0u,
+    THERMAL_MECHANICAL_INTERFACE_CACHE_MISS
+  );
 }
 
 `;
@@ -4883,6 +5002,9 @@ const THERMAL_PAIR_RELAXATION_LIMIT: f32 = 0.25;
 const THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY: u32 = 0u;
 const THERMAL_PAIR_VISIT_OUTCOME_REPLAY: u32 = 1u;
 const THERMAL_PAIR_VISIT_OUTCOME_SELF: u32 = 2u;
+const THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN: u32 = 0u;
+const THERMAL_MECHANICAL_INTERFACE_CACHE_MISS: u32 = 1u;
+const THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR: u32 = 2u;
 const THERMAL_AGGREGATE_MAGIC: u32 = 0x53414731u;
 const THERMAL_AGGREGATE_VERSION: u32 = 2u;
 const THERMAL_AGGREGATE_STATUS_EXACT: u32 = 259u;
@@ -5407,7 +5529,34 @@ fn thermal_derived_word(particle_index: u32, component: u32) -> u32 {
 struct ThermalMechanicalInterfaceLookup {
   classified: u32,
   effective_face_area_m2: f32,
+  receipt_cursor: u32,
+  cache_state: u32,
 };
+
+struct ThermalMechanicalInterfaceCursorLookup {
+  peer_index: u32,
+  classified: u32,
+  effective_face_area_m2: f32,
+  admitted: u32,
+};
+
+fn thermal_mechanical_interface_unproven() -> ThermalMechanicalInterfaceLookup {
+  return ThermalMechanicalInterfaceLookup(
+    0u,
+    0.0,
+    0u,
+    THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN
+  );
+}
+
+fn thermal_mechanical_interface_miss() -> ThermalMechanicalInterfaceLookup {
+  return ThermalMechanicalInterfaceLookup(
+    0u,
+    0.0,
+    0u,
+    THERMAL_MECHANICAL_INTERFACE_CACHE_MISS
+  );
+}
 
 fn thermal_mechanical_interface_receipt_admitted() -> bool {
   if (thermal_params.mechanical_interface_receipt_required == 0u) {
@@ -5459,11 +5608,69 @@ fn thermal_mechanical_interface_receipt_admitted() -> bool {
       <= (available_words - row_base) / MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
 }
 
+// Resolve one source-directed row without searching. The thermal CSR stores
+// this global receipt-row ordinal only after the budget pass has found the
+// same row through the authoritative linear lookup. Rechecking the source
+// range and signed-area payload keeps a malformed optional cache fail closed.
+fn thermal_mechanical_interface_lookup_cursor(
+  self_index: u32,
+  receipt_cursor: u32
+) -> ThermalMechanicalInterfaceCursorLookup {
+  var result = ThermalMechanicalInterfaceCursorLookup(
+    0xffffffffu,
+    0u,
+    0.0,
+    0u
+  );
+  if (
+    !thermal_mechanical_interface_receipt_pair_admitted()
+    || self_index >= thermal_params.particle_count
+  ) { return result; }
+  let offset_base = MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS;
+  let begin = mechanical_interface_receipt[offset_base + self_index];
+  let end = mechanical_interface_receipt[offset_base + self_index + 1u];
+  let total = mechanical_interface_receipt[13u];
+  if (
+    begin > end
+    || end > total
+    || receipt_cursor < begin
+    || receipt_cursor >= end
+  ) { return result; }
+  let row_base = offset_base + thermal_params.particle_count + 1u;
+  let available_words = arrayLength(&mechanical_interface_receipt);
+  if (
+    row_base > available_words
+    || receipt_cursor
+      >= (available_words - row_base) / MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS
+  ) { return result; }
+  let row = row_base
+    + receipt_cursor * MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+  let peer_index = mechanical_interface_receipt[row];
+  let signed_area_m2 = bitcast<f32>(mechanical_interface_receipt[row + 1u]);
+  if (
+    peer_index >= thermal_params.particle_count
+    || peer_index == self_index
+    || !ss_exact_near_finite(signed_area_m2)
+  ) { return result; }
+  result.peer_index = peer_index;
+  if (signed_area_m2 > 0.0) {
+    result.classified = 1u;
+    result.effective_face_area_m2 = signed_area_m2;
+  } else if (signed_area_m2 < 0.0) {
+    result.classified = 1u;
+  }
+  result.admitted = 1u;
+  return result;
+}
+
 fn thermal_mechanical_interface_lookup(
   self_index: u32,
   other_index: u32
 ) -> ThermalMechanicalInterfaceLookup {
-  var result = ThermalMechanicalInterfaceLookup(0u, 0.0);
+  if (thermal_params.mechanical_interface_receipt_required == 0u) {
+    return thermal_mechanical_interface_miss();
+  }
+  var result = thermal_mechanical_interface_unproven();
   if (
     !thermal_mechanical_interface_receipt_pair_admitted()
     || self_index >= thermal_params.particle_count
@@ -5482,6 +5689,8 @@ fn thermal_mechanical_interface_lookup(
       mechanical_interface_receipt[row + 1u]
     );
     if (!ss_exact_near_finite(signed_area_m2)) { return result; }
+    result.receipt_cursor = cursor;
+    result.cache_state = THERMAL_MECHANICAL_INTERFACE_CACHE_CURSOR;
     if (signed_area_m2 > 0.0) {
       result.classified = 1u;
       result.effective_face_area_m2 = signed_area_m2;
@@ -5490,7 +5699,7 @@ fn thermal_mechanical_interface_lookup(
     }
     return result;
   }
-  return result;
+  return thermal_mechanical_interface_miss();
 }
 
 fn thermal_conductivity_sidecar_admitted() -> bool {
@@ -5740,7 +5949,24 @@ fn thermal_publish_proposal_row(row_offset: u32, row: vec4<f32>) {
   thermal_evidence_add(6u, 1u, false);
 }
 
-fn thermal_visit_fused_pair(
+struct ThermalPairVisitOutcome {
+  outcome: u32,
+  mechanical_interface_cache_state: u32,
+  mechanical_interface_receipt_cursor: u32,
+};
+
+fn thermal_pair_visit_outcome(
+  outcome: u32,
+  mechanical_interface: ThermalMechanicalInterfaceLookup
+) -> ThermalPairVisitOutcome {
+  return ThermalPairVisitOutcome(
+    outcome,
+    mechanical_interface.cache_state,
+    mechanical_interface.receipt_cursor
+  );
+}
+
+fn thermal_visit_fused_pair_cached(
   budget_mode: bool,
   self_index: u32,
   other_index: u32,
@@ -5762,19 +5988,26 @@ fn thermal_visit_fused_pair(
   radiation_candidate_visit_count: ptr<function, u32>,
   conduction_mask_hit_count: ptr<function, u32>,
   radiation_mask_hit_count: ptr<function, u32>,
-  local_count_overflow: ptr<function, bool>
-) -> u32 {
+  local_count_overflow: ptr<function, bool>,
+  mechanical_interface_cache: ThermalMechanicalInterfaceLookup
+) -> ThermalPairVisitOutcome {
   // Keep self out of the terminal skipped-member count: the law returns
   // before it increments either candidate counter, whereas every other
   // no-op candidate is represented by exactly one terminal count.
   if (other_index == self_index) {
-    return THERMAL_PAIR_VISIT_OUTCOME_SELF;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_SELF,
+      thermal_mechanical_interface_miss()
+    );
   }
   // Exact traversal validates its peer before calling here. Preserve a raw
   // replay for a defensive out-of-range call rather than coalescing a state
   // that could otherwise turn a malformed receipt into a sealed one.
   if (other_index >= thermal_params.particle_count) {
-    return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+      thermal_mechanical_interface_unproven()
+    );
   }
   let conduction_count_ready = thermal_increment_local(
     conduction_candidate_visit_count
@@ -5784,11 +6017,17 @@ fn thermal_visit_fused_pair(
   );
   if (!conduction_count_ready || !radiation_count_ready) {
     *local_count_overflow = true;
-    return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+      thermal_mechanical_interface_unproven()
+    );
   }
   let other_pos_mass = source_state[other_index * 2u];
   if (other_pos_mass.w <= 0.0) {
-    return THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY,
+      thermal_mechanical_interface_unproven()
+    );
   }
   let other_temperature = thermal_derived_value(other_index, 0u);
   let other_temperature_slope = thermal_derived_value(other_index, 1u);
@@ -5806,7 +6045,10 @@ fn thermal_visit_fused_pair(
   // direct law's result is the authority; only the ordinary finite no-op
   // paths below may be terminal-accounted by the bounded CSR receipt.
   if (!ss_exact_near_finite(distance_squared_m2)) {
-    return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+      thermal_mechanical_interface_unproven()
+    );
   }
   // Preserve the original sqrt comparisons near either support boundary, but
   // reject the overwhelmingly common distant candidate with a conservative
@@ -5819,7 +6061,10 @@ fn thermal_visit_fused_pair(
     && distance_squared_m2
       > maximum_support_squared_m2 * 1.000003814697265625
   ) {
-    return THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY,
+      thermal_mechanical_interface_unproven()
+    );
   }
   // The retained mechanical receipt and conductivity sidecar both carry
   // relatively expensive authenticated headers.  A candidate outside both
@@ -5832,10 +6077,16 @@ fn thermal_visit_fused_pair(
       != thermal_derived_word(other_index, 8u)
     || thermal_derived_word(self_index, 9u)
       != thermal_derived_word(other_index, 9u);
-  let mechanical_interface = thermal_mechanical_interface_lookup(
-    self_index,
-    other_index
-  );
+  var mechanical_interface = mechanical_interface_cache;
+  if (
+    mechanical_interface.cache_state
+      == THERMAL_MECHANICAL_INTERFACE_CACHE_UNPROVEN
+  ) {
+    mechanical_interface = thermal_mechanical_interface_lookup(
+      self_index,
+      other_index
+    );
+  }
   let interface_pair =
     thermal_params.mechanical_interface_receipt_required != 0u
     && (
@@ -5874,7 +6125,10 @@ fn thermal_visit_fused_pair(
     && other_thermal_conductivity_w_per_mk > 0.0;
   let radiation_hit = distance_m < radiation_support_m;
   if (!conduction_hit && !radiation_hit) {
-    return THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY,
+      mechanical_interface
+    );
   }
   *neighbor_min_temperature = min(*neighbor_min_temperature, other_temperature);
   *neighbor_max_temperature = max(*neighbor_max_temperature, other_temperature);
@@ -5912,7 +6166,10 @@ fn thermal_visit_fused_pair(
       !ss_exact_near_finite(pair_conductance_w_per_k)
       || pair_conductance_w_per_k < 0.0
     ) {
-      return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+      return thermal_pair_visit_outcome(
+        THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+        mechanical_interface
+      );
     }
     let raw_energy_j = pair_conductance_w_per_k
       * (other_temperature - self_temperature) * thermal_params.dt_s;
@@ -5962,7 +6219,10 @@ fn thermal_visit_fused_pair(
       + max(conduction_energy_j, 0.0) + max(radiation_energy_j, 0.0);
     *requested_loss_j = *requested_loss_j
       + max(-conduction_energy_j, 0.0) + max(-radiation_energy_j, 0.0);
-    return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+      mechanical_interface
+    );
   }
   let other_gain_scale = thermal_derived_value(other_index, 4u);
   let other_loss_scale = thermal_derived_value(other_index, 5u);
@@ -5973,7 +6233,10 @@ fn thermal_visit_fused_pair(
     || other_loss_scale < 0.0 || other_loss_scale > 1.0
   ) {
     *local_count_overflow = true;
-    return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+    return thermal_pair_visit_outcome(
+      THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+      mechanical_interface
+    );
   }
   if (conduction_energy_j > 0.0) {
     conduction_energy_j = conduction_energy_j
@@ -5993,7 +6256,64 @@ fn thermal_visit_fused_pair(
     + conduction_energy_j / self_mass;
   *radiation_specific_energy_delta = *radiation_specific_energy_delta
     + radiation_energy_j / self_mass;
-  return THERMAL_PAIR_VISIT_OUTCOME_REPLAY;
+  return thermal_pair_visit_outcome(
+    THERMAL_PAIR_VISIT_OUTCOME_REPLAY,
+    mechanical_interface
+  );
+}
+
+// Classic/bin traversals and exact-directory fallbacks retain the original
+// call contract. Only the thermal CSR capture/replay path passes an explicit
+// mechanical-interface cache into the shared pair-law core.
+fn thermal_visit_fused_pair(
+  budget_mode: bool,
+  self_index: u32,
+  other_index: u32,
+  self_position: vec3<f32>,
+  self_mass: f32,
+  self_temperature: f32,
+  self_temperature_slope: f32,
+  self_radius_m: f32,
+  self_emissivity: f32,
+  self_gain_scale: f32,
+  self_loss_scale: f32,
+  requested_gain_j: ptr<function, f32>,
+  requested_loss_j: ptr<function, f32>,
+  conduction_specific_energy_delta: ptr<function, f32>,
+  radiation_specific_energy_delta: ptr<function, f32>,
+  neighbor_min_temperature: ptr<function, f32>,
+  neighbor_max_temperature: ptr<function, f32>,
+  conduction_candidate_visit_count: ptr<function, u32>,
+  radiation_candidate_visit_count: ptr<function, u32>,
+  conduction_mask_hit_count: ptr<function, u32>,
+  radiation_mask_hit_count: ptr<function, u32>,
+  local_count_overflow: ptr<function, bool>
+) -> u32 {
+  return thermal_visit_fused_pair_cached(
+    budget_mode,
+    self_index,
+    other_index,
+    self_position,
+    self_mass,
+    self_temperature,
+    self_temperature_slope,
+    self_radius_m,
+    self_emissivity,
+    self_gain_scale,
+    self_loss_scale,
+    requested_gain_j,
+    requested_loss_j,
+    conduction_specific_energy_delta,
+    radiation_specific_energy_delta,
+    neighbor_min_temperature,
+    neighbor_max_temperature,
+    conduction_candidate_visit_count,
+    radiation_candidate_visit_count,
+    conduction_mask_hit_count,
+    radiation_mask_hit_count,
+    local_count_overflow,
+    thermal_mechanical_interface_unproven()
+  ).outcome;
 }
 
 ${thermalCandidateCsrHelpersWgsl}
@@ -6341,7 +6661,7 @@ ${thermalCandidateCsrExactTraversalPrefixWgsl}  if (
         malformed = true;
         break;
       }
-      let thermal_pair_visit_outcome = thermal_visit_fused_pair(
+      let thermal_pair_visit = thermal_visit_fused_pair_cached(
         budget_mode,
         particle_index,
         other_index,
@@ -6363,7 +6683,8 @@ ${thermalCandidateCsrExactTraversalPrefixWgsl}  if (
         &radiation_candidate_visit_count,
         &conduction_mask_hit_count,
         &radiation_mask_hit_count,
-        &local_count_overflow
+        &local_count_overflow,
+        thermal_mechanical_interface_unproven()
       );
 ${thermalCandidateCsrCaptureCandidateWgsl}
     }
@@ -6636,7 +6957,7 @@ ${thermalCandidateCsrSkippedMemberWgsl}
               malformed = true;
               break;
             }
-            let thermal_pair_visit_outcome = thermal_visit_fused_pair(
+            let thermal_pair_visit = thermal_visit_fused_pair_cached(
               budget_mode,
               particle_index,
               other_index,
@@ -6658,7 +6979,8 @@ ${thermalCandidateCsrSkippedMemberWgsl}
               &radiation_candidate_visit_count,
               &conduction_mask_hit_count,
               &radiation_mask_hit_count,
-              &local_count_overflow
+              &local_count_overflow,
+              thermal_mechanical_interface_unproven()
             );
 ${thermalCandidateCsrCaptureCandidateWgsl}
           }
@@ -8599,7 +8921,7 @@ export function createSchroederSpatialThermalExhaustiveShadowWgslForNativeTest()
     other_index < thermal_params.particle_count;
     other_index = other_index + 1u
   ) {
-    let thermal_pair_visit_outcome = thermal_visit_fused_pair(
+    let thermal_pair_visit = thermal_visit_fused_pair_cached(
       budget_mode,
       particle_index,
       other_index,
@@ -8621,7 +8943,8 @@ export function createSchroederSpatialThermalExhaustiveShadowWgslForNativeTest()
       &radiation_candidate_visit_count,
       &conduction_mask_hit_count,
       &radiation_mask_hit_count,
-      &local_count_overflow
+      &local_count_overflow,
+      thermal_mechanical_interface_unproven()
     );
 ${thermalCandidateCsrCaptureCandidateWgsl}
   }

@@ -4670,8 +4670,13 @@ test('long-horizon SS batches keep diagnostics final-only and do not mirror stag
   );
   assert.match(
     scheduleRunSource,
-    /const livePreviewEnabled = Boolean\([\s\S]*?residentScheduleLivePreview === true[\s\S]*?postProgress:[\s\S]*?if \(\s*livePreviewEnabled[\s\S]*?candidateDrawLoop\.notify\(\{ livePreview: true \}, candidate\)/,
-    'pre-terminal drawing must remain behind an explicit non-authoritative live-preview request'
+    /const postLivePreviewProgress = livePreviewEnabled[\s\S]*?progressAtMs - livePreviewLastDrawMs[\s\S]*?< livePreviewMinIntervalMs[\s\S]*?const candidate = postResidentScheduleCandidate[\s\S]*?candidateDrawLoop\.notify\(\{ livePreview: true \}, candidate\)/,
+    'pre-terminal candidate construction and drawing must remain time-gated behind an explicit non-authoritative live-preview request'
+  );
+  assert.match(
+    scheduleRunSource,
+    /\.\.\.\(postLivePreviewProgress[\s\S]*?\? \{ postProgress: postLivePreviewProgress \}[\s\S]*?: \{\}\)/,
+    'offscreen schedules must omit their progress consumer unless live preview is active'
   );
   assert.doesNotMatch(
     probeSource,

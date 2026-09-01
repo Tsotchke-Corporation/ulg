@@ -1002,9 +1002,11 @@ function committedResidentSchedulePresentationRenderReceiptFields(data = {}) {
 //
 // Together (storageGeneration, physicsTick) is strictly increasing over every
 // candidate one lane emits, which is exactly the mailbox's ordering contract.
-// The terminal-result candidate of a schedule whose last step already emitted
-// a progress candidate carries the SAME version; the mailbox truthfully drops
-// it as a duplicate (droppedStaleCount) rather than reordering.
+// The terminal-result candidate of a live-preview schedule whose last step
+// already emitted a progress candidate carries the SAME version; the mailbox
+// truthfully drops it as a duplicate (droppedStaleCount) rather than
+// reordering. With live preview disabled, only this terminal candidate is
+// constructed and posted.
 //
 // Fail-closed: when the epoch identity or either version word is missing or
 // non-finite (e.g. a schedule cancelled before step 1 has a null
@@ -1083,11 +1085,11 @@ function postResidentScheduleCandidate(source) {
   return candidate;
 }
 
-// W4b: worker-local terminal candidate consumer. The schedule loop publishes
-// every progress candidate to the mailbox for telemetry, but NEVER invokes
-// this consumer. Only the page's exact post-StateManager-commit admission can
-// call notify(admission), at which point the single terminal candidate is
-// drawn once from worker-retained post-step buffers.
+// W4b: worker-local terminal candidate consumer. Explicit live preview can
+// publish time-coalesced progress candidates to the mailbox, but NEVER gives
+// them committed authority. Only the page's exact post-StateManager-commit
+// admission can promote/draw the terminal candidate from worker-retained
+// post-step buffers.
 function createResidentScheduleCandidateDrawLoop({
   runner = null,
   schedulePayload = {},
@@ -1638,49 +1640,59 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
     33,
     Math.round(Number(livePreviewRequest?.livePreviewMinIntervalMs) || 66)
   );
-  let livePreviewLastDrawMs = 0;
-  let livePreviewDrawCount = 0;
+  let livePreviewLastDrawMs = Number.NEGATIVE_INFINITY;
+  const postLivePreviewProgress = livePreviewEnabled
+    ? (progress) => {
+        try {
+          if (!residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
+            return;
+          }
+          const progressAtMs = nowMs();
+          if (
+            progressAtMs - livePreviewLastDrawMs
+              < livePreviewMinIntervalMs
+          ) {
+            return;
+          }
+          // Gate before reading the progress envelope or building/freezing a
+          // candidate. Off-cadence progress remains wholly worker-local.
+          const candidate = postResidentScheduleCandidate({
+            scheduleId: progress?.scheduleId ?? null,
+            laneId: scheduleLaneId,
+            stateKey: scheduleStateKey,
+            presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
+            stepOrdinal: progress?.stepOrdinal ?? null,
+            epochIdentity: progress?.epochIdentity ?? null,
+            retainedBufferRefs:
+              progress?.stepSummary?.retainedBufferRefs ?? null,
+            summary: progress?.stepSummary ?? null
+          });
+          if (!candidate) return;
+          livePreviewLastDrawMs = progressAtMs;
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+          candidateDrawLoop.notify({ livePreview: true }, candidate);
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+        } catch {
+          // Candidate delivery must never abort the batch (mirrors the W2
+          // driver's own fire-and-forget progress contract).
+        }
+      }
+    : null;
   try {
     const result = await timeoutResidentStage(
-      runner.runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload, {
-        id: data.id ?? null,
-        postProgress: (progress) => {
-          try {
-            if (!residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
-              return;
-            }
-            const candidate = postResidentScheduleCandidate({
-              scheduleId: progress?.scheduleId ?? null,
-              laneId: scheduleLaneId,
-              stateKey: scheduleStateKey,
-              presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
-              stepOrdinal: progress?.stepOrdinal ?? null,
-              epochIdentity: progress?.epochIdentity ?? null,
-              retainedBufferRefs:
-                progress?.stepSummary?.retainedBufferRefs ?? null,
-              summary: progress?.stepSummary ?? null
-            });
-            if (
-              livePreviewEnabled
-              && candidate
-              && nowMs() - livePreviewLastDrawMs >= livePreviewMinIntervalMs
-            ) {
-              livePreviewLastDrawMs = nowMs();
-              livePreviewDrawCount += 1;
-              try {
-                flushWorkerQueueSubmitBurst(device);
-              } catch {}
-              candidateDrawLoop.notify({ livePreview: true }, candidate);
-              try {
-                flushWorkerQueueSubmitBurst(device);
-              } catch {}
-            }
-          } catch {
-            // Candidate delivery must never abort the batch (mirrors the W2
-            // driver's own fire-and-forget progress contract).
-          }
+      runner.runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload,
+        {
+          id: data.id ?? null,
+          ...(postLivePreviewProgress
+            ? { postProgress: postLivePreviewProgress }
+            : {})
         }
-      }),
+      ),
       timeoutMs
     );
     try {

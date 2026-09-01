@@ -330,31 +330,50 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
   );
 });
 
-test('presentation worker schedule verb injects its own device, drives the W2 schedule driver, and emits versioned candidates', async () => {
+test('presentation worker schedule verb omits offscreen progress work and emits only its terminal candidate by default', async () => {
   await ensureFakePresentationReady();
   const candidateCountBefore = candidateMessages().length;
   const statsBefore = workerModule.presentationResidentScheduleCandidateMailbox.stats();
   let capturedPayload = null;
   let capturedId = null;
+  let capturedRunnerOptions = null;
+  let suppressedProgressReadCount = 0;
   const fakeRunner = {
-    async runUlgMechanicsResidentStageWorkerSchedulePayload(payload, { id, postProgress }) {
+    async runUlgMechanicsResidentStageWorkerSchedulePayload(payload, options) {
       capturedPayload = payload;
-      capturedId = id;
+      capturedId = options.id;
+      capturedRunnerOptions = options;
       for (let stepOrdinal = 1; stepOrdinal <= 3; stepOrdinal += 1) {
-        postProgress({
+        const progress = {
           schema: 'peercompute.ulg.worker-resident-schedule-progress.v0',
           scheduleId: 'ulg:test:sched-candidates',
           completedStepCount: stepOrdinal,
-          stepOrdinal,
-          epochIdentity: scheduleEpochIdentity(stepOrdinal),
+          stepOrdinal
+        };
+        Object.defineProperties(progress, {
+          epochIdentity: {
+            enumerable: true,
+            get() {
+              suppressedProgressReadCount += 1;
+              return scheduleEpochIdentity(stepOrdinal);
+            }
+          },
           stepSummary: {
-            schema: 'peercompute.ulg.worker-resident-schedule-step-summary.v0',
-            scheduleId: 'ulg:test:sched-candidates',
-            stepOrdinal,
-            particleCount: 2,
-            retainedBufferRefs: [`ulg-worker:test:state:${stepOrdinal}`]
+            enumerable: true,
+            get() {
+              suppressedProgressReadCount += 1;
+              return {
+                schema:
+                  'peercompute.ulg.worker-resident-schedule-step-summary.v0',
+                scheduleId: 'ulg:test:sched-candidates',
+                stepOrdinal,
+                particleCount: 2,
+                retainedBufferRefs: [`ulg-worker:test:state:${stepOrdinal}`]
+              };
+            }
           }
         });
+        options.postProgress?.(progress);
       }
       return {
         schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
@@ -391,6 +410,16 @@ test('presentation worker schedule verb injects its own device, drives the W2 sc
 
   // Device injection mirrors the single-stage verb exactly.
   assert.equal(capturedId, 'ulg:test:message-1');
+  assert.equal(
+    Object.hasOwn(capturedRunnerOptions, 'postProgress'),
+    false,
+    'offscreen progress must have no consumer when live preview is disabled'
+  );
+  assert.equal(
+    suppressedProgressReadCount,
+    0,
+    'default schedules must not inspect progress candidate fields'
+  );
   const injectedContext = capturedPayload.context.ulgMechanicsResidentStageWorker;
   assert.equal(injectedContext.preferWebGpu, true);
   assert.equal(injectedContext.common.sameWorkerQueueFenceFallback, true);
@@ -415,42 +444,255 @@ test('presentation worker schedule verb injects its own device, drives the W2 sc
     'worker-offscreen-resident-schedule-on-presentation-device-completed'
   ));
 
-  // One bridge candidate message per progress envelope AND one for the
-  // terminal result.
+  // The offscreen path publishes only the exact terminal result by default.
   const candidates = candidateMessages().slice(candidateCountBefore);
-  assert.equal(candidates.length, 4);
-  candidates.forEach((message, index) => {
-    const candidate = message.candidate;
-    assert.equal(candidate.schema, ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA);
-    assert.equal(candidate.version.scheduleId, 'ulg:test:sched-candidates');
-    // Version mapping: residentExecutionGeneration := storageGeneration,
-    // nextStep := physicsTick (strictly advancing per the W2 driver's
-    // epoch-identity seal).
-    assert.equal(candidate.version.residentExecutionGeneration, 7);
-    const stepOrdinal = Math.min(index + 1, 3);
-    assert.equal(candidate.version.nextStep, 100 + stepOrdinal);
-    assert.equal(candidate.version.stepOrdinal, stepOrdinal);
-    assert.equal(candidate.epochIdentity.physicsTick, 100 + stepOrdinal);
-    assert.equal(candidate.epochIdentity.positionEpoch, 200 + stepOrdinal);
-    assertCloneableOnly(candidate, `candidate[${index}]`);
-    structuredClone(candidate);
-  });
-  // The terminal candidate duplicates the last progress candidate's version.
-  assert.deepEqual(
-    { ...candidates[3].candidate.version },
-    { ...candidates[2].candidate.version }
-  );
+  assert.equal(candidates.length, 1);
+  const candidate = candidates[0].candidate;
+  assert.equal(candidate.schema, ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA);
+  assert.equal(candidate.version.scheduleId, 'ulg:test:sched-candidates');
+  assert.equal(candidate.version.residentExecutionGeneration, 7);
+  assert.equal(candidate.version.nextStep, 103);
+  assert.equal(candidate.version.stepOrdinal, 3);
+  assert.equal(candidate.epochIdentity.physicsTick, 103);
+  assert.equal(candidate.epochIdentity.positionEpoch, 203);
+  assert.deepEqual(candidate.retainedBufferRefs, ['ulg-worker:test:state:3']);
+  assertCloneableOnly(candidate, 'terminalCandidate');
+  structuredClone(candidate);
 
-  // Worker-local mailbox: three accepted progress candidates; the terminal
-  // duplicate is truthfully dropped and counted, never reordered forward.
+  // Worker-local mailbox: one accepted terminal candidate and no duplicate.
   const stats = workerModule.presentationResidentScheduleCandidateMailbox.stats();
-  assert.equal(stats.publishedCount - statsBefore.publishedCount, 3);
-  assert.equal(stats.droppedStaleCount - statsBefore.droppedStaleCount, 1);
+  assert.equal(stats.publishedCount - statsBefore.publishedCount, 1);
+  assert.equal(stats.droppedStaleCount - statsBefore.droppedStaleCount, 0);
   assert.equal(stats.latestVersion.residentExecutionGeneration, 7);
   assert.equal(stats.latestVersion.nextStep, 103);
   const latest = workerModule.presentationResidentScheduleCandidateMailbox.peekLatest();
   assert.equal(latest.version.stepOrdinal, 3);
   assert.ok(Object.isFrozen(latest));
+});
+
+test('explicit live preview time-coalesces sparse progress before candidate construction and always publishes terminal', async () => {
+  await ensureFakePresentationReady();
+  const candidateCountBefore = candidateMessages().length;
+  const statsBefore =
+    workerModule.presentationResidentScheduleCandidateMailbox.stats();
+  const previousNow = fakeSelf.performance.now;
+  let clockMs = 0;
+  let retainedResolveCount = 0;
+  let suppressedStepFourReadCount = 0;
+  let runnerOptions = null;
+  let terminalAdmissionConsumed = false;
+  let terminalCandidateVersion = null;
+  const scheduleId = 'ulg:test:sched-live-preview-coalescing';
+  const laneId = 'ulg:test:lane-live-preview-coalescing';
+  const stateKey = 'ulg:test:state-live-preview-coalescing';
+  const terminalFence = {
+    required: true,
+    scope: 'resident-schedule-terminal',
+    terminalScheduleFence: true,
+    fenceSatisfied: true,
+    authorityAdmissionReady: true,
+    scheduleId,
+    laneId,
+    stateKey,
+    completedStepCount: 7,
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone'
+  };
+  const terminalAdmission = {
+    schema:
+      'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+    status:
+      'state-manager-committed-resident-schedule-presentation-admission',
+    scheduleId,
+    laneId,
+    stateKey,
+    candidateVersion: {
+      residentExecutionGeneration: 11,
+      nextStep: 107,
+      scheduleId,
+      stepOrdinal: 7
+    },
+    authority: {
+      status: 'state-manager-committed-worker-schedule',
+      computeManagerCompletionSchema:
+        'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+      computeManagerLeaseId: 'lease:live-preview-coalescing',
+      computeManagerLeaseStatus: 'completed',
+      computeManagerFenceSatisfied: true,
+      stateManagerCommitStatus: 'committed',
+      stateManagerCommitAccepted: true
+    },
+    terminalFence
+  };
+  const fakeBuffer = { mapAsync() {} };
+  const fakeRunner = {
+    async runUlgMechanicsResidentStageWorkerSchedulePayload(_payload, options) {
+      runnerOptions = options;
+      for (const [stepOrdinal, atMs] of [[2, 10], [4, 30], [6, 76]]) {
+        clockMs = atMs;
+        const progress = {};
+        Object.defineProperties(progress, {
+          scheduleId: {
+            enumerable: true,
+            get() {
+              if (stepOrdinal === 4) suppressedStepFourReadCount += 1;
+              return scheduleId;
+            }
+          },
+          stepOrdinal: {
+            enumerable: true,
+            get() {
+              if (stepOrdinal === 4) suppressedStepFourReadCount += 1;
+              return stepOrdinal;
+            }
+          },
+          epochIdentity: {
+            enumerable: true,
+            get() {
+              if (stepOrdinal === 4) suppressedStepFourReadCount += 1;
+              return scheduleEpochIdentity(stepOrdinal, {
+                storageGeneration: 11
+              });
+            }
+          },
+          stepSummary: {
+            enumerable: true,
+            get() {
+              if (stepOrdinal === 4) suppressedStepFourReadCount += 1;
+              return {
+                stepOrdinal,
+                particleCount: 2,
+                retainedBufferRefs: [`retained:live-preview:${stepOrdinal}`]
+              };
+            }
+          }
+        });
+        options.postProgress(progress);
+      }
+      clockMs = 80;
+      return {
+        schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
+        status: 'worker-resident-schedule-completed',
+        scheduleId,
+        laneId,
+        stateKey,
+        requestedStepCount: 7,
+        completedStepCount: 7,
+        cancelled: false,
+        finalEpochIdentity: scheduleEpochIdentity(7, {
+          storageGeneration: 11
+        }),
+        perStepSummaries: {
+          lastStep: { stepOrdinal: 7, particleCount: 2 }
+        },
+        retainedBufferRefs: ['retained:live-preview:7'],
+        gpuFence: terminalFence
+      };
+    },
+    resolveUlgMechanicsResidentStageWorkerRetainedParticleState() {
+      retainedResolveCount += 1;
+      return {
+        status: 'worker-retained-particle-state-ready',
+        sourceStateBuffer: fakeBuffer,
+        sourceThermoBuffer: fakeBuffer,
+        particleCount: 2,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        stateBufferByteLength: 64,
+        thermoBufferByteLength: 96
+      };
+    }
+  };
+  const retainedRenderRequest = {
+    enabled: true,
+    sourceStageId: 'schroederSameLevelMechanics',
+    residentScheduleLivePreview: true,
+    livePreviewMinIntervalMs: 66,
+    particleCount: 2,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    stateByteLength: 64,
+    thermoByteLength: 96,
+    colorRowCount: 1,
+    colorRowsByteLength: 32,
+    materialColorRows: new Float32Array(8),
+    viewProjectionMatrix: new Float32Array(16),
+    boxDimsM: [12, 8, 6],
+    width: 8,
+    height: 8,
+    cssWidth: 8,
+    cssHeight: 8,
+    pixelRatio: 1
+  };
+
+  fakeSelf.performance.now = () => clockMs;
+  try {
+    await workerModule.runResidentScheduleOnPresentationDevice(
+      {
+        id: 'ulg:test:message-live-preview-coalescing',
+        payload: {
+          schedule: {
+            scheduleId,
+            stepCount: 7,
+            progressEverySteps: 2
+          },
+          lease: { laneId, stateKey },
+          context: {
+            ulgMechanicsResidentStageWorker: {
+              common: {
+                presentationWorkerRenderRetainedStageOutput:
+                  retainedRenderRequest
+              }
+            }
+          }
+        }
+      },
+      { runnerModuleOverride: fakeRunner }
+    );
+
+    assert.equal(typeof runnerOptions.postProgress, 'function');
+    assert.equal(suppressedStepFourReadCount, 0);
+    const candidates = candidateMessages().slice(candidateCountBefore);
+    terminalCandidateVersion = candidates.at(-1)?.candidate?.version ?? null;
+    assert.deepEqual(
+      candidates.map((message) => message.candidate.version.nextStep),
+      [102, 106, 107]
+    );
+    assert.deepEqual(
+      candidates.map((message) => message.candidate.version.stepOrdinal),
+      [2, 6, 7]
+    );
+    candidates.forEach((message, index) => {
+      assertCloneableOnly(message.candidate, `livePreviewCandidate[${index}]`);
+      structuredClone(message.candidate);
+    });
+    const stats =
+      workerModule.presentationResidentScheduleCandidateMailbox.stats();
+    assert.equal(stats.publishedCount - statsBefore.publishedCount, 3);
+    assert.equal(stats.droppedStaleCount - statsBefore.droppedStaleCount, 0);
+    assert.equal(stats.latestVersion.nextStep, 107);
+    assert.equal(retainedResolveCount, 3);
+
+    const admitted =
+      workerModule.presentCommittedResidentScheduleCandidate(
+        terminalAdmission
+      );
+    assert.equal(admitted.stateManagerCommittedPresentation, true);
+    assert.equal(admitted.committedPresentationPromotedWithoutRedraw, true);
+    assert.equal(retainedResolveCount, 3);
+    terminalAdmissionConsumed = true;
+  } finally {
+    fakeSelf.performance.now = previousNow;
+    if (!terminalAdmissionConsumed) {
+      workerModule.presentCommittedResidentScheduleCandidate(
+        {
+          ...terminalAdmission,
+          candidateVersion:
+            terminalCandidateVersion ?? terminalAdmission.candidateVersion
+        }
+      );
+    }
+  }
 });
 
 test('resident schedule candidates stay telemetry-only until exact committed admission', async () => {
@@ -473,7 +715,7 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
   const fakeBuffer = { mapAsync() {} };
   const fakeRunner = {
     async runUlgMechanicsResidentStageWorkerSchedulePayload(_payload, { postProgress }) {
-      postProgress({
+      postProgress?.({
         scheduleId: 'ulg:test:sched-committed-draw',
         stepOrdinal: 1,
         epochIdentity: scheduleEpochIdentity(1, { storageGeneration: 8 }),
@@ -770,7 +1012,7 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
     ...fakeRunner,
     async runUlgMechanicsResidentStageWorkerSchedulePayload(_payload, { postProgress }) {
       const epochIdentity = scheduleEpochIdentity(1, { storageGeneration: 8 });
-      postProgress({
+      postProgress?.({
         scheduleId: 'ulg:test:sched-committed-draw-next-lane',
         stepOrdinal: 1,
         epochIdentity,

@@ -159,12 +159,22 @@ async function settleBefore(promise, timeoutMs, timeoutMessage) {
 
 function productionM3Device({
   fenceFactory = () => Promise.resolve(),
-  lost = new Promise(() => {})
+  lost = new Promise(() => {}),
+  explicitLayouts = true,
+  validatePhaseAutoBindings = false
 } = {}) {
   let nextPassOrdinal = 0;
+  const expectedWorkspaceAutoBindings = new Map([
+    ['seal_parent_field_predictors', [1, 2, 3, 4, 5, 11]],
+    ['begin_cross_level_phase_volume_admission', [0, 1, 2, 3, 5, 6, 8, 9]],
+    ['validate_fine_cross_level_phase_volume_admission', [0, 1, 3, 5, 7, 8]],
+    ['validate_coarse_cross_level_phase_volume_admission', [0, 2, 3, 5, 9, 11]],
+    ['seal_cross_level_phase_volume_admission', [1, 2, 3, 5]]
+  ]);
   const device = {
     createdBuffers: [],
     createdPipelines: [],
+    validatedAutoBindGroups: [],
     submissions: [],
     dispatches: [],
     passTrace: [],
@@ -194,16 +204,31 @@ function productionM3Device({
       return buffer;
     },
     createShaderModule(descriptor) { return descriptor; },
-    createBindGroupLayout(descriptor) { return descriptor; },
-    createPipelineLayout(descriptor) { return descriptor; },
     createComputePipeline(descriptor) {
       this.createdPipelines.push(descriptor);
       return {
         descriptor,
-        getBindGroupLayout() { return { entries: [] }; }
+        getBindGroupLayout(index = 0) {
+          if (descriptor.layout && descriptor.layout !== 'auto') {
+            return descriptor.layout.bindGroupLayouts[index];
+          }
+          return {
+            entryPoint: descriptor.compute.entryPoint,
+            index
+          };
+        }
       };
     },
-    createBindGroup(descriptor) { return descriptor; },
+    createBindGroup(descriptor) {
+      const entryPoint = descriptor.layout?.entryPoint;
+      const expectedBindings = expectedWorkspaceAutoBindings.get(entryPoint);
+      if (validatePhaseAutoBindings && expectedBindings) {
+        const bindings = descriptor.entries.map(({ binding }) => binding);
+        assert.deepEqual(bindings, expectedBindings, entryPoint);
+        this.validatedAutoBindGroups.push({ entryPoint, bindings });
+      }
+      return descriptor;
+    },
     createCommandEncoder() {
       return {
         clearBuffer() {},
@@ -230,6 +255,8 @@ function productionM3Device({
               device.passTrace.push({
                 kind: 'indirect',
                 passOrdinal,
+                indirectBuffer: buffer,
+                indirectOffset: offset,
                 label: pipeline?.descriptor?.label ?? null,
                 entryPoint:
                   pipeline?.descriptor?.compute?.entryPoint ?? null
@@ -250,6 +277,10 @@ function productionM3Device({
       return fenceFactory(device.fenceRequestCount);
     }
   };
+  if (explicitLayouts) {
+    device.createBindGroupLayout = (descriptor) => descriptor;
+    device.createPipelineLayout = (descriptor) => descriptor;
+  }
   return device;
 }
 
@@ -1435,7 +1466,10 @@ const BASE_FINE_CORRECTION_TIMESTAMP_STAGES = Object.freeze([
 ]);
 
 const PHASE_FINE_CORRECTION_TIMESTAMP_STAGES = Object.freeze([
-  'admit-cross-level-phase-volume',
+  'begin-cross-level-phase-volume-admission',
+  'validate-fine-cross-level-phase-volume-admission',
+  'validate-coarse-cross-level-phase-volume-admission',
+  'seal-cross-level-phase-volume-admission',
   'propose-cross-level-phase-volume',
   ...BASE_FINE_CORRECTION_TIMESTAMP_STAGES
 ]);
@@ -1454,7 +1488,10 @@ const BASE_FINE_CORRECTION_ENTRY_POINTS = Object.freeze([
 ]);
 
 const PHASE_FINE_CORRECTION_ENTRY_POINTS = Object.freeze([
-  'admit_cross_level_phase_volume',
+  'begin_cross_level_phase_volume_admission',
+  'validate_fine_cross_level_phase_volume_admission',
+  'validate_coarse_cross_level_phase_volume_admission',
+  'seal_cross_level_phase_volume_admission',
   'propose_cross_level_phase_volume',
   ...BASE_FINE_CORRECTION_ENTRY_POINTS
 ]);
@@ -1654,6 +1691,22 @@ test('M3 profiling-off corrections retain one grouped compute pass per fine subs
       scenario.fineSubstepCount,
       `${scenario.label} grouped pass count`
     );
+    if (scenario.phaseVolumeInterfaceTransportEnabled) {
+      for (const entry of fineTrace.filter(({ entryPoint }) => (
+        entryPoint === 'validate_fine_cross_level_phase_volume_admission'
+      ))) {
+        assert.equal(entry.kind, 'indirect');
+        assert.match(entry.indirectBuffer?.label ?? '', /fine-indirect$/);
+        assert.equal(entry.indirectOffset, 0);
+      }
+      for (const entry of fineTrace.filter(({ entryPoint }) => (
+        entryPoint === 'validate_coarse_cross_level_phase_volume_admission'
+      ))) {
+        assert.equal(entry.kind, 'indirect');
+        assert.match(entry.indirectBuffer?.label ?? '', /coarse-indirect$/);
+        assert.equal(entry.indirectOffset, 0);
+      }
+    }
 
     assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
       fixture.device,
@@ -1667,6 +1720,48 @@ test('M3 profiling-off corrections retain one grouped compute pass per fine subs
       );
     }
   }
+});
+
+test('M3 phase admission auto-layout fallback binds only reflected resources', async () => {
+  const device = productionM3Device({
+    explicitLayouts: false,
+    validatePhaseAutoBindings: true
+  });
+  const fixture = productionM3Fixture({
+    device,
+    fineSubstepCount: 1,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const { result } = await runProductionM3Fixture(fixture);
+
+  assert.deepEqual(
+    device.validatedAutoBindGroups
+      .filter(({ entryPoint }) => (
+        entryPoint !== 'seal_parent_field_predictors'
+      ))
+      .map(({ entryPoint }) => entryPoint),
+    [
+      'begin_cross_level_phase_volume_admission',
+      'validate_fine_cross_level_phase_volume_admission',
+      'validate_coarse_cross_level_phase_volume_admission',
+      'seal_cross_level_phase_volume_admission'
+    ]
+  );
+  assert.equal(
+    device.validatedAutoBindGroups.some(({ entryPoint }) => (
+      entryPoint === 'seal_parent_field_predictors'
+    )),
+    true
+  );
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('M3 phase auto-layout fallback cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
 });
 
 test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid update', async () => {

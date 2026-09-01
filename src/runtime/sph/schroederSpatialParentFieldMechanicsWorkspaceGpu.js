@@ -99,6 +99,10 @@ const IDENTITY_FIELDS = Object.freeze([
   'supportEpoch'
 ]);
 
+const PHASE_ADMISSION_PIPELINE_BINDINGS = Object.freeze([
+  0, 1, 2, 3, 5, 6, 7, 8, 9, 11
+]);
+
 const PIPELINE_BINDINGS = Object.freeze({
   initialize: Object.freeze([0, 1, 2, 3, 4, 5]),
   registerReflux: Object.freeze([0, 2, 3, 4, 5, 11]),
@@ -108,7 +112,7 @@ const PIPELINE_BINDINGS = Object.freeze({
   validateRegistry: Object.freeze([0, 3, 4, 5, 11]),
   updatePredictors: Object.freeze([0, 3, 4, 5, 11]),
   contactPredictors: Object.freeze([0, 3, 4, 5, 11]),
-  sealPredictors: Object.freeze([3, 4, 5, 11]),
+  sealPredictors: Object.freeze([1, 2, 3, 4, 5, 11]),
   beginFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   validateFine: Object.freeze([0, 1, 3, 4, 5, 11]),
   validateRoutedCoarse: Object.freeze([0, 3, 4, 5, 11]),
@@ -121,10 +125,15 @@ const PIPELINE_BINDINGS = Object.freeze({
   // Fine finalization now settles cross-level phase-volume routes, which
   // reads the coarse mechanics field view (2).
   finalizeFine: Object.freeze([0, 1, 2, 3, 4, 5, 11]),
-  // Admission authenticates the coarse pressure receipt and coarse phase
-  // moments, so it binds the coarse mechanics field view (2) as well.
-  admitCrossLevelPhaseVolume:
-    Object.freeze([0, 1, 2, 3, 5, 6, 7, 8, 9, 11]),
+  // The explicit path shares one superset layout, while the auto-layout
+  // fallback must bind only resources reflected by each entry point.
+  beginCrossLevelPhaseVolumeAdmission:
+    Object.freeze([0, 1, 2, 3, 5, 6, 8, 9]),
+  validateFineCrossLevelPhaseVolumeAdmission:
+    Object.freeze([0, 1, 3, 5, 7, 8]),
+  validateCoarseCrossLevelPhaseVolumeAdmission:
+    Object.freeze([0, 2, 3, 5, 9, 11]),
+  sealCrossLevelPhaseVolumeAdmission: Object.freeze([1, 2, 3, 5]),
   // Proposal reads coarse phase state and pressure rows through the coarse
   // mechanics field view (2) while routing impulses through the workspace.
   proposeCrossLevelPhaseVolume:
@@ -183,6 +192,12 @@ const FINE_CORRECTION_PIPELINE_NAMES = new Set([
   'commitRefluxRows',
   'commitReflux',
   'finalizeFine'
+]);
+const PHASE_ADMISSION_PIPELINE_NAMES = new Set([
+  'beginCrossLevelPhaseVolumeAdmission',
+  'validateFineCrossLevelPhaseVolumeAdmission',
+  'validateCoarseCrossLevelPhaseVolumeAdmission',
+  'sealCrossLevelPhaseVolumeAdmission'
 ]);
 
 function positiveInteger(value, label, max = 0xffff_ffff) {
@@ -1542,6 +1557,10 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     'fine-correction-shared',
     FINE_CORRECTION_PIPELINE_BINDINGS
   );
+  const phaseAdmissionSharedLayout = createSharedLayout(
+    'phase-admission-shared',
+    PHASE_ADMISSION_PIPELINE_BINDINGS
+  );
   const pipeline = (name, entryPoint) => device.createComputePipeline({
     label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
     layout: PREDICTOR_PIPELINE_NAMES.has(name)
@@ -1550,7 +1569,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
         ? (terminalSharedLayout?.pipelineLayout ?? 'auto')
         : FINE_CORRECTION_PIPELINE_NAMES.has(name)
           ? (fineCorrectionSharedLayout?.pipelineLayout ?? 'auto')
-          : 'auto',
+          : PHASE_ADMISSION_PIPELINE_NAMES.has(name)
+            ? (phaseAdmissionSharedLayout?.pipelineLayout ?? 'auto')
+            : 'auto',
     compute: { module, entryPoint }
   });
   const pipelines = Object.freeze({
@@ -1574,8 +1595,22 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
       pipeline('commitRefluxRows', 'commit_routed_reflux_rows'),
     commitReflux: pipeline('commitReflux', 'commit_routed_reflux'),
     finalizeFine: pipeline('finalizeFine', 'finalize_fine_velocity_correction'),
-    admitCrossLevelPhaseVolume:
-      pipeline('admitCrossLevelPhaseVolume', 'admit_cross_level_phase_volume'),
+    beginCrossLevelPhaseVolumeAdmission: pipeline(
+      'beginCrossLevelPhaseVolumeAdmission',
+      'begin_cross_level_phase_volume_admission'
+    ),
+    validateFineCrossLevelPhaseVolumeAdmission: pipeline(
+      'validateFineCrossLevelPhaseVolumeAdmission',
+      'validate_fine_cross_level_phase_volume_admission'
+    ),
+    validateCoarseCrossLevelPhaseVolumeAdmission: pipeline(
+      'validateCoarseCrossLevelPhaseVolumeAdmission',
+      'validate_coarse_cross_level_phase_volume_admission'
+    ),
+    sealCrossLevelPhaseVolumeAdmission: pipeline(
+      'sealCrossLevelPhaseVolumeAdmission',
+      'seal_cross_level_phase_volume_admission'
+    ),
     proposeCrossLevelPhaseVolume:
       pipeline('proposeCrossLevelPhaseVolume', 'propose_cross_level_phase_volume'),
     initializeTerminal: pipeline('initializeTerminal', 'initialize_coarse_terminal_workspace'),
@@ -2822,12 +2857,47 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     );
     const fineCorrectionBindGroup = (pipelineName) =>
       fineCorrectionGroup ?? bindGroup(execution, pipelineName);
+    const phaseAdmissionGroup = phaseVolumeTransportAuthority
+      ? sharedBindGroup(
+          execution,
+          phaseAdmissionSharedLayout,
+          PHASE_ADMISSION_PIPELINE_BINDINGS,
+          'phase-admission-shared'
+        )
+      : null;
+    const phaseAdmissionBindGroup = (pipelineName) =>
+      phaseAdmissionGroup ?? bindGroup(execution, pipelineName);
     const correctionStages = [
       ...(phaseVolumeTransportAuthority ? [
         {
-          name: 'admit-cross-level-phase-volume',
-          pipeline: pipelines.admitCrossLevelPhaseVolume,
-          bindGroup: bindGroup(execution, 'admitCrossLevelPhaseVolume')
+          name: 'begin-cross-level-phase-volume-admission',
+          pipeline: pipelines.beginCrossLevelPhaseVolumeAdmission,
+          bindGroup: phaseAdmissionBindGroup(
+            'beginCrossLevelPhaseVolumeAdmission'
+          )
+        },
+        {
+          name: 'validate-fine-cross-level-phase-volume-admission',
+          pipeline: pipelines.validateFineCrossLevelPhaseVolumeAdmission,
+          bindGroup: phaseAdmissionBindGroup(
+            'validateFineCrossLevelPhaseVolumeAdmission'
+          ),
+          indirectBuffer: ownership.arena.fineIndirectBuffer
+        },
+        {
+          name: 'validate-coarse-cross-level-phase-volume-admission',
+          pipeline: pipelines.validateCoarseCrossLevelPhaseVolumeAdmission,
+          bindGroup: phaseAdmissionBindGroup(
+            'validateCoarseCrossLevelPhaseVolumeAdmission'
+          ),
+          indirectBuffer: ownership.arena.coarseIndirectBuffer
+        },
+        {
+          name: 'seal-cross-level-phase-volume-admission',
+          pipeline: pipelines.sealCrossLevelPhaseVolumeAdmission,
+          bindGroup: phaseAdmissionBindGroup(
+            'sealCrossLevelPhaseVolumeAdmission'
+          )
         },
         {
           name: 'propose-cross-level-phase-volume',

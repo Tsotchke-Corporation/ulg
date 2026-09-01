@@ -114,7 +114,14 @@ const ENTRY_TO_PIPELINE = {
   apply_fine_route_heat: 'applyFineHeat',
   commit_routed_reflux: 'commitReflux',
   finalize_fine_velocity_correction: 'finalizeFine',
-  admit_cross_level_phase_volume: 'admitCrossLevelPhaseVolume',
+  begin_cross_level_phase_volume_admission:
+    'beginCrossLevelPhaseVolumeAdmission',
+  validate_fine_cross_level_phase_volume_admission:
+    'validateFineCrossLevelPhaseVolumeAdmission',
+  validate_coarse_cross_level_phase_volume_admission:
+    'validateCoarseCrossLevelPhaseVolumeAdmission',
+  seal_cross_level_phase_volume_admission:
+    'sealCrossLevelPhaseVolumeAdmission',
   propose_cross_level_phase_volume: 'proposeCrossLevelPhaseVolume',
   initialize_coarse_terminal_workspace: 'initializeTerminal',
   register_coarse_terminal_registry: 'registerTerminal',
@@ -133,6 +140,7 @@ const ENTRY_TO_PIPELINE = {
 let mismatches = 0;
 for (const [entry, pipelineName] of Object.entries(ENTRY_TO_PIPELINE)) {
   if (!functions.has(entry)) {
+    mismatches += 1;
     console.log(`MISSING ENTRY IN WGSL: ${entry}`);
     continue;
   }
@@ -150,3 +158,4 @@ for (const [entry, pipelineName] of Object.entries(ENTRY_TO_PIPELINE)) {
   }
 }
 console.log(mismatches === 0 ? 'ALL PIPELINE BINDINGS AGREE' : `${mismatches} mismatched pipelines`);
+if (mismatches !== 0) process.exitCode = 1;

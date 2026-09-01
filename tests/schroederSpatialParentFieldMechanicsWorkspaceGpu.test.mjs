@@ -689,7 +689,7 @@ test('parent-field mechanics rejects devices below the ten-storage-binding floor
   );
 });
 
-test('fine-correction base pipelines share one exact explicit layout', () => {
+test('fine-correction and phase-admission pipelines share exact explicit layouts', () => {
   const device = fakeDevice({ explicitLayouts: true });
   const runtime = createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     parentFieldCapacity: 1,
@@ -724,15 +724,41 @@ test('fine-correction base pipelines share one exact explicit layout', () => {
     finePipelineLayout.bindGroupLayouts[0].entries.map(({ binding }) => binding),
     [0, 1, 2, 3, 4, 5, 11]
   );
-  for (const entryPoint of [
-    'admit_cross_level_phase_volume',
-    'propose_cross_level_phase_volume'
-  ]) {
-    assert.equal(
-      device.pipelines.find(({ compute }) => compute.entryPoint === entryPoint)?.layout,
-      'auto'
-    );
-  }
+  const phaseAdmissionEntryPoints = new Set([
+    'begin_cross_level_phase_volume_admission',
+    'validate_fine_cross_level_phase_volume_admission',
+    'validate_coarse_cross_level_phase_volume_admission',
+    'seal_cross_level_phase_volume_admission'
+  ]);
+  const phaseAdmissionPipelines = device.pipelines.filter(({ compute }) => (
+    phaseAdmissionEntryPoints.has(compute.entryPoint)
+  ));
+  assert.equal(
+    phaseAdmissionPipelines.length,
+    phaseAdmissionEntryPoints.size
+  );
+  const [phaseAdmissionPipelineLayout] = new Set(
+    phaseAdmissionPipelines.map(({ layout }) => layout)
+  );
+  assert.equal(
+    phaseAdmissionPipelines.every(
+      ({ layout }) => layout === phaseAdmissionPipelineLayout
+    ),
+    true
+  );
+  assert.notEqual(phaseAdmissionPipelineLayout, 'auto');
+  assert.deepEqual(
+    phaseAdmissionPipelineLayout.bindGroupLayouts[0].entries.map(
+      ({ binding }) => binding
+    ),
+    [0, 1, 2, 3, 5, 6, 7, 8, 9, 11]
+  );
+  assert.equal(
+    device.pipelines.find(({ compute }) => (
+      compute.entryPoint === 'propose_cross_level_phase_volume'
+    ))?.layout,
+    'auto'
+  );
   assert.equal(runtime.destroy(), true);
 });
 
@@ -1079,10 +1105,17 @@ test('workspace WGSL has frozen coarse registry, causal affine routes, and seale
     /vec3<f32>\(params\.gravity_x, params\.gravity_y, params\.gravity_z\)\s*\* params\.macro_dt/
   );
   assert.match(schroederSpatialParentFieldMechanicsWorkspaceWgsl, /fn prepare_fine_transaction/);
-  assert.match(
-    schroederSpatialParentFieldMechanicsWorkspaceWgsl,
-    /fn admit_cross_level_phase_volume/
-  );
+  for (const entryPoint of [
+    'begin_cross_level_phase_volume_admission',
+    'validate_fine_cross_level_phase_volume_admission',
+    'validate_coarse_cross_level_phase_volume_admission',
+    'seal_cross_level_phase_volume_admission'
+  ]) {
+    assert.match(
+      schroederSpatialParentFieldMechanicsWorkspaceWgsl,
+      new RegExp(`fn ${entryPoint}`)
+    );
+  }
   assert.match(
     schroederSpatialParentFieldMechanicsWorkspaceWgsl,
     /fn propose_cross_level_phase_volume/
@@ -1302,6 +1335,8 @@ test('workspace indirect parent-field kernels flatten two-dimensional dispatch r
     'inject_coarse_native_state',
     'update_parent_field_predictors',
     'contact_parent_field_predictors',
+    'validate_fine_cross_level_phase_volume_admission',
+    'validate_coarse_cross_level_phase_volume_admission',
     'propose_cross_level_phase_volume',
     'validate_fine_velocity_correction',
     'validate_routed_coarse_cfl',
@@ -1348,6 +1383,76 @@ test('workspace indirect parent-field kernels flatten two-dimensional dispatch r
       /indirect_row_index\(id, workgroup_count\)/g
     )].length,
     indirectEntryPoints.length
+  );
+});
+
+test('phase-volume admission validates rows in parallel and seals deterministic precedence', () => {
+  const source = schroederSpatialParentFieldMechanicsWorkspaceWgsl;
+  const entrySource = (entryPoint) => {
+    const functionBegin = source.indexOf(`fn ${entryPoint}(`);
+    assert.notEqual(functionBegin, -1, `missing ${entryPoint}`);
+    const begin = source.lastIndexOf('@compute', functionBegin);
+    const end = source.indexOf('@compute', functionBegin + entryPoint.length);
+    return source.slice(begin, end === -1 ? source.length : end);
+  };
+  const beginSource = entrySource(
+    'begin_cross_level_phase_volume_admission'
+  );
+  const fineSource = entrySource(
+    'validate_fine_cross_level_phase_volume_admission'
+  );
+  const coarseSource = entrySource(
+    'validate_coarse_cross_level_phase_volume_admission'
+  );
+  const sealSource = entrySource(
+    'seal_cross_level_phase_volume_admission'
+  );
+
+  assert.match(beginSource, /@compute @workgroup_size\(1\)/);
+  assert.equal([...beginSource.matchAll(/INVALID_INDEX/g)].length, 6);
+  assert.ok(
+    beginSource.indexOf('PHASE_ADMISSION_TOKEN_WORD')
+      > beginSource.lastIndexOf('INVALID_INDEX'),
+    'the admission token must publish after all six minima initialize'
+  );
+  for (const validatorSource of [fineSource, coarseSource]) {
+    assert.match(validatorSource, /@compute @workgroup_size\(64\)/);
+    assert.equal([...validatorSource.matchAll(/atomicMin\(/g)].length, 3);
+    assert.doesNotMatch(
+      validatorSource,
+      /ws_reject\(|reflux_reject\(|reject_pressure_authority\(|atomicAdd\(|atomicOr\(|ws_store\(|phase_admission_store\(/
+    );
+  }
+  assert.match(
+    fineSource,
+    /phase_route_admitted\(fine_field\)[\s\S]*fine_phase_moment_valid\(fine_field\)[\s\S]*fine_pressure_row_valid\(fine_field\)/
+  );
+  assert.match(
+    coarseSource,
+    /parent_to_coarse_load\(parent\)[\s\S]*coarse_phase_moment_valid\(coarse_field, parent\)[\s\S]*coarse_pressure_row_valid\(coarse_field, parent\)/
+  );
+  assert.match(sealSource, /@compute @workgroup_size\(1\)/);
+  assert.doesNotMatch(sealSource, /\bfor\s*\(|\bloop\s*\{/);
+  assert.ok(
+    sealSource.indexOf('first_fine_failure')
+      < sealSource.indexOf('first_coarse_failure'),
+    'every fine failure must retain precedence over every coarse failure'
+  );
+  assert.match(
+    sealSource,
+    /fine_route == first_fine_failure[\s\S]*fine_moment == first_fine_failure[\s\S]*reject_pressure_authority\(\)/
+  );
+  assert.match(
+    sealSource,
+    /coarse_registry == first_coarse_failure[\s\S]*coarse_moment == first_coarse_failure[\s\S]*reject_pressure_authority\(\)/
+  );
+  assert.match(
+    sealSource,
+    /atomicOr\([\s\S]*FIELD_PRESSURE_CONSUMER_CROSS_LEVEL/
+  );
+  assert.match(
+    source,
+    /fn phase_admission_scratch_fits\(\)[\s\S]*params\.baseline_offset[\s\S]*PHASE_ADMISSION_SCRATCH_WORDS/
   );
 });
 

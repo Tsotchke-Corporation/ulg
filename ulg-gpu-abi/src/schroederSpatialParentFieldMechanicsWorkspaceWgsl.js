@@ -308,6 +308,14 @@ const PHASE_MOMENT_READY_ADMITTED: u32 = ${
 const PHASE_SOLID: u32 = 1u;
 const PHASE_GAS: u32 = 3u;
 const PHASE_PLASMA: u32 = 4u;
+const PHASE_ADMISSION_SCRATCH_WORDS: u32 = 8u;
+const PHASE_ADMISSION_TOKEN_WORD: u32 = 0u;
+const PHASE_ADMISSION_FINE_ROUTE_WORD: u32 = 1u;
+const PHASE_ADMISSION_FINE_MOMENT_WORD: u32 = 2u;
+const PHASE_ADMISSION_FINE_PRESSURE_WORD: u32 = 3u;
+const PHASE_ADMISSION_COARSE_REGISTRY_WORD: u32 = 4u;
+const PHASE_ADMISSION_COARSE_MOMENT_WORD: u32 = 5u;
+const PHASE_ADMISSION_COARSE_PRESSURE_WORD: u32 = 6u;
 const ROUTE_CFL_NUMERIC_GUARD_FACTOR: f32 = 0.9999847412109375;
 const ROUTE_CFL_PHYSICAL_AUDIT_FACTOR: f32 = 1.000003814697265625;
 
@@ -2678,14 +2686,56 @@ fn scatter_cross_level_phase_route(
   return true;
 }
 
+// Predictor contact is the last consumer of the baseline bank. Phase-volume
+// admission reuses its first eight words as dispatch-local integer evidence;
+// this changes neither the workspace ABI nor its retained allocation size.
+fn phase_admission_scratch_fits() -> bool {
+  return arrayLength(&workspace) >= WORKSPACE_HEADER_WORDS
+    && params.required_words >= WORKSPACE_HEADER_WORDS
+    && params.required_words <= arrayLength(&workspace)
+    && params.baseline_offset >= WORKSPACE_HEADER_WORDS
+    && range_fits(
+      params.baseline_offset,
+      PHASE_ADMISSION_SCRATCH_WORDS,
+      params.required_words
+    )
+    && ws_load(26u) == params.baseline_offset;
+}
+
+fn phase_admission_address(word: u32) -> u32 {
+  return params.baseline_offset + word;
+}
+
+fn phase_admission_load(word: u32) -> u32 {
+  return ws_load(phase_admission_address(word));
+}
+
+fn phase_admission_store(word: u32, value: u32) {
+  ws_store(phase_admission_address(word), value);
+}
+
+fn phase_admission_token() -> u32 {
+  return params.fine_substep_ordinal + 1u;
+}
+
+fn phase_admission_started() -> bool {
+  return params.transport_enabled != 0u
+    && phase_admission_scratch_fits()
+    && ws_load(2u) == READY_ADMITTED
+    && ws_load(36u) == PHASE_PREDICTORS
+    && phase_admission_load(PHASE_ADMISSION_TOKEN_WORD)
+      == phase_admission_token();
+}
+
 @compute @workgroup_size(1)
-fn admit_cross_level_phase_volume() {
+fn begin_cross_level_phase_volume_admission() {
   if (params.transport_enabled == 0u) { return; }
   if (arrayLength(&workspace) < params.required_words
       || ws_load(0u) != WORKSPACE_MAGIC
       || ws_load(1u) != WORKSPACE_VERSION
       || ws_load(2u) != READY_ADMITTED
       || ws_load(36u) != PHASE_PREDICTORS
+      || !phase_admission_scratch_fits()
       || !parent_admitted()
       || !fine_admitted(
         FIELD_VELOCITY,
@@ -2715,41 +2765,140 @@ fn admit_cross_level_phase_volume() {
     ws_reject(STATUS_OVERFLOW, 38u);
     return;
   }
-  for (var fine_field = 0u; fine_field < ws_load(21u); fine_field = fine_field + 1u) {
-    if (!phase_route_admitted(fine_field)) {
-      ws_reject(STATUS_INVALID_ROUTE, 86u);
-      return;
-    }
-    if (!fine_phase_moment_valid(fine_field)) {
-      ws_reject(STATUS_INVALID_SOURCE, 86u);
-      return;
-    }
-    if (!fine_pressure_row_valid(fine_field)) {
-      reject_pressure_authority();
-      ws_reject(STATUS_INVALID_SOURCE, 86u);
-      return;
-    }
+  phase_admission_store(PHASE_ADMISSION_FINE_ROUTE_WORD, INVALID_INDEX);
+  phase_admission_store(PHASE_ADMISSION_FINE_MOMENT_WORD, INVALID_INDEX);
+  phase_admission_store(PHASE_ADMISSION_FINE_PRESSURE_WORD, INVALID_INDEX);
+  phase_admission_store(PHASE_ADMISSION_COARSE_REGISTRY_WORD, INVALID_INDEX);
+  phase_admission_store(PHASE_ADMISSION_COARSE_MOMENT_WORD, INVALID_INDEX);
+  phase_admission_store(PHASE_ADMISSION_COARSE_PRESSURE_WORD, INVALID_INDEX);
+  phase_admission_store(7u, 0u);
+  // Publish last so later dispatches can never observe partially initialized
+  // evidence for this fine-substep ordinal.
+  phase_admission_store(
+    PHASE_ADMISSION_TOKEN_WORD,
+    phase_admission_token()
+  );
+}
+
+@compute @workgroup_size(64)
+fn validate_fine_cross_level_phase_volume_admission(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let fine_field = indirect_row_index(id, workgroup_count);
+  if (!phase_admission_started() || fine_field >= ws_load(21u)) {
+    return;
   }
-  for (
-    var coarse_field = 0u;
-    coarse_field < ws_load(22u);
-    coarse_field = coarse_field + 1u
-  ) {
-    let parent = parent_view[parent_view[54u] + coarse_field];
-    if (parent >= ws_load(23u)
-        || parent_to_coarse_load(parent) != coarse_field) {
+  if (!phase_route_admitted(fine_field)) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_FINE_ROUTE_WORD
+      )],
+      fine_field
+    );
+  }
+  if (!fine_phase_moment_valid(fine_field)) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_FINE_MOMENT_WORD
+      )],
+      fine_field
+    );
+  }
+  if (!fine_pressure_row_valid(fine_field)) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_FINE_PRESSURE_WORD
+      )],
+      fine_field
+    );
+  }
+}
+
+@compute @workgroup_size(64)
+fn validate_coarse_cross_level_phase_volume_admission(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroup_count: vec3<u32>
+) {
+  let coarse_field = indirect_row_index(id, workgroup_count);
+  if (!phase_admission_started() || coarse_field >= ws_load(22u)) {
+    return;
+  }
+  let parent = parent_view[parent_view[54u] + coarse_field];
+  if (parent >= ws_load(23u)
+      || parent_to_coarse_load(parent) != coarse_field) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_COARSE_REGISTRY_WORD
+      )],
+      coarse_field
+    );
+  }
+  if (!coarse_phase_moment_valid(coarse_field, parent)) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_COARSE_MOMENT_WORD
+      )],
+      coarse_field
+    );
+  }
+  if (!coarse_pressure_row_valid(coarse_field, parent)) {
+    atomicMin(
+      &workspace[phase_admission_address(
+        PHASE_ADMISSION_COARSE_PRESSURE_WORD
+      )],
+      coarse_field
+    );
+  }
+}
+
+@compute @workgroup_size(1)
+fn seal_cross_level_phase_volume_admission() {
+  if (!phase_admission_started()) { return; }
+  let fine_route = phase_admission_load(
+    PHASE_ADMISSION_FINE_ROUTE_WORD
+  );
+  let fine_moment = phase_admission_load(
+    PHASE_ADMISSION_FINE_MOMENT_WORD
+  );
+  let fine_pressure = phase_admission_load(
+    PHASE_ADMISSION_FINE_PRESSURE_WORD
+  );
+  let first_fine_failure = min(fine_route, min(fine_moment, fine_pressure));
+  if (first_fine_failure != INVALID_INDEX) {
+    if (fine_route == first_fine_failure) {
+      ws_reject(STATUS_INVALID_ROUTE, 86u);
+    } else if (fine_moment == first_fine_failure) {
+      ws_reject(STATUS_INVALID_SOURCE, 86u);
+    } else {
+      reject_pressure_authority();
+      ws_reject(STATUS_INVALID_SOURCE, 86u);
+    }
+    return;
+  }
+  let coarse_registry = phase_admission_load(
+    PHASE_ADMISSION_COARSE_REGISTRY_WORD
+  );
+  let coarse_moment = phase_admission_load(
+    PHASE_ADMISSION_COARSE_MOMENT_WORD
+  );
+  let coarse_pressure = phase_admission_load(
+    PHASE_ADMISSION_COARSE_PRESSURE_WORD
+  );
+  let first_coarse_failure = min(
+    coarse_registry,
+    min(coarse_moment, coarse_pressure)
+  );
+  if (first_coarse_failure != INVALID_INDEX) {
+    if (coarse_registry == first_coarse_failure) {
       ws_reject(STATUS_INVALID_REGISTRY, 87u);
-      return;
-    }
-    if (!coarse_phase_moment_valid(coarse_field, parent)) {
+    } else if (coarse_moment == first_coarse_failure) {
       ws_reject(STATUS_INVALID_SOURCE, 87u);
-      return;
-    }
-    if (!coarse_pressure_row_valid(coarse_field, parent)) {
+    } else {
       reject_pressure_authority();
       ws_reject(STATUS_INVALID_SOURCE, 87u);
-      return;
     }
+    return;
   }
   let fine_receipt = fine_receipt_offset();
   let fine_prior_claimed = atomicOr(

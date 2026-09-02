@@ -325,9 +325,12 @@ import {
   webGpuDeviceId
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  armWorkerQueueSubmitBurst,
+  cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   registerQueueOrderedCleanupClaim,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  workerQueueSubmitBurstStats
 } from '../src/runtime/webgpuComputeLayout.js';
 import {
   createGpuReadbackTelemetry
@@ -8513,6 +8516,7 @@ test('Schroeder single-level commits and fences a generation before successor pu
     fenceCallCount += 1;
     return generationFence;
   };
+  armWorkerQueueSubmitBurst(device);
   let generation = null;
   let publicationCallCount = 0;
   const residentStepRunner = async (options) => {
@@ -8648,6 +8652,26 @@ test('Schroeder single-level commits and fences a generation before successor pu
     'final-render-proxy-published-from-exact-committed-successor'
   );
   assert.equal(result.finalRenderProxyPublished, true);
+  assert.equal(
+    result.finalRenderProxySubmitFusionStatus,
+    'final-render-proxy-submit-fusion-not-eligible'
+  );
+  assert.deepEqual(
+    result.finalRenderProxySubmitFusion,
+    {
+      status: 'final-render-proxy-submit-fusion-not-eligible',
+      eligible: false,
+      fused: false,
+      reasons: ['resident-transfer-cleanup-unavailable']
+    }
+  );
+  const submitBurstStats = workerQueueSubmitBurstStats(device);
+  assert.equal(submitBurstStats.open, false);
+  assert.equal(submitBurstStats.openCount, 0);
+  assert.equal(submitBurstStats.heldSubmitTotal, 0);
+  assert.equal(submitBurstStats.flushCount, 0);
+  assert.equal(submitBurstStats.writeThroughCount, 0);
+  assert.equal(submitBurstStats.staleWriteFlushCount, 0);
   assert.equal(
     result.finalRenderProxySourceFamily,
     result.schroederSpatialSuccessorSourceFamily
@@ -12054,6 +12078,7 @@ test('injected spatial generations fail closed on paired-v2 requested and observ
 
 test('Schroeder two-level authority builds one canonical generation with two compact level views', async () => {
   const device = createFakeWebGpuDevice();
+  armWorkerQueueSubmitBurst(device);
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
   const residentCalls = [];
@@ -12374,6 +12399,16 @@ test('Schroeder two-level authority builds one canonical generation with two com
     result.schroederSpatialSuccessorSourceFamily
   );
   assert.equal(result.finalRenderProxyPublished, true);
+  assert.equal(
+    result.finalRenderProxySubmitFusionStatus,
+    'final-render-proxy-submit-fusion-not-eligible'
+  );
+  assert.deepEqual(result.finalRenderProxySubmitFusion, {
+    status: 'final-render-proxy-submit-fusion-not-eligible',
+    eligible: false,
+    fused: false,
+    reasons: ['resident-transfer-cleanup-unavailable']
+  });
   assert.equal(
     result.portableSummary.sourceFamily,
     result.schroederSpatialSuccessorSourceFamily
@@ -14011,6 +14046,7 @@ test('M4: Schroeder two-level authoritative mode chains the reaction sidecar aft
 
 test('M4: paired canonical mechanics refresh settles thermal and reaction sidecar claims at one existing submit', async () => {
   const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  armWorkerQueueSubmitBurst(device);
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
   let retiredThermalGraph = null;
@@ -14024,6 +14060,13 @@ test('M4: paired canonical mechanics refresh settles thermal and reaction sideca
   const reactionMechanicsBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'paired-reaction-mechanics-out', size: 4096, usage: 128
   }), device);
+  const pairedTwoLevelMechanicsRunner = async (options) => (
+    driveAuthoritativeCanonicalEpochs(options, {
+      prefix: 'paired-reaction-two-level',
+      terminalOwnsThermoBuffer: true
+    })
+  );
+  pairedTwoLevelMechanicsRunner.schroederSpatialTopologyTransitionAware = true;
   const result = await runSchroederSameLevelMechanicsWebGpu({
     device,
     ...buffers,
@@ -14037,12 +14080,7 @@ test('M4: paired canonical mechanics refresh settles thermal and reaction sideca
     enableMechanicsFieldPairV2: true,
     twoLevelMechanicsAuthority: 'authoritative',
     twoLevelFineSubstepCount: 2,
-    twoLevelMechanicsRunner: async (options) => (
-      driveAuthoritativeCanonicalEpochs(options, {
-        prefix: 'paired-reaction-two-level',
-        terminalOwnsThermoBuffer: true
-      })
-    ),
+    twoLevelMechanicsRunner: pairedTwoLevelMechanicsRunner,
     residentStepOptions: {
       thermalMaterialTable: canonicalSidecarThermalMaterialTable,
       mechanicsMaterialTable: canonicalSidecarMechanicsMaterialTable,
@@ -14078,6 +14116,33 @@ test('M4: paired canonical mechanics refresh settles thermal and reaction sideca
   await Promise.resolve();
   const step = result.residentStep;
   assert.deepEqual(device.queueFenceCalls, []);
+  assert.equal(
+    result.finalRenderProxySubmitFusionStatus,
+    'final-render-proxy-submit-fused'
+  );
+  assert.deepEqual(result.finalRenderProxySubmitFusion, {
+    status: 'final-render-proxy-submit-fused',
+    eligible: true,
+    fused: true,
+    borrowed: false,
+    realSubmitCount: 1,
+    submittedCommandBufferCount: 3,
+    heldSubmitCount: 2,
+    writeThroughCount: 1,
+    staleWriteFlushCount: 0,
+    fenceFlushCount: 0,
+    postSubmitCleanupCount: 1,
+    openAfter: false,
+    reasons: []
+  });
+  const finalProxySubmitStats = workerQueueSubmitBurstStats(device);
+  assert.equal(finalProxySubmitStats.open, false);
+  assert.equal(finalProxySubmitStats.openCount, 1);
+  assert.equal(finalProxySubmitStats.heldSubmitTotal, 2);
+  assert.equal(finalProxySubmitStats.flushCount, 1);
+  assert.equal(finalProxySubmitStats.flushSubmitCount, 3);
+  assert.equal(finalProxySubmitStats.writeThroughCount, 1);
+  assert.equal(finalProxySubmitStats.staleWriteFlushCount, 0);
   assert.equal(result.twoLevelMechanics.sidecarHostQueueFenceCount, 0);
   assert.equal(step.hostQueueFenceCount, 0);
   assert.equal(step.normalHotLoopReadbackFree, true);
@@ -14107,6 +14172,91 @@ test('M4: paired canonical mechanics refresh settles thermal and reaction sideca
   ]) {
     assert.equal(graphBuffer.destroyCount, 1);
   }
+});
+
+test('fused final render submit failure leaves external cleanup claims cancelable', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const submitFailure = new Error('final proxy real submit failed');
+  submitFailure.code = 'ERR_TEST_FINAL_PROXY_REAL_SUBMIT';
+  const realSubmit = device.queue.submit.bind(device.queue);
+  device.queue.submit = (commandBuffers) => {
+    if (
+      workerQueueSubmitBurstStats(device)?.open === true
+      && commandBuffers.length === 3
+    ) {
+      throw submitFailure;
+    }
+    return realSubmit(commandBuffers);
+  };
+  armWorkerQueueSubmitBurst(device);
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 3 });
+  const producerFamily = 'test-final-proxy-boundary-failure';
+  const producerOutput = Object.freeze({ producerFamily });
+  let producerCleanupCount = 0;
+  const producerCleanup = () => {
+    producerCleanupCount += 1;
+  };
+  const issuer = createQueueOrderedCleanupClaimIssuer({ producerFamily });
+  const producerClaim = registerQueueOrderedCleanupClaim(
+    issuer,
+    device,
+    {
+      producerOutput,
+      cleanup: producerCleanup
+    }
+  );
+  const twoLevelMechanicsRunner = async (options) => (
+    driveAuthoritativeCanonicalEpochs(options, {
+      prefix: 'final-proxy-boundary-failure'
+    })
+  );
+  twoLevelMechanicsRunner.schroederSpatialTopologyTransitionAware = true;
+
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      ...buffers,
+      ...uploads,
+      selectedLevel: 0,
+      minLevel: 0,
+      maxLevel: 1,
+      baseGridSpacingM: 0.25,
+      dt: 5e-4,
+      enableTwoLevelMechanics: true,
+      enableMechanicsFieldPairV2: true,
+      twoLevelMechanicsAuthority: 'authoritative',
+      twoLevelFineSubstepCount: 2,
+      twoLevelMechanicsRunner,
+      queueOrderedProducerClaims: [producerClaim],
+      residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+    }),
+    (error) => error === submitFailure
+  );
+
+  assert.equal(
+    cancelQueueOrderedCleanupClaim(
+      producerClaim,
+      device,
+      {
+        producerOutput,
+        cleanup: producerCleanup
+      }
+    ),
+    true,
+    'the failed real submit must not seal or strand the external claim'
+  );
+  assert.equal(producerCleanupCount, 0);
+  const stats = workerQueueSubmitBurstStats(device);
+  assert.equal(stats.open, false);
+  assert.equal(stats.flushCount, 1);
+  assert.equal(stats.heldSubmitTotal, 2);
+  assert.equal(stats.writeThroughCount, 1);
+  assert.equal(stats.postSubmitCleanupTotal, 1);
+  const finalActiveNodeBuffer = device.createdBuffers.findLast(
+    (buffer) => buffer.label === 'ulg-schroeder-active-nodes-out'
+  );
+  assert.equal(finalActiveNodeBuffer?.destroyed, true);
 });
 
 test('the neighbour candidate arena is byte-bounded instead of scaling with particle count', () => {

@@ -3912,6 +3912,21 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
     'worker-ss-chain-next-mechanics',
     particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
   );
+  const finalRenderProxySubmitFusion = Object.freeze({
+    status: 'final-render-proxy-submit-fused',
+    eligible: true,
+    fused: true,
+    borrowed: false,
+    realSubmitCount: 1,
+    submittedCommandBufferCount: 3,
+    heldSubmitCount: 2,
+    writeThroughCount: 1,
+    staleWriteFlushCount: 0,
+    fenceFlushCount: 0,
+    postSubmitCleanupCount: 1,
+    openAfter: false,
+    reasons: Object.freeze([])
+  });
   const observedStepZero = {};
   const mechanics = await runUlgMechanicsResidentStageWorkerPayload(payload(
     stage(
@@ -3945,6 +3960,11 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
           return {
             status: 'schroeder-same-level-mechanics-completed',
             selectedLevel: 0,
+            finalRenderProxyBuildStatus:
+              'final-render-proxy-published-from-exact-committed-successor',
+            finalRenderProxySubmitFusionStatus:
+              'final-render-proxy-submit-fused',
+            finalRenderProxySubmitFusion,
             residentStep: {
               backend: 'webgpu',
               status: 'resident-step-completed',
@@ -4092,6 +4112,26 @@ test('ULG resident stage worker chains schroederSpatialEpoch and schroederSameLe
     'authoritative'
   );
   assert.equal(mechanics.value.hierarchyStageSummary.fullParticleReadbackPerformed, false);
+  assert.equal(
+    mechanics.value.hierarchyStageSummary.finalRenderProxyBuildStatus,
+    'final-render-proxy-published-from-exact-committed-successor'
+  );
+  assert.equal(
+    mechanics.value.hierarchyStageSummary.finalRenderProxySubmitFusionStatus,
+    'final-render-proxy-submit-fused'
+  );
+  assert.deepEqual(
+    mechanics.value.hierarchyStageSummary.finalRenderProxySubmitFusion,
+    finalRenderProxySubmitFusion
+  );
+  assert.notStrictEqual(
+    mechanics.value.hierarchyStageSummary.finalRenderProxySubmitFusion,
+    finalRenderProxySubmitFusion
+  );
+  assert.notStrictEqual(
+    mechanics.value.hierarchyStageSummary.finalRenderProxySubmitFusion.reasons,
+    finalRenderProxySubmitFusion.reasons
+  );
   assert.deepEqual(
     mechanics.value.hierarchyStageSummary.postMechanicsClosure,
     {
@@ -5143,6 +5183,20 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
   assert.equal(result.cancelled, false);
   assert.equal(result.requestedStepCount, 3);
   assert.equal(result.completedStepCount, 3);
+  assert.equal(result.submitBurstObservation.opened, false);
+  assert.equal(result.submitBurstObservation.stats, null);
+  const cumulativeSubmitStats =
+    result.submitBurstObservation.cumulativeStats;
+  assert.ok(cumulativeSubmitStats);
+  assert.equal(cumulativeSubmitStats.open, false);
+  assert.ok(Number.isInteger(cumulativeSubmitStats.directSubmitTotal));
+  assert.ok(Number.isInteger(cumulativeSubmitStats.flushCount));
+  assert.equal(
+    cumulativeSubmitStats.directSubmitTotal
+      + cumulativeSubmitStats.flushCount,
+    fixture.device.queue.submitCalls.length,
+    'passive wrapper counters must equal the fake queue native-submit census'
+  );
   assert.equal(
     result.controlPlaneYieldReceipt.schema,
     ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA

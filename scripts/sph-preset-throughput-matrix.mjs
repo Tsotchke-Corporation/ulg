@@ -728,6 +728,15 @@ async function compactPageSnapshot(page) {
           },
       submitCensus: lane?.submitCensus ?? null,
       submitBurstObservation: lane?.submitBurstObservation ?? null,
+      finalRenderProxyBuildStatus:
+        lastStepSummary?.hierarchyStageSummary
+          ?.finalRenderProxyBuildStatus ?? null,
+      finalRenderProxySubmitFusionStatus:
+        lastStepSummary?.hierarchyStageSummary
+          ?.finalRenderProxySubmitFusionStatus ?? null,
+      finalRenderProxySubmitFusion:
+        lastStepSummary?.hierarchyStageSummary
+          ?.finalRenderProxySubmitFusion ?? null,
       lastResidentMs: perf?.lastResidentMs ?? null,
       lastResidentCycleMs: perf?.lastResidentCycleMs ?? null,
       lastResidentPostComputeMs: perf?.lastResidentPostComputeMs ?? null,

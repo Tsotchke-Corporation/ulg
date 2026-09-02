@@ -144,7 +144,8 @@ import {
   closeWorkerQueueSubmitBurst,
   flushWorkerQueueSubmitBurst,
   openWorkerQueueSubmitBurst,
-  prewarmCachedExplicitComputePipeline
+  prewarmCachedExplicitComputePipeline,
+  workerQueueSubmitBurstStats
 } from '../runtime/webgpuComputeLayout.js';
 import {
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
@@ -5988,6 +5989,19 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       kernelResult.phaseVolumeLevelUpdateStatus ?? null,
     pressureInterfaceOwnerScopeStatus:
       kernelResult.pressureInterfaceOwnerScopeStatus ?? null,
+    finalRenderProxyBuildStatus:
+      kernelResult.finalRenderProxyBuildStatus ?? null,
+    finalRenderProxySubmitFusionStatus:
+      kernelResult.finalRenderProxySubmitFusionStatus ?? null,
+    finalRenderProxySubmitFusion:
+      kernelResult.finalRenderProxySubmitFusion == null
+        ? null
+        : {
+            ...kernelResult.finalRenderProxySubmitFusion,
+            reasons: [
+              ...(kernelResult.finalRenderProxySubmitFusion.reasons || [])
+            ]
+          },
     residentStageStatus: { ...(residentStep.stageStatus || {}) },
     residentStageBackends: { ...(residentStep.stageBackends || {}) },
     staticGpuTableUploadStatus: {
@@ -11673,7 +11687,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       submitBurstObservation: {
         ...resolveSubmitBurstEligibility(),
         opened: submitBurstCloseStats != null,
-        stats: submitBurstCloseStats
+        stats: submitBurstCloseStats,
+        // Always-on wrapper counters are passive and profile-independent.
+        // Their directSubmitTotal + flushCount delta is the native queue
+        // submission count even when the wider schedule burst is ineligible.
+        cumulativeStats: workerQueueSubmitBurstStats(state.workerDevice)
       },
       submitCensus: submitCensus.size > 0
         ? Object.fromEntries(submitCensus)

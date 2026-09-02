@@ -164,7 +164,9 @@ import {
   registerQueueOrderedCleanupClaim,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  withWorkerQueueSubmitBurstWriteThrough,
+  workerQueueSubmitBurstStats
 } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -780,6 +782,10 @@ const schroederHierarchySubmittedTemporaryCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
     producerFamily: 'schroeder-hierarchy-submitted-temporaries'
   });
+const finalRenderActiveNodeSubmissionDeferralToken = Object.freeze({
+  schema: 'peercompute.ulg.final-render-active-node-submit-deferral.v0'
+});
+const deferredFinalRenderActiveNodeSubmissions = new WeakMap();
 const schroederHierarchyTransferCleanupClaimIssuers = new Map(
   ['render', 'next-tick'].map((transferClass) => {
     const producerFamily =
@@ -8292,6 +8298,54 @@ export async function runSchroederLevelAssignmentWebGpu({
   }
 }
 
+function takeDeferredFinalRenderActiveNodeSubmission(
+  result,
+  device,
+  action
+) {
+  const record = deferredFinalRenderActiveNodeSubmissions.get(result);
+  if (!record || record.device !== device || record.state !== 'pending') {
+    const error = new Error(
+      `Final render active-node submission cannot ${action}: pending authority is missing or stale`
+    );
+    error.code =
+      'ERR_SCHROEDER_FINAL_RENDER_ACTIVE_NODE_SUBMISSION_AUTHORITY';
+    throw error;
+  }
+  record.state = action;
+  deferredFinalRenderActiveNodeSubmissions.delete(result);
+  return record;
+}
+
+function finalizeDeferredFinalRenderActiveNodeSubmission(result, device) {
+  const record = takeDeferredFinalRenderActiveNodeSubmission(
+    result,
+    device,
+    'finalize'
+  );
+  try {
+    return record.finalize();
+  } catch (error) {
+    try {
+      record.abort();
+    } catch {
+      // Preserve the exact finalization failure.
+    }
+    throw error;
+  }
+}
+
+function abortDeferredFinalRenderActiveNodeSubmission(result, device) {
+  if (!deferredFinalRenderActiveNodeSubmissions.has(result)) return false;
+  const record = takeDeferredFinalRenderActiveNodeSubmission(
+    result,
+    device,
+    'abort'
+  );
+  record.abort();
+  return true;
+}
+
 export async function runSchroederActiveNodeListWebGpu({
   device,
   levelAssignment,
@@ -8307,7 +8361,8 @@ export async function runSchroederActiveNodeListWebGpu({
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
   queueOrderedCleanup = false,
   queueOrderedLocalTemporaryCleanup = false,
-  queueOrderedProducerClaims = []
+  queueOrderedProducerClaims = [],
+  queueOrderedSubmissionDeferralToken = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederActiveNodeListWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -8329,6 +8384,31 @@ export async function runSchroederActiveNodeListWebGpu({
     maxTileSpacingM
   });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const deferQueueOrderedSubmission =
+    queueOrderedSubmissionDeferralToken
+      === finalRenderActiveNodeSubmissionDeferralToken;
+  if (
+    queueOrderedSubmissionDeferralToken != null
+    && deferQueueOrderedSubmission !== true
+  ) {
+    const error = new Error(
+      'Schroeder active-node submission deferral requires exact private authority'
+    );
+    error.code =
+      'ERR_SCHROEDER_ACTIVE_NODE_SUBMISSION_DEFERRAL_UNAUTHORIZED';
+    throw error;
+  }
+  if (
+    deferQueueOrderedSubmission
+    && (!noFullReadback || queueOrderedCleanup !== true)
+  ) {
+    const error = new Error(
+      'Schroeder active-node submission deferral requires queue-ordered no-full-readback cleanup'
+    );
+    error.code =
+      'ERR_SCHROEDER_ACTIVE_NODE_SUBMISSION_DEFERRAL_ROUTE';
+    throw error;
+  }
   if (!Array.isArray(queueOrderedProducerClaims)) {
     throw new TypeError(
       'Schroeder active-node queueOrderedProducerClaims must be an array'
@@ -8550,12 +8630,7 @@ export async function runSchroederActiveNodeListWebGpu({
         source: 'schroeder-active-node-temporary-cleanup'
       });
     };
-    if (
-      noFullReadback
-      && queueOrderedCleanup === true
-      && submissionObserved
-      && successfulReturn
-    ) {
+    const finalizeQueueOrderedSubmission = () => {
       let producerClaim = null;
       try {
         producerClaim = registerQueueOrderedCleanupClaim(
@@ -8626,6 +8701,29 @@ export async function runSchroederActiveNodeListWebGpu({
             recordHostQueueFence();
           }
         }
+      }
+      return queueOrderedFinalConsumerCapability;
+    };
+    if (
+      noFullReadback
+      && queueOrderedCleanup === true
+      && submissionObserved
+      && successfulReturn
+    ) {
+      if (deferQueueOrderedSubmission) {
+        if (deferredFinalRenderActiveNodeSubmissions.has(result)) {
+          throw new Error(
+            'Final render active-node submission deferral was registered twice'
+          );
+        }
+        deferredFinalRenderActiveNodeSubmissions.set(result, {
+          device,
+          state: 'pending',
+          finalize: finalizeQueueOrderedSubmission,
+          abort: cleanup
+        });
+      } else {
+        finalizeQueueOrderedSubmission();
       }
     } else if (
       noFullReadback
@@ -18456,6 +18554,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let ownsResolvedFinalRenderLevelAssignment = false;
   let finalRenderProxyBuildStatus =
     'final-render-proxy-build-not-requested';
+  let finalRenderProxySubmitFusionStatus =
+    'final-render-proxy-submit-fusion-not-requested';
+  let finalRenderProxySubmitFusion = null;
   const twoLevelSidecarClaimFinalConsumerExpected = Boolean(
     pairedCanonicalQueueOrderedCleanup === true
     && residentStepOptions?.mechanicsMaterialTable
@@ -18746,50 +18847,248 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     const createdLevelAssignment = admittedLevelAssignment == null;
     ownsResolvedFinalRenderLevelAssignment =
       createdLevelAssignment && successorAuthority !== true;
-    resolvedFinalRenderLevelAssignment = admittedLevelAssignment
-      || await runHierarchyStage(
-        'final-render-level-assignment',
-        () => successorLevelAssignmentRunner({
-          device,
-          sphParticleState: normalizedFinalSphParticleState,
-          mlsMpmParticleState: normalizedFinalMlsMpmParticleState,
-          sphParticleUpload: finalSphUpload,
-          mlsMpmParticleUpload: finalMlsMpmUpload,
-          baseGridSpacingM: plan.baseGridSpacingM,
-          minLevel: plan.minLevel,
-          maxLevel: plan.maxLevel,
-          targetSupportCells,
-          supportRadiusScale,
-          retainAssignmentBuffer: true,
-          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-          queueOrderedCleanup: canonicalHierarchyQueueOrderedCleanup,
-          queueOrderedLocalTemporaryCleanup:
-            independentV2LocalSubmittedTemporaryCleanup
-        })
-      );
-    const finalAssignment = resolvedFinalRenderLevelAssignment;
-    if (
-      !finalAssignment?.assignmentBuffer
-      || finalAssignment.particleCount !== particleCount
-      || finalAssignment.sourceStateBuffer !== finalSphUpload.stateBuffer
-      || finalAssignment.sourceThermoBuffer !== finalSphUpload.thermoBuffer
-      || finalAssignment.sourceMechanicsBuffer
-        !== finalMlsMpmUpload.mechanicsBuffer
-      || finalAssignment.sourceStateBufferBorrowed !== true
-      || finalAssignment.sourceThermoBufferBorrowed !== true
-      || finalAssignment.sourceMechanicsBufferBorrowed !== true
-    ) {
-      if (createdLevelAssignment) {
-        finalAssignment?.destroyAssignmentBuffer?.();
+    let deferFinalRenderActiveNodeSubmission = false;
+    const produceFinalRenderProxyArtifacts = async () => {
+      resolvedFinalRenderLevelAssignment = admittedLevelAssignment
+        || await runHierarchyStage(
+          'final-render-level-assignment',
+          () => successorLevelAssignmentRunner({
+            device,
+            sphParticleState: normalizedFinalSphParticleState,
+            mlsMpmParticleState: normalizedFinalMlsMpmParticleState,
+            sphParticleUpload: finalSphUpload,
+            mlsMpmParticleUpload: finalMlsMpmUpload,
+            baseGridSpacingM: plan.baseGridSpacingM,
+            minLevel: plan.minLevel,
+            maxLevel: plan.maxLevel,
+            targetSupportCells,
+            supportRadiusScale,
+            retainAssignmentBuffer: true,
+            readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+            queueOrderedCleanup: canonicalHierarchyQueueOrderedCleanup,
+            queueOrderedLocalTemporaryCleanup:
+              independentV2LocalSubmittedTemporaryCleanup
+          })
+        );
+      const finalAssignment = resolvedFinalRenderLevelAssignment;
+      if (
+        !finalAssignment?.assignmentBuffer
+        || finalAssignment.particleCount !== particleCount
+        || finalAssignment.sourceStateBuffer !== finalSphUpload.stateBuffer
+        || finalAssignment.sourceThermoBuffer !== finalSphUpload.thermoBuffer
+        || finalAssignment.sourceMechanicsBuffer
+          !== finalMlsMpmUpload.mechanicsBuffer
+        || finalAssignment.sourceStateBufferBorrowed !== true
+        || finalAssignment.sourceThermoBufferBorrowed !== true
+        || finalAssignment.sourceMechanicsBufferBorrowed !== true
+      ) {
+        if (createdLevelAssignment) {
+          finalAssignment?.destroyAssignmentBuffer?.();
+        }
+        resolvedFinalRenderLevelAssignment = null;
+        ownsResolvedFinalRenderLevelAssignment = false;
+        const error = new Error(
+          'Final render level assignment does not retain the exact successor state/thermo/mechanics family'
+        );
+        error.code = 'ERR_SCHROEDER_FINAL_RENDER_ASSIGNMENT_PROVENANCE';
+        throw error;
       }
+      let producedFinalRenderActiveNodeList = null;
+      try {
+        resolvedFinalRenderActiveNodeList = await runHierarchyStage(
+          'final-render-active-node-list',
+          async () => {
+            producedFinalRenderActiveNodeList =
+              await runSchroederActiveNodeListWebGpu({
+                device,
+                levelAssignment: finalAssignment,
+                phaseVolumeAssignmentOverlay: null,
+                phaseVolumeAssignmentOverlayIndex: null,
+                phaseVolumeLevelUpdate: null,
+                selectedLevel: plan.selectedLevel,
+                tileCellCount,
+                supportInflateCells,
+                retainActiveNodeBuffer: true,
+                readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+                queueOrderedCleanup: residentTransferQueueOrderedCleanup,
+                queueOrderedLocalTemporaryCleanup:
+                  independentV2LocalSubmittedTemporaryCleanup,
+                queueOrderedProducerClaims,
+                queueOrderedSubmissionDeferralToken:
+                  deferFinalRenderActiveNodeSubmission
+                    ? finalRenderActiveNodeSubmissionDeferralToken
+                    : null
+              });
+            return producedFinalRenderActiveNodeList;
+          }
+        );
+      } catch (error) {
+        if (producedFinalRenderActiveNodeList) {
+          resolvedFinalRenderActiveNodeList =
+            producedFinalRenderActiveNodeList;
+        }
+        throw error;
+      }
+      return resolvedFinalRenderActiveNodeList;
+    };
+    const submitBurstBefore = workerQueueSubmitBurstStats(device);
+    const submitFusionReasons = [];
+    if (successorAuthority !== true) {
+      submitFusionReasons.push('successor-authority-unavailable');
+    }
+    if (!createdLevelAssignment) {
+      submitFusionReasons.push('level-assignment-already-admitted');
+    }
+    if (
+      successorLevelAssignmentRunner
+        !== runSchroederLevelAssignmentWebGpu
+    ) {
+      submitFusionReasons.push('injected-level-assignment-runner');
+    }
+    if (readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE) {
+      submitFusionReasons.push('full-readback-route');
+    }
+    if (measureHierarchyStageQueueFence) {
+      submitFusionReasons.push('queue-fence-profiling-active');
+    }
+    if (gpuTimestampRecorder?.active === true) {
+      submitFusionReasons.push('gpu-timestamp-profiling-active');
+    }
+    if (residentTransferQueueOrderedCleanup !== true) {
+      submitFusionReasons.push('resident-transfer-cleanup-unavailable');
+    }
+    if (submitBurstBefore == null) {
+      submitFusionReasons.push('worker-submit-burst-unarmed');
+    } else if (submitBurstBefore.open === true) {
+      // A schedule-owned burst may intentionally span several physics steps.
+      // Forcing a final-proxy boundary here would collapse that wider cadence
+      // back to one real submit per step and erase its bulk-lane win.
+      submitFusionReasons.push('schedule-submit-burst-already-open');
+    }
+    const submitFusionEligible = submitFusionReasons.length === 0;
+    finalRenderProxySubmitFusionStatus = submitFusionEligible
+      ? 'final-render-proxy-submit-fusion-eligible'
+      : 'final-render-proxy-submit-fusion-not-eligible';
+    finalRenderProxySubmitFusion = Object.freeze({
+      status: finalRenderProxySubmitFusionStatus,
+      eligible: submitFusionEligible,
+      fused: false,
+      reasons: Object.freeze(submitFusionReasons)
+    });
+    try {
+      if (submitFusionEligible) {
+        deferFinalRenderActiveNodeSubmission = true;
+        await withWorkerQueueSubmitBurstWriteThrough(
+          device,
+          produceFinalRenderProxyArtifacts,
+          {
+            label: 'ulg-schroeder-final-render-proxy',
+            flushReason: 'final-render-proxy'
+          }
+        );
+        const finalConsumerCapability =
+          finalizeDeferredFinalRenderActiveNodeSubmission(
+            resolvedFinalRenderActiveNodeList,
+            device
+          );
+        if (!finalConsumerCapability) {
+          const error = new Error(
+            'Fused final render active-node submit did not seal its exact cleanup authority'
+          );
+          error.code =
+            'ERR_SCHROEDER_FINAL_RENDER_ACTIVE_NODE_SUBMISSION_UNSEALED';
+          throw error;
+        }
+        const submitBurstAfter = workerQueueSubmitBurstStats(device);
+        const statDelta = (field) => (
+          (submitBurstAfter?.[field] ?? 0)
+          - (submitBurstBefore?.[field] ?? 0)
+        );
+        const realSubmitCount = statDelta('flushCount');
+        const submittedCommandBufferCount =
+          statDelta('flushSubmitCount');
+        const heldSubmitCount = statDelta('heldSubmitTotal');
+        const writeThroughCount = statDelta('writeThroughCount');
+        const staleWriteFlushCount = statDelta('staleWriteFlushCount');
+        const fenceFlushCount = statDelta('fenceFlushCount');
+        const fused = Boolean(
+          realSubmitCount === 1
+          && submittedCommandBufferCount === 3
+          && heldSubmitCount === 2
+          && writeThroughCount === 1
+          && staleWriteFlushCount === 0
+          && fenceFlushCount === 0
+          && submitBurstAfter?.open !== true
+        );
+        const fusionOutcomeReasons = [];
+        if (!fused) {
+          if (writeThroughCount !== 1 || staleWriteFlushCount !== 0) {
+            fusionOutcomeReasons.push('write-through-fallback');
+          }
+          if (fenceFlushCount !== 0) {
+            fusionOutcomeReasons.push('queue-fence-flush');
+          }
+          if (realSubmitCount !== 1) {
+            fusionOutcomeReasons.push('multiple-real-submits');
+          }
+          if (
+            heldSubmitCount !== 2
+            || submittedCommandBufferCount !== 3
+          ) {
+            fusionOutcomeReasons.push('unexpected-command-buffer-census');
+          }
+          if (submitBurstAfter?.open === true) {
+            fusionOutcomeReasons.push('scope-remained-open');
+          }
+        }
+        finalRenderProxySubmitFusionStatus = fused
+          ? 'final-render-proxy-submit-fused'
+          : 'final-render-proxy-submit-fusion-fell-back';
+        finalRenderProxySubmitFusion = Object.freeze({
+          status: finalRenderProxySubmitFusionStatus,
+          eligible: true,
+          fused,
+          borrowed: submitBurstBefore.open === true,
+          realSubmitCount,
+          submittedCommandBufferCount,
+          heldSubmitCount,
+          writeThroughCount,
+          staleWriteFlushCount,
+          fenceFlushCount,
+          postSubmitCleanupCount: statDelta('postSubmitCleanupTotal'),
+          openAfter: submitBurstAfter?.open === true,
+          reasons: Object.freeze(fusionOutcomeReasons)
+        });
+      } else {
+        await produceFinalRenderProxyArtifacts();
+      }
+    } catch (error) {
+      try {
+        abortDeferredFinalRenderActiveNodeSubmission(
+          resolvedFinalRenderActiveNodeList,
+          device
+        );
+      } catch {
+        // Preserve the exact runner or real-submit failure.
+      }
+      try {
+        resolvedFinalRenderActiveNodeList?.destroyActiveNodeBuffer?.();
+      } catch {
+        // Best-effort exceptional output retirement must not mask authority.
+      }
+      if (createdLevelAssignment) {
+        try {
+          resolvedFinalRenderLevelAssignment?.destroyAssignmentBuffer?.();
+        } catch {
+          // Preserve the exact runner or real-submit failure.
+        }
+      }
+      resolvedFinalRenderActiveNodeList = null;
       resolvedFinalRenderLevelAssignment = null;
       ownsResolvedFinalRenderLevelAssignment = false;
-      const error = new Error(
-        'Final render level assignment does not retain the exact successor state/thermo/mechanics family'
-      );
-      error.code = 'ERR_SCHROEDER_FINAL_RENDER_ASSIGNMENT_PROVENANCE';
       throw error;
     }
+    const finalAssignment = resolvedFinalRenderLevelAssignment;
     if (ownsResolvedFinalRenderLevelAssignment) {
       registerHierarchyArtifacts(
         'final-render-level-assignment',
@@ -18797,34 +19096,6 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         null,
         { expectedConsumers: ['final-render-active-node-list'] }
       );
-    }
-    try {
-      resolvedFinalRenderActiveNodeList = await runHierarchyStage(
-        'final-render-active-node-list',
-        () => runSchroederActiveNodeListWebGpu({
-          device,
-          levelAssignment: finalAssignment,
-          phaseVolumeAssignmentOverlay: null,
-          phaseVolumeAssignmentOverlayIndex: null,
-          phaseVolumeLevelUpdate: null,
-          selectedLevel: plan.selectedLevel,
-          tileCellCount,
-          supportInflateCells,
-          retainActiveNodeBuffer: true,
-          readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-          queueOrderedCleanup: residentTransferQueueOrderedCleanup,
-          queueOrderedLocalTemporaryCleanup:
-            independentV2LocalSubmittedTemporaryCleanup,
-          queueOrderedProducerClaims
-        })
-      );
-    } catch (error) {
-      if (createdLevelAssignment) {
-        finalAssignment.destroyAssignmentBuffer?.();
-      }
-      resolvedFinalRenderLevelAssignment = null;
-      ownsResolvedFinalRenderLevelAssignment = false;
-      throw error;
     }
     registerHierarchyArtifacts(
       'final-render-active-node-list',
@@ -22740,6 +23011,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     pressureInterfaceOwnerScopeDiagnosticOnly: true,
     pressureInterfaceOwnerScopeForceRowsApplied: false,
     finalRenderProxyBuildStatus,
+    finalRenderProxySubmitFusionStatus,
+    finalRenderProxySubmitFusion,
     finalRenderProxyPublished:
       finalRenderProxyBuildStatus
         === 'final-render-proxy-published-from-exact-committed-successor',

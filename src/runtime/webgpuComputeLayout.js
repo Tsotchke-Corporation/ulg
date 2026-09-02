@@ -418,6 +418,7 @@ function workerQueueSubmitBurstWriteThrough(
 ) {
   if (typeof device.createCommandEncoder !== 'function') return false;
   let bytes;
+  let staging = null;
   try {
     bytes = workerQueueSubmitBurstWriteThroughBytes(data, dataOffset, size);
   } catch {
@@ -427,7 +428,7 @@ function workerQueueSubmitBurstWriteThrough(
     return false;
   }
   try {
-    const staging = device.createBuffer({
+    staging = device.createBuffer({
       label: 'ulg-submit-burst-write-through-staging',
       size: bytes.byteLength,
       usage: (globalThis.GPUBufferUsage?.COPY_SRC ?? 0x0004),
@@ -450,11 +451,22 @@ function workerQueueSubmitBurstWriteThrough(
     if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
       record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
     }
-    record.deferredCleanups.push(() => {
+    // queue.submit takes ownership of the command-buffer resource references.
+    // Once the real submit returns, destroy may retire this one-use staging
+    // allocation without a host fence; WebGPU keeps previously submitted uses
+    // alive until the queue is finished with them. Generic arena cleanups stay
+    // on deferredCleanups because their release latency also gates reuse.
+    record.postSubmitCleanups.push(() => {
       staging.destroy?.();
     });
+    record.stats.postSubmitCleanupTotal += 1;
     return true;
   } catch {
+    try {
+      staging?.destroy?.();
+    } catch {
+      // A failed write-through falls back to the order-preserving flush path.
+    }
     return false;
   }
 }
@@ -478,6 +490,7 @@ export function armWorkerQueueSubmitBurst(device) {
     createStamp: 0,
     heldSubmitStamp: 0,
     heldCommandBuffers: [],
+    postSubmitCleanups: [],
     deferredCleanups: [],
     bufferStamps: new WeakMap(),
     realSubmit: queue.submit.bind(queue),
@@ -505,6 +518,7 @@ export function armWorkerQueueSubmitBurst(device) {
       fenceFlushCount: 0,
       cadenceFlushCount: 0,
       closeFlushCount: 0,
+      postSubmitCleanupTotal: 0,
       deferredCleanupTotal: 0,
       deferredDestroyTotal: 0,
       immediateDestroyTotal: 0
@@ -640,8 +654,10 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
   const record = workerQueueSubmitBurstRecords.get(device);
   if (!record) return null;
   const held = record.heldCommandBuffers;
+  const postSubmitCleanups = record.postSubmitCleanups;
   const cleanups = record.deferredCleanups;
   record.heldCommandBuffers = [];
+  record.postSubmitCleanups = [];
   record.deferredCleanups = [];
   record.heldSubmitStamp = record.createStamp;
   let submitError = null;
@@ -654,6 +670,16 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
       record.realSubmit(held);
     } catch (error) {
       submitError = error;
+    }
+  }
+  // These cleanups own disposable staging resources only. The real submit has
+  // either accepted their command buffers or failed, so they can be destroyed
+  // synchronously without manufacturing an onSubmittedWorkDone fence.
+  for (const cleanup of postSubmitCleanups) {
+    try {
+      cleanup();
+    } catch {
+      // Cleanup failures must not mask the submit error.
     }
   }
   // One real fence per cleanup, matching deferSubmittedWorkCleanup's
@@ -679,6 +705,18 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
   return { flushed: held.length, reason };
 }
 
+function snapshotWorkerQueueSubmitBurstStats(stats, extra = null) {
+  return {
+    ...stats,
+    // These are the only mutable nested values in the counter record. Every
+    // published observation is historical telemetry, so it must own both
+    // maps rather than changing underneath a retained schedule result.
+    staleWriteFlushLabels: { ...stats.staleWriteFlushLabels },
+    writeThroughLabels: { ...stats.writeThroughLabels },
+    ...(extra || {})
+  };
+}
+
 export function closeWorkerQueueSubmitBurst(device, reason = 'burst-close') {
   const record = workerQueueSubmitBurstRecords.get(device);
   if (!record || !record.open) return null;
@@ -690,14 +728,82 @@ export function closeWorkerQueueSubmitBurst(device, reason = 'burst-close') {
   }
   record.open = false;
   record.label = null;
-  const stats = { ...record.stats };
+  const stats = snapshotWorkerQueueSubmitBurstStats(record.stats);
   if (flushError) throw flushError;
   return stats;
 }
 
 export function workerQueueSubmitBurstStats(device) {
   const record = workerQueueSubmitBurstRecords.get(device);
-  return record ? { ...record.stats, open: record.open } : null;
+  return record
+    ? snapshotWorkerQueueSubmitBurstStats(record.stats, { open: record.open })
+    : null;
+}
+
+/**
+ * Run one narrow queue-order-sensitive sequence with stale writeBuffer calls
+ * represented as held staging copies. If a schedule already owns the burst,
+ * borrow it and flush before the result escapes; otherwise own a short burst.
+ * The caller decides whether the device was armed early enough to use this
+ * scope safely.
+ */
+export async function withWorkerQueueSubmitBurstWriteThrough(
+  device,
+  runner,
+  {
+    label = 'ulg-worker-write-through-scope',
+    flushReason = 'write-through-scope'
+  } = {}
+) {
+  if (typeof runner !== 'function') {
+    throw new TypeError('worker queue write-through scope requires a runner');
+  }
+  const record = armWorkerQueueSubmitBurst(device);
+  const borrowed = record.open === true;
+  const previousWriteThroughEnabled = record.writeThroughEnabled;
+  const previousLabel = record.label;
+  if (borrowed) {
+    record.writeThroughEnabled = true;
+  } else {
+    openWorkerQueueSubmitBurst(device, { label, writeThrough: true });
+  }
+
+  let value;
+  let runnerError = null;
+  try {
+    value = await runner();
+  } catch (error) {
+    runnerError = error;
+  }
+
+  let boundaryError = null;
+  try {
+    if (borrowed) {
+      flushWorkerQueueSubmitBurst(device, flushReason);
+    } else {
+      closeWorkerQueueSubmitBurst(device, flushReason);
+    }
+  } catch (error) {
+    boundaryError = error;
+  } finally {
+    record.writeThroughEnabled = previousWriteThroughEnabled;
+    record.label = borrowed ? previousLabel : null;
+  }
+
+  if (runnerError && boundaryError) {
+    try {
+      Object.defineProperty(runnerError, 'submitBurstBoundaryError', {
+        value: boundaryError,
+        enumerable: false
+      });
+    } catch {
+      // Preserve the primary typed error even when it cannot carry detail.
+    }
+    throw runnerError;
+  }
+  if (runnerError) throw runnerError;
+  if (boundaryError) throw boundaryError;
+  return value;
 }
 
 export const QUEUE_ORDERED_SUBMITTED_WORK_CLEANUP_RECEIPT_SCHEMA =

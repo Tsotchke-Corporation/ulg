@@ -35,6 +35,12 @@ export default defineConfig({
         ),
         webgpuComputeLayout: fileURLToPath(
           new URL('./src/runtime/webgpuComputeLayout.js', import.meta.url)
+        ),
+        workerOwnedIsosurfacePresenter: fileURLToPath(
+          new URL('./src/services/workerOwnedIsosurfacePresenter.js', import.meta.url)
+        ),
+        sphWorkerPresentationQos: fileURLToPath(
+          new URL('./src/runtime/sph/sphWorkerPresentationQos.js', import.meta.url)
         )
       },
       preserveEntrySignatures: 'exports-only',
@@ -56,6 +62,12 @@ export default defineConfig({
           }
           if (chunk.name === 'webgpuComputeLayout') {
             return 'runtime/webgpuComputeLayout.js';
+          }
+          if (chunk.name === 'workerOwnedIsosurfacePresenter') {
+            return 'assets/workerOwnedIsosurfacePresenter.js';
+          }
+          if (chunk.name === 'sphWorkerPresentationQos') {
+            return 'runtime/sph/sphWorkerPresentationQos.js';
           }
           return 'assets/[name]-[hash].js';
         }

@@ -9,6 +9,18 @@ import {
 import {
   flushWorkerQueueSubmitBurst
 } from '../runtime/webgpuComputeLayout.js';
+import {
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+  createWorkerOwnedIsosurfacePresenter
+} from './workerOwnedIsosurfacePresenter.js';
+import {
+  ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+  ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED,
+  ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+  isExactWorkerPresentationFrameQueueCompletionProof
+} from '../runtime/sph/sphWorkerPresentationQos.js';
 
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
@@ -40,6 +52,14 @@ const RESIDENT_STAGE_OUTPUT_RENDER_REQUEST_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0';
 const RENDER_ROW_PARTICLE_STRIDE_FLOATS = 8;
 const RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS = 8;
+const RESIDENT_PARTICLE_TEMPORAL_MOTION_SCHEMA =
+  'peercompute.ulg.worker-offscreen-particle-temporal-motion.v0';
+const RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA =
+  'peercompute.ulg.worker-offscreen-particle-temporal-motion-frame.v0';
+const RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA =
+  'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0';
+const DEFAULT_PARTICLE_TEMPORAL_TARGET_HZ = 60;
+const DEFAULT_PARTICLE_TEMPORAL_MAX_HORIZON_S = 0.25;
 const WORKER_PRESENTATION_DEPTH_FORMAT = 'depth24plus';
 const GAS_PHASE_ID = 3;
 const TEXTURE_RENDER_ATTACHMENT = 0x10;
@@ -73,6 +93,15 @@ let canvasConfigureSkipCount = 0;
 let canvasUnconfigureCount = 0;
 let lastCanvasConfigureAction = 'unavailable';
 let lastCanvasConfigureReason = null;
+// The page owns the identity of the actual worker framebuffer. Every resize,
+// clear, or destructive owner handoff advances this epoch before the command is
+// posted. A render may advertise pixels only when the epoch captured at its
+// queue submission is still current after the GPU fence and presentation edge.
+let workerFramebufferEpoch = 0;
+// init waits on adapter/device acquisition, while resize messages may arrive in
+// the meantime. Retain the newest requested canvas geometry so the resumed init
+// cannot restore stale pre-resize dimensions.
+let desiredCanvasConfiguration = null;
 // Display arbitration: never present a state older than the newest one
 // already on screen. The presentation-worker retained-stage lane can lag
 // the authoritative main-thread chain; without this gate its late draws
@@ -99,6 +128,8 @@ let renderRowsVaporPipeline = null;
 let renderRowsBindGroupLayout = null;
 let renderRowsParticleBuffer = null;
 let renderRowsParticleBufferByteLength = 0;
+let renderRowsParticleVelocityBuffer = null;
+let renderRowsParticleVelocityBufferByteLength = 0;
 let renderRowsUniformBuffer = null;
 let renderDepthTexture = null;
 let renderDepthView = null;
@@ -148,11 +179,285 @@ let pendingCommittedResidentSchedulePresentation = null;
 let previewViewProjectionOverride = null;
 let previewCameraRedraw = null;
 let previewCameraRedrawLastMs = 0;
+let workerOwnedIsosurfacePresenter = null;
+let workerParticleTemporalPresentation = null;
+let workerParticleTemporalAnimationHandle = null;
+let workerParticleTemporalAnimationHandleKind = null;
+let workerParticleTemporalGeneration = 0;
+let workerParticleTemporalMotionFrameSerial = 0;
+let workerParticleTemporalSubmittedFrameSerial = 0;
+let workerParticleTemporalFrameInFlight = null;
+let workerPresentationQueueCompletionSerial = 0;
+let workerParticleTemporalBoundaryPending = false;
+let workerParticleTemporalAuthorityAdmissionPending = false;
 let residentScheduleCandidateStreamIdentity = null;
 let residentScheduleCandidateStreamEpoch = 0;
 
+function normalizeWorkerFramebufferEpoch(value) {
+  const epoch = Number(value);
+  return Number.isSafeInteger(epoch) && epoch > 0 ? epoch : null;
+}
+
+function adoptWorkerFramebufferEpoch(value) {
+  const epoch = normalizeWorkerFramebufferEpoch(value);
+  if (epoch == null || epoch < workerFramebufferEpoch) return false;
+  workerFramebufferEpoch = epoch;
+  return true;
+}
+
+function workerFramebufferEpochIsCurrent(epoch) {
+  return normalizeWorkerFramebufferEpoch(epoch) === workerFramebufferEpoch;
+}
+
+function submittedWorkerFramebufferEpoch(data = null) {
+  const requestedEpoch = normalizeWorkerFramebufferEpoch(
+    data?.workerFramebufferEpoch
+  );
+  return requestedEpoch === workerFramebufferEpoch ? requestedEpoch : null;
+}
+
+function currentWorkerFramebufferEpoch() {
+  return normalizeWorkerFramebufferEpoch(workerFramebufferEpoch);
+}
+
+function rememberDesiredCanvasConfiguration(data = {}) {
+  const messageEpoch = normalizeWorkerFramebufferEpoch(
+    data.workerFramebufferEpoch
+  );
+  if (
+    messageEpoch != null
+    && messageEpoch !== workerFramebufferEpoch
+  ) return false;
+  desiredCanvasConfiguration = {
+    width: data.width,
+    height: data.height,
+    cssWidth: data.cssWidth,
+    cssHeight: data.cssHeight,
+    pixelRatio: data.pixelRatio
+  };
+  return true;
+}
+
 function nowMs() {
   return typeof self.performance?.now === 'function' ? self.performance.now() : Date.now();
+}
+
+export function retainHandledPromiseForLaterJoin(value) {
+  const retained = Promise.resolve(value);
+  // Register rejection handling in the same turn that starts the work. Keep
+  // the original promise so a later authority join still observes failure.
+  void retained.catch(() => {});
+  return retained;
+}
+
+export function normalizeWorkerParticleTemporalMotionRequest(value = null) {
+  if (value?.schema !== RESIDENT_PARTICLE_TEMPORAL_MOTION_SCHEMA) return null;
+  if (value.enabled !== true) return null;
+  const targetHz = Math.max(
+    1,
+    Math.min(
+      240,
+      Number.isFinite(Number(value.targetHz))
+        ? Number(value.targetHz)
+        : DEFAULT_PARTICLE_TEMPORAL_TARGET_HZ
+    )
+  );
+  const maxHorizonS = Math.max(
+    1 / targetHz,
+    Math.min(
+      1,
+      Number.isFinite(Number(value.maxHorizonS))
+        ? Number(value.maxHorizonS)
+        : DEFAULT_PARTICLE_TEMPORAL_MAX_HORIZON_S
+    )
+  );
+  const maxDisplacementM = Number(value.maxDisplacementM);
+  if (!Number.isFinite(maxDisplacementM) || maxDisplacementM <= 0) return null;
+  const simulationTimeScale = Math.max(
+    0.01,
+    Math.min(
+      10,
+      Number.isFinite(Number(value.simulationTimeScale))
+        ? Number(value.simulationTimeScale)
+        : 1
+    )
+  );
+  const maxSimulationAgeS = Math.max(
+    1e-6,
+    Math.min(
+      1,
+      Number.isFinite(Number(value.maxSimulationAgeS))
+        ? Number(value.maxSimulationAgeS)
+      : maxHorizonS * simulationTimeScale
+    )
+  );
+  const presentationSlotCount = Number(value.presentationSlotCount);
+  if (
+    !Number.isSafeInteger(presentationSlotCount)
+    || presentationSlotCount <= 0
+  ) return null;
+  return Object.freeze({
+    schema: RESIDENT_PARTICLE_TEMPORAL_MOTION_SCHEMA,
+    enabled: true,
+    targetHz,
+    minFrameIntervalMs: 1000 / targetHz,
+    maxHorizonS,
+    simulationTimeScale,
+    maxSimulationAgeS,
+    presentationSlotCount,
+    maxDisplacementM,
+    method: 'bounded-keyframe-velocity-extrapolation',
+    sourceVelocityLanes: Object.freeze([4, 5, 6]),
+    authoritativeStateMutation: false
+  });
+}
+
+function cancelWorkerParticleTemporalAnimationFrame() {
+  if (workerParticleTemporalAnimationHandle == null) return;
+  try {
+    if (
+      workerParticleTemporalAnimationHandleKind === 'raf'
+      && typeof self.cancelAnimationFrame === 'function'
+    ) {
+      self.cancelAnimationFrame(workerParticleTemporalAnimationHandle);
+    } else {
+      globalThis.clearTimeout?.(workerParticleTemporalAnimationHandle);
+    }
+  } catch {}
+  workerParticleTemporalAnimationHandle = null;
+  workerParticleTemporalAnimationHandleKind = null;
+}
+
+function stopWorkerParticleTemporalPresentation({ clearState = true } = {}) {
+  workerParticleTemporalGeneration += 1;
+  cancelWorkerParticleTemporalAnimationFrame();
+  // A generation bump makes any late completion stale. Detach it as well so a
+  // lost/stuck presentation fence cannot poison every later keyframe or QoS
+  // boundary by remaining installed in the single in-flight slot forever.
+  workerParticleTemporalFrameInFlight = null;
+  if (clearState) workerParticleTemporalPresentation = null;
+}
+
+function invalidateWorkerParticleTemporalFrameInFlight() {
+  workerParticleTemporalGeneration += 1;
+  cancelWorkerParticleTemporalAnimationFrame();
+  if (workerParticleTemporalPresentation) {
+    // Preserve the retained keyframe but move it to a new generation. Any
+    // timed-out completion captured the prior generation and therefore cannot
+    // publish late pixels or reclaim the single in-flight slot.
+    workerParticleTemporalPresentation.generation =
+      workerParticleTemporalGeneration;
+  }
+  workerParticleTemporalFrameInFlight = null;
+}
+
+function requestWorkerParticleTemporalAnimationFrame(callback) {
+  if (typeof self.requestAnimationFrame === 'function') {
+    workerParticleTemporalAnimationHandleKind = 'raf';
+    workerParticleTemporalAnimationHandle = self.requestAnimationFrame(callback);
+    return;
+  }
+  workerParticleTemporalAnimationHandleKind = 'timer';
+  workerParticleTemporalAnimationHandle = globalThis.setTimeout(
+    () => callback(nowMs()),
+    Math.max(
+      1,
+      Math.round(
+        workerParticleTemporalPresentation?.motion?.minFrameIntervalMs ?? 16
+      )
+    )
+  );
+}
+
+function workerParticleFirstSlotMidpointMotionAgeS(
+  presentation = workerParticleTemporalPresentation
+) {
+  const maxSimulationAgeS = Number(
+    presentation?.motion?.maxSimulationAgeS
+  );
+  const presentationSlotCount = Number(
+    presentation?.motion?.presentationSlotCount
+  );
+  if (
+    !Number.isFinite(maxSimulationAgeS)
+    || maxSimulationAgeS <= 0
+    || !Number.isSafeInteger(presentationSlotCount)
+    || presentationSlotCount <= 0
+  ) return null;
+  return maxSimulationAgeS / (2 * presentationSlotCount);
+}
+
+function scheduleWorkerParticleTemporalPresentation({
+  preferImmediate = false,
+  continueAfterAdmission = true,
+  motionAgeSOverride = null
+} = {}) {
+  if (
+    disposed
+    || !workerParticleTemporalPresentation
+    || workerParticleTemporalPresentation.autonomousEnabled !== true
+    || workerParticleTemporalAnimationHandle != null
+    || workerParticleTemporalFrameInFlight != null
+    || workerParticleTemporalBoundaryPending
+    || workerParticleTemporalAuthorityAdmissionPending
+  ) return;
+  const generation = workerParticleTemporalPresentation.generation;
+  const drawAndContinue = async () => {
+    if (
+      disposed
+      || !workerParticleTemporalPresentation
+      || workerParticleTemporalPresentation.generation !== generation
+      || workerParticleTemporalBoundaryPending
+      || workerParticleTemporalAuthorityAdmissionPending
+    ) return;
+    const result = drawWorkerParticleTemporalMotionFrame({
+      reason: 'worker-particle-temporal-display-cadence',
+      // An admitted worker rAF is already the presentation clock. Submitting
+      // its successor on that edge preserves 60 Hz monitors and does not
+      // quantize 90/120/144 Hz displays down by rejecting sub-15ms intervals.
+      force: preferImmediate,
+      motionAgeSOverride
+    });
+    if (result?.rendered !== true || !result?.completion) {
+      if (
+        result?.horizonExhausted !== true
+        && continueAfterAdmission === true
+      ) {
+        scheduleWorkerParticleTemporalPresentation();
+      }
+      return;
+    }
+    try {
+      const completionResult = await result.completion;
+      if (completionResult?.admitted !== true) return;
+    } catch {
+      return;
+    }
+    if (
+      disposed
+      || !workerParticleTemporalPresentation
+      || workerParticleTemporalPresentation.generation !== generation
+      || workerParticleTemporalBoundaryPending
+      || workerParticleTemporalAuthorityAdmissionPending
+    ) return;
+    if (
+      result?.horizonExhausted === true
+      || continueAfterAdmission !== true
+    ) return;
+    // The post-GPU rAF that admitted this frame is itself the pacing
+    // opportunity for its successor. Submit immediately from that callback;
+    // adding another pre-submit rAF would halve autonomous cadence to ~30 Hz.
+    scheduleWorkerParticleTemporalPresentation({ preferImmediate: true });
+  };
+  if (preferImmediate) {
+    void drawAndContinue();
+    return;
+  }
+  requestWorkerParticleTemporalAnimationFrame(() => {
+    workerParticleTemporalAnimationHandle = null;
+    workerParticleTemporalAnimationHandleKind = null;
+    void drawAndContinue();
+  });
 }
 
 function publish(status) {
@@ -177,6 +482,7 @@ function publish(status) {
     pixelRatio,
     backingWidth: canvas?.width ?? null,
     backingHeight: canvas?.height ?? null,
+    workerFramebufferEpoch,
     canvasConfigureCount,
     canvasConfigureSkipCount,
     canvasUnconfigureCount,
@@ -459,7 +765,9 @@ function unconfigureCanvas({ reason = 'dispose' } = {}) {
 }
 
 function destroyRenderRowsResources() {
+  stopWorkerParticleTemporalPresentation();
   renderRowsParticleBuffer?.destroy?.();
+  renderRowsParticleVelocityBuffer?.destroy?.();
   renderRowsUniformBuffer?.destroy?.();
   renderDepthTexture?.destroy?.();
   renderBoxUniformBuffer?.destroy?.();
@@ -469,8 +777,10 @@ function destroyRenderRowsResources() {
   renderRowsVaporPipeline = null;
   renderRowsBindGroupLayout = null;
   renderRowsParticleBuffer = null;
+  renderRowsParticleVelocityBuffer = null;
   renderRowsUniformBuffer = null;
   renderRowsParticleBufferByteLength = 0;
+  renderRowsParticleVelocityBufferByteLength = 0;
   renderDepthTexture = null;
   renderDepthView = null;
   renderDepthTextureWidth = 0;
@@ -511,6 +821,7 @@ function destroyRenderRowsResources() {
 }
 
 function clearPresentation({ reason = 'clear' } = {}) {
+  stopWorkerParticleTemporalPresentation();
   if (!device || !context) {
     publish({
       status: 'worker-offscreen-presentation-clear-blocked',
@@ -652,6 +963,7 @@ async function maybeDrawRetainedResidentStageOutput({
   }
   return drawResidentParticleStateProducer({
     ...request,
+    workerFramebufferEpoch,
     schema: RESIDENT_STAGE_OUTPUT_RENDER_REQUEST_SCHEMA,
     inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
     producerSourceKind: 'worker-retained-resident-stage-output',
@@ -830,7 +1142,9 @@ export const presentationResidentScheduleCandidateMailbox =
 
 function resetResidentScheduleCandidateMailbox() {
   presentationResidentScheduleCandidateMailbox.reset();
-  pendingCommittedResidentSchedulePresentation = null;
+  invalidatePendingCommittedResidentSchedulePresentation(
+    'resident schedule candidate mailbox reset before terminal frame admission'
+  );
   residentScheduleCandidateStreamIdentity = null;
   // The stream epoch is deliberately NOT zeroed: the bridge-side mailbox
   // orders candidates by (epoch, laneId, stateKey) across this worker's whole
@@ -1093,6 +1407,7 @@ function postResidentScheduleCandidate(source) {
 function createResidentScheduleCandidateDrawLoop({
   runner = null,
   schedulePayload = {},
+  isScheduleCurrent = () => true,
   reason = 'run-resident-schedule-on-presentation-device'
 } = {}) {
   const request = retainedStageOutputRenderRequest(schedulePayload);
@@ -1119,6 +1434,7 @@ function createResidentScheduleCandidateDrawLoop({
   let drawing = false;
   let lastDrawnCandidate = null;
   let lastDrawnStatus = null;
+  let lastDrawnPresentationCompletion = null;
   // A live-preview draw presents the lane's CURRENT retained state
   // mid-schedule. It must never claim StateManager commitment: the
   // committed receipt helper hardcodes stateManagerCommittedPresentation
@@ -1199,6 +1515,42 @@ function createResidentScheduleCandidateDrawLoop({
           });
         }
         const livePreviewMode = request.residentScheduleLivePreview === true;
+        const workerOwnedIsosurfaceRequest = request.workerOwnedIsosurface;
+        if (
+          workerOwnedIsosurfaceRequest?.enabled === true
+          && admission?.livePreview !== true
+        ) {
+          stopWorkerParticleTemporalPresentation();
+          const receiptFields = {
+            renderRowsSchema: RENDER_ROWS_SCHEMA,
+            inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+            producerSourceKind: 'worker-retained-resident-stage-output',
+            producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+            sourceCacheStatus:
+              'worker-retained-resident-schedule-candidate-captured',
+            sourceStageId: 'schroederSameLevelMechanics',
+            retainedParticleStateStatus: retained.status,
+            particleCount: retained.particleCount,
+            sourceTransferBytes: 0,
+            sourceStateTransferBytes: 0,
+            inputTransferBytes: 0,
+            workerLocalRenderRowsProduced: false,
+            sphStep: candidate.version.nextStep,
+            residentScheduleCandidatePresentation: true,
+            ...candidateReceiptFields(admission, candidate)
+          };
+          return ensureWorkerOwnedIsosurfacePresenter().enqueue({
+            request: workerOwnedIsosurfaceRequest,
+            retained,
+            sphStep: candidate.version.nextStep,
+            receiptFields
+          }).then((enqueueReceipt) => publishRenderRowsStatus({
+            ...enqueueReceipt,
+            ...receiptFields,
+            workerLocalRenderRowsProduced: false,
+            reason: enqueueReceipt.reason || `${reason}:worker-isosurface-enqueue`
+          }));
+        }
         if (livePreviewMode) {
           // Camera responsiveness: the page streams the current
           // view-projection while the preview owns the display; redraw the
@@ -1208,6 +1560,7 @@ function createResidentScheduleCandidateDrawLoop({
         }
         const drawStatus = drawResidentParticleStateProducer({
           ...request,
+          workerFramebufferEpoch,
           ...(livePreviewMode && previewViewProjectionOverride
             ? { viewProjectionMatrix: previewViewProjectionOverride }
             : {}),
@@ -1248,14 +1601,27 @@ function createResidentScheduleCandidateDrawLoop({
           clearAlpha: Number.isFinite(Number(request.clearAlpha))
             ? Number(request.clearAlpha)
             : clearAlpha,
+          onTemporalFrameStatus(nextStatus) {
+            if (
+              sameResidentScheduleCandidateVersion(
+                lastDrawnCandidate?.version,
+                candidate?.version
+              )
+            ) {
+              lastDrawnStatus = nextStatus;
+            }
+          },
           reason: `${reason}:resident-schedule-candidate`
         });
         if (
           drawStatus?.status
             === 'worker-offscreen-resident-particle-state-producer-rendered'
+          || drawStatus?.presentationFrameCompletion
         ) {
           lastDrawnCandidate = candidate;
           lastDrawnStatus = drawStatus;
+          lastDrawnPresentationCompletion =
+            drawStatus.presentationFrameCompletion ?? null;
         }
         return drawStatus;
     } finally {
@@ -1275,14 +1641,22 @@ function createResidentScheduleCandidateDrawLoop({
           lastDrawnStatus,
           reason
         });
-        if (promotion) {
+        if (
+          promotion
+          && workerFramebufferEpochIsCurrent(
+            promotion.workerFramebufferEpoch
+          )
+        ) {
           // The exact terminal candidate was already submitted to the worker
           // canvas as an uncommitted live-preview frame. StateManager commit
           // does not change its pixels; promote that same versioned frame to
           // an authority-bearing receipt without a duplicate compute/render
           // submission. A non-matching candidate still takes the ordinary
           // committed draw path below.
-          return publishRenderRowsStatus(promotion);
+          const promoted = publishRenderRowsStatus(promotion);
+          lastDrawnStatus = promoted;
+          promoteWorkerParticleTemporalPresentation(promoted);
+          return promoted;
         }
         return drawCandidate(admission, candidate);
       } catch (error) {
@@ -1308,20 +1682,96 @@ function createResidentScheduleCandidateDrawLoop({
         return null;
       }
     },
-    ensureTerminalPreview(candidate = null) {
+    async ensureTerminalPreview(candidate = null, {
+      token = null,
+      deadlineMs = 250
+    } = {}) {
+      const stillCurrent = () => Boolean(
+        token?.active !== false
+        && isScheduleCurrent()
+      );
+      const waitForProof = async (proof) => {
+        const settled = await promiseWithinWorkerParticleDeadline(
+          proof,
+          deadlineMs
+        );
+        if (settled.timedOut) {
+          if (token) token.active = false;
+          invalidateWorkerParticleTemporalFrameInFlight();
+          throw new Error(
+            'worker particle terminal preview missed its presentation deadline'
+          );
+        }
+        return settled.value;
+      };
+      if (!stillCurrent()) return null;
+      // A final-boundary handoff cover is intentionally queued before the
+      // terminal mechanics chunk. Let that exact old-source frame reach its
+      // post-GPU presentation opportunity before replacing the temporal
+      // generation with the terminal keyframe.
+      if (workerParticleTemporalFrameInFlight) {
+        try {
+          await waitForProof(workerParticleTemporalFrameInFlight);
+        } catch (error) {
+          if (!stillCurrent()) return null;
+          throw error;
+        }
+      }
+      if (!stillCurrent()) return null;
       if (
-        lastDrawnStatus?.status
-          === 'worker-offscreen-resident-particle-state-producer-rendered'
-        && sameResidentScheduleCandidateVersion(
+        sameResidentScheduleCandidateVersion(
           lastDrawnCandidate?.version,
           candidate?.version
         )
+        && workerFramebufferEpochIsCurrent(
+          lastDrawnStatus?.workerFramebufferEpoch
+        )
+        && (
+          lastDrawnStatus?.status
+            === 'worker-offscreen-resident-particle-state-producer-rendered'
+          || lastDrawnPresentationCompletion
+        )
       ) {
+        if (lastDrawnPresentationCompletion) {
+          try {
+            await waitForProof(lastDrawnPresentationCompletion);
+          } catch (error) {
+            if (!stillCurrent()) return null;
+            throw error;
+          }
+        }
+        if (!stillCurrent()) return null;
         return lastDrawnStatus;
       }
-      return drawCandidate({ livePreview: true }, candidate);
+      if (!stillCurrent()) return null;
+      const drawStatus = drawCandidate({ livePreview: true }, candidate);
+      if (drawStatus?.presentationFrameCompletion) {
+        try {
+          await waitForProof(drawStatus.presentationFrameCompletion);
+        } catch (error) {
+          if (!stillCurrent()) return null;
+          throw error;
+        }
+      }
+      if (!stillCurrent()) return null;
+      return lastDrawnStatus ?? drawStatus;
     }
   };
+}
+
+function workerParticleKeyframePresentationProofReady(status = null) {
+  return Boolean(
+    status?.presentationFrameSchema
+      === RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA
+    && status?.presentationFrameStatus
+      === 'worker-particle-keyframe-presentation-opportunity'
+    && status?.presentationFrameAdmitted === true
+    && status?.presentationFrameGpuCompleted === true
+    && status?.presentationFramePresentationOpportunity === true
+    && status?.presentationFramePresentationOpportunityMethod
+      === 'worker-request-animation-frame-after-gpu-completion'
+    && isExactWorkerPresentationFrameQueueCompletionProof(status)
+  );
 }
 
 export function resolveCommittedResidentSchedulePreviewPromotion({
@@ -1335,6 +1785,7 @@ export function resolveCommittedResidentSchedulePreviewPromotion({
     admission?.livePreview === true
     || lastDrawnStatus?.status
       !== 'worker-offscreen-resident-particle-state-producer-rendered'
+    || !workerParticleKeyframePresentationProofReady(lastDrawnStatus)
     || !sameResidentScheduleCandidateVersion(
       lastDrawnCandidate?.version,
       candidate?.version
@@ -1381,6 +1832,27 @@ function committedResidentSchedulePresentationBlocked(data = {}, reason) {
     stepOrdinal: data?.candidateVersion?.stepOrdinal ?? null,
     workerLocalRenderRowsProduced: false
   });
+}
+
+function invalidatePendingCommittedResidentSchedulePresentation(reason) {
+  const pending = pendingCommittedResidentSchedulePresentation;
+  if (!pending) {
+    workerParticleTemporalAuthorityAdmissionPending = false;
+    return false;
+  }
+  if (pending.terminalPreviewToken) {
+    pending.terminalPreviewToken.active = false;
+  }
+  pendingCommittedResidentSchedulePresentation = null;
+  workerParticleTemporalAuthorityAdmissionPending = false;
+  stopWorkerParticleTemporalPresentation();
+  committedResidentSchedulePresentationBlocked({
+    scheduleId: pending.scheduleId,
+    laneId: pending.laneId,
+    stateKey: pending.stateKey,
+    candidateVersion: pending.terminalCandidate?.version ?? null
+  }, reason);
+  return true;
 }
 
 // Page -> presentation-worker admission for exactly one terminal candidate.
@@ -1456,10 +1928,103 @@ export function presentCommittedResidentScheduleCandidate(data = {}) {
           : 'committed presentation lacks ComputeManager/StateManager authority')
     );
   }
-  // Consume before drawing so a duplicate/replayed admission cannot submit a
-  // second frame even when draw setup throws.
-  pendingCommittedResidentSchedulePresentation = null;
-  return pending.candidateDrawLoop.notify(data, pending.terminalCandidate);
+  if (pending.admissionInFlight === true) {
+    return committedResidentSchedulePresentationBlocked(
+      data,
+      'committed presentation admission is already joining terminal frame proof'
+    );
+  }
+  const promoteProvedTerminalFrame = (provedStatus = null) => {
+    if (pendingCommittedResidentSchedulePresentation !== pending) {
+      return committedResidentSchedulePresentationBlocked(
+        data,
+        'pending terminal presentation changed before proof admission'
+      );
+    }
+    if (
+      pending.terminalPresentationCompletion
+      && (
+        provedStatus?.status
+          !== 'worker-offscreen-resident-particle-state-producer-rendered'
+        || !workerParticleKeyframePresentationProofReady(provedStatus)
+      )
+    ) {
+      if (pending.terminalPreviewToken) {
+        pending.terminalPreviewToken.active = false;
+      }
+      pendingCommittedResidentSchedulePresentation = null;
+      workerParticleTemporalAuthorityAdmissionPending = false;
+      stopWorkerParticleTemporalPresentation();
+      return committedResidentSchedulePresentationBlocked(
+        data,
+        'terminal particle keyframe lacks exact GPU and presentation-opportunity proof'
+      );
+    }
+    // Consume only after both signals joined so a duplicate admission or next
+    // schedule cannot race the proof and replace the exact framebuffer.
+    pendingCommittedResidentSchedulePresentation = null;
+    if (pending.terminalPreviewToken) {
+      pending.terminalPreviewToken.active = false;
+    }
+    workerParticleTemporalAuthorityAdmissionPending = false;
+    const promoted = pending.candidateDrawLoop.notify(
+      data,
+      pending.terminalCandidate
+    );
+    if (
+      promoted?.presentationFrameAdmitted === true
+      && promoted?.presentationFrameGpuCompleted === true
+      && promoted?.presentationFramePresentationOpportunity === true
+    ) {
+      scheduleWorkerParticleTemporalPresentation({
+        preferImmediate: true,
+        motionAgeSOverride: workerParticleFirstSlotMidpointMotionAgeS()
+      });
+    }
+    return promoted;
+  };
+  if (pending.terminalPresentationCompletion) {
+    pending.admissionInFlight = true;
+    return promiseWithinWorkerParticleDeadline(
+      pending.terminalPresentationCompletion,
+      pending.terminalPresentationDeadlineMs ?? 250
+    ).then(
+      (proof) => {
+        if (proof.timedOut) {
+          if (pendingCommittedResidentSchedulePresentation === pending) {
+            if (pending.terminalPreviewToken) {
+              pending.terminalPreviewToken.active = false;
+            }
+            pendingCommittedResidentSchedulePresentation = null;
+            workerParticleTemporalAuthorityAdmissionPending = false;
+            stopWorkerParticleTemporalPresentation();
+          }
+          return committedResidentSchedulePresentationBlocked(
+            data,
+            'terminal particle keyframe presentation proof timed out'
+          );
+        }
+        return promoteProvedTerminalFrame(proof.value);
+      },
+      (error) => {
+        if (pendingCommittedResidentSchedulePresentation === pending) {
+          if (pending.terminalPreviewToken) {
+            pending.terminalPreviewToken.active = false;
+          }
+          pendingCommittedResidentSchedulePresentation = null;
+          workerParticleTemporalAuthorityAdmissionPending = false;
+          stopWorkerParticleTemporalPresentation();
+        }
+        return committedResidentSchedulePresentationBlocked(
+          data,
+          error instanceof Error
+            ? `terminal particle keyframe proof failed: ${error.message}`
+            : 'terminal particle keyframe proof failed'
+        );
+      }
+    );
+  }
+  return promoteProvedTerminalFrame();
 }
 
 // Mirrors runResidentStageOnPresentationDevice exactly (same device-injection
@@ -1623,6 +2188,9 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
   const candidateDrawLoop = createResidentScheduleCandidateDrawLoop({
     runner,
     schedulePayload,
+    isScheduleCurrent: () => residentScheduleCandidateStreamIsCurrent(
+      scheduleCandidateStream
+    ),
     reason: data.reason || 'run-resident-schedule-on-presentation-device'
   });
   // Explicit page opt-in: mid-schedule LIVE PREVIEW draws of the lane's
@@ -1637,7 +2205,7 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
     && livePreviewRequest?.residentScheduleLivePreview === true
   );
   const livePreviewMinIntervalMs = Math.max(
-    33,
+    8,
     Math.round(Number(livePreviewRequest?.livePreviewMinIntervalMs) || 66)
   );
   let livePreviewLastDrawMs = Number.NEGATIVE_INFINITY;
@@ -1690,6 +2258,14 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
           id: data.id ?? null,
           ...(postLivePreviewProgress
             ? { postProgress: postLivePreviewProgress }
+            : {}),
+          ...(livePreviewEnabled
+            ? {
+                onTier0PresentationSubmissionBoundary: (boundary) =>
+                  runWorkerParticleTemporalPresentationSubmissionBoundary(
+                    boundary
+                  )
+              }
             : {})
         }
       ),
@@ -1716,19 +2292,28 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
             'worker resident schedule terminal candidate cannot overwrite a pending committed presentation'
           );
         }
+        let terminalPresentationCompletion = null;
+        let terminalPreviewToken = null;
         if (livePreviewEnabled) {
           // Materialize the exact terminal pixels while the terminal retained
-          // family is current. The later post-StateManager admission can then
-          // promote this same candidate without submitting a duplicate draw.
-          // This draw is presentation-only and remains outside the already
-          // satisfied physics/authority fence.
+          // family is current. GPU+rAF presentation proof and the page's
+          // ComputeManager/StateManager commit are independent signals, so
+          // start the proof now but do not serialize authority publication
+          // behind it. The admission handler joins both before promotion.
           try {
             flushWorkerQueueSubmitBurst(device);
           } catch {}
-          candidateDrawLoop.ensureTerminalPreview(terminalCandidate);
-          try {
-            flushWorkerQueueSubmitBurst(device);
-          } catch {}
+          workerParticleTemporalAuthorityAdmissionPending = true;
+          // An already armed autonomous callback must not overwrite the exact
+          // terminal pixels between their proof and authority promotion.
+          cancelWorkerParticleTemporalAnimationFrame();
+          terminalPreviewToken = { active: true };
+          terminalPresentationCompletion = retainHandledPromiseForLaterJoin(
+            candidateDrawLoop.ensureTerminalPreview(terminalCandidate, {
+              token: terminalPreviewToken,
+              deadlineMs: 250
+            })
+          );
         }
         pendingCommittedResidentSchedulePresentation = {
           scheduleId: result?.scheduleId ?? null,
@@ -1736,10 +2321,15 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
           stateKey: result?.stateKey ?? schedulePayload.lease?.stateKey ?? null,
           terminalCandidate,
           terminalFence: result?.gpuFence ?? null,
-          candidateDrawLoop
+          candidateDrawLoop,
+          terminalPresentationCompletion,
+          terminalPreviewToken,
+          terminalPresentationDeadlineMs: 250,
+          admissionInFlight: false
         };
       }
     } catch {
+      workerParticleTemporalAuthorityAdmissionPending = false;
       // Terminal candidate failures must not mask the completed result.
     }
     publishResidentStageStatus({
@@ -1930,11 +2520,13 @@ struct Params {
   fallbackPointSizePx: f32,
   minPointSizePx: f32,
   maxPointSizePx: f32,
-  _pad: vec2<f32>,
+  motionAgeS: f32,
+  motionMaxDisplacementM: f32,
 };
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read> particleVelocities: array<vec4<f32>>;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -2016,7 +2608,18 @@ fn buildVertex(
   let signedRadiusM = particle.positionRadius.w;
   let belongsToPass = (vaporPass && signedRadiusM < 0.0)
     || (!vaporPass && signedRadiusM > 0.0);
-  var clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
+  let rawDisplacementM = particleVelocities[instanceIndex].xyz
+    * max(params.motionAgeS, 0.0);
+  let rawDisplacementLengthM = length(rawDisplacementM);
+  let displacementScale = select(
+    1.0,
+    params.motionMaxDisplacementM / max(rawDisplacementLengthM, 0.000001),
+    params.motionMaxDisplacementM > 0.0
+      && rawDisplacementLengthM > params.motionMaxDisplacementM
+  );
+  let centerM = particle.positionRadius.xyz
+    + rawDisplacementM * displacementScale;
+  var clip = params.viewProjection * vec4<f32>(centerM, 1.0);
   if (
     clip.w <= 0.0001
     || !belongsToPass
@@ -2026,7 +2629,7 @@ fn buildVertex(
   }
   let corner = quadCorner(vertexIndex);
   let radiusM = abs(signedRadiusM);
-  var pointSizePx = projectiveRadiusPx(particle.positionRadius.xyz, radiusM, clip);
+  var pointSizePx = projectiveRadiusPx(centerM, radiusM, clip);
   if (pointSizePx <= 0.0001) {
     pointSizePx = max(radiusM * params.radiusScalePx, params.fallbackPointSizePx);
   }
@@ -2113,6 +2716,11 @@ function ensureRenderRowsPipeline() {
         binding: 1,
         visibility: gpuShaderStage('VERTEX', SHADER_STAGE_VERTEX),
         buffer: { type: 'uniform' }
+      },
+      {
+        binding: 2,
+        visibility: gpuShaderStage('VERTEX', SHADER_STAGE_VERTEX),
+        buffer: { type: 'read-only-storage' }
       }
     ]
   });
@@ -2395,6 +3003,801 @@ function drawWorkerPresentationBox(pass, viewProjection, boxDimsM) {
   return dims;
 }
 
+function armWorkerParticleTemporalPresentation({
+  motionRequest = null,
+  renderBindGroup = null,
+  particleCount = 0,
+  viewProjection = null,
+  uniformTemplate = null,
+  boxDimsM = null,
+  sourceReceipt = null,
+  onStatus = null,
+  scheduleImmediately = true,
+  autonomousEnabled = true
+} = {}) {
+  const motion = normalizeWorkerParticleTemporalMotionRequest(motionRequest);
+  if (
+    !motion
+    || !renderBindGroup
+    || !(particleCount > 0)
+    || !(uniformTemplate instanceof Float32Array)
+    || uniformTemplate.length < 24
+    || !sourceReceipt
+  ) {
+    stopWorkerParticleTemporalPresentation();
+    return false;
+  }
+  stopWorkerParticleTemporalPresentation();
+  const submittedAtMs = nowMs();
+  workerParticleTemporalPresentation = {
+    generation: workerParticleTemporalGeneration,
+    motion,
+    renderBindGroup,
+    particleCount,
+    viewProjection: normalizeMatrix(viewProjection),
+    uniformTemplate: new Float32Array(uniformTemplate),
+    boxDimsM: normalizeWorkerPresentationBoxDims(boxDimsM),
+    sourceReceipt: { ...sourceReceipt },
+    sourceFrameCount: Number(sourceReceipt.frameCount),
+    sourceSphStep: Number.isFinite(Number(sourceReceipt.sphStep))
+      ? Number(sourceReceipt.sphStep)
+      : null,
+    submittedAtMs,
+    lastSubmittedAtMs: submittedAtMs,
+    lastMotionAgeS: 0,
+    autonomousEnabled: autonomousEnabled === true,
+    onStatus: typeof onStatus === 'function' ? onStatus : null
+  };
+  if (scheduleImmediately) scheduleWorkerParticleTemporalPresentation();
+  return true;
+}
+
+function updateWorkerParticleTemporalViewProjection(viewProjection) {
+  if (!workerParticleTemporalPresentation) return false;
+  workerParticleTemporalPresentation.viewProjection =
+    normalizeMatrix(viewProjection);
+  return true;
+}
+
+function promoteWorkerParticleTemporalPresentation(sourceReceipt = null) {
+  const presentation = workerParticleTemporalPresentation;
+  if (!presentation || !sourceReceipt) return false;
+  const sourceStep = Number(sourceReceipt.sphStep);
+  if (
+    Number.isFinite(Number(presentation.sourceSphStep))
+    && Number.isFinite(sourceStep)
+    && sourceStep !== Number(presentation.sourceSphStep)
+  ) return false;
+  presentation.sourceReceipt = { ...sourceReceipt };
+  presentation.onStatus?.(presentation.sourceReceipt);
+  return true;
+}
+
+function waitForWorkerParticlePresentationOpportunity({ timeoutMs = 75 } = {}) {
+  const boundedTimeoutMs = Math.max(8, Math.round(Number(timeoutMs) || 75));
+  return new Promise((resolve) => {
+    let settled = false;
+    let frameHandle = null;
+    let timeoutHandle = null;
+    const finish = ({ available, method }) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle != null) globalThis.clearTimeout?.(timeoutHandle);
+      resolve(Object.freeze({
+        available: available === true,
+        method,
+        observedAtMs: nowMs()
+      }));
+    };
+    if (typeof self.requestAnimationFrame !== 'function') {
+      timeoutHandle = globalThis.setTimeout?.(() => finish({
+        available: false,
+        method: 'worker-request-animation-frame-unavailable'
+      }), 0);
+      return;
+    }
+    frameHandle = self.requestAnimationFrame(() => finish({
+      available: true,
+      method: 'worker-request-animation-frame-after-gpu-completion'
+    }));
+    timeoutHandle = globalThis.setTimeout?.(() => {
+      try { self.cancelAnimationFrame?.(frameHandle); } catch {}
+      finish({
+        available: false,
+        method: 'worker-request-animation-frame-timeout'
+      });
+    }, boundedTimeoutMs);
+  });
+}
+
+function promiseWithinWorkerParticleDeadline(promise, timeoutMs) {
+  const boundedTimeoutMs = Math.max(8, Math.round(Number(timeoutMs) || 75));
+  let timeoutHandle = null;
+  return Promise.race([
+    Promise.resolve(promise).then((value) => ({ timedOut: false, value })),
+    new Promise((resolve) => {
+      timeoutHandle = globalThis.setTimeout?.(
+        () => resolve({ timedOut: true, value: null }),
+        boundedTimeoutMs
+      );
+    })
+  ]).finally(() => {
+    if (timeoutHandle != null) globalThis.clearTimeout?.(timeoutHandle);
+  });
+}
+
+function trackWorkerParticleKeyframePresentationCompletion({
+  queueCompletion = null,
+  queueCompletionSerial = null,
+  generation = null,
+  submittedFramebufferEpoch = null,
+  submittedAtMs = nowMs(),
+  drawnBoxDimsM = null
+} = {}) {
+  const presentation = workerParticleTemporalPresentation;
+  if (
+    !presentation
+    || presentation.generation !== generation
+  ) return null;
+  const completion = (async () => {
+    if (!queueCompletion || typeof queueCompletion.then !== 'function') {
+      const nextStatus = publishRenderRowsStatus({
+        ...presentation.sourceReceipt,
+        status: 'worker-offscreen-resident-particle-keyframe-presentation-blocked',
+        reason: 'worker-particle-keyframe-queue-completion-unavailable',
+        presentationFrameSchema:
+          RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+        presentationFrameStatus:
+          'worker-particle-keyframe-queue-completion-unavailable',
+        presentationFrameAdmitted: false,
+        presentationFrameGpuCompleted: false,
+        presentationFramePresentationOpportunity: false,
+        presentationQueueCompletionCount: null,
+        presentationQueueCompletionSerial: queueCompletionSerial,
+        presentationQueueCompletionMethod: null,
+        presentationQueueCompletionScope:
+          ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+        physicsQueuePrefixCoverage:
+          ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+        physicsHostQueueFenceParticipation: null,
+        authoritativeStateMutation: false
+      });
+      presentation.sourceReceipt = { ...nextStatus };
+      presentation.onStatus?.(nextStatus);
+      return {
+        rendered: false,
+        gpuCompleted: false,
+        presentationOpportunity: false,
+        admitted: false,
+        reason: 'worker-particle-keyframe-queue-completion-unavailable',
+        status: nextStatus
+      };
+    }
+    try {
+      await queueCompletion;
+    } catch (error) {
+      if (
+        disposed
+        || !workerParticleTemporalPresentation
+        || workerParticleTemporalPresentation.generation !== generation
+        || !workerFramebufferEpochIsCurrent(submittedFramebufferEpoch)
+      ) {
+        return {
+          rendered: false,
+          gpuCompleted: false,
+          presentationOpportunity: false,
+          admitted: false,
+          stale: true,
+          reason: 'worker-particle-keyframe-generation-superseded',
+          error
+        };
+      }
+      const nextStatus = publishRenderRowsStatus({
+        ...presentation.sourceReceipt,
+        status: 'worker-offscreen-resident-particle-keyframe-presentation-blocked',
+        reason: 'worker-particle-keyframe-queue-completion-failed',
+        presentationFrameSchema:
+          RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+        presentationFrameStatus:
+          'worker-particle-keyframe-queue-completion-failed',
+        presentationFrameAdmitted: false,
+        presentationFrameGpuCompleted: false,
+        presentationFramePresentationOpportunity: false,
+        presentationQueueCompletionCount: null,
+        presentationQueueCompletionSerial: queueCompletionSerial,
+        presentationQueueCompletionMethod:
+          'worker-device.queue.onSubmittedWorkDone',
+        presentationQueueCompletionScope:
+          ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+        physicsQueuePrefixCoverage:
+          ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+        physicsHostQueueFenceParticipation: null,
+        authoritativeStateMutation: false,
+        ...compactError(error)
+      });
+      presentation.sourceReceipt = { ...nextStatus };
+      presentation.onStatus?.(nextStatus);
+      return {
+        rendered: false,
+        gpuCompleted: false,
+        presentationOpportunity: false,
+        admitted: false,
+        reason: 'worker-particle-keyframe-queue-completion-failed',
+        error,
+        status: nextStatus
+      };
+    }
+    const gpuCompletedAtMs = nowMs();
+    const opportunity = await waitForWorkerParticlePresentationOpportunity({
+      timeoutMs: Math.max(50, presentation.motion.minFrameIntervalMs * 4)
+    });
+    if (
+      disposed
+      || !workerParticleTemporalPresentation
+      || workerParticleTemporalPresentation.generation !== generation
+      || !workerFramebufferEpochIsCurrent(submittedFramebufferEpoch)
+    ) {
+      return {
+        rendered: true,
+        gpuCompleted: true,
+        presentationOpportunity: opportunity.available,
+        admitted: false,
+        stale: true,
+        reason: 'worker-particle-keyframe-generation-superseded'
+      };
+    }
+    const currentPresentation = workerParticleTemporalPresentation;
+    const admitted = opportunity.available === true;
+    if (admitted) {
+      frameCount += 1;
+      readyFrameCount = frameCount;
+      notePresentedSphStep(currentPresentation.sourceSphStep);
+      currentPresentation.sourceFrameCount = frameCount;
+    }
+    const completedAtMs = opportunity.observedAtMs;
+    const nextStatus = publishRenderRowsStatus({
+      ...currentPresentation.sourceReceipt,
+      status: admitted
+        ? 'worker-offscreen-resident-particle-state-producer-rendered'
+        : 'worker-offscreen-resident-particle-keyframe-presentation-blocked',
+      reason: admitted
+        ? 'worker-particle-keyframe-presentation-opportunity'
+        : 'worker-particle-keyframe-gpu-completed-without-presentation-opportunity',
+      frameCount,
+      readyFrameCount,
+      readyEver: readyFrameCount > 0,
+      workerReady: true,
+      workerFramebufferEpoch: submittedFramebufferEpoch,
+      updatedAtMs: completedAtMs,
+      ...workerPresentationGeometryReceipt(drawnBoxDimsM),
+      presentationFrameSchema:
+        RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+      presentationFrameStatus: admitted
+        ? 'worker-particle-keyframe-presentation-opportunity'
+        : 'worker-particle-keyframe-gpu-completed-without-presentation-opportunity',
+      presentationFrameAdmitted: admitted,
+      presentationFrameGpuCompleted: true,
+      presentationFrameGpuCompletedAtMs: gpuCompletedAtMs,
+      presentationFramePresentationOpportunity: admitted,
+      presentationFramePresentationOpportunityMethod: opportunity.method,
+      presentationFrameSubmitToGpuCompleteMs: Math.max(
+        0,
+        gpuCompletedAtMs - submittedAtMs
+      ),
+      presentationFrameSubmitToPresentationOpportunityMs: Math.max(
+        0,
+        completedAtMs - submittedAtMs
+      ),
+      presentationQueueCompletionCount: queueCompletionSerial,
+      presentationQueueCompletionSerial: queueCompletionSerial,
+      presentationQueueCompletionMethod:
+        'worker-device.queue.onSubmittedWorkDone',
+      presentationQueueCompletionScope:
+        ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+      physicsQueuePrefixCoverage:
+        ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+      physicsHostQueueFenceParticipation: null,
+      authoritativeStateMutation: false
+    });
+    currentPresentation.sourceReceipt = { ...nextStatus };
+    currentPresentation.onStatus?.(nextStatus);
+    return {
+      rendered: true,
+      gpuCompleted: true,
+      presentationOpportunity: admitted,
+      admitted,
+      status: nextStatus
+    };
+  })();
+  let trackedCompletion = null;
+  trackedCompletion = completion.then(
+    (result) => {
+      if (workerParticleTemporalFrameInFlight === trackedCompletion) {
+        workerParticleTemporalFrameInFlight = null;
+        if (
+          result?.admitted === true
+          && workerParticleTemporalPresentation?.autonomousEnabled === true
+          && !workerParticleTemporalAuthorityAdmissionPending
+        ) {
+          scheduleWorkerParticleTemporalPresentation({
+            preferImmediate: true,
+            // Start halfway to the first deterministic QoS boundary. This
+            // keeps the first autonomous cover distinct from the boundary's
+            // exact completed-substep age even when wall time lands on it.
+            motionAgeSOverride:
+              workerParticleFirstSlotMidpointMotionAgeS()
+          });
+        }
+      }
+      return result;
+    },
+    (error) => {
+      if (workerParticleTemporalFrameInFlight === trackedCompletion) {
+        workerParticleTemporalFrameInFlight = null;
+      }
+      throw error;
+    }
+  );
+  workerParticleTemporalFrameInFlight = trackedCompletion;
+  return trackedCompletion;
+}
+
+function drawWorkerParticleTemporalMotionFrame({
+  reason = 'worker-particle-temporal-motion-frame',
+  force = false,
+  boundary = null,
+  motionAgeSOverride = null
+} = {}) {
+  const presentation = workerParticleTemporalPresentation;
+  if (
+    !presentation
+    || presentation.autonomousEnabled !== true
+    || !device
+    || !context
+    || !format
+    || disposed
+  ) {
+    return { rendered: false, horizonExhausted: true, completion: null };
+  }
+  if (workerParticleTemporalFrameInFlight) {
+    return {
+      rendered: false,
+      horizonExhausted: false,
+      frameInFlight: true,
+      completion: workerParticleTemporalFrameInFlight
+    };
+  }
+  const drawAtMs = nowMs();
+  const minimumIntervalMs = presentation.motion.minFrameIntervalMs;
+  if (
+    force !== true
+    &&
+    drawAtMs - presentation.lastSubmittedAtMs
+      < minimumIntervalMs * 0.9
+  ) {
+    return { rendered: false, horizonExhausted: false, completion: null };
+  }
+  const rawAgeS = Math.max(0, (drawAtMs - presentation.submittedAtMs) / 1000);
+  const boundaryCompletedSubsteps = Number(boundary?.completedSubstepCount);
+  const boundaryTotalSubsteps = Number(boundary?.totalSubstepCount);
+  const boundaryProgressReady = Boolean(
+    boundary
+    && Number.isSafeInteger(boundaryCompletedSubsteps)
+    && Number.isSafeInteger(boundaryTotalSubsteps)
+    && boundaryCompletedSubsteps > 0
+    && boundaryTotalSubsteps > 0
+    && boundaryCompletedSubsteps < boundaryTotalSubsteps
+  );
+  // Forced queue-boundary frames represent an exact fraction of the logical
+  // K-step transaction. Their motion age must not depend on whether a fence
+  // happened to resolve just before or after vsync. Autonomous frames retain
+  // wall-time extrapolation between those deterministic anchors.
+  const wallMotionAgeS = Math.min(
+    rawAgeS * presentation.motion.simulationTimeScale,
+    presentation.motion.maxSimulationAgeS
+  );
+  const boundaryMotionAgeS = boundaryProgressReady
+    ? presentation.motion.maxSimulationAgeS
+      * boundaryCompletedSubsteps / boundaryTotalSubsteps
+    : null;
+  const requestedMotionAgeS = Number(motionAgeSOverride);
+  const motionAgeOverrideReady = Boolean(
+    Number.isFinite(requestedMotionAgeS)
+    && requestedMotionAgeS > 0
+  );
+  const motionAgeS = motionAgeOverrideReady
+    ? Math.max(
+        presentation.lastMotionAgeS,
+        Math.min(
+          requestedMotionAgeS,
+          presentation.motion.maxSimulationAgeS
+        )
+      )
+    : boundaryProgressReady
+      ? Math.max(
+          presentation.lastMotionAgeS,
+          Math.min(
+            boundaryMotionAgeS,
+            presentation.motion.maxSimulationAgeS
+          )
+        )
+      : wallMotionAgeS;
+  const horizonExhausted = motionAgeOverrideReady || boundaryProgressReady
+    ? false
+    : rawAgeS >= presentation.motion.maxHorizonS - 1e-6
+      || motionAgeS >= presentation.motion.maxSimulationAgeS - 1e-6;
+  if (motionAgeS <= presentation.lastMotionAgeS + 1e-6) {
+    return { rendered: false, horizonExhausted, completion: null };
+  }
+  const uniforms = new Float32Array(presentation.uniformTemplate);
+  uniforms.set(presentation.viewProjection, 0);
+  uniforms[22] = motionAgeS;
+  uniforms[23] = presentation.motion.maxDisplacementM;
+  device.queue.writeBuffer(renderRowsUniformBuffer, 0, uniforms);
+  const encoder = device.createCommandEncoder({
+    label: 'ulg-offscreen-particle-temporal-motion-encoder'
+  });
+  const pass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(
+    pass,
+    presentation.renderBindGroup,
+    presentation.particleCount
+  );
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    pass,
+    presentation.viewProjection,
+    presentation.boxDimsM
+  );
+  pass.end();
+  const motionFramebufferEpoch = currentWorkerFramebufferEpoch();
+  if (motionFramebufferEpoch == null) {
+    return { rendered: false, horizonExhausted: true, completion: null };
+  }
+  device.queue.submit([encoder.finish()]);
+  workerParticleTemporalSubmittedFrameSerial += 1;
+  const submittedFrameSerial = workerParticleTemporalSubmittedFrameSerial;
+  const submittedGeneration = presentation.generation;
+  presentation.lastSubmittedAtMs = drawAtMs;
+  presentation.lastMotionAgeS = motionAgeS;
+  let queueCompletion = null;
+  let queueCompletionSerial = null;
+  try {
+    queueCompletion = typeof device.queue?.onSubmittedWorkDone === 'function'
+      ? device.queue.onSubmittedWorkDone()
+      : null;
+    if (queueCompletion && typeof queueCompletion.then === 'function') {
+      workerPresentationQueueCompletionSerial += 1;
+      queueCompletionSerial = workerPresentationQueueCompletionSerial;
+    }
+  } catch {}
+  const completion = (async () => {
+    if (!queueCompletion || typeof queueCompletion.then !== 'function') {
+      return {
+        rendered: true,
+        gpuCompleted: false,
+        presentationOpportunity: false,
+        admitted: false,
+        reason: 'worker-particle-temporal-queue-completion-unavailable'
+      };
+    }
+    try {
+      await queueCompletion;
+    } catch (error) {
+      return {
+        rendered: true,
+        gpuCompleted: false,
+        presentationOpportunity: false,
+        admitted: false,
+        reason: 'worker-particle-temporal-queue-completion-failed',
+        error
+      };
+    }
+    const gpuCompletedAtMs = nowMs();
+    const opportunity = await waitForWorkerParticlePresentationOpportunity({
+      timeoutMs: Math.max(50, presentation.motion.minFrameIntervalMs * 4)
+    });
+    if (
+      disposed
+      || !workerParticleTemporalPresentation
+      || workerParticleTemporalPresentation.generation !== submittedGeneration
+      || !workerFramebufferEpochIsCurrent(motionFramebufferEpoch)
+    ) {
+      return {
+        rendered: true,
+        gpuCompleted: true,
+        presentationOpportunity: opportunity.available,
+        admitted: false,
+        stale: true,
+        reason: 'worker-particle-temporal-generation-superseded'
+      };
+    }
+    const currentPresentation = workerParticleTemporalPresentation;
+    const admitted = opportunity.available === true;
+    if (admitted) {
+      frameCount += 1;
+      readyFrameCount = frameCount;
+      notePresentedSphStep(currentPresentation.sourceSphStep);
+      workerParticleTemporalMotionFrameSerial += 1;
+    }
+    const completedAtMs = opportunity.observedAtMs;
+    const nextStatus = publishRenderRowsStatus({
+      ...currentPresentation.sourceReceipt,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
+      reason,
+      frameCount,
+      readyFrameCount,
+      readyEver: true,
+      workerReady: true,
+      workerFramebufferEpoch: motionFramebufferEpoch,
+      updatedAtMs: completedAtMs,
+      ...workerPresentationGeometryReceipt(drawnBoxDimsM),
+      motionFrameSchema: RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA,
+      motionFrameStatus: admitted
+        ? 'worker-particle-temporal-motion-frame-presentation-opportunity'
+        : 'worker-particle-temporal-motion-frame-gpu-completed-without-presentation-opportunity',
+      motionFrameAdmitted: admitted,
+      motionFrameSubmittedSerial: submittedFrameSerial,
+      motionFrameGpuCompleted: true,
+      motionFrameGpuCompletedAtMs: gpuCompletedAtMs,
+      motionFramePresentationOpportunity: admitted,
+      motionFramePresentationOpportunityMethod: opportunity.method,
+      motionFrameSerial: admitted
+        ? workerParticleTemporalMotionFrameSerial
+        : null,
+      motionSourceFrameCount: currentPresentation.sourceFrameCount,
+      motionSourceSphStep: currentPresentation.sourceSphStep,
+      motionAgeS,
+      motionHorizonS: currentPresentation.motion.maxHorizonS,
+      motionSimulationTimeScale:
+        currentPresentation.motion.simulationTimeScale,
+      motionMaxSimulationAgeS:
+        currentPresentation.motion.maxSimulationAgeS,
+      motionMaxDisplacementM: currentPresentation.motion.maxDisplacementM,
+      motionTargetHz: currentPresentation.motion.targetHz,
+      motionMethod: currentPresentation.motion.method,
+      motionVelocityBufferRetained: true,
+      motionVelocitySourceLanes: [
+        ...currentPresentation.motion.sourceVelocityLanes
+      ],
+      motionSubmitToGpuCompleteMs: Math.max(0, gpuCompletedAtMs - drawAtMs),
+      motionSubmitToPresentationOpportunityMs: Math.max(
+        0,
+        completedAtMs - drawAtMs
+      ),
+      presentationQueueCompletionCount: queueCompletionSerial,
+      presentationQueueCompletionSerial: queueCompletionSerial,
+      presentationQueueCompletionMethod:
+        'worker-device.queue.onSubmittedWorkDone',
+      presentationQueueCompletionScope:
+        ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+      physicsQueuePrefixCoverage: boundaryProgressReady
+        ? ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED
+        : ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+      physicsHostQueueFenceParticipation: boundaryProgressReady
+        ? true
+        : null,
+      motionAgeSource: motionAgeOverrideReady
+        ? 'explicit-qos-midpoint'
+        : boundaryProgressReady
+          ? 'completed-substep-boundary'
+          : 'bounded-wall-clock',
+      ...(boundary && typeof boundary === 'object'
+        ? { motionPresentationQosBoundary: { ...boundary } }
+        : {}),
+      authoritativeStateMutation: false
+    });
+    currentPresentation.sourceReceipt = { ...nextStatus };
+    currentPresentation.onStatus?.(nextStatus);
+    return {
+      rendered: true,
+      gpuCompleted: true,
+      presentationOpportunity: admitted,
+      admitted,
+      status: nextStatus
+    };
+  })();
+  let trackedCompletion = null;
+  trackedCompletion = completion.finally(() => {
+    if (workerParticleTemporalFrameInFlight === trackedCompletion) {
+      workerParticleTemporalFrameInFlight = null;
+    }
+  });
+  workerParticleTemporalFrameInFlight = trackedCompletion;
+  return {
+    rendered: true,
+    horizonExhausted,
+    submittedFrameSerial,
+    completion: trackedCompletion
+  };
+}
+
+export async function runWorkerParticleTemporalPresentationSubmissionBoundary(
+  boundary = {}
+) {
+  workerParticleTemporalBoundaryPending = true;
+  cancelWorkerParticleTemporalAnimationFrame();
+  let terminalHandoffCoverReady = false;
+  let terminalHandoffMotionAgeS = null;
+  try {
+    const presentation = workerParticleTemporalPresentation;
+    if (
+      !presentation
+      || presentation.autonomousEnabled !== true
+      || disposed
+    ) {
+      throw new Error(
+        'worker particle temporal presentation is unavailable at the fused submission boundary'
+      );
+    }
+    const boundaryGeneration = presentation.generation;
+    const deadlineMs = Math.max(
+      50,
+      presentation.motion.minFrameIntervalMs * 4
+    );
+    if (workerParticleTemporalFrameInFlight) {
+      const prior = await promiseWithinWorkerParticleDeadline(
+        workerParticleTemporalFrameInFlight,
+        deadlineMs
+      );
+      if (prior.timedOut) {
+        invalidateWorkerParticleTemporalFrameInFlight();
+        throw new Error(
+          'worker particle temporal presentation prior frame missed the QoS boundary deadline'
+        );
+      }
+      cancelWorkerParticleTemporalAnimationFrame();
+    }
+    if (
+      disposed
+      || !workerParticleTemporalPresentation
+      || workerParticleTemporalPresentation.generation !== boundaryGeneration
+    ) {
+      throw new Error(
+        'worker particle temporal presentation was superseded at the QoS boundary'
+      );
+    }
+    const draw = drawWorkerParticleTemporalMotionFrame({
+      reason: 'worker-particle-temporal-fused-submission-boundary',
+      force: true,
+      boundary
+    });
+    if (!draw.rendered || !draw.completion) {
+      throw new Error(
+        draw.horizonExhausted
+          ? 'worker particle temporal presentation exhausted its bounded horizon'
+          : 'worker particle temporal presentation did not submit at the QoS boundary'
+      );
+    }
+    const completed = await promiseWithinWorkerParticleDeadline(
+      draw.completion,
+      deadlineMs
+    );
+    if (completed.timedOut) {
+      invalidateWorkerParticleTemporalFrameInFlight();
+      throw new Error(
+        'worker particle temporal presentation missed the QoS boundary deadline'
+      );
+    }
+    if (completed.value?.admitted !== true) {
+      throw new Error(
+        completed.value?.reason
+        || 'worker particle temporal presentation lacked a completed presentation opportunity'
+      );
+    }
+    const completedSubstepCount = Number(boundary?.completedSubstepCount);
+    const totalSubstepCount = Number(boundary?.totalSubstepCount);
+    const chunkStepCount = Number(boundary?.chunkStepCount);
+    terminalHandoffCoverReady = Boolean(
+      Number.isSafeInteger(completedSubstepCount)
+      && Number.isSafeInteger(totalSubstepCount)
+      && Number.isSafeInteger(chunkStepCount)
+      && completedSubstepCount > 0
+      && chunkStepCount > 0
+      && completedSubstepCount < totalSubstepCount
+      && completedSubstepCount + chunkStepCount >= totalSubstepCount
+    );
+    if (terminalHandoffCoverReady) {
+      terminalHandoffMotionAgeS = presentation.motion.maxSimulationAgeS
+        * (
+          completedSubstepCount
+          + (totalSubstepCount - completedSubstepCount) / 2
+        )
+        / totalSubstepCount;
+    }
+    return Object.freeze({
+      schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+      status: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+      submissionOrdinal: Number(boundary?.submissionOrdinal) || null,
+      completedSubstepCount: Number(boundary?.completedSubstepCount) || null,
+      totalSubstepCount: Number(boundary?.totalSubstepCount) || null,
+      chunkStepCount: Number(boundary?.chunkStepCount) || null,
+      motionFrameSubmittedSerial:
+        draw.submittedFrameSerial ?? null,
+      motionFrameSerial:
+        completed.value?.status?.motionFrameSerial ?? null,
+      gpuCompleted: true,
+      gpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+      presentationOpportunity: true,
+      presentationOpportunityMethod:
+        completed.value?.status?.motionFramePresentationOpportunityMethod
+        ?? null,
+      queuePrefixCoveredPhysics: true,
+      presentationQueueCompletionScope:
+        ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+      physicsQueuePrefixCoverage:
+        ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED,
+      physicsContinuationBlocked: true,
+      presentationQosHostQueueFenceCount: 1,
+      terminalHandoffCoverReady,
+      presentationQueueCompletionCount:
+        completed.value?.status?.presentationQueueCompletionCount ?? null,
+      presentationQueueCompletionSerial:
+        completed.value?.status?.presentationQueueCompletionSerial ?? null,
+      presentationQueueCompletionMethod:
+        completed.value?.status?.presentationQueueCompletionMethod ?? null
+    });
+  } finally {
+    workerParticleTemporalBoundaryPending = false;
+    if (terminalHandoffCoverReady) {
+      // The boundary's post-GPU rAF is also the pacing edge for one final
+      // old-source cover. Submit it now so it can be proved on the next rAF
+      // while the terminal mechanics chunk/fence completes. The terminal
+      // keyframe then supersedes it and is proved on the following edge.
+      scheduleWorkerParticleTemporalPresentation({
+        preferImmediate: true,
+        continueAfterAdmission: false,
+        motionAgeSOverride: terminalHandoffMotionAgeS
+      });
+    }
+  }
+}
+
+function ensureWorkerOwnedIsosurfacePresenter() {
+  if (workerOwnedIsosurfacePresenter) return workerOwnedIsosurfacePresenter;
+  if (!device || !context || !format) {
+    throw new Error('worker-owned isosurface presentation requires an initialized canvas device');
+  }
+  workerOwnedIsosurfacePresenter = createWorkerOwnedIsosurfacePresenter({
+    device,
+    context,
+    format,
+    depthFormat: WORKER_PRESENTATION_DEPTH_FORMAT,
+    getDepthView: () => ensureWorkerPresentationDepthView(),
+    drawOverlay(pass, viewProjection, boxDimsM) {
+      drawWorkerPresentationBox(pass, viewProjection, boxDimsM);
+    },
+    waitForPresentationOpportunity: () =>
+      waitForWorkerParticlePresentationOpportunity({ timeoutMs: 100 }),
+    getFramebufferEpoch: () => workerFramebufferEpoch,
+    nextPresentationQueueCompletionSerial() {
+      workerPresentationQueueCompletionSerial += 1;
+      return workerPresentationQueueCompletionSerial;
+    },
+    onFrameSubmitted({ sphStep }) {
+      frameCount += 1;
+      readyFrameCount = frameCount;
+      notePresentedSphStep(sphStep);
+    },
+    onTerminal(receipt) {
+      publishRenderRowsStatus({
+        ...receipt,
+        renderRowsSchema: RENDER_ROWS_SCHEMA,
+        inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+        producerSourceKind: 'worker-retained-resident-stage-output',
+        producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+        sourceStageId: 'schroederSameLevelMechanics',
+        workerLocalRenderRowsProduced:
+          receipt?.status
+            === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+        frameCount,
+        readyFrameCount,
+        readyEver: readyFrameCount > 0
+      });
+    }
+  });
+  return workerOwnedIsosurfacePresenter;
+}
+
 function workerPresentationGeometryReceipt(boxDimsM) {
   return {
     presentationGeometry: 'sphere-impostor-depth-fallback',
@@ -2430,6 +3833,25 @@ function ensureRenderRowsParticleBuffer(byteLength) {
       | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
   });
   renderRowsParticleBufferByteLength = nextByteLength;
+}
+
+function ensureRenderRowsParticleVelocityBuffer(byteLength) {
+  const nextByteLength = Math.max(
+    4 * Float32Array.BYTES_PER_ELEMENT,
+    Math.ceil(Number(byteLength) || 0)
+  );
+  if (
+    renderRowsParticleVelocityBuffer
+    && renderRowsParticleVelocityBufferByteLength >= nextByteLength
+  ) return;
+  renderRowsParticleVelocityBuffer?.destroy?.();
+  renderRowsParticleVelocityBuffer = device.createBuffer({
+    label: 'ulg-offscreen-render-rows-particle-velocities',
+    size: nextByteLength,
+    usage: gpuBufferUsage('STORAGE', BUFFER_USAGE_STORAGE)
+      | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
+  });
+  renderRowsParticleVelocityBufferByteLength = nextByteLength;
 }
 
 function createResidentRenderProducerShaderModule() {
@@ -2564,6 +3986,7 @@ struct ParticleStateParams {
 @group(0) @binding(2) var<storage, read> colorRows: array<ColorRow>;
 @group(0) @binding(3) var<storage, read_write> outputParticles: array<Particle>;
 @group(0) @binding(4) var<uniform> params: ParticleStateParams;
+@group(0) @binding(5) var<storage, read_write> outputVelocities: array<vec4<f32>>;
 
 fn materialPhaseColor(materialId: f32, phaseId: f32) -> vec4<f32> {
   var color = params.fallbackColor;
@@ -2619,6 +4042,7 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
       0.0
     );
     outputParticles[index].color = vec4<f32>(0.0);
+    outputVelocities[index] = vec4<f32>(0.0);
     return;
   }
   let fallbackRadiusM = max(params.values.x, 0.000001);
@@ -2645,6 +4069,12 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
   );
   let color = materialPhaseColor(materialId, phaseId);
   outputParticles[index].color = vec4<f32>(color.rgb, color.a * clamp(params.values.y, 0.0, 1.0));
+  outputVelocities[index] = vec4<f32>(
+    stateRows[stateOffset + 4u],
+    stateRows[stateOffset + 5u],
+    stateRows[stateOffset + 6u],
+    1.0
+  );
 }
 `
   });
@@ -2686,6 +4116,11 @@ function ensureResidentParticleStateProducerPipeline() {
         binding: 4,
         visibility: gpuShaderStage('COMPUTE', SHADER_STAGE_COMPUTE),
         buffer: { type: 'uniform' }
+      },
+      {
+        binding: 5,
+        visibility: gpuShaderStage('COMPUTE', SHADER_STAGE_COMPUTE),
+        buffer: { type: 'storage' }
       }
     ]
   });
@@ -2767,6 +4202,16 @@ function normalizeMatrix(value) {
 }
 
 function drawRenderRows(data) {
+  const framebufferEpoch = submittedWorkerFramebufferEpoch(data);
+  if (framebufferEpoch == null) {
+    return publishRenderRowsStatus({
+      status: 'worker-offscreen-presentation-superseded-stale-framebuffer-epoch',
+      reason: 'draw-render-rows carries a stale worker framebuffer epoch',
+      workerFramebufferEpoch: normalizeWorkerFramebufferEpoch(
+        data.workerFramebufferEpoch
+      )
+    });
+  }
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
       schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
@@ -2788,6 +4233,7 @@ function drawRenderRows(data) {
     });
     return;
   }
+  stopWorkerParticleTemporalPresentation();
   configureCanvas({
     width: data.width,
     height: data.height,
@@ -2818,6 +4264,9 @@ function drawRenderRows(data) {
   clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
   ensureRenderRowsPipeline();
   ensureRenderRowsParticleBuffer(particleRows.byteLength);
+  ensureRenderRowsParticleVelocityBuffer(
+    particleCount * 4 * Float32Array.BYTES_PER_ELEMENT
+  );
   device.queue.writeBuffer(renderRowsParticleBuffer, 0, particleRows);
   const viewProjection = normalizeMatrix(data.viewProjectionMatrix);
   const uniforms = new Float32Array(24);
@@ -2834,7 +4283,14 @@ function drawRenderRows(data) {
     layout: renderRowsBindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: renderRowsParticleBuffer, size: particleRows.byteLength } },
-      { binding: 1, resource: { buffer: renderRowsUniformBuffer } }
+      { binding: 1, resource: { buffer: renderRowsUniformBuffer } },
+      {
+        binding: 2,
+        resource: {
+          buffer: renderRowsParticleVelocityBuffer,
+          size: particleCount * 4 * Float32Array.BYTES_PER_ELEMENT
+        }
+      }
     ]
   });
   const encoder = device.createCommandEncoder({ label: 'ulg-offscreen-render-rows-encoder' });
@@ -2850,7 +4306,7 @@ function drawRenderRows(data) {
   frameCount += 1;
   notePresentedSphStep(data.sphStep);
   readyFrameCount = frameCount;
-  publishRenderRowsStatus({
+  return publishRenderRowsStatus({
     status: 'worker-offscreen-render-rows-rendered',
     reason: data.reason || 'draw-render-rows',
     displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
@@ -2872,11 +4328,24 @@ function drawRenderRows(data) {
     frameCount,
     readyEver: true,
     readyFrameCount,
-    workerReady: true
+    workerReady: true,
+    workerFramebufferEpoch: framebufferEpoch
   });
 }
 
 function drawResidentRenderProducer(data) {
+  const framebufferEpoch = submittedWorkerFramebufferEpoch(data);
+  if (framebufferEpoch == null) {
+    return publishRenderRowsStatus({
+      schema: RESIDENT_RENDER_PRODUCER_SCHEMA,
+      status: 'worker-offscreen-presentation-superseded-stale-framebuffer-epoch',
+      reason:
+        'draw-resident-render-producer carries a stale worker framebuffer epoch',
+      workerFramebufferEpoch: normalizeWorkerFramebufferEpoch(
+        data.workerFramebufferEpoch
+      )
+    });
+  }
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
       status: 'worker-offscreen-presentation-superseded-stale-step',
@@ -2897,6 +4366,7 @@ function drawResidentRenderProducer(data) {
     });
     return;
   }
+  stopWorkerParticleTemporalPresentation();
   configureCanvas({
     width: data.width,
     height: data.height,
@@ -2965,6 +4435,9 @@ function drawResidentRenderProducer(data) {
     : sourceRows.byteLength;
   ensureResidentRenderProducerSourceBuffer(activeSourceByteLength);
   ensureRenderRowsParticleBuffer(activeSourceByteLength);
+  ensureRenderRowsParticleVelocityBuffer(
+    particleCount * 4 * Float32Array.BYTES_PER_ELEMENT
+  );
   if (!sourceCacheHit) {
     device.queue.writeBuffer(residentRenderProducerSourceBuffer, 0, sourceRows);
     residentRenderProducerSourceCacheKey = sourceCacheKey;
@@ -3001,7 +4474,14 @@ function drawResidentRenderProducer(data) {
     layout: renderRowsBindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: renderRowsParticleBuffer, size: activeSourceByteLength } },
-      { binding: 1, resource: { buffer: renderRowsUniformBuffer } }
+      { binding: 1, resource: { buffer: renderRowsUniformBuffer } },
+      {
+        binding: 2,
+        resource: {
+          buffer: renderRowsParticleVelocityBuffer,
+          size: particleCount * 4 * Float32Array.BYTES_PER_ELEMENT
+        }
+      }
     ]
   });
   const encoder = device.createCommandEncoder({ label: 'ulg-offscreen-resident-render-producer-encoder' });
@@ -3060,11 +4540,24 @@ function drawResidentRenderProducer(data) {
     frameCount,
     readyEver: true,
     readyFrameCount,
-    workerReady: true
+    workerReady: true,
+    workerFramebufferEpoch: framebufferEpoch
   });
 }
 
 function drawResidentParticleStateProducer(data) {
+  const framebufferEpoch = submittedWorkerFramebufferEpoch(data);
+  if (framebufferEpoch == null) {
+    return publishRenderRowsStatus({
+      schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      status: 'worker-offscreen-presentation-superseded-stale-framebuffer-epoch',
+      reason:
+        'draw-resident-particle-state-producer carries a stale worker framebuffer epoch',
+      workerFramebufferEpoch: normalizeWorkerFramebufferEpoch(
+        data.workerFramebufferEpoch
+      )
+    });
+  }
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
       schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
@@ -3090,6 +4583,7 @@ function drawResidentParticleStateProducer(data) {
     });
     return;
   }
+  stopWorkerParticleTemporalPresentation();
   configureCanvas({
     width: data.width,
     height: data.height,
@@ -3179,7 +4673,11 @@ function drawResidentParticleStateProducer(data) {
   const outputByteLength = particleCount
     * RENDER_ROW_PARTICLE_STRIDE_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const velocityByteLength = particleCount
+    * 4
+    * Float32Array.BYTES_PER_ELEMENT;
   ensureRenderRowsParticleBuffer(outputByteLength);
+  ensureRenderRowsParticleVelocityBuffer(velocityByteLength);
   if (!workerRetainedStageOutputSource) {
     ensureResidentParticleStateProducerBuffer('state', stateByteLength);
     ensureResidentParticleStateProducerBuffer('thermo', thermoByteLength);
@@ -3266,7 +4764,14 @@ function drawResidentParticleStateProducer(data) {
         }
       },
       { binding: 3, resource: { buffer: renderRowsParticleBuffer, size: outputByteLength } },
-      { binding: 4, resource: { buffer: residentParticleStateProducerParamsBuffer } }
+      { binding: 4, resource: { buffer: residentParticleStateProducerParamsBuffer } },
+      {
+        binding: 5,
+        resource: {
+          buffer: renderRowsParticleVelocityBuffer,
+          size: velocityByteLength
+        }
+      }
     ]
   });
   const renderBindGroup = device.createBindGroup({
@@ -3274,7 +4779,14 @@ function drawResidentParticleStateProducer(data) {
     layout: renderRowsBindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: renderRowsParticleBuffer, size: outputByteLength } },
-      { binding: 1, resource: { buffer: renderRowsUniformBuffer } }
+      { binding: 1, resource: { buffer: renderRowsUniformBuffer } },
+      {
+        binding: 2,
+        resource: {
+          buffer: renderRowsParticleVelocityBuffer,
+          size: velocityByteLength
+        }
+      }
     ]
   });
   const encoder = device.createCommandEncoder({ label: 'ulg-offscreen-resident-particle-state-producer-encoder' });
@@ -3293,20 +4805,67 @@ function drawResidentParticleStateProducer(data) {
     data.boxDimsM
   );
   renderPass.end();
+  const temporalMotion = normalizeWorkerParticleTemporalMotionRequest(
+    data.temporalMotion
+  );
+  const keyframePresentationProofRequired = Boolean(
+    temporalMotion
+    || data.residentScheduleCandidatePresentation === true
+  );
+  // Every authority-bearing particle candidate needs the same queue-complete
+  // plus post-completion presentation-opportunity proof. A candidate without
+  // autonomous extrapolation still arms the proof state, but can never enter
+  // the temporal frame scheduler.
+  const keyframeProofMotionRequest = temporalMotion ?? (
+    keyframePresentationProofRequired
+      ? {
+          schema: RESIDENT_PARTICLE_TEMPORAL_MOTION_SCHEMA,
+          enabled: true,
+          targetHz: DEFAULT_PARTICLE_TEMPORAL_TARGET_HZ,
+          presentationSlotCount: 1,
+          maxHorizonS: 1 / DEFAULT_PARTICLE_TEMPORAL_TARGET_HZ,
+          simulationTimeScale: 1,
+          maxSimulationAgeS: 1e-6,
+          maxDisplacementM: 1e-6
+        }
+      : null
+  );
+  const keyframeSubmittedAtMs = nowMs();
   device.queue.submit([encoder.finish()]);
-  frameCount += 1;
-  notePresentedSphStep(data.sphStep);
-  readyFrameCount = frameCount;
+  let keyframeQueueCompletion = null;
+  let keyframeQueueCompletionSerial = null;
+  if (keyframePresentationProofRequired) {
+    try {
+      keyframeQueueCompletion =
+        typeof device.queue?.onSubmittedWorkDone === 'function'
+          ? device.queue.onSubmittedWorkDone()
+          : null;
+      if (
+        keyframeQueueCompletion
+        && typeof keyframeQueueCompletion.then === 'function'
+      ) {
+        workerPresentationQueueCompletionSerial += 1;
+        keyframeQueueCompletionSerial =
+          workerPresentationQueueCompletionSerial;
+      }
+    } catch {}
+  } else {
+    frameCount += 1;
+    notePresentedSphStep(data.sphStep);
+    readyFrameCount = frameCount;
+  }
   const sourceStateTransferBytes = (sourceCacheHit || workerRetainedStageOutputSource)
     ? 0
     : stateByteLength + thermoByteLength + colorRowsByteLength;
   const inputTransferBytes = workerRetainedStageOutputSource
     ? viewProjection.byteLength + colorRowsByteLength
     : sourceStateTransferBytes + viewProjection.byteLength;
-  return publishRenderRowsStatus({
+  const initialStatus = publishRenderRowsStatus({
     schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
     renderRowsSchema: RENDER_ROWS_SCHEMA,
-    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    status: keyframePresentationProofRequired
+      ? 'worker-offscreen-resident-particle-keyframe-submitted'
+      : 'worker-offscreen-resident-particle-state-producer-rendered',
     reason: data.reason || 'draw-resident-particle-state-producer',
     displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
       ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
@@ -3393,6 +4952,7 @@ function drawResidentParticleStateProducer(data) {
     producerColorBufferByteLength: residentParticleStateProducerColorBufferByteLength,
     producerParamsBufferByteLength: residentParticleStateProducerParamsBuffer.size ?? 0,
     uniformBufferByteLength: renderRowsUniformBuffer.size ?? 0,
+    particleVelocityBufferByteLength: velocityByteLength,
     canvasWidth: canvas?.width ?? null,
     canvasHeight: canvas?.height ?? null,
     radiusScalePx: uniforms[18],
@@ -3401,10 +4961,67 @@ function drawResidentParticleStateProducer(data) {
     maxPointSizePx: uniforms[21],
     ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
-    readyEver: true,
+    readyEver: readyFrameCount > 0,
     readyFrameCount,
-    workerReady: true
+    workerReady: true,
+    workerFramebufferEpoch: framebufferEpoch,
+    ...(keyframePresentationProofRequired
+      ? {
+          presentationFrameSchema:
+            RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+          presentationFrameStatus:
+            'worker-particle-keyframe-submitted-awaiting-presentation-opportunity',
+          presentationFrameAdmitted: false,
+          presentationFrameGpuCompleted: false,
+          presentationFramePresentationOpportunity: false,
+          presentationQueueCompletionCount: null,
+          presentationQueueCompletionSerial:
+            keyframeQueueCompletionSerial,
+          presentationQueueCompletionMethod: null,
+          presentationQueueCompletionScope:
+            ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+          physicsQueuePrefixCoverage:
+            ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+          physicsHostQueueFenceParticipation: null
+        }
+      : {}),
+    motionFrameSchema: null,
+    motionFrameStatus: 'worker-particle-temporal-motion-awaiting-next-frame',
+    motionFrameAdmitted: false,
+    motionFrameSerial: null
   });
+  const temporalPresentationArmed = armWorkerParticleTemporalPresentation({
+    motionRequest: keyframeProofMotionRequest,
+    renderBindGroup,
+    particleCount,
+    viewProjection,
+    uniformTemplate: uniforms,
+    boxDimsM: drawnBoxDimsM,
+    sourceReceipt: initialStatus,
+    onStatus: data.onTemporalFrameStatus,
+    scheduleImmediately: false,
+    autonomousEnabled: Boolean(temporalMotion)
+  });
+  if (temporalPresentationArmed) {
+    const presentationFrameCompletion =
+      trackWorkerParticleKeyframePresentationCompletion({
+        queueCompletion: keyframeQueueCompletion,
+        queueCompletionSerial: keyframeQueueCompletionSerial,
+        generation: workerParticleTemporalPresentation?.generation ?? null,
+        submittedFramebufferEpoch: framebufferEpoch,
+        submittedAtMs: keyframeSubmittedAtMs,
+        drawnBoxDimsM
+      });
+    if (presentationFrameCompletion) {
+      Object.defineProperty(initialStatus, 'presentationFrameCompletion', {
+        value: presentationFrameCompletion,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      });
+    }
+  }
+  return initialStatus;
 }
 
 async function initPresentation(data) {
@@ -3460,12 +5077,13 @@ async function initPresentation(data) {
     })
   );
   format = gpu.getPreferredCanvasFormat();
+  const initialCanvasConfiguration = desiredCanvasConfiguration || data;
   configureCanvas({
-    width: data.width,
-    height: data.height,
-    nextCssWidth: data.cssWidth,
-    nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio,
+    width: initialCanvasConfiguration.width,
+    height: initialCanvasConfiguration.height,
+    nextCssWidth: initialCanvasConfiguration.cssWidth,
+    nextCssHeight: initialCanvasConfiguration.cssHeight,
+    nextPixelRatio: initialCanvasConfiguration.pixelRatio,
     reason: 'init-offscreen-presentation'
   });
   device.lost?.then?.((info) => {
@@ -3490,6 +5108,16 @@ self.onmessage = (event) => {
   const data = event?.data || {};
   Promise.resolve().then(async () => {
     if (data.type === 'init-offscreen-presentation') {
+      if (!adoptWorkerFramebufferEpoch(data.workerFramebufferEpoch)) {
+        publish({
+          status:
+            'worker-offscreen-presentation-blocked-invalid-framebuffer-epoch',
+          reason: 'init requires a positive monotonic worker framebuffer epoch',
+          workerReady: false
+        });
+        return;
+      }
+      rememberDesiredCanvasConfiguration(data);
       resetPresentedSphStep();
       resetResidentScheduleCandidateMailbox();
       previewViewProjectionOverride = null;
@@ -3498,6 +5126,11 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'resize') {
+      if (!adoptWorkerFramebufferEpoch(data.workerFramebufferEpoch)) return;
+      rememberDesiredCanvasConfiguration(data);
+      invalidatePendingCommittedResidentSchedulePresentation(
+        'terminal resident-schedule presentation invalidated by canvas resize'
+      );
       configureCanvas({
         width: data.width,
         height: data.height,
@@ -3507,13 +5140,24 @@ self.onmessage = (event) => {
         reason: data.reason || 'resize'
       });
       clearPresentation({ reason: data.reason || 'resize' });
+      await workerOwnedIsosurfacePresenter?.resize?.({
+        viewProjectionMatrix: previewViewProjectionOverride,
+        reason: 'worker-owned-isosurface-resize-redraw'
+      });
       return;
     }
     if (data.type === 'clear') {
+      if (!adoptWorkerFramebufferEpoch(data.workerFramebufferEpoch)) return;
+      invalidatePendingCommittedResidentSchedulePresentation(
+        'terminal resident-schedule presentation invalidated by canvas clear'
+      );
       resetPresentedSphStep();
       // A deliberate clear invalidates the redraw closure (its content is
       // being wiped); the camera override itself stays current.
       previewCameraRedraw = null;
+      workerOwnedIsosurfacePresenter?.clear?.({
+        reason: data.reason || 'worker-owned-isosurface-clear'
+      });
       if (data.resetResidentScheduleCandidateMailbox !== false) {
         resetResidentScheduleCandidateMailbox();
       }
@@ -3549,7 +5193,35 @@ self.onmessage = (event) => {
           ? matrix
           : new Float32Array(matrix);
         const now = nowMs();
-        if (previewCameraRedraw && now - previewCameraRedrawLastMs >= 33) {
+        let workerIsosurfaceRedrawn = false;
+        if (
+          workerOwnedIsosurfacePresenter
+          && now - previewCameraRedrawLastMs >= 16
+        ) {
+          try {
+            workerIsosurfaceRedrawn =
+              await workerOwnedIsosurfacePresenter.redraw({
+                viewProjectionMatrix: previewViewProjectionOverride,
+                cameraPositionM: data.cameraPositionM,
+                reason: 'worker-owned-isosurface-camera-redraw'
+              }) === true;
+            if (workerIsosurfaceRedrawn) previewCameraRedrawLastMs = now;
+          } catch {
+            workerIsosurfaceRedrawn = false;
+          }
+        }
+        const workerParticleTemporalCameraUpdated = Boolean(
+          !workerIsosurfaceRedrawn
+          && updateWorkerParticleTemporalViewProjection(
+            previewViewProjectionOverride
+          )
+        );
+        if (
+          !workerIsosurfaceRedrawn
+          && !workerParticleTemporalCameraUpdated
+          && previewCameraRedraw
+          && now - previewCameraRedrawLastMs >= 33
+        ) {
           previewCameraRedrawLastMs = now;
           try {
             previewCameraRedraw();
@@ -3563,7 +5235,7 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'present-committed-resident-schedule-candidate') {
-      presentCommittedResidentScheduleCandidate(data);
+      await presentCommittedResidentScheduleCandidate(data);
       return;
     }
     if (data.type === 'cancel-resident-schedule-on-presentation-device') {
@@ -3578,6 +5250,9 @@ self.onmessage = (event) => {
       if (disposed) return;
       disposed = true;
       pendingCommittedResidentSchedulePresentation = null;
+      workerParticleTemporalAuthorityAdmissionPending = false;
+      await workerOwnedIsosurfacePresenter?.dispose?.();
+      workerOwnedIsosurfacePresenter = null;
       destroyRenderRowsResources();
       unconfigureCanvas({ reason: data.reason || 'dispose' });
       device?.destroy?.();

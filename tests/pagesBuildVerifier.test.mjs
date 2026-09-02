@@ -91,6 +91,18 @@ test('Pages config closes the copied offscreen worker static module graph', asyn
       source: 'src/runtime/webgpuComputeLayout.js',
       workerReference: '../runtime/webgpuComputeLayout.js',
       output: 'runtime/webgpuComputeLayout.js'
+    },
+    {
+      name: 'workerOwnedIsosurfacePresenter',
+      source: 'src/services/workerOwnedIsosurfacePresenter.js',
+      workerReference: './workerOwnedIsosurfacePresenter.js',
+      output: 'assets/workerOwnedIsosurfacePresenter.js'
+    },
+    {
+      name: 'sphWorkerPresentationQos',
+      source: 'src/runtime/sph/sphWorkerPresentationQos.js',
+      workerReference: '../runtime/sph/sphWorkerPresentationQos.js',
+      output: 'runtime/sph/sphWorkerPresentationQos.js'
     }
   ];
 

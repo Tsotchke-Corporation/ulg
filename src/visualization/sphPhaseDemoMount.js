@@ -3422,16 +3422,17 @@ export function residentGpuContinuationEvidenceReady(execution = null) {
   }
 }
 
-// W4b: continuation readiness for the worker-owned resident lane. The lane
-// retains its post-step particle buffers INSIDE the presentation worker, so
-// the page-device continuation evidence (nextParticleUploads with live
-// GPUBuffers) truthfully does not exist on a worker-lane execution. The lane
-// itself is the continuation: a completed, uncancelled schedule whose
-// terminal envelope proves retained worker refs and a sealed final epoch
-// identity is ready for the next batched schedule on the SAME lane.
-export function residentWorkerLaneContinuationReady(execution = null) {
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA =
+  'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS =
+  'worker-offscreen-resident-isosurface-presentation-enqueued';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS =
+  'worker-offscreen-resident-isosurface-presentation-rendered';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY =
+  'worker-owned-true-isosurface';
+
+function residentWorkerLaneRetainedAuthorityReady(execution = null) {
   const lane = execution?.workerOwnedResidentLane;
-  const presentation = lane?.committedPresentation;
   return Boolean(
     execution?.residentComputeManagerMode === 'worker-owned-resident-lane'
     && execution?.workerLaneFallback == null
@@ -3443,8 +3444,16 @@ export function residentWorkerLaneContinuationReady(execution = null) {
     && typeof lane.finalEpochIdentity === 'object'
     && Array.isArray(lane?.retainedBufferRefs)
     && lane.retainedBufferRefs.length > 0
-    && presentation?.status
-      === 'worker-offscreen-resident-particle-state-producer-rendered'
+  );
+}
+
+function residentWorkerLaneCommittedPresentationAuthorityReady({
+  execution = null,
+  presentation = null
+} = {}) {
+  const lane = execution?.workerOwnedResidentLane;
+  return Boolean(
+    residentWorkerLaneRetainedAuthorityReady(execution)
     && presentation?.committedPresentationSchema
       === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
     && presentation?.committedPresentationStatus
@@ -3484,17 +3493,141 @@ export function residentWorkerLaneContinuationReady(execution = null) {
   );
 }
 
+function residentWorkerLaneParticlePresentationReady(execution = null) {
+  const presentation = execution?.workerOwnedResidentLane?.committedPresentation;
+  return Boolean(
+    presentation?.status
+      === 'worker-offscreen-resident-particle-state-producer-rendered'
+    && residentWorkerLaneCommittedPresentationAuthorityReady({
+      execution,
+      presentation
+    })
+  );
+}
+
+export function residentWorkerLaneIsosurfacePresentationEnqueued(
+  execution = null
+) {
+  const presentation = execution?.workerOwnedResidentLane?.committedPresentation;
+  return Boolean(
+    presentation?.schema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+    && presentation?.status
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+    && presentation?.presentationGeometry
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+    && presentation?.sourceCapturedBeforePhysicsContinuation === true
+    && residentWorkerLaneCommittedPresentationAuthorityReady({
+      execution,
+      presentation
+    })
+  );
+}
+
+// Presentation completion is deliberately separate from continuation
+// authority. A rendered receipt can claim the worker canvas only when it
+// carries the same exact committed schedule identity as its enqueue receipt;
+// it can never substitute for that enqueue receipt in the physics hot loop.
+export function residentWorkerLaneIsosurfacePresentationConsumerReady({
+  execution = null,
+  presentation = null
+} = {}) {
+  return Boolean(
+    presentation?.schema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+    && presentation?.status
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    && presentation?.presentationGeometry
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+    && residentWorkerLaneCommittedPresentationAuthorityReady({
+      execution,
+      presentation
+    })
+  );
+}
+
+// W4b: continuation readiness for the worker-owned resident lane. The lane
+// retains its post-step particle buffers INSIDE the presentation worker, so
+// the page-device continuation evidence (nextParticleUploads with live
+// GPUBuffers) truthfully does not exist on a worker-lane execution. The lane
+// itself is the continuation: a completed, uncancelled schedule whose
+// terminal envelope proves retained worker refs and a sealed final epoch
+// identity is ready for the next batched schedule on the SAME lane.
+export function residentWorkerLaneContinuationReady(execution = null) {
+  return residentWorkerLaneParticlePresentationReady(execution)
+    || residentWorkerLaneIsosurfacePresentationEnqueued(execution);
+}
+
+function residentWorkerLaneTier0LogicalExecutionReady(route = null) {
+  const requestedStepCount = route?.requestedStepCount;
+  const commandSubmissionCount = route?.commandSubmissionCount;
+  const submissionStepCounts = route?.submissionStepCounts;
+  const presentationBoundaryCount = route?.presentationBoundaryCount;
+  const presentationBoundaryCompletedCount =
+    route?.presentationBoundaryCompletedCount;
+  const presentationBoundaryFailureCount =
+    route?.presentationBoundaryFailureCount;
+  const presentationQosHostQueueFenceCount =
+    route?.presentationQosHostQueueFenceCount;
+  if (
+    !Number.isSafeInteger(requestedStepCount)
+    || requestedStepCount < 1
+    || !Number.isSafeInteger(commandSubmissionCount)
+    || commandSubmissionCount < 1
+    || !Array.isArray(submissionStepCounts)
+    || submissionStepCounts.length !== commandSubmissionCount
+    || submissionStepCounts.some(
+      (count) => !Number.isSafeInteger(count) || count < 1
+    )
+    || submissionStepCounts.reduce((sum, count) => sum + count, 0)
+      !== requestedStepCount
+    || !Number.isSafeInteger(presentationBoundaryCount)
+    || presentationBoundaryCount !== commandSubmissionCount - 1
+    || !Number.isSafeInteger(presentationBoundaryCompletedCount)
+    || presentationBoundaryCompletedCount < 0
+    || !Number.isSafeInteger(presentationBoundaryFailureCount)
+    || presentationBoundaryFailureCount < 0
+    || presentationBoundaryCompletedCount + presentationBoundaryFailureCount
+      !== presentationBoundaryCount
+    || !Number.isSafeInteger(presentationQosHostQueueFenceCount)
+    || presentationQosHostQueueFenceCount
+      !== presentationBoundaryCompletedCount
+    || route?.logicalAuthorityPublicationCount !== 1
+    || route?.intermediateAuthorityPublicationCount !== 0
+  ) return false;
+  if (route?.submissionMode === 'single-terminal-submission') {
+    return commandSubmissionCount === 1
+      && submissionStepCounts[0] === requestedStepCount
+      && route?.maxSubstepsPerSubmission == null
+      && presentationBoundaryCount === 0;
+  }
+  const maxSubstepsPerSubmission = route?.maxSubstepsPerSubmission;
+  return route?.submissionMode === 'queue-ordered-presentation-qos-chunks'
+    && commandSubmissionCount > 1
+    && Number.isSafeInteger(maxSubstepsPerSubmission)
+    && maxSubstepsPerSubmission > 0
+    && maxSubstepsPerSubmission < requestedStepCount
+    && submissionStepCounts.every(
+      (count) => count <= maxSubstepsPerSubmission
+    );
+}
+
 export function resolveSphWorkerLanePostCommitFastContinuation({
   execution = null,
   workerLivePreviewEnabled = false
 } = {}) {
   const lane = execution?.workerOwnedResidentLane ?? null;
   const route = lane?.executionRoute ?? null;
+  const isosurfacePresentationEnqueued =
+    residentWorkerLaneIsosurfacePresentationEnqueued(execution);
   const blockers = [];
   if (!residentWorkerLaneContinuationReady(execution)) {
     blockers.push('strict-worker-lane-continuation-not-ready');
   }
-  if (workerLivePreviewEnabled !== true) {
+  if (
+    !isosurfacePresentationEnqueued
+    && workerLivePreviewEnabled !== true
+  ) {
     blockers.push('worker-live-preview-not-enabled');
   }
   if (
@@ -3516,7 +3649,7 @@ export function resolveSphWorkerLanePostCommitFastContinuation({
     || requestedStepCount < 1
     || completedStepCount !== requestedStepCount
     || route?.atomicSchedule !== true
-    || route?.commandSubmissionCount !== 1
+    || !residentWorkerLaneTier0LogicalExecutionReady(route)
     || route?.internalPositionSubstepCount !== requestedStepCount
   ) {
     blockers.push('tier0-atomic-execution-incomplete');
@@ -3550,8 +3683,12 @@ export function resolveSphWorkerLanePostCommitFastContinuation({
         : null,
     presentationConsumer:
       blockers.length === 0
-        ? 'worker-live-preview-versioned-mailbox'
+        ? (isosurfacePresentationEnqueued
+          ? ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+          : 'worker-live-preview-versioned-mailbox')
         : null,
+    presentationCompletionReady:
+      blockers.length === 0 && !isosurfacePresentationEnqueued,
     scheduleId: lane?.scheduleId ?? null,
     laneId: lane?.laneId ?? null,
     stateKey: lane?.stateKey ?? null,
@@ -14128,29 +14265,40 @@ export async function mountSphPhaseDemoOverlay({
       if (workerLanePostCommitFastContinuation.eligible) {
         // Tier0 has already crossed its worker terminal fence, ComputeManager
         // completion, StateManager commit, and exact committed worker
-        // presentation. Its live-preview canvas is the versioned presentation
-        // mailbox, so a second page-device particle readback + native-surface
-        // extraction would only serialize the next physics schedule behind a
-        // duplicate consumer. Leave active-law canonical routes unchanged.
+        // presentation admission. Particle mode already has rendered pixels;
+        // true-isosurface mode has synchronously retained/enqueued its exact
+        // source and finishes worker-locally. In either case a second
+        // page-device particle readback + native-surface extraction would
+        // serialize the next physics schedule behind a duplicate consumer.
+        // Leave active-law canonical routes unchanged.
         residentRenderReadbackSkippedCount += 1;
-        completePendingBodyEnvelopePreview({
-          generation,
-          reason: 'tier0-worker-committed-presentation-ready'
-        });
+        if (workerLanePostCommitFastContinuation.presentationCompletionReady) {
+          completePendingBodyEnvelopePreview({
+            generation,
+            reason: 'tier0-worker-committed-presentation-ready'
+          });
+        }
+        const workerLanePostCommitPresentationReason =
+          workerLanePostCommitFastContinuation.presentationConsumer
+            === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+            ? 'tier0-worker-owned-true-isosurface-enqueued'
+            : 'tier0-worker-live-preview-versioned-mailbox';
         updateResidentPerf({
           residentStepsPerSchedule: normalizedStepCount,
           renderReadbacks: residentRenderReadbackCount,
           skippedRenderReadbacks: residentRenderReadbackSkippedCount,
           lastRenderReadbackSkipped: true,
-          lastRenderReadbackSkipReason:
-            'tier0-worker-live-preview-versioned-mailbox',
+          lastRenderReadbackSkipReason: workerLanePostCommitPresentationReason,
           workerLanePostCommitFastContinuation: true
         });
         traceResidentSchedule('tier0-post-commit-fast-continuation-ready', {
           route: workerLanePostCommitFastContinuation.route,
           scheduleId: workerLanePostCommitFastContinuation.scheduleId,
           presentationConsumer:
-            workerLanePostCommitFastContinuation.presentationConsumer
+            workerLanePostCommitFastContinuation.presentationConsumer,
+          presentationCompletionReady:
+            workerLanePostCommitFastContinuation.presentationCompletionReady,
+          presentationReason: workerLanePostCommitPresentationReason
         });
         renderStatus();
         updateWarningBanner();

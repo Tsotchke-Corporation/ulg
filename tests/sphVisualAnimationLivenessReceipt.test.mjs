@@ -55,7 +55,9 @@ import {
   waitForQuiescentCaptureSnapshot
 } from '../scripts/sph-visual-animation-liveness-receipt.mjs';
 import {
+  classifyCadenceAcceptanceIssues,
   evaluateCadenceSample,
+  resolveHeadedSweepAutomatedDisposition,
   summarizeVisiblePresentationCadence
 } from '../scripts/sph-headed-cadence-metrics.mjs';
 import {
@@ -241,7 +243,9 @@ function evaluatedVisibleCadence(observations, {
   minimumHz = 54
 } = {}) {
   const cadence = summarizeVisiblePresentationCadence(observations, {
-    sampleDurationMs
+    sampleDurationMs,
+    sampleStartedAtMs: 0,
+    sampleEndedAtMs: sampleDurationMs
   });
   return {
     cadence,
@@ -1088,6 +1092,67 @@ test('preset-entry runner observes self-start before any pause/resume capture co
   assert.doesNotMatch(entryBranch, /initialPlayClickPerformed = true/);
 });
 
+test('headed sweep gates integrity for every preset and rate only for particle targets', () => {
+  const issues = [
+    'mean-visible-presentation-below-target',
+    'visible-presentation-stall-exceeds-budget',
+    'presentation-owner-unstable',
+    'presentation-source-step-regressed',
+    'future-unclassified-integrity-failure'
+  ];
+  const isosurface = classifyCadenceAcceptanceIssues(issues, {
+    throughputRequired: false
+  });
+  assert.deepEqual(isosurface.throughputIssues, [
+    'mean-visible-presentation-below-target',
+    'visible-presentation-stall-exceeds-budget'
+  ]);
+  assert.deepEqual(isosurface.acceptanceIssues, [
+    'presentation-owner-unstable',
+    'presentation-source-step-regressed',
+    'future-unclassified-integrity-failure'
+  ]);
+
+  const particle = classifyCadenceAcceptanceIssues(issues, {
+    throughputRequired: true
+  });
+  assert.deepEqual(particle.acceptanceIssues, [
+    'presentation-owner-unstable',
+    'presentation-source-step-regressed',
+    'future-unclassified-integrity-failure',
+    'mean-visible-presentation-below-target',
+    'visible-presentation-stall-exceeds-budget'
+  ]);
+});
+
+test('headed sweep automated success remains pending review and overrides stay diagnostic', () => {
+  assert.deepEqual(resolveHeadedSweepAutomatedDisposition({
+    automatedFailureCount: 0,
+    completeCannedMatrix: true,
+    diagnosticOverridesActive: false
+  }), {
+    status: 'pending-manual-visual-review',
+    automatedStatus: 'pass',
+    acceptanceEligible: false,
+    manualVisualReviewStatus: 'pending'
+  });
+  assert.equal(resolveHeadedSweepAutomatedDisposition({
+    automatedFailureCount: 0,
+    completeCannedMatrix: true,
+    diagnosticOverridesActive: true
+  }).status, 'diagnostic-pass');
+  assert.equal(resolveHeadedSweepAutomatedDisposition({
+    automatedFailureCount: 0,
+    completeCannedMatrix: false,
+    diagnosticOverridesActive: false
+  }).status, 'diagnostic-pass');
+  assert.equal(resolveHeadedSweepAutomatedDisposition({
+    automatedFailureCount: 1,
+    completeCannedMatrix: true,
+    diagnosticOverridesActive: false
+  }).status, 'fail');
+});
+
 test('headed cadence accepts 60 Hz distinct admitted geometry states', () => {
   const observations = Array.from({ length: 301 }, (_, index) => (
     visibleCadenceObservation({
@@ -1101,6 +1166,187 @@ test('headed cadence accepts 60 Hz distinct admitted geometry states', () => {
   assert.equal(cadence.visualTransitionCount, 300);
   assert.equal(cadence.meanVisiblePresentationHz, 60);
   assert.ok(cadence.medianVisiblePresentationHz >= 59.9);
+  assert.equal(evaluation.status, 'pass');
+  assert.deepEqual(evaluation.issues, []);
+});
+
+test('headed cadence allows one window-boundary transition at exact 54 Hz', () => {
+  const sampleDurationMs = 5_009;
+  const observations = Array.from({ length: 271 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: 4 + index * 1000 / 54,
+      sourceStep: index,
+      presentationSerial: index + 1
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations, {
+    sampleDurationMs,
+    minimumHz: 54
+  });
+  assert.equal(cadence.visualTransitionCount, 270);
+  assert.ok(cadence.meanVisiblePresentationHz < 54);
+  assert.equal(evaluation.requiredVisualTransitionCount, 270);
+  assert.ok(evaluation.boundaryAdjustedMeanVisiblePresentationHz >= 54);
+  assert.equal(evaluation.status, 'pass');
+  assert.deepEqual(evaluation.issues, []);
+});
+
+test('headed cadence accepts exact 54 Hz throughput across refresh-grid phases', () => {
+  for (const refreshHz of [60, 90, 120]) {
+    for (const phaseMs of [2, 9]) {
+      const observations = [visibleCadenceObservation({
+        timestampMs: 0,
+        sourceStep: 0,
+        presentationSerial: 1
+      })];
+      for (let index = 0; index < 270; index += 1) {
+        const idealTimestampMs = phaseMs + index * 1000 / 54;
+        const timestampMs = Math.ceil(
+          idealTimestampMs * refreshHz / 1000
+        ) * 1000 / refreshHz;
+        observations.push(visibleCadenceObservation({
+          timestampMs,
+          sourceStep: index + 1,
+          presentationSerial: index + 2
+        }));
+      }
+      const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+      assert.equal(cadence.visualTransitionCount, 270);
+      assert.equal(cadence.meanVisiblePresentationHz, 54);
+      assert.ok(
+        cadence.maximumVisiblePresentationGapMs
+          < evaluation.maximumAllowedVisiblePresentationGapMs
+      );
+      assert.ok(
+        cadence.minimumSustainedWindowTransitionCount
+          >= evaluation.requiredSustainedWindowTransitionCount
+      );
+      assert.equal(evaluation.tailIntervalRatesDiagnosticOnly, true);
+      assert.equal(evaluation.status, 'pass');
+      assert.deepEqual(evaluation.issues, []);
+    }
+  }
+});
+
+test('headed cadence keeps a sub-target p95 diagnostic when total throughput and stalls are healthy', () => {
+  const shortIntervalMs = (5_000 - 29 * 20) / 541;
+  const intervalsMs = [
+    ...Array.from({ length: 570 }, (_, index) => (
+      index % 20 === 0 ? 20 : shortIntervalMs
+    ))
+  ];
+  let timestampMs = 0;
+  const observations = [visibleCadenceObservation({
+    timestampMs,
+    sourceStep: 0,
+    presentationSerial: 1
+  })];
+  intervalsMs.forEach((intervalMs, index) => {
+    timestampMs += intervalMs;
+    observations.push(visibleCadenceObservation({
+      timestampMs,
+      sourceStep: index + 1,
+      presentationSerial: index + 2
+    }));
+  });
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.visualTransitionCount, 570);
+  assert.ok(cadence.meanVisiblePresentationHz > 100);
+  assert.equal(cadence.p95VisualIntervalEquivalentHz, 50);
+  assert.equal(cadence.maximumVisiblePresentationGapMs, 20);
+  assert.ok(
+    cadence.minimumSustainedWindowTransitionCount
+      >= evaluation.requiredSustainedWindowTransitionCount
+  );
+  assert.equal(evaluation.status, 'pass');
+  assert.deepEqual(evaluation.issues, []);
+});
+
+test('headed cadence rejects a rapid prefix followed by a held terminal frame', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 10,
+      sourceStep: index,
+      presentationSerial: index + 1
+    })
+  ));
+  observations.push(visibleCadenceObservation({
+    timestampMs: 5_000,
+    sourceStep: 300,
+    presentationSerial: 301
+  }));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.visualTransitionCount, 300);
+  assert.equal(cadence.meanVisiblePresentationHz, 60);
+  assert.equal(cadence.terminalVisiblePresentationHoldMs, 2_000);
+  assert.equal(cadence.maximumVisiblePresentationGapMs, 2_000);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(
+    evaluation.issues.includes('visible-presentation-stall-exceeds-budget')
+  );
+  assert.ok(
+    evaluation.issues.includes('sustained-visible-presentation-below-target')
+  );
+});
+
+test('headed cadence rejects a sub-rate 500 ms pocket despite a fast global mean', () => {
+  const transitionTimestampsMs = [];
+  for (let timestampMs = 1000 / 120; timestampMs < 2_000; timestampMs += 1000 / 120) {
+    transitionTimestampsMs.push(timestampMs);
+  }
+  for (let timestampMs = 2_000 + 1000 / 45; timestampMs <= 2_500; timestampMs += 1000 / 45) {
+    transitionTimestampsMs.push(timestampMs);
+  }
+  for (let timestampMs = 2_500 + 1000 / 120; timestampMs <= 5_000; timestampMs += 1000 / 120) {
+    transitionTimestampsMs.push(timestampMs);
+  }
+  const observations = [visibleCadenceObservation({
+    timestampMs: 0,
+    sourceStep: 0,
+    presentationSerial: 1
+  }), ...transitionTimestampsMs.map((timestampMs, index) => (
+    visibleCadenceObservation({
+      timestampMs,
+      sourceStep: index + 1,
+      presentationSerial: index + 2
+    })
+  ))];
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.ok(cadence.meanVisiblePresentationHz > 54);
+  assert.ok(
+    cadence.maximumVisiblePresentationGapMs
+      < evaluation.maximumAllowedVisiblePresentationGapMs
+  );
+  assert.ok(
+    cadence.minimumSustainedWindowTransitionCount
+      < evaluation.requiredSustainedWindowTransitionCount
+  );
+  assert.equal(evaluation.status, 'fail');
+  assert.deepEqual(evaluation.issues, [
+    'sustained-visible-presentation-below-target'
+  ]);
+});
+
+test('headed cadence tolerates one isolated 50 ms scheduling gap', () => {
+  const intervalsMs = Array.from({ length: 300 }, () => 1000 / 60);
+  intervalsMs.splice(150, 6, 50, 10, 10, 10, 10, 10);
+  let timestampMs = 0;
+  const observations = [visibleCadenceObservation({
+    timestampMs,
+    sourceStep: 0,
+    presentationSerial: 1
+  })];
+  intervalsMs.forEach((intervalMs, index) => {
+    timestampMs += intervalMs;
+    observations.push(visibleCadenceObservation({
+      timestampMs,
+      sourceStep: index + 1,
+      presentationSerial: index + 2
+    }));
+  });
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.ok(Math.abs(timestampMs - 5_000) < 1e-6);
+  assert.equal(cadence.maximumVisiblePresentationGapMs, 50);
   assert.equal(evaluation.status, 'pass');
   assert.deepEqual(evaluation.issues, []);
 });
@@ -1234,6 +1480,29 @@ test('headed cadence can admit explicit temporal geometry motion without inventi
   assert.equal(cadence.visualTransitionCount, 300);
   assert.equal(cadence.meanVisiblePresentationHz, 60);
   assert.equal(evaluation.status, 'pass');
+});
+
+test('headed cadence rejects advancing motion receipts over a frozen framebuffer serial', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 300,
+      sourceStep: 9,
+      presentationSerial: 1,
+      motionFrameAdmitted: true,
+      motionFrameSerial: index
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.distinctSourceCount, 1);
+  assert.equal(cadence.visualTransitionCount, 0);
+  assert.equal(cadence.presentationSerialStallCount, 300);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(
+    evaluation.issues.includes(
+      'presentation-serial-stalled-on-visual-transition'
+    )
+  );
+  assert.ok(evaluation.issues.includes('mean-visible-presentation-below-target'));
 });
 
 test('joint physics and presentation progress is required; RAF/render-only motion is rejected', () => {

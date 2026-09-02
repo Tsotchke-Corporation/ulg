@@ -495,19 +495,16 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // Single material -> the reserve term multiplier is already zero;
       // declare the intent explicitly anyway.
       reactionProductReserveMinimumLiveFraction: '0',
-      // M4 submit burst: hold command buffers and flush one queue.submit
-      // per K steps. Worker-derived eligibility (law-activation receipt: all
-      // law families quiescent) gates it; measured 2026-08-28 on this lane:
-      // +7% steps/s at 1k-13.8k, +3% at 32.8k (this preset's default N),
-      // -7% at 104k (inter-schedule turnaround grows; documented in the
-      // plan). Raise basen past ~64k and this knob is worth turning off.
+      // The scenario retains the eight-step compute burst request, while the
+      // route-generic Tier-0 presentation QoS layer splits an admitted burst
+      // into at most two substeps per queue submission whenever live visual
+      // demand is active. Quiescent/headless work can still use the full
+      // requested burst.
       submitBurstSteps: '8',
-      // Worker-canvas live preview: mid-schedule uncommitted draws of the
-      // lane's retained state every ~66ms, so visible motion is decoupled
-      // from schedule commits (the per-schedule isosurface path updates at
-      // only ~1-4 images/s and its readback sags the main-thread render
-      // loop). The committed terminal presentation remains the only
-      // authority-bearing draw.
+      // Worker-canvas live presentation targets 60 Hz. Exact retained
+      // keyframes and bounded velocity extrapolation decouple visible motion
+      // from slower schedule commits; the terminal schedule remains the only
+      // authority-bearing physics publication.
       workerLivePreview: '1',
       residentStepsPerSchedule: '64',
       residentComputeManagerMode: 'worker-owned-resident-lane',
@@ -546,7 +543,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     // and now admitted to the fused sequence INSIDE the canonical SS worker
     // lane. This is the visible acceptance arm for Tier-0 routing: the exact
     // law-activation receipt must remain quiescent and the route receipt must
-    // prove one atomic submission, zero readback, and retained continuation.
+    // prove one atomic logical authority transaction (possibly queue-chunked
+    // for presentation QoS), zero readback, and retained continuation.
     standardMatrixEnabled: false,
     controls: {
       drop: 'h2o',

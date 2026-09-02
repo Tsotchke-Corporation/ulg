@@ -14,7 +14,14 @@ import {
   ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT,
   ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
   ULG_WORKER_OFFSCREEN_PRESENTATION_TRANSPORT,
+  ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+  ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA,
   ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
   ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA,
   ULG_WORKER_OFFSCREEN_RENDER_ROWS_INPUT_TRANSPORT,
   ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
@@ -30,6 +37,7 @@ import {
 } from '../src/visualization/offscreenPresentationBridge.js';
 
 const COMMITTED_CANDIDATE_RECEIPT_FIELDS = Object.freeze({
+  workerFramebufferEpoch: 2,
   stateManagerCommittedPresentation: true,
   committedPresentationSchema:
     ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
@@ -70,6 +78,30 @@ const IMPOSTOR_PRESENTATION_RECEIPT_FIELDS = Object.freeze({
   boxWireframeDrawCount: 1,
   boxDimsM: [12, 8, 6],
   sameDevicePresentation: true
+});
+
+const ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS = Object.freeze({
+  presentationFrameSchema:
+    ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA,
+  presentationFrameStatus:
+    'worker-particle-keyframe-presentation-opportunity',
+  presentationFrameAdmitted: true,
+  presentationFrameGpuCompleted: true,
+  presentationFrameGpuCompletedAtMs: 101,
+  presentationFramePresentationOpportunity: true,
+  presentationFramePresentationOpportunityMethod:
+    'worker-request-animation-frame-after-gpu-completion',
+  presentationFrameSubmitToGpuCompleteMs: 4,
+  presentationFrameSubmitToPresentationOpportunityMs: 16,
+  presentationQueueCompletionCount: 3,
+  presentationQueueCompletionSerial: 3,
+  presentationQueueCompletionMethod:
+    'worker-device.queue.onSubmittedWorkDone',
+  presentationQueueCompletionScope:
+    'worker-offscreen-shared-device-queue-frame-proof',
+  physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+  physicsHostQueueFenceParticipation: null,
+  workerLocalRenderRowsProduced: true
 });
 
 test('worker offscreen presentation capability is fail-closed around transferred canvas ownership', () => {
@@ -377,6 +409,7 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       particleCount: 1,
       frameCount: 1,
       readyFrameCount: 1,
+      workerFramebufferEpoch: 2,
       residentScheduleCandidatePresentation: true,
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
@@ -407,6 +440,7 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       readyFrameCount: 1,
       residentScheduleCandidatePresentation: true,
       ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
       sourceStageId: 'schroederSameLevelMechanics',
@@ -453,7 +487,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       sphStep: 11,
       particleCount: 1,
       frameCount: 1,
-      readyFrameCount: 1
+      readyFrameCount: 1,
+      workerFramebufferEpoch: 2
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -471,7 +506,8 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       sphStep: 12,
       particleCount: 1,
       frameCount: 1,
-      readyFrameCount: 1
+      readyFrameCount: 1,
+      workerFramebufferEpoch: 2
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -501,11 +537,45 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       sphStep: 13,
       particleCount: 1,
       frameCount: 1,
-      readyFrameCount: 1
+      readyFrameCount: 1,
+      workerFramebufferEpoch: 2
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
   assert.equal(bridge.displayOwnerPresentedSphStep, 12);
+
+  // A submit-only terminal row cannot reveal or replace the durable frame,
+  // even if every authority field and framebuffer counter otherwise match.
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 2,
+    readyFrameCount: 2,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
+      displayOwnerEpoch: 9,
+      sphStep: 14,
+      particleCount: 1,
+      frameCount: 2,
+      readyFrameCount: 2,
+      residentScheduleCandidatePresentation: true,
+      ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+      presentationFrameStatus:
+        'worker-particle-keyframe-submitted-awaiting-presentation-opportunity',
+      presentationFrameAdmitted: false,
+      presentationFrameGpuCompleted: false,
+      presentationFramePresentationOpportunity: false,
+      producerSourceKind: 'worker-retained-resident-stage-output',
+      producerSourceTransport: 'worker-retained-resident-stage-output',
+      sourceStageId: 'schroederSameLevelMechanics',
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+      ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
+    }
+  });
+  assert.equal(bridge.displayOwnerPresentedSphStep, 12);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 2);
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
@@ -522,6 +592,41 @@ test('worker offscreen display ownership hides native non-owner and reveals only
       readyFrameCount: 2,
       residentScheduleCandidatePresentation: true,
       ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+      presentationQueueCompletionCount: 5,
+      presentationQueueCompletionSerial: 4,
+      presentationQueueCompletionMethod: 'unproved-queue-method',
+      producerSourceKind: 'worker-retained-resident-stage-output',
+      producerSourceTransport: 'worker-retained-resident-stage-output',
+      sourceStageId: 'schroederSameLevelMechanics',
+      retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+      ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
+    }
+  });
+  assert.equal(
+    bridge.displayOwnerPresentedSphStep,
+    12,
+    'a mismatched count/serial and wrong queue method cannot prove a keyframe'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 2,
+    readyFrameCount: 2,
+    workerOffscreenRenderRows: {
+      schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+      status: 'worker-offscreen-resident-particle-state-producer-rendered',
+      displayOwnerEpoch: 9,
+      sphStep: 14,
+      particleCount: 1,
+      frameCount: 2,
+      readyFrameCount: 2,
+      residentScheduleCandidatePresentation: true,
+      ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+      ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+      presentationQueueCompletionCount: 4,
+      presentationQueueCompletionSerial: 4,
       producerSourceKind: 'worker-retained-resident-stage-output',
       producerSourceTransport: 'worker-retained-resident-stage-output',
       sourceStageId: 'schroederSameLevelMechanics',
@@ -543,12 +648,169 @@ test('worker offscreen display ownership hides native non-owner and reveals only
     displayOwnerEpoch: 9,
     residentScheduleCandidatePresentation: true,
     ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+    ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+    presentationQueueCompletionCount: 4,
+    presentationQueueCompletionSerial: 4,
     producerSourceKind: 'worker-retained-resident-stage-output',
     producerSourceTransport: 'worker-retained-resident-stage-output',
     sourceStageId: 'schroederSameLevelMechanics',
     retainedParticleStateStatus: 'worker-retained-particle-state-ready',
     ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
   });
+
+  const motionReceipt = {
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+    renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    displayOwnerEpoch: 9,
+    sphStep: 14,
+    particleCount: 1,
+    frameCount: 3,
+    readyFrameCount: 3,
+    residentScheduleCandidatePresentation: true,
+    ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+    ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+    motionFrameSchema:
+      ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA,
+    motionFrameStatus:
+      'worker-particle-temporal-motion-frame-presentation-opportunity',
+    motionFrameAdmitted: true,
+    motionFrameGpuCompleted: true,
+    motionFramePresentationOpportunity: true,
+    motionFramePresentationOpportunityMethod:
+      'worker-request-animation-frame-after-gpu-completion',
+    motionFrameSerial: 1,
+    motionFrameSubmittedSerial: 1,
+    motionSourceFrameCount: 2,
+    motionSourceSphStep: 14,
+    motionMethod: 'bounded-keyframe-velocity-extrapolation',
+    motionVelocityBufferRetained: true,
+    presentationQueueCompletionCount: 5,
+    presentationQueueCompletionSerial: 5,
+    presentationQueueCompletionMethod:
+      'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope:
+      'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+    physicsHostQueueFenceParticipation: null,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: 'worker-retained-resident-stage-output',
+    sourceStageId: 'schroederSameLevelMechanics',
+    retainedParticleStateStatus: 'worker-retained-particle-state-ready',
+    ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS
+  };
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3,
+    readyFrameCount: 3,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      motionFrameSchema: 'bogus-motion-frame-schema'
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    2,
+    'a motion assertion with the wrong schema cannot advance the framebuffer'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3,
+    readyFrameCount: 3,
+    workerOffscreenRenderRows: motionReceipt
+  });
+  assert.equal(bridge.workerCanvasLastRenderedContent.frameCount, 3);
+  assert.equal(bridge.workerCanvasLastRenderedContent.motionFrameSerial, 1);
+  assert.equal(bridge.displayOwnerContentFrameSerial, 4);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      frameCount: 4,
+      readyFrameCount: 4,
+      motionFrameSerial: 2,
+      motionFrameSubmittedSerial: 2
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    3,
+    'a reused queue-completion serial cannot prove a new framebuffer'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      frameCount: 4,
+      readyFrameCount: 4,
+      motionFrameSerial: 2,
+      motionFrameSubmittedSerial: 2,
+      motionSourceFrameCount: 999,
+      presentationQueueCompletionCount: 6,
+      presentationQueueCompletionSerial: 6
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    3,
+    'motion must remain bound to the exact source keyframe'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      frameCount: 4,
+      readyFrameCount: 4,
+      motionFrameSerial: 2,
+      motionFrameSubmittedSerial: 2,
+      presentationQueueCompletionCount: 6,
+      presentationQueueCompletionSerial: 6,
+      physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+      physicsHostQueueFenceParticipation: true,
+      motionPresentationQosBoundary: {
+        submissionOrdinal: 2,
+        completedSubstepCount: 2,
+        totalSubstepCount: 64,
+        chunkStepCount: 2
+      }
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    4,
+    'an exact shared physics/presentation queue-prefix proof advances motion'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      sphStep: 15,
+      frameCount: 4,
+      readyFrameCount: 4,
+      presentationFrameSchema: null,
+      motionFrameSchema: null,
+      motionFrameAdmitted: false,
+      motionFrameSerial: null
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    4,
+    'a candidate without the exact keyframe proof cannot reveal pixels'
+  );
 
   // A page-side legacy draw may arrive after the newer worker candidate and
   // be rejected as stale. That last status must not erase the exact positive
@@ -615,6 +877,34 @@ test('worker offscreen display ownership hides native non-owner and reveals only
   assert.equal(committedNativeOwner.displayOwner, 'main-native');
   assert.equal(canvas.style.visibility, 'hidden');
 
+  const replayTargetOwner = bridge.setDisplayOwner({
+    owner: 'worker',
+    epoch: 10,
+    revealWhenContentReady: true,
+    reason: 'unit-replay-target-owner'
+  });
+  assert.equal(replayTargetOwner.displayCanvasVisible, false);
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3,
+    readyFrameCount: 3,
+    workerOffscreenRenderRows: {
+      ...motionReceipt,
+      displayOwnerEpoch: 10
+    }
+  });
+  assert.equal(
+    bridge.displayOwnerContentReady,
+    false,
+    'an exact completed-frame replay cannot repopulate cleared worker pixels'
+  );
+  assert.equal(canvas.style.visibility, 'hidden');
+  bridge.setDisplayOwner({
+    owner: 'main-native',
+    epoch: 11,
+    reason: 'unit-replay-test-cleanup'
+  });
+
   const disposed = bridge.dispose();
   const disposedLifecycleGeneration = bridge.lifecycleGeneration;
   const disposedMessageCount = worker.messages.length;
@@ -646,6 +936,347 @@ test('worker offscreen display ownership hides native non-owner and reveals only
   assert.equal(bridge.displayOwner, 'main-native');
   assert.equal(bridge.displayOwnerPresentedSphStep, null);
   assert.equal(worker.messages.length, disposedMessageCount);
+});
+
+test('worker true-isosurface enqueue advances continuation without claiming pixels', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.listeners = [];
+      worker = this;
+    }
+    postMessage() {}
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+    removeEventListener() {}
+    emit(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+    terminate() {}
+  }
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() { return {}; }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) { child.parentNode = this; },
+    removeChild(child) { child.parentNode = null; },
+    ownerDocument: { createElement() { return canvas; } }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    container,
+    width: 64,
+    height: 64,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  bridge.setDisplayOwner({
+    owner: 'worker',
+    epoch: 1,
+    revealWhenContentReady: true,
+    reason: 'unit-worker-isosurface-owner'
+  });
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  const common = {
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
+    renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+    presentationGeometry:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+    displayOwnerEpoch: 1,
+    sphStep: 11,
+    requestGeneration: 1,
+    particleCount: 32,
+    residentScheduleCandidatePresentation: true,
+    ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+    workerFramebufferEpoch: 1,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: 'worker-retained-resident-stage-output',
+    sourceStageId: 'schroederSameLevelMechanics',
+    retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+  };
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 0,
+    readyFrameCount: 0,
+    workerOffscreenRenderRows: {
+      ...common,
+      status:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+      sourceCapturedBeforePhysicsContinuation: true,
+      frameCount: 0,
+      readyFrameCount: 0
+    }
+  });
+  assert.equal(
+    bridge.committedResidentSchedulePresentationStatus.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  assert.equal(bridge.workerCanvasLastRenderedContent, null);
+  assert.equal(bridge.displayOwnerContentReady, false);
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  // queue.submit() alone is not proof that the image reached a presentation
+  // opportunity. The bridge must keep the worker canvas hidden until the
+  // exact GPU-completion + subsequent RAF receipt arrives.
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      ...common,
+      status:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+      frameCount: 1,
+      readyFrameCount: 1,
+      sameDevicePresentation: true,
+      surfaceCount: 1,
+      indirectDrawCount: 1
+    }
+  });
+  assert.equal(
+    bridge.committedResidentSchedulePresentationStatus.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  assert.equal(bridge.workerCanvasLastRenderedContent, null);
+  assert.equal(bridge.displayOwnerContentReady, false);
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      ...common,
+      status:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+      frameCount: 1,
+      readyFrameCount: 1,
+      sameDevicePresentation: true,
+      surfaceCount: 1,
+      indirectDrawCount: 1,
+      presentationFrameSchema:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA,
+      presentationFrameStatus:
+        'worker-owned-isosurface-presentation-opportunity',
+      presentationFrameAdmitted: true,
+      presentationFrameGpuCompleted: true,
+      presentationFrameGpuCompletionMethod:
+        'worker-device.queue.onSubmittedWorkDone',
+      presentationFramePresentationOpportunity: true,
+      presentationFramePresentationOpportunityMethod:
+        'worker-request-animation-frame-after-gpu-completion',
+      presentationQueueCompletionCount: 1,
+      presentationQueueCompletionSerial: 1,
+      presentationQueueCompletionMethod:
+        'worker-device.queue.onSubmittedWorkDone',
+      presentationQueueCompletionScope:
+        'worker-offscreen-shared-device-queue-frame-proof',
+      physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+      physicsHostQueueFenceParticipation: null
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.presentationGeometry,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+  );
+
+  const redrawReceipt = {
+    ...common,
+    status:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+    frameCount: 2,
+    readyFrameCount: 2,
+    sameDevicePresentation: true,
+    surfaceCount: 1,
+    indirectDrawCount: 1,
+    presentationFrameSchema:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA,
+    presentationFrameStatus:
+      'worker-owned-isosurface-presentation-opportunity',
+    presentationFrameAdmitted: true,
+    presentationFrameGpuCompleted: true,
+    presentationFrameGpuCompletionMethod:
+      'worker-device.queue.onSubmittedWorkDone',
+    presentationFramePresentationOpportunity: true,
+    presentationFramePresentationOpportunityMethod:
+      'worker-request-animation-frame-after-gpu-completion',
+    presentationQueueCompletionCount: 2,
+    presentationQueueCompletionSerial: 2,
+    presentationQueueCompletionMethod:
+      'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope:
+      'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+    physicsHostQueueFenceParticipation: null
+  };
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 2,
+    readyFrameCount: 2,
+    workerOffscreenRenderRows: redrawReceipt
+  });
+  assert.equal(bridge.workerCanvasLastRenderedContent.frameCount, 2);
+  assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 2);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3,
+    readyFrameCount: 3,
+    workerOffscreenRenderRows: {
+      ...redrawReceipt,
+      frameCount: 3,
+      readyFrameCount: 3
+    }
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.frameCount,
+    2,
+    'an equal-version redraw replay must not advance without a fresh queue serial'
+  );
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      ...common,
+      status: 'worker-offscreen-resident-isosurface-presentation-failed',
+      reason: 'later extraction failed',
+      frameCount: 1,
+      readyFrameCount: 1
+    }
+  });
+  assert.equal(canvas.style.visibility, 'visible');
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+  );
+
+  const newer = {
+    ...common,
+    scheduleId: 'schedule:newer-isosurface-frame',
+    computeManagerLeaseId: 'lease:newer-isosurface-frame',
+    residentExecutionGeneration: 8,
+    stepOrdinal: 2,
+    sphStep: 12,
+    requestGeneration: 2
+  };
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 1,
+    readyFrameCount: 1,
+    workerOffscreenRenderRows: {
+      ...newer,
+      status:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+      sourceCapturedBeforePhysicsContinuation: true,
+      frameCount: 1,
+      readyFrameCount: 1
+    }
+  });
+  assert.equal(
+    bridge.committedResidentSchedulePresentationStatus.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  assert.equal(bridge.committedResidentSchedulePresentationStatus.sphStep, 12);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 2,
+    readyFrameCount: 2,
+    workerOffscreenRenderRows: {
+      ...common,
+      status:
+        ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+      frameCount: 2,
+      readyFrameCount: 2,
+      sameDevicePresentation: true,
+      surfaceCount: 1,
+      indirectDrawCount: 1
+    }
+  });
+  assert.equal(
+    bridge.committedResidentSchedulePresentationStatus.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  assert.equal(bridge.committedResidentSchedulePresentationStatus.sphStep, 12);
+  assert.equal(bridge.displayOwnerPresentedSphStep, 11);
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.requestGeneration,
+    1
+  );
+
+  const preResizeQueueSerialHighWater =
+    bridge.workerFramebufferQueueCompletionSerialHighWater;
+  bridge.resize({
+    width: 80,
+    height: 64,
+    devicePixelRatio: 1,
+    reason: 'unit-isosurface-framebuffer-epoch-resize'
+  });
+  assert.equal(bridge.workerFramebufferEpoch, 2);
+  assert.equal(bridge.workerCanvasLastRenderedContent, null);
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  const unseenQueueSerialAfterResize = {
+    ...redrawReceipt,
+    ...newer,
+    status:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+    frameCount: 3,
+    readyFrameCount: 3,
+    presentationQueueCompletionCount: 3,
+    presentationQueueCompletionSerial: 3
+  };
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3,
+    readyFrameCount: 3,
+    workerOffscreenRenderRows: unseenQueueSerialAfterResize
+  });
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent,
+    null,
+    'a fresh queue serial from the pre-resize framebuffer must be rejected'
+  );
+  assert.equal(
+    bridge.workerFramebufferQueueCompletionSerialHighWater,
+    preResizeQueueSerialHighWater,
+    'a stale framebuffer epoch must not consume the queue-serial high water'
+  );
+  assert.equal(canvas.style.visibility, 'hidden');
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerOffscreenRenderRows: {
+      ...unseenQueueSerialAfterResize,
+      frameCount: 4,
+      readyFrameCount: 4,
+      workerFramebufferEpoch: 2,
+      presentationQueueCompletionCount: 4,
+      presentationQueueCompletionSerial: 4
+    }
+  });
+  assert.equal(bridge.workerCanvasLastRenderedContent.workerFramebufferEpoch, 2);
+  assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 4);
+  assert.equal(canvas.style.visibility, 'visible');
+  bridge.dispose();
 });
 
 test('worker offscreen render rows pack compact transferable particle rows', () => {

@@ -164,7 +164,16 @@ const WORKER_ROUTE_EXECUTION_KEYS = Object.freeze([
   'preflightStatus',
   'fusedSequenceSchema',
   'fusedSequenceStatus',
+  'submissionMode',
   'commandSubmissionCount',
+  'submissionStepCounts',
+  'maxSubstepsPerSubmission',
+  'presentationBoundaryCount',
+  'presentationBoundaryCompletedCount',
+  'presentationBoundaryFailureCount',
+  'presentationQosHostQueueFenceCount',
+  'logicalAuthorityPublicationCount',
+  'intermediateAuthorityPublicationCount',
   'internalPositionSubstepCount',
   'fullParticleReadbackPerformed',
   'fullParticleReadbackFree',
@@ -1687,9 +1696,68 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
           === 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0'
         && execution.fusedSequenceStatus
           === 'fused-resident-sequence-executed'
-        && execution.commandSubmissionCount === 1
         && execution.internalPositionSubstepCount === requestedCount,
       'tier0-fused-execution'
+    );
+    const submissionStepCounts = execution.submissionStepCounts;
+    const commandSubmissionCount = execution.commandSubmissionCount;
+    const submissionStepsExact = Boolean(
+      Array.isArray(submissionStepCounts)
+      && Number.isSafeInteger(commandSubmissionCount)
+      && commandSubmissionCount > 0
+      && submissionStepCounts.length === commandSubmissionCount
+      && submissionStepCounts.every(
+        (count) => Number.isSafeInteger(count) && count > 0
+      )
+      && submissionStepCounts.reduce((sum, count) => sum + count, 0)
+        === requestedCount
+    );
+    const presentationBoundaryCount = execution.presentationBoundaryCount;
+    const presentationBoundaryCompletedCount =
+      execution.presentationBoundaryCompletedCount;
+    const presentationBoundaryFailureCount =
+      execution.presentationBoundaryFailureCount;
+    const presentationQosHostQueueFenceCount =
+      execution.presentationQosHostQueueFenceCount;
+    const presentationBoundaryCountsExact = Boolean(
+      Number.isSafeInteger(presentationBoundaryCount)
+      && presentationBoundaryCount >= 0
+      && Number.isSafeInteger(presentationBoundaryCompletedCount)
+      && presentationBoundaryCompletedCount >= 0
+      && Number.isSafeInteger(presentationBoundaryFailureCount)
+      && presentationBoundaryFailureCount >= 0
+      && presentationBoundaryCount === commandSubmissionCount - 1
+      && presentationBoundaryCompletedCount
+        + presentationBoundaryFailureCount === presentationBoundaryCount
+      && Number.isSafeInteger(presentationQosHostQueueFenceCount)
+      && presentationQosHostQueueFenceCount
+        === presentationBoundaryCompletedCount
+    );
+    const singleSubmission = execution.submissionMode
+      === 'single-terminal-submission';
+    const presentationQosChunks = execution.submissionMode
+      === 'queue-ordered-presentation-qos-chunks';
+    requireWorkerRouteReceipt(
+      submissionStepsExact
+        && presentationBoundaryCountsExact
+        && execution.logicalAuthorityPublicationCount === 1
+        && execution.intermediateAuthorityPublicationCount === 0
+        && (
+          singleSubmission
+            ? commandSubmissionCount === 1
+              && submissionStepCounts[0] === requestedCount
+              && execution.maxSubstepsPerSubmission == null
+              && presentationBoundaryCount === 0
+            : presentationQosChunks
+              && commandSubmissionCount > 1
+              && Number.isSafeInteger(execution.maxSubstepsPerSubmission)
+              && execution.maxSubstepsPerSubmission > 0
+              && execution.maxSubstepsPerSubmission < requestedCount
+              && submissionStepCounts.every(
+                (count) => count <= execution.maxSubstepsPerSubmission
+              )
+        ),
+      'tier0-submission-authority'
     );
     requireWorkerRouteReceipt(
       execution.fullParticleReadbackPerformed === false
@@ -1831,7 +1899,16 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
         && execution.preflightStatus == null
         && execution.fusedSequenceSchema == null
         && execution.fusedSequenceStatus == null
+        && execution.submissionMode == null
         && execution.commandSubmissionCount == null
+        && execution.submissionStepCounts == null
+        && execution.maxSubstepsPerSubmission == null
+        && execution.presentationBoundaryCount == null
+        && execution.presentationBoundaryCompletedCount == null
+        && execution.presentationBoundaryFailureCount == null
+        && execution.presentationQosHostQueueFenceCount == null
+        && execution.logicalAuthorityPublicationCount == null
+        && execution.intermediateAuthorityPublicationCount == null
         && execution.internalPositionSubstepCount == null
         && execution.fullParticleReadbackPerformed == null
         && execution.fullParticleReadbackFree == null

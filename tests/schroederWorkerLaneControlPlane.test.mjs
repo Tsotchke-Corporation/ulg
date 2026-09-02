@@ -816,7 +816,16 @@ function canonicalRouteScheduleEvidence({
         preflightStatus: null,
         fusedSequenceSchema: null,
         fusedSequenceStatus: null,
+        submissionMode: null,
         commandSubmissionCount: null,
+        submissionStepCounts: null,
+        maxSubstepsPerSubmission: null,
+        presentationBoundaryCount: null,
+        presentationBoundaryCompletedCount: null,
+        presentationBoundaryFailureCount: null,
+        presentationQosHostQueueFenceCount: null,
+        logicalAuthorityPublicationCount: null,
+        intermediateAuthorityPublicationCount: null,
         internalPositionSubstepCount: null,
         fullParticleReadbackPerformed: null,
         fullParticleReadbackFree: null,
@@ -1055,7 +1064,9 @@ function tier0RouteScheduleEvidence({
     'worker:tier0:identity',
     'worker:tier0:mechanics'
   ],
-  includeReactionWatch = false
+  includeReactionWatch = false,
+  submissionStepCounts = [stepCount],
+  presentationBoundaryFailureCount = 0
 }) {
   const activationReceipt = routeLawActivation({
     contactSolver: false,
@@ -1097,6 +1108,12 @@ function tier0RouteScheduleEvidence({
       })
     : null;
   const particleCardinality = routeParticleCardinality(1, 1);
+  const commandSubmissionCount = submissionStepCounts.length;
+  const presentationBoundaryCount = Math.max(
+    0,
+    commandSubmissionCount - 1
+  );
+  const qosChunked = commandSubmissionCount > 1;
   return {
     lawActivationReceipt: activationReceipt,
     predecessorTargetTokenConsumption: null,
@@ -1138,7 +1155,22 @@ function tier0RouteScheduleEvidence({
         fusedSequenceSchema:
           'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
         fusedSequenceStatus: 'fused-resident-sequence-executed',
-        commandSubmissionCount: 1,
+        submissionMode: qosChunked
+          ? 'queue-ordered-presentation-qos-chunks'
+          : 'single-terminal-submission',
+        commandSubmissionCount,
+        submissionStepCounts: [...submissionStepCounts],
+        maxSubstepsPerSubmission: qosChunked
+          ? Math.max(...submissionStepCounts)
+          : null,
+        presentationBoundaryCount,
+        presentationBoundaryCompletedCount:
+          presentationBoundaryCount - presentationBoundaryFailureCount,
+        presentationBoundaryFailureCount,
+        presentationQosHostQueueFenceCount:
+          presentationBoundaryCount - presentationBoundaryFailureCount,
+        logicalAuthorityPublicationCount: 1,
+        intermediateAuthorityPublicationCount: 0,
         internalPositionSubstepCount: stepCount,
         fullParticleReadbackPerformed: false,
         fullParticleReadbackFree: true,
@@ -1208,7 +1240,9 @@ function tier0ScheduleResult({
     'worker:tier0:identity',
     'worker:tier0:mechanics'
   ],
-  includeReactionWatch = false
+  includeReactionWatch = false,
+  submissionStepCounts = [stepCount],
+  presentationBoundaryFailureCount = 0
 }) {
   return {
     schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
@@ -1226,7 +1260,9 @@ function tier0ScheduleResult({
       stateKey,
       stepCount,
       retainedBufferRefs,
-      includeReactionWatch
+      includeReactionWatch,
+      submissionStepCounts,
+      presentationBoundaryFailureCount
     }),
     gpuFence: terminalScheduleFence({
       scheduleId,
@@ -3744,6 +3780,50 @@ test('laws-quiescent Tier0 route receipt gates ComputeManager completion and Sta
   assert.equal(fixture.activeLeases.size, 0);
 });
 
+test('queue-ordered Tier0 presentation QoS chunks preserve one logical authority publication', async () => {
+  const fixture = authorityFixture();
+  const scheduleId = 'schedule:tier0-presentation-qos';
+  const laneId = 'lane:tier0-presentation-qos';
+  const stateKey = 'state:tier0-presentation-qos';
+  const stepCount = 5;
+  const result = await runSchroederWorkerLaneScheduleWithAuthority({
+    computeManager: fixture.computeManager,
+    stateManager: fixture.stateManager,
+    scheduleId,
+    laneId,
+    stateKey,
+    stepCount,
+    executeSchedule: async () => tier0ScheduleResult({
+      scheduleId,
+      laneId,
+      stateKey,
+      stepCount,
+      submissionStepCounts: [2, 2, 1],
+      presentationBoundaryFailureCount: 1
+    })
+  });
+
+  const execution = result.executionRouteAdmission.receipt.execution;
+  assert.equal(
+    execution.submissionMode,
+    'queue-ordered-presentation-qos-chunks'
+  );
+  assert.equal(execution.commandSubmissionCount, 3);
+  assert.deepEqual(execution.submissionStepCounts, [2, 2, 1]);
+  assert.equal(execution.maxSubstepsPerSubmission, 2);
+  assert.equal(execution.presentationBoundaryCount, 2);
+  assert.equal(execution.presentationBoundaryCompletedCount, 1);
+  assert.equal(execution.presentationBoundaryFailureCount, 1);
+  assert.equal(execution.logicalAuthorityPublicationCount, 1);
+  assert.equal(execution.intermediateAuthorityPublicationCount, 0);
+  assert.deepEqual(fixture.calls.map(([kind]) => kind), [
+    'acquire',
+    'complete',
+    'commit'
+  ]);
+  assert.equal(fixture.activeLeases.size, 0);
+});
+
 test('Tier0 admits a dormant motion-watch receipt without activating reaction execution', async () => {
   const fixture = authorityFixture();
   const scheduleId = 'schedule:tier0-reaction-watch';
@@ -3907,6 +3987,34 @@ test('invalid Tier0 route receipts reject the lease before completion or commit'
     ['fused-status', (result) => {
       result.executionRouteReceipt.execution.fusedSequenceStatus =
         'fused-resident-sequence-not-executed';
+    }],
+    ['submission-step-sum', (result) => {
+      Object.assign(result.executionRouteReceipt.execution, {
+        submissionMode: 'queue-ordered-presentation-qos-chunks',
+        commandSubmissionCount: 2,
+        submissionStepCounts: [2, 2],
+        maxSubstepsPerSubmission: 2,
+        presentationBoundaryCount: 1,
+        presentationBoundaryCompletedCount: 1
+      });
+    }],
+    ['submission-boundary-count', (result) => {
+      Object.assign(result.executionRouteReceipt.execution, {
+        submissionMode: 'queue-ordered-presentation-qos-chunks',
+        commandSubmissionCount: 2,
+        submissionStepCounts: [2, 1],
+        maxSubstepsPerSubmission: 2,
+        presentationBoundaryCount: 2,
+        presentationBoundaryCompletedCount: 2
+      });
+    }],
+    ['intermediate-authority', (result) => {
+      result.executionRouteReceipt.execution
+        .intermediateAuthorityPublicationCount = 1;
+    }],
+    ['logical-authority-count', (result) => {
+      result.executionRouteReceipt.execution
+        .logicalAuthorityPublicationCount = 2;
     }],
     ['lineage', (result) => {
       result.executionRouteReceipt.lineage.target.physicsTick += 1;

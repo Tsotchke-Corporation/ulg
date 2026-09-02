@@ -1,5 +1,78 @@
 const DEFAULT_NOMINAL_PRESENTATION_HZ = 60;
 
+// These failures describe rate rather than evidence integrity. They are the
+// only cadence failures that the all-preset sweep may waive for presets whose
+// acceptance contract is progression/correctness rather than 54 Hz visual
+// throughput. Unknown issue ids deliberately remain integrity failures.
+export const VISIBLE_PRESENTATION_THROUGHPUT_ISSUES = Object.freeze([
+  'visible-presentation-transitions-missing',
+  'visible-presentation-transition-count-below-target',
+  'mean-visible-presentation-below-target',
+  'sustained-visible-presentation-below-target',
+  'visible-presentation-stall-exceeds-budget'
+]);
+
+const visiblePresentationThroughputIssueSet = new Set(
+  VISIBLE_PRESENTATION_THROUGHPUT_ISSUES
+);
+
+export function classifyCadenceAcceptanceIssues(issues, {
+  throughputRequired = false
+} = {}) {
+  const uniqueIssues = [...new Set(
+    (Array.isArray(issues) ? issues : [])
+      .filter((issue) => typeof issue === 'string' && issue.length > 0)
+  )];
+  const throughputIssues = uniqueIssues.filter((issue) => (
+    visiblePresentationThroughputIssueSet.has(issue)
+  ));
+  const integrityIssues = uniqueIssues.filter((issue) => (
+    !visiblePresentationThroughputIssueSet.has(issue)
+  ));
+  return Object.freeze({
+    throughputRequired: throughputRequired === true,
+    throughputIssues: Object.freeze(throughputIssues),
+    integrityIssues: Object.freeze(integrityIssues),
+    acceptanceIssues: Object.freeze([
+      ...integrityIssues,
+      ...(throughputRequired === true ? throughputIssues : [])
+    ])
+  });
+}
+
+export function resolveHeadedSweepAutomatedDisposition({
+  automatedFailureCount = 0,
+  completeCannedMatrix = false,
+  diagnosticOverridesActive = false
+} = {}) {
+  const failureCount = Number(automatedFailureCount);
+  if (!Number.isSafeInteger(failureCount) || failureCount < 0) {
+    throw new RangeError('automatedFailureCount must be a nonnegative integer');
+  }
+  if (failureCount > 0) {
+    return Object.freeze({
+      status: 'fail',
+      automatedStatus: 'fail',
+      acceptanceEligible: false,
+      manualVisualReviewStatus: 'blocked-by-automated-failure'
+    });
+  }
+  if (completeCannedMatrix !== true || diagnosticOverridesActive === true) {
+    return Object.freeze({
+      status: 'diagnostic-pass',
+      automatedStatus: 'pass',
+      acceptanceEligible: false,
+      manualVisualReviewStatus: 'not-acceptance-eligible'
+    });
+  }
+  return Object.freeze({
+    status: 'pending-manual-visual-review',
+    automatedStatus: 'pass',
+    acceptanceEligible: false,
+    manualVisualReviewStatus: 'pending'
+  });
+}
+
 function finiteOrNull(value) {
   if (value == null || value === '') return null;
   const number = Number(value);
@@ -65,7 +138,10 @@ export function visiblePresentationIdentity(observation = {}) {
  * an admitted motion-frame identity when it actually advances the geometry.
  */
 export function summarizeVisiblePresentationCadence(observations, {
-  sampleDurationMs
+  sampleDurationMs,
+  sampleStartedAtMs = null,
+  sampleEndedAtMs = null,
+  sustainedWindowDurationMs = 500
 } = {}) {
   const durationMs = finiteOrNull(sampleDurationMs);
   const rows = Array.isArray(observations) ? observations : [];
@@ -74,6 +150,7 @@ export function summarizeVisiblePresentationCadence(observations, {
   const sourceIdentities = new Set();
   const visualIdentities = new Set();
   const visualTransitionIntervalsMs = [];
+  const visualTransitionTimestampsMs = [];
   const sourceTransitionIntervalsMs = [];
   const admissionBlockerCounts = new Map();
   let observedPresentationCount = 0;
@@ -81,11 +158,14 @@ export function summarizeVisiblePresentationCadence(observations, {
   let sourceTransitionCount = 0;
   let invalidObservationCount = 0;
   let presentationSerialRegressionCount = 0;
+  let presentationSerialStallCount = 0;
   let presentationCohortTransitionCount = 0;
   let sourceStepRegressionCount = 0;
   let motionFrameRegressionCount = 0;
   let timestampRegressionCount = 0;
+  let firstObservedTimestampMs = null;
   let lastObservedTimestampMs = null;
+  let firstValidPresentationAtMs = null;
   let lastObservedCohortIdentity = null;
   let lastValidCohortIdentity = null;
   let lastSourceStep = null;
@@ -108,6 +188,9 @@ export function summarizeVisiblePresentationCadence(observations, {
     const owner = nonEmptyString(observation?.owner);
     const cohortIdentity = nonEmptyString(observation?.cohortIdentity);
     const sourceStep = safeIntegerOrNull(observation?.sourceStep);
+    const presentationSerial = safeIntegerOrNull(
+      observation?.presentationSerial
+    );
     const visualIdentity = visiblePresentationIdentity(observation);
     if (
       timestampMs != null
@@ -117,6 +200,9 @@ export function summarizeVisiblePresentationCadence(observations, {
       timestampRegressionCount += 1;
     }
     if (timestampMs != null) lastObservedTimestampMs = timestampMs;
+    if (timestampMs != null && firstObservedTimestampMs == null) {
+      firstObservedTimestampMs = timestampMs;
+    }
     if (owner) ownerCohorts.add(owner);
     const fullCohortIdentity = owner && cohortIdentity
       ? `${owner}|${cohortIdentity}`
@@ -137,16 +223,20 @@ export function summarizeVisiblePresentationCadence(observations, {
       || !cohortIdentity
       || sourceStep == null
       || sourceStep < 0
+      || presentationSerial == null
+      || presentationSerial < 0
       || !visualIdentity
     ) {
       invalidObservationCount += 1;
       continue;
     }
     observedPresentationCount += 1;
+    if (firstValidPresentationAtMs == null) {
+      firstValidPresentationAtMs = timestampMs;
+    }
     sourceIdentities.add(`${fullCohortIdentity}|step:${sourceStep}`);
     visualIdentities.add(visualIdentity);
 
-    const presentationSerial = safeIntegerOrNull(observation?.presentationSerial);
     if (
       fullCohortIdentity === lastValidCohortIdentity
       && presentationSerial != null
@@ -155,8 +245,6 @@ export function summarizeVisiblePresentationCadence(observations, {
     ) {
       presentationSerialRegressionCount += 1;
     }
-    if (presentationSerial != null) lastPresentationSerial = presentationSerial;
-
     const motionFrameSerial = safeIntegerOrNull(observation?.motionFrameSerial);
     const admittedMotionFrame = Boolean(
       observation?.motionFrameAdmitted === true
@@ -169,6 +257,7 @@ export function summarizeVisiblePresentationCadence(observations, {
       lastMotionFrameSerial = admittedMotionFrame ? motionFrameSerial : null;
       lastVisualTransitionAtMs = timestampMs;
       lastSourceTransitionAtMs = timestampMs;
+      lastPresentationSerial = presentationSerial;
       continue;
     }
     if (fullCohortIdentity !== lastValidCohortIdentity) {
@@ -181,17 +270,10 @@ export function summarizeVisiblePresentationCadence(observations, {
       continue;
     }
 
-    let visualAdvanced = false;
+    let sourceAdvanced = false;
+    let motionAdvanced = false;
     if (sourceStep > lastSourceStep) {
-      sourceTransitionCount += 1;
-      const sourceIntervalMs = timestampMs - lastSourceTransitionAtMs;
-      if (Number.isFinite(sourceIntervalMs) && sourceIntervalMs > 0) {
-        sourceTransitionIntervalsMs.push(sourceIntervalMs);
-      }
-      lastSourceTransitionAtMs = timestampMs;
-      lastSourceStep = sourceStep;
-      lastMotionFrameSerial = admittedMotionFrame ? motionFrameSerial : null;
-      visualAdvanced = true;
+      sourceAdvanced = true;
     } else if (sourceStep < lastSourceStep) {
       sourceStepRegressionCount += 1;
     } else if (admittedMotionFrame) {
@@ -199,21 +281,44 @@ export function summarizeVisiblePresentationCadence(observations, {
         lastMotionFrameSerial == null
         || motionFrameSerial > lastMotionFrameSerial
       ) {
-        lastMotionFrameSerial = motionFrameSerial;
-        visualAdvanced = true;
+        motionAdvanced = true;
       } else if (motionFrameSerial < lastMotionFrameSerial) {
         motionFrameRegressionCount += 1;
       }
     }
 
+    let visualAdvanced = false;
+    if (sourceAdvanced || motionAdvanced) {
+      if (presentationSerial > lastPresentationSerial) {
+        visualAdvanced = true;
+        if (sourceAdvanced) {
+          sourceTransitionCount += 1;
+          const sourceIntervalMs = timestampMs - lastSourceTransitionAtMs;
+          if (Number.isFinite(sourceIntervalMs) && sourceIntervalMs > 0) {
+            sourceTransitionIntervalsMs.push(sourceIntervalMs);
+          }
+          lastSourceTransitionAtMs = timestampMs;
+          lastSourceStep = sourceStep;
+          lastMotionFrameSerial = admittedMotionFrame
+            ? motionFrameSerial
+            : null;
+        } else {
+          lastMotionFrameSerial = motionFrameSerial;
+        }
+      } else {
+        presentationSerialStallCount += 1;
+      }
+    }
     if (visualAdvanced) {
       const intervalMs = timestampMs - lastVisualTransitionAtMs;
       if (Number.isFinite(intervalMs) && intervalMs > 0) {
         visualTransitionIntervalsMs.push(intervalMs);
       }
       visualTransitionCount += 1;
+      visualTransitionTimestampsMs.push(timestampMs);
       lastVisualTransitionAtMs = timestampMs;
     }
+    lastPresentationSerial = presentationSerial;
   }
 
   const meanVisiblePresentationHz = durationMs > 0
@@ -221,6 +326,102 @@ export function summarizeVisiblePresentationCadence(observations, {
     : null;
   const medianVisualIntervalMs = median(visualTransitionIntervalsMs);
   const p95VisualIntervalMs = percentile(visualTransitionIntervalsMs, 0.95);
+  const cadenceSampleStartedAtMs = finiteOrNull(sampleStartedAtMs)
+    ?? firstObservedTimestampMs;
+  const cadenceSampleEndedAtMs = finiteOrNull(sampleEndedAtMs)
+    ?? (
+      cadenceSampleStartedAtMs != null && durationMs > 0
+        ? cadenceSampleStartedAtMs + durationMs
+        : lastObservedTimestampMs
+    );
+  const sampleBoundsReady = Boolean(
+    cadenceSampleStartedAtMs != null
+    && cadenceSampleEndedAtMs != null
+    && cadenceSampleEndedAtMs >= cadenceSampleStartedAtMs
+  );
+  const boundedVisualTransitionTimestampsMs = sampleBoundsReady
+    ? visualTransitionTimestampsMs.filter((timestampMs) => (
+        Number.isFinite(timestampMs)
+        && timestampMs >= cadenceSampleStartedAtMs
+        && timestampMs <= cadenceSampleEndedAtMs
+      ))
+    : [];
+  const boundedVisualProgressTimestampsMs = sampleBoundsReady
+    ? [firstValidPresentationAtMs, ...boundedVisualTransitionTimestampsMs]
+        .filter((timestampMs) => (
+          Number.isFinite(timestampMs)
+          && timestampMs >= cadenceSampleStartedAtMs
+          && timestampMs <= cadenceSampleEndedAtMs
+        ))
+        .sort((left, right) => left - right)
+    : [];
+  // Censor both sample edges. Transition-to-transition intervals alone miss a
+  // producer that presents rapidly and then freezes for the remainder of the
+  // declared measurement window.
+  const visiblePresentationGapsMs = [];
+  if (sampleBoundsReady) {
+    let gapStartMs = cadenceSampleStartedAtMs;
+    for (const timestampMs of boundedVisualProgressTimestampsMs) {
+      visiblePresentationGapsMs.push(Math.max(0, timestampMs - gapStartMs));
+      gapStartMs = timestampMs;
+    }
+    visiblePresentationGapsMs.push(Math.max(
+      0,
+      cadenceSampleEndedAtMs - gapStartMs
+    ));
+  }
+  const leadingVisiblePresentationHoldMs = visiblePresentationGapsMs.length > 0
+    ? visiblePresentationGapsMs[0]
+    : null;
+  const terminalVisiblePresentationHoldMs = visiblePresentationGapsMs.length > 0
+    ? visiblePresentationGapsMs.at(-1)
+    : null;
+  const maximumVisiblePresentationGapMs = visiblePresentationGapsMs.length > 0
+    ? Math.max(...visiblePresentationGapsMs)
+    : null;
+  const requestedSustainedWindowDurationMs = finiteOrNull(
+    sustainedWindowDurationMs
+  );
+  const exactSustainedWindowDurationMs = Boolean(
+    sampleBoundsReady
+    && requestedSustainedWindowDurationMs > 0
+    && requestedSustainedWindowDurationMs
+      <= cadenceSampleEndedAtMs - cadenceSampleStartedAtMs
+  )
+    ? requestedSustainedWindowDurationMs
+    : null;
+  let minimumSustainedWindowTransitionCount = null;
+  let minimumSustainedWindowStartedAtMs = null;
+  if (exactSustainedWindowDurationMs != null) {
+    const latestWindowStartMs =
+      cadenceSampleEndedAtMs - exactSustainedWindowDurationMs;
+    const candidateWindowStartsMs = [
+      cadenceSampleStartedAtMs,
+      latestWindowStartMs,
+      ...boundedVisualTransitionTimestampsMs.filter((timestampMs) => (
+        timestampMs >= cadenceSampleStartedAtMs
+        && timestampMs <= latestWindowStartMs
+      ))
+    ];
+    const epsilonMs = 1e-6;
+    for (const windowStartedAtMs of candidateWindowStartsMs) {
+      const windowEndedAtMs =
+        windowStartedAtMs + exactSustainedWindowDurationMs;
+      const transitionCount = boundedVisualTransitionTimestampsMs.filter(
+        (timestampMs) => (
+          timestampMs - windowStartedAtMs > epsilonMs
+          && timestampMs <= windowEndedAtMs + epsilonMs
+        )
+      ).length;
+      if (
+        minimumSustainedWindowTransitionCount == null
+        || transitionCount < minimumSustainedWindowTransitionCount
+      ) {
+        minimumSustainedWindowTransitionCount = transitionCount;
+        minimumSustainedWindowStartedAtMs = windowStartedAtMs;
+      }
+    }
+  }
   const meanSourcePresentationHz = durationMs > 0
     ? sourceTransitionCount * 1000 / durationMs
     : null;
@@ -242,6 +443,7 @@ export function summarizeVisiblePresentationCadence(observations, {
     visualTransitionCount,
     sourceTransitionCount,
     presentationSerialRegressionCount,
+    presentationSerialStallCount,
     sourceStepRegressionCount,
     motionFrameRegressionCount,
     timestampRegressionCount,
@@ -253,6 +455,14 @@ export function summarizeVisiblePresentationCadence(observations, {
     p95VisualIntervalEquivalentHz: p95VisualIntervalMs > 0
       ? 1000 / p95VisualIntervalMs
       : null,
+    cadenceSampleStartedAtMs,
+    cadenceSampleEndedAtMs,
+    leadingVisiblePresentationHoldMs,
+    terminalVisiblePresentationHoldMs,
+    maximumVisiblePresentationGapMs,
+    sustainedWindowDurationMs: exactSustainedWindowDurationMs,
+    minimumSustainedWindowTransitionCount,
+    minimumSustainedWindowStartedAtMs,
     meanSourcePresentationHz,
     medianSourcePresentationHz: medianSourceIntervalMs > 0
       ? 1000 / medianSourceIntervalMs
@@ -280,15 +490,57 @@ export function evaluateCadenceSample(sample, {
   const presentationSerialRegressionCount = Number(
     sample?.presentationSerialRegressionCount
   );
+  const presentationSerialStallCount = Number(
+    sample?.presentationSerialStallCount
+  );
   const sourceStepRegressionCount = Number(sample?.sourceStepRegressionCount);
   const motionFrameRegressionCount = Number(sample?.motionFrameRegressionCount);
   const timestampRegressionCount = Number(sample?.timestampRegressionCount);
+  const maximumVisiblePresentationGapMs = finiteOrNull(
+    sample?.maximumVisiblePresentationGapMs
+  );
+  const sustainedWindowDurationMs = finiteOrNull(
+    sample?.sustainedWindowDurationMs
+  );
+  const minimumSustainedWindowTransitionCount = safeIntegerOrNull(
+    sample?.minimumSustainedWindowTransitionCount
+  );
   const p95VisualIntervalEquivalentHz = finiteOrNull(
     sample?.p95VisualIntervalEquivalentHz
   );
-  const requiredVisualTransitionCount = sampleDurationMs > 0
-    ? Math.ceil(minimumHz * sampleDurationMs / 1000)
+  const maximumAllowedVisiblePresentationGapMs = Number(minimumHz) > 0
+    ? 3 * 1000 / Number(minimumHz)
     : null;
+  const requiredSustainedWindowTransitionCount = (
+    Number(minimumHz) > 0
+    && sustainedWindowDurationMs > 0
+  )
+    ? Math.max(
+        0,
+        Math.ceil(Number(minimumHz) * sustainedWindowDurationMs / 1000) - 1
+      )
+    : null;
+  const minimumSustainedWindowBoundaryAdjustedHz = (
+    minimumSustainedWindowTransitionCount != null
+    && sustainedWindowDurationMs > 0
+  )
+    ? (minimumSustainedWindowTransitionCount + 1)
+      * 1000 / sustainedWindowDurationMs
+    : null;
+  const requiredVisualTransitionCount = sampleDurationMs > 0
+    ? Math.floor(minimumHz * sampleDurationMs / 1000)
+    : null;
+  const boundaryAdjustedMeanVisiblePresentationHz = (
+    sampleDurationMs > 0
+    && Number.isSafeInteger(visualTransitionCount)
+    && visualTransitionCount >= 0
+  )
+    ? (visualTransitionCount + 1) * 1000 / sampleDurationMs
+    : null;
+  const meetsMinimumHz = (value) => (
+    Number.isFinite(value)
+    && value + 1e-6 >= minimumHz
+  );
   const issues = [];
   if (sample?.documentVisibility !== 'visible') issues.push('document-not-visible');
   if (sample?.documentHasFocus !== true) issues.push('document-not-focused');
@@ -322,14 +574,34 @@ export function evaluateCadenceSample(sample, {
   ) {
     issues.push('visible-presentation-transitions-exceed-raf-samples');
   }
-  if (!(meanVisiblePresentationHz >= minimumHz)) {
+  if (
+    !meetsMinimumHz(meanVisiblePresentationHz)
+    && !meetsMinimumHz(boundaryAdjustedMeanVisiblePresentationHz)
+  ) {
     issues.push('mean-visible-presentation-below-target');
   }
-  if (!(medianVisiblePresentationHz >= minimumHz)) {
-    issues.push('median-visible-presentation-below-target');
+  if (
+    minimumSustainedWindowTransitionCount == null
+    || requiredSustainedWindowTransitionCount == null
+    || minimumSustainedWindowTransitionCount
+      < requiredSustainedWindowTransitionCount
+  ) {
+    issues.push('sustained-visible-presentation-below-target');
   }
-  if (!(p95VisualIntervalEquivalentHz >= minimumHz)) {
-    issues.push('p95-visible-presentation-below-target');
+  // Median and p95 inverse-interval rates are valuable frame-pacing
+  // diagnostics, but they are not valid throughput gates across refresh
+  // rates. For example, an exact 54 Hz stream on a 60 Hz display must repeat
+  // one vsync periodically, producing a 33 ms interval and a nominal 30 Hz
+  // p95 despite meeting the requested throughput. Gate the actual transition
+  // count/mean plus every 500 ms window above, then reject a genuine held-frame
+  // stall of three minimum-rate periods here.
+  if (
+    !Number.isFinite(maximumVisiblePresentationGapMs)
+    || !Number.isFinite(maximumAllowedVisiblePresentationGapMs)
+    || maximumVisiblePresentationGapMs
+      > maximumAllowedVisiblePresentationGapMs + 1e-6
+  ) {
+    issues.push('visible-presentation-stall-exceeds-budget');
   }
   if (presentationOwnerCohortCount !== 1) {
     issues.push('presentation-owner-unstable');
@@ -339,6 +611,9 @@ export function evaluateCadenceSample(sample, {
   }
   if (presentationSerialRegressionCount > 0) {
     issues.push('presentation-serial-regressed');
+  }
+  if (presentationSerialStallCount > 0) {
+    issues.push('presentation-serial-stalled-on-visual-transition');
   }
   if (sourceStepRegressionCount > 0) {
     issues.push('presentation-source-step-regressed');
@@ -354,6 +629,16 @@ export function evaluateCadenceSample(sample, {
     targetHz,
     minimumMeasuredHz: minimumHz,
     requiredVisualTransitionCount,
+    boundaryAdjustedMeanVisiblePresentationHz,
+    maximumVisiblePresentationGapMs,
+    maximumAllowedVisiblePresentationGapMs,
+    sustainedWindowDurationMs,
+    minimumSustainedWindowTransitionCount,
+    requiredSustainedWindowTransitionCount,
+    minimumSustainedWindowBoundaryAdjustedHz,
+    medianVisiblePresentationHz,
+    p95VisualIntervalEquivalentHz,
+    tailIntervalRatesDiagnosticOnly: true,
     issues: Object.freeze(issues)
   });
 }

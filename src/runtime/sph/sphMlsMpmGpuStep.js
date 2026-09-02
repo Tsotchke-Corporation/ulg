@@ -14044,12 +14044,28 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   reactionActivationMotionEnvelope = null,
   deferContinuationOwnershipTransfer = false,
   registerSubmittedCleanup = null,
+  maxSubstepsPerSubmission = null,
+  onPresentationSubmissionBoundary = null,
   // PROF-0. Off by default: timestamp queries require the device to have been
   // created with the 'timestamp-query' feature, and resolving them costs a
   // small readback that the hot loop should not pay unprofiled.
   residentGpuTimestampProfilingRequested = false
 }) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  const normalizedMaxSubstepsPerSubmission = Math.min(
+    count,
+    Math.max(
+      1,
+      Math.round(finiteNumber(maxSubstepsPerSubmission, count))
+    )
+  );
+  const presentationQueueQosChunkingEnabled = Boolean(
+    typeof onPresentationSubmissionBoundary === 'function'
+    && normalizedMaxSubstepsPerSubmission < count
+  );
+  const submissionMode = presentationQueueQosChunkingEnabled
+    ? 'queue-ordered-presentation-qos-chunks'
+    : 'single-terminal-submission';
   const resolvedActiveGridDispatchPlanRefreshMode =
     normalizeMlsMpmActiveGridPlanRefreshMode(
       activeGridDispatchPlanRefreshMode
@@ -14437,6 +14453,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   let submittedCleanupRegistered = false;
   let returned = false;
   let reactionActivationObservationProposal = null;
+  const submissionStepCounts = [];
+  let commandSubmissionCount = 0;
+  let presentationBoundaryCount = 0;
+  let presentationBoundaryCompletedCount = 0;
+  let presentationBoundaryFailureCount = 0;
+  let presentationQosHostQueueFenceCount = 0;
+  let submittedSidecarStageCount = 0;
   try {
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -14518,10 +14541,32 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         computeBufferBinding(7, 'read-only-storage')
       ]
     });
-    const encoder = device.createCommandEncoder();
-    if (typeof encoder.clearBuffer !== 'function') {
-      throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
-    }
+    const createSequenceCommandEncoder = () => {
+      const nextEncoder = device.createCommandEncoder();
+      if (typeof nextEncoder.clearBuffer !== 'function') {
+        throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
+      }
+      return nextEncoder;
+    };
+    let encoder = createSequenceCommandEncoder();
+    let currentSubmissionStepCount = 0;
+    const markCurrentSidecarStagesSubmitted = () => {
+      while (submittedSidecarStageCount < sidecarEncoderStages.length) {
+        const stage = sidecarEncoderStages[submittedSidecarStageCount];
+        stage.markSubmittedWork?.();
+        submittedSidecarStageCount += 1;
+      }
+    };
+    const submitCurrentSequenceEncoder = (submittedStepCount) => {
+      device.queue.submit([encoder.finish()]);
+      commandSubmitted = true;
+      commandSubmissionCount += 1;
+      submissionStepCounts.push(submittedStepCount);
+      // A sidecar stage owns resources referenced by the command buffer that
+      // just entered the queue. Authenticate that exact owning submission now
+      // rather than waiting for later chunks to be encoded.
+      markCurrentSidecarStagesSubmitted();
+    };
     // PROF-0. The stageMs entries for the stages encoded below are assigned a
     // literal 0 further down, because their work lives inside this sequence.
     // Timestamp queries are the only way to attribute it. Inert unless the
@@ -14825,6 +14870,39 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         finalMechanicsRefreshStep = mechanicsRefreshStage.result;
         currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
       }
+      currentSubmissionStepCount += 1;
+      if (
+        presentationQueueQosChunkingEnabled
+        && index < count - 1
+        && currentSubmissionStepCount
+          >= normalizedMaxSubstepsPerSubmission
+      ) {
+        submitCurrentSequenceEncoder(currentSubmissionStepCount);
+        presentationBoundaryCount += 1;
+        const boundaryMetadata = Object.freeze({
+          submissionOrdinal: commandSubmissionCount,
+          completedSubstepCount: index + 1,
+          totalSubstepCount: count,
+          chunkStepCount: currentSubmissionStepCount
+        });
+        try {
+          const boundaryReceipt = await
+            onPresentationSubmissionBoundary(boundaryMetadata);
+          presentationBoundaryCompletedCount += 1;
+          presentationQosHostQueueFenceCount += Math.max(
+            0,
+            Number(boundaryReceipt?.presentationQosHostQueueFenceCount) || 0
+          );
+        } catch {
+          // Presentation QoS is deliberately fail-open. The logical physics
+          // transaction remains authoritative and must reach its sole
+          // terminal publication even if a frame opportunity times out or
+          // the compositor-facing callback fails.
+          presentationBoundaryFailureCount += 1;
+        }
+        encoder = createSequenceCommandEncoder();
+        currentSubmissionStepCount = 0;
+      }
     }
     if (
       (reactionActivationWatchTable == null)
@@ -14857,8 +14935,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     // Must be encoded on this encoder, after the profiled passes and before
     // finish(). No-op when profiling is inert.
     gpuTimestampProfiler.resolve(encoder);
-    device.queue.submit([encoder.finish()]);
-    commandSubmitted = true;
+    submitCurrentSequenceEncoder(currentSubmissionStepCount);
     if (
       reactionActivationObservationProposal
       && reactionActivationObservationProposal.markSubmittedWork() !== true
@@ -14867,7 +14944,6 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         'Tier0 reaction activation watch rejected its production submission'
       );
     }
-    for (const stage of sidecarEncoderStages) stage.markSubmittedWork?.();
     submittedSeparationTransientBuffers = [...separationScratchSets]
       .flatMap((scratchSet) => scratchSet?.transientBuffers || []);
     separationScratchSets.clear();
@@ -15397,7 +15473,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
       status: 'fused-resident-sequence-executed',
       stepCount: count,
-      commandSubmissionCount: 1,
+      submissionMode,
+      commandSubmissionCount,
+      submissionStepCounts: [...submissionStepCounts],
+      maxSubstepsPerSubmission: presentationQueueQosChunkingEnabled
+        ? normalizedMaxSubstepsPerSubmission
+        : null,
+      presentationBoundaryCount,
+      presentationBoundaryCompletedCount,
+      presentationBoundaryFailureCount,
+      presentationQosHostQueueFenceCount,
+      logicalAuthorityPublicationCount: 1,
+      intermediateAuthorityPublicationCount: 0,
       dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount,
       mechanicsDispatchCount: dispatchTopology.totalDispatches,
       sidecarFusionDispatchCount,
@@ -38464,6 +38551,10 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.deferContinuationOwnershipTransfer === true,
       registerSubmittedCleanup:
         args.registerFusedSubmittedCleanup ?? null,
+      maxSubstepsPerSubmission:
+        args.maxSubstepsPerSubmission ?? null,
+      onPresentationSubmissionBoundary:
+        args.onPresentationSubmissionBoundary ?? null,
       // PROF-0. Opt-in per run. The device must also have been created with
       // 'timestamp-query' (webgpuDeviceLimits.js negotiates it); the profiler
       // stays inert and says so if it was not.

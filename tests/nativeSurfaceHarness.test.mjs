@@ -5289,13 +5289,55 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
     /nativePresentation\?\.sourceStep[\s\S]*?sourceStep === renderStateSourceStep[\s\S]*?drawSourceSteps\.every/
   );
   assert.match(sampleSource, /!visibleCanvas\(workerCanvas\)/);
-  assert.doesNotMatch(sampleSource, /displayOwnerLastRenderedContent/);
+  assert.match(
+    sampleSource,
+    /presentation\?\.displayOwnerLastRenderedContent \|\| latestRows/,
+    'cadence must sample the durable admitted framebuffer, with raw rows only as startup fallback'
+  );
+  assert.match(
+    sampleSource,
+    /presentationQueueCompletionCount\s*=== presentationQueueCompletionSerial/
+  );
   assert.match(
     sweepSource,
     /schema: 'peercompute\.ulg\.headed-all-preset-cadence-sweep\.v2'/
   );
+  assert.match(
+    sweepSource,
+    /particlePresentationPresetIds = new Set\(\['bulk-water', 'water-realtime'\]\)/
+  );
+  assert.match(
+    sweepSource,
+    /classifyCadenceAcceptanceIssues\(\s*result\.cadenceEvaluation\.issues,\s*\{ throughputRequired: cadenceGatingRequired \}\s*\)/
+  );
+  assert.match(
+    sweepSource,
+    /result\.issues\.push\(\s*\.\.\.result\.cadenceIssueClassification\.acceptanceIssues/
+  );
+  assert.match(
+    sweepSource,
+    /cadenceGatedPresetIds: \[\.\.\.particlePresentationPresetIds\]/
+  );
+  assert.match(
+    sweepSource,
+    /cadenceGatingRequired\s*\? 'sphere-impostor-depth-fallback'\s*:\s*'worker-owned-true-isosurface'/
+  );
   assert.match(sweepSource, /rafMetricsDiagnosticOnly: true/);
   assert.match(sweepSource, /visibleStateIdentityRequired: true/);
+  assert.match(
+    sweepSource,
+    /const canonicalPresetHash = targetUrl\.searchParams\.toString\(\);[\s\S]*?targetUrl\.search = '';[\s\S]*?targetUrl\.hash = canonicalPresetHash/,
+    'the default-preset sweep must not turn preset runtime into an explicit presentation override'
+  );
+  assert.match(
+    sweepSource,
+    /surfaceDrawModeSelectedByUrl:\s*renderModeSelection\?\.selectedByUrl === true[\s\S]*?surfaceDrawModeSelectedByUrl === false[\s\S]*?surface-draw-mode-preset-runtime-serialized/,
+    'default-preset acceptance must prove implicit preset presentation provenance'
+  );
+  assert.match(sweepSource, /status: automatedDisposition\.status/);
+  assert.match(sweepSource, /manualScreenshotReviewReceiptSchema:/);
+  assert.match(sweepSource, /sha256: createHash\('sha256'\)/);
+  assert.match(sweepSource, /diagnosticOverridesActive/);
 });
 
 test('product-history acceptance proves the GPU-count P2G and full render commit gates', () => {

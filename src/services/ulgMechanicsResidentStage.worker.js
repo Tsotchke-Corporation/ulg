@@ -25,6 +25,11 @@ import {
   isExactQuiescentSphReactionTable
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
+  isExactWorkerTier0PresentationQosBoundaryProof,
+  resolveWorkerTier0PresentationQosSubsteps
+} from '../runtime/sph/sphWorkerPresentationQos.js';
+import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -266,6 +271,12 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT = 128;
 // never authority-admission receipts: StateManager still admits only the
 // schedule's final terminal fence.
 export const ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS = 16;
+// A presentation-coupled Tier0 lane must return to the compositor often
+// enough to sustain the 54 Hz interactive floor. This cap is route-generic:
+// materials and scenarios still run the same kernels and differ only in their
+// authored laws/conditions. Larger configured mechanics bursts remain valid
+// when no presentation boundary callback is attached.
+export { ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION };
 // Terminal schedule results keep the LAST step's full summary plus a compact
 // fixed-capacity per-step ring so envelopes stay bounded for any stepCount.
 export const ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY = 64;
@@ -6970,6 +6981,7 @@ function validateWorkerTier0FusedExecution(execution, {
   sourceLineage,
   expectedLineage,
   phaseCarrierPlan,
+  presentationBoundaryAudit = null,
   registeredSubmittedCleanupCount = 0,
   rejectedSubmittedCleanupCount = 0
 } = {}) {
@@ -7008,12 +7020,109 @@ function validateWorkerTier0FusedExecution(execution, {
     fused?.schema !== 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0'
     || fused.status !== 'fused-resident-sequence-executed'
     || fused.stepCount !== stepCount
-    || fused.commandSubmissionCount !== 1
     || fused.internalPositionSubstepCount !== stepCount
     || fused.storageGenerationDelta !== 1
     || fused.committedPositionEpochDelta !== 1
     || fused.physicsTickDelta !== stepCount
   ) failures.push('fused-sequence-receipt');
+  const submissionStepCounts = fused?.submissionStepCounts;
+  const commandSubmissionCount = fused?.commandSubmissionCount;
+  const submissionStepsExact = Boolean(
+    Array.isArray(submissionStepCounts)
+    && Number.isSafeInteger(commandSubmissionCount)
+    && commandSubmissionCount > 0
+    && submissionStepCounts.length === commandSubmissionCount
+    && submissionStepCounts.every(
+      (count) => Number.isSafeInteger(count) && count > 0
+    )
+    && submissionStepCounts.reduce((sum, count) => sum + count, 0)
+      === stepCount
+  );
+  const presentationBoundaryCount = fused?.presentationBoundaryCount;
+  const presentationBoundaryCompletedCount =
+    fused?.presentationBoundaryCompletedCount;
+  const presentationBoundaryFailureCount =
+    fused?.presentationBoundaryFailureCount;
+  const presentationBoundaryCountsExact = Boolean(
+    Number.isSafeInteger(presentationBoundaryCount)
+    && presentationBoundaryCount >= 0
+    && Number.isSafeInteger(presentationBoundaryCompletedCount)
+    && presentationBoundaryCompletedCount >= 0
+    && Number.isSafeInteger(presentationBoundaryFailureCount)
+    && presentationBoundaryFailureCount >= 0
+    && presentationBoundaryCount === commandSubmissionCount - 1
+    && presentationBoundaryCompletedCount + presentationBoundaryFailureCount
+      === presentationBoundaryCount
+    && Number.isSafeInteger(fused?.presentationQosHostQueueFenceCount)
+    && fused.presentationQosHostQueueFenceCount
+      === presentationBoundaryCompletedCount
+  );
+  const singleSubmission = fused?.submissionMode
+    === 'single-terminal-submission';
+  const presentationQosChunks = fused?.submissionMode
+    === 'queue-ordered-presentation-qos-chunks';
+  if (
+    !submissionStepsExact
+    || !presentationBoundaryCountsExact
+    || fused?.logicalAuthorityPublicationCount !== 1
+    || fused?.intermediateAuthorityPublicationCount !== 0
+    || (
+      singleSubmission
+        ? commandSubmissionCount !== 1
+          || submissionStepCounts[0] !== stepCount
+          || fused?.maxSubstepsPerSubmission != null
+          || presentationBoundaryCount !== 0
+        : !presentationQosChunks
+          || commandSubmissionCount <= 1
+          || !Number.isSafeInteger(fused?.maxSubstepsPerSubmission)
+          || fused.maxSubstepsPerSubmission <= 0
+          || fused.maxSubstepsPerSubmission >= stepCount
+          || submissionStepCounts.some(
+            (count) => count > fused.maxSubstepsPerSubmission
+          )
+    )
+  ) failures.push('fused-submission-authority');
+  const observedBoundaryInvocations = Array.isArray(
+    presentationBoundaryAudit?.invocations
+  )
+    ? presentationBoundaryAudit.invocations
+    : [];
+  let observedCompletedSubsteps = 0;
+  const observedBoundariesExact = observedBoundaryInvocations.every(
+    (observation, index) => {
+      const metadata = observation?.metadata;
+      const submissionStepCount = submissionStepCounts?.[index];
+      observedCompletedSubsteps += Number(submissionStepCount) || 0;
+      return metadata
+        && Object.getPrototypeOf(metadata) === Object.prototype
+        && Object.isFrozen(metadata)
+        && Object.keys(metadata).length === 4
+        && Object.hasOwn(metadata, 'submissionOrdinal')
+        && Object.hasOwn(metadata, 'completedSubstepCount')
+        && Object.hasOwn(metadata, 'totalSubstepCount')
+        && Object.hasOwn(metadata, 'chunkStepCount')
+        && metadata.submissionOrdinal === index + 1
+        && metadata.completedSubstepCount === observedCompletedSubsteps
+        && metadata.totalSubstepCount === stepCount
+        && metadata.chunkStepCount === submissionStepCount
+        && typeof observation.completed === 'boolean'
+        && (
+          observation.completed !== true
+          || isExactWorkerTier0PresentationQosBoundaryProof(
+            observation.receipt,
+            metadata
+          )
+        );
+    }
+  );
+  if (
+    !observedBoundariesExact
+    || observedBoundaryInvocations.length !== presentationBoundaryCount
+    || Number(presentationBoundaryAudit?.completedCount ?? 0)
+      !== presentationBoundaryCompletedCount
+    || Number(presentationBoundaryAudit?.failureCount ?? 0)
+      !== presentationBoundaryFailureCount
+  ) failures.push('fused-presentation-boundary-observation');
   if (
     preflight?.status !== 'fused-resident-sequence-preflight-ready'
     || preflight.sequenceRunnable !== true
@@ -8176,6 +8285,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   {
     id = null,
     postProgress = null,
+    onTier0PresentationSubmissionBoundary = null,
     runTier0FusedResidentSequence =
       runMlsMpmResidentStepsWithOptionalWebGpu
   } = {}
@@ -9559,9 +9669,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // checkpoint silently falls back to a fresh fence and drains the newest
     // sixteen-step window instead of overlapping it.
     //
-    // Tier0 is one atomic K-step submission followed by exactly one worker
-    // terminal fence. Short canonical schedules never reach a drain boundary,
-    // so neither route gets an otherwise invisible unused seed fence.
+    // Tier0 is one logical K-step authority transaction followed by exactly
+    // one worker terminal fence. Presentation QoS may split its queue work
+    // without creating an intermediate adoption boundary. Short canonical
+    // schedules never reach a drain boundary, so neither route gets an
+    // otherwise invisible unused seed fence.
     let pendingQueueDrainFencePromise = null;
     const startLaggedQueueDrainFence = () => {
       let fencePromise = null;
@@ -9713,6 +9825,77 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             ?? tier0PhaseCarrierPlan
             ?? null
         };
+        const tier0PresentationRequested =
+          typeof onTier0PresentationSubmissionBoundary === 'function';
+        const tier0PresentationMaxSubstepsPerSubmission =
+          resolveWorkerTier0PresentationQosSubsteps({
+            requestedStepCount: stepCount,
+            presentationRequested: tier0PresentationRequested
+          });
+        const tier0PresentationQosEnabled = Boolean(
+          tier0PresentationRequested
+          && Number.isSafeInteger(
+            tier0PresentationMaxSubstepsPerSubmission
+          )
+          && tier0PresentationMaxSubstepsPerSubmission > 0
+          && tier0PresentationMaxSubstepsPerSubmission < stepCount
+        );
+        const tier0PresentationBoundaryAudit = {
+          invocations: [],
+          completedCount: 0,
+          failureCount: 0,
+          lastMotionFrameSubmittedSerial: 0,
+          lastMotionFrameSerial: 0,
+          lastPresentationQueueCompletionSerial: 0
+        };
+        const tier0PresentationSubmissionBoundary =
+          tier0PresentationQosEnabled
+            ? async (metadata) => {
+              const observation = { metadata, completed: false };
+              tier0PresentationBoundaryAudit.invocations.push(observation);
+              try {
+                const receipt = await
+                  onTier0PresentationSubmissionBoundary(metadata);
+                observation.receipt = receipt;
+                if (!isExactWorkerTier0PresentationQosBoundaryProof(
+                  receipt,
+                  metadata
+                )) {
+                  throw new Error(
+                    'Tier0 presentation QoS boundary lacked exact GPU/presentation proof'
+                  );
+                }
+                if (
+                  receipt.motionFrameSubmittedSerial
+                    <= tier0PresentationBoundaryAudit
+                      .lastMotionFrameSubmittedSerial
+                  || receipt.motionFrameSerial
+                    <= tier0PresentationBoundaryAudit.lastMotionFrameSerial
+                  || receipt.presentationQueueCompletionSerial
+                    <= tier0PresentationBoundaryAudit
+                      .lastPresentationQueueCompletionSerial
+                ) {
+                  throw new Error(
+                    'Tier0 presentation QoS boundary replayed a completed frame proof'
+                  );
+                }
+                tier0PresentationBoundaryAudit
+                  .lastMotionFrameSubmittedSerial =
+                    receipt.motionFrameSubmittedSerial;
+                tier0PresentationBoundaryAudit.lastMotionFrameSerial =
+                  receipt.motionFrameSerial;
+                tier0PresentationBoundaryAudit
+                  .lastPresentationQueueCompletionSerial =
+                    receipt.presentationQueueCompletionSerial;
+                observation.completed = true;
+                tier0PresentationBoundaryAudit.completedCount += 1;
+                return receipt;
+              } catch (error) {
+                tier0PresentationBoundaryAudit.failureCount += 1;
+                throw error;
+              }
+            }
+            : null;
         const tier0Execution = await runTier0FusedResidentSequence({
           ...residentStepOptions,
           sphParticleState: tier0SphParticleState,
@@ -9738,18 +9921,27 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             ?? tier0MlsMpmParticleState.gridCflFactor
             ?? 0.4,
           stepCount,
+          maxSubstepsPerSubmission: tier0PresentationQosEnabled
+            ? tier0PresentationMaxSubstepsPerSubmission
+            : null,
+          onPresentationSubmissionBoundary: tier0PresentationQosEnabled
+            ? tier0PresentationSubmissionBoundary
+            : null,
           readbackMode: NO_FULL_READBACK_MODE,
           compactSummaryMode: 'none',
-          // Tier0's K substeps and terminal publication are one command
-          // submission. The next schedule can conservatively rebuild its
-          // active bounds from the carried terminal prediction; a second
-          // summary-plan submission here would break that atomic contract.
+          // Tier0's K substeps and terminal publication remain one logical
+          // authority transaction. The next schedule can conservatively
+          // rebuild its active bounds from the carried terminal prediction;
+          // a summary-plan submission here would add non-presentation work
+          // outside the bounded mechanics chunks.
           activeGridDispatchPlanRefreshMode: 'none',
           summaryRunner: null,
           fuseNoFullResidentMechanicsSequence: true,
           // Until a compact terminal motion/separation envelope is available,
           // an unread successor batch cannot safely reuse a bounded AABB.
-          // Tier0 remains one fused submission but dispatches the full grid.
+          // Tier0 remains one fused logical sequence but dispatches the full
+          // grid; presentation QoS may divide that sequence into queue-ordered
+          // command submissions without publishing an intermediate family.
           fuseNoFullResidentMechanicsActiveGrid: false,
           fuseNoFullResidentActiveGrid: false,
           schroederLevelAssignment: null,
@@ -9785,6 +9977,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             sourceLineage: tier0SourceLineage,
             expectedLineage: tier0ExpectedLineage,
             phaseCarrierPlan: tier0PhaseCarrierPlan,
+            presentationBoundaryAudit: tier0PresentationBoundaryAudit,
             registeredSubmittedCleanupCount:
               tier0SubmittedCleanupRecords.length,
             rejectedSubmittedCleanupCount:
@@ -9836,6 +10029,34 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               ...(tier0ExecutionValidation.preflight?.blockers || [])
             ],
             fusedStatus: tier0ExecutionValidation.fused?.status ?? null,
+            submissionMode:
+              tier0ExecutionValidation.fused?.submissionMode ?? null,
+            commandSubmissionCount:
+              tier0ExecutionValidation.fused?.commandSubmissionCount ?? null,
+            submissionStepCounts: [
+              ...(tier0ExecutionValidation.fused?.submissionStepCounts || [])
+            ],
+            maxSubstepsPerSubmission:
+              tier0ExecutionValidation.fused?.maxSubstepsPerSubmission
+              ?? null,
+            presentationBoundaryCount:
+              tier0ExecutionValidation.fused?.presentationBoundaryCount
+              ?? null,
+            presentationBoundaryCompletedCount:
+              tier0ExecutionValidation.fused
+                ?.presentationBoundaryCompletedCount ?? null,
+            presentationBoundaryFailureCount:
+              tier0ExecutionValidation.fused
+                ?.presentationBoundaryFailureCount ?? null,
+            presentationQosHostQueueFenceCount:
+              tier0ExecutionValidation.fused
+                ?.presentationQosHostQueueFenceCount ?? null,
+            logicalAuthorityPublicationCount:
+              tier0ExecutionValidation.fused
+                ?.logicalAuthorityPublicationCount ?? null,
+            intermediateAuthorityPublicationCount:
+              tier0ExecutionValidation.fused
+                ?.intermediateAuthorityPublicationCount ?? null,
             finalStepStatus:
               tier0ExecutionValidation.finalStep?.status ?? null,
             finalStepResidentBuffersRetained:
@@ -12248,8 +12469,32 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           tier0ExecutionValidation?.fused?.schema ?? null,
         fusedSequenceStatus:
           tier0ExecutionValidation?.fused?.status ?? null,
+        submissionMode:
+          tier0ExecutionValidation?.fused?.submissionMode ?? null,
         commandSubmissionCount:
           tier0ExecutionValidation?.fused?.commandSubmissionCount ?? null,
+        submissionStepCounts: tier0RouteSelected
+          ? [...(tier0ExecutionValidation?.fused?.submissionStepCounts || [])]
+          : null,
+        maxSubstepsPerSubmission:
+          tier0ExecutionValidation?.fused?.maxSubstepsPerSubmission ?? null,
+        presentationBoundaryCount:
+          tier0ExecutionValidation?.fused?.presentationBoundaryCount ?? null,
+        presentationBoundaryCompletedCount:
+          tier0ExecutionValidation?.fused
+            ?.presentationBoundaryCompletedCount ?? null,
+        presentationBoundaryFailureCount:
+          tier0ExecutionValidation?.fused
+            ?.presentationBoundaryFailureCount ?? null,
+        presentationQosHostQueueFenceCount:
+          tier0ExecutionValidation?.fused
+            ?.presentationQosHostQueueFenceCount ?? null,
+        logicalAuthorityPublicationCount:
+          tier0ExecutionValidation?.fused
+            ?.logicalAuthorityPublicationCount ?? null,
+        intermediateAuthorityPublicationCount:
+          tier0ExecutionValidation?.fused
+            ?.intermediateAuthorityPublicationCount ?? null,
         internalPositionSubstepCount:
           tier0ExecutionValidation?.fused?.internalPositionSubstepCount
           ?? null,

@@ -104,8 +104,16 @@ import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
-  mergeResidentProductMassBuffersWebGpu
+  mergeResidentProductMassBuffersWebGpu,
+  runMlsMpmResidentStepsWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
+  createWorkerTier0PresentationQosPlan,
+  resolveWorkerTier0PresentationQosSubsteps
+} from '../src/runtime/sph/sphWorkerPresentationQos.js';
 import {
   ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA,
   runCanonicalSphReactionMotionEnvelopeWatchWebGpu
@@ -122,6 +130,43 @@ import {
 } from '../src/runtime/material/materialClosures.js';
 
 const NATIVE_MESSAGE_CHANNEL = globalThis.MessageChannel;
+
+test('worker Tier0 presentation QoS is one shared route-generic policy', () => {
+  assert.equal(
+    ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
+    2
+  );
+  assert.equal(resolveWorkerTier0PresentationQosSubsteps({
+    requestedStepCount: 64,
+    presentationRequested: true
+  }), 2);
+  assert.equal(resolveWorkerTier0PresentationQosSubsteps({
+    requestedStepCount: 64,
+    presentationRequested: false
+  }), 64);
+  assert.equal(resolveWorkerTier0PresentationQosSubsteps(), null);
+  const plan = createWorkerTier0PresentationQosPlan({
+    requestedStepCount: 64,
+    presentationRequested: true,
+    targetHz: 60,
+    dtS: 0.001
+  });
+  const noPresentationPlan = createWorkerTier0PresentationQosPlan({
+    requestedStepCount: 64,
+    presentationRequested: false,
+    targetHz: 60,
+    dtS: 0.001
+  });
+  assert.equal(plan.effectiveSubstepsPerSubmission, 2);
+  assert.equal(plan.presentationSlotCount, 32);
+  assert.equal(plan.expectedWallHorizonS, 32 / 60);
+  assert.equal(plan.simulationHorizonS, 0.064);
+  assert.equal(plan.presentationRequested, true);
+  assert.equal(noPresentationPlan.effectiveSubstepsPerSubmission, 64);
+  assert.equal(noPresentationPlan.presentationSlotCount, 1);
+  assert.equal(noPresentationPlan.presentationRequested, false);
+  assert.equal(Object.isFrozen(plan), true);
+});
 
 function instrumentResidentScheduleMessageChannels(testContext) {
   const previousMessageChannel = globalThis.MessageChannel;
@@ -8752,8 +8797,41 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
     'drifting the dormant table fingerprint must reject before GPU work'
   );
 
+  const presentationBoundaries = [];
+  const tier0Progress = [];
   const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
-    tier0SchedulePayload(tier0ResidentStepOptions)
+    tier0SchedulePayload(tier0ResidentStepOptions),
+    {
+      postProgress: (progress) => tier0Progress.push(progress),
+      onTier0PresentationSubmissionBoundary: async (boundary) => {
+        assert.equal(Object.isFrozen(boundary), true);
+        presentationBoundaries.push(boundary);
+        await device.queue.onSubmittedWorkDone();
+        boundaryEvents.push('presentation-boundary');
+        return {
+          schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+          status: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+          ...boundary,
+          motionFrameSubmittedSerial: presentationBoundaries.length,
+          motionFrameSerial: presentationBoundaries.length,
+          gpuCompleted: true,
+          gpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+          presentationOpportunity: true,
+          presentationOpportunityMethod:
+            'worker-request-animation-frame-after-gpu-completion',
+          queuePrefixCoveredPhysics: true,
+          presentationQueueCompletionCount: presentationBoundaries.length,
+          presentationQueueCompletionSerial: presentationBoundaries.length,
+          presentationQueueCompletionMethod:
+            'worker-device.queue.onSubmittedWorkDone',
+          presentationQueueCompletionScope:
+            'worker-offscreen-shared-device-queue-frame-proof',
+          physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+          physicsContinuationBlocked: true,
+          presentationQosHostQueueFenceCount: 1
+        };
+      }
+    }
   );
   const outerRouteAdmission =
     validateSchroederWorkerScheduleExecutionRouteReceipt(result, {
@@ -8833,7 +8911,45 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
   );
   assert.equal(
     result.executionRouteReceipt.execution.commandSubmissionCount,
+    2
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.submissionMode,
+    'queue-ordered-presentation-qos-chunks'
+  );
+  assert.deepEqual(
+    result.executionRouteReceipt.execution.submissionStepCounts,
+    [2, 1]
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.maxSubstepsPerSubmission,
+    2
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.presentationBoundaryCount,
     1
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution
+      .presentationBoundaryCompletedCount,
+    1
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.presentationBoundaryFailureCount,
+    0
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.presentationQosHostQueueFenceCount,
+    1
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution.logicalAuthorityPublicationCount,
+    1
+  );
+  assert.equal(
+    result.executionRouteReceipt.execution
+      .intermediateAuthorityPublicationCount,
+    0
   );
   assert.equal(
     result.executionRouteReceipt.execution.internalPositionSubstepCount,
@@ -8890,13 +9006,13 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
   );
   assert.equal(
     device.queue.submitCalls.length - submissionsBeforeSchedule,
-    1,
-    'Tier0 must encode all K mechanics steps in one queue submission'
+    2,
+    'Tier0 may split queue work while retaining one logical terminal adoption'
   );
   assert.equal(
     (device.queue.submittedWorkDoneCount || 0) - fencesBeforeSchedule,
-    1,
-    'Tier0 must take only the worker schedule terminal queue fence'
+    2,
+    'Tier0 must prove its presentation boundary and terminal queue fence'
   );
   assert.equal(result.gpuFence.fenceSatisfied, true);
   const reactionObservation = result.nextScheduleLawActivationObservation;
@@ -8971,7 +9087,19 @@ test('ULG worker schedule selects Tier0 from the first contact-free seed receipt
     reactionObservation.failureReason,
     null
   );
-  assert.deepEqual(boundaryEvents, ['queue-fence', 'activation-map']);
+  assert.deepEqual(presentationBoundaries, [{
+    submissionOrdinal: 1,
+    completedSubstepCount: 2,
+    totalSubstepCount: stepCount,
+    chunkStepCount: 2
+  }]);
+  assert.deepEqual(tier0Progress, []);
+  assert.deepEqual(boundaryEvents, [
+    'queue-fence',
+    'presentation-boundary',
+    'queue-fence',
+    'activation-map'
+  ]);
   assert.equal(
     result.perStepSummaries.ring.length
       + result.perStepSummaries.droppedStepCount,
@@ -9278,6 +9406,107 @@ test('Tier0 forwards a reaction motion envelope only when a dormant watch is req
     tier0Call,
     /reactionActivationMotionEnvelope:\s*scheduleReactionActivationWatchRequested\s*\? scheduleReactionActivationMotionEnvelope\s*:\s*null/
   );
+});
+
+test('ULG worker rejects malformed multi-submit Tier0 authority before terminal adoption', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:tier0-malformed-qos-lane',
+    stateKey: 'ulg:test:tier0-malformed-qos-state'
+  };
+  const seedLineage = WORKER_LANE_SEED_DEFAULT_LINEAGE;
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:tier0-malformed-qos',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'tier0-malformed-qos-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      activeGridSafetyCells: 1
+    };
+    const scheduleId = 'ulg:test:tier0-malformed-qos-schedule';
+    let presentationBoundaryCount = 0;
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(
+          workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: {
+              selectedLevel: 0,
+              mechanicsFieldViewsRequired: false
+            },
+            schroederSameLevelMechanics: { residentStepOptions }
+          }),
+          { stepCount: 3, scheduleId },
+          laneOptions
+        ),
+        {
+          onTier0PresentationSubmissionBoundary: async () => {
+            presentationBoundaryCount += 1;
+          },
+          runTier0FusedResidentSequence: async (options) => {
+            const execution =
+              await runMlsMpmResidentStepsWithOptionalWebGpu(options);
+            return {
+              ...execution,
+              fusedResidentSequence: {
+                ...execution.fusedResidentSequence,
+                submissionStepCounts: [2, 2]
+              }
+            };
+          }
+        }
+      ),
+      (error) => {
+        assert.equal(
+          error.reason,
+          'tier0-fused-terminal-publication-invalid'
+        );
+        assert.ok(
+          error.residentScheduleError?.tier0ValidationFailures?.includes(
+            'fused-submission-authority'
+          )
+        );
+        return true;
+      }
+    );
+    assert.equal(presentationBoundaryCount, 1);
+    const retained =
+      resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+        ...laneOptions,
+        sourceStageId: 'schroederSameLevelMechanics'
+      });
+    assert.equal(retained.status, 'worker-retained-particle-state-ready');
+    assert.equal(retained.sphParticleUpload.physicsTick, seedLineage.physicsTick);
+    assert.equal(
+      retained.sphParticleUpload.storageGeneration,
+      seedLineage.storageGeneration
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane({
+      ...laneOptions,
+      reason: 'tier0-malformed-qos-test-complete'
+    });
+  }
 });
 
 test('ULG worker consumes a presealed dormant reaction transition and seals its active S2 continuation', async () => {

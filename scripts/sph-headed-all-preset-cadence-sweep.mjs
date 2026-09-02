@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -9,7 +10,9 @@ import {
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
+  classifyCadenceAcceptanceIssues,
   evaluateCadenceSample,
+  resolveHeadedSweepAutomatedDisposition,
   summarizeVisiblePresentationCadence
 } from './sph-headed-cadence-metrics.mjs';
 
@@ -25,9 +28,20 @@ const cadenceSampleMs = Number(process.env.ULG_HEADED_SWEEP_SAMPLE_MS) || 5_000;
 const nominalRenderHz = 60;
 // Interactive acceptance allows ten percent scheduling/compositor variance
 // around the nominal 60 Hz presentation target.
-const minimumRenderHz = Number(process.env.ULG_HEADED_SWEEP_MIN_RENDER_HZ)
-  || nominalRenderHz * 0.9;
-const livePreviewPresetIds = new Set(['bulk-water', 'water-realtime']);
+const requestedMinimumRenderHz = Number(
+  process.env.ULG_HEADED_SWEEP_MIN_RENDER_HZ
+);
+const minimumRenderHz = Math.max(
+  nominalRenderHz * 0.9,
+  Number.isFinite(requestedMinimumRenderHz)
+    ? requestedMinimumRenderHz
+    : nominalRenderHz * 0.9
+);
+// Only the two high-particle-count water fixtures are presentation-cadence
+// acceptance targets. Every canned preset still runs through the headed
+// rendering/progression checks below, but the true-isosurface fixtures are not
+// held to the particle-impostor throughput goal.
+const particlePresentationPresetIds = new Set(['bulk-water', 'water-realtime']);
 const scenarioSelection = String(
   process.env.ULG_HEADED_SWEEP_SCENARIOS || ''
 ).split(',').map((value) => value.trim()).filter(Boolean);
@@ -37,6 +51,12 @@ const selectedPresetIds = scenarioSelection.length > 0
 const scenarioPresets = SPH_PHASE_SCENARIO_PRESETS.filter((preset) => (
   selectedPresetIds == null || selectedPresetIds.has(preset.id)
 ));
+const completeCannedMatrix = Boolean(
+  scenarioPresets.length === SPH_PHASE_SCENARIO_PRESETS.length
+  && SPH_PHASE_SCENARIO_PRESETS.every((preset) => (
+    scenarioPresets.some((candidate) => candidate.id === preset.id)
+  ))
+);
 if (
   selectedPresetIds != null
   && scenarioPresets.length !== selectedPresetIds.size
@@ -48,6 +68,15 @@ if (
 const reactionActivationPolicyOverride = String(
   process.env.ULG_HEADED_SWEEP_REACTION_ACTIVATION_POLICY || ''
 ).trim() || null;
+const extraScenarioQuery = String(
+  process.env.ULG_HEADED_SWEEP_EXTRA_QUERY || ''
+).trim();
+const extraScenarioParams = Object.freeze(Object.fromEntries(
+  new URLSearchParams(extraScenarioQuery)
+));
+const diagnosticOverridesActive = Boolean(
+  reactionActivationPolicyOverride != null || extraScenarioQuery.length > 0
+);
 const profileGpuResources =
   process.env.ULG_HEADED_SWEEP_PROFILE_GPU_RESOURCES === '1';
 if (
@@ -99,6 +128,16 @@ function percentile(values, fraction) {
 
 function criticalConsoleText(text) {
   return /(?:ulg-gpu-(?:uncaptured-error|device-lost)|GPUValidationError|validation error|invalid WGSL|shader.*(?:error|invalid)|pipeline.*invalid|device lost|out of memory)/i.test(text);
+}
+
+async function screenshotDigest(filePath, label) {
+  const bytes = await readFile(filePath);
+  return Object.freeze({
+    label,
+    path: filePath,
+    byteLength: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex')
+  });
 }
 
 async function installGpuFaultCapture(page) {
@@ -243,15 +282,24 @@ async function readState(page) {
   return page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene || null;
+    const renderModeSelection = overlay?.__sphRenderModeSelection || null;
+    const locationUrl = new URL(location.href);
+    const hashLocationParams = locationUrl.hash.length > 1
+      ? new URLSearchParams(locationUrl.hash.slice(1))
+      : new URLSearchParams();
     const presentation = scene?.getWorkerOffscreenPresentation?.()
       || overlay?.__sphWorkerOffscreenPresentation
       || null;
     const renderState = scene?.getSphResidentRenderState?.()
       || overlay?.__sphResidentRenderState
       || null;
-    const rows = presentation?.workerOffscreenRenderRows
+    const latestRows = presentation?.workerOffscreenRenderRows
       || renderState?.workerOffscreenRenderRows
       || null;
+    const renderedContent = presentation?.displayOwnerLastRenderedContent || null;
+    const rows = presentation?.displayOwner === 'worker'
+      ? (renderedContent || latestRows)
+      : latestRows;
     const steps = scene?.getMlsMpmResidentSteps?.()
       || overlay?.__mlsMpmResidentSteps
       || null;
@@ -313,7 +361,6 @@ async function readState(page) {
     const renderSource = renderState?.residentRenderSource || null;
     const committedPresentation = workerLane?.committedPresentation || null;
     const finalEpochIdentity = workerLane?.finalEpochIdentity || null;
-    const renderedContent = presentation?.displayOwnerLastRenderedContent || null;
     const canvasRows = [...document.querySelectorAll('#sph-scene canvas')].map((canvas) => {
       const style = getComputedStyle(canvas);
       const rect = canvas.getBoundingClientRect();
@@ -432,6 +479,48 @@ async function readState(page) {
       && rows?.depthAttachmentReady === true
       && Number(rows?.boxWireframeDrawCount) === 1
     );
+    const workerParticleEndpointReady = Boolean(
+      renderedContent?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
+      && renderedContent?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && renderedContent?.presentationFrameSchema
+        === 'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0'
+      && renderedContent?.presentationFrameStatus
+        === 'worker-particle-keyframe-presentation-opportunity'
+      && renderedContent?.presentationFrameAdmitted === true
+      && renderedContent?.presentationFrameGpuCompleted === true
+      && renderedContent?.presentationFramePresentationOpportunity === true
+      && renderedContent?.presentationFramePresentationOpportunityMethod
+        === 'worker-request-animation-frame-after-gpu-completion'
+      && renderedContent?.presentationGeometry
+        === 'sphere-impostor-depth-fallback'
+      && renderedContent?.depthAttachmentReady === true
+      && Number(renderedContent?.boxWireframeDrawCount) === 1
+    );
+    const workerIsosurfaceEndpointReady = Boolean(
+      renderedContent?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
+      && renderedContent?.status
+        === 'worker-offscreen-resident-isosurface-presentation-rendered'
+      && renderedContent?.presentationFrameSchema
+        === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0'
+      && renderedContent?.presentationFrameStatus
+        === 'worker-owned-isosurface-presentation-opportunity'
+      && renderedContent?.presentationFrameAdmitted === true
+      && renderedContent?.presentationFrameGpuCompleted === true
+      && renderedContent?.presentationFrameGpuCompletionMethod
+        === 'worker-device.queue.onSubmittedWorkDone'
+      && renderedContent?.presentationFramePresentationOpportunity === true
+      && renderedContent?.presentationFramePresentationOpportunityMethod
+        === 'worker-request-animation-frame-after-gpu-completion'
+      && renderedContent?.presentationGeometry
+        === 'worker-owned-true-isosurface'
+      && renderedContent?.depthAttachmentReady === true
+      && Number(renderedContent?.boxWireframeDrawCount) === 1
+      && Number(renderedContent?.surfaceCount) > 0
+      && Number(renderedContent?.indirectDrawCount) > 0
+    );
     const tier0EndpointReady = Boolean(
       commonAuthorityReady
       && displayOwner === 'worker'
@@ -441,10 +530,7 @@ async function readState(page) {
       && Number(presentation?.displayOwnerContentFrameSerial) > 0
       && Number(presentation?.displayOwnerPresentedSphStep)
         === Number(renderedContent?.sphStep)
-      && renderedContent?.schema
-        === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
-      && renderedContent?.status
-        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && (workerParticleEndpointReady || workerIsosurfaceEndpointReady)
       && renderedContent?.residentScheduleCandidatePresentation === true
       && renderedContent?.stateManagerCommittedPresentation === true
       && renderedContent?.scheduleId === workerLane.scheduleId
@@ -461,16 +547,18 @@ async function readState(page) {
         === Number(finalEpochIdentity?.physicsTick)
       && Number(presentation?.frameCount) >= Number(renderedContent?.frameCount)
       && Number(renderedContent?.frameCount) > 0
-      && renderedContent?.presentationGeometry
-        === 'sphere-impostor-depth-fallback'
-      && renderedContent?.depthAttachmentReady === true
-      && Number(renderedContent?.boxWireframeDrawCount) === 1
     );
     return {
       capturedAtMs: performance.now(),
       documentVisibility: document.visibilityState,
       documentHasFocus: document.hasFocus(),
-      spatialChurnProfileQuery: new URL(location.href).searchParams.get('spatialChurnProfile'),
+      spatialChurnProfileQuery:
+        locationUrl.searchParams.get('spatialChurnProfile')
+        ?? hashLocationParams.get('spatialChurnProfile'),
+      surfaceDrawModeSelectedByUrl:
+        renderModeSelection?.selectedByUrl === true,
+      surfaceDrawModeRequestStatus:
+        renderModeSelection?.requestProvenance?.status ?? null,
       statusText: document.querySelector('#sph-status')?.textContent?.slice(0, 500) || null,
       warningText: document.querySelector('#sph-warning-bar')?.textContent?.slice(0, 500) || null,
       playText: document.querySelector('#sph-play')?.textContent?.trim() || null,
@@ -602,6 +690,33 @@ async function readState(page) {
         particleDepthModel: rows.particleDepthModel ?? null,
         depthAttachmentFormat: rows.depthAttachmentFormat ?? null,
         depthAttachmentReady: rows.depthAttachmentReady ?? null,
+        presentationFrameSchema: rows.presentationFrameSchema ?? null,
+        presentationFrameStatus: rows.presentationFrameStatus ?? null,
+        presentationFrameAdmitted: rows.presentationFrameAdmitted ?? null,
+        presentationFrameGpuCompleted:
+          rows.presentationFrameGpuCompleted ?? null,
+        presentationFrameGpuCompletionMethod:
+          rows.presentationFrameGpuCompletionMethod ?? null,
+        presentationFramePresentationOpportunity:
+          rows.presentationFramePresentationOpportunity ?? null,
+        presentationFramePresentationOpportunityMethod:
+          rows.presentationFramePresentationOpportunityMethod ?? null,
+        presentationQueueCompletionCount:
+          rows.presentationQueueCompletionCount ?? null,
+        presentationQueueCompletionSerial:
+          rows.presentationQueueCompletionSerial ?? null,
+        presentationQueueCompletionMethod:
+          rows.presentationQueueCompletionMethod ?? null,
+        presentationQueueCompletionScope:
+          rows.presentationQueueCompletionScope ?? null,
+        physicsQueuePrefixCoverage:
+          rows.physicsQueuePrefixCoverage ?? null,
+        physicsHostQueueFenceParticipation:
+          rows.physicsHostQueueFenceParticipation ?? null,
+        motionPresentationQosBoundary:
+          rows.motionPresentationQosBoundary ?? null,
+        surfaceCount: rows.surfaceCount ?? null,
+        indirectDrawCount: rows.indirectDrawCount ?? null,
         condensedDepthWriteEnabled: rows.condensedDepthWriteEnabled ?? null,
         vaporDepthWriteEnabled: rows.vaporDepthWriteEnabled ?? null,
         boxWireframeDrawCount: rows.boxWireframeDrawCount ?? null,
@@ -666,6 +781,9 @@ function committedPresentationReady(state, { expectWorkerOwner = false } = {}) {
     && state?.documentHasFocus === true
     && state?.playText === 'Pause'
     && state?.spatialChurnProfileQuery === '0'
+    && state?.surfaceDrawModeSelectedByUrl === false
+    && state?.surfaceDrawModeRequestStatus
+      === 'surface-draw-mode-preset-runtime-serialized'
     && state?.pendingPresentation?.schema
       === 'peercompute.ulg.sph-pending-body-envelope-preview.v0'
     && state?.pendingPresentation?.status
@@ -742,10 +860,20 @@ async function sampleRenderCadence(page) {
         || overlay?.__mlsMpmResidentSteps
         || null;
       const workerLane = steps?.workerOwnedResidentLane || null;
-      const rows = presentation?.workerOffscreenRenderRows
+      const owner = presentation?.displayOwner ?? null;
+      const latestRows = presentation?.workerOffscreenRenderRows
         || renderState?.workerOffscreenRenderRows
         || null;
-      const owner = presentation?.displayOwner ?? null;
+      // Measure the exact admitted framebuffer that still owns the visible
+      // canvas. A newer queue-submitted keyframe is diagnostic state only
+      // until its GPU-completion + presentation-opportunity proof lands.
+      const rows = owner === 'worker'
+        ? (presentation?.displayOwnerLastRenderedContent || latestRows)
+        : latestRows;
+      const durableWorkerFrame = Boolean(
+        owner === 'worker'
+        && presentation?.displayOwnerLastRenderedContent === rows
+      );
       const workerCanvas = document.querySelector(
         'canvas[data-ulg-worker-offscreen-presentation="true"]'
       );
@@ -770,11 +898,13 @@ async function sampleRenderCadence(page) {
         laneId
         && stateKey
         && lifecycleGeneration > 0
+        && displayOwnerEpoch != null
       )
         ? JSON.stringify([
             laneId,
             stateKey,
-            lifecycleGeneration
+            lifecycleGeneration,
+            displayOwnerEpoch
           ])
         : null;
       if (owner === 'worker') {
@@ -791,6 +921,124 @@ async function sampleRenderCadence(page) {
         const rowsDisplayOwnerEpoch = safeNonNegativeInteger(
           rows?.displayOwnerEpoch
         );
+        const motionFrameSerial = safeNonNegativeInteger(
+          rows?.motionFrameSerial
+        );
+        const motionFrameSubmittedSerial = safeNonNegativeInteger(
+          rows?.motionFrameSubmittedSerial
+        );
+        const motionSourceFrameCount = safeNonNegativeInteger(
+          rows?.motionSourceFrameCount
+        );
+        const motionSourceSphStep = safeNonNegativeInteger(
+          rows?.motionSourceSphStep
+        );
+        const motionFrameClaimed = Boolean(
+          rows?.motionFrameSchema != null
+          || rows?.motionFrameAdmitted === true
+          || rows?.motionFrameSerial != null
+        );
+        const presentationQueueCompletionCount = safeNonNegativeInteger(
+          rows?.presentationQueueCompletionCount
+        );
+        const presentationQueueCompletionSerial = safeNonNegativeInteger(
+          rows?.presentationQueueCompletionSerial
+        );
+        const physicsQueuePrefixCoverage = rows?.physicsQueuePrefixCoverage;
+        const motionPresentationQosBoundary =
+          rows?.motionPresentationQosBoundary;
+        const exactIncludedPhysicsPrefix = Boolean(
+          physicsQueuePrefixCoverage !== 'physics-queue-prefix-included'
+          || (
+            rows?.physicsHostQueueFenceParticipation === true
+            && Number.isSafeInteger(Number(
+              motionPresentationQosBoundary?.submissionOrdinal
+            ))
+            && Number(motionPresentationQosBoundary.submissionOrdinal) > 0
+            && Number.isSafeInteger(Number(
+              motionPresentationQosBoundary?.completedSubstepCount
+            ))
+            && Number(motionPresentationQosBoundary.completedSubstepCount) > 0
+            && Number.isSafeInteger(Number(
+              motionPresentationQosBoundary?.totalSubstepCount
+            ))
+            && Number(motionPresentationQosBoundary.totalSubstepCount)
+              > Number(motionPresentationQosBoundary.completedSubstepCount)
+            && Number.isSafeInteger(Number(
+              motionPresentationQosBoundary?.chunkStepCount
+            ))
+            && Number(motionPresentationQosBoundary.chunkStepCount) > 0
+          )
+        );
+        const exactUnattributedPhysicsPrefix = Boolean(
+          physicsQueuePrefixCoverage
+            !== 'physics-queue-prefix-not-attributed'
+          || rows?.physicsHostQueueFenceParticipation !== true
+        );
+        const exactPresentationQueueCompletionProof = Boolean(
+          presentationQueueCompletionCount > 0
+          && presentationQueueCompletionSerial > 0
+          && presentationQueueCompletionCount
+            === presentationQueueCompletionSerial
+          && rows?.presentationQueueCompletionMethod
+            === 'worker-device.queue.onSubmittedWorkDone'
+          && rows?.presentationQueueCompletionScope
+            === 'worker-offscreen-shared-device-queue-frame-proof'
+          && (
+            physicsQueuePrefixCoverage
+              === 'physics-queue-prefix-not-attributed'
+            || physicsQueuePrefixCoverage
+              === 'physics-queue-prefix-included'
+          )
+          && exactIncludedPhysicsPrefix
+          && exactUnattributedPhysicsPrefix
+        );
+        const exactMotionFrameProof = Boolean(
+          rows?.motionFrameSchema
+            === 'peercompute.ulg.worker-offscreen-particle-temporal-motion-frame.v0'
+          && rows?.motionFrameStatus
+            === 'worker-particle-temporal-motion-frame-presentation-opportunity'
+          && rows?.motionFrameAdmitted === true
+          && rows?.motionFrameGpuCompleted === true
+          && rows?.motionFramePresentationOpportunity === true
+          && rows?.motionFramePresentationOpportunityMethod
+            === 'worker-request-animation-frame-after-gpu-completion'
+          && motionFrameSerial > 0
+          && motionFrameSubmittedSerial >= motionFrameSerial
+          && motionSourceSphStep === sourceStep
+          && motionSourceFrameCount > 0
+          && motionSourceFrameCount < frameCount
+          && rows?.motionMethod === 'bounded-keyframe-velocity-extrapolation'
+          && rows?.motionVelocityBufferRetained === true
+          && exactPresentationQueueCompletionProof
+        );
+        const particlePresentation = Boolean(
+          rows?.schema
+            === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
+          && rows?.presentationGeometry === 'sphere-impostor-depth-fallback'
+        );
+        const isosurfacePresentation = Boolean(
+          rows?.schema
+            === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
+          && rows?.presentationGeometry === 'worker-owned-true-isosurface'
+        );
+        const exactIsosurfaceFrameProof = Boolean(
+          isosurfacePresentation
+          && rows?.status
+            === 'worker-offscreen-resident-isosurface-presentation-rendered'
+          && rows?.presentationFrameSchema
+            === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0'
+          && rows?.presentationFrameStatus
+            === 'worker-owned-isosurface-presentation-opportunity'
+          && rows?.presentationFrameAdmitted === true
+          && rows?.presentationFrameGpuCompleted === true
+          && rows?.presentationFrameGpuCompletionMethod
+            === 'worker-device.queue.onSubmittedWorkDone'
+          && rows?.presentationFramePresentationOpportunity === true
+          && rows?.presentationFramePresentationOpportunityMethod
+            === 'worker-request-animation-frame-after-gpu-completion'
+          && exactPresentationQueueCompletionProof
+        );
         const admissionChecks = {
           'cohort-ready': Boolean(cohortIdentity),
           'display-owner-epoch-ready': displayOwnerEpoch != null,
@@ -798,6 +1046,14 @@ async function sampleRenderCadence(page) {
             rowsDisplayOwnerEpoch === displayOwnerEpoch,
           'display-owner-content-ready':
             presentation?.displayOwnerContentReady === true,
+          'display-owner-content-frame-ready':
+            safeNonNegativeInteger(
+              presentation?.displayOwnerContentFrameSerial
+            ) > 0,
+          'display-owner-content-step-current':
+            safeNonNegativeInteger(
+              presentation?.displayOwnerPresentedSphStep
+            ) === sourceStep,
           'worker-canvas-status-visible':
             presentation?.displayCanvasVisible === true,
           'worker-canvas-visible': visibleCanvas(workerCanvas),
@@ -807,12 +1063,10 @@ async function sampleRenderCadence(page) {
               === 'worker',
           'control-envelope-retired': pendingPresentation?.active !== true,
           'control-envelope-layer-hidden': !pendingPresentationVisible,
-          'render-row-schema-ready': rows?.schema
-            === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0',
           'render-row-abi-ready': rows?.renderRowsSchema
             === 'peercompute.ulg.worker-offscreen-render-rows.v0',
-          'render-row-status-ready': rows?.status
-            === 'worker-offscreen-resident-particle-state-producer-rendered',
+          'worker-presentation-geometry-supported':
+            particlePresentation || isosurfacePresentation,
           'worker-local-render-row-ready':
             rows?.workerLocalRenderRowsProduced === true,
           'render-row-lane-current': rows?.laneId == null || rows.laneId === laneId,
@@ -820,15 +1074,50 @@ async function sampleRenderCadence(page) {
             rows?.stateKey == null || rows.stateKey === stateKey,
           'particle-count-ready': particleCount > 0,
           'frame-count-ready': frameCount > 0,
-          'frame-count-current': frameCount === presentationFrameCount,
+          'frame-count-current': durableWorkerFrame
+            || frameCount === presentationFrameCount,
           'ready-frame-count-ready': readyFrameCount > 0,
           'ready-frame-count-current':
-            readyFrameCount === presentationReadyFrameCount,
-          'worker-geometry-ready':
-            rows?.presentationGeometry === 'sphere-impostor-depth-fallback',
-          'worker-depth-ready': rows?.depthAttachmentReady === true,
+            durableWorkerFrame
+            || readyFrameCount === presentationReadyFrameCount,
           'worker-same-device-ready': rows?.sameDevicePresentation === true,
-          'source-step-ready': sourceStep != null
+          'source-step-ready': sourceStep != null,
+          ...(particlePresentation
+            ? {
+                'particle-render-row-status-ready': rows?.status
+                  === 'worker-offscreen-resident-particle-state-producer-rendered',
+                'particle-keyframe-proof-schema-ready':
+                  rows?.presentationFrameSchema
+                    === 'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0',
+                'particle-keyframe-proof-status-ready':
+                  rows?.presentationFrameStatus
+                    === 'worker-particle-keyframe-presentation-opportunity',
+                'particle-keyframe-gpu-completed':
+                  rows?.presentationFrameGpuCompleted === true,
+                'particle-keyframe-presentation-opportunity':
+                  rows?.presentationFramePresentationOpportunity === true,
+                'particle-keyframe-admitted':
+                  rows?.presentationFrameAdmitted === true,
+                'particle-keyframe-presentation-opportunity-method-ready':
+                  rows?.presentationFramePresentationOpportunityMethod
+                    === 'worker-request-animation-frame-after-gpu-completion',
+                'particle-keyframe-presentation-queue-proof-ready': Boolean(
+                  exactPresentationQueueCompletionProof
+                ),
+                'particle-motion-frame-proof-ready':
+                  !motionFrameClaimed || exactMotionFrameProof,
+                'particle-depth-ready': rows?.depthAttachmentReady === true
+              }
+            : {}),
+          ...(isosurfacePresentation
+            ? {
+                'isosurface-frame-proof-ready': exactIsosurfaceFrameProof,
+                'isosurface-surface-count-ready':
+                  safeNonNegativeInteger(rows?.surfaceCount) > 0,
+                'isosurface-indirect-draw-ready':
+                  safeNonNegativeInteger(rows?.indirectDrawCount) > 0
+              }
+            : {})
         };
         const admissionBlockers = Object.entries(admissionChecks)
           .filter(([, ready]) => !ready)
@@ -843,8 +1132,26 @@ async function sampleRenderCadence(page) {
           presentationSerial: frameCount,
           displayOwnerEpoch,
           admissionBlockers,
-          motionFrameAdmitted: false,
-          motionFrameSerial: null
+          // A submit receipt is not display cadence: same-queue motion
+          // commands can sit behind a long fused mechanics dispatch and then
+          // reach the compositor in a burst. Count a temporal frame only once
+          // the producer has proved both GPU completion and a subsequent
+          // presentation opportunity.
+          motionFrameAdmitted: Boolean(
+            exactMotionFrameProof
+          ),
+          motionFrameSerial: exactMotionFrameProof
+            ? motionFrameSerial
+            : null,
+          motionFrameSchema: exactMotionFrameProof
+            ? rows.motionFrameSchema
+            : null,
+          motionSourceFrameCount: exactMotionFrameProof
+            ? motionSourceFrameCount
+            : null,
+          motionSourceSphStep: exactMotionFrameProof
+            ? motionSourceSphStep
+            : null
         };
       }
       if (owner === 'main-native') {
@@ -1112,7 +1419,11 @@ async function sampleRenderCadence(page) {
     .filter((value) => Number.isFinite(value) && value > 0);
   const visiblePresentationCadence = summarizeVisiblePresentationCadence(
     sample?.visiblePresentationObservations,
-    { sampleDurationMs }
+    {
+      sampleDurationMs,
+      sampleStartedAtMs: Number(sample?.startedAtMs),
+      sampleEndedAtMs: Number(sample?.endedAtMs)
+    }
   );
   return {
     requestedDurationMs: cadenceSampleMs,
@@ -1182,10 +1493,44 @@ async function collectRenderCadence(page) {
 
 async function waitForCommittedPresentation(page, options) {
   const startedAt = Date.now();
+  let lastProgressAt = startedAt;
   let lastState = null;
   while (Date.now() - startedAt < timeoutMs) {
     lastState = await readState(page);
     if (committedPresentationReady(lastState, options)) return lastState;
+    if (Date.now() - lastProgressAt >= 10_000) {
+      lastProgressAt = Date.now();
+      console.log(JSON.stringify({
+        event: 'committed-presentation-wait',
+        elapsedMs: lastProgressAt - startedAt,
+        expectedOwner: options?.expectWorkerOwner ? 'worker' : 'main-native',
+        playText: lastState?.playText ?? null,
+        surfaceDrawModeSelectedByUrl:
+          lastState?.surfaceDrawModeSelectedByUrl ?? null,
+        surfaceDrawModeRequestStatus:
+          lastState?.surfaceDrawModeRequestStatus ?? null,
+        displayOwner: lastState?.displayOwner ?? null,
+        displayOwnerContentReady:
+          lastState?.displayOwnerContentReady ?? null,
+        workerCanvasVisible: lastState?.workerCanvasVisible ?? null,
+        commonAuthorityReady: lastState?.commonAuthorityReady ?? null,
+        canonicalEndpointReady: lastState?.canonicalEndpointReady ?? null,
+        tier0EndpointReady: lastState?.tier0EndpointReady ?? null,
+        physicsStep: lastState?.physicsStep ?? null,
+        visiblePresentationStep:
+          lastState?.visiblePresentationStep ?? null,
+        workerGeometry:
+          lastState?.workerRows?.presentationGeometry ?? null,
+        pendingPresentationStatus:
+          lastState?.pendingPresentation?.status ?? null,
+        pendingPresentationActive:
+          lastState?.pendingPresentation?.active ?? null,
+        spatialChurnProfileQuery:
+          lastState?.spatialChurnProfileQuery ?? null,
+        residentError: lastState?.residentError ?? null,
+        renderError: lastState?.renderError ?? null
+      }));
+    }
     await page.waitForTimeout(250);
   }
   throw new Error(
@@ -1243,23 +1588,52 @@ try {
       pageErrors.push(error?.message || String(error));
     });
     await installGpuFaultCapture(page);
-    const target = new URL(sphPhaseScenarioPresetUrl(preset.id, {
+    const targetUrl = new URL(sphPhaseScenarioPresetUrl(preset.id, {
+      // Keep the escape hatch for additive diagnostics, but seal every preset
+      // control/runtime identity after it so a diagnostic query cannot turn an
+      // acceptance row into another scenario or presentation pipeline.
+      ...extraScenarioParams,
+      ...preset.controls,
+      ...preset.runtime,
+      scenario: preset.id,
       visualCapture: '1',
       residentAuto: '0',
       spatialChurnProfile: '0',
+      renderer: preset.runtime?.renderer ?? 'native-webgpu',
+      renderOwnership: preset.runtime?.renderOwnership
+        ?? 'worker-owned-resident-render-producer',
+      workerOffscreenPresentation:
+        preset.runtime?.workerOffscreenPresentation ?? '1',
+      workerLivePreview: preset.runtime?.workerLivePreview ?? '0',
       ...(reactionActivationPolicyOverride == null
         ? {}
         : { reactionActivationPolicy: reactionActivationPolicyOverride })
-    }), baseUrl).toString();
+    }), baseUrl);
+    // This is a DEFAULT-preset acceptance sweep. Preset selection in the UI
+    // uses the canonical hash route. On that route, a serialized `surfaceDraw`
+    // equal to the selected preset is correctly classified as preset runtime;
+    // the same value in the query is intentionally treated as a direct user
+    // diagnostic override. Reproduce the UI route exactly so default worker
+    // ownership and explicit main-thread ownership cannot be conflated.
+    const canonicalPresetHash = targetUrl.searchParams.toString();
+    targetUrl.search = '';
+    // Keep this harness-only resource diagnostic in the query. The mounted
+    // UI may canonicalize/drop non-control hash keys, while the query survives
+    // and—unlike surfaceDraw—does not alter presentation provenance.
+    targetUrl.searchParams.set('spatialChurnProfile', '0');
+    targetUrl.hash = canonicalPresetHash;
+    const target = targetUrl.toString();
     const result = {
       presetId: preset.id,
       target,
       status: 'running',
       screenshots: [],
+      screenshotEvidence: [],
       first: null,
       second: null,
       cadence: null,
       cadenceEvaluation: null,
+      cadenceIssueClassification: null,
       cadenceAttempts: [],
       issues: []
     };
@@ -1272,18 +1646,39 @@ try {
       if (/Play/i.test(playText || '')) {
         await page.evaluate(() => document.querySelector('#sph-play')?.click());
       }
-      const expectWorkerOwner = livePreviewPresetIds.has(preset.id);
+      const expectWorkerOwner = Boolean(
+        preset.runtime?.renderOwnership
+          === 'worker-owned-resident-render-producer'
+        && preset.runtime?.workerOffscreenPresentation === '1'
+      );
+      const cadenceGatingRequired = particlePresentationPresetIds.has(
+        preset.id
+      );
+      const expectedWorkerGeometry = cadenceGatingRequired
+        ? 'sphere-impostor-depth-fallback'
+        : 'worker-owned-true-isosurface';
+      result.cadenceGatingRequired = cadenceGatingRequired;
+      result.expectedWorkerGeometry = expectedWorkerGeometry;
       result.first = await waitForCommittedPresentation(page, {
         expectWorkerOwner
       });
       const firstPath = path.join(outputDir, `${preset.id}-a.png`);
       await page.screenshot({ path: firstPath, type: 'png' });
       result.screenshots.push(firstPath);
+      result.screenshotEvidence.push(
+        await screenshotDigest(firstPath, 'initial-committed-presentation')
+      );
       const cadenceResult = await collectRenderCadence(page);
       result.cadence = cadenceResult.sample;
       result.cadenceEvaluation = cadenceResult.evaluation;
       result.cadenceAttempts = cadenceResult.attempts;
-      result.issues.push(...result.cadenceEvaluation.issues);
+      result.cadenceIssueClassification = classifyCadenceAcceptanceIssues(
+        result.cadenceEvaluation.issues,
+        { throughputRequired: cadenceGatingRequired }
+      );
+      result.issues.push(
+        ...result.cadenceIssueClassification.acceptanceIssues
+      );
       result.second = await waitForPhysicsAndPresentationAdvance(
         page,
         result.first,
@@ -1292,23 +1687,38 @@ try {
       const secondPath = path.join(outputDir, `${preset.id}-b.png`);
       await page.screenshot({ path: secondPath, type: 'png' });
       result.screenshots.push(secondPath);
+      result.screenshotEvidence.push(
+        await screenshotDigest(secondPath, 'advanced-committed-presentation')
+      );
       if (!physicsAndPresentationAdvanced(result.first, result.second)) {
         result.issues.push('physics-and-visible-presentation-did-not-advance');
       }
       if (!committedPresentationReady(result.second, { expectWorkerOwner })) {
         result.issues.push('final-committed-presentation-not-ready');
       }
-      if (result.first?.workerRows?.presentationGeometry !== 'sphere-impostor-depth-fallback') {
-        result.issues.push('worker-impostor-receipt-missing');
+      if (expectWorkerOwner) {
+        for (const [label, snapshot] of [
+          ['initial', result.first],
+          ['final', result.second]
+        ]) {
+          if (
+            snapshot?.workerRows?.presentationGeometry
+              !== expectedWorkerGeometry
+          ) {
+            result.issues.push(
+              `${label}-worker-presentation-geometry-receipt-missing`
+            );
+          }
+          if (snapshot?.workerRows?.depthAttachmentReady !== true) {
+            result.issues.push(`${label}-worker-depth-attachment-not-ready`);
+          }
+          if (Number(snapshot?.workerRows?.boxWireframeDrawCount) !== 1) {
+            result.issues.push(`${label}-worker-box-wireframe-not-drawn`);
+          }
+        }
       }
-      if (result.first?.workerRows?.depthAttachmentReady !== true) {
-        result.issues.push('worker-depth-attachment-not-ready');
-      }
-      if (Number(result.first?.workerRows?.boxWireframeDrawCount) !== 1) {
-        result.issues.push('worker-box-wireframe-not-drawn');
-      }
-      if (livePreviewPresetIds.has(preset.id) && result.first?.workerCanvasVisible !== true) {
-        result.issues.push('tier0-worker-live-preview-not-visible');
+      if (expectWorkerOwner && result.first?.workerCanvasVisible !== true) {
+        result.issues.push('worker-owned-presentation-not-visible');
       }
       const criticalMessages = consoleEntries.filter((entry) => criticalConsoleText(entry.text));
       if (pageErrors.length > 0) result.issues.push('page-error');
@@ -1324,6 +1734,8 @@ try {
         event: 'scenario-complete',
         presetId: preset.id,
         status: result.status,
+        cadenceGatingRequired,
+        expectedWorkerGeometry,
         firstFrame: result.first?.workerRows?.frameCount,
         secondFrame: result.second?.workerRows?.frameCount,
         firstStep: result.first?.sphStep,
@@ -1341,6 +1753,13 @@ try {
           result.cadence?.medianVisiblePresentationHz,
         p95VisualIntervalEquivalentHz:
           result.cadence?.p95VisualIntervalEquivalentHz,
+        maximumVisiblePresentationGapMs:
+          result.cadence?.maximumVisiblePresentationGapMs,
+        minimumSustainedWindowTransitionCount:
+          result.cadence?.minimumSustainedWindowTransitionCount,
+        minimumSustainedWindowBoundaryAdjustedHz:
+          result.cadenceEvaluation
+            ?.minimumSustainedWindowBoundaryAdjustedHz,
         meanSourcePresentationHz:
           result.cadence?.meanSourcePresentationHz,
         workerVisible: result.first?.workerCanvasVisible,
@@ -1378,9 +1797,18 @@ try {
 }
 
 const failed = results.filter((result) => result.status !== 'pass');
+const automatedDisposition = resolveHeadedSweepAutomatedDisposition({
+  automatedFailureCount: failed.length,
+  completeCannedMatrix,
+  diagnosticOverridesActive
+});
 const summary = {
   schema: 'peercompute.ulg.headed-all-preset-cadence-sweep.v2',
-  status: failed.length === 0 ? 'pass' : 'fail',
+  status: automatedDisposition.status,
+  automatedStatus: automatedDisposition.automatedStatus,
+  acceptanceEligible: automatedDisposition.acceptanceEligible,
+  manualVisualReviewStatus:
+    automatedDisposition.manualVisualReviewStatus,
   acceptance: {
     scope: 'visual-presentation-throughput-and-committed-animation',
     nominalRenderHz,
@@ -1391,11 +1819,31 @@ const summary = {
     spatialKeyChurnProfilingEnabled: false,
     simulationRealtimeFactorGating: false,
     rafMetricsDiagnosticOnly: true,
+    medianAndP95IntervalRatesDiagnosticOnly: true,
+    maximumAllowedVisiblePresentationGapMs:
+      3 * 1000 / minimumRenderHz,
+    sustainedCadenceWindowMs: 500,
+    requiredSustainedWindowTransitionCount:
+      Math.ceil(minimumRenderHz * 0.5) - 1,
     visibleStateIdentityRequired: true,
     sourceStepJumpsCountAsOnePresentation: true,
     reactionActivationPolicyOverride,
+    extraScenarioQuery: extraScenarioQuery || null,
+    extraScenarioParams,
+    diagnosticOverridesActive,
     gpuResourceProfilingEnabled: profileGpuResources,
-    manualScreenshotReviewRequired: true
+    manualScreenshotReviewRequired: true,
+    manualScreenshotReviewReceiptSchema:
+      'peercompute.ulg.headed-all-preset-manual-visual-review.v0',
+    manualScreenshotReviewRequirements: [
+      'physics-geometry-visible-beyond-box-wireframe',
+      'control-body-preview-absent',
+      'nonblank-physics-layer',
+      'scenario-geometry-changes-across-screenshot-pair'
+    ],
+    cadenceGatedPresetIds: [...particlePresentationPresetIds],
+    completeCannedMatrix,
+    selectedPresetIds: scenarioPresets.map((preset) => preset.id)
   },
   desktop: {
     browser: '/usr/bin/google-chrome',
@@ -1416,6 +1864,8 @@ await writeFile(path.join(outputDir, 'summary.json'), `${JSON.stringify(summary,
 console.log(JSON.stringify({
   event: 'sweep-complete',
   status: summary.status,
+  automatedStatus: summary.automatedStatus,
+  acceptanceEligible: summary.acceptanceEligible,
   scenarioCount: summary.scenarioCount,
   passedScenarioCount: summary.passedScenarioCount,
   outputDir

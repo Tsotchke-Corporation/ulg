@@ -35,11 +35,69 @@ const fakeSelf = {
   GPUTextureUsage: { RENDER_ATTACHMENT: 0x10 },
   GPUShaderStage: { VERTEX: 0x1, FRAGMENT: 0x2, COMPUTE: 0x4 },
   GPUColorWrite: { ALL: 0xF },
-  navigator: {}
+  navigator: {},
+  requestAnimationFrame(callback) {
+    const handle = ++this._rafHandle;
+    const immediate = setImmediate(() => {
+      this._rafImmediates.delete(handle);
+      callback(Date.now());
+    });
+    this._rafImmediates.set(handle, immediate);
+    return handle;
+  },
+  cancelAnimationFrame(handle) {
+    const immediate = this._rafImmediates.get(handle);
+    if (immediate) clearImmediate(immediate);
+    this._rafImmediates.delete(handle);
+  },
+  _rafHandle: 0,
+  _rafImmediates: new Map()
 };
 globalThis.self = fakeSelf;
 
 const workerModule = await import('../src/services/ulgOffscreenRender.worker.js');
+
+test('terminal presentation completion is handled immediately but rejects at its later join', async () => {
+  let rejectCompletion;
+  const error = new Error('injected terminal presentation failure');
+  const completion = new Promise((_resolve, reject) => {
+    rejectCompletion = reject;
+  });
+  const retained = workerModule.retainHandledPromiseForLaterJoin(completion);
+  rejectCompletion(error);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(retained, (received) => received === error);
+});
+
+test('worker particle temporal motion request preserves bounded simulation-time pacing', () => {
+  const motion = workerModule.normalizeWorkerParticleTemporalMotionRequest({
+    schema: 'peercompute.ulg.worker-offscreen-particle-temporal-motion.v0',
+    enabled: true,
+    targetHz: 60,
+    presentationSlotCount: 32,
+    maxHorizonS: 0.25,
+    simulationTimeScale: 0.48,
+    maxSimulationAgeS: 0.064,
+    maxDisplacementM: 0.04
+  });
+  assert.equal(motion.targetHz, 60);
+  assert.equal(motion.presentationSlotCount, 32);
+  assert.equal(motion.maxHorizonS, 0.25);
+  assert.equal(motion.simulationTimeScale, 0.48);
+  assert.equal(motion.maxSimulationAgeS, 0.064);
+  assert.equal(motion.maxDisplacementM, 0.04);
+  assert.deepEqual(motion.sourceVelocityLanes, [4, 5, 6]);
+  assert.equal(motion.authoritativeStateMutation, false);
+  assert.equal(Object.isFrozen(motion), true);
+  assert.equal(
+    workerModule.normalizeWorkerParticleTemporalMotionRequest({
+      schema: 'peercompute.ulg.worker-offscreen-particle-temporal-motion.v0',
+      enabled: true,
+      maxDisplacementM: 0
+    }),
+    null
+  );
+});
 
 const fakeDevice = {
   createShaderModule(descriptor) {
@@ -118,7 +176,8 @@ const fakeDevice = {
   },
   queue: {
     submit(commandBuffers) { fakeGpuRecords.submits.push(commandBuffers); },
-    writeBuffer(...args) { fakeGpuRecords.writes.push(args); }
+    writeBuffer(...args) { fakeGpuRecords.writes.push(args); },
+    onSubmittedWorkDone() { return Promise.resolve(); }
   },
   lost: new Promise(() => {})
 };
@@ -139,14 +198,20 @@ const fakeCanvas = {
   getContext: (kind) => (kind === 'webgpu' ? fakeCanvasContext : null)
 };
 let requestedDeviceDescriptor = null;
+let fakeAdapterRequestCount = 0;
+let fakeAdapterGate = null;
 fakeSelf.navigator = {
   gpu: {
-    requestAdapter: async () => ({
-      requestDevice: async (descriptor) => {
-        requestedDeviceDescriptor = descriptor;
-        return fakeDevice;
-      }
-    }),
+    requestAdapter: async () => {
+      fakeAdapterRequestCount += 1;
+      if (fakeAdapterGate) await fakeAdapterGate;
+      return {
+        requestDevice: async (descriptor) => {
+          requestedDeviceDescriptor = descriptor;
+          return fakeDevice;
+        }
+      };
+    },
     getPreferredCanvasFormat: () => 'bgra8unorm'
   }
 };
@@ -183,7 +248,8 @@ async function ensureFakePresentationReady() {
       cssHeight: 8,
       pixelRatio: 1,
       backgroundColor: '#000000',
-      clearAlpha: 0
+      clearAlpha: 0,
+      workerFramebufferEpoch: 1
     }
   });
   const ready = await flushUntil(() => postedMessages.some(
@@ -238,7 +304,59 @@ test('presentation worker schedule verb fails closed before the WebGPU device ex
 
 test('presentation worker initializes on a synthetic WebGPU device through the message path', async () => {
   assert.equal(typeof fakeSelf.onmessage, 'function');
-  await ensureFakePresentationReady();
+  let releaseAdapter = null;
+  fakeAdapterGate = new Promise((resolve) => {
+    releaseAdapter = resolve;
+  });
+  fakeSelf.onmessage({
+    data: {
+      type: 'init-offscreen-presentation',
+      canvas: fakeCanvas,
+      width: 4,
+      height: 4,
+      cssWidth: 4,
+      cssHeight: 4,
+      pixelRatio: 1,
+      backgroundColor: '#000000',
+      clearAlpha: 0,
+      workerFramebufferEpoch: 1
+    }
+  });
+  assert.equal(
+    await flushUntil(() => fakeAdapterRequestCount === 1),
+    true,
+    'adapter acquisition did not begin'
+  );
+  fakeSelf.onmessage({
+    data: {
+      type: 'resize',
+      width: 8,
+      height: 8,
+      cssWidth: 8,
+      cssHeight: 8,
+      pixelRatio: 1,
+      workerFramebufferEpoch: 2,
+      reason: 'test-resize-during-adapter-acquisition'
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseAdapter();
+  fakeAdapterGate = null;
+  assert.equal(
+    await flushUntil(() => postedMessages.some(
+      (message) => message?.status === 'worker-offscreen-presentation-ready'
+    )),
+    true,
+    'presentation worker never reported ready on the fake device'
+  );
+  assert.equal(fakeCanvas.width, 8);
+  assert.equal(fakeCanvas.height, 8);
+  assert.equal(
+    postedMessages.findLast((message) =>
+      message?.status === 'worker-offscreen-presentation-ready')
+      ?.workerFramebufferEpoch,
+    2
+  );
   assert.equal(
     requestedDeviceDescriptor?.requiredLimits?.maxStorageBuffersPerShaderStage,
     RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
@@ -260,6 +378,7 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
       cssWidth: 8,
       cssHeight: 8,
       pixelRatio: 1,
+      workerFramebufferEpoch: 2,
       reason: 'test-same-size-resize'
     }
   });
@@ -283,6 +402,7 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
       cssWidth: 16,
       cssHeight: 12,
       pixelRatio: 1,
+      workerFramebufferEpoch: 3,
       reason: 'test-backing-size-resize'
     }
   });
@@ -299,6 +419,26 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
   assert.equal(resizedReceipt.canvasConfigureCount, configureCountAfterInit + 1);
   assert.equal(resizedReceipt.canvasConfigureSkipCount, 1);
 
+  const messagesBeforeMissingEpoch = postedMessages.length;
+  fakeSelf.onmessage({
+    data: {
+      type: 'draw-resident-particle-state-producer',
+      width: 16,
+      height: 12,
+      particleCount: 0,
+      reason: 'test-missing-framebuffer-epoch'
+    }
+  });
+  assert.equal(await flushUntil(() => postedMessages
+    .slice(messagesBeforeMissingEpoch)
+    .some((message) => message?.workerOffscreenRenderRows?.status
+      === 'worker-offscreen-presentation-superseded-stale-framebuffer-epoch')), true);
+  assert.equal(
+    fakeCanvasConfigureCount,
+    configureCountAfterInit + 1,
+    'an untagged page draw must be rejected before it can reconfigure or draw'
+  );
+
   const messagesBeforeCandidate = postedMessages.length;
   fakeSelf.onmessage({
     data: {
@@ -309,6 +449,7 @@ test('presentation worker reuses an unchanged canvas configuration and reconfigu
       cssHeight: 12,
       pixelRatio: 1,
       particleCount: 0,
+      workerFramebufferEpoch: 3,
       reason: 'test-empty-resident-candidate'
     }
   });
@@ -671,9 +812,13 @@ test('explicit live preview time-coalesces sparse progress before candidate cons
     assert.equal(stats.publishedCount - statsBefore.publishedCount, 3);
     assert.equal(stats.droppedStaleCount - statsBefore.droppedStaleCount, 0);
     assert.equal(stats.latestVersion.nextStep, 107);
-    assert.equal(retainedResolveCount, 3);
+    assert.equal(
+      retainedResolveCount,
+      2,
+      'the terminal draw may wait for the prior keyframe proof until admission'
+    );
 
-    const admitted =
+    const admitted = await
       workerModule.presentCommittedResidentScheduleCandidate(
         terminalAdmission
       );
@@ -684,7 +829,7 @@ test('explicit live preview time-coalesces sparse progress before candidate cons
   } finally {
     fakeSelf.performance.now = previousNow;
     if (!terminalAdmissionConsumed) {
-      workerModule.presentCommittedResidentScheduleCandidate(
+      await workerModule.presentCommittedResidentScheduleCandidate(
         {
           ...terminalAdmission,
           candidateVersion:
@@ -873,9 +1018,31 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
   // the telemetry-only assertions above still prove that uncommitted
   // progress cannot resolve retained buffers.
   retainedRenderRequest.residentScheduleLivePreview = true;
-  const admitted = workerModule.presentCommittedResidentScheduleCandidate(
+  const admissionMessageCount = postedMessages.length;
+  const submittedAdmission =
+    workerModule.presentCommittedResidentScheduleCandidate(
     exactAdmission
   );
+  assert.equal(
+    submittedAdmission.status,
+    'worker-offscreen-resident-particle-keyframe-submitted'
+  );
+  assert.equal(await flushUntil(() => postedMessages
+    .slice(admissionMessageCount)
+    .some((message) => (
+      message?.workerOffscreenRenderRows?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && message.workerOffscreenRenderRows.stateManagerCommittedPresentation
+        === true
+    ))), true, 'committed keyframe never reached its presentation opportunity');
+  const admitted = postedMessages
+    .slice(admissionMessageCount)
+    .map((message) => message?.workerOffscreenRenderRows)
+    .findLast((receipt) => (
+      receipt?.status
+        === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && receipt.stateManagerCommittedPresentation === true
+    ));
   assert.equal(retainedResolveCount, 1);
   assert.deepEqual(retainedResolveArgs, {
     laneId: 'ulg:test:lane-committed-draw',
@@ -961,6 +1128,7 @@ test('resident schedule candidates stay telemetry-only until exact committed adm
       cssWidth: 29,
       cssHeight: 17,
       pixelRatio: 1,
+      workerFramebufferEpoch: 4,
       reason: 'test-live-preview-resize'
     }
   });
@@ -1121,7 +1289,24 @@ test('exact rendered terminal preview promotes to committed authority without re
     depthAttachmentFormat: 'depth24plus',
     depthAttachmentReady: true,
     boxWireframeDrawCount: 1,
-    boxDimsM: [12, 8, 6]
+    boxDimsM: [12, 8, 6],
+    presentationFrameSchema:
+      'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0',
+    presentationFrameStatus:
+      'worker-particle-keyframe-presentation-opportunity',
+    presentationFrameAdmitted: true,
+    presentationFrameGpuCompleted: true,
+    presentationFramePresentationOpportunity: true,
+    presentationFramePresentationOpportunityMethod:
+      'worker-request-animation-frame-after-gpu-completion',
+    presentationQueueCompletionCount: 1,
+    presentationQueueCompletionSerial: 1,
+    presentationQueueCompletionMethod:
+      'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope:
+      'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+    physicsHostQueueFenceParticipation: null
   };
   const promoted = workerModule.resolveCommittedResidentSchedulePreviewPromotion({
     admission,
@@ -1166,6 +1351,271 @@ test('exact rendered terminal preview promotes to committed authority without re
     null,
     'a failed preview cannot be promoted'
   );
+  const keyframeProofSchema =
+    'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0';
+  assert.equal(
+    workerModule.resolveCommittedResidentSchedulePreviewPromotion({
+      admission,
+      candidate,
+      lastDrawnCandidate: candidate,
+      lastDrawnStatus: {
+        ...renderedPreview,
+        presentationFrameSchema: keyframeProofSchema,
+        presentationFrameAdmitted: false,
+        presentationFrameGpuCompleted: true,
+        presentationFramePresentationOpportunity: false
+      }
+    }),
+    null,
+    'a submitted or merely GPU-completed keyframe cannot be promoted'
+  );
+  const proofPromoted =
+    workerModule.resolveCommittedResidentSchedulePreviewPromotion({
+      admission,
+      candidate,
+      lastDrawnCandidate: candidate,
+      lastDrawnStatus: {
+        ...renderedPreview,
+        presentationFrameSchema: keyframeProofSchema,
+        presentationFrameAdmitted: true,
+        presentationFrameGpuCompleted: true,
+        presentationFramePresentationOpportunity: true
+      }
+    });
+  assert.equal(proofPromoted?.presentationFrameAdmitted, true);
+  assert.equal(proofPromoted?.committedPresentationPromotedWithoutRedraw, true);
+});
+
+test('particle presentation admits keyframe and motion only after controlled fence and RAF proofs', async () => {
+  await ensureFakePresentationReady();
+  const scheduleId = 'ulg:test:controlled-presentation-proof';
+  const laneId = 'ulg:test:controlled-presentation-proof-lane';
+  const stateKey = 'ulg:test:controlled-presentation-proof-state';
+  const terminalFence = {
+    required: true,
+    scope: 'resident-schedule-terminal',
+    terminalScheduleFence: true,
+    fenceSatisfied: true,
+    authorityAdmissionReady: true,
+    scheduleId,
+    laneId,
+    stateKey,
+    completedStepCount: 1,
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone'
+  };
+  const retainedBuffer = { mapAsync() {} };
+  const fakeRunner = {
+    async runUlgMechanicsResidentStageWorkerSchedulePayload() {
+      return {
+        schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
+        status: 'worker-resident-schedule-completed',
+        scheduleId,
+        laneId,
+        stateKey,
+        requestedStepCount: 1,
+        completedStepCount: 1,
+        cancelled: false,
+        retainedBufferRefs: ['retained:controlled-presentation-proof'],
+        finalEpochIdentity: scheduleEpochIdentity(1, {
+          storageGeneration: 101
+        }),
+        perStepSummaries: {
+          lastStep: { stepOrdinal: 1, particleCount: 2 }
+        },
+        gpuFence: terminalFence
+      };
+    },
+    resolveUlgMechanicsResidentStageWorkerRetainedParticleState() {
+      return {
+        status: 'worker-retained-particle-state-ready',
+        sourceStateBuffer: retainedBuffer,
+        sourceThermoBuffer: retainedBuffer,
+        particleCount: 2,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        stateBufferByteLength: 64,
+        thermoBufferByteLength: 96
+      };
+    }
+  };
+  await workerModule.runResidentScheduleOnPresentationDevice({
+    payload: {
+      schedule: { scheduleId, stepCount: 1 },
+      lease: { laneId, stateKey },
+      context: {
+        ulgMechanicsResidentStageWorker: {
+          common: {
+            presentationWorkerRenderRetainedStageOutput: {
+              enabled: true,
+              sourceStageId: 'schroederSameLevelMechanics',
+              particleCount: 2,
+              stateStrideFloats: 8,
+              thermoStrideFloats: 12,
+              stateByteLength: 64,
+              thermoByteLength: 96,
+              colorRowCount: 1,
+              colorRowsByteLength: 32,
+              materialColorRows: new Float32Array(8),
+              viewProjectionMatrix: new Float32Array(16),
+              boxDimsM: [12, 8, 6],
+              temporalMotion: {
+                schema:
+                  'peercompute.ulg.worker-offscreen-particle-temporal-motion.v0',
+                enabled: true,
+                targetHz: 60,
+                presentationSlotCount: 32,
+                maxHorizonS: 0.25,
+                simulationTimeScale: 1,
+                maxSimulationAgeS: 0.064,
+                maxDisplacementM: 0.04
+              }
+            }
+          }
+        }
+      }
+    }
+  }, { runnerModuleOverride: fakeRunner });
+
+  const candidate =
+    workerModule.presentationResidentScheduleCandidateMailbox.peekLatest();
+  const admission = {
+    schema:
+      'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+    status:
+      'state-manager-committed-resident-schedule-presentation-admission',
+    scheduleId,
+    laneId,
+    stateKey,
+    candidateVersion: candidate.version,
+    authority: {
+      status: 'state-manager-committed-worker-schedule',
+      computeManagerCompletionSchema:
+        'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+      computeManagerLeaseId: 'lease:controlled-presentation-proof',
+      computeManagerLeaseStatus: 'completed',
+      computeManagerFenceSatisfied: true,
+      stateManagerCommitStatus: 'committed',
+      stateManagerCommitAccepted: true
+    },
+    terminalFence
+  };
+  const previousFence = fakeDevice.queue.onSubmittedWorkDone;
+  const previousRequestAnimationFrame = fakeSelf.requestAnimationFrame;
+  const previousCancelAnimationFrame = fakeSelf.cancelAnimationFrame;
+  const previousNow = fakeSelf.performance.now;
+  const pendingFences = [];
+  const pendingRafs = new Map();
+  let nextRafHandle = 0;
+  let clockMs = 1_000;
+  fakeDevice.queue.onSubmittedWorkDone = () => new Promise((resolve) => {
+    pendingFences.push(resolve);
+  });
+  fakeSelf.requestAnimationFrame = (callback) => {
+    const handle = ++nextRafHandle;
+    pendingRafs.set(handle, callback);
+    return handle;
+  };
+  fakeSelf.cancelAnimationFrame = (handle) => {
+    pendingRafs.delete(handle);
+  };
+  fakeSelf.performance.now = () => clockMs;
+  const takeRaf = () => {
+    const entry = pendingRafs.entries().next().value;
+    assert.ok(entry, 'expected a pending worker RAF callback');
+    pendingRafs.delete(entry[0]);
+    return entry[1];
+  };
+  try {
+    const messageCountBefore = postedMessages.length;
+    const submitted =
+      workerModule.presentCommittedResidentScheduleCandidate(admission);
+    assert.equal(
+      submitted.status,
+      'worker-offscreen-resident-particle-keyframe-submitted'
+    );
+    assert.equal(pendingFences.length, 1);
+    assert.equal(pendingRafs.size, 0);
+    assert.equal(postedMessages.slice(messageCountBefore).some((message) => (
+      message?.workerOffscreenRenderRows?.presentationFrameAdmitted === true
+    )), false);
+
+    pendingFences[0]();
+    assert.equal(await flushUntil(() => pendingRafs.size === 1), true);
+    assert.equal(postedMessages.slice(messageCountBefore).some((message) => (
+      message?.workerOffscreenRenderRows?.presentationFrameAdmitted === true
+    )), false, 'GPU completion alone must not admit the keyframe');
+
+    clockMs += 20;
+    takeRaf()(clockMs);
+    assert.equal(await flushUntil(() => pendingFences.length >= 2), true);
+    const keyframe = postedMessages
+      .slice(messageCountBefore)
+      .map((message) => message?.workerOffscreenRenderRows)
+      .findLast((receipt) => receipt?.presentationFrameAdmitted === true);
+    assert.equal(
+      keyframe.presentationFramePresentationOpportunityMethod,
+      'worker-request-animation-frame-after-gpu-completion'
+    );
+    assert.equal(keyframe.motionFrameAdmitted, false);
+    assert.equal(pendingRafs.size, 0);
+
+    pendingFences[1]();
+    assert.equal(await flushUntil(() => pendingRafs.size === 1), true);
+    clockMs += 16;
+    takeRaf()(clockMs);
+    assert.equal(await flushUntil(() => postedMessages
+      .slice(messageCountBefore)
+      .some((message) => (
+        message?.workerOffscreenRenderRows?.motionFrameAdmitted === true
+      ))), true);
+    const motion = postedMessages
+      .slice(messageCountBefore)
+      .map((message) => message?.workerOffscreenRenderRows)
+      .findLast((receipt) => receipt?.motionFrameAdmitted === true);
+    assert.equal(
+      motion.motionFrameSchema,
+      'peercompute.ulg.worker-offscreen-particle-temporal-motion-frame.v0'
+    );
+    assert.equal(motion.motionSourceSphStep, keyframe.sphStep);
+    assert.equal(motion.motionSourceFrameCount, keyframe.frameCount);
+    assert.ok(motion.frameCount > keyframe.frameCount);
+    assert.equal(motion.motionAgeSource, 'explicit-qos-midpoint');
+    assert.equal(
+      motion.motionAgeS,
+      0.001,
+      'the first autonomous cover samples the midpoint before boundary 1/32'
+    );
+    assert.equal(
+      motion.presentationQueueCompletionCount,
+      motion.presentationQueueCompletionSerial
+    );
+    assert.equal(
+      motion.presentationQueueCompletionScope,
+      'worker-offscreen-shared-device-queue-frame-proof'
+    );
+    assert.equal(
+      motion.physicsQueuePrefixCoverage,
+      'physics-queue-prefix-not-attributed'
+    );
+    assert.equal(motion.physicsHostQueueFenceParticipation, null);
+  } finally {
+    fakeSelf.onmessage({
+      data: {
+        type: 'clear',
+        workerFramebufferEpoch: 5,
+        reason: 'controlled-presentation-proof-cleanup'
+      }
+    });
+    await flushUntil(() => postedMessages.some((message) => (
+      message?.status === 'worker-offscreen-presentation-ready'
+      && message?.reason === 'controlled-presentation-proof-cleanup'
+    )));
+    fakeDevice.queue.onSubmittedWorkDone = previousFence;
+    fakeSelf.requestAnimationFrame = previousRequestAnimationFrame;
+    fakeSelf.cancelAnimationFrame = previousCancelAnimationFrame;
+    fakeSelf.performance.now = previousNow;
+  }
 });
 
 test('presentation worker schedule verb skips candidates truthfully when no epoch identity exists', async () => {

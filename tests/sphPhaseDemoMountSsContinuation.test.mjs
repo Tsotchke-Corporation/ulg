@@ -4,6 +4,10 @@ import { test } from 'node:test';
 
 import {
   SPH_PHASE_URL_PARAM_KEYS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
   resolveSphReactionActivationConfiguration,
   resolveSphMountedArchitectureControlState,
   resolveSphMountedScheduleControlEvidence,
@@ -11,6 +15,8 @@ import {
   resolveSphMountedWorkerLaneScheduleStepCount,
   resolveSphWorkerLanePostCommitFastContinuation,
   residentWorkerLaneContinuationReady,
+  residentWorkerLaneIsosurfacePresentationConsumerReady,
+  residentWorkerLaneIsosurfacePresentationEnqueued,
   shouldSkipSphResidentPressureInterfaceForRenderRefresh,
   sphResidentChainedContinuationAllowed,
   sphResidentInterfaceRefreshPublicationIsCurrent,
@@ -349,7 +355,7 @@ test('mounted SS worker playback honors the renderer policy chunk cap', () => {
   }), 128);
 });
 
-test('worker lane continuation requires the exact committed rendered receipt', () => {
+test('worker lane continuation separates exact admission from asynchronous isosurface completion', () => {
   const execution = {
     residentComputeManagerMode: 'worker-owned-resident-lane',
     workerLaneFallback: null,
@@ -434,6 +440,93 @@ test('worker lane continuation requires the exact committed rendered receipt', (
     }), false, `${field} must fail closed`);
   }
 
+  const isosurfaceEnqueuedPresentation = {
+    ...execution.workerOwnedResidentLane.committedPresentation,
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
+    status:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+    presentationGeometry:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+    sourceCapturedBeforePhysicsContinuation: true
+  };
+  const isosurfaceExecution = {
+    ...execution,
+    workerOwnedResidentLane: {
+      ...execution.workerOwnedResidentLane,
+      committedPresentation: isosurfaceEnqueuedPresentation
+    }
+  };
+  assert.equal(
+    residentWorkerLaneIsosurfacePresentationEnqueued(isosurfaceExecution),
+    true
+  );
+  assert.equal(residentWorkerLaneContinuationReady(isosurfaceExecution), true);
+  for (const [field, value] of [
+    ['schema', null],
+    ['presentationGeometry', 'sphere-impostor-depth-fallback'],
+    ['sourceCapturedBeforePhysicsContinuation', false],
+    ['computeManagerFenceSatisfied', false]
+  ]) {
+    const rejectedExecution = {
+      ...isosurfaceExecution,
+      workerOwnedResidentLane: {
+        ...isosurfaceExecution.workerOwnedResidentLane,
+        committedPresentation: {
+          ...isosurfaceEnqueuedPresentation,
+          [field]: value
+        }
+      }
+    };
+    assert.equal(
+      residentWorkerLaneIsosurfacePresentationEnqueued(rejectedExecution),
+      false,
+      `enqueue ${field} must fail closed`
+    );
+    assert.equal(residentWorkerLaneContinuationReady(rejectedExecution), false);
+  }
+
+  const renderedIsosurfacePresentation = {
+    ...isosurfaceEnqueuedPresentation,
+    status:
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+  };
+  assert.equal(
+    residentWorkerLaneIsosurfacePresentationConsumerReady({
+      execution: isosurfaceExecution,
+      presentation: renderedIsosurfacePresentation
+    }),
+    true
+  );
+  assert.equal(
+    residentWorkerLaneContinuationReady({
+      ...isosurfaceExecution,
+      workerOwnedResidentLane: {
+        ...isosurfaceExecution.workerOwnedResidentLane,
+        committedPresentation: renderedIsosurfacePresentation
+      }
+    }),
+    false,
+    'a rendered terminal receipt cannot replace the enqueue admission'
+  );
+  for (const [field, value] of [
+    ['schema', null],
+    ['presentationGeometry', 'sphere-impostor-depth-fallback'],
+    ['stateManagerCommitAccepted', false],
+    ['scheduleId', 'schedule:other']
+  ]) {
+    assert.equal(
+      residentWorkerLaneIsosurfacePresentationConsumerReady({
+        execution: isosurfaceExecution,
+        presentation: {
+          ...renderedIsosurfacePresentation,
+          [field]: value
+        }
+      }),
+      false,
+      `terminal ${field} must fail closed`
+    );
+  }
+
   const tier0Execution = {
     ...execution,
     fullParticleReadbackPerformed: false,
@@ -451,7 +544,16 @@ test('worker lane continuation requires the exact committed rendered receipt', (
         requestedStepCount: 64,
         completedStepCount: 64,
         atomicSchedule: true,
-        commandSubmissionCount: 1,
+        submissionMode: 'queue-ordered-presentation-qos-chunks',
+        commandSubmissionCount: 8,
+        submissionStepCounts: [8, 8, 8, 8, 8, 8, 8, 8],
+        maxSubstepsPerSubmission: 8,
+        presentationBoundaryCount: 7,
+        presentationBoundaryCompletedCount: 7,
+        presentationBoundaryFailureCount: 0,
+        presentationQosHostQueueFenceCount: 7,
+        logicalAuthorityPublicationCount: 1,
+        intermediateAuthorityPublicationCount: 0,
         internalPositionSubstepCount: 64,
         fullParticleReadbackPerformed: false,
         fullParticleReadbackFree: true,
@@ -476,8 +578,34 @@ test('worker lane continuation requires the exact committed rendered receipt', (
     fast.presentationConsumer,
     'worker-live-preview-versioned-mailbox'
   );
+  assert.equal(fast.presentationCompletionReady, true);
   assert.equal(Object.isFrozen(fast), true);
   assert.equal(Object.isFrozen(fast.blockers), true);
+
+  for (const executionRoutePatch of [
+    { submissionStepCounts: [8, 8, 8, 8, 8, 8, 8, 7] },
+    { presentationBoundaryCount: 6 },
+    { presentationBoundaryFailureCount: null },
+    { presentationQosHostQueueFenceCount: null },
+    { logicalAuthorityPublicationCount: 2 },
+    { intermediateAuthorityPublicationCount: 1 }
+  ]) {
+    const malformed = resolveSphWorkerLanePostCommitFastContinuation({
+      execution: {
+        ...tier0Execution,
+        workerOwnedResidentLane: {
+          ...tier0Execution.workerOwnedResidentLane,
+          executionRoute: {
+            ...tier0Execution.workerOwnedResidentLane.executionRoute,
+            ...executionRoutePatch
+          }
+        }
+      },
+      workerLivePreviewEnabled: true
+    });
+    assert.equal(malformed.eligible, false);
+    assert.ok(malformed.blockers.includes('tier0-atomic-execution-incomplete'));
+  }
 
   const noPreview = resolveSphWorkerLanePostCommitFastContinuation({
     execution: tier0Execution,
@@ -485,6 +613,27 @@ test('worker lane continuation requires the exact committed rendered receipt', (
   });
   assert.equal(noPreview.eligible, false);
   assert.ok(noPreview.blockers.includes('worker-live-preview-not-enabled'));
+
+  const isosurfaceFast = resolveSphWorkerLanePostCommitFastContinuation({
+    execution: {
+      ...tier0Execution,
+      workerOwnedResidentLane: {
+        ...tier0Execution.workerOwnedResidentLane,
+        committedPresentation: isosurfaceEnqueuedPresentation
+      }
+    },
+    workerLivePreviewEnabled: false
+  });
+  assert.equal(isosurfaceFast.eligible, true);
+  assert.equal(
+    isosurfaceFast.presentationConsumer,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+  );
+  assert.equal(isosurfaceFast.presentationCompletionReady, false);
+  assert.equal(
+    isosurfaceFast.blockers.includes('worker-live-preview-not-enabled'),
+    false
+  );
 
   const readback = resolveSphWorkerLanePostCommitFastContinuation({
     execution: {

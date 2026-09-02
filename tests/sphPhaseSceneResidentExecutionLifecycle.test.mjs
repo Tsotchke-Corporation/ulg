@@ -2,10 +2,205 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
+import {
+  resolveWorkerSchedulePresentationDisplayOwner,
+  workerLanePresentationHoldsDisplay,
+  workerOwnedIsosurfaceDisplayActive
+} from '../src/visualization/sphPhaseScene.js';
+
 const sceneSourcePath = new URL(
   '../src/visualization/sphPhaseScene.js',
   import.meta.url
 );
+
+test('committed worker isosurface remains the exact display authority', () => {
+  const residentSteps = {
+    residentComputeManagerMode: 'worker-owned-resident-lane',
+    workerLaneFallback: null,
+    workerOwnedResidentLane: {
+      residentScheduleStatus: 'worker-resident-schedule-completed',
+      cancelled: false,
+      completedStepCount: 2,
+      finalEpochIdentity: {
+        storageGeneration: 17,
+        physicsTick: 42
+      },
+      retainedBufferRefs: [{ id: 'retained:iso' }],
+      scheduleId: 'schedule:iso',
+      laneId: 'lane:iso',
+      stateKey: 'state:iso',
+      committedPresentation: {
+        schema:
+          'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0',
+        status: 'worker-offscreen-resident-isosurface-presentation-enqueued',
+        presentationGeometry: 'worker-owned-true-isosurface',
+        sourceCapturedBeforePhysicsContinuation: true,
+        committedPresentationSchema:
+          'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+        committedPresentationStatus:
+          'state-manager-committed-resident-schedule-presentation-admission',
+        residentScheduleCandidatePresentation: true,
+        stateManagerCommittedPresentation: true,
+        scheduleId: 'schedule:iso',
+        laneId: 'lane:iso',
+        stateKey: 'state:iso',
+        residentExecutionGeneration: 17,
+        sphStep: 42,
+        stepOrdinal: 2,
+        authorityStatus: 'state-manager-committed-worker-schedule',
+        computeManagerCompletionSchema:
+          'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+        computeManagerLeaseId: 'lease:iso',
+        computeManagerLeaseStatus: 'completed',
+        computeManagerFenceSatisfied: true,
+        stateManagerCommitStatus: 'committed',
+        stateManagerCommitAccepted: true,
+        terminalScheduleFence: true,
+        terminalFenceScope: 'resident-schedule-terminal',
+        terminalFenceSatisfied: true,
+        terminalFenceAuthorityAdmissionReady: true,
+        producerSourceKind: 'worker-retained-resident-stage-output',
+        producerSourceTransport: 'worker-retained-resident-stage-output',
+        sourceStageId: 'schroederSameLevelMechanics',
+        retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      }
+    }
+  };
+  assert.equal(workerOwnedIsosurfaceDisplayActive(residentSteps), true);
+  for (const [field, value] of [
+    ['status', 'worker-offscreen-resident-isosurface-presentation-rendered'],
+    ['sourceCapturedBeforePhysicsContinuation', false],
+    ['stateManagerCommittedPresentation', false],
+    ['computeManagerFenceSatisfied', false],
+    ['terminalFenceAuthorityAdmissionReady', false],
+    ['scheduleId', 'schedule:stale'],
+    ['residentExecutionGeneration', 18],
+    ['residentExecutionGeneration', null],
+    ['residentExecutionGeneration', '17'],
+    ['sphStep', 43],
+    ['sphStep', null],
+    ['sphStep', '42'],
+    ['stepOrdinal', 1],
+    ['stepOrdinal', null],
+    ['stepOrdinal', '2'],
+    ['producerSourceKind', 'worker-progress-candidate'],
+    ['producerSourceTransport', 'worker-progress-candidate'],
+    ['sourceStageId', 'g2p'],
+    ['retainedParticleStateStatus', 'worker-retained-particle-state-missing-buffer']
+  ]) {
+    assert.equal(workerOwnedIsosurfaceDisplayActive({
+      ...residentSteps,
+      workerOwnedResidentLane: {
+        ...residentSteps.workerOwnedResidentLane,
+        committedPresentation: {
+          ...residentSteps.workerOwnedResidentLane.committedPresentation,
+          [field]: value
+        }
+      }
+    }), false, `${field} must fail closed`);
+  }
+  for (const [field, value] of [
+    ['residentComputeManagerMode', 'direct'],
+    ['workerLaneFallback', { status: 'worker-lane-fallback' }]
+  ]) {
+    assert.equal(workerOwnedIsosurfaceDisplayActive({
+      ...residentSteps,
+      [field]: value
+    }), false, `${field} must fail closed`);
+  }
+  for (const [field, value] of [
+    ['cancelled', true],
+    ['completedStepCount', 0],
+    ['finalEpochIdentity', null],
+    ['finalEpochIdentity', { storageGeneration: null, physicsTick: 42 }],
+    ['finalEpochIdentity', { storageGeneration: '17', physicsTick: 42 }],
+    ['finalEpochIdentity', { storageGeneration: 17, physicsTick: null }],
+    ['finalEpochIdentity', { storageGeneration: 17, physicsTick: '42' }],
+    ['retainedBufferRefs', []],
+    ['laneId', 'lane:stale'],
+    ['stateKey', 'state:stale']
+  ]) {
+    assert.equal(workerOwnedIsosurfaceDisplayActive({
+      ...residentSteps,
+      workerOwnedResidentLane: {
+        ...residentSteps.workerOwnedResidentLane,
+        [field]: value
+      }
+    }), false, `${field} must fail closed`);
+  }
+});
+
+test('explicit main-thread presentation outranks worker continuity', () => {
+  const activeWorkerLane = {
+    activeWorkerPresentation: true,
+    laneSeeded: true,
+    lanePoisoned: false
+  };
+  assert.equal(workerLanePresentationHoldsDisplay(activeWorkerLane), true);
+  assert.equal(workerLanePresentationHoldsDisplay({
+    ...activeWorkerLane,
+    explicitMainThreadPresentationRequested: true
+  }), false);
+  assert.equal(workerLanePresentationHoldsDisplay({
+    ...activeWorkerLane,
+    activeWorkerPresentation: false
+  }), false);
+  assert.equal(workerLanePresentationHoldsDisplay({
+    ...activeWorkerLane,
+    laneSeeded: false
+  }), false);
+  assert.equal(workerLanePresentationHoldsDisplay({
+    ...activeWorkerLane,
+    lanePoisoned: true
+  }), false);
+});
+
+test('worker schedule preserves the old frame until explicit native handoff', () => {
+  const explicit = {
+    explicitMainThreadPresentationRequested: true,
+    workerLaneNativeSurfacePresentationRequested: true,
+    workerLivePreviewRequested: false,
+    workerOwnedIsosurfaceRequested: true
+  };
+  assert.equal(resolveWorkerSchedulePresentationDisplayOwner({
+    ...explicit,
+    mainNativeDisplayOwnershipDeferred: true
+  }), 'worker');
+  assert.equal(resolveWorkerSchedulePresentationDisplayOwner({
+    ...explicit,
+    mainNativeDisplayOwnershipDeferred: false
+  }), 'main-native');
+  assert.equal(resolveWorkerSchedulePresentationDisplayOwner({
+    workerLaneNativeSurfacePresentationRequested: true
+  }), 'main-native');
+  assert.equal(resolveWorkerSchedulePresentationDisplayOwner({
+    workerLaneNativeSurfacePresentationRequested: true,
+    workerOwnedIsosurfaceRequested: true
+  }), 'worker');
+  assert.equal(resolveWorkerSchedulePresentationDisplayOwner({
+    workerLaneNativeSurfacePresentationRequested: true,
+    workerLivePreviewRequested: true
+  }), 'worker');
+});
+
+test('scene arbitration pins exact worker isosurfaces at both native handoffs', async () => {
+  const source = await readFile(sceneSourcePath, 'utf8');
+  assert.match(
+    source,
+    /const committedWorkerOwnedIsosurfaceDisplayActive =\s*workerOwnedIsosurfaceDisplayActive\(mlsMpmResidentSteps\);[\s\S]{0,900}?scene\.userData\.sphWorkerLaneLivePreviewRequested === true\s*\|\| committedWorkerOwnedIsosurfaceDisplayActive\s*\|\| !exactWorkerLaneNativeSurfaceSnapshot[\s\S]{0,500}?explicitMainThreadPresentationRequested:\s*item\.explicitMainThreadSurfaceDrawBridgeRequested === true/,
+    'native candidate commit must retain exact worker-isosurface ownership'
+  );
+  assert.match(
+    source,
+    /const committedWorkerOwnedIsosurfaceDisplayActive =\s*workerOwnedIsosurfaceDisplayActive\(residentSteps\);[\s\S]{0,2200}?\!admittedWorkerLaneNativeSurfaceSource\s*\|\| committedWorkerOwnedIsosurfaceDisplayActive[\s\S]{0,1000}?explicitMainThreadPresentationRequested:\s*explicitMainThreadSurfaceDrawBridgeRequested[\s\S]{0,3000}?\!workerLaneWorkerPresentationHoldsDisplay/,
+    'resident refresh must not let an incidental native snapshot steal worker-isosurface ownership'
+  );
+  assert.match(
+    source,
+    /const committedWorkerOwnedIsosurfacePresentationStatus =\s*committedWorkerOwnedIsosurfaceDisplayActive\s*&& !explicitMainThreadSurfaceDrawBridgeRequested/,
+    'explicit main-thread presentation must bypass retained worker-isosurface output'
+  );
+});
 
 test('scene replacement preserves only canonical resident product-history continuation handles', async () => {
   const source = await readFile(sceneSourcePath, 'utf8');
@@ -188,7 +383,16 @@ test('worker-lane public execution projects bounded route and turnaround evidenc
     'routeDecisionStatus',
     'transition',
     'blockers',
+    'submissionMode',
     'commandSubmissionCount',
+    'submissionStepCounts',
+    'maxSubstepsPerSubmission',
+    'presentationBoundaryCount',
+    'presentationBoundaryCompletedCount',
+    'presentationBoundaryFailureCount',
+    'presentationQosHostQueueFenceCount',
+    'logicalAuthorityPublicationCount',
+    'intermediateAuthorityPublicationCount',
     'internalPositionSubstepCount',
     'fullParticleReadbackFree',
     'mapAsyncCount',

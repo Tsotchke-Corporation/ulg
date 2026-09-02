@@ -1,6 +1,9 @@
 import {
   createResidentRenderCandidateMailbox
 } from './residentRenderCandidateMailbox.js';
+import {
+  isExactWorkerPresentationFrameQueueCompletionProof
+} from '../runtime/sph/sphWorkerPresentationQos.js';
 
 export {
   ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA
@@ -29,6 +32,20 @@ export const ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-render-producer.v0';
 export const ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA =
+  'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA =
+  'peercompute.ulg.worker-offscreen-particle-temporal-motion-frame.v0';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA =
+  'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS =
+  'worker-offscreen-resident-isosurface-presentation-enqueued';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS =
+  'worker-offscreen-resident-isosurface-presentation-rendered';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY =
+  'worker-owned-true-isosurface';
+export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA =
+  'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0';
 export const ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_TRANSPORT =
   'worker-resident-particle-state-transfer';
 export const ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_CACHE_TRANSPORT =
@@ -52,6 +69,225 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
 function nonEmptyString(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   return text || null;
+}
+
+function workerPresentationPhysicsPrefixNotAttributed(receipt = null) {
+  return Boolean(
+    receipt?.physicsQueuePrefixCoverage
+      === 'physics-queue-prefix-not-attributed'
+    && receipt?.physicsHostQueueFenceParticipation !== true
+  );
+}
+
+function workerParticleMotionQueueAttributionReady(receipt = null) {
+  if (workerPresentationPhysicsPrefixNotAttributed(receipt)) return true;
+  const boundary = receipt?.motionPresentationQosBoundary;
+  const completedSubstepCount = Number(boundary?.completedSubstepCount);
+  const totalSubstepCount = Number(boundary?.totalSubstepCount);
+  const chunkStepCount = Number(boundary?.chunkStepCount);
+  return Boolean(
+    receipt?.physicsQueuePrefixCoverage === 'physics-queue-prefix-included'
+    && receipt?.physicsHostQueueFenceParticipation === true
+    && Number.isSafeInteger(Number(boundary?.submissionOrdinal))
+    && Number(boundary.submissionOrdinal) > 0
+    && Number.isSafeInteger(completedSubstepCount)
+    && completedSubstepCount > 0
+    && Number.isSafeInteger(totalSubstepCount)
+    && totalSubstepCount > completedSubstepCount
+    && Number.isSafeInteger(chunkStepCount)
+    && chunkStepCount > 0
+  );
+}
+
+function workerParticleKeyframePresentationProofReady(receipt = null) {
+  return Boolean(
+    receipt?.presentationFrameSchema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA
+    && receipt?.presentationFrameStatus
+      === 'worker-particle-keyframe-presentation-opportunity'
+    && receipt?.presentationFrameAdmitted === true
+    && receipt?.presentationFrameGpuCompleted === true
+    && receipt?.presentationFramePresentationOpportunity === true
+    && receipt?.presentationFramePresentationOpportunityMethod
+      === 'worker-request-animation-frame-after-gpu-completion'
+    && isExactWorkerPresentationFrameQueueCompletionProof(receipt)
+    && workerPresentationPhysicsPrefixNotAttributed(receipt)
+  );
+}
+
+function workerParticleTemporalMotionFrameSelfProofReady(receipt = null) {
+  const motionFrameSerial = Number(receipt?.motionFrameSerial);
+  const motionFrameSubmittedSerial = Number(
+    receipt?.motionFrameSubmittedSerial
+  );
+  const motionSourceFrameCount = Number(receipt?.motionSourceFrameCount);
+  const motionSourceSphStep = Number(receipt?.motionSourceSphStep);
+  return Boolean(
+    receipt?.motionFrameSchema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA
+    && receipt?.motionFrameStatus
+      === 'worker-particle-temporal-motion-frame-presentation-opportunity'
+    && receipt?.motionFrameAdmitted === true
+    && receipt?.motionFrameGpuCompleted === true
+    && receipt?.motionFramePresentationOpportunity === true
+    && receipt?.motionFramePresentationOpportunityMethod
+      === 'worker-request-animation-frame-after-gpu-completion'
+    && Number.isSafeInteger(motionFrameSerial)
+    && motionFrameSerial > 0
+    && Number.isSafeInteger(motionFrameSubmittedSerial)
+    && motionFrameSubmittedSerial >= motionFrameSerial
+    && Number.isSafeInteger(motionSourceFrameCount)
+    && motionSourceFrameCount > 0
+    && Number.isSafeInteger(motionSourceSphStep)
+    && motionSourceSphStep >= 0
+    && Number(receipt?.sphStep) === motionSourceSphStep
+    && receipt?.motionMethod === 'bounded-keyframe-velocity-extrapolation'
+    && receipt?.motionVelocityBufferRetained === true
+    && isExactWorkerPresentationFrameQueueCompletionProof(receipt)
+    && workerParticleMotionQueueAttributionReady(receipt)
+  );
+}
+
+function workerParticleTemporalMotionFrameBoundToSource(
+  receipt,
+  previousReceipt
+) {
+  if (
+    !workerParticleTemporalMotionFrameSelfProofReady(receipt)
+    || !previousReceipt
+  ) return false;
+  const previousIsMotion =
+    workerParticleTemporalMotionFrameSelfProofReady(previousReceipt);
+  const expectedSourceSphStep = Number(
+    previousIsMotion
+      ? previousReceipt.motionSourceSphStep
+      : previousReceipt.sphStep
+  );
+  const expectedSourceFrameCount = Number(
+    previousIsMotion
+      ? previousReceipt.motionSourceFrameCount
+      : previousReceipt.frameCount
+  );
+  return Boolean(
+    Number(receipt.motionSourceSphStep) === expectedSourceSphStep
+    && Number(receipt.motionSourceFrameCount) === expectedSourceFrameCount
+    && Number(receipt.frameCount) > Number(previousReceipt.frameCount)
+  );
+}
+
+function workerIsosurfacePresentationProofReady(receipt = null) {
+  return Boolean(
+    receipt?.presentationFrameSchema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA
+    && receipt?.presentationFrameStatus
+      === 'worker-owned-isosurface-presentation-opportunity'
+    && receipt?.presentationFrameAdmitted === true
+    && receipt?.presentationFrameGpuCompleted === true
+    && receipt?.presentationFrameGpuCompletionMethod
+      === 'worker-device.queue.onSubmittedWorkDone'
+    && receipt?.presentationFramePresentationOpportunity === true
+    && receipt?.presentationFramePresentationOpportunityMethod
+      === 'worker-request-animation-frame-after-gpu-completion'
+    && isExactWorkerPresentationFrameQueueCompletionProof(receipt)
+    && workerPresentationPhysicsPrefixNotAttributed(receipt)
+  );
+}
+
+function committedPresentationReceiptVersion(receipt = null) {
+  const presentationLaneEpoch = Number(receipt?.presentationLaneEpoch);
+  const residentExecutionGeneration = Number(
+    receipt?.residentExecutionGeneration
+  );
+  const sphStep = Number(receipt?.sphStep);
+  const stepOrdinal = Number(receipt?.stepOrdinal);
+  if (
+    !Number.isSafeInteger(presentationLaneEpoch)
+    || presentationLaneEpoch <= 0
+    || !Number.isSafeInteger(residentExecutionGeneration)
+    || residentExecutionGeneration < 0
+    || !Number.isSafeInteger(sphStep)
+    || sphStep < 0
+    || !Number.isSafeInteger(stepOrdinal)
+    || stepOrdinal <= 0
+  ) return null;
+  const requestGeneration = Number(receipt?.requestGeneration);
+  const motionFrameSerial = Number(receipt?.motionFrameSerial);
+  return Object.freeze([
+    presentationLaneEpoch,
+    residentExecutionGeneration,
+    sphStep,
+    stepOrdinal,
+    Number.isSafeInteger(requestGeneration) && requestGeneration > 0
+      ? requestGeneration
+      : 0,
+    workerParticleTemporalMotionFrameSelfProofReady(receipt)
+      ? motionFrameSerial
+      : 0
+  ]);
+}
+
+function committedPresentationReceiptStatusRank(status) {
+  const normalized = String(status || '');
+  if (/-rendered$/.test(normalized)) return 3;
+  if (/(?:blocked|failed|superseded)/.test(normalized)) return 2;
+  if (/-enqueued$/.test(normalized)) return 1;
+  return 0;
+}
+
+function committedPresentationReceiptCanAdvance(previous, incoming) {
+  if (!previous) return true;
+  const previousVersion = committedPresentationReceiptVersion(previous);
+  const incomingVersion = committedPresentationReceiptVersion(incoming);
+  if (!previousVersion) return true;
+  if (!incomingVersion) return false;
+  for (let index = 0; index < incomingVersion.length; index += 1) {
+    if (incomingVersion[index] > previousVersion[index]) return true;
+    if (incomingVersion[index] < previousVersion[index]) return false;
+  }
+  return committedPresentationReceiptStatusRank(incoming?.status)
+    >= committedPresentationReceiptStatusRank(previous?.status);
+}
+
+function committedPresentationFramebufferCanAdvance(
+  previous,
+  incoming,
+  queueCompletionSerialHighWater = 0
+) {
+  const incomingQueueCompletionSerial = Number(
+    incoming?.presentationQueueCompletionSerial
+  );
+  const queueSerialFloor = Number(queueCompletionSerialHighWater);
+  if (
+    Number.isSafeInteger(queueSerialFloor)
+    && queueSerialFloor > 0
+    && Number.isSafeInteger(incomingQueueCompletionSerial)
+    && incomingQueueCompletionSerial > 0
+    && incomingQueueCompletionSerial <= queueSerialFloor
+  ) return false;
+  if (!previous) return true;
+  const previousQueueCompletionSerial = Number(
+    previous?.presentationQueueCompletionSerial
+  );
+  if (
+    Number.isSafeInteger(previousQueueCompletionSerial)
+    && previousQueueCompletionSerial > 0
+    && Number.isSafeInteger(incomingQueueCompletionSerial)
+    && incomingQueueCompletionSerial > 0
+    && incomingQueueCompletionSerial <= previousQueueCompletionSerial
+  ) return false;
+  const previousVersion = committedPresentationReceiptVersion(previous);
+  const incomingVersion = committedPresentationReceiptVersion(incoming);
+  if (!previousVersion) return true;
+  if (!incomingVersion) return false;
+  for (let index = 0; index < incomingVersion.length; index += 1) {
+    if (incomingVersion[index] > previousVersion[index]) return true;
+    if (incomingVersion[index] < previousVersion[index]) return false;
+  }
+  // Camera redraws intentionally retain the same source/version tuple. The
+  // strictly advancing same-worker queue-completion serial above is their
+  // framebuffer identity; equal source coordinates are not a replay.
+  return Number.isSafeInteger(incomingQueueCompletionSerial)
+    && incomingQueueCompletionSerial > 0;
 }
 
 export function buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
@@ -909,6 +1145,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
     // handoff adopt pixels rendered while the native seed still owned display,
     // but only while the framebuffer counters remain unchanged.
     workerCanvasLastRenderedContent: null,
+    // Monotonic bridge-owned identity for the pixels themselves. Unlike the
+    // display-owner epoch, every destructive canvas operation advances this
+    // even when ownership does not change.
+    workerFramebufferEpoch: 1,
+    // Queue-completion serials are allocated by one presentation-worker
+    // lifecycle. Canvas clears, resizes, and owner handoffs invalidate pixels,
+    // but they must not reset this replay floor while that worker is alive.
+    workerFramebufferQueueCompletionSerialHighWater: 0,
     residentRenderProducerSourceCacheKey: null,
     residentRenderProducerSourceParticleCount: 0,
     residentRenderProducerSourceStrideFloats: 0,
@@ -1032,6 +1276,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       );
       setDisplayCanvasOwnedVisibility(this.canvas, workerCanvasVisible);
       if (normalizedOwner === 'main-native' && this.worker && displayOwnerChanged) {
+        this.workerFramebufferEpoch += 1;
+        this.workerCanvasLastRenderedContent = null;
         this.residentRenderCandidateMailbox.reset();
         this.residentRenderCandidateStreamIdentity = null;
         this.worker.postMessage?.({
@@ -1039,6 +1285,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
           backgroundColor: currentBackgroundColor,
           clearAlpha,
           displayOwnerEpoch: requestedEpoch,
+          workerFramebufferEpoch: this.workerFramebufferEpoch,
           resetResidentScheduleCandidateMailbox: true,
           reason: `display-owner-main-native:${reason}`
         });
@@ -1249,11 +1496,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
         // The worker's resize path reconfigures and clears the OffscreenCanvas.
         // Invalidate the exact content receipt before posting that operation;
         // a later positive render receipt is required to reveal it again.
+        this.workerFramebufferEpoch += 1;
+        this.workerCanvasLastRenderedContent = null;
         if (this.displayOwner === 'worker') {
           this.displayOwnerContentReady = false;
           this.displayOwnerPresentedSphStep = null;
           this.displayOwnerLastRenderedContent = null;
-          this.workerCanvasLastRenderedContent = null;
           setDisplayCanvasOwnedVisibility(this.canvas, false);
         }
         this.worker.postMessage?.({
@@ -1263,6 +1511,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
           cssWidth: nextSize.cssWidth,
           cssHeight: nextSize.cssHeight,
           pixelRatio: nextSize.pixelRatio,
+          workerFramebufferEpoch: this.workerFramebufferEpoch,
           reason: next.reason || 'resize'
         });
       }
@@ -1285,15 +1534,28 @@ export function createUlgWorkerOffscreenPresentationBridge({
         displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
       });
     },
-    updatePreviewViewProjection(matrix, { reason = 'preview-camera-update' } = {}) {
-      // Fire-and-forget camera stream for the live preview; deliberately no
-      // status publication (it runs per animation frame during drags).
+    updatePreviewViewProjection(matrix, {
+      reason = 'preview-camera-update',
+      cameraPositionM = null
+    } = {}) {
+      // Fire-and-forget camera stream for whichever worker-owned geometry is
+      // visible; deliberately no page status publication (it can run per
+      // animation frame during drags).
       if (this.disposed || !this.worker || !matrix || Number(matrix.length) !== 16) {
         return null;
       }
+      const normalizedCameraPosition =
+        (Array.isArray(cameraPositionM) || ArrayBuffer.isView(cameraPositionM))
+        && cameraPositionM.length === 3
+        && Array.from(cameraPositionM, Number).every(Number.isFinite)
+          ? Array.from(cameraPositionM, Number)
+          : null;
       this.worker.postMessage?.({
         type: 'update-preview-view-projection',
         viewProjectionMatrix: matrix,
+        ...(normalizedCameraPosition
+          ? { cameraPositionM: normalizedCameraPosition }
+          : {}),
         reason
       });
       return { status: 'worker-offscreen-preview-view-projection-posted', reason };
@@ -1302,17 +1564,19 @@ export function createUlgWorkerOffscreenPresentationBridge({
       if (this.disposed) return disposedMutationStatus('setBackgroundColor');
       currentBackgroundColor = color || currentBackgroundColor;
       if (this.worker) {
+        this.workerFramebufferEpoch += 1;
+        this.workerCanvasLastRenderedContent = null;
         if (this.displayOwner === 'worker') {
           this.displayOwnerContentReady = false;
           this.displayOwnerPresentedSphStep = null;
           this.displayOwnerLastRenderedContent = null;
-          this.workerCanvasLastRenderedContent = null;
           setDisplayCanvasOwnedVisibility(this.canvas, false);
         }
         this.worker.postMessage?.({
           type: 'clear',
           backgroundColor: currentBackgroundColor,
           clearAlpha,
+          workerFramebufferEpoch: this.workerFramebufferEpoch,
           resetResidentScheduleCandidateMailbox: false,
           reason
         });
@@ -1384,6 +1648,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       this.worker.postMessage?.({
         type: 'draw-render-rows',
         displayOwnerEpoch: this.displayOwnerEpoch,
+        workerFramebufferEpoch: this.workerFramebufferEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
         inputTransport: ULG_WORKER_OFFSCREEN_RENDER_ROWS_INPUT_TRANSPORT,
@@ -1512,6 +1777,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const message = {
         type: 'draw-resident-render-producer',
         displayOwnerEpoch: this.displayOwnerEpoch,
+        workerFramebufferEpoch: this.workerFramebufferEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
@@ -1677,6 +1943,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const message = {
         type: 'draw-resident-particle-state-producer',
         displayOwnerEpoch: this.displayOwnerEpoch,
+        workerFramebufferEpoch: this.workerFramebufferEpoch,
         sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
@@ -2061,6 +2328,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       this.displayOwnerPresentedSphStep = null;
       this.displayOwnerLastRenderedContent = null;
       this.workerCanvasLastRenderedContent = null;
+      this.workerFramebufferQueueCompletionSerialHighWater = 0;
+      this.workerFramebufferEpoch = 0;
       this.committedResidentSchedulePresentationStatus = null;
       this.retainedCompactSnapshotStatus = null;
       this.retainedCompactSnapshotRequestIdentity = null;
@@ -2108,6 +2377,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     bridge.residentRenderCandidateMailbox?.reset?.();
     bridge.residentRenderCandidateStreamIdentity = null;
     bridge.committedResidentSchedulePresentationStatus = null;
+    bridge.workerFramebufferQueueCompletionSerialHighWater = 0;
     const workerLifecycleGeneration = bridge.lifecycleGeneration;
     const handleWorkerMessage = (event) => {
       if (
@@ -2191,6 +2461,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && Number(contentReceipt.frameCount) === Number(data.frameCount)
         && Number.isFinite(Number(contentReceipt.readyFrameCount))
         && Number(contentReceipt.readyFrameCount) === Number(data.readyFrameCount)
+        && Number.isSafeInteger(Number(contentReceipt.workerFramebufferEpoch))
+        && Number(contentReceipt.workerFramebufferEpoch)
+          === bridge.workerFramebufferEpoch
       );
       const committedReceiptLaneEpoch = Number(
         contentReceipt?.presentationLaneEpoch
@@ -2217,8 +2490,10 @@ export function createUlgWorkerOffscreenPresentationBridge({
         });
       }
       const committedReceiptAuthorityReady = Boolean(
-        contentReceipt?.schema
-          === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA
+        [
+          ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+          ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+        ].includes(contentReceipt?.schema)
         && contentReceipt?.renderRowsSchema
           === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
         && contentReceipt?.residentScheduleCandidatePresentation === true
@@ -2263,7 +2538,22 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && contentReceipt?.terminalFenceSatisfied === true
         && contentReceipt?.terminalFenceAuthorityAdmissionReady === true
       );
-      const candidateReceiptReady = Boolean(
+      const keyframePresentationProofReady =
+        workerParticleKeyframePresentationProofReady(contentReceipt);
+      const temporalMotionFrameClaimed = Boolean(
+        contentReceipt?.motionFrameSchema != null
+        || contentReceipt?.motionFrameAdmitted === true
+        || (
+          contentReceipt?.motionFrameSerial != null
+          && Number.isSafeInteger(Number(contentReceipt.motionFrameSerial))
+        )
+      );
+      const temporalMotionFrameProofReady =
+        workerParticleTemporalMotionFrameBoundToSource(
+          contentReceipt,
+          bridge.workerCanvasLastRenderedContent
+        );
+      const legacyParticleCandidateReceiptReady = Boolean(
         exactFramebufferReceipt
         && committedReceiptAuthorityReady
         && contentReceipt.schema
@@ -2271,6 +2561,16 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && contentReceipt.renderRowsSchema === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
         && contentReceipt.status
           === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && (
+          (
+            !temporalMotionFrameClaimed
+            && keyframePresentationProofReady
+          )
+          || (
+            temporalMotionFrameClaimed
+            && temporalMotionFrameProofReady
+          )
+        )
         && contentReceipt.residentScheduleCandidatePresentation === true
         && contentReceipt.stateManagerCommittedPresentation === true
         && contentReceipt.committedPresentationSchema
@@ -2320,6 +2620,45 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && contentReceipt.retainedParticleStateStatus
           === 'worker-retained-particle-state-ready'
       );
+      const isosurfaceReceipt = Boolean(
+        contentReceipt?.schema
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+        && contentReceipt?.presentationGeometry
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+      );
+      const isosurfaceEnqueueReceiptReady = Boolean(
+        committedReceiptAuthorityReady
+        && isosurfaceReceipt
+        && contentReceipt?.status
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+        && contentReceipt?.sourceCapturedBeforePhysicsContinuation === true
+        && contentReceipt?.producerSourceKind
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt?.producerSourceTransport
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt?.sourceStageId === 'schroederSameLevelMechanics'
+        && contentReceipt?.retainedParticleStateStatus
+          === 'worker-retained-particle-state-ready'
+      );
+      const isosurfaceRenderedReceiptReady = Boolean(
+        exactFramebufferReceipt
+        && committedReceiptAuthorityReady
+        && isosurfaceReceipt
+        && workerIsosurfacePresentationProofReady(contentReceipt)
+        && contentReceipt?.status
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+        && contentReceipt?.producerSourceKind
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt?.producerSourceTransport
+          === 'worker-retained-resident-stage-output'
+        && contentReceipt?.sourceStageId === 'schroederSameLevelMechanics'
+        && contentReceipt?.retainedParticleStateStatus
+          === 'worker-retained-particle-state-ready'
+      );
+      const candidateReceiptReady = Boolean(
+        legacyParticleCandidateReceiptReady
+        || isosurfaceRenderedReceiptReady
+      );
       const committedPresentationTerminalReceipt = Boolean(
         committedReceiptAuthorityReady
         && (
@@ -2328,12 +2667,31 @@ export function createUlgWorkerOffscreenPresentationBridge({
               === 'worker-offscreen-resident-particle-state-producer-rendered'
             && exactFramebufferReceipt
           )
+          || isosurfaceEnqueueReceiptReady
+          || isosurfaceRenderedReceiptReady
           || /(?:blocked|failed|superseded)/.test(
             String(contentReceipt.status || '')
           )
         )
       );
-      if (committedPresentationTerminalReceipt) {
+      const committedPresentationReceiptCurrent =
+        committedPresentationReceiptCanAdvance(
+          bridge.committedResidentSchedulePresentationStatus,
+          contentReceipt
+        );
+      const committedPresentationFramebufferCurrent = Boolean(
+        candidateReceiptReady
+        && committedPresentationReceiptCurrent
+        && committedPresentationFramebufferCanAdvance(
+          bridge.workerCanvasLastRenderedContent,
+          contentReceipt,
+          bridge.workerFramebufferQueueCompletionSerialHighWater
+        )
+      );
+      if (
+        committedPresentationTerminalReceipt
+        && committedPresentationReceiptCurrent
+      ) {
         bridge.committedResidentSchedulePresentationStatus = Object.freeze({
           ...contentReceipt
         });
@@ -2369,9 +2727,15 @@ export function createUlgWorkerOffscreenPresentationBridge({
           residentExecutionGeneration:
             contentReceipt?.residentExecutionGeneration ?? null,
           exactFramebufferReceipt,
+          workerFramebufferEpoch: contentReceipt?.workerFramebufferEpoch ?? null,
+          expectedWorkerFramebufferEpoch: bridge.workerFramebufferEpoch,
           committedReceiptAuthorityReady,
+          isosurfaceEnqueueReceiptReady,
+          isosurfaceRenderedReceiptReady,
           candidateReceiptReady,
-          committedPresentationTerminalReceipt
+          committedPresentationTerminalReceipt,
+          committedPresentationReceiptCurrent,
+          committedPresentationFramebufferCurrent
         });
         if (ring.length > 32) ring.splice(0, ring.length - 32);
       }
@@ -2389,6 +2753,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
             ),
             frameCount: Number(contentReceipt.frameCount),
             readyFrameCount: Number(contentReceipt.readyFrameCount),
+            workerFramebufferEpoch:
+              Number(contentReceipt.workerFramebufferEpoch),
             displayOwnerEpoch: Number.isFinite(Number(contentReceipt.displayOwnerEpoch))
               ? Number(contentReceipt.displayOwnerEpoch)
               : bridge.displayOwnerEpoch,
@@ -2418,6 +2784,247 @@ export function createUlgWorkerOffscreenPresentationBridge({
             stepOrdinal: Number.isSafeInteger(Number(contentReceipt.stepOrdinal))
               ? Number(contentReceipt.stepOrdinal)
               : null,
+            ...(Number.isSafeInteger(Number(contentReceipt.requestGeneration))
+              && Number(contentReceipt.requestGeneration) > 0
+              ? {
+                  requestGeneration: Number(contentReceipt.requestGeneration)
+                }
+              : {}),
+            ...(contentReceipt.presentationFrameSchema
+              === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_KEYFRAME_PRESENTATION_FRAME_SCHEMA
+              ? {
+                  presentationFrameSchema:
+                    contentReceipt.presentationFrameSchema,
+                  presentationFrameStatus:
+                    contentReceipt.presentationFrameStatus ?? null,
+                  presentationFrameAdmitted:
+                    contentReceipt.presentationFrameAdmitted === true,
+                  presentationFrameGpuCompleted:
+                    contentReceipt.presentationFrameGpuCompleted === true,
+                  presentationFrameGpuCompletedAtMs:
+                    Number.isFinite(Number(
+                      contentReceipt.presentationFrameGpuCompletedAtMs
+                    ))
+                      ? Number(contentReceipt.presentationFrameGpuCompletedAtMs)
+                      : null,
+                  presentationFramePresentationOpportunity:
+                    contentReceipt.presentationFramePresentationOpportunity
+                      === true,
+                  presentationFramePresentationOpportunityMethod:
+                    contentReceipt
+                      .presentationFramePresentationOpportunityMethod ?? null,
+                  presentationFrameSubmitToGpuCompleteMs:
+                    Number.isFinite(Number(
+                      contentReceipt.presentationFrameSubmitToGpuCompleteMs
+                    ))
+                      ? Number(
+                          contentReceipt.presentationFrameSubmitToGpuCompleteMs
+                        )
+                      : null,
+                  presentationFrameSubmitToPresentationOpportunityMs:
+                    Number.isFinite(Number(
+                      contentReceipt
+                        .presentationFrameSubmitToPresentationOpportunityMs
+                    ))
+                      ? Number(
+                          contentReceipt
+                            .presentationFrameSubmitToPresentationOpportunityMs
+                        )
+                      : null,
+                  presentationQueueCompletionCount:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.presentationQueueCompletionCount
+                    ))
+                      ? Number(
+                          contentReceipt.presentationQueueCompletionCount
+                        )
+                      : null,
+                  presentationQueueCompletionSerial:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.presentationQueueCompletionSerial
+                    ))
+                      ? Number(contentReceipt.presentationQueueCompletionSerial)
+                      : null,
+                  presentationQueueCompletionMethod:
+                    contentReceipt.presentationQueueCompletionMethod ?? null,
+                  presentationQueueCompletionScope:
+                    contentReceipt.presentationQueueCompletionScope
+                      ?? null,
+                  physicsQueuePrefixCoverage:
+                    contentReceipt.physicsQueuePrefixCoverage ?? null,
+                  physicsHostQueueFenceParticipation:
+                    typeof contentReceipt.physicsHostQueueFenceParticipation
+                      === 'boolean'
+                      ? contentReceipt.physicsHostQueueFenceParticipation
+                      : null
+                }
+              : {}),
+            ...(contentReceipt.presentationFrameSchema
+              === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA
+              ? {
+                  presentationFrameSchema:
+                    contentReceipt.presentationFrameSchema,
+                  presentationFrameStatus:
+                    contentReceipt.presentationFrameStatus ?? null,
+                  presentationFrameAdmitted:
+                    contentReceipt.presentationFrameAdmitted === true,
+                  presentationFrameGpuCompleted:
+                    contentReceipt.presentationFrameGpuCompleted === true,
+                  presentationFrameGpuCompletionMethod:
+                    contentReceipt.presentationFrameGpuCompletionMethod
+                    ?? null,
+                  presentationFramePresentationOpportunity:
+                    contentReceipt.presentationFramePresentationOpportunity
+                      === true,
+                  presentationFramePresentationOpportunityMethod:
+                    contentReceipt
+                      .presentationFramePresentationOpportunityMethod ?? null,
+                  presentationFrameSubmitToGpuCompleteMs:
+                    Number.isFinite(Number(
+                      contentReceipt.presentationFrameSubmitToGpuCompleteMs
+                    ))
+                      ? Number(
+                          contentReceipt.presentationFrameSubmitToGpuCompleteMs
+                        )
+                      : null,
+                  presentationFrameSubmitToPresentationOpportunityMs:
+                    Number.isFinite(Number(
+                      contentReceipt
+                        .presentationFrameSubmitToPresentationOpportunityMs
+                    ))
+                      ? Number(
+                          contentReceipt
+                            .presentationFrameSubmitToPresentationOpportunityMs
+                        )
+                      : null,
+                  presentationQueueCompletionCount:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.presentationQueueCompletionCount
+                    ))
+                      ? Number(contentReceipt.presentationQueueCompletionCount)
+                      : null,
+                  presentationQueueCompletionSerial:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.presentationQueueCompletionSerial
+                    ))
+                      ? Number(contentReceipt.presentationQueueCompletionSerial)
+                      : null,
+                  presentationQueueCompletionMethod:
+                    contentReceipt.presentationQueueCompletionMethod ?? null,
+                  presentationQueueCompletionScope:
+                    contentReceipt.presentationQueueCompletionScope ?? null,
+                  physicsQueuePrefixCoverage:
+                    contentReceipt.physicsQueuePrefixCoverage ?? null,
+                  physicsHostQueueFenceParticipation:
+                    typeof contentReceipt.physicsHostQueueFenceParticipation
+                      === 'boolean'
+                      ? contentReceipt.physicsHostQueueFenceParticipation
+                      : null
+                }
+              : {}),
+            ...(temporalMotionFrameProofReady
+              ? {
+                  motionFrameSchema: contentReceipt.motionFrameSchema ?? null,
+                  motionFrameStatus: contentReceipt.motionFrameStatus ?? null,
+                  motionFrameAdmitted: true,
+                  motionFrameGpuCompleted: true,
+                  motionFramePresentationOpportunity: true,
+                  motionFramePresentationOpportunityMethod:
+                    contentReceipt.motionFramePresentationOpportunityMethod
+                    ?? null,
+                  motionFrameSerial: Number(contentReceipt.motionFrameSerial),
+                  motionFrameSubmittedSerial:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.motionFrameSubmittedSerial
+                    ))
+                      ? Number(contentReceipt.motionFrameSubmittedSerial)
+                      : null,
+                  motionSourceFrameCount:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.motionSourceFrameCount
+                    ))
+                      ? Number(contentReceipt.motionSourceFrameCount)
+                      : null,
+                  motionSourceSphStep:
+                    Number.isSafeInteger(Number(
+                      contentReceipt.motionSourceSphStep
+                    ))
+                      ? Number(contentReceipt.motionSourceSphStep)
+                      : null,
+                  motionAgeS: Number.isFinite(Number(contentReceipt.motionAgeS))
+                    ? Number(contentReceipt.motionAgeS)
+                    : null,
+                  motionAgeSource: contentReceipt.motionAgeSource ?? null,
+                  motionHorizonS:
+                    Number.isFinite(Number(contentReceipt.motionHorizonS))
+                      ? Number(contentReceipt.motionHorizonS)
+                      : null,
+                  motionSimulationTimeScale:
+                    Number.isFinite(Number(
+                      contentReceipt.motionSimulationTimeScale
+                    ))
+                      ? Number(contentReceipt.motionSimulationTimeScale)
+                      : null,
+                  motionMaxSimulationAgeS:
+                    Number.isFinite(Number(
+                      contentReceipt.motionMaxSimulationAgeS
+                    ))
+                      ? Number(contentReceipt.motionMaxSimulationAgeS)
+                      : null,
+                  motionMaxDisplacementM:
+                    Number.isFinite(Number(
+                      contentReceipt.motionMaxDisplacementM
+                    ))
+                      ? Number(contentReceipt.motionMaxDisplacementM)
+                      : null,
+                  motionTargetHz:
+                    Number.isFinite(Number(contentReceipt.motionTargetHz))
+                      ? Number(contentReceipt.motionTargetHz)
+                      : null,
+                  motionMethod: contentReceipt.motionMethod ?? null,
+                  motionVelocityBufferRetained:
+                    contentReceipt.motionVelocityBufferRetained === true,
+                  ...(contentReceipt.motionPresentationQosBoundary
+                    && typeof contentReceipt.motionPresentationQosBoundary
+                      === 'object'
+                    ? {
+                        motionPresentationQosBoundary: Object.freeze({
+                          submissionOrdinal: Number(
+                            contentReceipt.motionPresentationQosBoundary
+                              .submissionOrdinal
+                          ),
+                          completedSubstepCount: Number(
+                            contentReceipt.motionPresentationQosBoundary
+                              .completedSubstepCount
+                          ),
+                          totalSubstepCount: Number(
+                            contentReceipt.motionPresentationQosBoundary
+                              .totalSubstepCount
+                          ),
+                          chunkStepCount: Number(
+                            contentReceipt.motionPresentationQosBoundary
+                              .chunkStepCount
+                          )
+                        })
+                      }
+                    : {}),
+                  motionSubmitToGpuCompleteMs:
+                    Number.isFinite(Number(
+                      contentReceipt.motionSubmitToGpuCompleteMs
+                    ))
+                      ? Number(contentReceipt.motionSubmitToGpuCompleteMs)
+                      : null,
+                  motionSubmitToPresentationOpportunityMs:
+                    Number.isFinite(Number(
+                      contentReceipt.motionSubmitToPresentationOpportunityMs
+                    ))
+                      ? Number(
+                          contentReceipt
+                            .motionSubmitToPresentationOpportunityMs
+                        )
+                      : null
+                }
+              : {}),
             authorityStatus: contentReceipt.authorityStatus ?? null,
             computeManagerCompletionSchema:
               contentReceipt.computeManagerCompletionSchema ?? null,
@@ -2444,6 +3051,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
             sourceStageId: contentReceipt.sourceStageId ?? null,
             retainedParticleStateStatus:
               contentReceipt.retainedParticleStateStatus ?? null,
+            workerLocalRenderRowsProduced:
+              contentReceipt.workerLocalRenderRowsProduced === true,
             ...(typeof contentReceipt.presentationGeometry === 'string'
               ? {
                   presentationGeometry: contentReceipt.presentationGeometry,
@@ -2476,6 +3085,21 @@ export function createUlgWorkerOffscreenPresentationBridge({
                   boxDimsM: normalizePresentationBoxDimsM(
                     contentReceipt.boxDimsM
                   ),
+                  ...(contentReceipt.presentationGeometry
+                    === 'worker-owned-true-isosurface'
+                    ? {
+                        surfaceCount: Math.max(
+                          0,
+                          Math.floor(Number(contentReceipt.surfaceCount) || 0)
+                        ),
+                        indirectDrawCount: Math.max(
+                          0,
+                          Math.floor(
+                            Number(contentReceipt.indirectDrawCount) || 0
+                          )
+                        )
+                      }
+                    : {}),
                   sameDevicePresentation:
                     contentReceipt.sameDevicePresentation === true
                 }
@@ -2506,10 +3130,24 @@ export function createUlgWorkerOffscreenPresentationBridge({
               : {})
           })
         : null;
-      if (candidateReceiptReady) {
+      if (committedPresentationFramebufferCurrent) {
         bridge.workerCanvasLastRenderedContent = compactContentReceipt;
-        bridge.committedResidentSchedulePresentationStatus =
-          compactContentReceipt;
+        const acceptedQueueCompletionSerial = Number(
+          contentReceipt?.presentationQueueCompletionSerial
+        );
+        if (
+          Number.isSafeInteger(acceptedQueueCompletionSerial)
+          && acceptedQueueCompletionSerial > 0
+        ) {
+          bridge.workerFramebufferQueueCompletionSerialHighWater = Math.max(
+            bridge.workerFramebufferQueueCompletionSerialHighWater,
+            acceptedQueueCompletionSerial
+          );
+        }
+        if (committedPresentationReceiptCurrent) {
+          bridge.committedResidentSchedulePresentationStatus =
+            compactContentReceipt;
+        }
       }
       const contentReceiptReady = Boolean(
         exactFramebufferReceipt
@@ -2522,7 +3160,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
           // W4b: only the exact post-StateManager-commit candidate receipt may
           // bypass the page epoch. Raw progress/terminal candidate markers are
           // telemetry and can never reveal pixels.
-          || candidateReceiptReady
+          || (
+            committedPresentationFramebufferCurrent
+          )
         )
         && bridge.displayOwner === 'worker'
       );
@@ -2539,6 +3179,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA
         || data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA
         || data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA
+        || data.workerOffscreenRenderRows?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
       ) {
         bridge.publishRenderRowsStatus(data.workerOffscreenRenderRows);
       }
@@ -2613,7 +3254,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       cssHeight: size.cssHeight,
       pixelRatio: size.pixelRatio,
       backgroundColor: currentBackgroundColor,
-      clearAlpha
+      clearAlpha,
+      workerFramebufferEpoch: bridge.workerFramebufferEpoch
     }, [offscreenCanvas]);
     publish({
       status: 'worker-offscreen-presentation-transfer-submitted',

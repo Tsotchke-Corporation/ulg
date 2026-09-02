@@ -113,6 +113,9 @@ import {
   runSchroederWorkerLaneScheduleWithAuthority
 } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
+  createWorkerTier0PresentationQosPlan
+} from '../runtime/sph/sphWorkerPresentationQos.js';
+import {
   SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND,
   schroederTargetScheduleSuccessorGasBoundaryActionable,
   schroederTargetScheduleSuccessorReactionExecutionRequired
@@ -274,6 +277,9 @@ import {
 import {
   ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
   ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
   createUlgWorkerOffscreenPresentationBridge
 } from './offscreenPresentationBridge.js';
 import {
@@ -10684,6 +10690,11 @@ function normalizeResidentReadbackMode(value) {
 // padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
+// First worker-owned keyframe tier. At 48^3 the generalized dense field and
+// marching-cubes passes are small enough to remain a presentation consumer,
+// while preserving a smooth true surface. Temporal presentation can redraw
+// and advect this retained mesh independently between authoritative keyframes.
+export const SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION = 48;
 // 96 (from 64) after the extraction vertex-rows budget landed: vertex
 // allocation no longer scales with res³ (extension clamp), so the ceiling is
 // bound by field-buffer memory and field-kernel cost, not by worst-case
@@ -15097,6 +15108,126 @@ export function applySphPresentationCanvasOwnership({
   });
 }
 
+// A committed worker isosurface is the visible presentation authority until
+// another exact worker frame supersedes it. The compact native snapshot is a
+// diagnostic/fallback consumer after this point; it must never steal canvas
+// ownership and clear the already-admitted worker surface.
+export function workerOwnedIsosurfaceDisplayActive(residentSteps = null) {
+  const lane = residentSteps?.workerOwnedResidentLane ?? null;
+  const presentation = lane?.committedPresentation ?? null;
+  return Boolean(
+    residentSteps?.residentComputeManagerMode
+      === 'worker-owned-resident-lane'
+    && residentSteps?.workerLaneFallback == null
+    && lane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+    && lane?.cancelled === false
+    && Number.isSafeInteger(Number(lane?.completedStepCount))
+    && Number(lane.completedStepCount) > 0
+    && lane?.finalEpochIdentity
+    && typeof lane.finalEpochIdentity === 'object'
+    && Number.isSafeInteger(lane.finalEpochIdentity.storageGeneration)
+    && lane.finalEpochIdentity.storageGeneration >= 0
+    && Number.isSafeInteger(lane.finalEpochIdentity.physicsTick)
+    && lane.finalEpochIdentity.physicsTick >= 0
+    && Array.isArray(lane?.retainedBufferRefs)
+    && lane.retainedBufferRefs.length > 0
+    && typeof lane?.scheduleId === 'string'
+    && lane.scheduleId.length > 0
+    && typeof lane?.laneId === 'string'
+    && lane.laneId.length > 0
+    && typeof lane?.stateKey === 'string'
+    && lane.stateKey.length > 0
+    && presentation?.schema
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+    && presentation?.status
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+    && presentation?.presentationGeometry
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+    && presentation?.sourceCapturedBeforePhysicsContinuation === true
+    && presentation?.committedPresentationSchema
+      === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+    && presentation?.committedPresentationStatus
+      === 'state-manager-committed-resident-schedule-presentation-admission'
+    && presentation?.residentScheduleCandidatePresentation === true
+    && presentation?.stateManagerCommittedPresentation === true
+    && presentation?.scheduleId === lane.scheduleId
+    && presentation?.laneId === lane.laneId
+    && presentation?.stateKey === lane.stateKey
+    && Number.isSafeInteger(presentation?.residentExecutionGeneration)
+    && presentation.residentExecutionGeneration >= 0
+    && presentation.residentExecutionGeneration
+      === lane.finalEpochIdentity.storageGeneration
+    && Number.isSafeInteger(presentation?.sphStep)
+    && presentation.sphStep >= 0
+    && presentation.sphStep === lane.finalEpochIdentity.physicsTick
+    && Number.isSafeInteger(presentation?.stepOrdinal)
+    && presentation.stepOrdinal > 0
+    && presentation.stepOrdinal === Number(lane.completedStepCount)
+    && presentation?.authorityStatus
+      === 'state-manager-committed-worker-schedule'
+    && presentation?.computeManagerCompletionSchema
+      === ULG_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+    && typeof presentation?.computeManagerLeaseId === 'string'
+    && presentation.computeManagerLeaseId.length > 0
+    && presentation?.computeManagerLeaseStatus === 'completed'
+    && presentation?.computeManagerFenceSatisfied === true
+    && presentation?.stateManagerCommitStatus === 'committed'
+    && presentation?.stateManagerCommitAccepted === true
+    && presentation?.terminalScheduleFence === true
+    && presentation?.terminalFenceScope === 'resident-schedule-terminal'
+    && presentation?.terminalFenceSatisfied === true
+    && presentation?.terminalFenceAuthorityAdmissionReady === true
+    && presentation?.producerSourceKind
+      === 'worker-retained-resident-stage-output'
+    && presentation?.producerSourceTransport
+      === 'worker-retained-resident-stage-output'
+    && presentation?.sourceStageId === 'schroederSameLevelMechanics'
+    && presentation?.retainedParticleStateStatus
+      === 'worker-retained-particle-state-ready'
+  );
+}
+
+// Explicit main-thread presentation is a user choice, not an automatic
+// fallback. It must therefore outrank every worker-owned continuity policy
+// once a main-thread frame can be admitted. Keeping this arbitration pure
+// makes the precedence independently testable instead of relying on source
+// matching across the asynchronous candidate and resident-schedule paths.
+export function workerLanePresentationHoldsDisplay({
+  activeWorkerPresentation = false,
+  laneSeeded = false,
+  lanePoisoned = false,
+  explicitMainThreadPresentationRequested = false
+} = {}) {
+  return Boolean(
+    explicitMainThreadPresentationRequested !== true
+    && activeWorkerPresentation === true
+    && laneSeeded === true
+    && lanePoisoned !== true
+  );
+}
+
+export function resolveWorkerSchedulePresentationDisplayOwner({
+  explicitMainThreadPresentationRequested = false,
+  mainNativeDisplayOwnershipDeferred = false,
+  workerLaneNativeSurfacePresentationRequested = false,
+  workerLivePreviewRequested = false,
+  workerOwnedIsosurfaceRequested = false
+} = {}) {
+  // An explicit main-thread request becomes visible only after its first
+  // native frame is validated and submitted. Until that atomic handoff, keep
+  // the retained worker frame composited instead of clearing both canvases.
+  if (explicitMainThreadPresentationRequested === true) {
+    return mainNativeDisplayOwnershipDeferred === true
+      ? 'worker'
+      : 'main-native';
+  }
+  return workerLaneNativeSurfacePresentationRequested === true
+    && workerLivePreviewRequested !== true
+    && workerOwnedIsosurfaceRequested !== true
+    ? 'main-native'
+    : 'worker';
+}
+
 export function createSphPhaseScene(container, {
   // Opt-in per-stage mechanics tracing (sphStageMechanicsTracer.js). Off by
   // default: every snapshot is an extra submit plus a fixed-size map, which
@@ -16984,12 +17115,25 @@ export function createSphPhaseScene(container, {
         updatedAtMs: nowMs()
       };
       const bridge = workerOffscreenPresentationBridge;
+      const explicitMainThreadPresentationRequested = Boolean(
+        scene.userData.sphMainThreadSurfaceDrawDisplayOwnership?.requested
+          === true
+        && scene.userData.sphMainThreadSurfaceDrawDisplayOwnership?.explicit
+          === true
+      );
       if (
         bridge
         && !bridge.disposed
         && bridge.displayOwner !== 'worker'
-        && workerSchroederLaneState?.seeded === true
-        && !workerLaneNativeSurfacePresentationRequested
+        && workerLanePresentationHoldsDisplay({
+          activeWorkerPresentation: Boolean(
+            !workerLaneNativeSurfacePresentationRequested
+            || workerOwnedIsosurfaceDisplayActive(mlsMpmResidentSteps)
+          ),
+          laneSeeded: workerSchroederLaneState?.seeded === true,
+          lanePoisoned: workerSchroederLaneState?.poisoned === true,
+          explicitMainThreadPresentationRequested
+        })
       ) {
         bridge.setDisplayOwner({
           owner: 'worker',
@@ -30129,18 +30273,24 @@ fn main(
               && mlsMpmResidentSteps?.workerOwnedResidentLane
                 ?.committedPresentation?.stateManagerCommittedPresentation === true
             );
-            const workerLaneOwnsPresentation = Boolean(
-              workerSchroederLaneState?.seeded === true
-              && workerSchroederLaneState.poisoned !== true
-              && (
+            const committedWorkerOwnedIsosurfaceDisplayActive =
+              workerOwnedIsosurfaceDisplayActive(mlsMpmResidentSteps);
+            const workerLaneOwnsPresentation =
+              workerLanePresentationHoldsDisplay({
+                activeWorkerPresentation: Boolean(
                 // Live preview pins the display to the worker canvas even
                 // when an exact committed snapshot is available on the
                 // native path — see the owner selection in
                 // refreshSphResidentRenderState.
-                scene.userData.sphWorkerLaneLivePreviewRequested === true
-                || !exactWorkerLaneNativeSurfaceSnapshot
-              )
-            );
+                  scene.userData.sphWorkerLaneLivePreviewRequested === true
+                  || committedWorkerOwnedIsosurfaceDisplayActive
+                  || !exactWorkerLaneNativeSurfaceSnapshot
+                ),
+                laneSeeded: workerSchroederLaneState?.seeded === true,
+                lanePoisoned: workerSchroederLaneState?.poisoned === true,
+                explicitMainThreadPresentationRequested:
+                  item.explicitMainThreadSurfaceDrawBridgeRequested === true
+              });
             const workerDisplayOwnerCommit = workerLaneOwnsPresentation
               ? null
               : item.workerPresentationBridge?.setDisplayOwner?.({
@@ -30198,6 +30348,7 @@ fn main(
     additionalPlan,
     lineage,
     residentRenderSource,
+    explicitMainThreadSurfaceDrawBridgeRequested = false,
     publicationGuard
   }) {
     if (!residentRenderSource?.schema) {
@@ -30248,6 +30399,8 @@ fn main(
       preparation,
       lineage,
       residentRenderSource,
+      explicitMainThreadSurfaceDrawBridgeRequested:
+        explicitMainThreadSurfaceDrawBridgeRequested === true,
       publicationGuard,
       sceneLifecycleGeneration: sphNativeSurfaceSceneLifecycleGeneration,
       bridgeFormat: preparation.renderBridgeCandidate?.format ?? null,
@@ -46665,6 +46818,8 @@ fn main(
       surfaceDrawDiagnosticModeExplicit
       && isMainThreadResidentSurfaceDrawBridgeMode(surfaceDrawDiagnosticMode)
     );
+    const committedWorkerOwnedIsosurfaceDisplayActive =
+      workerOwnedIsosurfaceDisplayActive(residentSteps);
     // W4b: while the seeded worker lane is the active SS route, the lane's
     // render candidates are the ONLY live presentation source (the page
     // device receives no per-step state, so any main-canvas consumer would
@@ -46672,12 +46827,20 @@ fn main(
     // must not take display ownership from the explicitly requested
     // worker-owned producer; an EXPLICIT surfaceDraw main-thread selection
     // still wins below.
-    const workerLaneCandidatePresentationActive = Boolean(
-      workerSchroederLaneState?.seeded === true
-      && workerSchroederLaneState.poisoned !== true
-      && workerLaneRouteAdmission({ requireManagers: false }).eligible === true
-      && !admittedWorkerLaneNativeSurfaceSource
-    );
+    const workerLaneCandidatePresentationActive =
+      workerLanePresentationHoldsDisplay({
+        activeWorkerPresentation: Boolean(
+          workerLaneRouteAdmission({ requireManagers: false }).eligible === true
+          && (
+        !admittedWorkerLaneNativeSurfaceSource
+        || committedWorkerOwnedIsosurfaceDisplayActive
+          )
+        ),
+        laneSeeded: workerSchroederLaneState?.seeded === true,
+        lanePoisoned: workerSchroederLaneState?.poisoned === true,
+        explicitMainThreadPresentationRequested:
+          explicitMainThreadSurfaceDrawBridgeRequested
+      });
     // The native WebGPU surface consumer paints the MAIN canvas even when it
     // was reached by defaulting (auto-resolve) rather than an explicit URL
     // selection. Letting the worker-presented particle canvas keep drawing on
@@ -46714,20 +46877,25 @@ fn main(
       && !committedNativeSurfacePresentationAvailable
       && !admittedWorkerLaneNativeSurfaceSource
     );
-    // While a live preview is requested and the worker lane is live, the
-    // worker canvas keeps the display across schedule boundaries: handing
-    // ownership to main-native after each committed snapshot resets the
-    // bridge's content-ready latch, and preview draws (deliberately barred
-    // from revealing pixels) would then paint a hidden canvas all schedule.
-    const workerLaneLivePreviewHoldsDisplay = Boolean(
-      scene.userData.sphWorkerLaneLivePreviewRequested === true
-      && workerSchroederLaneState?.seeded === true
-      && workerSchroederLaneState.poisoned !== true
-    );
+    // A live preview or exact committed worker isosurface keeps the display
+    // across schedule boundaries. Handing ownership to main-native after each
+    // compact snapshot resets the bridge's content-ready latch and clears the
+    // worker canvas, destroying the actual worker presentation.
+    const workerLaneWorkerPresentationHoldsDisplay =
+      workerLanePresentationHoldsDisplay({
+        activeWorkerPresentation: Boolean(
+        scene.userData.sphWorkerLaneLivePreviewRequested === true
+        || committedWorkerOwnedIsosurfaceDisplayActive
+        ),
+        laneSeeded: workerSchroederLaneState?.seeded === true,
+        lanePoisoned: workerSchroederLaneState?.poisoned === true,
+        explicitMainThreadPresentationRequested:
+          explicitMainThreadSurfaceDrawBridgeRequested
+      });
     const effectivePresentationDisplayOwner =
       mainThreadSurfaceDrawDisplayOwnershipRequested
       && !mainNativeDisplayOwnershipDeferred
-      && !workerLaneLivePreviewHoldsDisplay
+      && !workerLaneWorkerPresentationHoldsDisplay
         ? 'main-native'
         : 'worker';
     const effectivePresentationDisplayOwnerEpoch = Math.max(
@@ -46764,20 +46932,36 @@ fn main(
       workerDisplayOwnerStatus: workerOffscreenDisplayOwner?.status ?? null,
       updatedAtMs: nowMs()
     };
-    const presentationWorkerRetainedOutputStatus = (
-      renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
-      && !presentationWorkerRetainedOutputBypassedForNativeConsumer
-      && !explicitMainThreadSurfaceDrawBridgeRequested
-    )
-      // The worker may only keep display ownership when its retained stage
-      // output is for the CURRENT step; a stale output (worker stages not
-      // running, e.g. under two-level authority) must fall through to the
-      // compact render-row transfer so fresh particle data reaches the
-      // worker-owned canvas every refresh.
-      ? workerOffscreenRetainedStageOutputStatusForParticleState(nextSphParticleState, {
-        requireSourceStepMatch: true
-      })
-      : null;
+    const committedWorkerOwnedIsosurfacePresentationStatus =
+      committedWorkerOwnedIsosurfaceDisplayActive
+        && !explicitMainThreadSurfaceDrawBridgeRequested
+        ? {
+            ...(
+              currentWorkerOffscreenRenderRowsStatus()
+              || residentSteps?.workerOwnedResidentLane?.committedPresentation
+              || {}
+            ),
+            sourceStepMatchesCurrent: true
+          }
+        : null;
+    const presentationWorkerRetainedOutputStatus =
+      committedWorkerOwnedIsosurfacePresentationStatus
+      || ((
+        renderOwnershipPolicyForRefresh
+          ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+        && !presentationWorkerRetainedOutputBypassedForNativeConsumer
+        && !explicitMainThreadSurfaceDrawBridgeRequested
+      )
+        // The worker may only keep display ownership when its retained stage
+        // output is for the CURRENT step; a stale output (worker stages not
+        // running, e.g. under two-level authority) must fall through to the
+        // compact render-row transfer so fresh particle data reaches the
+        // worker-owned canvas every refresh.
+        ? workerOffscreenRetainedStageOutputStatusForParticleState(
+            nextSphParticleState,
+            { requireSourceStepMatch: true }
+          )
+        : null);
     if (presentationWorkerRetainedOutputStatus) {
       const preservedWorkerRenderRowsStatus = publishWorkerOffscreenRenderRowsStatus({
         ...presentationWorkerRetainedOutputStatus,
@@ -49407,6 +49591,7 @@ fn main(
                         residentDraw: nativeSurfaceDraw,
                         additionalPlan: stagedAdditionalSurfacePlan,
                         residentRenderSource,
+                        explicitMainThreadSurfaceDrawBridgeRequested,
                         lineage: {
                           residentSteps,
                           workerLaneNativeSurfacePresentationSource:
@@ -51733,8 +51918,7 @@ fn main(
   function streamPreviewCameraIfLivePreviewOwnsDisplay() {
     const bridge = workerOffscreenPresentationBridge;
     if (
-      scene.userData.sphWorkerLaneLivePreviewRequested !== true
-      || workerSchroederLaneState?.seeded !== true
+      workerSchroederLaneState?.seeded !== true
       || bridge?.displayOwner !== 'worker'
       || typeof bridge.updatePreviewViewProjection !== 'function'
     ) {
@@ -51752,13 +51936,16 @@ fn main(
       if (!changed) return;
     }
     lastPostedPreviewViewProjection = matrix;
-    bridge.updatePreviewViewProjection(matrix);
+    bridge.updatePreviewViewProjection(matrix, {
+      reason: 'worker-owned-presentation-camera-update',
+      cameraPositionM: camera.position.toArray()
+    });
   }
   function animate() {
     if (!running) return;
     const controlsChanged = controls.update() === true;
-    // The preview draws with the schedule-time matrix otherwise; without
-    // this stream a camera drag lags presentation by up to a schedule.
+    // Worker-owned geometry draws with the schedule-time matrix otherwise;
+    // without this stream a camera drag lags presentation by up to a schedule.
     streamPreviewCameraIfLivePreviewOwnsDisplay();
     const nativeBridge = sphResidentSurfaceDrawRenderBridge?.rendererBridge
       === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
@@ -52538,6 +52725,36 @@ fn main(
       materialProperties: currentMaterialProperties,
       reactionTable: sphReactionTable
     });
+    const workerOwnedIsosurfaceBatches =
+      stageId === 'schroederSameLevelMechanics'
+      && workerLaneNativeSurfacePresentationRequested
+      && Array.isArray(sphResidentRenderSurfaceState?.fieldBatches)
+        ? sphResidentRenderSurfaceState.fieldBatches
+        : [];
+    const workerOwnedIsosurfaceSurfaceTable =
+      workerOwnedIsosurfaceBatches.length > 0
+        ? createRenderFieldSurfaceTableForBatches(
+            workerOwnedIsosurfaceBatches,
+            {
+              maxResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+              minResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
+            }
+          )
+        : null;
+    const workerOwnedIsosurfaceBudget = workerOwnedIsosurfaceSurfaceTable
+      ? Math.max(
+          3,
+          Math.floor(
+            Math.min(
+              nativeMarchingCubesVertexRowsBudgetPerSurface(
+                workerOwnedIsosurfaceSurfaceTable.surfaceCount
+              ),
+              SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
+                * (SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION - 1) ** 3
+            ) / 3
+          ) * 3
+        )
+      : 0;
     return {
       schema: 'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0',
       enabled: true,
@@ -52572,6 +52789,34 @@ fn main(
         `colors:${materialColorRows.length}`
       ].join('|'),
       viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      ...(workerOwnedIsosurfaceSurfaceTable
+        ? {
+            workerOwnedIsosurface: {
+              schema:
+                'peercompute.ulg.worker-offscreen-resident-isosurface-request.v0',
+              enabled: true,
+              geometryMode: 'true-isosurface',
+              producer:
+                'worker-retained-state-to-field-to-marching-cubes-indirect',
+              materialAgnostic: true,
+              scenarioAgnostic: true,
+              readbackMode: 'no-full-readback',
+              surfaceTable: workerOwnedIsosurfaceSurfaceTable,
+              surfaceCount: workerOwnedIsosurfaceSurfaceTable.surfaceCount,
+              totalFieldCells:
+                workerOwnedIsosurfaceSurfaceTable.totalFieldCells,
+              fieldResolution:
+                SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+              fieldPadding: FIELD_PADDING,
+              refEdgeM,
+              renderSmearDtS: 0,
+              vertexRowsBudget: workerOwnedIsosurfaceBudget,
+              viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+              cameraPositionM: camera.position.toArray(),
+              boxDimsM: [...dims]
+            }
+          }
+        : {}),
       boxDimsM: [...dims],
       radiusScalePx: Math.max(48, Math.min(240, backingMinPx * 0.14)),
       fallbackPointSizePx: Math.max(3, Math.min(8, backingMinPx * 0.008)),
@@ -52852,8 +53097,19 @@ fn main(
       );
       if (
         identityMatches
-        && status?.status
-          === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && (
+          status?.status
+            === 'worker-offscreen-resident-particle-state-producer-rendered'
+          || (
+            status?.schema
+              === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA
+            && status?.status
+              === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+            && status?.presentationGeometry
+              === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+            && status?.sourceCapturedBeforePhysicsContinuation === true
+          )
+        )
         && status?.committedPresentationSchema
           === ULG_WORKER_OFFSCREEN_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
         && status?.committedPresentationStatus
@@ -53738,6 +53994,18 @@ fn main(
         .toLowerCase() === 'authoritative'
     );
     const workerLivePreviewRequested = workerLiveParticlePreview === true;
+    const workerTemporalPresentationTargetHz = 60;
+    const workerTemporalPresentationQosPlan =
+      createWorkerTier0PresentationQosPlan({
+        requestedStepCount,
+        presentationRequested: workerLivePreviewRequested,
+        targetHz: workerTemporalPresentationTargetHz,
+        dtS: dt
+      });
+    const workerTemporalExpectedWallHorizonS =
+      workerTemporalPresentationQosPlan.expectedWallHorizonS;
+    const workerTemporalSimulationHorizonS =
+      workerTemporalPresentationQosPlan.simulationHorizonS;
     const renderRequestBase = workerOffscreenRetainedStageOutputRenderRequest({
       stageId: 'schroederSameLevelMechanics',
       laneId,
@@ -53753,7 +54021,46 @@ fn main(
           // The presentation worker throttles them and every preview
           // publishes stateManagerCommittedPresentation: false.
           residentScheduleLivePreview: workerLivePreviewRequested,
-          livePreviewMinIntervalMs: 66
+          livePreviewMinIntervalMs: 1000 / 60,
+          temporalMotion: workerLivePreviewRequested
+            ? {
+                schema:
+                  'peercompute.ulg.worker-offscreen-particle-temporal-motion.v0',
+                enabled: true,
+                targetHz: workerTemporalPresentationTargetHz,
+                presentationSlotCount:
+                  workerTemporalPresentationQosPlan.presentationSlotCount,
+                // Presentation-only characteristic motion from the exact
+                // retained position/velocity keyframe. Freeze at a bounded
+                // horizon rather than inventing an authoritative SPH state
+                // when a newer worker result is late.
+                maxHorizonS: Math.max(
+                  0.25,
+                  workerTemporalExpectedWallHorizonS * 1.5
+                ),
+                // The logical physics transaction advances K*dt while its
+                // queue-QoS presentation slots advance in wall time. Pace
+                // characteristic motion across those slots so a slower-than-
+                // realtime simulation does not overshoot and snap backward
+                // at the next exact terminal keyframe.
+                simulationTimeScale:
+                  workerTemporalSimulationHorizonS
+                    / workerTemporalExpectedWallHorizonS,
+                maxSimulationAgeS: workerTemporalSimulationHorizonS,
+                maxDisplacementM: Math.max(
+                  0.04,
+                  0.75 * (
+                    Number(sphParticleState?.smoothingLengthM) || 0.02
+                  )
+                )
+              }
+            : null,
+          // Explicit particle live preview and true-isosurface extraction are
+          // different geometry modes. Never let an uncommitted particle frame
+          // promote over a queued committed surface generation.
+          workerOwnedIsosurface: workerLivePreviewRequested
+            ? null
+            : (renderRequestBase.workerOwnedIsosurface ?? null)
         }
       : null;
     workerLanePageTiming.renderRequestReadyAtMs = nowMs();
@@ -53795,26 +54102,48 @@ fn main(
           twoLevelTerminalRefluxReceiptRequired:
             authorityTerminalRefluxReceiptRequired
         }) => {
-          // Surface presets keep the last admitted native isosurface visible
-          // while the worker computes and emits a hidden candidate receipt.
-          // Particle/debug modes still let the worker canvas own display.
-          // The native path exports the exact committed worker snapshot after
-          // this schedule and only then swaps the surface generation.
+          // Worker-owned surface presets keep the last admitted frame visible
+          // while the same worker captures/builds their next true-isosurface.
+          // Legacy surface fallback still uses a page-native snapshot; particle
+          // and debug modes retain their existing worker canvas route.
           // The explicit live-preview request also hands the worker canvas
           // the display: mid-schedule preview draws are its whole point,
           // and they are invisible under main-native ownership.
+          const workerOwnedIsosurfaceRequested = Boolean(
+            renderRequest?.workerOwnedIsosurface?.enabled === true
+          );
+          const explicitMainThreadPresentationRequested = Boolean(
+            scene.userData.sphMainThreadSurfaceDrawDisplayOwnership?.requested
+              === true
+            && scene.userData.sphMainThreadSurfaceDrawDisplayOwnership?.explicit
+              === true
+          );
+          const mainNativeDisplayOwnershipDeferred = Boolean(
+            scene.userData.sphMainThreadSurfaceDrawDisplayOwnership
+              ?.mainNativeDisplayOwnershipDeferred === true
+          );
           const requestedScheduleDisplayOwner =
-            workerLaneNativeSurfacePresentationRequested
-            && !workerLivePreviewRequested
-              ? 'main-native'
-              : 'worker';
+            resolveWorkerSchedulePresentationDisplayOwner({
+              explicitMainThreadPresentationRequested,
+              mainNativeDisplayOwnershipDeferred,
+              workerLaneNativeSurfacePresentationRequested,
+              workerLivePreviewRequested,
+              workerOwnedIsosurfaceRequested
+            });
           const workerDisplayOwnerAdmission = bridge.setDisplayOwner?.({
             owner: requestedScheduleDisplayOwner,
             reason: requestedScheduleDisplayOwner === 'main-native'
-              ? 'worker-lane-native-surface-snapshot-presentation-admission'
-              : (workerLivePreviewRequested
+              ? (explicitMainThreadPresentationRequested
+                ? 'explicit-main-thread-surface-presentation-admission'
+                : 'worker-lane-native-surface-snapshot-presentation-admission')
+              : (explicitMainThreadPresentationRequested
+                && mainNativeDisplayOwnershipDeferred
+                ? 'explicit-main-thread-surface-presentation-deferred-until-native-frame'
+              : (workerOwnedIsosurfaceRequested
+                ? 'worker-lane-true-isosurface-presentation-admission'
+                : (workerLivePreviewRequested
                 ? 'worker-lane-live-preview-admission'
-                : 'worker-lane-resident-schedule-admission'),
+                : 'worker-lane-resident-schedule-admission'))),
             revealWhenContentReady: requestedScheduleDisplayOwner === 'worker'
           }) || null;
           if (bridge.displayOwner !== requestedScheduleDisplayOwner) {
@@ -54051,9 +54380,10 @@ fn main(
     // Presentation is a consumer of committed state, never an admission
     // mechanism. The schedule result above has already crossed the worker
     // terminal queue fence, ComputeManager lease completion, and StateManager
-    // commit. Release the exact terminal candidate only now, then wait until
-    // its worker-local queue submit is acknowledged before allowing the mount
-    // to continue this retained lane.
+    // commit. Release the exact terminal candidate only now. Particle mode
+    // waits for its already-cheap draw; true-isosurface mode waits only until
+    // the worker has captured/enqueued the immutable source. Field/MC/draw are
+    // an asynchronous consumer and never serialize the next physics schedule.
     let committedPresentation = null;
     if (renderRequest) {
       try {
@@ -54126,7 +54456,12 @@ fn main(
       }
       markResidentStepsProgress(
         committedPresentation?.stateManagerCommittedPresentation === true
-          ? 'resident-steps-worker-lane-committed-presentation-complete'
+          ? (
+              committedPresentation?.status
+                === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+                ? 'resident-steps-worker-lane-committed-isosurface-enqueued'
+                : 'resident-steps-worker-lane-committed-presentation-complete'
+            )
           : 'resident-steps-worker-lane-committed-presentation-blocked',
         {
           laneId,
@@ -54784,8 +55119,28 @@ fn main(
               completedStepCount:
                 executionRoute?.completedStepCount ?? null,
               atomicSchedule: executionRoute?.atomicSchedule === true,
+              submissionMode: executionRoute?.submissionMode ?? null,
               commandSubmissionCount:
                 executionRoute?.commandSubmissionCount ?? null,
+              submissionStepCounts: Array.isArray(
+                executionRoute?.submissionStepCounts
+              )
+                ? [...executionRoute.submissionStepCounts]
+                : null,
+              maxSubstepsPerSubmission:
+                executionRoute?.maxSubstepsPerSubmission ?? null,
+              presentationBoundaryCount:
+                executionRoute?.presentationBoundaryCount ?? null,
+              presentationBoundaryCompletedCount:
+                executionRoute?.presentationBoundaryCompletedCount ?? null,
+              presentationBoundaryFailureCount:
+                executionRoute?.presentationBoundaryFailureCount ?? null,
+              presentationQosHostQueueFenceCount:
+                executionRoute?.presentationQosHostQueueFenceCount ?? null,
+              logicalAuthorityPublicationCount:
+                executionRoute?.logicalAuthorityPublicationCount ?? null,
+              intermediateAuthorityPublicationCount:
+                executionRoute?.intermediateAuthorityPublicationCount ?? null,
               internalPositionSubstepCount:
                 executionRoute?.internalPositionSubstepCount ?? null,
               fullParticleReadbackPerformed:

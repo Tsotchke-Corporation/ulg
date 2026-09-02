@@ -21677,6 +21677,9 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     readbackMode: 'no-full-readback',
     compactSummaryMode: 'final-only',
     fuseNoFullResidentMechanicsSequence: true,
+    // A chunk size alone cannot weaken the legacy one-submit contract. The
+    // worker must also provide the presentation boundary callback.
+    maxSubstepsPerSubmission: 1,
     summaryRunner({
       sphParticleUpload,
       mlsMpmParticleUpload,
@@ -21750,7 +21753,33 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.stepCount, 2);
   assert.equal(execution.completedStepCount, 2);
   assert.equal(execution.fusedResidentSequence.status, 'fused-resident-sequence-executed');
+  assert.equal(
+    execution.fusedResidentSequence.submissionMode,
+    'single-terminal-submission'
+  );
   assert.equal(execution.fusedResidentSequence.commandSubmissionCount, 1);
+  assert.deepEqual(execution.fusedResidentSequence.submissionStepCounts, [2]);
+  assert.equal(
+    execution.fusedResidentSequence.maxSubstepsPerSubmission,
+    null
+  );
+  assert.equal(execution.fusedResidentSequence.presentationBoundaryCount, 0);
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryCompletedCount,
+    0
+  );
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryFailureCount,
+    0
+  );
+  assert.equal(
+    execution.fusedResidentSequence.logicalAuthorityPublicationCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.intermediateAuthorityPublicationCount,
+    0
+  );
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, true);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequenceStepCount, 2);
   assert.equal(execution.finalStep.particlePingPong.sourceSlot, 1);
@@ -21812,6 +21841,241 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     ],
     'only the shared zero-row placeholders outlive the execution'
   );
+});
+
+test('MLS-MPM fused resident sequence yields presentation QoS boundaries between bounded queue submissions', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const boundaries = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('qos-source-state'),
+      thermoBuffer: tracker.buffer('qos-source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('qos-source-mechanics'),
+      slot: 0
+    },
+    stepCount: 17,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    maxSubstepsPerSubmission: 8,
+    async onPresentationSubmissionBoundary(metadata) {
+      assert.equal(Object.isFrozen(metadata), true);
+      assert.ok(
+        Object.values(metadata).every((value) => (
+          typeof value === 'number' && Number.isFinite(value)
+        ))
+      );
+      boundaries.push(metadata);
+      return { presentationQosHostQueueFenceCount: 1 };
+    }
+  });
+
+  assert.equal(execution.completedStepCount, 17);
+  assert.equal(
+    execution.fusedResidentSequence.submissionMode,
+    'queue-ordered-presentation-qos-chunks'
+  );
+  assert.equal(execution.fusedResidentSequence.commandSubmissionCount, 3);
+  assert.deepEqual(
+    execution.fusedResidentSequence.submissionStepCounts,
+    [8, 8, 1]
+  );
+  assert.equal(execution.fusedResidentSequence.maxSubstepsPerSubmission, 8);
+  assert.equal(execution.fusedResidentSequence.presentationBoundaryCount, 2);
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryCompletedCount,
+    2
+  );
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryFailureCount,
+    0
+  );
+  assert.equal(
+    execution.fusedResidentSequence.presentationQosHostQueueFenceCount,
+    2
+  );
+  assert.equal(
+    execution.fusedResidentSequence.logicalAuthorityPublicationCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.intermediateAuthorityPublicationCount,
+    0
+  );
+  assert.deepEqual(boundaries, [
+    {
+      submissionOrdinal: 1,
+      completedSubstepCount: 8,
+      totalSubstepCount: 17,
+      chunkStepCount: 8
+    },
+    {
+      submissionOrdinal: 2,
+      completedSubstepCount: 16,
+      totalSubstepCount: 17,
+      chunkStepCount: 8
+    }
+  ]);
+  assert.equal(device.submissions.length, 3);
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM fused resident sequence treats a rejected presentation QoS boundary as fail-open telemetry', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  let boundaryCallCount = 0;
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('qos-fail-open-source-state'),
+      thermoBuffer: tracker.buffer('qos-fail-open-source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('qos-fail-open-source-mechanics'),
+      slot: 0
+    },
+    stepCount: 5,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    maxSubstepsPerSubmission: 2,
+    async onPresentationSubmissionBoundary() {
+      boundaryCallCount += 1;
+      if (boundaryCallCount === 1) {
+        throw new Error('synthetic compositor boundary failure');
+      }
+      return { presentationQosHostQueueFenceCount: 1 };
+    }
+  });
+
+  assert.equal(execution.completedStepCount, 5);
+  assert.equal(boundaryCallCount, 2);
+  assert.equal(
+    execution.fusedResidentSequence.submissionMode,
+    'queue-ordered-presentation-qos-chunks'
+  );
+  assert.deepEqual(
+    execution.fusedResidentSequence.submissionStepCounts,
+    [2, 2, 1]
+  );
+  assert.equal(execution.fusedResidentSequence.commandSubmissionCount, 3);
+  assert.equal(execution.fusedResidentSequence.presentationBoundaryCount, 2);
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryCompletedCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.presentationBoundaryFailureCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.presentationQosHostQueueFenceCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.logicalAuthorityPublicationCount,
+    1
+  );
+  assert.equal(
+    execution.fusedResidentSequence.intermediateAuthorityPublicationCount,
+    0
+  );
+  assert.equal(device.submissions.length, 3);
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM fused resident sequence defers exact-once cleanup after a submitted QoS prefix fails', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const createCommandEncoder = device.createCommandEncoder.bind(device);
+  let encoderCreateCount = 0;
+  let boundaryCallCount = 0;
+  let queueCompletionCount = 0;
+  device.createCommandEncoder = () => {
+    encoderCreateCount += 1;
+    if (encoderCreateCount === 2) {
+      throw new Error('synthetic second QoS encoder failure');
+    }
+    return createCommandEncoder();
+  };
+  device.queue.onSubmittedWorkDone = async () => {
+    queueCompletionCount += 1;
+  };
+
+  await assert.rejects(
+    runMlsMpmResidentStepsWithOptionalWebGpu({
+      ...buffers,
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        stateBuffer: tracker.buffer('qos-prefix-failure-source-state'),
+        thermoBuffer: tracker.buffer('qos-prefix-failure-source-thermo'),
+        slot: 0
+      },
+      mlsMpmParticleUpload: {
+        status: 'webgpu-uploaded',
+        mechanicsBuffer: tracker.buffer(
+          'qos-prefix-failure-source-mechanics'
+        ),
+        slot: 0
+      },
+      stepCount: 5,
+      preferWebGpu: true,
+      device,
+      boxDimsM: [3, 3, 3],
+      readbackMode: 'no-full-readback',
+      compactSummaryMode: 'none',
+      activeGridDispatchPlanRefreshMode: 'none',
+      fuseNoFullResidentMechanicsSequence: true,
+      maxSubstepsPerSubmission: 2,
+      async onPresentationSubmissionBoundary() {
+        boundaryCallCount += 1;
+      }
+    }),
+    /synthetic second QoS encoder failure/
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(device.submissions.length, 1);
+  assert.equal(boundaryCallCount, 1);
+  assert.equal(queueCompletionCount, 1);
+  const sharedBufferLabels = new Set([
+    'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
+    'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
+  ]);
+  const sequenceOwnedBuffers = device.createdBuffers.filter(
+    (buffer) => !sharedBufferLabels.has(buffer.label)
+  );
+  assert.ok(sequenceOwnedBuffers.length > 0);
+  for (const buffer of sequenceOwnedBuffers) {
+    assert.equal(buffer.destroyCount, 1, `${buffer.label} cleanup count`);
+  }
 });
 
 test('MLS-MPM fused sequence admits the laws-quiescent one-lane phase plan and publishes exact K-step terminal lineage', async () => {

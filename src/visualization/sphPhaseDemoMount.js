@@ -5665,7 +5665,7 @@ function buildOverlayShell() {
       </div>
     </div>
     <div id="sph-warning-bar" aria-live="polite">
-      <span id="sph-fps" class="sph-fps-chip">render fps -- | physics fps --</span>
+      <span id="sph-fps" class="sph-fps-chip" title="UI requestAnimationFrame callback rate; this is not visible geometry throughput.">ui raf -- | physics fps --</span>
     </div>
     <button id="sph-toggle" type="button" aria-label="Toggle controls">☰ menu</button>
     <button id="sph-lighting-toggle" type="button" aria-label="Toggle dark-lab lighting" aria-pressed="false">☾ dark lab</button>
@@ -11119,6 +11119,9 @@ export async function mountSphPhaseDemoOverlay({
 
   function sampleFrameCounters() {
     const now = performance.now();
+    // Legacy `renderFps` storage is kept for receipt compatibility, but this
+    // counter is only the UI requestAnimationFrame heartbeat. It says nothing
+    // about whether a new particle/surface state reached the visible canvas.
     frameCounters.renderFrames += 1;
     const elapsedS = (now - frameCounters.lastSampleMs) / 1000;
     if (elapsedS >= 1) {
@@ -11433,7 +11436,7 @@ export async function mountSphPhaseDemoOverlay({
   function updateWarningBanner() {
     const simTimeS = currentSimulationTimeS();
     const simText = Number.isFinite(simTimeS) ? ` | sim t ${fmt(simTimeS, 3)}s` : '';
-    fpsEl.textContent = `render fps ${fmt(frameCounters.renderFps, 1)} | physics fps ${fmt(frameCounters.physicsFps, 1)} | resident fps ${fmt(frameCounters.residentFps, 1)} | resident ${residentCompletionRateStatusText()}${simText}`;
+    fpsEl.textContent = `ui raf ${fmt(frameCounters.renderFps, 1)} | physics fps ${fmt(frameCounters.physicsFps, 1)} | resident fps ${fmt(frameCounters.residentFps, 1)} | resident ${residentCompletionRateStatusText()}${simText}`;
     const warnings = currentWarningMessages();
     const warningNodes = warnings.map((message) => {
       const chip = document.createElement('span');
@@ -16766,7 +16769,7 @@ export async function mountSphPhaseDemoOverlay({
         `resident stages  : ${residentStageTimingStatusText(residentStageTiming)}`,
         `scene sync       : ${sceneSyncTimingStatusText(overlay.__sphSetParticlesTiming)}`,
         `worker rebuild   : ${workerRebuildTimingStatusText(workerTiming)}`,
-        `fps              : render ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
+        `fps              : ui-raf ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
         `closure cache    : lookup=${peerClosureCacheLookup?.status || 'pending'} hits=${peerClosureCacheLookup?.hitCount ?? 0} misses=${peerClosureCacheLookup?.missCount ?? 0} stale=${peerClosureCacheLookup?.staleCount ?? 0} stored=${peerClosureCacheWrite?.entryCount ?? 0} consumed=${Boolean(peerClosureCacheConsumed)}`,
         `cold cache       : ${coldStartCacheStatusText()}`,
         `cache clear      : ${cacheClearStatusText()}`,
@@ -17011,7 +17014,7 @@ export async function mountSphPhaseDemoOverlay({
       `cpu step stages  : ${cpuDriverStepTimingStatusText(cpuDriverStepTiming)}`,
       `scene sync       : ${sceneSyncTimingStatusText(overlay.__sphSetParticlesTiming)}`,
       `worker rebuild   : ${workerRebuildTimingStatusText(workerTiming)}`,
-      `fps              : render ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
+      `fps              : ui-raf ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
       `closure cache    : lookup=${peerClosureCacheLookup?.status || 'pending'} hits=${peerClosureCacheLookup?.hitCount ?? 0} misses=${peerClosureCacheLookup?.missCount ?? 0} stale=${peerClosureCacheLookup?.staleCount ?? 0} stored=${peerClosureCacheWrite?.entryCount ?? 0} consumed=${Boolean(peerClosureCacheConsumed)}`,
       `cold cache       : ${coldStartCacheStatusText()}`,
       `cache clear      : ${cacheClearStatusText()}`,

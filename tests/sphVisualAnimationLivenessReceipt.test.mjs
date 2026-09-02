@@ -55,6 +55,10 @@ import {
   waitForQuiescentCaptureSnapshot
 } from '../scripts/sph-visual-animation-liveness-receipt.mjs';
 import {
+  evaluateCadenceSample,
+  summarizeVisiblePresentationCadence
+} from '../scripts/sph-headed-cadence-metrics.mjs';
+import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
   SCHROEDER_DYNAMIC_LAW_ROUTING_EXECUTION_GATE,
   SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
@@ -206,6 +210,54 @@ function presetEntryAutoplaySnapshot(id, overrides = {}) {
     renderBridgeSourceResidentNextStep: stepCount,
     ...overrides
   });
+}
+
+function visibleCadenceObservation({
+  timestampMs,
+  sourceStep,
+  presentationSerial,
+  owner = 'main-native',
+  cohortIdentity = 'lane-a|state-a|lifecycle-1|owner-epoch-1',
+  admitted = true,
+  motionFrameAdmitted = false,
+  motionFrameSerial = null,
+  admissionBlockers = []
+}) {
+  return {
+    timestampMs,
+    owner,
+    cohortIdentity,
+    admitted,
+    sourceStep,
+    presentationSerial,
+    motionFrameAdmitted,
+    motionFrameSerial,
+    admissionBlockers
+  };
+}
+
+function evaluatedVisibleCadence(observations, {
+  sampleDurationMs = 5_000,
+  minimumHz = 54
+} = {}) {
+  const cadence = summarizeVisiblePresentationCadence(observations, {
+    sampleDurationMs
+  });
+  return {
+    cadence,
+    evaluation: evaluateCadenceSample({
+      ...cadence,
+      sampleDurationMs,
+      rafFrameCount: Math.max(0, observations.length - 1),
+      documentVisibility: 'visible',
+      documentHasFocus: true,
+      finalDocumentVisibility: 'visible',
+      finalDocumentHasFocus: true
+    }, {
+      minimumHz,
+      targetHz: 60
+    })
+  };
 }
 
 function frameIdentity(snapshot) {
@@ -1034,6 +1086,154 @@ test('preset-entry runner observes self-start before any pause/resume capture co
   assert.ok(pauseIndex > observedIndex);
   assert.ok(resumeIndex > pauseIndex);
   assert.doesNotMatch(entryBranch, /initialPlayClickPerformed = true/);
+});
+
+test('headed cadence accepts 60 Hz distinct admitted geometry states', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 300,
+      sourceStep: index,
+      presentationSerial: index + 1
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.sourceTransitionCount, 300);
+  assert.equal(cadence.visualTransitionCount, 300);
+  assert.equal(cadence.meanVisiblePresentationHz, 60);
+  assert.ok(cadence.medianVisiblePresentationHz >= 59.9);
+  assert.equal(evaluation.status, 'pass');
+  assert.deepEqual(evaluation.issues, []);
+});
+
+test('headed cadence rejects a 60 Hz RAF over frozen geometry', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 300,
+      sourceStep: 7,
+      presentationSerial: index + 1
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.observedPresentationCount, 301);
+  assert.equal(cadence.distinctSourceCount, 1);
+  assert.equal(cadence.sourceTransitionCount, 0);
+  assert.equal(cadence.visualTransitionCount, 0);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(evaluation.issues.includes('visible-presentation-transitions-missing'));
+  assert.ok(evaluation.issues.includes('mean-visible-presentation-below-target'));
+});
+
+test('headed cadence counts a large source-step jump as one visible state', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 300,
+      sourceStep: Math.floor(index / 15) * 64,
+      presentationSerial: index + 1
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.sourceTransitionCount, 20);
+  assert.equal(cadence.visualTransitionCount, 20);
+  assert.equal(cadence.meanVisiblePresentationHz, 4);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(
+    evaluation.issues.includes('visible-presentation-transition-count-below-target')
+  );
+});
+
+test('headed cadence ignores camera redraw and same-step terminal promotion', () => {
+  const observations = [
+    visibleCadenceObservation({
+      timestampMs: 0,
+      sourceStep: 12,
+      presentationSerial: 1
+    }),
+    visibleCadenceObservation({
+      timestampMs: 16,
+      sourceStep: 12,
+      presentationSerial: 2
+    }),
+    visibleCadenceObservation({
+      timestampMs: 32,
+      sourceStep: 12,
+      presentationSerial: 3
+    })
+  ];
+  const cadence = summarizeVisiblePresentationCadence(observations, {
+    sampleDurationMs: 5_000
+  });
+  assert.equal(cadence.distinctSourceCount, 1);
+  assert.equal(cadence.sourceTransitionCount, 0);
+  assert.equal(cadence.visualTransitionCount, 0);
+});
+
+test('headed cadence invalidates owner lineage changes even while a frame is unadmitted', () => {
+  const observations = [
+    visibleCadenceObservation({
+      timestampMs: 0,
+      sourceStep: 20,
+      presentationSerial: 1
+    }),
+    visibleCadenceObservation({
+      timestampMs: 16,
+      sourceStep: null,
+      presentationSerial: null,
+      admitted: false,
+      cohortIdentity: 'lane-b|state-a|lifecycle-1|owner-epoch-1',
+      admissionBlockers: ['native-source-step-ready']
+    }),
+    visibleCadenceObservation({
+      timestampMs: 32,
+      sourceStep: 21,
+      presentationSerial: 2
+    })
+  ];
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.invalidObservationCount, 1);
+  assert.equal(cadence.presentationCohortCount, 2);
+  assert.equal(cadence.presentationCohortTransitionCount, 2);
+  assert.equal(cadence.admissionBlockerCounts['native-source-step-ready'], 1);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(evaluation.issues.includes('presentation-source-cohort-unstable'));
+});
+
+test('headed cadence rejects source regressions and does not treat the baseline as motion', () => {
+  const observations = [
+    visibleCadenceObservation({
+      timestampMs: 0,
+      sourceStep: 42,
+      presentationSerial: 1
+    }),
+    visibleCadenceObservation({
+      timestampMs: 16,
+      sourceStep: 41,
+      presentationSerial: 2
+    })
+  ];
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.sourceStepRegressionCount, 1);
+  assert.equal(cadence.sourceTransitionCount, 0);
+  assert.equal(cadence.visualTransitionCount, 0);
+  assert.equal(evaluation.status, 'fail');
+  assert.ok(evaluation.issues.includes('presentation-source-step-regressed'));
+});
+
+test('headed cadence can admit explicit temporal geometry motion without inventing source states', () => {
+  const observations = Array.from({ length: 301 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 300,
+      sourceStep: 9,
+      presentationSerial: index + 1,
+      motionFrameAdmitted: true,
+      motionFrameSerial: index
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(cadence.distinctSourceCount, 1);
+  assert.equal(cadence.sourceTransitionCount, 0);
+  assert.equal(cadence.visualTransitionCount, 300);
+  assert.equal(cadence.meanVisiblePresentationHz, 60);
+  assert.equal(evaluation.status, 'pass');
 });
 
 test('joint physics and presentation progress is required; RAF/render-only motion is rejected', () => {

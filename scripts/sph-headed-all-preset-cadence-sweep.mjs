@@ -8,6 +8,12 @@ import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
+import {
+  evaluateCadenceSample,
+  summarizeVisiblePresentationCadence
+} from './sph-headed-cadence-metrics.mjs';
+
+export { evaluateCadenceSample } from './sph-headed-cadence-metrics.mjs';
 
 const outputDir = process.env.ULG_HEADED_SWEEP_OUTPUT
   || '/tmp/ulg-headed-all-preset-cadence-sweep';
@@ -89,43 +95,6 @@ function percentile(values, fraction) {
     Math.max(0, Math.ceil(sorted.length * fraction) - 1)
   );
   return sorted[index];
-}
-
-export function evaluateCadenceSample(sample, {
-  minimumHz = nominalRenderHz * 0.9,
-  targetHz = nominalRenderHz
-} = {}) {
-  const meanRafHz = finiteOrNull(sample?.meanRafHz);
-  const medianRafHz = finiteOrNull(sample?.medianRafHz);
-  const overlayMedianFps = finiteOrNull(sample?.overlayMedianFps);
-  const overlayWindowCount = Number(sample?.overlayWindowCount);
-  const sampleDurationMs = finiteOrNull(sample?.sampleDurationMs);
-  const rafFrameCount = Number(sample?.rafFrameCount);
-  const issues = [];
-  if (sample?.documentVisibility !== 'visible') issues.push('document-not-visible');
-  if (sample?.documentHasFocus !== true) issues.push('document-not-focused');
-  if (sample?.finalDocumentVisibility !== 'visible') {
-    issues.push('document-not-visible-at-window-end');
-  }
-  if (sample?.finalDocumentHasFocus !== true) {
-    issues.push('document-not-focused-at-window-end');
-  }
-  if (!(sampleDurationMs >= 5_000)) issues.push('cadence-window-too-short');
-  if (!(Number.isSafeInteger(rafFrameCount) && rafFrameCount > 0)) {
-    issues.push('raf-frames-missing');
-  }
-  if (!(meanRafHz >= minimumHz)) issues.push('mean-raf-below-target');
-  if (!(medianRafHz >= minimumHz)) issues.push('median-raf-below-target');
-  if (!(Number.isSafeInteger(overlayWindowCount) && overlayWindowCount >= 3)) {
-    issues.push('overlay-fps-windows-insufficient');
-  }
-  if (!(overlayMedianFps >= minimumHz)) issues.push('overlay-fps-below-target');
-  return Object.freeze({
-    status: issues.length === 0 ? 'pass' : 'fail',
-    targetHz,
-    minimumMeasuredHz: minimumHz,
-    issues: Object.freeze(issues)
-  });
 }
 
 function criticalConsoleText(text) {
@@ -725,6 +694,7 @@ async function sampleRenderCadence(page) {
     const callbackTimestamps = [];
     const rafTimestamps = [];
     const overlayFpsSamples = [];
+    const visiblePresentationObservations = [];
     let lastOverlaySampleMs = null;
     const startedAtMs = performance.now();
     const resourceEventStartIndex = Array.isArray(
@@ -735,10 +705,318 @@ async function sampleRenderCadence(page) {
     ) ? globalThis.__ulgSphCadenceTimelineEvents.length : 0;
     const documentVisibility = document.visibilityState;
     const documentHasFocus = document.hasFocus();
+    const visibleCanvas = (candidate) => {
+      if (!candidate?.isConnected) return false;
+      const style = getComputedStyle(candidate);
+      const bounds = candidate.getBoundingClientRect();
+      return Boolean(
+        style.visibility !== 'hidden'
+        && style.display !== 'none'
+        && Number(style.opacity ?? 1) > 0
+        && Number(bounds.width) > 0
+        && Number(bounds.height) > 0
+      );
+    };
+    const safeNonNegativeInteger = (value) => {
+      if (value == null || value === '') return null;
+      const number = Number(value);
+      return Number.isSafeInteger(number) && number >= 0 ? number : null;
+    };
+    const nonEmptyString = (value) => {
+      const text = typeof value === 'string' ? value.trim() : '';
+      return text || null;
+    };
+    const readVisiblePresentationObservation = (timestampMs) => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const scene = overlay?.__sphScene || null;
+      const presentation = scene?.getWorkerOffscreenPresentation?.()
+        || overlay?.__sphWorkerOffscreenPresentation
+        || null;
+      const renderState = scene?.getSphResidentRenderState?.()
+        || overlay?.__sphResidentRenderState
+        || null;
+      const surfaceDraw = scene?.getSphResidentSurfaceDraw?.()
+        || overlay?.__sphResidentSurfaceDraw
+        || null;
+      const steps = scene?.getMlsMpmResidentSteps?.()
+        || overlay?.__mlsMpmResidentSteps
+        || null;
+      const workerLane = steps?.workerOwnedResidentLane || null;
+      const rows = presentation?.workerOffscreenRenderRows
+        || renderState?.workerOffscreenRenderRows
+        || null;
+      const owner = presentation?.displayOwner ?? null;
+      const workerCanvas = document.querySelector(
+        'canvas[data-ulg-worker-offscreen-presentation="true"]'
+      );
+      const mainCanvas = document.querySelector(
+        '#sph-scene canvas:not([data-ulg-worker-offscreen-presentation="true"])'
+      );
+      const mainCanvasStyle = mainCanvas ? getComputedStyle(mainCanvas) : null;
+      const pendingPresentation = overlay?.__sphPendingPresentation || null;
+      const pendingPresentationLayer = overlay?.querySelector(
+        '#sph-pending-presentation'
+      ) || null;
+      const pendingPresentationVisible = visibleCanvas(pendingPresentationLayer);
+      const laneId = nonEmptyString(workerLane?.laneId);
+      const stateKey = nonEmptyString(workerLane?.stateKey);
+      const lifecycleGeneration = safeNonNegativeInteger(
+        presentation?.lifecycleGeneration
+      );
+      const displayOwnerEpoch = safeNonNegativeInteger(
+        presentation?.displayOwnerEpoch
+      );
+      const cohortIdentity = (
+        laneId
+        && stateKey
+        && lifecycleGeneration > 0
+      )
+        ? JSON.stringify([
+            laneId,
+            stateKey,
+            lifecycleGeneration
+          ])
+        : null;
+      if (owner === 'worker') {
+        const sourceStep = safeNonNegativeInteger(rows?.sphStep);
+        const particleCount = safeNonNegativeInteger(rows?.particleCount);
+        const frameCount = safeNonNegativeInteger(rows?.frameCount);
+        const readyFrameCount = safeNonNegativeInteger(rows?.readyFrameCount);
+        const presentationFrameCount = safeNonNegativeInteger(
+          presentation?.frameCount
+        );
+        const presentationReadyFrameCount = safeNonNegativeInteger(
+          presentation?.readyFrameCount
+        );
+        const rowsDisplayOwnerEpoch = safeNonNegativeInteger(
+          rows?.displayOwnerEpoch
+        );
+        const admissionChecks = {
+          'cohort-ready': Boolean(cohortIdentity),
+          'display-owner-epoch-ready': displayOwnerEpoch != null,
+          'render-row-owner-epoch-current':
+            rowsDisplayOwnerEpoch === displayOwnerEpoch,
+          'display-owner-content-ready':
+            presentation?.displayOwnerContentReady === true,
+          'worker-canvas-status-visible':
+            presentation?.displayCanvasVisible === true,
+          'worker-canvas-visible': visibleCanvas(workerCanvas),
+          'main-canvas-hidden': mainCanvasStyle?.opacity === '0',
+          'compositor-owner-worker':
+            mainCanvas?.getAttribute('data-ulg-presentation-compositor-owner')
+              === 'worker',
+          'control-envelope-retired': pendingPresentation?.active !== true,
+          'control-envelope-layer-hidden': !pendingPresentationVisible,
+          'render-row-schema-ready': rows?.schema
+            === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0',
+          'render-row-abi-ready': rows?.renderRowsSchema
+            === 'peercompute.ulg.worker-offscreen-render-rows.v0',
+          'render-row-status-ready': rows?.status
+            === 'worker-offscreen-resident-particle-state-producer-rendered',
+          'worker-local-render-row-ready':
+            rows?.workerLocalRenderRowsProduced === true,
+          'render-row-lane-current': rows?.laneId == null || rows.laneId === laneId,
+          'render-row-state-current':
+            rows?.stateKey == null || rows.stateKey === stateKey,
+          'particle-count-ready': particleCount > 0,
+          'frame-count-ready': frameCount > 0,
+          'frame-count-current': frameCount === presentationFrameCount,
+          'ready-frame-count-ready': readyFrameCount > 0,
+          'ready-frame-count-current':
+            readyFrameCount === presentationReadyFrameCount,
+          'worker-geometry-ready':
+            rows?.presentationGeometry === 'sphere-impostor-depth-fallback',
+          'worker-depth-ready': rows?.depthAttachmentReady === true,
+          'worker-same-device-ready': rows?.sameDevicePresentation === true,
+          'source-step-ready': sourceStep != null
+        };
+        const admissionBlockers = Object.entries(admissionChecks)
+          .filter(([, ready]) => !ready)
+          .map(([name]) => name);
+        const admitted = admissionBlockers.length === 0;
+        return {
+          timestampMs,
+          owner,
+          admitted,
+          sourceStep,
+          cohortIdentity,
+          presentationSerial: frameCount,
+          displayOwnerEpoch,
+          admissionBlockers,
+          motionFrameAdmitted: false,
+          motionFrameSerial: null
+        };
+      }
+      if (owner === 'main-native') {
+        const nativePresentation = overlay?.__sphWorkerLaneNativeSurfacePresentation
+          || null;
+        const renderBridge = scene?.getSphResidentSurfaceDrawRenderBridge?.()
+          || null;
+        const nativeCanvas = scene?.scene?.userData?.sphNativeWebGpuSurfaceConsumer
+          ?.canvas
+          || renderBridge?.canvas
+          || null;
+        const presentationProof = overlay?.__sphResidentPresentationProof || null;
+        const renderSource = renderState?.residentRenderSource || null;
+        const handoff = renderSource?.workerLaneNativeSurfaceSnapshotHandoff
+          || null;
+        const committedPresentation = workerLane?.committedPresentation || null;
+        const sourceStep = safeNonNegativeInteger(
+          nativePresentation?.sourceStep
+        );
+        const renderStateSourceStep = safeNonNegativeInteger(
+          renderState?.sourceResidentNextStep
+          ?? renderState?.residentRenderSource?.nextStep
+        );
+        const renderBridgeSourceStep = safeNonNegativeInteger(
+          renderBridge?.sourceResidentNextStep
+        );
+        const surfaceDrawSourceStep = safeNonNegativeInteger(
+          surfaceDraw?.sourceResidentNextStep
+        );
+        const surfaceDrawBridgeSourceStep = safeNonNegativeInteger(
+          surfaceDraw?.renderBridgeSourceResidentNextStep
+        );
+        const drawSourceSteps = [
+          renderBridgeSourceStep,
+          surfaceDrawSourceStep,
+          surfaceDrawBridgeSourceStep
+        ].filter((step) => step != null);
+        const renderBridgeFrameCount = safeNonNegativeInteger(
+          renderBridge?.frameCount
+        );
+        const committedSourceStep = safeNonNegativeInteger(
+          committedPresentation?.sphStep
+        );
+        const sourceTimesReady = Boolean(
+          Number.isFinite(Number(nativePresentation?.sourceTimeS))
+          && Number.isFinite(Number(workerLane?.laneSimTimeS))
+          && Math.abs(
+            Number(nativePresentation.sourceTimeS) - Number(workerLane.laneSimTimeS)
+          ) <= 1e-9
+        );
+        const handoffTimesReady = Boolean(
+          Number.isFinite(Number(handoff?.sourceTimeS))
+          && Number.isFinite(Number(nativePresentation?.sourceTimeS))
+          && Math.abs(
+            Number(handoff.sourceTimeS) - Number(nativePresentation.sourceTimeS)
+          ) <= 1e-9
+        );
+        const admissionChecks = {
+          'cohort-ready': Boolean(cohortIdentity),
+          'display-owner-epoch-ready': displayOwnerEpoch != null,
+          'display-owner-content-ready':
+            presentation?.displayOwnerContentReady === true,
+          'worker-canvas-status-hidden':
+            presentation?.displayCanvasVisible === false,
+          'native-canvas-visible': visibleCanvas(nativeCanvas),
+          'worker-canvas-hidden': !visibleCanvas(workerCanvas),
+          'main-canvas-visible': mainCanvasStyle?.opacity === '1',
+          'compositor-owner-native':
+            mainCanvas?.getAttribute('data-ulg-presentation-compositor-owner')
+              === 'main-native',
+          'control-envelope-retired': pendingPresentation?.active !== true,
+          'control-envelope-layer-hidden': !pendingPresentationVisible,
+          'presentation-proof-bridge-ready':
+            presentationProof?.bridge === 'native-webgpu-surface-consumer',
+          'presentation-proof-admitted': presentationProof?.admitted === true,
+          'presentation-proof-source-current':
+            presentationProof?.sourceCurrent === true,
+          'native-source-schema-ready': nativePresentation?.schema
+            === 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
+          'native-source-status-ready': nativePresentation?.status
+            === 'worker-lane-native-surface-presentation-source-ready',
+          'native-source-request-ready':
+            Boolean(nonEmptyString(nativePresentation?.requestId)),
+          'native-source-cache-current':
+            nativePresentation?.cacheKey === nativePresentation?.requestId,
+          'native-render-bridge-ready':
+            renderBridge?.rendererBridge === 'native-webgpu-surface-consumer',
+          'native-source-step-ready': sourceStep != null,
+          'committed-source-step-ready': committedSourceStep != null,
+          'native-source-step-current':
+            committedSourceStep != null && sourceStep === committedSourceStep + 1,
+          'native-source-time-current': sourceTimesReady,
+          'render-state-source-current': renderState?.sourceResidentRenderSourceStatus
+            === 'resident-render-source-current',
+          'render-state-generation-current':
+            renderState?.sourceResidentExecutionGenerationMatchesCurrent === true,
+          'render-source-generation-current':
+            renderSource?.residentExecutionGenerationMatchesCurrent === true,
+          'surface-draw-generation-current':
+            surfaceDraw?.sourceResidentExecutionGenerationMatchesCurrent === true,
+          'render-bridge-generation-current':
+            renderBridge?.sourceResidentExecutionGenerationMatchesCurrent === true,
+          'render-state-source-step-current': sourceStep === renderStateSourceStep,
+          'draw-source-step-receipts-ready': drawSourceSteps.length > 0,
+          'draw-source-steps-current':
+            drawSourceSteps.every((step) => step === sourceStep),
+          'native-source-schedule-current':
+            nativePresentation?.scheduleId === workerLane?.scheduleId,
+          'native-source-lane-current': nativePresentation?.laneId === laneId,
+          'native-source-state-current': nativePresentation?.stateKey === stateKey,
+          'native-source-particles-ready':
+            safeNonNegativeInteger(nativePresentation?.particleCount) > 0,
+          'native-handoff-schema-ready': handoff?.schema
+            === 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
+          'native-handoff-status-ready': handoff?.status
+            === 'worker-lane-native-surface-presentation-source-admitted',
+          'native-handoff-schedule-current':
+            handoff?.scheduleId === nativePresentation?.scheduleId,
+          'native-handoff-lane-current': handoff?.laneId === laneId,
+          'native-handoff-state-current': handoff?.stateKey === stateKey,
+          'native-handoff-request-current':
+            handoff?.requestId === nativePresentation?.requestId,
+          'native-handoff-cache-current':
+            handoff?.cacheKey === nativePresentation?.cacheKey,
+          'native-handoff-step-current':
+            safeNonNegativeInteger(handoff?.sourceStep) === sourceStep,
+          'native-handoff-time-current': handoffTimesReady,
+          'native-handoff-shared-slot-ready':
+            handoff?.sharedSlotIdentityVerified === true,
+          'native-handoff-lineage-ready': handoff?.workerLineageMetadataStatus
+            === 'worker-retained-compact-snapshot-lineage-metadata-ready',
+          'native-handoff-terminal-readback-ready':
+            handoff?.terminalCompactSnapshotReadback === true,
+          'native-frame-count-ready': renderBridgeFrameCount > 0
+        };
+        const admissionBlockers = Object.entries(admissionChecks)
+          .filter(([, ready]) => !ready)
+          .map(([name]) => name);
+        const admitted = admissionBlockers.length === 0;
+        return {
+          timestampMs,
+          owner,
+          admitted,
+          sourceStep,
+          cohortIdentity,
+          presentationSerial: renderBridgeFrameCount,
+          displayOwnerEpoch,
+          admissionBlockers,
+          motionFrameAdmitted: false,
+          motionFrameSerial: null
+        };
+      }
+      return {
+        timestampMs,
+        owner,
+        admitted: false,
+        sourceStep: null,
+        cohortIdentity,
+        presentationSerial: null,
+        displayOwnerEpoch,
+        admissionBlockers: ['unsupported-display-owner'],
+        motionFrameAdmitted: false,
+        motionFrameSerial: null
+      };
+    };
     const tick = (timestamp) => {
       const callbackAtMs = performance.now();
       rafTimestamps.push(timestamp);
       callbackTimestamps.push(callbackAtMs);
+      visiblePresentationObservations.push(
+        readVisiblePresentationObservation(callbackAtMs)
+      );
       const overlay = document.querySelector('#sph-phase-overlay');
       const currentOverlayFps = Number(overlay?.__sphFrameCounters?.renderFps);
       const currentOverlaySampleMs = Number(
@@ -771,6 +1049,7 @@ async function sampleRenderCadence(page) {
         callbackTimestamps,
         rafTimestamps,
         overlayFpsSamples,
+        visiblePresentationObservations,
         gpuResourceCreationEvents: Array.isArray(
           globalThis.__ulgGpuResourceCreationEvents
         )
@@ -831,6 +1110,10 @@ async function sampleRenderCadence(page) {
   const overlayFpsSamples = overlayFpsWindows
     .map((entry) => entry.renderFps)
     .filter((value) => Number.isFinite(value) && value > 0);
+  const visiblePresentationCadence = summarizeVisiblePresentationCadence(
+    sample?.visiblePresentationObservations,
+    { sampleDurationMs }
+  );
   return {
     requestedDurationMs: cadenceSampleMs,
     sampleDurationMs,
@@ -847,6 +1130,7 @@ async function sampleRenderCadence(page) {
     overlayFpsWindows,
     overlayWindowCount: overlayFpsWindows.length,
     overlayMedianFps: median(overlayFpsSamples),
+    ...visiblePresentationCadence,
     longestRafIntervalsMs,
     longestRafIntervals,
     rafIntervalCountOver33Ms:
@@ -1051,6 +1335,14 @@ try {
         meanRafHz: result.cadence?.meanRafHz,
         medianRafHz: result.cadence?.medianRafHz,
         overlayMedianFps: result.cadence?.overlayMedianFps,
+        meanVisiblePresentationHz:
+          result.cadence?.meanVisiblePresentationHz,
+        medianVisiblePresentationHz:
+          result.cadence?.medianVisiblePresentationHz,
+        p95VisualIntervalEquivalentHz:
+          result.cadence?.p95VisualIntervalEquivalentHz,
+        meanSourcePresentationHz:
+          result.cadence?.meanSourcePresentationHz,
         workerVisible: result.first?.workerCanvasVisible,
         issues: result.issues
       }));
@@ -1087,7 +1379,7 @@ try {
 
 const failed = results.filter((result) => result.status !== 'pass');
 const summary = {
-  schema: 'peercompute.ulg.headed-all-preset-cadence-sweep.v1',
+  schema: 'peercompute.ulg.headed-all-preset-cadence-sweep.v2',
   status: failed.length === 0 ? 'pass' : 'fail',
   acceptance: {
     scope: 'visual-presentation-throughput-and-committed-animation',
@@ -1098,6 +1390,9 @@ const summary = {
     cadenceSampleMs,
     spatialKeyChurnProfilingEnabled: false,
     simulationRealtimeFactorGating: false,
+    rafMetricsDiagnosticOnly: true,
+    visibleStateIdentityRequired: true,
+    sourceStepJumpsCountAsOnePresentation: true,
     reactionActivationPolicyOverride,
     gpuResourceProfilingEnabled: profileGpuResources,
     manualScreenshotReviewRequired: true

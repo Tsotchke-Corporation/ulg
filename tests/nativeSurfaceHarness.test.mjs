@@ -5262,6 +5262,42 @@ test('resident GPU completions count as physics frames even when a CPU driver ob
   );
 });
 
+test('headed cadence sweep gates distinct admitted geometry instead of RAF heartbeat', () => {
+  const sweepSource = readRepoFile(
+    'scripts/sph-headed-all-preset-cadence-sweep.mjs'
+  );
+  const sampleStart = sweepSource.indexOf('async function sampleRenderCadence(page)');
+  const sampleEnd = sweepSource.indexOf(
+    'const CADENCE_ENVIRONMENT_ISSUES',
+    sampleStart
+  );
+  assert.ok(sampleStart >= 0 && sampleEnd > sampleStart);
+  const sampleSource = sweepSource.slice(sampleStart, sampleEnd);
+
+  assert.match(sampleSource, /visiblePresentationObservations\.push\(/);
+  assert.match(sampleSource, /summarizeVisiblePresentationCadence\(/);
+  assert.match(
+    sampleSource,
+    /rows\?\.renderRowsSchema\s*=== 'peercompute\.ulg\.worker-offscreen-render-rows\.v0'/
+  );
+  assert.match(
+    sampleSource,
+    /rows\?\.sphStep[\s\S]*?frameCount === presentationFrameCount[\s\S]*?readyFrameCount === presentationReadyFrameCount/
+  );
+  assert.match(
+    sampleSource,
+    /nativePresentation\?\.sourceStep[\s\S]*?sourceStep === renderStateSourceStep[\s\S]*?drawSourceSteps\.every/
+  );
+  assert.match(sampleSource, /!visibleCanvas\(workerCanvas\)/);
+  assert.doesNotMatch(sampleSource, /displayOwnerLastRenderedContent/);
+  assert.match(
+    sweepSource,
+    /schema: 'peercompute\.ulg\.headed-all-preset-cadence-sweep\.v2'/
+  );
+  assert.match(sweepSource, /rafMetricsDiagnosticOnly: true/);
+  assert.match(sweepSource, /visibleStateIdentityRequired: true/);
+});
+
 test('product-history acceptance proves the GPU-count P2G and full render commit gates', () => {
   const metric = {
     residentStep: {

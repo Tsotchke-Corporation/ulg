@@ -8369,7 +8369,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('view state       : peercompute-worker-packed-state');
     expect(derivedSummary.statusText).toContain('worker view-state evidence-only');
   }
-  expect(derivedSummary.warningText).toContain('render fps');
+  expect(derivedSummary.warningText).toContain('ui raf');
   expect(derivedSummary.warningText).toContain('physics fps');
   expect(derivedSummary.frameCounters).toBeTruthy();
   expect(Number.isFinite(derivedSummary.frameCounters.renderFps)).toBe(true);

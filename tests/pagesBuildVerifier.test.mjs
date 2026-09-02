@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { verifyPagesBuild } from '../scripts/verify-pages-build.mjs';
+import pagesConfig from '../vite.pages.config.mjs';
 
 async function fixture({ htmlReference = './assets/pages-good.js', offscreenSource = '' } = {}) {
   const outDir = await mkdtemp(path.join(os.tmpdir(), 'ulg-pages-verifier-'));
@@ -57,5 +58,51 @@ test('Pages build verifier rejects a missing nested worker import', async () => 
     );
   } finally {
     await rm(outDir, { recursive: true, force: true });
+  }
+});
+
+test('Pages config closes the copied offscreen worker static module graph', async () => {
+  const workerSource = await readFile(
+    new URL('../src/services/ulgOffscreenRender.worker.js', import.meta.url),
+    'utf8'
+  );
+  const input = pagesConfig.build.rollupOptions.input;
+  const entryFileNames = pagesConfig.build.rollupOptions.output.entryFileNames;
+  assert.equal(
+    pagesConfig.build.modulePreload,
+    false,
+    'shared page/worker chunks must not receive the DOM-only module-preload helper'
+  );
+  const expectedEntries = [
+    {
+      name: 'residentRenderCandidateMailbox',
+      source: 'src/visualization/residentRenderCandidateMailbox.js',
+      workerReference: '../visualization/residentRenderCandidateMailbox.js',
+      output: 'visualization/residentRenderCandidateMailbox.js'
+    },
+    {
+      name: 'webgpuDeviceLimits',
+      source: 'src/runtime/webgpuDeviceLimits.js',
+      workerReference: '../runtime/webgpuDeviceLimits.js',
+      output: 'runtime/webgpuDeviceLimits.js'
+    },
+    {
+      name: 'webgpuComputeLayout',
+      source: 'src/runtime/webgpuComputeLayout.js',
+      workerReference: '../runtime/webgpuComputeLayout.js',
+      output: 'runtime/webgpuComputeLayout.js'
+    }
+  ];
+
+  for (const entry of expectedEntries) {
+    assert.ok(
+      workerSource.includes(`from '${entry.workerReference}'`),
+      `offscreen worker should import ${entry.workerReference}`
+    );
+    assert.ok(
+      input[entry.name].endsWith(entry.source),
+      `${entry.name} should build from ${entry.source}`
+    );
+    assert.equal(entryFileNames({ name: entry.name }), entry.output);
   }
 });

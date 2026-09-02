@@ -1,6 +1,6 @@
 {
   "abiVersion": "0.5",
-  "closureId": "eshkol:a08f9e4ad05688c0",
+  "closureId": "eshkol:f52349bd3a2cb46e",
   "closureKind": "magnetar-closure-descriptor-fixture",
   "derivatives": [
     {
@@ -29,7 +29,7 @@
     },
     "exports": [
       {
-        "index": 40,
+        "index": 35,
         "kind": "function",
         "name": "scheme_main",
         "signature": {
@@ -48,10 +48,10 @@
           ],
           "results": []
         },
-        "typeIndex": 34
+        "typeIndex": 0
       },
       {
-        "index": 41,
+        "index": 39,
         "kind": "function",
         "name": "main",
         "signature": {
@@ -89,7 +89,7 @@
         "kind": "table",
         "limits": {
           "hasMaximum": false,
-          "minimum": 10
+          "minimum": 6
         },
         "module": "env",
         "name": "__indirect_function_table"
@@ -110,25 +110,41 @@
           ],
           "results": []
         },
-        "typeIndex": 6
+        "typeIndex": 73
       },
       {
         "functionIndex": 1,
         "kind": "function",
         "module": "env",
-        "name": "eshkol_is_bignum_tagged",
+        "name": "ulg_read_f64",
         "signature": {
           "parameters": [
             "i32"
           ],
           "results": [
-            "i32"
+            "f64"
           ]
         },
-        "typeIndex": 100
+        "typeIndex": 102
       },
       {
         "functionIndex": 2,
+        "kind": "function",
+        "module": "env",
+        "name": "ulg_write_f64",
+        "signature": {
+          "parameters": [
+            "i32",
+            "f64"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 103
+      },
+      {
+        "functionIndex": 3,
         "kind": "function",
         "module": "env",
         "name": "eshkol_rational_to_double",
@@ -143,7 +159,22 @@
         "typeIndex": 102
       },
       {
-        "functionIndex": 3,
+        "functionIndex": 4,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_taylor_c0",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "f64"
+          ]
+        },
+        "typeIndex": 102
+      },
+      {
+        "functionIndex": 5,
         "kind": "function",
         "module": "env",
         "name": "eshkol_bignum_to_double",
@@ -158,10 +189,56 @@
         "typeIndex": 102
       },
       {
-        "functionIndex": 4,
+        "functionIndex": 6,
         "kind": "function",
         "module": "env",
-        "name": "eshkol_bignum_binary_tagged",
+        "name": "arena_allocate_ad_node_with_header",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 67
+      },
+      {
+        "functionIndex": 7,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tape_add_node",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 8,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_is_taylor_tagged",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 67
+      },
+      {
+        "functionIndex": 9,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_taylor_binary_tagged",
         "signature": {
           "parameters": [
             "i32",
@@ -172,10 +249,25 @@
           ],
           "results": []
         },
-        "typeIndex": 5
+        "typeIndex": 72
       },
       {
-        "functionIndex": 5,
+        "functionIndex": 10,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_is_bignum_tagged",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 67
+      },
+      {
+        "functionIndex": 11,
         "kind": "function",
         "module": "env",
         "name": "eshkol_is_rational_tagged_ptr",
@@ -187,10 +279,10 @@
             "i32"
           ]
         },
-        "typeIndex": 100
+        "typeIndex": 67
       },
       {
-        "functionIndex": 6,
+        "functionIndex": 12,
         "kind": "function",
         "module": "env",
         "name": "eshkol_rational_binary_tagged_ptr",
@@ -204,44 +296,40 @@
           ],
           "results": []
         },
-        "typeIndex": 5
+        "typeIndex": 72
       },
       {
-        "functionIndex": 7,
+        "functionIndex": 13,
         "kind": "function",
         "module": "env",
-        "name": "eshkol_bignum_from_overflow",
+        "name": "eshkol_set_error_location",
         "signature": {
           "parameters": [
             "i32",
-            "i64",
-            "i64",
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        "typeIndex": 103
-      },
-      {
-        "functionIndex": 8,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_allocate",
-        "signature": {
-          "parameters": [
             "i32",
             "i32"
           ],
-          "results": [
-            "i32"
-          ]
+          "results": []
         },
-        "typeIndex": 104
+        "typeIndex": 70
       },
       {
-        "functionIndex": 9,
+        "functionIndex": 14,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_type_error_with_operand",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 70
+      },
+      {
+        "functionIndex": 15,
         "kind": "function",
         "module": "env",
         "name": "arena_allocate_vector_with_header",
@@ -257,7 +345,57 @@
         "typeIndex": 104
       },
       {
-        "functionIndex": 10,
+        "functionIndex": 16,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 17,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_bignum_from_overflow",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i64",
+            "i64",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 105
+      },
+      {
+        "functionIndex": 18,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_tensor_operand_checked",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 19,
         "kind": "function",
         "module": "env",
         "name": "eshkol_shapes_equal",
@@ -272,25 +410,10 @@
             "i64"
           ]
         },
-        "typeIndex": 105
+        "typeIndex": 106
       },
       {
-        "functionIndex": 11,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_allocate_tensor_with_header",
-        "signature": {
-          "parameters": [
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        "typeIndex": 100
-      },
-      {
-        "functionIndex": 12,
+        "functionIndex": 20,
         "kind": "function",
         "module": "env",
         "name": "eshkol_broadcast_elementwise_f64",
@@ -312,13 +435,13 @@
             "i64"
           ]
         },
-        "typeIndex": 106
+        "typeIndex": 107
       },
       {
-        "functionIndex": 13,
+        "functionIndex": 21,
         "kind": "function",
         "module": "env",
-        "name": "arena_allocate_ad_node_with_header",
+        "name": "arena_allocate_tensor_with_header",
         "signature": {
           "parameters": [
             "i32"
@@ -327,15 +450,16 @@
             "i32"
           ]
         },
-        "typeIndex": 100
+        "typeIndex": 67
       },
       {
-        "functionIndex": 14,
+        "functionIndex": 22,
         "kind": "function",
         "module": "env",
-        "name": "arena_tape_add_node",
+        "name": "eshkol_tensor_result_dtype_binary",
         "signature": {
           "parameters": [
+            "i32",
             "i32",
             "i32"
           ],
@@ -343,70 +467,44 @@
             "i32"
           ]
         },
-        "typeIndex": 104
+        "typeIndex": 108
       },
       {
-        "functionIndex": 15,
+        "functionIndex": 23,
         "kind": "function",
         "module": "env",
-        "name": "eshkol_make_exception_with_header",
+        "name": "eshkol_bignum_binary_tagged",
         "signature": {
           "parameters": [
             "i32",
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        "typeIndex": 104
-      },
-      {
-        "functionIndex": 16,
-        "kind": "function",
-        "module": "env",
-        "name": "eshkol_raise",
-        "signature": {
-          "parameters": [
+            "i32",
+            "i32",
+            "i32",
             "i32"
           ],
           "results": []
         },
-        "typeIndex": 1
+        "typeIndex": 72
       },
       {
-        "functionIndex": 17,
+        "functionIndex": 24,
         "kind": "function",
         "module": "env",
-        "name": "ulg_read_f64",
-        "signature": {
-          "parameters": [
-            "i32"
-          ],
-          "results": [
-            "f64"
-          ]
-        },
-        "typeIndex": 102
-      },
-      {
-        "functionIndex": 18,
-        "kind": "function",
-        "module": "env",
-        "name": "ulg_write_f64",
+        "name": "__multi3",
         "signature": {
           "parameters": [
             "i32",
-            "f64"
+            "i64",
+            "i64",
+            "i64",
+            "i64"
           ],
-          "results": [
-            "i32"
-          ]
+          "results": []
         },
-        "typeIndex": 107
+        "typeIndex": 109
       },
       {
-        "functionIndex": 19,
+        "functionIndex": 25,
         "kind": "function",
         "module": "env",
         "name": "eshkol_init_stack_size",
@@ -417,7 +515,7 @@
         "typeIndex": 101
       },
       {
-        "functionIndex": 20,
+        "functionIndex": 26,
         "kind": "function",
         "module": "env",
         "name": "get_global_arena",
@@ -427,10 +525,10 @@
             "i32"
           ]
         },
-        "typeIndex": 108
+        "typeIndex": 110
       },
       {
-        "functionIndex": 21,
+        "functionIndex": 27,
         "kind": "function",
         "module": "env",
         "name": "eshkol_lambda_registry_init",
@@ -439,126 +537,19 @@
           "results": []
         },
         "typeIndex": 101
-      },
-      {
-        "functionIndex": 22,
-        "kind": "function",
-        "module": "env",
-        "name": "eshkol_intern_symbol_lookup",
-        "signature": {
-          "parameters": [
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        "typeIndex": 100
-      },
-      {
-        "functionIndex": 23,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_allocate_cons_with_header",
-        "signature": {
-          "parameters": [
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        "typeIndex": 100
-      },
-      {
-        "functionIndex": 24,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_tagged_cons_set_ptr",
-        "signature": {
-          "parameters": [
-            "i32",
-            "i32",
-            "i64",
-            "i32"
-          ],
-          "results": []
-        },
-        "typeIndex": 109
-      },
-      {
-        "functionIndex": 25,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_tagged_cons_set_null",
-        "signature": {
-          "parameters": [
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        "typeIndex": 2
-      },
-      {
-        "functionIndex": 26,
-        "kind": "function",
-        "module": "env",
-        "name": "eshkol_lambda_registry_add",
-        "signature": {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        "typeIndex": 3
-      },
-      {
-        "functionIndex": 27,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_tagged_cons_set_int64",
-        "signature": {
-          "parameters": [
-            "i32",
-            "i32",
-            "i64",
-            "i32"
-          ],
-          "results": []
-        },
-        "typeIndex": 109
-      },
-      {
-        "functionIndex": 28,
-        "kind": "function",
-        "module": "env",
-        "name": "arena_tagged_cons_set_double",
-        "signature": {
-          "parameters": [
-            "i32",
-            "i32",
-            "f64",
-            "i32"
-          ],
-          "results": []
-        },
-        "typeIndex": 110
       }
     ],
     "instantiate": "WebAssembly.instantiate",
     "module": {
-      "byteLength": 169528,
-      "sha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa",
+      "byteLength": 45039,
+      "sha256": "sha256:0fa939f9ef69b42e26eff033aa5a5e927f4edd6ba4be8c3ccb21bafacc6274d2",
       "url": "magnetar-closure.wasm"
     },
     "serviceWorkerSafe": true,
     "startFunctionIndex": null,
     "target": "wasm32-unknown-unknown",
     "wasmMetadata": {
-      "functionCount": 42,
+      "functionCount": 40,
       "hasStartSection": false,
       "startFunctionIndex": null,
       "types": [
@@ -569,744 +560,18 @@
             "i32",
             "i32",
             "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
             "i64"
           ],
           "results": []
         },
         {
           "parameters": [
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
             "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": []
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i32",
-            "i64",
             "i32",
             "i32",
             "i32",
@@ -3263,6 +2528,732 @@
           "results": [
             "i32"
           ]
+        },
+        {
+          "parameters": [
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
         },
         {
           "parameters": [],
@@ -3279,55 +3270,6 @@
         {
           "parameters": [
             "i32",
-            "i64",
-            "i64",
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        {
-          "parameters": [
-            "i32",
-            "i32"
-          ],
-          "results": [
-            "i32"
-          ]
-        },
-        {
-          "parameters": [
-            "i32",
-            "i64",
-            "i32",
-            "i64"
-          ],
-          "results": [
-            "i64"
-          ]
-        },
-        {
-          "parameters": [
-            "i64",
-            "i32",
-            "i32",
-            "i64",
-            "i32",
-            "i32",
-            "i64",
-            "i32",
-            "i32",
-            "i32",
-            "i32"
-          ],
-          "results": [
-            "i64"
-          ]
-        },
-        {
-          "parameters": [
-            "i32",
             "f64"
           ],
           "results": [
@@ -3335,7 +3277,10 @@
           ]
         },
         {
-          "parameters": [],
+          "parameters": [
+            "i32",
+            "i32"
+          ],
           "results": [
             "i32"
           ]
@@ -3343,20 +3288,68 @@
         {
           "parameters": [
             "i32",
-            "i32",
+            "i64",
             "i64",
             "i32"
           ],
-          "results": []
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i64",
+            "i32",
+            "i64"
+          ],
+          "results": [
+            "i64"
+          ]
+        },
+        {
+          "parameters": [
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i64"
+          ]
         },
         {
           "parameters": [
             "i32",
             "i32",
-            "f64",
             "i32"
           ],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i64",
+            "i64",
+            "i64",
+            "i64"
+          ],
           "results": []
+        },
+        {
+          "parameters": [],
+          "results": [
+            "i32"
+          ]
         }
       ]
     }
@@ -3432,9 +3425,9 @@
       "-o",
       "/home/cos/projects/ulg/public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm"
     ],
-    "createdAt": "2026-06-07T08:04:00Z",
+    "createdAt": "2026-09-02T05:17:57.139543Z",
     "inputHash": "sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69",
-    "methodHash": "sha256:a08f9e4ad05688c02124ab895ea66ac240845956cc38bd372baa114d80776d5d",
+    "methodHash": "sha256:f52349bd3a2cb46edacf32f803de62614b896ab342386fd8abfa1a94df84c0e6",
     "notes": [
       "Generated from Eshkol AOT WASM output.",
       "No JIT, eval, dynamic import, or network behavior is required by this artifact."
@@ -3455,7 +3448,7 @@
     "sourcePath": "examples/magnetar_closure.esk",
     "sourceSha256": "sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69",
     "wasmPath": "magnetar-closure.wasm",
-    "wasmSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+    "wasmSha256": "sha256:0fa939f9ef69b42e26eff033aa5a5e927f4edd6ba4be8c3ccb21bafacc6274d2"
   },
   "sourceService": "eshkol",
   "uncertainty": {
@@ -3819,8 +3812,8 @@
                 "check": "artifact-module-sha256-matches-module-ref",
                 "evidenceSource": "artifact.execution.module.sha256",
                 "observed": {
-                  "moduleSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa",
-                  "provenanceWasmSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+                  "moduleSha256": "sha256:0fa939f9ef69b42e26eff033aa5a5e927f4edd6ba4be8c3ccb21bafacc6274d2",
+                  "provenanceWasmSha256": "sha256:0fa939f9ef69b42e26eff033aa5a5e927f4edd6ba4be8c3ccb21bafacc6274d2"
                 },
                 "ready": true,
                 "status": "pass"

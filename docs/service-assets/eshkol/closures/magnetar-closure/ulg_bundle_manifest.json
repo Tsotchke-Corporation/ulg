@@ -1,12 +1,12 @@
 {
   "artifact": {
-    "byteLength": 115004,
+    "byteLength": 114802,
     "path": "magnetar-closure.ulg.json",
-    "sha256": "sha256:43c3070b8279363e6ad25207c561681689af618035a441046fc3163c85265d4b"
+    "sha256": "sha256:e27ac697ad9a2b055d48e1ec60b71cfe77700120b6d072cf6b77f89310f0282a"
   },
   "commands": {
     "artifactHelper": [
-      "/bin/python3",
+      "/usr/bin/python3",
       "/home/cos/projects/eshkol/scripts/emit_ulg_closure_artifact.py",
       "/home/cos/projects/eshkol/examples/magnetar_closure.esk",
       "--artifact",
@@ -20,12 +20,12 @@
       "--metadata-json",
       "/home/cos/projects/eshkol/examples/magnetar_closure.ulg-metadata.json",
       "--created-at",
-      "2026-06-07T08:04:00Z",
+      "2026-09-02T05:17:57.139543Z",
       "--require-export",
       "main"
     ]
   },
-  "createdAt": "2026-06-07T08:04:00Z",
+  "createdAt": "2026-09-02T05:17:57.139543Z",
   "hostImports": {
     "byteLength": 19457,
     "domFree": true,
@@ -49,9 +49,9 @@
     "preserveRelativeUrls": true
   },
   "module": {
-    "byteLength": 169528,
+    "byteLength": 45039,
     "path": "magnetar-closure.wasm",
-    "sha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+    "sha256": "sha256:0fa939f9ef69b42e26eff033aa5a5e927f4edd6ba4be8c3ccb21bafacc6274d2"
   },
   "schema": "eshkol.ulg.closure-bundle.v0",
   "schemaSnapshot": {

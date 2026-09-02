@@ -1,3 +1,15 @@
+import {
+  createResidentRenderCandidateMailbox,
+  ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+  ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS
+} from '../visualization/residentRenderCandidateMailbox.js';
+import {
+  webGpuDeviceDescriptorForResidentSph
+} from '../runtime/webgpuDeviceLimits.js';
+import {
+  flushWorkerQueueSubmitBurst
+} from '../runtime/webgpuComputeLayout.js';
+
 const SCHEMA = 'peercompute.ulg.worker-offscreen-presentation.v0';
 const TRANSPORT = 'worker-owned-presented-canvas';
 const DISPLAY_HANDOFF = 'transferControlToOffscreen';
@@ -9,6 +21,12 @@ const RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0';
 const PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
+const PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA =
+  'peercompute.ulg.presentation-worker-resident-schedule-cancel.v0';
+const PRESENTATION_WORKER_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA =
+  'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0';
+const WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA =
+  'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0';
 const PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 const REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
@@ -22,6 +40,8 @@ const RESIDENT_STAGE_OUTPUT_RENDER_REQUEST_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0';
 const RENDER_ROW_PARTICLE_STRIDE_FLOATS = 8;
 const RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS = 8;
+const WORKER_PRESENTATION_DEPTH_FORMAT = 'depth24plus';
+const GAS_PHASE_ID = 3;
 const TEXTURE_RENDER_ATTACHMENT = 0x10;
 const BUFFER_USAGE_COPY_DST = 0x08;
 const BUFFER_USAGE_UNIFORM = 0x40;
@@ -42,6 +62,17 @@ let cssHeight = 0;
 let pixelRatio = 1;
 let frameCount = 0;
 let readyFrameCount = 0;
+// GPUCanvasContext.configure() recreates presentation resources. Repeating it
+// for every resident candidate needlessly churns the Dawn/Vulkan surface while
+// the same device queue is still carrying canonical compute work. Keep the
+// exact active configuration and reconfigure only when one of its inputs (or
+// the canvas backing size) actually changes.
+let canvasConfiguration = null;
+let canvasConfigureCount = 0;
+let canvasConfigureSkipCount = 0;
+let canvasUnconfigureCount = 0;
+let lastCanvasConfigureAction = 'unavailable';
+let lastCanvasConfigureReason = null;
 // Display arbitration: never present a state older than the newest one
 // already on screen. The presentation-worker retained-stage lane can lag
 // the authoritative main-thread chain; without this gate its late draws
@@ -64,10 +95,19 @@ function resetPresentedSphStep() {
 }
 let disposed = false;
 let renderRowsPipeline = null;
+let renderRowsVaporPipeline = null;
 let renderRowsBindGroupLayout = null;
 let renderRowsParticleBuffer = null;
 let renderRowsParticleBufferByteLength = 0;
 let renderRowsUniformBuffer = null;
+let renderDepthTexture = null;
+let renderDepthView = null;
+let renderDepthTextureWidth = 0;
+let renderDepthTextureHeight = 0;
+let renderBoxPipeline = null;
+let renderBoxBindGroupLayout = null;
+let renderBoxUniformBuffer = null;
+let renderBoxBindGroup = null;
 let renderRowsStatus = null;
 let residentRenderProducerPipeline = null;
 let residentRenderProducerBindGroupLayout = null;
@@ -96,6 +136,20 @@ let residentParticleStateProducerThermoRowsByteLength = 0;
 let residentParticleStateProducerColorRowsByteLength = 0;
 let residentStageRunnerModulePromise = null;
 let retainedCompactSnapshotStatus = null;
+// A terminal candidate is retained until the page proves that the exact
+// schedule crossed BOTH authority boundaries: the worker terminal queue fence
+// and the NodeKernel/ComputeManager/StateManager commit. Progress candidates
+// remain mailbox telemetry only and can never reach the draw loop.
+let pendingCommittedResidentSchedulePresentation = null;
+// Live-preview camera channel: the page streams the current view-projection
+// while the worker canvas owns the display; candidate draws prefer it over
+// the matrix frozen into the schedule's render request, and camera updates
+// redraw the freshest candidate without waiting for new physics.
+let previewViewProjectionOverride = null;
+let previewCameraRedraw = null;
+let previewCameraRedrawLastMs = 0;
+let residentScheduleCandidateStreamIdentity = null;
+let residentScheduleCandidateStreamEpoch = 0;
 
 function nowMs() {
   return typeof self.performance?.now === 'function' ? self.performance.now() : Date.now();
@@ -123,6 +177,12 @@ function publish(status) {
     pixelRatio,
     backingWidth: canvas?.width ?? null,
     backingHeight: canvas?.height ?? null,
+    canvasConfigureCount,
+    canvasConfigureSkipCount,
+    canvasUnconfigureCount,
+    canvasConfigured: canvasConfiguration !== null,
+    lastCanvasConfigureAction,
+    lastCanvasConfigureReason,
     workerOffscreenRenderRows: renderRowsStatus,
     updatedAtMs: nowMs(),
     scientificValidation: false,
@@ -170,7 +230,13 @@ function publishResidentStageStatus({
   startedAtMs = null,
   timeoutMs = null,
   result = null,
-  error = null
+  error = null,
+  // W4b: terminal truth of a batched resident schedule. The full W2 result
+  // envelope is structured-cloneable by construction (the mechanics worker
+  // posts it verbatim on its own message loop), so the scene adopts it from
+  // this status channel without a second transport.
+  residentScheduleResult = null,
+  residentScheduleError = null
 } = {}) {
   const residentStageStatus = {
     schema: PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA,
@@ -183,6 +249,15 @@ function publishResidentStageStatus({
     workerDeviceProvided,
     elapsedMs: Number.isFinite(startedAtMs) ? Math.max(0, nowMs() - startedAtMs) : null,
     timeoutMs: timeoutMs ?? null,
+    ...(residentScheduleResult
+      ? {
+          scheduleId: residentScheduleResult.scheduleId ?? null,
+          residentScheduleResult
+        }
+      : {}),
+    ...(residentScheduleError
+      ? { residentScheduleError }
+      : {}),
     ...(result
       ? {
           residentStageSummary: result?.summary || null,
@@ -291,34 +366,119 @@ function configureCanvas({
   height = canvas?.height ?? 1,
   nextCssWidth = cssWidth,
   nextCssHeight = cssHeight,
-  nextPixelRatio = pixelRatio
+  nextPixelRatio = pixelRatio,
+  reason = 'configure-canvas'
 } = {}) {
-  if (!canvas || !context || !device || !format) return;
-  canvas.width = Math.max(1, Math.floor(Number(width) || 1));
-  canvas.height = Math.max(1, Math.floor(Number(height) || 1));
+  if (!canvas || !context || !device || !format) {
+    lastCanvasConfigureAction = 'unavailable';
+    lastCanvasConfigureReason = String(reason || 'configure-canvas');
+    return { configured: false, reason: 'canvas-configuration-unavailable' };
+  }
+  const backingWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const backingHeight = Math.max(1, Math.floor(Number(height) || 1));
+  const usage = self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT;
+  const alphaMode = 'premultiplied';
   cssWidth = Number.isFinite(Number(nextCssWidth)) ? Number(nextCssWidth) : cssWidth;
   cssHeight = Number.isFinite(Number(nextCssHeight)) ? Number(nextCssHeight) : cssHeight;
   pixelRatio = Number.isFinite(Number(nextPixelRatio)) && Number(nextPixelRatio) > 0
     ? Number(nextPixelRatio)
     : pixelRatio;
-  context.configure({
+
+  const configurationMatches = Boolean(
+    canvasConfiguration
+    && canvasConfiguration.canvas === canvas
+    && canvasConfiguration.context === context
+    && canvasConfiguration.device === device
+    && canvasConfiguration.format === format
+    && canvasConfiguration.usage === usage
+    && canvasConfiguration.alphaMode === alphaMode
+    && canvasConfiguration.width === backingWidth
+    && canvasConfiguration.height === backingHeight
+    && Number(canvas.width) === backingWidth
+    && Number(canvas.height) === backingHeight
+  );
+  lastCanvasConfigureReason = String(reason || 'configure-canvas');
+  if (configurationMatches) {
+    canvasConfigureSkipCount += 1;
+    lastCanvasConfigureAction = 'reused';
+    return {
+      configured: false,
+      reason: 'canvas-configuration-unchanged',
+      configureCount: canvasConfigureCount,
+      skipCount: canvasConfigureSkipCount
+    };
+  }
+
+  if (Number(canvas.width) !== backingWidth) canvas.width = backingWidth;
+  if (Number(canvas.height) !== backingHeight) canvas.height = backingHeight;
+  try {
+    context.configure({
+      device,
+      format,
+      usage,
+      alphaMode
+    });
+  } catch (error) {
+    lastCanvasConfigureAction = 'configure-failed';
+    throw error;
+  }
+  canvasConfiguration = {
+    canvas,
+    context,
     device,
     format,
-    usage: self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT,
-    alphaMode: 'premultiplied'
-  });
+    usage,
+    alphaMode,
+    width: backingWidth,
+    height: backingHeight
+  };
+  canvasConfigureCount += 1;
+  lastCanvasConfigureAction = 'configured';
+  return {
+    configured: true,
+    reason: lastCanvasConfigureReason,
+    configureCount: canvasConfigureCount,
+    skipCount: canvasConfigureSkipCount
+  };
+}
+
+function unconfigureCanvas({ reason = 'dispose' } = {}) {
+  lastCanvasConfigureReason = String(reason || 'dispose');
+  if (!canvasConfiguration) {
+    lastCanvasConfigureAction = 'unconfigured';
+    return false;
+  }
+  try {
+    context?.unconfigure?.();
+    canvasUnconfigureCount += 1;
+    return true;
+  } finally {
+    canvasConfiguration = null;
+    lastCanvasConfigureAction = 'unconfigured';
+  }
 }
 
 function destroyRenderRowsResources() {
   renderRowsParticleBuffer?.destroy?.();
   renderRowsUniformBuffer?.destroy?.();
+  renderDepthTexture?.destroy?.();
+  renderBoxUniformBuffer?.destroy?.();
   residentRenderProducerSourceBuffer?.destroy?.();
   residentRenderProducerParamsBuffer?.destroy?.();
   renderRowsPipeline = null;
+  renderRowsVaporPipeline = null;
   renderRowsBindGroupLayout = null;
   renderRowsParticleBuffer = null;
   renderRowsUniformBuffer = null;
   renderRowsParticleBufferByteLength = 0;
+  renderDepthTexture = null;
+  renderDepthView = null;
+  renderDepthTextureWidth = 0;
+  renderDepthTextureHeight = 0;
+  renderBoxPipeline = null;
+  renderBoxBindGroupLayout = null;
+  renderBoxUniformBuffer = null;
+  renderBoxBindGroup = null;
   residentRenderProducerPipeline = null;
   residentRenderProducerBindGroupLayout = null;
   residentRenderProducerSourceBuffer = null;
@@ -657,6 +817,1004 @@ async function runResidentStageOnPresentationDevice(data = {}) {
   }
 }
 
+// --- W3: batched resident schedule on the presentation device ---
+//
+// Worker-local single-slot mailbox for the render candidates this worker's
+// schedule runs produce. The bridge keeps its own mirror (fed by the
+// 'resident-schedule-candidate' messages below); this instance is the
+// worker-side arbitration point for future worker-local draw consumers.
+// Exported for direct-invocation tests (this module is otherwise a plain
+// worker script).
+export const presentationResidentScheduleCandidateMailbox =
+  createResidentRenderCandidateMailbox();
+
+function resetResidentScheduleCandidateMailbox() {
+  presentationResidentScheduleCandidateMailbox.reset();
+  pendingCommittedResidentSchedulePresentation = null;
+  residentScheduleCandidateStreamIdentity = null;
+  // The stream epoch is deliberately NOT zeroed: the bridge-side mailbox
+  // orders candidates by (epoch, laneId, stateKey) across this worker's whole
+  // lifetime. A page rebuild re-inits the presentation and seeds a NEW lane;
+  // restarting the epoch at 1 would tie the new lane with the retired lane's
+  // epoch and the bridge would reject every committed receipt of the rebuilt
+  // lane as belonging to an inactive stream (observed as a silent 15s
+  // committed-presentation timeout per schedule).
+}
+
+function prepareResidentScheduleCandidateStream({ laneId = null, stateKey = null } = {}) {
+  const nextLaneId = nonEmptyString(laneId);
+  const nextStateKey = nonEmptyString(stateKey);
+  if (!nextLaneId || !nextStateKey) return null;
+  const changed = Boolean(
+    residentScheduleCandidateStreamIdentity
+    && (
+      residentScheduleCandidateStreamIdentity.laneId !== nextLaneId
+      || residentScheduleCandidateStreamIdentity.stateKey !== nextStateKey
+    )
+  );
+  if (changed) {
+    presentationResidentScheduleCandidateMailbox.reset();
+    resetPresentedSphStep();
+  }
+  if (!residentScheduleCandidateStreamIdentity || changed) {
+    residentScheduleCandidateStreamEpoch += 1;
+  }
+  residentScheduleCandidateStreamIdentity = Object.freeze({
+    epoch: residentScheduleCandidateStreamEpoch,
+    laneId: nextLaneId,
+    stateKey: nextStateKey
+  });
+  return residentScheduleCandidateStreamIdentity;
+}
+
+function residentScheduleCandidateStreamIsCurrent(stream = null) {
+  return Boolean(
+    stream
+    && residentScheduleCandidateStreamIdentity
+    && Number(stream.epoch) === Number(residentScheduleCandidateStreamIdentity.epoch)
+    && stream.laneId === residentScheduleCandidateStreamIdentity.laneId
+    && stream.stateKey === residentScheduleCandidateStreamIdentity.stateKey
+  );
+}
+
+function nonEmptyString(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || null;
+}
+
+function sameResidentScheduleCandidateVersion(left = null, right = null) {
+  return Boolean(
+    left
+    && right
+    && Number.isSafeInteger(Number(left.residentExecutionGeneration))
+    && Number(left.residentExecutionGeneration)
+      === Number(right.residentExecutionGeneration)
+    && Number.isSafeInteger(Number(left.nextStep))
+    && Number(left.nextStep) === Number(right.nextStep)
+    && nonEmptyString(left.scheduleId) === nonEmptyString(right.scheduleId)
+    && Number.isSafeInteger(Number(left.stepOrdinal))
+    && Number(left.stepOrdinal) === Number(right.stepOrdinal)
+  );
+}
+
+function committedResidentSchedulePresentationReceiptFields(
+  admission = null,
+  candidate = null
+) {
+  return {
+    residentScheduleCandidatePresentation: true,
+    stateManagerCommittedPresentation: true,
+    committedPresentationSchema: admission?.schema ?? null,
+    committedPresentationStatus: admission?.status ?? null,
+    scheduleId: admission?.scheduleId ?? null,
+    laneId: admission?.laneId ?? null,
+    stateKey: admission?.stateKey ?? null,
+    presentationAdmissionPostedAtMs:
+      Number.isFinite(Number(admission?.presentationAdmissionPostedAtMs))
+        ? Number(admission.presentationAdmissionPostedAtMs)
+        : null,
+    presentationLaneEpoch:
+      candidate?.presentationLaneEpoch ?? null,
+    residentExecutionGeneration:
+      admission?.candidateVersion?.residentExecutionGeneration ?? null,
+    sphStep: admission?.candidateVersion?.nextStep ?? null,
+    stepOrdinal: admission?.candidateVersion?.stepOrdinal ?? null,
+    authorityStatus: admission?.authority?.status ?? null,
+    computeManagerCompletionSchema:
+      admission?.authority?.computeManagerCompletionSchema ?? null,
+    computeManagerLeaseId:
+      admission?.authority?.computeManagerLeaseId ?? null,
+    computeManagerLeaseStatus:
+      admission?.authority?.computeManagerLeaseStatus ?? null,
+    computeManagerFenceSatisfied:
+      admission?.authority?.computeManagerFenceSatisfied === true,
+    stateManagerCommitStatus:
+      admission?.authority?.stateManagerCommitStatus ?? null,
+    stateManagerCommitAccepted:
+      admission?.authority?.stateManagerCommitAccepted === true,
+    terminalScheduleFence:
+      admission?.terminalFence?.terminalScheduleFence === true,
+    terminalFenceScope: admission?.terminalFence?.scope ?? null,
+    terminalFenceSatisfied:
+      admission?.terminalFence?.fenceSatisfied === true,
+    terminalFenceAuthorityAdmissionReady:
+      admission?.terminalFence?.authorityAdmissionReady === true
+  };
+}
+
+function committedResidentSchedulePresentationRenderReceiptFields(data = {}) {
+  if (data?.stateManagerCommittedPresentation !== true) return {};
+  return {
+    residentScheduleCandidatePresentation:
+      data.residentScheduleCandidatePresentation === true,
+    stateManagerCommittedPresentation: true,
+    committedPresentationSchema: data.committedPresentationSchema ?? null,
+    committedPresentationStatus: data.committedPresentationStatus ?? null,
+    scheduleId: data.scheduleId ?? null,
+    laneId: data.laneId ?? null,
+    stateKey: data.stateKey ?? null,
+    presentationLaneEpoch: data.presentationLaneEpoch ?? null,
+    residentExecutionGeneration: data.residentExecutionGeneration ?? null,
+    sphStep: data.sphStep ?? null,
+    stepOrdinal: data.stepOrdinal ?? null,
+    authorityStatus: data.authorityStatus ?? null,
+    computeManagerCompletionSchema:
+      data.computeManagerCompletionSchema ?? null,
+    computeManagerLeaseId: data.computeManagerLeaseId ?? null,
+    computeManagerLeaseStatus: data.computeManagerLeaseStatus ?? null,
+    computeManagerFenceSatisfied:
+      data.computeManagerFenceSatisfied === true,
+    stateManagerCommitStatus: data.stateManagerCommitStatus ?? null,
+    stateManagerCommitAccepted: data.stateManagerCommitAccepted === true,
+    terminalScheduleFence: data.terminalScheduleFence === true,
+    terminalFenceScope: data.terminalFenceScope ?? null,
+    terminalFenceSatisfied: data.terminalFenceSatisfied === true,
+    terminalFenceAuthorityAdmissionReady:
+      data.terminalFenceAuthorityAdmissionReady === true
+  };
+}
+
+// Version mapping (documented decision for W3):
+//
+// The de-facto version token for render candidates is the scene's
+// resident-render-source metadata (peercompute.ulg.sph-resident-render-source
+// .v0, src/visualization/sphPhaseScene.js), ordered by
+// (residentExecutionGeneration, nextStep). The presentation worker has no
+// access to the scene's counters, so it derives the same ordering from the
+// lane's own sealed epoch identity words carried by every W2 schedule
+// progress envelope and terminal result:
+//
+//   version.residentExecutionGeneration := epochIdentity.storageGeneration
+//     The lane's generationId lineage word: it only changes when the lane's
+//     storage generation re-materializes, which strictly supersedes every
+//     candidate of the prior generation (the scene-side analogue is the
+//     per-execution residentExecutionGeneration counter).
+//
+//   version.nextStep := epochIdentity.physicsTick
+//     The W2 schedule driver's 'epoch-identity-regressed' seal guarantees
+//     physicsTick (and positionEpoch) strictly advance per step, and a
+//     continuation schedule on the retained lane keeps advancing from the
+//     retained words — so within one storage generation versions strictly
+//     increase across steps AND across schedules.
+//
+//   version.scheduleId / version.stepOrdinal are carried verbatim for
+//     observability only; they do not participate in ordering.
+//
+// Together (storageGeneration, physicsTick) is strictly increasing over every
+// candidate one lane emits, which is exactly the mailbox's ordering contract.
+// The terminal-result candidate of a live-preview schedule whose last step
+// already emitted a progress candidate carries the SAME version; the mailbox
+// truthfully drops it as a duplicate (droppedStaleCount) rather than
+// reordering. With live preview disabled, only this terminal candidate is
+// constructed and posted.
+//
+// Fail-closed: when the epoch identity or either version word is missing or
+// non-finite (e.g. a schedule cancelled before step 1 has a null
+// finalEpochIdentity) the builder returns null — a candidate is skipped, never
+// fabricated.
+export function buildPresentationResidentScheduleRenderCandidate({
+  scheduleId = null,
+  laneId = null,
+  stateKey = null,
+  presentationLaneEpoch = null,
+  stepOrdinal = null,
+  epochIdentity = null,
+  retainedBufferRefs = null,
+  summary = null
+} = {}) {
+  if (!epochIdentity || typeof epochIdentity !== 'object') return null;
+  for (const field of ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS) {
+    if (!Number.isFinite(Number(epochIdentity[field]))) return null;
+  }
+  const residentExecutionGeneration = Number(epochIdentity.storageGeneration);
+  const nextStep = Number(epochIdentity.physicsTick);
+  return {
+    schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    laneId: nonEmptyString(laneId),
+    stateKey: nonEmptyString(stateKey),
+    presentationLaneEpoch: Number.isSafeInteger(Number(presentationLaneEpoch))
+      && Number(presentationLaneEpoch) > 0
+      ? Number(presentationLaneEpoch)
+      : null,
+    version: {
+      residentExecutionGeneration,
+      nextStep,
+      scheduleId: typeof scheduleId === 'string' ? scheduleId : null,
+      stepOrdinal: Number.isFinite(Number(stepOrdinal))
+        ? Number(stepOrdinal)
+        : null
+    },
+    epochIdentity: Object.fromEntries(
+      ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS.map(
+        (field) => [field, Number(epochIdentity[field])]
+      )
+    ),
+    ...(Array.isArray(retainedBufferRefs)
+      ? { retainedBufferRefs: [...retainedBufferRefs] }
+      : {}),
+    ...(summary && typeof summary === 'object' ? { summary } : {})
+  };
+}
+
+// (a) publish into the worker-local mailbox, (b) post the bridge message.
+// Stale/duplicate versions are dropped by the mailbox but the bridge message
+// is still posted — the bridge-side mailbox applies the identical ordering
+// gate and counts its own drops. Returns the candidate or null when the
+// source had no publishable identity.
+function postResidentScheduleCandidate(source) {
+  const candidate = buildPresentationResidentScheduleRenderCandidate(source);
+  if (!candidate) return null;
+  // Telemetry is best-effort and cannot own presentation. The exact terminal
+  // candidate returned here is retained separately for post-commit admission,
+  // even when the mailbox drops its duplicate version or postMessage fails.
+  try {
+    presentationResidentScheduleCandidateMailbox.publish(candidate);
+  } catch {
+    // Candidate telemetry rejection never destroys the direct terminal value.
+  }
+  try {
+    self.postMessage({
+      type: 'resident-schedule-candidate',
+      laneId: candidate.laneId,
+      stateKey: candidate.stateKey,
+      candidate
+    });
+  } catch {
+    // The terminal presentation path is independent of telemetry delivery.
+  }
+  return candidate;
+}
+
+// W4b: worker-local terminal candidate consumer. Explicit live preview can
+// publish time-coalesced progress candidates to the mailbox, but NEVER gives
+// them committed authority. Only the page's exact post-StateManager-commit
+// admission can promote/draw the terminal candidate from worker-retained
+// post-step buffers.
+function createResidentScheduleCandidateDrawLoop({
+  runner = null,
+  schedulePayload = {},
+  reason = 'run-resident-schedule-on-presentation-device'
+} = {}) {
+  const request = retainedStageOutputRenderRequest(schedulePayload);
+  const laneId = schedulePayload.lease?.laneId || schedulePayload.lane?.laneId || null;
+  const stateKey = schedulePayload.lease?.stateKey || schedulePayload.lane?.stateKey || null;
+  const resolverAvailable =
+    typeof runner?.resolveUlgMechanicsResidentStageWorkerRetainedParticleState === 'function';
+  if (
+    !request
+    || request.sourceStageId !== 'schroederSameLevelMechanics'
+    || !resolverAvailable
+  ) {
+    return {
+      active: false,
+      requested: Boolean(request),
+      inactiveReason: !request
+        ? 'no-retained-stage-output-render-request'
+        : (!resolverAvailable
+          ? 'retained-particle-state-resolver-unavailable'
+          : 'render-request-not-schroeder-same-level-mechanics'),
+      notify() {}
+    };
+  }
+  let drawing = false;
+  let lastDrawnCandidate = null;
+  let lastDrawnStatus = null;
+  // A live-preview draw presents the lane's CURRENT retained state
+  // mid-schedule. It must never claim StateManager commitment: the
+  // committed receipt helper hardcodes stateManagerCommittedPresentation
+  // true, so previews carry their own honest uncommitted marker (which
+  // also keeps the page's committed-presentation matcher from ever
+  // admitting one).
+  const candidateReceiptFields = (admission, candidate) => (
+    admission?.livePreview === true
+      ? {
+          residentScheduleCandidatePresentation: true,
+          stateManagerCommittedPresentation: false,
+          residentSchedulePresentationMode: 'uncommitted-live-preview',
+          scheduleId: candidate?.scheduleId ?? null,
+          laneId: candidate?.laneId ?? laneId,
+          stateKey: candidate?.stateKey ?? stateKey,
+          presentationLaneEpoch: candidate?.presentationLaneEpoch ?? null,
+          stepOrdinal: candidate?.version?.stepOrdinal ?? null
+        }
+      : committedResidentSchedulePresentationReceiptFields(
+          admission,
+          candidate
+        )
+  );
+  const drawCandidate = (admission, candidate) => {
+    if (drawing) return null;
+    drawing = true;
+    try {
+        if (!candidate) return null;
+        const retained = runner.resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+          laneId,
+          stateKey,
+          sourceStageId: 'schroederSameLevelMechanics'
+        });
+        const candidateParticleCount = Number(candidate?.summary?.particleCount);
+        const retainedParticleCount = Number(retained?.particleCount);
+        const retainedStateStrideFloats = Number(retained?.stateStrideFloats);
+        const retainedThermoStrideFloats = Number(retained?.thermoStrideFloats);
+        const retainedStateByteLength = Number(retained?.stateBufferByteLength);
+        const retainedThermoByteLength = Number(retained?.thermoBufferByteLength);
+        const retainedShapeReady = Boolean(
+          Number.isSafeInteger(candidateParticleCount)
+          && candidateParticleCount > 0
+          && candidateParticleCount === retainedParticleCount
+          && Number.isSafeInteger(retainedStateStrideFloats)
+          && retainedStateStrideFloats > 0
+          && Number.isSafeInteger(retainedThermoStrideFloats)
+          && retainedThermoStrideFloats >= 12
+          && Number.isSafeInteger(retainedStateByteLength)
+          && retainedStateByteLength
+            >= retainedParticleCount * retainedStateStrideFloats * 4
+          && Number.isSafeInteger(retainedThermoByteLength)
+          && retainedThermoByteLength
+            >= retainedParticleCount * retainedThermoStrideFloats * 4
+        );
+        if (
+          retained?.status !== 'worker-retained-particle-state-ready'
+          || !isGpuBufferLike(retained.sourceStateBuffer)
+          || !isGpuBufferLike(retained.sourceThermoBuffer)
+          || !retainedShapeReady
+        ) {
+          return publishRenderRowsStatus({
+            schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+            renderRowsSchema: RENDER_ROWS_SCHEMA,
+            status: 'worker-offscreen-resident-schedule-candidate-render-blocked-source-unavailable',
+            reason: retained?.status !== 'worker-retained-particle-state-ready'
+              ? (retained?.status || reason)
+              : 'worker-retained-particle-state-terminal-shape-mismatch',
+            inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+            producerSourceKind: 'worker-retained-resident-stage-output',
+            producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+            sourceStageId: 'schroederSameLevelMechanics',
+            retainedParticleStateStatus: retained?.status || null,
+            particleCount: retained?.particleCount ?? 0,
+            sourceTransferBytes: 0,
+            sourceStateTransferBytes: 0,
+            workerLocalRenderRowsProduced: false,
+            ...candidateReceiptFields(admission, candidate)
+          });
+        }
+        const livePreviewMode = request.residentScheduleLivePreview === true;
+        if (livePreviewMode) {
+          // Camera responsiveness: the page streams the current
+          // view-projection while the preview owns the display; redraw the
+          // freshest candidate on camera updates instead of waiting for the
+          // next physics candidate.
+          previewCameraRedraw = () => drawCandidate({ livePreview: true }, candidate);
+        }
+        const drawStatus = drawResidentParticleStateProducer({
+          ...request,
+          ...(livePreviewMode && previewViewProjectionOverride
+            ? { viewProjectionMatrix: previewViewProjectionOverride }
+            : {}),
+          inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+          producerSourceKind: 'worker-retained-resident-stage-output',
+          producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+          sourceCacheStatus: 'worker-retained-resident-schedule-candidate-bound',
+          sourceStageId: 'schroederSameLevelMechanics',
+          retainedParticleStateStatus: retained.status,
+          sourceStateBuffer: retained.sourceStateBuffer,
+          sourceThermoBuffer: retained.sourceThermoBuffer,
+          particleCount: retained.particleCount,
+          stateStrideFloats: retained.stateStrideFloats,
+          thermoStrideFloats: retained.thermoStrideFloats,
+          stateByteLength: retained.stateBufferByteLength,
+          thermoByteLength: retained.thermoBufferByteLength,
+          // Presentation ordering rides the candidate's own strictly
+          // advancing version word (physicsTick), so a stale draw can never
+          // supersede a newer presented step.
+          sphStep: candidate.version.nextStep,
+          residentScheduleCandidatePresentation: true,
+          ...candidateReceiptFields(admission, candidate),
+          // A schedule can outlive a viewport resize. Presentation geometry
+          // is camera-current, so it must also use the worker's current
+          // backing/CSS dimensions rather than snapping the canvas and depth
+          // texture back to the dimensions captured at schedule dispatch.
+          width: canvas?.width ?? request.width ?? 1,
+          height: canvas?.height ?? request.height ?? 1,
+          cssWidth,
+          cssHeight,
+          pixelRatio,
+          backgroundColor: request.backgroundColor || backgroundColor,
+          // The worker is an overlay above the scene/environment canvas.
+          // Worker-owned resident presentation removes the page-side stale
+          // particle surface, and this renderer now supplies its own box, so
+          // the preview must remain transparent to preserve the environment
+          // instead of hiding it behind an opaque presentation canvas.
+          clearAlpha: Number.isFinite(Number(request.clearAlpha))
+            ? Number(request.clearAlpha)
+            : clearAlpha,
+          reason: `${reason}:resident-schedule-candidate`
+        });
+        if (
+          drawStatus?.status
+            === 'worker-offscreen-resident-particle-state-producer-rendered'
+        ) {
+          lastDrawnCandidate = candidate;
+          lastDrawnStatus = drawStatus;
+        }
+        return drawStatus;
+    } finally {
+      drawing = false;
+    }
+  };
+  return {
+    active: true,
+    requested: true,
+    inactiveReason: null,
+    notify(admission = null, candidate = null) {
+      try {
+        const promotion = resolveCommittedResidentSchedulePreviewPromotion({
+          admission,
+          candidate,
+          lastDrawnCandidate,
+          lastDrawnStatus,
+          reason
+        });
+        if (promotion) {
+          // The exact terminal candidate was already submitted to the worker
+          // canvas as an uncommitted live-preview frame. StateManager commit
+          // does not change its pixels; promote that same versioned frame to
+          // an authority-bearing receipt without a duplicate compute/render
+          // submission. A non-matching candidate still takes the ordinary
+          // committed draw path below.
+          return publishRenderRowsStatus(promotion);
+        }
+        return drawCandidate(admission, candidate);
+      } catch (error) {
+        // Candidate presentation must never abort the batch; surface the
+        // failure on the render-rows status channel instead.
+        try {
+          return publishRenderRowsStatus({
+            schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+            renderRowsSchema: RENDER_ROWS_SCHEMA,
+            status: 'worker-offscreen-resident-schedule-candidate-render-failed',
+            reason: error instanceof Error ? error.message : String(error),
+            inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+            producerSourceKind: 'worker-retained-resident-stage-output',
+            producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+            sourceStageId: 'schroederSameLevelMechanics',
+            workerLocalRenderRowsProduced: false,
+            ...candidateReceiptFields(admission, candidate),
+            ...compactError(error)
+          });
+        } catch {
+          // Even status publication failures stay out of the step loop.
+        }
+        return null;
+      }
+    },
+    ensureTerminalPreview(candidate = null) {
+      if (
+        lastDrawnStatus?.status
+          === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && sameResidentScheduleCandidateVersion(
+          lastDrawnCandidate?.version,
+          candidate?.version
+        )
+      ) {
+        return lastDrawnStatus;
+      }
+      return drawCandidate({ livePreview: true }, candidate);
+    }
+  };
+}
+
+export function resolveCommittedResidentSchedulePreviewPromotion({
+  admission = null,
+  candidate = null,
+  lastDrawnCandidate = null,
+  lastDrawnStatus = null,
+  reason = 'run-resident-schedule-on-presentation-device'
+} = {}) {
+  if (
+    admission?.livePreview === true
+    || lastDrawnStatus?.status
+      !== 'worker-offscreen-resident-particle-state-producer-rendered'
+    || !sameResidentScheduleCandidateVersion(
+      lastDrawnCandidate?.version,
+      candidate?.version
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...lastDrawnStatus,
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    reason:
+      `${reason}:resident-schedule-terminal-preview-promoted-after-commit`,
+    residentSchedulePresentationMode:
+      'committed-terminal-live-preview-promotion',
+    committedPresentationPromotedWithoutRedraw: true,
+    workerLocalRenderRowsProduced: true,
+    updatedAtMs: nowMs(),
+    ...committedResidentSchedulePresentationReceiptFields(
+      admission,
+      candidate
+    )
+  };
+}
+
+function committedResidentSchedulePresentationBlocked(data = {}, reason) {
+  return publishRenderRowsStatus({
+    schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+    renderRowsSchema: RENDER_ROWS_SCHEMA,
+    status:
+      'worker-offscreen-committed-resident-schedule-presentation-blocked',
+    reason,
+    inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: RESIDENT_STAGE_OUTPUT_TRANSPORT,
+    sourceStageId: 'schroederSameLevelMechanics',
+    residentScheduleCandidatePresentation: true,
+    stateManagerCommittedPresentation: false,
+    scheduleId: data?.scheduleId ?? null,
+    laneId: data?.laneId ?? null,
+    stateKey: data?.stateKey ?? null,
+    residentExecutionGeneration:
+      data?.candidateVersion?.residentExecutionGeneration ?? null,
+    sphStep: data?.candidateVersion?.nextStep ?? null,
+    stepOrdinal: data?.candidateVersion?.stepOrdinal ?? null,
+    workerLocalRenderRowsProduced: false
+  });
+}
+
+// Page -> presentation-worker admission for exactly one terminal candidate.
+// This is intentionally exported as a direct test seam; the message loop is
+// the only production caller. Any missing/mismatched authority word leaves the
+// candidate undrawn and consumes no worker-retained source.
+export function presentCommittedResidentScheduleCandidate(data = {}) {
+  const pending = pendingCommittedResidentSchedulePresentation;
+  if (!pending) {
+    return committedResidentSchedulePresentationBlocked(
+      data,
+      'no pending terminal resident-schedule candidate exists'
+    );
+  }
+  const scheduleId = nonEmptyString(data.scheduleId);
+  const laneId = nonEmptyString(data.laneId);
+  const stateKey = nonEmptyString(data.stateKey);
+  const terminalFence = data.terminalFence;
+  const authority = data.authority;
+  const candidateVersion = data.candidateVersion;
+  const identityReady = Boolean(
+    data.schema
+      === PRESENTATION_WORKER_COMMITTED_RESIDENT_SCHEDULE_PRESENTATION_SCHEMA
+    && data.status
+      === 'state-manager-committed-resident-schedule-presentation-admission'
+    && scheduleId === pending.scheduleId
+    && laneId === pending.laneId
+    && stateKey === pending.stateKey
+    && sameResidentScheduleCandidateVersion(
+      candidateVersion,
+      pending.terminalCandidate?.version
+    )
+  );
+  const terminalFenceReady = Boolean(
+    terminalFence
+    && terminalFence.required === true
+    && terminalFence.scope === 'resident-schedule-terminal'
+    && terminalFence.terminalScheduleFence === true
+    && terminalFence.fenceSatisfied === true
+    && terminalFence.authorityAdmissionReady === true
+    && terminalFence.queueCompletionStatus === 'queue-work-completed'
+    && [
+      'queue.onSubmittedWorkDone',
+      'worker-device.queue.onSubmittedWorkDone'
+    ].includes(terminalFence.queueCompletionMethod)
+    && terminalFence.scheduleId === scheduleId
+    && terminalFence.laneId === laneId
+    && terminalFence.stateKey === stateKey
+    && Number(terminalFence.completedStepCount)
+      === Number(candidateVersion?.stepOrdinal)
+    && terminalFence.scheduleId === pending.terminalFence?.scheduleId
+    && Number(terminalFence.completedStepCount)
+      === Number(pending.terminalFence?.completedStepCount)
+  );
+  const authorityReady = Boolean(
+    authority
+    && authority.status === 'state-manager-committed-worker-schedule'
+    && authority.computeManagerCompletionSchema
+      === WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA
+    && nonEmptyString(authority.computeManagerLeaseId)
+    && authority.computeManagerLeaseStatus === 'completed'
+    && authority.computeManagerFenceSatisfied === true
+    && authority.stateManagerCommitStatus === 'committed'
+    && authority.stateManagerCommitAccepted === true
+  );
+  if (!identityReady || !terminalFenceReady || !authorityReady) {
+    return committedResidentSchedulePresentationBlocked(
+      data,
+      !identityReady
+        ? 'committed presentation identity does not match the pending terminal candidate'
+        : (!terminalFenceReady
+          ? 'committed presentation lacks the exact terminal schedule fence'
+          : 'committed presentation lacks ComputeManager/StateManager authority')
+    );
+  }
+  // Consume before drawing so a duplicate/replayed admission cannot submit a
+  // second frame even when draw setup throws.
+  pendingCommittedResidentSchedulePresentation = null;
+  return pending.candidateDrawLoop.notify(data, pending.terminalCandidate);
+}
+
+// Mirrors runResidentStageOnPresentationDevice exactly (same device-injection
+// pattern through context.ulgMechanicsResidentStageWorker.common.deviceResult
+// with sameWorkerQueueFenceFallback, same dynamic module import) but drives
+// the W2 batched schedule entry runUlgMechanicsResidentStageWorkerSchedule-
+// Payload. `runnerModuleOverride` is a test-only seam so node tests can inject
+// a fake mechanics module; the message path never sets it. Exported for
+// direct-invocation tests.
+export async function runResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  const payload = data.payload && typeof data.payload === 'object' ? data.payload : {};
+  if (!device || !context) {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-webgpu-unavailable',
+      reason: 'presentation worker WebGPU device/context is unavailable',
+      stagePayload: payload,
+      workerDeviceSource: null,
+      workerDeviceProvided: false,
+      workerReady: false
+    });
+    return;
+  }
+  if (pendingCommittedResidentSchedulePresentation) {
+    publishResidentStageStatus({
+      status:
+        'worker-offscreen-resident-schedule-on-presentation-device-blocked-pending-committed-presentation',
+      reason:
+        'the prior terminal candidate has not received its StateManager-commit presentation admission',
+      stagePayload: payload,
+      workerReady: true
+    });
+    return;
+  }
+  const startedAtMs = nowMs();
+  const timeoutMs = residentStageTimeoutMs(data);
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publishResidentStageStatus({
+        status: 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+        reason: 'mechanics resident stage runner import failed',
+        stagePayload: payload,
+        workerReady: true,
+        startedAtMs,
+        timeoutMs,
+        error
+      });
+      return;
+    }
+  }
+  if (typeof runner.runUlgMechanicsResidentStageWorkerSchedulePayload !== 'function') {
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule runner is unavailable in presentation worker',
+      stagePayload: payload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs
+    });
+    return;
+  }
+  const previousContext = payload.context && typeof payload.context === 'object'
+    ? payload.context
+    : {};
+  const previousWorkerContext = previousContext.ulgMechanicsResidentStageWorker
+    || previousContext.mechanicsResidentStageWorker
+    || {};
+  const previousCommon = previousWorkerContext.common && typeof previousWorkerContext.common === 'object'
+    ? previousWorkerContext.common
+    : {};
+  const schedulePayload = {
+    ...payload,
+    context: {
+      ...previousContext,
+      ulgMechanicsResidentStageWorker: {
+        ...previousWorkerContext,
+        preferWebGpu: true,
+        common: {
+          ...previousCommon,
+          sameWorkerQueueFenceFallback: true,
+          deviceResult: {
+            status: 'webgpu-ready-presentation-worker-device',
+            reason: 'resident schedule is executing inside the offscreen presentation worker',
+            device,
+            workerDeviceSource: 'offscreen-presentation-worker-device',
+            workerDeviceProvided: true
+          },
+          navigatorRef: self.navigator
+        }
+      }
+    }
+  };
+  const scheduleLaneId =
+    schedulePayload.lease?.laneId || schedulePayload.lane?.laneId || null;
+  const scheduleStateKey =
+    schedulePayload.lease?.stateKey || schedulePayload.lane?.stateKey || null;
+  const scheduleCandidateStream = prepareResidentScheduleCandidateStream({
+    laneId: scheduleLaneId,
+    stateKey: scheduleStateKey
+  });
+  // W4b: a scheduleStepOptionsProvider is a FUNCTION and can never cross
+  // postMessage, so the presentation worker injects the worker-local lane
+  // continuation classifier here — the W2 driver consults it for steps 2+
+  // (and for step 1 of a continuation schedule on a retained lane). An
+  // explicitly provided provider (direct in-worker callers, tests) always
+  // wins; without the factory the schedule keeps its original fail-closed
+  // behavior.
+  try {
+    const injectedWorkerContext =
+      schedulePayload.context.ulgMechanicsResidentStageWorker;
+    const scheduleStageOptions = injectedWorkerContext.stageOptions
+      && typeof injectedWorkerContext.stageOptions === 'object'
+      ? injectedWorkerContext.stageOptions
+      : null;
+    const epochStageOptions = scheduleStageOptions?.schroederSpatialEpoch
+      && typeof scheduleStageOptions.schroederSpatialEpoch === 'object'
+      ? scheduleStageOptions.schroederSpatialEpoch
+      : null;
+    if (
+      epochStageOptions
+      && typeof epochStageOptions.scheduleStepOptionsProvider !== 'function'
+      && typeof runner.createWorkerSchroederLaneLevelAssignmentProvider === 'function'
+    ) {
+      injectedWorkerContext.stageOptions = {
+        ...scheduleStageOptions,
+        schroederSpatialEpoch: {
+          ...epochStageOptions,
+          scheduleStepOptionsProvider:
+            runner.createWorkerSchroederLaneLevelAssignmentProvider({
+              laneId: schedulePayload.lease?.laneId
+                ?? schedulePayload.lane?.laneId
+                ?? null,
+              stateKey: schedulePayload.lease?.stateKey
+                ?? schedulePayload.lane?.stateKey
+                ?? null,
+              classifierOptions:
+                epochStageOptions.laneContinuationClassifierOptions || null
+            })
+        }
+      };
+    }
+  } catch {
+    // Provider injection is an enabler, never a gate: without it the W2
+    // driver fails closed exactly as before.
+  }
+  publishResidentStageStatus({
+    status: 'worker-offscreen-resident-schedule-on-presentation-device-started',
+    reason: data.reason || 'run-resident-schedule-on-presentation-device',
+    stagePayload: schedulePayload,
+    workerReady: true,
+    startedAtMs,
+    timeoutMs
+  });
+  // W4b: progress candidates are telemetry-only. The draw loop is retained
+  // with the terminal candidate and can be notified only by an exact
+  // post-StateManager-commit admission from the page.
+  const candidateDrawLoop = createResidentScheduleCandidateDrawLoop({
+    runner,
+    schedulePayload,
+    reason: data.reason || 'run-resident-schedule-on-presentation-device'
+  });
+  // Explicit page opt-in: mid-schedule LIVE PREVIEW draws of the lane's
+  // current retained state on the worker canvas. Every preview publishes
+  // with an uncommitted marker; the committed terminal presentation stays
+  // the only authority-bearing draw. Throttled so per-step progress posts
+  // do not swamp the canvas, and the submit burst is flushed around each
+  // draw (a held canvas present would outlive its swapchain texture).
+  const livePreviewRequest = retainedStageOutputRenderRequest(schedulePayload);
+  const livePreviewEnabled = Boolean(
+    candidateDrawLoop.active
+    && livePreviewRequest?.residentScheduleLivePreview === true
+  );
+  const livePreviewMinIntervalMs = Math.max(
+    33,
+    Math.round(Number(livePreviewRequest?.livePreviewMinIntervalMs) || 66)
+  );
+  let livePreviewLastDrawMs = Number.NEGATIVE_INFINITY;
+  const postLivePreviewProgress = livePreviewEnabled
+    ? (progress) => {
+        try {
+          if (!residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
+            return;
+          }
+          const progressAtMs = nowMs();
+          if (
+            progressAtMs - livePreviewLastDrawMs
+              < livePreviewMinIntervalMs
+          ) {
+            return;
+          }
+          // Gate before reading the progress envelope or building/freezing a
+          // candidate. Off-cadence progress remains wholly worker-local.
+          const candidate = postResidentScheduleCandidate({
+            scheduleId: progress?.scheduleId ?? null,
+            laneId: scheduleLaneId,
+            stateKey: scheduleStateKey,
+            presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
+            stepOrdinal: progress?.stepOrdinal ?? null,
+            epochIdentity: progress?.epochIdentity ?? null,
+            retainedBufferRefs:
+              progress?.stepSummary?.retainedBufferRefs ?? null,
+            summary: progress?.stepSummary ?? null
+          });
+          if (!candidate) return;
+          livePreviewLastDrawMs = progressAtMs;
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+          candidateDrawLoop.notify({ livePreview: true }, candidate);
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+        } catch {
+          // Candidate delivery must never abort the batch (mirrors the W2
+          // driver's own fire-and-forget progress contract).
+        }
+      }
+    : null;
+  try {
+    const result = await timeoutResidentStage(
+      runner.runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload,
+        {
+          id: data.id ?? null,
+          ...(postLivePreviewProgress
+            ? { postProgress: postLivePreviewProgress }
+            : {})
+        }
+      ),
+      timeoutMs
+    );
+    try {
+      const terminalCandidate = residentScheduleCandidateStreamIsCurrent(
+        scheduleCandidateStream
+      )
+        ? postResidentScheduleCandidate({
+            scheduleId: result?.scheduleId ?? null,
+            laneId: result?.laneId ?? scheduleLaneId,
+            stateKey: result?.stateKey ?? scheduleStateKey,
+            presentationLaneEpoch: scheduleCandidateStream?.epoch ?? null,
+            stepOrdinal: result?.completedStepCount ?? null,
+            epochIdentity: result?.finalEpochIdentity ?? null,
+            retainedBufferRefs: result?.retainedBufferRefs ?? null,
+            summary: result?.perStepSummaries?.lastStep ?? null
+          })
+        : null;
+      if (terminalCandidate && candidateDrawLoop.active) {
+        if (pendingCommittedResidentSchedulePresentation) {
+          throw new Error(
+            'worker resident schedule terminal candidate cannot overwrite a pending committed presentation'
+          );
+        }
+        if (livePreviewEnabled) {
+          // Materialize the exact terminal pixels while the terminal retained
+          // family is current. The later post-StateManager admission can then
+          // promote this same candidate without submitting a duplicate draw.
+          // This draw is presentation-only and remains outside the already
+          // satisfied physics/authority fence.
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+          candidateDrawLoop.ensureTerminalPreview(terminalCandidate);
+          try {
+            flushWorkerQueueSubmitBurst(device);
+          } catch {}
+        }
+        pendingCommittedResidentSchedulePresentation = {
+          scheduleId: result?.scheduleId ?? null,
+          laneId: result?.laneId ?? schedulePayload.lease?.laneId ?? null,
+          stateKey: result?.stateKey ?? schedulePayload.lease?.stateKey ?? null,
+          terminalCandidate,
+          terminalFence: result?.gpuFence ?? null,
+          candidateDrawLoop
+        };
+      }
+    } catch {
+      // Terminal candidate failures must not mask the completed result.
+    }
+    publishResidentStageStatus({
+      status: 'worker-offscreen-resident-schedule-on-presentation-device-completed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      result,
+      // The full W2 terminal envelope, forwarded verbatim: the page-side
+      // scene adopts its truthful words (completedStepCount, per-step epoch
+      // seals, lane identity, gpuFence, retained refs, cancellation).
+      residentScheduleResult: result ?? null
+    });
+  } catch (error) {
+    publishResidentStageStatus({
+      status: error?.message?.includes('timed out')
+        ? 'worker-offscreen-resident-schedule-on-presentation-device-timeout'
+        : 'worker-offscreen-resident-schedule-on-presentation-device-failed',
+      reason: data.reason || 'run-resident-schedule-on-presentation-device',
+      stagePayload: schedulePayload,
+      workerReady: true,
+      startedAtMs,
+      timeoutMs,
+      error,
+      residentScheduleError: error?.residentScheduleError ?? null
+    });
+  }
+}
+
+// Forwards to the W2 cancel entry (a pure between-steps flag; no device is
+// required, so cancellation works even while init is still pending). The
+// terminal 'resident-schedule-...-completed' status with result.cancelled:
+// true remains the acknowledgement, exactly as on the mechanics worker's own
+// message loop. Exported for direct-invocation tests.
+export async function cancelResidentScheduleOnPresentationDevice(data = {}, {
+  runnerModuleOverride = null
+} = {}) {
+  let runner = runnerModuleOverride;
+  if (!runner) {
+    try {
+      runner = await residentStageRunnerModule();
+    } catch (error) {
+      publish({
+        status: 'worker-offscreen-resident-schedule-cancel-failed',
+        reason: 'mechanics resident stage runner import failed',
+        workerReady: Boolean(device && context),
+        ...compactError(error)
+      });
+      return null;
+    }
+  }
+  if (typeof runner.cancelUlgMechanicsResidentStageWorkerSchedule !== 'function') {
+    publish({
+      status: 'worker-offscreen-resident-schedule-cancel-blocked-runner-unavailable',
+      reason: 'mechanics resident schedule cancel entry is unavailable in presentation worker',
+      workerReady: Boolean(device && context)
+    });
+    return null;
+  }
+  const outcome = runner.cancelUlgMechanicsResidentStageWorkerSchedule(data.id);
+  publish({
+    status: 'worker-offscreen-resident-schedule-cancel-forwarded',
+    reason: data.reason || 'cancel-resident-schedule-on-presentation-device',
+    workerReady: Boolean(device && context),
+    workerOffscreenResidentScheduleCancel: {
+      schema: PRESENTATION_WORKER_RESIDENT_SCHEDULE_CANCEL_SCHEMA,
+      id: data.id ?? null,
+      ...(outcome && typeof outcome === 'object' ? outcome : {})
+    }
+  });
+  return outcome;
+}
+
 async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
   if (!device || !context) {
     return publishRetainedCompactSnapshotStatus({
@@ -758,7 +1916,7 @@ async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
 
 function createRenderRowsShaderModule() {
   return device.createShaderModule({
-    label: 'ulg-offscreen-render-rows-shader',
+    label: 'ulg-offscreen-projective-sphere-impostor-shader',
     code: `
 struct Particle {
   positionRadius: vec4<f32>,
@@ -780,7 +1938,9 @@ struct Params {
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
-  @location(0) color: vec4<f32>,
+  @location(0) quadUv: vec2<f32>,
+  @location(1) color: vec4<f32>,
+  @location(2) @interpolate(flat) vaporClass: f32,
 };
 
 fn quadCorner(vertexIndex: u32) -> vec2<f32> {
@@ -794,19 +1954,84 @@ fn quadCorner(vertexIndex: u32) -> vec2<f32> {
   return corner;
 }
 
-@vertex
-fn vsMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOut {
-  let particle = particles[instanceIndex];
-  let clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
+fn hiddenVertex() -> VertexOut {
   var out: VertexOut;
-  if (clip.w <= 0.0001) {
-    out.position = vec4<f32>(2.0, 2.0, 1.0, 1.0);
-    out.color = vec4<f32>(0.0);
-    return out;
+  out.position = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  out.quadUv = vec2<f32>(2.0);
+  out.color = vec4<f32>(0.0);
+  out.vaporClass = 0.0;
+  return out;
+}
+
+fn projectedAxisOffsetPx(
+  centerClip: vec4<f32>,
+  axisClip: vec4<f32>
+) -> vec2<f32> {
+  if (centerClip.w <= 0.0001 || axisClip.w <= 0.0001) {
+    return vec2<f32>(0.0);
+  }
+  let deltaNdc = axisClip.xy / axisClip.w - centerClip.xy / centerClip.w;
+  return deltaNdc * max(params.canvasSizePx, vec2<f32>(1.0)) * 0.5;
+}
+
+fn projectiveRadiusPx(
+  centerM: vec3<f32>,
+  radiusM: f32,
+  centerClip: vec4<f32>
+) -> f32 {
+  let dx = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(radiusM, 0.0, 0.0), 1.0)
+  );
+  let dy = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(0.0, radiusM, 0.0), 1.0)
+  );
+  let dz = projectedAxisOffsetPx(
+    centerClip,
+    params.viewProjection * vec4<f32>(centerM + vec3<f32>(0.0, 0.0, radiusM), 1.0)
+  );
+  // The three projected axis offsets are the columns of a 2x3 screen-space
+  // Jacobian. A sphere projects to the ellipse defined by that Jacobian; its
+  // outer radius is the largest singular value, not the Frobenius norm (which
+  // overstates a centered sphere by sqrt(2)). Compute the largest eigenvalue
+  // of A*A^T directly so physical radius remains truthful at every view.
+  let rowXX = dx.x * dx.x + dy.x * dy.x + dz.x * dz.x;
+  let rowXY = dx.x * dx.y + dy.x * dy.y + dz.x * dz.y;
+  let rowYY = dx.y * dx.y + dy.y * dy.y + dz.y * dz.y;
+  let eigenGap = sqrt(max(
+    0.0,
+    (rowXX - rowYY) * (rowXX - rowYY) + 4.0 * rowXY * rowXY
+  ));
+  let largestEigenvalue = 0.5 * (rowXX + rowYY + eigenGap);
+  return sqrt(max(largestEigenvalue, 0.0));
+}
+
+fn buildVertex(
+  vertexIndex: u32,
+  instanceIndex: u32,
+  vaporPass: bool
+) -> VertexOut {
+  let particle = particles[instanceIndex];
+  let signedRadiusM = particle.positionRadius.w;
+  let belongsToPass = (vaporPass && signedRadiusM < 0.0)
+    || (!vaporPass && signedRadiusM > 0.0);
+  var clip = params.viewProjection * vec4<f32>(particle.positionRadius.xyz, 1.0);
+  if (
+    clip.w <= 0.0001
+    || !belongsToPass
+    || particle.color.a <= 0.0
+  ) {
+    return hiddenVertex();
   }
   let corner = quadCorner(vertexIndex);
-  let pointSizePx = clamp(
-    max(particle.positionRadius.w * params.radiusScalePx, params.fallbackPointSizePx),
+  let radiusM = abs(signedRadiusM);
+  var pointSizePx = projectiveRadiusPx(particle.positionRadius.xyz, radiusM, clip);
+  if (pointSizePx <= 0.0001) {
+    pointSizePx = max(radiusM * params.radiusScalePx, params.fallbackPointSizePx);
+  }
+  pointSizePx = clamp(
+    pointSizePx,
     params.minPointSizePx,
     params.maxPointSizePx
   );
@@ -815,21 +2040,64 @@ fn vsMain(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) inst
     (pointSizePx / max(params.canvasSizePx.y, 1.0)) * 2.0
   );
   let ndc = (clip.xy / clip.w) + ndcOffset;
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  var out: VertexOut;
   out.position = vec4<f32>(ndc * clip.w, clip.z, clip.w);
+  out.quadUv = corner;
   out.color = particle.color;
+  out.vaporClass = select(0.0, 1.0, vaporPass);
   return out;
+}
+
+@vertex
+fn vsCondensed(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32
+) -> VertexOut {
+  return buildVertex(vertexIndex, instanceIndex, false);
+}
+
+@vertex
+fn vsVapor(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32
+) -> VertexOut {
+  return buildVertex(vertexIndex, instanceIndex, true);
 }
 
 @fragment
 fn fsMain(input: VertexOut) -> @location(0) vec4<f32> {
-  return input.color;
+  let radiusSquared = dot(input.quadUv, input.quadUv);
+  if (radiusSquared > 1.0) {
+    discard;
+  }
+  let sphereNormal = normalize(vec3<f32>(
+    input.quadUv,
+    sqrt(max(0.0, 1.0 - radiusSquared))
+  ));
+  let light = normalize(vec3<f32>(-0.36, 0.52, 0.77));
+  let diffuse = 0.34 + 0.66 * max(dot(sphereNormal, light), 0.0);
+  let rim = pow(1.0 - max(sphereNormal.z, 0.0), 2.0) * 0.16;
+  let condensedEdge = 1.0 - smoothstep(0.90, 1.0, radiusSquared);
+  let vaporEdge = 1.0 - smoothstep(0.18, 1.0, radiusSquared);
+  let edge = mix(condensedEdge, vaporEdge, input.vaporClass);
+  let vaporOpacity = mix(1.0, 0.68, input.vaporClass);
+  return vec4<f32>(
+    input.color.rgb * (diffuse + rim),
+    input.color.a * edge * vaporOpacity
+  );
 }
 `
   });
 }
 
 function ensureRenderRowsPipeline() {
-  if (renderRowsPipeline && renderRowsBindGroupLayout && renderRowsUniformBuffer) {
+  if (
+    renderRowsPipeline
+    && renderRowsVaporPipeline
+    && renderRowsBindGroupLayout
+    && renderRowsUniformBuffer
+  ) {
     return;
   }
   const shaderModule = createRenderRowsShaderModule();
@@ -853,11 +2121,11 @@ function ensureRenderRowsPipeline() {
     bindGroupLayouts: [renderRowsBindGroupLayout]
   });
   renderRowsPipeline = device.createRenderPipeline({
-    label: 'ulg-offscreen-render-rows-pipeline',
+    label: 'ulg-offscreen-condensed-sphere-impostor-pipeline',
     layout: pipelineLayout,
     vertex: {
       module: shaderModule,
-      entryPoint: 'vsMain'
+      entryPoint: 'vsCondensed'
     },
     fragment: {
       module: shaderModule,
@@ -881,6 +2149,47 @@ function ensureRenderRowsPipeline() {
     },
     primitive: {
       topology: 'triangle-list'
+    },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: true,
+      depthCompare: 'less-equal'
+    }
+  });
+  renderRowsVaporPipeline = device.createRenderPipeline({
+    label: 'ulg-offscreen-vapor-sphere-impostor-pipeline',
+    layout: pipelineLayout,
+    vertex: {
+      module: shaderModule,
+      entryPoint: 'vsVapor'
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fsMain',
+      targets: [{
+        format,
+        blend: {
+          color: {
+            srcFactor: 'src-alpha',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          },
+          alpha: {
+            srcFactor: 'one',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          }
+        },
+        writeMask: self.GPUColorWrite?.ALL ?? 0xF
+      }]
+    },
+    primitive: {
+      topology: 'triangle-list'
+    },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: false,
+      depthCompare: 'less-equal'
     }
   });
   renderRowsUniformBuffer = device.createBuffer({
@@ -889,6 +2198,220 @@ function ensureRenderRowsPipeline() {
     usage: gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
       | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
   });
+}
+
+function ensureWorkerPresentationDepthView() {
+  const width = Math.max(1, Number(canvas?.width) || 1);
+  const height = Math.max(1, Number(canvas?.height) || 1);
+  if (
+    renderDepthTexture
+    && renderDepthView
+    && renderDepthTextureWidth === width
+    && renderDepthTextureHeight === height
+  ) {
+    return renderDepthView;
+  }
+  renderDepthTexture?.destroy?.();
+  renderDepthTexture = device.createTexture({
+    label: 'ulg-offscreen-presentation-depth',
+    size: [width, height, 1],
+    format: WORKER_PRESENTATION_DEPTH_FORMAT,
+    usage: self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT
+  });
+  renderDepthView = renderDepthTexture.createView();
+  renderDepthTextureWidth = width;
+  renderDepthTextureHeight = height;
+  return renderDepthView;
+}
+
+function ensureWorkerPresentationBoxPipeline() {
+  if (
+    renderBoxPipeline
+    && renderBoxBindGroupLayout
+    && renderBoxUniformBuffer
+    && renderBoxBindGroup
+  ) {
+    return;
+  }
+  const shaderModule = device.createShaderModule({
+    label: 'ulg-offscreen-presentation-box-wireframe-shader',
+    code: `
+struct BoxParams {
+  viewProjection: mat4x4<f32>,
+  dimsM: vec4<f32>,
+  color: vec4<f32>,
+};
+
+struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> params: BoxParams;
+
+const BOX_EDGES = array<vec3<f32>, 24>(
+  vec3<f32>(0., 0., 0.), vec3<f32>(1., 0., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 0., 1.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(0., 0., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 0., 0.),
+  vec3<f32>(0., 1., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 1., 0.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(1., 1., 1.), vec3<f32>(0., 1., 1.),
+  vec3<f32>(0., 1., 1.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(0., 0., 0.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 1., 1.)
+);
+
+@vertex
+fn vsMain(@builtin(vertex_index) index: u32) -> VertexOut {
+  let corner = BOX_EDGES[index] * params.dimsM.xyz;
+  var clip = params.viewProjection * vec4<f32>(corner, 1.0);
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  if (clip.w <= 0.0001) {
+    clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  }
+  var out: VertexOut;
+  out.position = clip;
+  out.color = params.color;
+  return out;
+}
+
+@fragment
+fn fsMain(input: VertexOut) -> @location(0) vec4<f32> {
+  return input.color;
+}
+`
+  });
+  renderBoxBindGroupLayout = device.createBindGroupLayout({
+    label: 'ulg-offscreen-presentation-box-wireframe-bind-group-layout',
+    entries: [{
+      binding: 0,
+      visibility: gpuShaderStage('VERTEX', SHADER_STAGE_VERTEX),
+      buffer: { type: 'uniform' }
+    }]
+  });
+  renderBoxPipeline = device.createRenderPipeline({
+    label: 'ulg-offscreen-presentation-box-wireframe-pipeline',
+    layout: device.createPipelineLayout({
+      label: 'ulg-offscreen-presentation-box-wireframe-pipeline-layout',
+      bindGroupLayouts: [renderBoxBindGroupLayout]
+    }),
+    vertex: { module: shaderModule, entryPoint: 'vsMain' },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fsMain',
+      targets: [{
+        format,
+        blend: {
+          color: {
+            srcFactor: 'src-alpha',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          },
+          alpha: {
+            srcFactor: 'one',
+            dstFactor: 'one-minus-src-alpha',
+            operation: 'add'
+          }
+        },
+        writeMask: self.GPUColorWrite?.ALL ?? 0xF
+      }]
+    },
+    primitive: { topology: 'line-list' },
+    depthStencil: {
+      format: WORKER_PRESENTATION_DEPTH_FORMAT,
+      depthWriteEnabled: false,
+      depthCompare: 'less-equal'
+    }
+  });
+  renderBoxUniformBuffer = device.createBuffer({
+    label: 'ulg-offscreen-presentation-box-wireframe-uniforms',
+    size: 24 * Float32Array.BYTES_PER_ELEMENT,
+    usage: gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
+      | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
+  });
+  renderBoxBindGroup = device.createBindGroup({
+    label: 'ulg-offscreen-presentation-box-wireframe-bind-group',
+    layout: renderBoxBindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: renderBoxUniformBuffer } }]
+  });
+}
+
+function normalizeWorkerPresentationBoxDims(value) {
+  if (!(Array.isArray(value) || ArrayBuffer.isView(value)) || value.length !== 3) {
+    return null;
+  }
+  const dims = Array.from(value, Number);
+  return dims.every((entry) => Number.isFinite(entry) && entry > 0)
+    ? dims
+    : null;
+}
+
+function workerPresentationRenderPassDescriptor() {
+  return {
+    colorAttachments: [{
+      view: context.getCurrentTexture().createView(),
+      clearValue: colorToClearValue(backgroundColor, clearAlpha),
+      loadOp: 'clear',
+      storeOp: 'store'
+    }],
+    depthStencilAttachment: {
+      view: ensureWorkerPresentationDepthView(),
+      depthClearValue: 1,
+      depthLoadOp: 'clear',
+      depthStoreOp: 'discard'
+    }
+  };
+}
+
+function drawWorkerPresentationParticles(pass, bindGroup, particleCount) {
+  pass.setPipeline(renderRowsPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(6, particleCount, 0, 0);
+  pass.setPipeline(renderRowsVaporPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(6, particleCount, 0, 0);
+}
+
+function drawWorkerPresentationBox(pass, viewProjection, boxDimsM) {
+  const dims = normalizeWorkerPresentationBoxDims(boxDimsM);
+  if (!dims) return null;
+  ensureWorkerPresentationBoxPipeline();
+  const params = new Float32Array(24);
+  params.set(viewProjection, 0);
+  params[16] = dims[0];
+  params[17] = dims[1];
+  params[18] = dims[2];
+  params[20] = 0.36;
+  params[21] = 0.82;
+  params[22] = 0.74;
+  params[23] = 0.82;
+  device.queue.writeBuffer(renderBoxUniformBuffer, 0, params);
+  pass.setPipeline(renderBoxPipeline);
+  pass.setBindGroup(0, renderBoxBindGroup);
+  pass.draw(24, 1, 0, 0);
+  return dims;
+}
+
+function workerPresentationGeometryReceipt(boxDimsM) {
+  return {
+    presentationGeometry: 'sphere-impostor-depth-fallback',
+    particleImpostorShape: 'projective-circular-lit-disc',
+    particleImpostorPassCount: 2,
+    projectiveParticleSizing: true,
+    particleDepthModel: 'center-plane-depth',
+    depthAttachmentFormat: WORKER_PRESENTATION_DEPTH_FORMAT,
+    depthAttachmentReady: Boolean(renderDepthTexture && renderDepthView),
+    condensedDepthTestEnabled: true,
+    condensedDepthWriteEnabled: true,
+    vaporDepthTestEnabled: true,
+    vaporDepthWriteEnabled: false,
+    boxWireframeDrawCount: boxDimsM ? 1 : 0,
+    boxDimsM: boxDimsM ? [...boxDimsM] : null,
+    sameDevicePresentation: true
+  };
 }
 
 function ensureRenderRowsParticleBuffer(byteLength) {
@@ -936,10 +2459,10 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
   let source = sourceParticles[index];
-  outputParticles[index].positionRadius = vec4<f32>(
-    source.positionRadius.xyz,
-    max(source.positionRadius.w, 0.000001)
-  );
+  // Preserve the signed presentation radius packed by the shared bridge.
+  // Negative means exact gas (depth-tested/non-depth-writing); zero remains a
+  // deliberately hidden dormant row. This producer never changes physics.
+  outputParticles[index].positionRadius = source.positionRadius;
   outputParticles[index].color = vec4<f32>(
     clamp(source.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)),
     clamp(source.color.a, 0.0, 1.0)
@@ -1084,17 +2607,41 @@ fn csMain(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let smoothingLengthM = thermoRows[thermoOffset + 8u];
   let visualRadiusM = thermoRows[thermoOffset + 11u];
   let massKg = stateRows[stateOffset + 3u];
+  // Phase-carrier topology preallocates dormant product/companion rows with
+  // zero mass. They are capacity, not visible particles. Rendering them with
+  // the fallback radius overlays every live carrier with a white square and
+  // makes truthful motion/reaction frames look frozen.
+  if (!(massKg > 0.0)) {
+    outputParticles[index].positionRadius = vec4<f32>(
+      stateRows[stateOffset + 0u],
+      stateRows[stateOffset + 1u],
+      stateRows[stateOffset + 2u],
+      0.0
+    );
+    outputParticles[index].color = vec4<f32>(0.0);
+    return;
+  }
   let fallbackRadiusM = max(params.values.x, 0.000001);
   let densityRadiusM = radiusFromMassDensity(massKg, restDensityKgPerM3, fallbackRadiusM);
   var radiusM = select(densityRadiusM, visualRadiusM, visualRadiusM > 0.0);
   if (smoothingLengthM > 0.0) {
     radiusM = min(radiusM, smoothingLengthM * 12.0);
   }
+  // A signed visual radius is worker-local presentation metadata. It lets
+  // one generic producer route exact gas through a depth-tested,
+  // non-depth-writing pass while plasma and condensed carriers retain normal
+  // depth writes; the physical state/thermo buffers remain untouched.
+  let vaporLike = abs(phaseId - ${GAS_PHASE_ID}.0) < 0.5;
+  let signedRadiusM = select(
+    max(radiusM, 0.000001),
+    -max(radiusM, 0.000001),
+    vaporLike
+  );
   outputParticles[index].positionRadius = vec4<f32>(
     stateRows[stateOffset + 0u],
     stateRows[stateOffset + 1u],
     stateRows[stateOffset + 2u],
-    max(radiusM, 0.000001)
+    signedRadiusM
   );
   let color = materialPhaseColor(materialId, phaseId);
   outputParticles[index].color = vec4<f32>(color.rgb, color.a * clamp(params.values.y, 0.0, 1.0));
@@ -1222,12 +2769,15 @@ function normalizeMatrix(value) {
 function drawRenderRows(data) {
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
+      schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-presentation-superseded-stale-step',
       reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
       sphStep: Number(data.sphStep),
       lastPresentedSphStep: Number(lastPresentedSphStep),
       particleCount: data.particleCount ?? 0,
-      inputTransferBytes: 0
+      inputTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   if (!device || !context || !format) {
@@ -1243,7 +2793,8 @@ function drawRenderRows(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-render-rows'
   });
   const particleRows = data.particleRows instanceof Float32Array
     ? data.particleRows
@@ -1287,17 +2838,13 @@ function drawRenderRows(data) {
     ]
   });
   const encoder = device.createCommandEncoder({ label: 'ulg-offscreen-render-rows-encoder' });
-  const pass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  pass.setPipeline(renderRowsPipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.draw(6, particleCount, 0, 0);
+  const pass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(pass, bindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    pass,
+    viewProjection,
+    data.boxDimsM
+  );
   pass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -1321,6 +2868,7 @@ function drawRenderRows(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,
@@ -1344,7 +2892,8 @@ function drawResidentRenderProducer(data) {
       status: 'worker-offscreen-resident-render-producer-blocked-webgpu-unavailable',
       reason: 'WebGPU device/context is unavailable',
       inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
-      workerReady: false
+      workerReady: false,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
     return;
   }
@@ -1353,7 +2902,8 @@ function drawResidentRenderProducer(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-resident-render-producer'
   });
   const sourceRows = data.sourceParticleRows instanceof Float32Array
     ? data.sourceParticleRows
@@ -1462,17 +3012,13 @@ function drawResidentRenderProducer(data) {
   computePass.setBindGroup(0, producerBindGroup);
   computePass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
   computePass.end();
-  const renderPass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  renderPass.setPipeline(renderRowsPipeline);
-  renderPass.setBindGroup(0, renderBindGroup);
-  renderPass.draw(6, particleCount, 0, 0);
+  const renderPass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(renderPass, renderBindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    renderPass,
+    viewProjection,
+    data.boxDimsM
+  );
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -1510,6 +3056,7 @@ function drawResidentRenderProducer(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,
@@ -1520,12 +3067,15 @@ function drawResidentRenderProducer(data) {
 function drawResidentParticleStateProducer(data) {
   if (!presentationStepAccepts(data.sphStep)) {
     return publishRenderRowsStatus({
+      schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+      renderRowsSchema: RENDER_ROWS_SCHEMA,
       status: 'worker-offscreen-presentation-superseded-stale-step',
       reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
       sphStep: Number(data.sphStep),
       lastPresentedSphStep: Number(lastPresentedSphStep),
       particleCount: data.particleCount ?? 0,
-      inputTransferBytes: 0
+      inputTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   if (!device || !context || !format) {
@@ -1535,7 +3085,8 @@ function drawResidentParticleStateProducer(data) {
       status: 'worker-offscreen-resident-particle-state-producer-blocked-webgpu-unavailable',
       reason: 'WebGPU device/context is unavailable',
       inputTransport: RESIDENT_RENDER_PRODUCER_TRANSPORT,
-      workerReady: false
+      workerReady: false,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
     return;
   }
@@ -1544,7 +3095,8 @@ function drawResidentParticleStateProducer(data) {
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'draw-resident-particle-state-producer'
   });
   const particleCount = Math.max(0, Math.floor(Number(data.particleCount) || 0));
   const stateStrideFloats = Math.max(1, Math.floor(Number(data.stateStrideFloats) || 8));
@@ -1616,7 +3168,8 @@ function drawResidentParticleStateProducer(data) {
       sourceCacheHit: false,
       sourceRowsPacked: false,
       sourceTransferBytes: 0,
-      sourceStateTransferBytes: 0
+      sourceStateTransferBytes: 0,
+      ...committedResidentSchedulePresentationRenderReceiptFields(data)
     });
   }
   backgroundColor = data.backgroundColor || backgroundColor;
@@ -1732,17 +3285,13 @@ function drawResidentParticleStateProducer(data) {
   computePass.setBindGroup(0, producerBindGroup);
   computePass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
   computePass.end();
-  const renderPass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      clearValue: colorToClearValue(backgroundColor, clearAlpha),
-      loadOp: 'clear',
-      storeOp: 'store'
-    }]
-  });
-  renderPass.setPipeline(renderRowsPipeline);
-  renderPass.setBindGroup(0, renderBindGroup);
-  renderPass.draw(6, particleCount, 0, 0);
+  const renderPass = encoder.beginRenderPass(workerPresentationRenderPassDescriptor());
+  drawWorkerPresentationParticles(renderPass, renderBindGroup, particleCount);
+  const drawnBoxDimsM = drawWorkerPresentationBox(
+    renderPass,
+    viewProjection,
+    data.boxDimsM
+  );
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
@@ -1762,6 +3311,51 @@ function drawResidentParticleStateProducer(data) {
     displayOwnerEpoch: Number.isFinite(Number(data.displayOwnerEpoch))
       ? Math.max(0, Math.round(Number(data.displayOwnerEpoch)))
       : null,
+    // W4b: candidate-driven presentations are ordered by the candidate's own
+    // strictly advancing version (presentationStepAccepts above), not by the
+    // page display-owner epoch — the bridge reveals them on this marker.
+    ...(data.residentScheduleCandidatePresentation === true
+      ? { residentScheduleCandidatePresentation: true }
+      : {}),
+    ...(data.stateManagerCommittedPresentation === true
+      ? {
+          stateManagerCommittedPresentation: true,
+          committedPresentationSchema:
+            data.committedPresentationSchema ?? null,
+          committedPresentationStatus:
+            data.committedPresentationStatus ?? null,
+          scheduleId: data.scheduleId ?? null,
+          laneId: data.laneId ?? null,
+          stateKey: data.stateKey ?? null,
+          presentationAdmissionPostedAtMs:
+            data.presentationAdmissionPostedAtMs ?? null,
+          presentationLaneEpoch:
+            data.presentationLaneEpoch ?? null,
+          residentExecutionGeneration:
+            data.residentExecutionGeneration ?? null,
+          stepOrdinal: data.stepOrdinal ?? null,
+          authorityStatus: data.authorityStatus ?? null,
+          computeManagerCompletionSchema:
+            data.computeManagerCompletionSchema ?? null,
+          computeManagerLeaseId:
+            data.computeManagerLeaseId ?? null,
+          computeManagerLeaseStatus:
+            data.computeManagerLeaseStatus ?? null,
+          computeManagerFenceSatisfied:
+            data.computeManagerFenceSatisfied === true,
+          stateManagerCommitStatus:
+            data.stateManagerCommitStatus ?? null,
+          stateManagerCommitAccepted:
+            data.stateManagerCommitAccepted === true,
+          terminalScheduleFence:
+            data.terminalScheduleFence === true,
+          terminalFenceScope: data.terminalFenceScope ?? null,
+          terminalFenceSatisfied:
+            data.terminalFenceSatisfied === true,
+          terminalFenceAuthorityAdmissionReady:
+            data.terminalFenceAuthorityAdmissionReady === true
+        }
+      : {}),
     sphStep: Number.isFinite(Number(data.sphStep)) ? Number(data.sphStep) : null,
     particleCount,
     inputTransferBytes,
@@ -1805,6 +3399,7 @@ function drawResidentParticleStateProducer(data) {
     fallbackPointSizePx: uniforms[19],
     minPointSizePx: uniforms[20],
     maxPointSizePx: uniforms[21],
+    ...workerPresentationGeometryReceipt(drawnBoxDimsM),
     frameCount,
     readyEver: true,
     readyFrameCount,
@@ -1814,6 +3409,7 @@ function drawResidentParticleStateProducer(data) {
 
 async function initPresentation(data) {
   canvas = data.canvas || null;
+  canvasConfiguration = null;
   backgroundColor = data.backgroundColor || backgroundColor;
   clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
   cssWidth = Number(data.cssWidth) || 0;
@@ -1854,14 +3450,23 @@ async function initPresentation(data) {
     });
     return;
   }
-  device = await adapter.requestDevice();
+  device = await adapter.requestDevice(
+    // timestamp-query is negotiated whenever the adapter offers it: the
+    // feature itself is free, and the resident stages that share this
+    // device can only place diagnostic pass timestamps when it was granted
+    // at acquisition (the device is a session singleton).
+    webGpuDeviceDescriptorForResidentSph(adapter, {
+      timestampProfilingRequested: true
+    })
+  );
   format = gpu.getPreferredCanvasFormat();
   configureCanvas({
     width: data.width,
     height: data.height,
     nextCssWidth: data.cssWidth,
     nextCssHeight: data.cssHeight,
-    nextPixelRatio: data.pixelRatio
+    nextPixelRatio: data.pixelRatio,
+    reason: 'init-offscreen-presentation'
   });
   device.lost?.then?.((info) => {
     publish({
@@ -1886,6 +3491,9 @@ self.onmessage = (event) => {
   Promise.resolve().then(async () => {
     if (data.type === 'init-offscreen-presentation') {
       resetPresentedSphStep();
+      resetResidentScheduleCandidateMailbox();
+      previewViewProjectionOverride = null;
+      previewCameraRedraw = null;
       await initPresentation(data);
       return;
     }
@@ -1895,13 +3503,20 @@ self.onmessage = (event) => {
         height: data.height,
         nextCssWidth: data.cssWidth,
         nextCssHeight: data.cssHeight,
-        nextPixelRatio: data.pixelRatio
+        nextPixelRatio: data.pixelRatio,
+        reason: data.reason || 'resize'
       });
       clearPresentation({ reason: data.reason || 'resize' });
       return;
     }
     if (data.type === 'clear') {
       resetPresentedSphStep();
+      // A deliberate clear invalidates the redraw closure (its content is
+      // being wiped); the camera override itself stays current.
+      previewCameraRedraw = null;
+      if (data.resetResidentScheduleCandidateMailbox !== false) {
+        resetResidentScheduleCandidateMailbox();
+      }
       backgroundColor = data.backgroundColor || backgroundColor;
       clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
       clearPresentation({ reason: data.reason || 'clear' });
@@ -1923,14 +3538,48 @@ self.onmessage = (event) => {
       await runResidentStageOnPresentationDevice(data);
       return;
     }
+    if (data.type === 'run-resident-schedule-on-presentation-device') {
+      await runResidentScheduleOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'update-preview-view-projection') {
+      const matrix = data.viewProjectionMatrix;
+      if (matrix && Number(matrix.length) === 16) {
+        previewViewProjectionOverride = matrix instanceof Float32Array
+          ? matrix
+          : new Float32Array(matrix);
+        const now = nowMs();
+        if (previewCameraRedraw && now - previewCameraRedrawLastMs >= 33) {
+          previewCameraRedrawLastMs = now;
+          try {
+            previewCameraRedraw();
+          } catch {
+            // A redraw against torn-down retained state just disarms the
+            // camera channel until the next candidate rearms it.
+            previewCameraRedraw = null;
+          }
+        }
+      }
+      return;
+    }
+    if (data.type === 'present-committed-resident-schedule-candidate') {
+      presentCommittedResidentScheduleCandidate(data);
+      return;
+    }
+    if (data.type === 'cancel-resident-schedule-on-presentation-device') {
+      await cancelResidentScheduleOnPresentationDevice(data);
+      return;
+    }
     if (data.type === 'export-retained-compact-snapshot') {
       await exportRetainedCompactSnapshotFromPresentationDevice(data);
       return;
     }
     if (data.type === 'dispose') {
+      if (disposed) return;
       disposed = true;
+      pendingCommittedResidentSchedulePresentation = null;
       destroyRenderRowsResources();
-      context?.unconfigure?.();
+      unconfigureCanvas({ reason: data.reason || 'dispose' });
       device?.destroy?.();
       publish({
         status: 'worker-offscreen-presentation-disposed',

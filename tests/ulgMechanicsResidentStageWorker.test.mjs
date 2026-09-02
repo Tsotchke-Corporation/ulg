@@ -5038,6 +5038,107 @@ function schedulePayload(context, schedule, {
   };
 }
 
+test('canonical retained particle state exposes the exact private worker lane family without changing cloneable receipts', async () => {
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'private-retained-particle-family',
+    withCarriedResidentProductMass: true
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:private-retained-particle-family-lane',
+    stateKey: 'ulg:test:private-retained-particle-family-state'
+  };
+  const successorSourceFamily = Object.freeze({
+    schema: 'peercompute.ulg.test-successor-source-family.v0',
+    status: 'test-successor-source-family-retained',
+    sourceGenerationId: 77
+  });
+  const mechanicsRunner = fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner;
+  fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner = async (args) => {
+      const execution = await mechanicsRunner(args);
+      execution.residentStep.schroederSpatialSuccessorSourceFamily =
+        successorSourceFamily;
+      return execution;
+    };
+
+  try {
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount: 1,
+          scheduleId: 'ulg:test:private-retained-particle-family-schedule'
+        },
+        laneOptions
+      )
+    );
+    const retained =
+      resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+        ...laneOptions,
+        sourceStageId: 'schroederSameLevelMechanics'
+      });
+
+    assert.equal(retained.status, 'worker-retained-particle-state-ready');
+    assert.equal(retained.retainedWithinWorker, true);
+    assert.equal(retained.sameWorkerPrivateReferences, true);
+    assert.equal(retained.postMessageTransportAllowed, false);
+    assert.strictEqual(
+      retained.sphParticleUpload.stateBuffer,
+      retained.sourceStateBuffer
+    );
+    assert.strictEqual(
+      retained.sphParticleUpload.thermoBuffer,
+      retained.sourceThermoBuffer
+    );
+    assert.strictEqual(
+      retained.mlsMpmParticleUpload.mechanicsBuffer,
+      retained.sourceMechanicsBuffer
+    );
+    assert.strictEqual(
+      retained.advancedStateMetadata.sphParticleState,
+      retained.sphParticleState
+    );
+    assert.strictEqual(
+      retained.advancedStateMetadata.mlsMpmParticleState,
+      retained.mlsMpmParticleState
+    );
+    assert.equal(retained.sphParticleState.step, 1);
+    assert.equal(retained.mlsMpmParticleState.step, 1);
+    assert.strictEqual(retained.successorSourceFamily, successorSourceFamily);
+    assert.strictEqual(
+      retained.residentProductMass,
+      fixture.residentProductMasses[0]
+    );
+
+    // The schedule's public transport remains clone-safe and never carries
+    // any of the raw worker-local aliases returned by the direct resolver.
+    assert.equal('sphParticleUpload' in result, false);
+    assert.equal('mlsMpmParticleUpload' in result, false);
+    assert.equal('successorSourceFamily' in result, false);
+    assert.equal('residentProductMass' in result, false);
+    assert.equal('advancedStateMetadata' in result, false);
+    assertNoWorkerGpuBuffers(result, 'privateRetainedParticleFamilyResult');
+    structuredClone(result);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+
+  const released =
+    resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+      ...laneOptions,
+      sourceStageId: 'schroederSameLevelMechanics'
+    });
+  assert.equal(released.status, 'worker-retained-particle-state-missing-lane');
+  assert.equal(released.sameWorkerPrivateReferences, false);
+  assert.equal('sphParticleUpload' in released, false);
+  assert.equal('advancedStateMetadata' in released, false);
+});
+
 test('worker schedule executes the exact enabled and disabled hierarchy policy', async () => {
   const executableFields = [
     'enablePortableSummary',

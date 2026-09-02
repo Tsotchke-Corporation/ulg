@@ -2159,7 +2159,8 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
       laneId: normalizeString(laneId, null),
       stateKey: normalizeString(stateKey, null),
       sourceStageId,
-      retainedWithinWorker: false
+      retainedWithinWorker: false,
+      sameWorkerPrivateReferences: false
     };
   }
   const g2p = retainedG2pOutput(record);
@@ -2168,7 +2169,8 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
   // them through the same contract the g2p output uses. The buffers stay
   // worker-retained — this resolver only ever hands them to same-worker
   // consumers (the presentation draw path), never across postMessage.
-  const schroederLaneUpload = record.schroederLane?.sphParticleUpload || null;
+  const schroederLane = record.schroederLane || null;
+  const schroederLaneUpload = schroederLane?.sphParticleUpload || null;
   const schroederLaneSource =
     sourceStageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
     && schroederLaneUpload?.stateBuffer
@@ -2177,9 +2179,9 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
           thermoBuffer: schroederLaneUpload.thermoBuffer || null,
           identityBuffer: schroederLaneUpload.identityBuffer || null,
           mechanicsBuffer:
-            record.schroederLane?.mlsMpmParticleUpload?.mechanicsBuffer || null,
+            schroederLane?.mlsMpmParticleUpload?.mechanicsBuffer || null,
           particleCount:
-            record.schroederLane?.particleCount
+            schroederLane?.particleCount
             ?? schroederLaneUpload.particleCount
             ?? null,
           stateStrideFloats: schroederLaneUpload.stateStrideFloats ?? null,
@@ -2194,7 +2196,7 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
           identityRevision: schroederLaneUpload.identityRevision ?? null,
           renderDomainKeys: schroederLaneUpload.renderDomainKeys || null,
           mechanicsBufferByteLength:
-            record.schroederLane?.mlsMpmParticleUpload
+            schroederLane?.mlsMpmParticleUpload
               ?.mechanicsBufferByteLength ?? null
         }
       : null;
@@ -2207,6 +2209,29 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
   const thermoBuffer = record.retainedThermoBuffer || source?.thermoBuffer || null;
   const canonicalSchroederSource =
     sourceStageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID;
+  const sameWorkerPrivateReferences = Boolean(
+    canonicalSchroederSource
+    && schroederLane?.sphParticleState
+    && schroederLane?.mlsMpmParticleState
+    && schroederLaneUpload?.stateBuffer
+    && schroederLaneUpload?.thermoBuffer
+    && schroederLane?.mlsMpmParticleUpload?.mechanicsBuffer
+  );
+  const advancedStateMetadata = sameWorkerPrivateReferences
+    ? Object.freeze({
+        sphParticleState: schroederLane.sphParticleState,
+        mlsMpmParticleState: schroederLane.mlsMpmParticleState
+      })
+    : null;
+  const residentProductMass = sameWorkerPrivateReferences
+    ? (
+        schroederLane.residentStepOptions?.residentProductMass
+        ?? schroederLane.residentStep?.nextParticleUploads
+          ?.residentProductMass
+        ?? schroederLane.residentStep?.residentProductMass
+        ?? null
+      )
+    : null;
   const resolvedParticleCount = Math.max(0, Math.floor(Number(
     canonicalSchroederSource
       ? source?.particleCount
@@ -2260,6 +2285,7 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
       stateKey: normalizeString(stateKey, null),
       sourceStageId,
       retainedWithinWorker: false,
+      sameWorkerPrivateReferences: false,
       particleCount: resolvedParticleCount,
       stateBufferRetained: Boolean(source?.stateBuffer),
       thermoBufferRetained: Boolean(thermoBuffer),
@@ -2274,10 +2300,32 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     stateKey: normalizeString(stateKey, null),
     sourceStageId,
     retainedWithinWorker: true,
+    // These are exact aliases into this module instance's retained lane.
+    // They are intentionally absent from every cloneable worker message
+    // receipt and may only be consumed by code executing in this worker.
+    sameWorkerPrivateReferences,
+    postMessageTransportAllowed: false,
     sourceStateBuffer: exportSources?.stateBuffer || source.stateBuffer,
     sourceThermoBuffer: thermoBuffer,
     sourceMechanicsBuffer: exportSources?.mechanicsBuffer || source.mechanicsBuffer || null,
     sourceIdentityBuffer: source.identityBuffer || null,
+    sphParticleState: sameWorkerPrivateReferences
+      ? schroederLane.sphParticleState
+      : null,
+    mlsMpmParticleState: sameWorkerPrivateReferences
+      ? schroederLane.mlsMpmParticleState
+      : null,
+    sphParticleUpload: sameWorkerPrivateReferences
+      ? schroederLaneUpload
+      : null,
+    mlsMpmParticleUpload: sameWorkerPrivateReferences
+      ? schroederLane.mlsMpmParticleUpload
+      : null,
+    successorSourceFamily: sameWorkerPrivateReferences
+      ? schroederLane.successorSourceFamily
+      : null,
+    residentProductMass,
+    advancedStateMetadata,
     particleCount: resolvedParticleCount,
     stateStrideFloats: resolvedStateStrideFloats,
     thermoStrideFloats: resolvedThermoStrideFloats,

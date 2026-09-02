@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   SPH_PRESET_THROUGHPUT_MATRIX_SCHEMA,
   SPH_PRESET_THROUGHPUT_SCENARIO_SCHEMA,
+  evaluateSphPresetSpatialKeyChurnSamples,
   evaluateSphPresetThroughputSamples,
   expectedSphPresetExecutionRoute
 } from '../scripts/sph-preset-throughput-matrix.mjs';
@@ -62,6 +63,10 @@ function tier0Sample(index, overrides = {}) {
     fullParticleReadbackFree: true,
     workerLaneContinuationReady: true,
     committedPresentationReady: true,
+    pendingPreviewActive: false,
+    pendingPreviewStatus:
+      'control-envelope-preview-retired-after-current-presentation',
+    pendingPreviewLayerHidden: true,
     runtimeError: null,
     controlPlaneYieldReceipt: controlPlaneYieldReceipt(),
     executionRoute: {
@@ -82,6 +87,60 @@ function assertClose(actual, expected, tolerance = 1e-12) {
     Math.abs(actual - expected) <= tolerance,
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+function spatialKeyChurnTotals(index, overrides = {}) {
+  const scaled = (value) => index * value;
+  return {
+    schema:
+      'peercompute.ulg.sph-scene-worker-spatial-key-churn-cumulative.v0',
+    diagnosticOnly: true,
+    authorityBearing: false,
+    committedScheduleCount: index,
+    requestedScheduleCount: index,
+    completeScheduleCount: index,
+    rejectedScheduleCount: 0,
+    notApplicableScheduleCount: 0,
+    notRequestedScheduleCount: 0,
+    expectedRecordCount: scaled(4),
+    decodedRecordCount: scaled(4),
+    observedRecordCount: scaled(4),
+    visitedParticleCount: scaled(40),
+    priorActiveParticleCount: scaled(32),
+    successorActiveParticleCount: scaled(32),
+    comparedActiveParticleCount: scaled(8),
+    activatedParticleCount: 0,
+    deactivatedParticleCount: 0,
+    movedParticleCount: scaled(4),
+    spatialKeyChangedParticleCount: scaled(2),
+    spatialKeyUnchangedParticleCount: scaled(6),
+    cellXChangedParticleCount: scaled(2),
+    cellYChangedParticleCount: 0,
+    cellZChangedParticleCount: 0,
+    invalidPriorParticleCount: 0,
+    invalidSuccessorParticleCount: 0,
+    dormantParticleCount: scaled(8),
+    zeroSpatialKeyChangeRecordCount: scaled(3),
+    nonzeroSpatialKeyChangeRecordCount: scaled(1),
+    mapAsyncCount: index,
+    readbackByteLength: scaled(512),
+    additionalQueueSubmissionCount: 0,
+    additionalHostQueueFenceCount: 0,
+    maxAbsCellDelta: [1, 0, 0],
+    sampleTotalsValid: true,
+    counterSaturated: false,
+    coverageComplete: true,
+    sampleCoverageComplete: true,
+    firstScheduleId: 'lane:fixture:schedule:1',
+    lastScheduleId: `lane:fixture:schedule:${index}`,
+    lastStatus: 'spatial-key-churn-observation-ready',
+    lastReason: null,
+    derived: {
+      spatialKeyChangeRatio: 0.25,
+      zeroSpatialKeyChangeRecordRatio: 0.75
+    },
+    ...overrides
+  };
 }
 
 test('configured preset route expectations cover both canonical and Tier-0 arms', () => {
@@ -117,6 +176,79 @@ test('configured preset route expectations cover both canonical and Tier-0 arms'
     expectedSphPresetExecutionRoute('water-realtime'),
     'tier0-fused-resident-sequence'
   );
+});
+
+test('spatial-key churn evaluator uses monotonic committed endpoint deltas', () => {
+  const samples = [1, 2, 3].map((index) => tier0Sample(index, {
+    spatialKeyChurnCumulativeTotals: spatialKeyChurnTotals(index)
+  }));
+  const result = evaluateSphPresetSpatialKeyChurnSamples({
+    samples,
+    profileRequested: true
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.evidenceReady, true);
+  assert.equal(result.applicable, true);
+  assert.equal(result.cumulativeCounterResetDetected, false);
+  assert.equal(result.delta.completeScheduleCount, 2);
+  assert.equal(result.delta.observedRecordCount, 8);
+  assert.equal(result.derived.spatialKeyChangeRatio, 0.25);
+  assert.equal(result.derived.zeroSpatialKeyChangeRecordRatio, 0.75);
+  assert.equal(
+    result.timingAuthority,
+    'diagnostic-overhead-included-non-authoritative'
+  );
+});
+
+test('spatial-key churn evaluator distinguishes N/A and counter resets', () => {
+  const notApplicable = [1, 2].map((index) => tier0Sample(index, {
+    spatialKeyChurnCumulativeTotals: spatialKeyChurnTotals(index, {
+      completeScheduleCount: 0,
+      notApplicableScheduleCount: index,
+      expectedRecordCount: 0,
+      decodedRecordCount: 0,
+      observedRecordCount: 0,
+      visitedParticleCount: 0,
+      priorActiveParticleCount: 0,
+      successorActiveParticleCount: 0,
+      comparedActiveParticleCount: 0,
+      movedParticleCount: 0,
+      spatialKeyChangedParticleCount: 0,
+      spatialKeyUnchangedParticleCount: 0,
+      cellXChangedParticleCount: 0,
+      dormantParticleCount: 0,
+      zeroSpatialKeyChangeRecordCount: 0,
+      nonzeroSpatialKeyChangeRecordCount: 0,
+      mapAsyncCount: 0,
+      readbackByteLength: 0,
+      sampleCoverageComplete: false,
+      lastStatus: 'spatial-key-churn-observation-not-applicable',
+      derived: null
+    })
+  }));
+  const nAResult = evaluateSphPresetSpatialKeyChurnSamples({
+    samples: notApplicable,
+    profileRequested: true
+  });
+  assert.equal(nAResult.status, 'not-applicable');
+  assert.equal(nAResult.evidenceReady, true);
+  assert.equal(nAResult.applicable, false);
+  assert.equal(nAResult.derived, null);
+
+  const reset = evaluateSphPresetSpatialKeyChurnSamples({
+    samples: [
+      tier0Sample(1, {
+        spatialKeyChurnCumulativeTotals: spatialKeyChurnTotals(3)
+      }),
+      tier0Sample(2, {
+        spatialKeyChurnCumulativeTotals: spatialKeyChurnTotals(2)
+      })
+    ],
+    profileRequested: true
+  });
+  assert.equal(reset.status, 'rejected-or-incomplete');
+  assert.equal(reset.evidenceReady, false);
+  assert.equal(reset.cumulativeCounterResetDetected, true);
 });
 
 test('throughput evaluator measures simulation time per wall time after warmup', () => {
@@ -191,6 +323,21 @@ test('throughput evaluator fails closed on a wrong route or readback', () => {
   });
   assert.equal(readbackResult.status, 'fail');
   assert.equal(readbackResult.readbackFree, false);
+});
+
+test('throughput authority fails closed while the real control preview is active', () => {
+  const stuckPreview = tier0Sample(2, {
+    pendingPreviewActive: true,
+    pendingPreviewStatus: 'physics-pending-control-envelope-preview',
+    pendingPreviewLayerHidden: false
+  });
+  const result = evaluateSphPresetThroughputSamples({
+    presetId: 'water-realtime',
+    samples: [tier0Sample(0), tier0Sample(1), stuckPreview],
+    warmupCommitCount: 0
+  });
+  assert.equal(result.terminalAuthorityReady, false);
+  assert.equal(result.status, 'fail');
 });
 
 test('canonical authority uses the full worker-lane predicate instead of a Tier0-only route field', () => {

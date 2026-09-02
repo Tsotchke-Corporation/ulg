@@ -7,6 +7,7 @@ import {
   createWebGpuStableRadixScanUnique,
   createWebGpuU32ExclusiveScan,
   createWebGpuU32ScanPlan,
+  enumerateWebGpuStableRadixPrewarmPipelineDescriptors,
   WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT,
   WEBGPU_RADIX_SCATTER_WORKGROUP_STORAGE_BYTES,
   WEBGPU_RADIX_UNIQUE_CLEARED_WORD_COUNT,
@@ -18,8 +19,12 @@ import {
   webGpuSerialRadixHistogramScanWgsl,
   webGpuStableRadixWgsl,
   webGpuU32ExclusiveScanWgsl,
-  webGpuSortedUniqueWgsl
+  webGpuSortedUniqueWgsl,
+  webGpuStableRadixPipelineDescriptors
 } from '../src/runtime/webgpuRadixScanUnique.js';
+import {
+  prewarmCachedExplicitComputePipeline
+} from '../src/runtime/webgpuComputeLayout.js';
 import {
   ULG_WEBGPU_RADIX_GPU_COUNT_ABI,
   ULG_WEBGPU_RADIX_UNIQUE_ABI,
@@ -143,6 +148,59 @@ function createFailureInjectedDevice() {
   };
   return device;
 }
+
+test('one nine-program generic radix bundle serves every capacity and placement role', async () => {
+  const table = webGpuStableRadixPipelineDescriptors();
+  assert.equal(
+    table.schema,
+    'peercompute.ulg.webgpu-stable-radix-pipeline-descriptors.v0'
+  );
+  const descriptors = enumerateWebGpuStableRadixPrewarmPipelineDescriptors();
+  assert.equal(descriptors.length, 9);
+  assert.equal(
+    new Set(descriptors.map((descriptor) =>
+      `${descriptor.cacheKey}|${descriptor.label}|${descriptor.entryPoint}`
+    )).size,
+    9
+  );
+  for (const descriptor of descriptors) {
+    assert.equal(Array.isArray(descriptor.bindings), true);
+    assert.equal(descriptor.bindings.length, 0);
+    assert.doesNotMatch(
+      `${descriptor.cacheKey}|${descriptor.label}`,
+      /sodium|cesium|water|preset|material|capture|direct|summary/i
+    );
+  }
+
+  const device = createFakeDevice();
+  for (const descriptor of descriptors) {
+    const result = await prewarmCachedExplicitComputePipeline(
+      device,
+      descriptor
+    );
+    assert.equal(result.cacheStatus, 'pipeline-prewarmed');
+  }
+  assert.equal(device.pipelines.length, 9);
+  const runtimes = [
+    ['capture', 256, 1],
+    ['direct', 1024, 2],
+    ['summary', 64, 1]
+  ].map(([role, maxElementCount, maxKeyWordCount]) =>
+    createWebGpuStableRadixScanUnique(device, {
+      maxElementCount,
+      maxKeyWordCount,
+      label: `scenario-specific-${role}-buffers`
+    }));
+  assert.equal(
+    device.pipelines.length,
+    9,
+    'capacity- and role-specific runtime construction compiles nothing'
+  );
+  for (const runtime of runtimes) {
+    assert.equal(runtime.pipelineCount, 12);
+    runtime.destroy();
+  }
+});
 
 function assertDestroyedExactlyOnce(buffers, context) {
   for (const buffer of buffers) {
@@ -905,15 +963,10 @@ test('300k five-word radix topology fuses bounded scan tops to 168 ordered dispa
   assert.equal(computeCommands(encoder).length, 168);
   assert.equal(
     computeCommands(encoder).filter((command) => (
-      command.pipeline.endsWith('-histogram-scan-fused-top-add')
+      command.pipeline === 'ulg-webgpu-u32-exclusive-scan-fused-top-add'
     )).length,
-    40
-  );
-  assert.equal(
-    computeCommands(encoder).filter((command) => (
-      command.pipeline.endsWith('-head-scan-fused-top-add')
-    )).length,
-    1
+    41,
+    'forty histogram scans and one head scan share the generic fused pipeline'
   );
   runtime.releaseExecution(result, { discardedEncoder: true });
   runtime.destroy();
@@ -1111,13 +1164,9 @@ test('opt-in bounded serial histogram scan removes one dispatch per measured mec
   assert.equal(commands.length, 79);
   assert.equal(
     commands.filter((command) => (
-      command.pipeline === 'serial-mechanics-radix-serial-histogram-scan'
+      command.pipeline === 'ulg-webgpu-serial-radix-histogram-scan'
     )).length,
     24
-  );
-  assert.equal(
-    commands.some((command) => command.pipeline.includes('-histogram-scan-blocks')),
-    false
   );
   assert.equal(result.paramsWriteCount, 3);
   assert.equal(runtime.pipelineCount, 13);
@@ -1257,18 +1306,30 @@ test('radix sort and unique encode a no-readback GPU CSR with indirect dispatch'
   );
   assert.equal(passes.every((pass) => pass.ended), true);
   assert.equal(commands.length, 126);
-  assert.ok(commands.some((command) => command.pipeline === 'test-radix-initialize'));
+  assert.ok(commands.some((command) => (
+    command.pipeline === 'ulg-webgpu-stable-radix-initialize'
+  )));
   assert.equal(
-    commands.filter((command) => command.pipeline === 'test-radix-histogram').length,
+    commands.filter((command) => (
+      command.pipeline === 'ulg-webgpu-stable-radix-histogram'
+    )).length,
     40
   );
   assert.equal(
-    commands.filter((command) => command.pipeline === 'test-radix-scatter').length,
+    commands.filter((command) => (
+      command.pipeline === 'ulg-webgpu-stable-radix-scatter'
+    )).length,
     40
   );
-  assert.ok(commands.some((command) => command.pipeline === 'test-radix-mark-heads'));
-  assert.ok(commands.some((command) => command.pipeline === 'test-radix-scatter-unique'));
-  assert.ok(commands.some((command) => command.pipeline === 'test-radix-finalize-unique'));
+  assert.ok(commands.some((command) => (
+    command.pipeline === 'ulg-webgpu-sorted-unique-mark-heads'
+  )));
+  assert.ok(commands.some((command) => (
+    command.pipeline === 'ulg-webgpu-sorted-unique-scatter'
+  )));
+  assert.ok(commands.some((command) => (
+    command.pipeline === 'ulg-webgpu-sorted-unique-finalize'
+  )));
   assert.equal(
     encoder.events.filter((event) => event.kind === 'clear').length,
     3
@@ -1306,10 +1367,10 @@ test('standalone scans fuse the bounded top scan with its lower offset add', () 
   assert.deepEqual(
     computeCommands(groupedEncoder).map((command) => command.pipeline),
     [
-      'test-scan-blocks',
-      'test-scan-blocks',
-      'test-scan-fused-top-add',
-      'test-scan-add-block-offsets'
+      'ulg-webgpu-u32-exclusive-scan-blocks',
+      'ulg-webgpu-u32-exclusive-scan-blocks',
+      'ulg-webgpu-u32-exclusive-scan-fused-top-add',
+      'ulg-webgpu-u32-exclusive-scan-add-block-offsets'
     ]
   );
 

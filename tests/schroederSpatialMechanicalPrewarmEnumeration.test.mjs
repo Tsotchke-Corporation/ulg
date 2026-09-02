@@ -9,10 +9,31 @@ import {
   schroederSpatialMechanicalPipelineDescriptors
 } from '../src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
 import {
+  enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors,
+  schroederSpatialReactionDiscoveryPipelineDescriptors
+} from '../src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  enumerateSphReactionProductPlacementSegmentedPrewarmPipelineDescriptors,
+  sphReactionProductPlacementSegmentedPipelineDescriptors
+} from '../src/runtime/sph/schroederSpatialReactionProductPlacementGpu.js';
+import {
+  enumerateSphReactionStepPrewarmPipelineDescriptors,
+  sphReactionStepPipelineDescriptors
+} from '../src/runtime/sph/sphReactionGpuKernel.js';
+import {
+  enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors,
+  sphReactionCanonicalSummaryPipelineDescriptors
+} from '../src/runtime/sph/sphReactionGpuSummary.js';
+import {
+  enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors,
+  sphPhaseCarrierOneToFourPipelineDescriptor
+} from '../src/runtime/sph/sphPhaseCarrierMaterializationGpu.js';
+import {
   createCachedExplicitComputePipeline,
   prewarmCachedExplicitComputePipeline
 } from '../src/runtime/webgpuComputeLayout.js';
 import {
+  enumerateWorkerSchroederLanePrewarmPipelineDescriptors,
   prewarmWorkerSchroederLaneComputePipelines
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 
@@ -241,6 +262,163 @@ test('every enumerated descriptor prewarms into the cache the sync path then hit
   assert.equal(device.counters.sync, 0, 'the sync path never compiled');
 });
 
+test('reaction-step prewarm covers one fixed material-agnostic pipeline family', () => {
+  const table = sphReactionStepPipelineDescriptors();
+  assert.equal(
+    table.schema,
+    'peercompute.ulg.sph-reaction-step-pipeline-descriptors.v0'
+  );
+  const descriptors = enumerateSphReactionStepPrewarmPipelineDescriptors();
+  assert.equal(descriptors.length, 5);
+  assert.deepEqual(
+    descriptors.map((descriptor) => descriptor.entryPoint),
+    ['pack_source', 'bin_particles', 'propose', 'resolve', 'unpack']
+  );
+  assert.equal(
+    new Set(descriptors.map((descriptor) => descriptor.code)).size,
+    1,
+    'all reaction-table passes share the same generic WGSL module'
+  );
+  for (const descriptor of descriptors) {
+    assertCompleteDescriptor(descriptor, descriptor.entryPoint);
+    assert.equal(descriptor.cacheKey, 'ulg-sph-reaction-step');
+  }
+});
+
+test('reaction-discovery prewarm covers both envelope routes for both live directory ABIs', () => {
+  const tables = [1, 2].map((directoryAbiVersion) =>
+    schroederSpatialReactionDiscoveryPipelineDescriptors({
+      directoryAbiVersion
+    }));
+  const descriptors =
+    enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors();
+  assert.equal(descriptors.length, 14);
+  const identity = (descriptor) => JSON.stringify([
+    descriptor.cacheKey,
+    descriptor.label,
+    descriptor.entryPoint,
+    descriptor.bindings
+  ]);
+  const identities = new Set(descriptors.map(identity));
+  for (const table of tables) {
+    for (const descriptor of [
+      table.displacement,
+      table.proposal,
+      table.seal,
+      table.activationMotionBounds,
+      table.activationMotionWatch,
+      table.activationObservationWithMotion,
+      table.activationObservationWithoutMotion
+    ]) {
+      assert.ok(
+        identities.has(identity(descriptor)),
+        `directory v${table.directoryAbiVersion} ${descriptor.entryPoint}`
+      );
+    }
+  }
+  assert.equal(
+    new Set(descriptors.map((descriptor) => descriptor.code)).size,
+    2,
+    'the fixed warm set covers both supported spatial-directory ABIs'
+  );
+  for (const descriptor of descriptors) {
+    assertCompleteDescriptor(descriptor, descriptor.entryPoint);
+  }
+});
+
+test('segmented reaction placement exposes one fixed 22-pass generic warm set', () => {
+  const table = sphReactionProductPlacementSegmentedPipelineDescriptors();
+  assert.equal(
+    table.schema,
+    'peercompute.ulg.sph-reaction-product-placement-segmented-pipeline-descriptors.v0'
+  );
+  const descriptors =
+    enumerateSphReactionProductPlacementSegmentedPrewarmPipelineDescriptors();
+  assert.equal(descriptors.length, 22);
+  assert.equal(
+    new Set(descriptors.map((descriptor) => descriptor.cacheKey)).size,
+    22
+  );
+  for (const descriptor of descriptors) {
+    assertCompleteDescriptor(descriptor, descriptor.entryPoint);
+    assert.doesNotMatch(
+      `${descriptor.cacheKey}|${descriptor.label}`,
+      /sodium|cesium|fluorine|water|preset|material[-_]?id/i
+    );
+  }
+});
+
+test('canonical reaction summary shares twelve passes and warms both ABI classifiers', () => {
+  const v1 = sphReactionCanonicalSummaryPipelineDescriptors({
+    directoryAbiVersion: 1
+  });
+  const v2 = sphReactionCanonicalSummaryPipelineDescriptors({
+    directoryAbiVersion: 2
+  });
+  assert.equal(
+    v2.schema,
+    'peercompute.ulg.sph-reaction-canonical-summary-pipeline-descriptors.v0'
+  );
+  const descriptors =
+    enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors();
+  assert.equal(descriptors.length, 14);
+  const cacheKeys = new Set(descriptors.map((descriptor) => descriptor.cacheKey));
+  assert.ok(cacheKeys.has(v1.placementClassification.cacheKey));
+  assert.ok(cacheKeys.has(v2.placementClassification.cacheKey));
+  for (const descriptor of descriptors) {
+    assertCompleteDescriptor(descriptor, descriptor.entryPoint);
+    assert.doesNotMatch(
+      `${descriptor.cacheKey}|${descriptor.label}`,
+      /sodium|cesium|fluorine|water|preset|material[-_]?id/i
+    );
+  }
+});
+
+test('phase-carrier one-to-four transition prewarms one capacity-independent program', () => {
+  const descriptor = sphPhaseCarrierOneToFourPipelineDescriptor();
+  assert.deepEqual(
+    enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors(),
+    [descriptor]
+  );
+  assertCompleteDescriptor(descriptor, descriptor.entryPoint);
+  assert.doesNotMatch(
+    `${descriptor.cacheKey}|${descriptor.label}`,
+    /sodium|cesium|fluorine|water|preset|material[-_]?id/i
+  );
+});
+
+test('worker warm-program identities never encode material, reaction instance, or scenario data', () => {
+  const descriptors = enumerateWorkerSchroederLanePrewarmPipelineDescriptors();
+  const sourceByProgramIdentity = new Map();
+  for (const descriptor of descriptors) {
+    assert.equal(typeof descriptor.cacheKey, 'string');
+    assert.equal(typeof descriptor.label, 'string');
+    assert.equal(typeof descriptor.code, 'string');
+    assert.equal(typeof descriptor.entryPoint, 'string');
+    assert.ok(Array.isArray(descriptor.bindings));
+    assert.doesNotMatch(
+      `${descriptor.cacheKey}|${descriptor.label}`,
+      /sodium|cesium|fluorine|water|iron|ice|steam|smoke|preset|scenario|material[-_]?(?:id|key|name)|reaction[-_]?(?:id|index)[-_:]?\d|phase[-_]?id[-_:]?\d/i
+    );
+    const programIdentity = JSON.stringify([
+      descriptor.cacheKey,
+      descriptor.label,
+      descriptor.entryPoint,
+      descriptor.bindings
+    ]);
+    const priorSource = sourceByProgramIdentity.get(programIdentity);
+    if (priorSource == null) {
+      sourceByProgramIdentity.set(programIdentity, descriptor.code);
+    } else {
+      assert.equal(
+        descriptor.code,
+        priorSource,
+        'one stable program identity cannot select scenario-dependent WGSL'
+      );
+    }
+  }
+});
+
 test('worker lane-admission hook reports a truthful settled summary from the default enumeration', async () => {
   const device = fakeDevice();
   const summary = await prewarmWorkerSchroederLaneComputePipelines(device);
@@ -251,7 +429,7 @@ test('worker lane-admission hook reports a truthful settled summary from the def
   assert.equal(summary.status, 'worker-lane-pipeline-prewarm-completed');
   assert.equal(summary.reason, null);
   const expectedCount =
-    enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors().length;
+    enumerateWorkerSchroederLanePrewarmPipelineDescriptors().length;
   assert.equal(summary.requestedCount, expectedCount);
   assert.equal(summary.firedCount, expectedCount);
   assert.equal(summary.settledCount, expectedCount);

@@ -1226,6 +1226,165 @@ function explicitPlacementPipeline(device, {
   });
 }
 
+// Product placement is a fixed segmented dataflow. Material identity,
+// reaction identity, event capacity, and topology counts are buffer data, not
+// shader specializations. The live encoder and lane prewarm share these exact
+// descriptors so the first authenticated placement never compiles programs.
+export function sphReactionProductPlacementSegmentedPipelineDescriptors() {
+  const ro = (binding) => computeBufferBinding(binding, 'read-only-storage');
+  const rw = (binding) => computeBufferBinding(binding, 'storage');
+  const uniform = (binding) => computeBufferBinding(binding, 'uniform');
+  const descriptor = (name, code, entryPoint, bindings) => Object.freeze({
+    cacheKey: `ulg-sph-reaction-placement-segmented-v4-${name}`,
+    label: `ulg-sph-reaction-placement-segmented-${name}`,
+    code,
+    entryPoint,
+    bindings
+  });
+  return Object.freeze({
+    schema:
+      'peercompute.ulg.sph-reaction-product-placement-segmented-pipeline-descriptors.v0',
+    preflight: descriptor(
+      'preflight',
+      sphReactionProductPlacementPreflightWgsl,
+      'preflight_segmented_placement',
+      [ro(0), rw(1), uniform(2), rw(3)]
+    ),
+    plan: descriptor(
+      'plan',
+      sphReactionProductPlacementPlanWgsl,
+      'plan_product_events',
+      [ro(0), ro(1), ro(2), ro(4), rw(5), rw(6), rw(7), ro(8), uniform(9)]
+    ),
+    eventApply: descriptor(
+      'event-apply',
+      sphReactionProductPlacementEventApplyWgsl,
+      'apply_unique_events_and_emit_summaries',
+      [rw(0), rw(1), rw(2), rw(3), ro(5), rw(6), rw(7), rw(8), uniform(9)]
+    ),
+    captureInitialize: descriptor(
+      'capture-initialize',
+      sphReactionProductPlacementCaptureReduceWgsl,
+      'initialize_capture_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    captureReduce: descriptor(
+      'capture-reduce',
+      sphReactionProductPlacementCaptureReduceWgsl,
+      'reduce_capture_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    captureApply: descriptor(
+      'capture-apply',
+      sphReactionProductPlacementCaptureApplyWgsl,
+      'apply_capture_segment_tails',
+      [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), rw(7), uniform(8)]
+    ),
+    directPlan: descriptor(
+      'direct-plan',
+      sphReactionProductPlacementDirectPlanWgsl,
+      'emit_direct_pair_hyperedges',
+      [ro(0), ro(1), ro(2), ro(3), ro(4), rw(5), rw(6), rw(7), uniform(8)]
+    ),
+    directInitialize: descriptor(
+      'direct-initialize',
+      sphReactionProductPlacementDirectReduceWgsl,
+      'initialize_direct_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    directReduce: descriptor(
+      'direct-reduce',
+      sphReactionProductPlacementDirectReduceWgsl,
+      'reduce_direct_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    directClaimInitialize: descriptor(
+      'direct-claim-init',
+      sphReactionProductPlacementDirectApplyWgsl,
+      'initialize_direct_endpoint_claims',
+      [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]
+    ),
+    directClaim: descriptor(
+      'direct-claim',
+      sphReactionProductPlacementDirectApplyWgsl,
+      'claim_direct_pair_hyperedge_endpoints',
+      [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]
+    ),
+    directApply: descriptor(
+      'direct-apply',
+      sphReactionProductPlacementDirectApplyWgsl,
+      'apply_direct_pair_hyperedge_tails',
+      [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]
+    ),
+    summaryInitialize: descriptor(
+      'summary-initialize',
+      sphReactionProductPlacementSummaryReduceWgsl,
+      'initialize_summary_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    summaryReduce: descriptor(
+      'summary-reduce',
+      sphReactionProductPlacementSummaryReduceWgsl,
+      'reduce_summary_segments',
+      [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]
+    ),
+    termInitialize: descriptor(
+      'term-initialize',
+      sphReactionProductPlacementSummaryApplyWgsl,
+      'initialize_product_term_summaries',
+      [ro(0), ro(1), ro(2), rw(3), rw(4), uniform(5)]
+    ),
+    summaryApply: descriptor(
+      'summary-apply',
+      sphReactionProductPlacementSummaryApplyWgsl,
+      'apply_product_term_segment_tails',
+      [ro(0), ro(1), ro(2), rw(3), rw(4), uniform(5)]
+    ),
+    finalize: descriptor(
+      'finalize',
+      sphReactionProductPlacementFinalizeWgsl,
+      'finalize_segmented_placement_receipt',
+      [ro(0), ro(1), rw(2), uniform(3)]
+    ),
+    transactionalPublish: descriptor(
+      'transactional-publish',
+      sphReactionProductPlacementTransactionalPublishWgsl,
+      'publish_or_restore_placement_destination',
+      [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), uniform(7)]
+    ),
+    transactionalAuxiliaryPublish: descriptor(
+      'transactional-auxiliary-publish',
+      sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
+      'publish_or_retain_placement_ledgers',
+      [ro(0), rw(1), ro(2), rw(3), rw(4), uniform(5)]
+    ),
+    transactionalTerminal: descriptor(
+      'transactional-terminal',
+      sphReactionProductPlacementTransactionalTerminalWgsl,
+      'seal_transactional_placement_publication',
+      [rw(0), uniform(1)]
+    ),
+    transactionalDestinationRecovery: descriptor(
+      'transactional-destination-recovery',
+      sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
+      'recover_unsafe_placement_destination',
+      [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), uniform(7)]
+    ),
+    transactionalAuxiliaryMaterialize: descriptor(
+      'transactional-auxiliary-materialize',
+      sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
+      'materialize_safe_placement_ledgers',
+      [ro(0), rw(1), ro(2), rw(3), rw(4), uniform(5)]
+    )
+  });
+}
+
+export function enumerateSphReactionProductPlacementSegmentedPrewarmPipelineDescriptors() {
+  const { schema: _schema, ...descriptors } =
+    sphReactionProductPlacementSegmentedPipelineDescriptors();
+  return Object.values(descriptors);
+}
+
 function placementTimestampBegin(recorder, encoder, descriptor) {
   return recorder?.active === true
     && typeof recorder.beginEncoderSpan === 'function'
@@ -1517,79 +1676,43 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     ])
   );
 
-  const ro = (binding) => computeBufferBinding(binding, 'read-only-storage');
-  const rw = (binding) => computeBufferBinding(binding, 'storage');
-  const uniform = (binding) => computeBufferBinding(binding, 'uniform');
-  const pipeline = (name, code, entryPoint, bindings) => explicitPlacementPipeline(device, {
-    cacheKey: `ulg-sph-reaction-placement-segmented-v4-${name}`,
-    label: `ulg-sph-reaction-placement-segmented-${name}`,
-    code,
-    entryPoint,
-    bindings
-  });
-  const preflight = pipeline('preflight', sphReactionProductPlacementPreflightWgsl,
-    'preflight_segmented_placement', [ro(0), rw(1), uniform(2), rw(3)]);
-  const plan = pipeline('plan', sphReactionProductPlacementPlanWgsl,
-    'plan_product_events', [ro(0), ro(1), ro(2), ro(4), rw(5), rw(6), rw(7), ro(8), uniform(9)]);
-  const eventApply = pipeline('event-apply', sphReactionProductPlacementEventApplyWgsl,
-    'apply_unique_events_and_emit_summaries', [rw(0), rw(1), rw(2), rw(3), ro(5), rw(6), rw(7), rw(8), uniform(9)]);
-  const captureInitialize = pipeline('capture-initialize', sphReactionProductPlacementCaptureReduceWgsl,
-    'initialize_capture_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const captureReduce = pipeline('capture-reduce', sphReactionProductPlacementCaptureReduceWgsl,
-    'reduce_capture_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const captureApply = pipeline('capture-apply', sphReactionProductPlacementCaptureApplyWgsl,
-    'apply_capture_segment_tails', [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), rw(7), uniform(8)]);
-  const directPlan = pipeline('direct-plan', sphReactionProductPlacementDirectPlanWgsl,
-    'emit_direct_pair_hyperedges', [ro(0), ro(1), ro(2), ro(3), ro(4), rw(5), rw(6), rw(7), uniform(8)]);
-  const directInitialize = pipeline('direct-initialize', sphReactionProductPlacementDirectReduceWgsl,
-    'initialize_direct_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const directReduce = pipeline('direct-reduce', sphReactionProductPlacementDirectReduceWgsl,
-    'reduce_direct_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const directClaimInit = pipeline('direct-claim-init', sphReactionProductPlacementDirectApplyWgsl,
-    'initialize_direct_endpoint_claims', [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]);
-  const directClaim = pipeline('direct-claim', sphReactionProductPlacementDirectApplyWgsl,
-    'claim_direct_pair_hyperedge_endpoints', [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]);
-  const directApply = pipeline('direct-apply', sphReactionProductPlacementDirectApplyWgsl,
-    'apply_direct_pair_hyperedge_tails', [ro(0), ro(1), ro(2), rw(3), ro(4), ro(5), rw(6), rw(7), uniform(8)]);
-  const summaryInitialize = pipeline('summary-initialize', sphReactionProductPlacementSummaryReduceWgsl,
-    'initialize_summary_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const summaryReduce = pipeline('summary-reduce', sphReactionProductPlacementSummaryReduceWgsl,
-    'reduce_summary_segments', [ro(0), ro(1), ro(2), ro(3), rw(4), uniform(5)]);
-  const termInitialize = pipeline('term-initialize', sphReactionProductPlacementSummaryApplyWgsl,
-    'initialize_product_term_summaries', [ro(0), ro(1), ro(2), rw(3), rw(4), uniform(5)]);
-  const summaryApply = pipeline('summary-apply', sphReactionProductPlacementSummaryApplyWgsl,
-    'apply_product_term_segment_tails', [ro(0), ro(1), ro(2), rw(3), rw(4), uniform(5)]);
-  const finalize = pipeline('finalize', sphReactionProductPlacementFinalizeWgsl,
-    'finalize_segmented_placement_receipt', [ro(0), ro(1), rw(2), uniform(3)]);
+  const pipelineDescriptors =
+    sphReactionProductPlacementSegmentedPipelineDescriptors();
+  const pipeline = (descriptor) =>
+    explicitPlacementPipeline(device, descriptor);
+  const preflight = pipeline(pipelineDescriptors.preflight);
+  const plan = pipeline(pipelineDescriptors.plan);
+  const eventApply = pipeline(pipelineDescriptors.eventApply);
+  const captureInitialize = pipeline(pipelineDescriptors.captureInitialize);
+  const captureReduce = pipeline(pipelineDescriptors.captureReduce);
+  const captureApply = pipeline(pipelineDescriptors.captureApply);
+  const directPlan = pipeline(pipelineDescriptors.directPlan);
+  const directInitialize = pipeline(pipelineDescriptors.directInitialize);
+  const directReduce = pipeline(pipelineDescriptors.directReduce);
+  const directClaimInit = pipeline(
+    pipelineDescriptors.directClaimInitialize
+  );
+  const directClaim = pipeline(pipelineDescriptors.directClaim);
+  const directApply = pipeline(pipelineDescriptors.directApply);
+  const summaryInitialize = pipeline(pipelineDescriptors.summaryInitialize);
+  const summaryReduce = pipeline(pipelineDescriptors.summaryReduce);
+  const termInitialize = pipeline(pipelineDescriptors.termInitialize);
+  const summaryApply = pipeline(pipelineDescriptors.summaryApply);
+  const finalize = pipeline(pipelineDescriptors.finalize);
   const transactionalPublish = pipeline(
-    'transactional-publish',
-    sphReactionProductPlacementTransactionalPublishWgsl,
-    'publish_or_restore_placement_destination',
-    [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), uniform(7)]
+    pipelineDescriptors.transactionalPublish
   );
   const transactionalAuxiliaryPublish = pipeline(
-    'transactional-auxiliary-publish',
-    sphReactionProductPlacementTransactionalAuxiliaryPublishWgsl,
-    'publish_or_retain_placement_ledgers',
-    [ro(0), rw(1), ro(2), rw(3), rw(4), uniform(5)]
+    pipelineDescriptors.transactionalAuxiliaryPublish
   );
   const transactionalTerminal = pipeline(
-    'transactional-terminal',
-    sphReactionProductPlacementTransactionalTerminalWgsl,
-    'seal_transactional_placement_publication',
-    [rw(0), uniform(1)]
+    pipelineDescriptors.transactionalTerminal
   );
   const transactionalDestinationRecovery = pipeline(
-    'transactional-destination-recovery',
-    sphReactionProductPlacementTransactionalDestinationRecoveryWgsl,
-    'recover_unsafe_placement_destination',
-    [ro(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), uniform(7)]
+    pipelineDescriptors.transactionalDestinationRecovery
   );
   const transactionalAuxiliaryMaterialize = pipeline(
-    'transactional-auxiliary-materialize',
-    sphReactionProductPlacementTransactionalAuxiliaryMaterializeWgsl,
-    'materialize_safe_placement_ledgers',
-    [ro(0), rw(1), ro(2), rw(3), rw(4), uniform(5)]
+    pipelineDescriptors.transactionalAuxiliaryMaterialize
   );
 
   const metadata = {

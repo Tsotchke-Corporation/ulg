@@ -115,6 +115,7 @@ import {
   residentSurfaceBatchOpticalSignature,
   opticalGpuTableBindingLayoutSignature,
   opticalGpuTableBufferContentsEqual,
+  canReuseSphNativeSurfaceDrawRenderBridge,
   residentRenderGasPressureSummary,
   residentRenderFieldReadbackModeForSurfaceOverlay,
   selectPressureInterfaceGridForceAdmissionForExecutionMode,
@@ -3428,6 +3429,96 @@ test('SPH phase renderer keeps optical binding layout stable while live values c
   assert.notDeepEqual(Array.from(clearTable.records), Array.from(denseTable.records));
 });
 
+test('native surface bridge reuse is independent of optical material identities and capacities', () => {
+  const device = {};
+  const context = {};
+  const legacyLayout = 'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0';
+  const bridge = {
+    rendererBridge: 'native-webgpu-surface-consumer',
+    released: false,
+    deviceLost: false,
+    device,
+    context,
+    format: 'rgba8unorm',
+    bindGroupLayout: {},
+    cameraBuffer: {},
+    cameraBufferByteLength: 64,
+    opaquePipeline: {},
+    refractivePipeline: {},
+    vaporPipeline: {},
+    refractiveBackfacePipeline: null,
+    envSampler: {},
+    surfaceInputLayout: legacyLayout,
+    opticalGpuBuffers: {
+      recordsBuffer: {},
+      recordsBufferByteLength: 16,
+      spectralSamplesBuffer: {},
+      spectralSamplesBufferByteLength: 16
+    },
+    opticalGpuTableReuseKey: 'one-record',
+    opticalGpuTableBindingLayoutSignature: 'sodium:liquid:0',
+    fieldGradientDummyBuffer: {},
+    temperatureDummyBuffer: {},
+    refractionBindGroupLayout: {},
+    refractionSampler: {},
+    refractionDummyTexture: {},
+    refractionDummyBindGroup: {},
+    refractionBackfaceDummyTexture: {},
+    refractionBackfaceDummyView: {},
+    envDummyTexture: {},
+    envDummyView: {}
+  };
+  const request = {
+    device,
+    context,
+    format: 'rgba8unorm',
+    surfaceInputLayout: legacyLayout,
+    cameraBufferByteLength: 64
+  };
+
+  assert.equal(canReuseSphNativeSurfaceDrawRenderBridge(bridge, request), true);
+  assert.equal(
+    canReuseSphNativeSurfaceDrawRenderBridge(bridge, {
+      ...request,
+      device: {}
+    }),
+    false
+  );
+  assert.equal(
+    canReuseSphNativeSurfaceDrawRenderBridge(bridge, {
+      ...request,
+      cameraBufferByteLength: 65
+    }),
+    false
+  );
+  bridge.opticalGpuTableReuseKey = 'many-records';
+  bridge.opticalGpuTableBindingLayoutSignature = 'cesium:gas:93|water:liquid:4';
+  bridge.opticalGpuBuffers.recordsBufferByteLength = 4;
+  bridge.opticalGpuBuffers.spectralSamplesBufferByteLength = 4;
+  assert.equal(
+    canReuseSphNativeSurfaceDrawRenderBridge(bridge, request),
+    true,
+    'material IDs and replacement-buffer capacity do not select a program'
+  );
+
+  const compactRequest = {
+    ...request,
+    surfaceInputLayout: 'webgpu-marching-cubes-compact-position-rows',
+    cameraBufferByteLength: SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH
+  };
+  bridge.surfaceInputLayout = compactRequest.surfaceInputLayout;
+  bridge.cameraBufferByteLength = compactRequest.cameraBufferByteLength;
+  assert.equal(
+    canReuseSphNativeSurfaceDrawRenderBridge(bridge, compactRequest),
+    false,
+    'compact input requires its stable backface pipeline ABI'
+  );
+  bridge.refractiveBackfacePipeline = {};
+  assert.equal(canReuseSphNativeSurfaceDrawRenderBridge(bridge, compactRequest), true);
+  bridge.released = true;
+  assert.equal(canReuseSphNativeSurfaceDrawRenderBridge(bridge, compactRequest), false);
+});
+
 test('SPH phase renderer derives a packed optical GPU table from surface batches', () => {
   const batches = createContinuousSurfaceBatches({
     boxEdgeM: 5,
@@ -6087,6 +6178,89 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
     executor.drawCommands.map((command) => command.batchParamsBuffer.destroyCount),
     [1, 1]
   );
+});
+
+test('Schroeder proxy programs are shared across simulation generations and data bindings', () => {
+  const { drawSource, nativeBackend } = createSchroederNativeProxyFixture();
+  const { device, calls } = createFakeSchroederProxyRenderDevice();
+  const resolver = (suffix) => new Map([
+    ['active-node-list:test', {
+      buffer: { label: `active-${suffix}` },
+      rowCount: suffix === 'generation-a' ? 12 : 8,
+      strideFloats: SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
+      byteLength: 12 * SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    }],
+    ['aggregate-node:test', {
+      buffer: { label: `aggregate-${suffix}` },
+      rowCount: suffix === 'generation-a' ? 3 : 2,
+      strideFloats: SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
+      byteLength: 3 * SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    }]
+  ]);
+  const generationA = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+    retainedBufferResolver: resolver('generation-a'),
+    source: 'generation-a'
+  });
+  const generationB = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource: {
+      ...drawSource,
+      nativeGridSpacingM: 0.5,
+      drawBatches: drawSource.drawBatches.map((batch) => ({ ...batch }))
+    },
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+    retainedBufferResolver: resolver('generation-b'),
+    source: 'generation-b'
+  });
+
+  assert.equal(generationA.ready, true);
+  assert.equal(generationB.ready, true);
+  assert.equal(generationA.programIdentity, 'device-color-format-depth-format-shader-abi');
+  assert.equal(generationA.programKey, generationB.programKey);
+  assert.equal(generationA.module, generationB.module);
+  assert.equal(generationA.bindGroupLayout, generationB.bindGroupLayout);
+  assert.equal(generationA.pipelineLayout, generationB.pipelineLayout);
+  assert.equal(generationA.pipeline, generationB.pipeline);
+  assert.equal(calls.shaderModules.length, 1);
+  assert.equal(calls.bindGroupLayouts.length, 1);
+  assert.equal(calls.pipelineLayouts.length, 1);
+  assert.equal(calls.pipelines.length, 1);
+  assert.notEqual(generationA.cameraBuffer, generationB.cameraBuffer);
+  assert.notEqual(
+    generationA.drawCommands[0].batchParamsBuffer,
+    generationB.drawCommands[0].batchParamsBuffer
+  );
+  assert.notEqual(
+    generationA.drawCommands[0].bindGroup,
+    generationB.drawCommands[0].bindGroup
+  );
+
+  assert.equal(generationA.destroy(), true);
+  assert.equal(generationB.destroy(), true);
+
+  const noDepth = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    depthFormat: null,
+    retainedBufferResolver: resolver('no-depth'),
+    source: 'different-render-state'
+  });
+  assert.equal(noDepth.ready, true);
+  assert.notEqual(noDepth.programKey, generationA.programKey);
+  assert.equal(calls.shaderModules.length, 2, 'render-state variant owns one separate program');
+  assert.equal(calls.pipelines.length, 2);
+  assert.equal(noDepth.destroy(), true);
 });
 
 test('SPH scene retries retained SS input release without re-destroying proxy uniforms', () => {
@@ -9127,13 +9301,21 @@ test('SPH resident pressure interface state blocks force-row upload without grid
   assert.equal(state.gpuAuthoritativeState, false);
 });
 
-test('extraction-enforced vertex budget uncaps field resolution and yields per-surface row caps', () => {
-  // With the extension clamp active, resolution is bounded only by the
-  // global/requested caps — 4 surfaces no longer force 42.
+test('extraction-enforced vertex budget keeps a bounded total field working set', () => {
+  // With the extension clamp active, four surfaces retain the full 96-cell
+  // axis instead of falling back to the legacy vertex-allocation limit.
   const uncapped = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {
     vertexRowsBudgetEnforcedByExtraction: true
   });
   assert.equal(uncapped, 96);
+  // More dynamic phase/material lanes share the same total field-cell budget
+  // rather than multiplying clear/resolve work without bound.
+  const eightSurfaceResolution =
+    nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(8, {
+      vertexRowsBudgetEnforcedByExtraction: true
+    });
+  assert.equal(eightSurfaceResolution, 76);
+  assert.ok(8 * eightSurfaceResolution ** 3 <= 4 * 96 ** 3);
   // Legacy math unchanged when the flag is absent.
   const legacy = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {});
   assert.ok(legacy < 96, `legacy budget resolution should stay capped, got ${legacy}`);

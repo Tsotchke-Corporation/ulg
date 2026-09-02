@@ -251,6 +251,7 @@ import {
 } from './sphThermalGpuKernel.js';
 import {
   SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE,
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION,
   createSchroederFrozenLevelAssignmentRefreshGpu
 } from './schroederFrozenLevelAssignmentRefreshGpu.js';
 import {
@@ -727,14 +728,18 @@ const GPU_MAP_MODE = {
 };
 
 // Frozen level classification is reused across fine substeps while positions
-// advance.  The refresh buffers are persistent device arenas, not per-step
-// allocations.  Particle cardinality is part of the ABI and therefore the
-// cache key; topology-changing publication starts a later macro tick with a
-// different runtime when required.
+// advance. The count/profile key selects persistent, capacity-sized device
+// arenas; it is not program identity. The refresh factory separately shares
+// immutable programs by device + stable execution ABI, so a topology change
+// may allocate a new runtime without recompiling a particle-count variant.
 const SCHROEDER_FROZEN_ASSIGNMENT_REFRESH_RUNTIME_CACHE = new WeakMap();
 const SCHROEDER_AGGREGATE_TRAVERSAL_RUNTIME_CACHE = new WeakMap();
 
-function cachedSchroederFrozenAssignmentRefreshRuntime(device, particleCount) {
+function cachedSchroederFrozenAssignmentRefreshRuntime(
+  device,
+  particleCount,
+  { spatialKeyChurnObservationEnabled = false } = {}
+) {
   let byParticleCount =
     SCHROEDER_FROZEN_ASSIGNMENT_REFRESH_RUNTIME_CACHE.get(device);
   if (!byParticleCount) {
@@ -744,14 +749,18 @@ function cachedSchroederFrozenAssignmentRefreshRuntime(device, particleCount) {
       byParticleCount
     );
   }
-  let runtime = byParticleCount.get(particleCount);
+  const cacheKey = `${particleCount}:${
+    spatialKeyChurnObservationEnabled ? 'spatial-key-churn' : 'production'
+  }`;
+  let runtime = byParticleCount.get(cacheKey);
   if (!runtime) {
     runtime = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       maxParticleCount: particleCount,
       arenaCount: 2,
+      spatialKeyChurnObservationEnabled,
       label: `ulg-schroeder-two-level-frozen-refresh-${particleCount}`
     });
-    byParticleCount.set(particleCount, runtime);
+    byParticleCount.set(cacheKey, runtime);
   }
   return runtime;
 }
@@ -14846,6 +14855,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
   macroBoundaryLevelAssignmentRunner = runSchroederLevelAssignmentWebGpu,
   macroBoundaryRunnerOptions = {},
   refreshRuntime = null,
+  spatialKeyChurnObservationTargets = null,
   phaseVolumeInterfaceTransportEnabled = false,
   mechanicsEpochMode =
     SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_LEGACY_PROPOSALS
@@ -14959,8 +14969,36 @@ export function createSchroederTwoLevelCanonicalEpochController({
       mechanicsGrid: coarseMechanicsGrid
     })
   ]);
+  const spatialKeyChurnObservationRequested =
+    spatialKeyChurnObservationTargets != null;
+  if (
+    spatialKeyChurnObservationRequested
+    && (
+      !Array.isArray(spatialKeyChurnObservationTargets)
+      || spatialKeyChurnObservationTargets.length < 1
+    )
+  ) {
+    throw new TypeError(
+      'spatialKeyChurnObservationTargets must be a nonempty target array'
+    );
+  }
+  const resolvedSpatialKeyChurnObservationTargets =
+    spatialKeyChurnObservationRequested
+      ? [...spatialKeyChurnObservationTargets]
+      : [];
   const runtime = refreshRuntime
-    || cachedSchroederFrozenAssignmentRefreshRuntime(device, particleCount);
+    || cachedSchroederFrozenAssignmentRefreshRuntime(device, particleCount, {
+      spatialKeyChurnObservationEnabled:
+        spatialKeyChurnObservationRequested
+    });
+  if (
+    Boolean(runtime?.spatialKeyChurnObservationEnabled)
+      !== spatialKeyChurnObservationRequested
+  ) {
+    throw new TypeError(
+      'frozen refresh runtime and spatial-key churn target mode disagree'
+    );
+  }
   const epochs = [];
   const assignmentReleasePromises = new Set();
   const refreshAttemptRecords = [];
@@ -14968,6 +15006,8 @@ export function createSchroederTwoLevelCanonicalEpochController({
   let disposed = false;
   let cleanupFailureCount = 0;
   let proposalBuildCount = 0;
+  let spatialKeyChurnTargetIndex = 0;
+  const spatialKeyChurnObservationCopies = [];
   let lifecycleStatus = 'active';
   let abortAttemptPromise = null;
   let positiveClosePromise = null;
@@ -16029,6 +16069,22 @@ export function createSchroederTwoLevelCanonicalEpochController({
               physicsTick: refreshPhysicsTick,
               physicsSubstep: refreshPhysicsSubstep
             });
+          const spatialKeyChurnObservationTarget =
+            spatialKeyChurnObservationRequested
+              ? resolvedSpatialKeyChurnObservationTargets[
+                  spatialKeyChurnTargetIndex
+                ] ?? null
+              : null;
+          if (
+            spatialKeyChurnObservationRequested
+            && spatialKeyChurnObservationTarget == null
+          ) {
+            const error = new Error(
+              'Canonical frozen refresh exhausted its spatial-key churn targets'
+            );
+            error.code = 'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET';
+            throw error;
+          }
           const refreshTimestamp = gpuTimestampRecorder?.active === true
             && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
             && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
@@ -16047,6 +16103,14 @@ export function createSchroederTwoLevelCanonicalEpochController({
               currentMlsMpmParticleUpload:
                 refreshedMlsMpmParticleUpload,
               frozenFineSubstepAuthorityProof,
+              spatialKeyChurnObservationTarget,
+              spatialKeyChurnExactCellAtlas:
+                spatialKeyChurnObservationRequested
+                  ? {
+                      cellMin: [0, 0, 0],
+                      cellCount: [...fineMechanicsGrid.gridDims]
+                    }
+                  : null,
               physicsTick: refreshPhysicsTick,
               physicsSubstep: refreshPhysicsSubstep,
               refreshMode:
@@ -16122,6 +16186,33 @@ export function createSchroederTwoLevelCanonicalEpochController({
               }
             }
             throw error;
+          }
+          if (spatialKeyChurnObservationRequested) {
+            const copy =
+              refreshedAssignment.spatialKeyChurnObservationCopy ?? null;
+            if (
+              copy?.status
+                !== 'frozen-spatial-key-churn-copy-encoded-unverified'
+              || copy.recordOrdinal
+                !== spatialKeyChurnObservationTarget.recordOrdinal
+              || copy.stepOrdinal
+                !== spatialKeyChurnObservationTarget.stepOrdinal
+              || copy.fineSubstepOrdinal
+                !== spatialKeyChurnObservationTarget.fineSubstepOrdinal
+              || copy.targetOffsetBytes
+                !== spatialKeyChurnObservationTarget.targetOffsetBytes
+              || copy.targetByteLength
+                !== spatialKeyChurnObservationTarget.targetByteLength
+            ) {
+              const error = new Error(
+                'Frozen refresh did not return its exact spatial-key churn copy receipt'
+              );
+              error.code =
+                'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_RECEIPT';
+              throw error;
+            }
+            spatialKeyChurnObservationCopies.push(copy);
+            spatialKeyChurnTargetIndex += 1;
           }
           break;
         } catch (error) {
@@ -16872,6 +16963,14 @@ export function createSchroederTwoLevelCanonicalEpochController({
           epochs.filter((epoch) => epoch.privateAdvanced).length,
         publishedEpochCount: epochs.filter((epoch) => epoch.published).length,
         refreshAttemptCount: refreshAttemptRecords.length,
+        spatialKeyChurnObservationRequested,
+        spatialKeyChurnObservationTargetCount:
+          resolvedSpatialKeyChurnObservationTargets.length,
+        spatialKeyChurnObservationEncodedCount:
+          spatialKeyChurnObservationCopies.length,
+        spatialKeyChurnObservationCopies: Object.freeze(
+          spatialKeyChurnObservationCopies.map((copy) => ({ ...copy }))
+        ),
         activeRefreshAttemptCount: activeRefreshAttemptRecords.size,
         cleanupFailureCount,
         generationIds: Object.freeze(epochs.map(
@@ -19556,6 +19655,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         directArenaCount: resolvedSpatialEpochArenaCount,
         mechanicsFieldPairV2Enabled: enableMechanicsFieldPairV2,
         spatialEpochGenerationRunner,
+        spatialKeyChurnObservationTargets:
+          residentStepOptions?.[
+            SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION
+          ] ?? null,
         phaseVolumeInterfaceTransportEnabled: true,
         mechanicsEpochMode:
           SCHROEDER_TWO_LEVEL_CANONICAL_EPOCH_MODE_FUSED_PRIVATE

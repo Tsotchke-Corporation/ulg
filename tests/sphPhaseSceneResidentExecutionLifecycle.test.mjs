@@ -201,3 +201,57 @@ test('worker-lane public execution projects bounded route and turnaround evidenc
   assert.match(projection, /resultAssembledAtMs:/);
   assert.match(projection, /workerLanePageTiming:/);
 });
+
+test('worker-lane churn profiling stays bounded, identity-bound, and post-commit', async () => {
+  const source = await readFile(sceneSourcePath, 'utf8');
+  const scheduleStart = source.indexOf(
+    'async function runWorkerLaneSchroederResidentSchedule('
+  );
+  const projectionStart = source.indexOf(
+    'function workerLaneResidentExecutionFromScheduleResult(',
+    scheduleStart
+  );
+  const projectionEnd = source.indexOf(
+    'function compactWorkerOffscreenResidentStageStatus',
+    projectionStart
+  );
+  assert.ok(
+    scheduleStart >= 0
+      && projectionStart > scheduleStart
+      && projectionEnd > projectionStart
+  );
+  const schedule = source.slice(scheduleStart, projectionStart);
+  const projection = source.slice(projectionStart, projectionEnd);
+  const authorityCommit = schedule.indexOf(
+    'await runSchroederWorkerLaneScheduleWithAuthority({'
+  );
+  const churnCommit = schedule.indexOf(
+    'commitWorkerLaneSpatialKeyChurnCumulativeTotals({'
+  );
+  const laneProgressCommit = schedule.indexOf(
+    'laneState.completedStepTotal += completedStepCount;'
+  );
+  assert.ok(
+    authorityCommit >= 0
+      && churnCommit > authorityCommit
+      && laneProgressCommit > churnCommit,
+    'diagnostic history is committed only at the admitted lane-progress seam'
+  );
+  assert.match(
+    schedule,
+    /spatialKeyChurnProfileRequested === true\s*\? createWorkerLaneSpatialKeyChurnCumulativeTotals\(\)\s*:\s*null/,
+    'unprofiled lanes allocate no cumulative diagnostic state'
+  );
+  for (const field of ['scheduleId', 'laneId', 'stateKey']) {
+    assert.match(
+      projection,
+      new RegExp(`${field}: spatialKeyChurnObservation\\.${field}`)
+    );
+  }
+  assert.match(
+    projection,
+    /const compactGpuFence = result\.gpuFence[\s\S]*spatialKeyChurnObservation: compactSpatialKeyChurnObservation/
+  );
+  assert.doesNotMatch(projection, /gpuFence:\s*result\.gpuFence/);
+  assert.match(projection, /spatialKeyChurnCumulativeTotals:/);
+});

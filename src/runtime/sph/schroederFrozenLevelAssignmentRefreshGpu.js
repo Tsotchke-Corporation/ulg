@@ -15,6 +15,16 @@ import {
   schroederFrozenLevelAssignmentRefreshWgsl
 } from '../../../ulg-gpu-abi/src/schroederFrozenLevelAssignmentRefreshWgsl.js';
 import {
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_WORDS
+} from '../../../ulg-gpu-abi/src/schroederFrozenSpatialKeyChurn.js';
+import {
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_FLAG_ADMITTED,
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_PARAMS_BYTES,
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_WORKGROUP_SIZE,
+  schroederFrozenSpatialKeyChurnWgsl
+} from '../../../ulg-gpu-abi/src/schroederFrozenSpatialKeyChurnWgsl.js';
+import {
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice,
   webGpuDeviceId
@@ -22,6 +32,10 @@ import {
 import {
   createGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipeline
+} from '../webgpuComputeLayout.js';
 
 export const ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA =
   'peercompute.ulg.schroeder-frozen-level-assignment-refresh.v1';
@@ -34,6 +48,12 @@ export const SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE = Object.freeze({
   MACRO_BOUNDARY: 'macro-boundary-full-reclassification',
   POST_CLOSURE: 'post-closure-full-reclassification'
 });
+export const ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET_SCHEMA =
+  'peercompute.ulg.schroeder-frozen-spatial-key-churn-target.v0';
+export const ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA =
+  'peercompute.ulg.schroeder-frozen-spatial-key-churn-copy.v0';
+export const SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION =
+  'schroederFrozenSpatialKeyChurnTargets';
 const SCHROEDER_POST_CLOSURE_TICK_MODE = Object.freeze({
   SAME_LOOKUP_TICK: 'same-lookup-tick',
   NEXT_TICK_SUCCESSOR: 'next-tick-successor'
@@ -56,8 +76,37 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+const FROZEN_REFRESH_PIPELINE_BINDINGS = Object.freeze([
+  computeBufferBinding(0, 'read-only-storage'),
+  computeBufferBinding(1, 'read-only-storage'),
+  computeBufferBinding(2, 'storage'),
+  computeBufferBinding(3, 'uniform')
+]);
+const FROZEN_REFRESH_PIPELINE_DESCRIPTOR = Object.freeze({
+  cacheKey: 'ulg-schroeder-frozen-level-assignment-refresh.v1',
+  label: 'ulg-schroeder-frozen-level-assignment-refresh',
+  code: schroederFrozenLevelAssignmentRefreshWgsl,
+  entryPoint: 'main',
+  bindings: FROZEN_REFRESH_PIPELINE_BINDINGS
+});
+const FROZEN_SPATIAL_KEY_CHURN_CLASSIFY_PIPELINE_DESCRIPTOR = Object.freeze({
+  cacheKey: 'ulg-schroeder-frozen-spatial-key-churn.v0',
+  label: 'ulg-schroeder-frozen-spatial-key-churn-classify',
+  code: schroederFrozenSpatialKeyChurnWgsl,
+  entryPoint: 'classify',
+  bindings: FROZEN_REFRESH_PIPELINE_BINDINGS
+});
+const FROZEN_SPATIAL_KEY_CHURN_SEAL_PIPELINE_DESCRIPTOR = Object.freeze({
+  cacheKey: 'ulg-schroeder-frozen-spatial-key-churn.v0',
+  label: 'ulg-schroeder-frozen-spatial-key-churn-seal',
+  code: schroederFrozenSpatialKeyChurnWgsl,
+  entryPoint: 'seal',
+  bindings: FROZEN_REFRESH_PIPELINE_BINDINGS
+});
 const frozenFineSubstepAuthorityProofs = new WeakMap();
 const admittedPostClosureLevelAssignments = new WeakMap();
+const frozenSpatialKeyChurnTargetOrigins = new WeakMap();
+const frozenSpatialKeyChurnTargetBufferOrigins = new WeakMap();
 
 function refreshError(message, code, ErrorType = Error) {
   const error = new ErrorType(message);
@@ -81,6 +130,22 @@ function exactU32(value, label, { positive = false } = {}) {
   ) {
     throw refreshError(
       `${label} must be an exact ${positive ? 'positive ' : ''}u32`,
+      'ERR_SCHROEDER_FROZEN_REFRESH_IDENTITY',
+      RangeError
+    );
+  }
+  return value;
+}
+
+function exactI32(value, label) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < -0x8000_0000
+    || value > 0x7fff_ffff
+  ) {
+    throw refreshError(
+      `${label} must be an exact i32`,
       'ERR_SCHROEDER_FROZEN_REFRESH_IDENTITY',
       RangeError
     );
@@ -288,7 +353,17 @@ function validatePriorLevelAssignment(prior, device, maxParticleCount) {
       RangeError
     );
   }
-  return { particleCount, assignmentByteLength, identity };
+  return {
+    particleCount,
+    assignmentByteLength,
+    identity,
+    queryProfile: Object.freeze({
+      chartId: prior.chartId,
+      minLevel: prior.minLevel,
+      maxLevel: prior.maxLevel,
+      baseGridSpacingM
+    })
+  };
 }
 
 function validateCurrentState({
@@ -711,6 +786,89 @@ function createParamsData(particleCount) {
   ]);
 }
 
+function createFrozenSpatialKeyChurnParamsData({
+  particleCount,
+  target,
+  priorIdentity,
+  currentIdentity,
+  queryProfile,
+  exactCellAtlas
+}) {
+  const data = new ArrayBuffer(SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_PARAMS_BYTES);
+  const view = new DataView(data);
+  const u32 = (word, value) => view.setUint32(word * U32_BYTES, value >>> 0, true);
+  const i32 = (word, value) => view.setInt32(word * U32_BYTES, value | 0, true);
+  const f32 = (word, value) => view.setFloat32(word * U32_BYTES, value, true);
+  u32(0, particleCount);
+  u32(1, ASSIGNMENT_STRIDE_WORDS);
+  u32(2, STATE_STRIDE_WORDS);
+  u32(3, SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_FLAG_ADMITTED);
+  u32(4, target.stepOrdinal);
+  u32(5, target.fineSubstepOrdinal);
+  u32(6, priorIdentity.positionEpoch);
+  u32(7, currentIdentity.positionEpoch);
+  u32(8, priorIdentity.topologyEpoch);
+  u32(9, priorIdentity.chartEpoch);
+  u32(10, priorIdentity.levelEpoch);
+  u32(11, priorIdentity.supportEpoch);
+  u32(12, queryProfile.chartId);
+  i32(13, queryProfile.minLevel);
+  i32(14, queryProfile.maxLevel);
+  f32(15, queryProfile.baseGridSpacingM);
+  i32(16, exactCellAtlas.cellMin[0]);
+  i32(17, exactCellAtlas.cellMin[1]);
+  i32(18, exactCellAtlas.cellMin[2]);
+  u32(19, exactCellAtlas.cellCount[0]);
+  u32(20, exactCellAtlas.cellCount[1]);
+  u32(21, exactCellAtlas.cellCount[2]);
+  u32(22, 1);
+  u32(23, 0);
+  return new Uint32Array(data);
+}
+
+function validateFrozenSpatialKeyChurnExactCellAtlas(exactCellAtlas) {
+  const cellMin = exactCellAtlas?.cellMin == null
+    ? null
+    : Array.from(exactCellAtlas.cellMin);
+  const cellCount = exactCellAtlas?.cellCount == null
+    ? null
+    : Array.from(exactCellAtlas.cellCount);
+  if (
+    !cellMin
+    || cellMin.length !== 3
+    || !cellCount
+    || cellCount.length !== 3
+  ) {
+    throw refreshError(
+      'frozen spatial-key churn requires the canonical exact-cell atlas',
+      'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_ATLAS',
+      TypeError
+    );
+  }
+  const normalized = {
+    cellMin: Object.freeze(cellMin.map(
+      (value, axis) => exactI32(value, `exactCellAtlas.cellMin[${axis}]`)
+    )),
+    cellCount: Object.freeze(cellCount.map(
+      (value, axis) => exactU32(
+        value,
+        `exactCellAtlas.cellCount[${axis}]`,
+        { positive: true }
+      )
+    ))
+  };
+  if (normalized.cellMin.some((minimum, axis) => (
+    minimum + normalized.cellCount[axis] - 1 > 0x7fff_ffff
+  ))) {
+    throw refreshError(
+      'frozen spatial-key churn exact-cell atlas exceeds the signed cell domain',
+      'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_ATLAS',
+      RangeError
+    );
+  }
+  return Object.freeze(normalized);
+}
+
 function createOwnedBuffer(device, descriptor) {
   return tagWebGpuBufferDevice(device.createBuffer(descriptor), device);
 }
@@ -753,6 +911,145 @@ export function refreshSchroederFrozenLevelAssignmentRowsCpuOracle({
     refreshedWords[assignmentOffset + 14] = stateWords[stateOffset + 2];
   }
   return new Float32Array(refreshedWords.buffer);
+}
+
+/**
+ * Reserve one disjoint MAP_READ ring slot for a frozen-refresh churn record.
+ * The target is module-branded and single-use; only the refresh runtime can
+ * consume it. Its copied bytes remain diagnostic-only until the worker's
+ * existing schedule-terminal queue fence has completed.
+ */
+export function createSchroederFrozenSpatialKeyChurnTarget({
+  device,
+  scheduleId,
+  laneId,
+  stateKey,
+  recordOrdinal,
+  stepOrdinal,
+  fineSubstepOrdinal,
+  expectedParticleCount,
+  targetBuffer,
+  targetOffsetBytes
+} = {}) {
+  requireDevice(device);
+  const resolvedRecordOrdinal = positiveInteger(recordOrdinal, 'recordOrdinal');
+  const resolvedStepOrdinal = positiveInteger(stepOrdinal, 'stepOrdinal');
+  const resolvedFineSubstepOrdinal = positiveInteger(
+    fineSubstepOrdinal,
+    'fineSubstepOrdinal'
+  );
+  const resolvedParticleCount = positiveInteger(
+    expectedParticleCount,
+    'expectedParticleCount'
+  );
+  const resolvedOffset = Number(targetOffsetBytes);
+  const usage = Number(targetBuffer?.usage);
+  const mapReadUsage = globalThis.GPUBufferUsage?.MAP_READ ?? 1;
+  if (
+    typeof scheduleId !== 'string'
+    || scheduleId.length === 0
+    || typeof laneId !== 'string'
+    || laneId.length === 0
+    || typeof stateKey !== 'string'
+    || stateKey.length === 0
+    || !Number.isSafeInteger(resolvedOffset)
+    || resolvedOffset < 0
+    || resolvedOffset
+      !== (resolvedRecordOrdinal - 1)
+        * SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+    || resolvedOffset % U32_BYTES !== 0
+    || !targetBuffer
+    || targetBuffer.destroyed === true
+    || !webGpuBufferMatchesDevice(targetBuffer, device)
+    || targetBuffer.mapState !== 'unmapped'
+    || !Number.isSafeInteger(usage)
+    || (usage & GPU_BUFFER_USAGE.COPY_DST) !== GPU_BUFFER_USAGE.COPY_DST
+    || (usage & mapReadUsage) !== mapReadUsage
+    || Number(targetBuffer.size)
+      < resolvedOffset + SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+  ) {
+    throw refreshError(
+      'frozen spatial-key churn target requires one exact unmapped MAP_READ ring slot',
+      'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET',
+      TypeError
+    );
+  }
+  let bufferOrigin = frozenSpatialKeyChurnTargetBufferOrigins.get(targetBuffer);
+  if (!bufferOrigin) {
+    bufferOrigin = {
+      deviceId: webGpuDeviceId(device),
+      scheduleId,
+      laneId,
+      stateKey,
+      reservedOffsets: new Set()
+    };
+    frozenSpatialKeyChurnTargetBufferOrigins.set(targetBuffer, bufferOrigin);
+  }
+  if (
+    bufferOrigin.deviceId !== webGpuDeviceId(device)
+    || bufferOrigin.scheduleId !== scheduleId
+    || bufferOrigin.laneId !== laneId
+    || bufferOrigin.stateKey !== stateKey
+    || bufferOrigin.reservedOffsets.has(resolvedOffset)
+  ) {
+    throw refreshError(
+      'frozen spatial-key churn ring identity or slot reservation is stale',
+      'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET'
+    );
+  }
+  const target = Object.freeze({
+    schema: ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET_SCHEMA,
+    scheduleId,
+    laneId,
+    stateKey,
+    recordOrdinal: resolvedRecordOrdinal,
+    stepOrdinal: resolvedStepOrdinal,
+    fineSubstepOrdinal: resolvedFineSubstepOrdinal,
+    expectedParticleCount: resolvedParticleCount,
+    targetBuffer,
+    targetOffsetBytes: resolvedOffset,
+    targetByteLength: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+  });
+  frozenSpatialKeyChurnTargetOrigins.set(target, {
+    target,
+    deviceId: webGpuDeviceId(device),
+    targetBuffer,
+    targetOffsetBytes: resolvedOffset,
+    consumed: false
+  });
+  bufferOrigin.reservedOffsets.add(resolvedOffset);
+  return target;
+}
+
+function validateFrozenSpatialKeyChurnTarget({
+  device,
+  target,
+  particleCount
+}) {
+  const origin = frozenSpatialKeyChurnTargetOrigins.get(target);
+  if (
+    !origin
+    || origin.target !== target
+    || origin.deviceId !== webGpuDeviceId(device)
+    || origin.consumed === true
+    || !Object.isFrozen(target)
+    || target?.schema !== ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET_SCHEMA
+    || target.expectedParticleCount !== particleCount
+    || target.targetByteLength !== SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+    || target.targetBuffer !== origin.targetBuffer
+    || target.targetOffsetBytes !== origin.targetOffsetBytes
+    || target.targetBuffer?.destroyed === true
+    || !webGpuBufferMatchesDevice(target.targetBuffer, device)
+    || target.targetBuffer?.mapState !== 'unmapped'
+    || Number(target.targetBuffer?.size)
+      < target.targetOffsetBytes + target.targetByteLength
+  ) {
+    throw refreshError(
+      'frozen spatial-key churn encode requires one exact live reserved target',
+      'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET'
+    );
+  }
+  return origin;
 }
 
 /**
@@ -1121,9 +1418,13 @@ export function admitSchroederPostClosureLevelAssignment({
 export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
   maxParticleCount,
   arenaCount = 2,
+  spatialKeyChurnObservationEnabled = false,
   label = 'ulg-schroeder-frozen-level-assignment-refresh'
 } = {}) {
   requireDevice(device);
+  if (typeof spatialKeyChurnObservationEnabled !== 'boolean') {
+    throw new TypeError('spatialKeyChurnObservationEnabled must be a boolean');
+  }
   const resolvedMaxParticleCount = positiveInteger(maxParticleCount, 'maxParticleCount');
   const resolvedArenaCount = positiveInteger(arenaCount, 'arenaCount', 8);
   const outputByteLength = checkedByteLength(
@@ -1169,16 +1470,33 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
     );
   }
 
-  const shaderModule = device.createShaderModule({
-    label: `${label}-shader`,
-    code: schroederFrozenLevelAssignmentRefreshWgsl
-  });
-  const pipeline = device.createComputePipeline({
-    label: `${label}-pipeline`,
-    layout: 'auto',
-    compute: { module: shaderModule, entryPoint: 'main' }
-  });
-  const bindGroupLayout = pipeline.getBindGroupLayout(0);
+  // Program identity is device + stable execution ABI only. Particle count,
+  // caller labels, material identity, and scenario configuration size the
+  // instance-owned arenas below; none may trigger shader compilation.
+  const {
+    pipeline,
+    bindGroupLayout
+  } = createCachedExplicitComputePipeline(
+    device,
+    FROZEN_REFRESH_PIPELINE_DESCRIPTOR
+  );
+  const churnClassifyProgram = spatialKeyChurnObservationEnabled
+    ? createCachedExplicitComputePipeline(
+        device,
+        FROZEN_SPATIAL_KEY_CHURN_CLASSIFY_PIPELINE_DESCRIPTOR
+      )
+    : null;
+  const churnSealProgram = spatialKeyChurnObservationEnabled
+    ? createCachedExplicitComputePipeline(
+        device,
+        FROZEN_SPATIAL_KEY_CHURN_SEAL_PIPELINE_DESCRIPTOR
+      )
+    : null;
+  const churnClassifyPipeline = churnClassifyProgram?.pipeline ?? null;
+  const churnSealPipeline = churnSealProgram?.pipeline ?? null;
+  const churnClassifyBindGroupLayout =
+    churnClassifyProgram?.bindGroupLayout ?? null;
+  const churnSealBindGroupLayout = churnSealProgram?.bindGroupLayout ?? null;
   const arenas = Array.from({ length: resolvedArenaCount }, (_, arenaIndex) => ({
     arenaIndex,
     generation: 0,
@@ -1196,7 +1514,24 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       label: `${label}-params-${arenaIndex}`,
       size: SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_PARAMS_BYTES,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    })
+    }),
+    spatialKeyChurnReceiptBuffer: spatialKeyChurnObservationEnabled
+      ? createOwnedBuffer(device, {
+          label: `${label}-spatial-key-churn-receipt-${arenaIndex}`,
+          size: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+          usage:
+            GPU_BUFFER_USAGE.STORAGE
+            | GPU_BUFFER_USAGE.COPY_SRC
+            | GPU_BUFFER_USAGE.COPY_DST
+        })
+      : null,
+    spatialKeyChurnParamsBuffer: spatialKeyChurnObservationEnabled
+      ? createOwnedBuffer(device, {
+          label: `${label}-spatial-key-churn-params-${arenaIndex}`,
+          size: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_PARAMS_BYTES,
+          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        })
+      : null
   }));
   const executionRetirements = new WeakMap();
   let destroyed = false;
@@ -1204,8 +1539,10 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
 
   const arenaOwnedBuffers = (arena) => [
     arena.assignmentBuffer,
-    arena.paramsBuffer
-  ];
+    arena.paramsBuffer,
+    arena.spatialKeyChurnReceiptBuffer,
+    arena.spatialKeyChurnParamsBuffer
+  ].filter(Boolean);
 
   const destroyArenaOwnedBuffers = (arena) => {
     const failures = [];
@@ -1322,6 +1659,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
     maxParticleCount: resolvedMaxParticleCount,
     arenaCount: resolvedArenaCount,
     outputByteLength,
+    spatialKeyChurnObservationEnabled,
     normalHotLoopReadbackFree: true,
 
     waitForAvailableArena() {
@@ -1434,6 +1772,8 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       currentSphParticleUpload,
       currentMlsMpmParticleUpload = null,
       frozenFineSubstepAuthorityProof = null,
+      spatialKeyChurnObservationTarget = null,
+      spatialKeyChurnExactCellAtlas = null,
       physicsTick,
       physicsSubstep,
       macroBoundaryLevelAssignment = null,
@@ -1449,6 +1789,8 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           currentSphParticleUpload,
           currentMlsMpmParticleUpload,
           frozenFineSubstepAuthorityProof,
+          spatialKeyChurnObservationTarget,
+          spatialKeyChurnExactCellAtlas,
           physicsTick,
           physicsSubstep,
           refreshMode
@@ -1526,6 +1868,8 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       currentSphParticleUpload,
       currentMlsMpmParticleUpload = null,
       frozenFineSubstepAuthorityProof = null,
+      spatialKeyChurnObservationTarget = null,
+      spatialKeyChurnExactCellAtlas = null,
       physicsTick = priorLevelAssignment?.physicsTick,
       physicsSubstep,
       refreshMode =
@@ -1597,6 +1941,51 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           'ERR_SCHROEDER_FROZEN_REFRESH_AUTHORITY_PROOF'
         );
       }
+      if (
+        spatialKeyChurnObservationEnabled
+          !== (spatialKeyChurnObservationTarget != null)
+      ) {
+        throw refreshError(
+          spatialKeyChurnObservationEnabled
+            ? 'diagnostic frozen refresh requires one exact spatial-key churn target'
+            : 'production frozen refresh does not admit a spatial-key churn target',
+          'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET'
+        );
+      }
+      let spatialKeyChurnTargetOrigin = null;
+      let resolvedSpatialKeyChurnExactCellAtlas = null;
+      if (spatialKeyChurnObservationTarget != null) {
+        if (typeof encoder.copyBufferToBuffer !== 'function') {
+          throw refreshError(
+            'spatial-key churn observation requires caller-owned copy encoding',
+            'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_ENCODER',
+            TypeError
+          );
+        }
+        spatialKeyChurnTargetOrigin = validateFrozenSpatialKeyChurnTarget({
+          device,
+          target: spatialKeyChurnObservationTarget,
+          particleCount: prior.particleCount
+        });
+        if (
+          spatialKeyChurnObservationTarget.fineSubstepOrdinal
+            !== current.physicsSubstep
+        ) {
+          throw refreshError(
+            'spatial-key churn target fine-substep ordinal disagrees with the retained successor identity',
+            'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET'
+          );
+        }
+        resolvedSpatialKeyChurnExactCellAtlas =
+          validateFrozenSpatialKeyChurnExactCellAtlas(
+            spatialKeyChurnExactCellAtlas
+          );
+      } else if (spatialKeyChurnExactCellAtlas != null) {
+        throw refreshError(
+          'production frozen refresh does not admit a diagnostic exact-cell atlas',
+          'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_ATLAS'
+        );
+      }
       const arena = arenas.find((candidate) => !candidate.busy && !candidate.retired);
       if (!arena) {
         throw refreshBackpressureError();
@@ -1609,6 +1998,20 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           0,
           createParamsData(prior.particleCount)
         );
+        if (spatialKeyChurnObservationTarget != null) {
+          device.queue.writeBuffer(
+            arena.spatialKeyChurnParamsBuffer,
+            0,
+            createFrozenSpatialKeyChurnParamsData({
+              particleCount: prior.particleCount,
+              target: spatialKeyChurnObservationTarget,
+              priorIdentity: prior.identity,
+              currentIdentity: current,
+              queryProfile: prior.queryProfile,
+              exactCellAtlas: resolvedSpatialKeyChurnExactCellAtlas
+            })
+          );
+        }
         const bindGroup = device.createBindGroup({
           label: `${label}-bind-group-${arena.arenaIndex}-${arena.generation}`,
           layout: bindGroupLayout,
@@ -1629,6 +2032,115 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           prior.particleCount / SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_WORKGROUP_SIZE
         ));
         pass.end();
+
+        let spatialKeyChurnObservationCopy = null;
+        if (spatialKeyChurnObservationTarget != null) {
+          encoder.clearBuffer(
+            arena.spatialKeyChurnReceiptBuffer,
+            0,
+            SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+          );
+          const churnClassifyBindGroup = device.createBindGroup({
+            label:
+              `${label}-spatial-key-churn-classify-bind-group-`
+              + `${arena.arenaIndex}-${arena.generation}`,
+            layout: churnClassifyBindGroupLayout,
+            entries: [
+              {
+                binding: 0,
+                resource: { buffer: priorLevelAssignment.assignmentBuffer }
+              },
+              {
+                binding: 1,
+                resource: { buffer: current.stateBuffer }
+              },
+              {
+                binding: 2,
+                resource: { buffer: arena.spatialKeyChurnReceiptBuffer }
+              },
+              {
+                binding: 3,
+                resource: { buffer: arena.spatialKeyChurnParamsBuffer }
+              }
+            ]
+          });
+          const churnSealBindGroup = device.createBindGroup({
+            label:
+              `${label}-spatial-key-churn-seal-bind-group-`
+              + `${arena.arenaIndex}-${arena.generation}`,
+            layout: churnSealBindGroupLayout,
+            entries: [
+              {
+                binding: 2,
+                resource: { buffer: arena.spatialKeyChurnReceiptBuffer }
+              },
+              {
+                binding: 3,
+                resource: { buffer: arena.spatialKeyChurnParamsBuffer }
+              }
+            ]
+          });
+          const churnClassifyPass = encoder.beginComputePass({
+            label:
+              `${label}-spatial-key-churn-classify-pass-`
+              + `${arena.arenaIndex}-${arena.generation}`
+          });
+          churnClassifyPass.setPipeline(churnClassifyPipeline);
+          churnClassifyPass.setBindGroup(0, churnClassifyBindGroup);
+          churnClassifyPass.dispatchWorkgroups(Math.ceil(
+            prior.particleCount
+              / SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_WORKGROUP_SIZE
+          ));
+          churnClassifyPass.end();
+          const churnSealPass = encoder.beginComputePass({
+            label:
+              `${label}-spatial-key-churn-seal-pass-`
+              + `${arena.arenaIndex}-${arena.generation}`
+          });
+          churnSealPass.setPipeline(churnSealPipeline);
+          churnSealPass.setBindGroup(0, churnSealBindGroup);
+          churnSealPass.dispatchWorkgroups(1);
+          churnSealPass.end();
+          encoder.copyBufferToBuffer(
+            arena.spatialKeyChurnReceiptBuffer,
+            0,
+            spatialKeyChurnObservationTarget.targetBuffer,
+            spatialKeyChurnObservationTarget.targetOffsetBytes,
+            SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+          );
+          spatialKeyChurnTargetOrigin.consumed = true;
+          spatialKeyChurnObservationCopy = Object.freeze({
+            schema: ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA,
+            status: 'frozen-spatial-key-churn-copy-encoded-unverified',
+            scheduleId: spatialKeyChurnObservationTarget.scheduleId,
+            laneId: spatialKeyChurnObservationTarget.laneId,
+            stateKey: spatialKeyChurnObservationTarget.stateKey,
+            recordOrdinal: spatialKeyChurnObservationTarget.recordOrdinal,
+            stepOrdinal: spatialKeyChurnObservationTarget.stepOrdinal,
+            fineSubstepOrdinal:
+              spatialKeyChurnObservationTarget.fineSubstepOrdinal,
+            expectedParticleCount: prior.particleCount,
+            expectedPhysicsSubstep: current.physicsSubstep,
+            expectedPriorPositionEpoch: prior.identity.positionEpoch,
+            expectedSuccessorPositionEpoch: current.positionEpoch,
+            expectedTopologyEpoch: prior.identity.topologyEpoch,
+            expectedChartEpoch: prior.identity.chartEpoch,
+            expectedLevelEpoch: prior.identity.levelEpoch,
+            expectedSupportEpoch: prior.identity.supportEpoch,
+            exactCellAtlas: {
+              cellMin: [...resolvedSpatialKeyChurnExactCellAtlas.cellMin],
+              cellCount: [...resolvedSpatialKeyChurnExactCellAtlas.cellCount]
+            },
+            targetOffsetBytes:
+              spatialKeyChurnObservationTarget.targetOffsetBytes,
+            targetByteLength:
+              SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+            recordWordLength: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_WORDS,
+            encodedIntoCallerSubmission: true,
+            additionalQueueSubmissionCount: 0,
+            fullParticleReadbackPerformed: false
+          });
+        }
 
         const execution = {
           ...priorLevelAssignment,
@@ -1684,6 +2196,7 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
           fullReadbackPerformed: false,
           fullParticleReadbackPerformed: false,
           fullParticleReadbackFree: true,
+          spatialKeyChurnObservationCopy,
           ...createGpuReadbackTelemetry({
             scope: 'schroeder-frozen-level-assignment-refresh'
           }),

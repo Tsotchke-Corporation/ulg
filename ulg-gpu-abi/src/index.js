@@ -43,6 +43,8 @@ export * from './sphReactionStrictGate.js';
 export * from './schroederSpatialAggregateView.js';
 export * from './schroederSpatialAggregateViewWgsl.js';
 export * from './schroederFrozenLevelAssignmentRefreshWgsl.js';
+export * from './schroederFrozenSpatialKeyChurn.js';
+export * from './schroederFrozenSpatialKeyChurnWgsl.js';
 export * from './schroederCrossLevelInvariantEvidence.js';
 export * from './schroederCrossLevelInvariantEvidenceWgsl.js';
 export * from './schroederCrossLevelRefluxLedger.js';

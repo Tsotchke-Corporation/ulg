@@ -685,6 +685,30 @@ function materializedDescriptors({
   };
 }
 
+export function sphPhaseCarrierOneToFourPipelineDescriptor() {
+  return Object.freeze({
+    cacheKey: 'ulg-sph-phase-carrier-one-to-four.v0',
+    label: 'ulg-sph-phase-carrier-one-to-four',
+    code: sphPhaseCarrierOneToFourMaterializationWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'storage'),
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'storage'),
+      computeBufferBinding(8, 'uniform')
+    ]
+  });
+}
+
+export function enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors() {
+  return [sphPhaseCarrierOneToFourPipelineDescriptor()];
+}
+
 export function createSphPhaseCarrierOneToFourMaterializationWebGpuEncoderStage({
   device,
   sphParticleState,
@@ -789,24 +813,10 @@ export function createSphPhaseCarrierOneToFourMaterializationWebGpuEncoderStage(
     allocated.push(paramsBuffer);
     device.queue.writeBuffer(paramsBuffer, 0, createParamsArray(plan));
 
-    const bindings = [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'read-only-storage'),
-      computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'storage'),
-      computeBufferBinding(5, 'storage'),
-      computeBufferBinding(6, 'storage'),
-      computeBufferBinding(7, 'storage'),
-      computeBufferBinding(8, 'uniform')
-    ];
-    const pipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-phase-carrier-one-to-four.v0',
-      label: 'ulg-sph-phase-carrier-one-to-four',
-      code: sphPhaseCarrierOneToFourMaterializationWgsl,
-      entryPoint: 'main',
-      bindings
-    });
+    const pipeline = createCachedExplicitComputePipeline(
+      device,
+      sphPhaseCarrierOneToFourPipelineDescriptor()
+    );
     const bindGroup = device.createBindGroup({
       layout: pipeline.bindGroupLayout,
       entries: [

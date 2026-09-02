@@ -1205,6 +1205,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'workerLivePreview',
   'compactMechanicsView',
   'observeSpatialAuthority',
+  'spatialChurnProfile',
   'bg',
   'bgimg',
   'lighting',
@@ -6979,6 +6980,7 @@ export async function mountSphPhaseDemoOverlay({
     'workerLivePreview',
     'compactMechanicsView',
     'observeSpatialAuthority',
+    'spatialChurnProfile',
     ...mountedPresentationPolicyResetKeys,
     ...mountedHierarchyPolicyResetKeys
   ]);
@@ -7702,6 +7704,14 @@ export async function mountSphPhaseDemoOverlay({
     ),
     false
   );
+  // Diagnostic only. This is URL/hash scoped rather than preset/policy
+  // scoped because it adds GPU atomics and one compact terminal map and must
+  // never silently contaminate a production throughput baseline.
+  const initialSpatialKeyChurnProfileEnabled = booleanUrlParam(
+    initialHash.get('spatialChurnProfile')
+      ?? initialQuery.get('spatialChurnProfile'),
+    false
+  );
   const initialSchroederTwoLevelMechanicsEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederTwoLevel', 'ssTwoLevel'],
@@ -7831,6 +7841,8 @@ export async function mountSphPhaseDemoOverlay({
       initialSchroederMechanicsFieldPairV2Enabled,
     twoLevelMechanicsAuthority: initialSchroederTwoLevelMechanicsAuthority,
     twoLevelFineSubstepCount: initialSchroederTwoLevelFineSubstepCount,
+    spatialKeyChurnProfileEnabled:
+      initialSpatialKeyChurnProfileEnabled,
     enableParticleStorageMaterialization: initialSchroederParticleStorageMaterializationEnabled,
     particleStorageAdmissionRowBudget: initialSchroederParticleStorageAdmissionRowBudget,
     particleStorageRequiredCapacity: initialSchroederParticleStorageRequiredCapacity,
@@ -7901,6 +7913,8 @@ export async function mountSphPhaseDemoOverlay({
         config.enableMechanicsFieldPairV2,
       schroederTwoLevelMechanicsAuthority: config.twoLevelMechanicsAuthority,
       schroederTwoLevelFineSubstepCount: config.twoLevelFineSubstepCount,
+      schroederSpatialKeyChurnProfile:
+        config.spatialKeyChurnProfileEnabled === true,
       schroederEnableParticleStorageMaterialization: config.enableParticleStorageMaterialization,
       schroederParticleStorageAdmissionRowBudget: config.particleStorageAdmissionRowBudget,
       schroederParticleStorageRequiredCapacity: config.particleStorageRequiredCapacity,
@@ -8723,6 +8737,9 @@ export async function mountSphPhaseDemoOverlay({
         if (initialSchroederTwoLevelFineSubstepCount > 1) {
           q.set('schroederTwoLevelSubsteps', String(initialSchroederTwoLevelFineSubstepCount));
         }
+      }
+      if (initialSpatialKeyChurnProfileEnabled) {
+        q.set('spatialChurnProfile', '1');
       }
       if (initialSchroederParticleStorageAdmissionRowBudget != null) {
         q.set('schroederParticleStorageRowBudget', String(initialSchroederParticleStorageAdmissionRowBudget));
@@ -12149,7 +12166,8 @@ export async function mountSphPhaseDemoOverlay({
     schroederParticleStorageCapacityMargin = null,
     schroederParticleStorageFreeListSlotCapacity = null,
     schroederParticleStorageFreeListAvailableSlotCount = null,
-    schroederParticleStorageFreeListMaxSlotsPerRow = null
+    schroederParticleStorageFreeListMaxSlotsPerRow = null,
+    schroederSpatialKeyChurnProfile = false
   } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
@@ -12192,6 +12210,7 @@ export async function mountSphPhaseDemoOverlay({
       `ssPhaseVolume=${Boolean(schroederEnablePhaseVolumeMigration) ? 1 : 0}`,
       `ssLawQueue=${Boolean(schroederEnableLawQueue) ? 1 : 0}`,
       `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`,
+      `ssSpatialChurnProfile=${Boolean(schroederSpatialKeyChurnProfile) ? 1 : 0}`,
       `ssParticleStorage=${Boolean(schroederEnableParticleStorageMaterialization) ? 1 : 0}`,
       `ssParticleStorageRows=${schroederParticleStorageAdmissionRowBudget ?? 'auto'}`,
       `ssParticleStorageCapacity=${schroederParticleStorageRequiredCapacity ?? 'auto'}`,

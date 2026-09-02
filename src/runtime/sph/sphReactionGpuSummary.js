@@ -1864,14 +1864,9 @@ export function createSphReactionStrictGateGpuFinalizePlan({
   });
 }
 
-export function resolveSphReactionProductPlacementClassificationProgram(
-  placement
+function reactionProductPlacementClassificationProgramForDirectoryAbiVersion(
+  directoryAbiVersion
 ) {
-  const directoryAbiVersion = placement?.directoryAbiVersion;
-  const authenticationDirectoryAbiVersion =
-    placement?.authentication?.directoryAbiVersion;
-  const generationDirectoryAbiVersion =
-    placement?.generation?.execution?.abiVersion;
   const directoryV2 =
     directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
   if (
@@ -1887,6 +1882,27 @@ export function resolveSphReactionProductPlacementClassificationProgram(
       'ERR_SPH_REACTION_PRODUCT_PLACEMENT_CLASSIFICATION_UNSUPPORTED_DIRECTORY_ABI';
     throw error;
   }
+  return Object.freeze({
+    directoryAbiVersion,
+    cacheKeySuffix: `directory-v${directoryAbiVersion}`,
+    shaderCode: directoryV2
+      ? sphReactionProductEventSpatialClassificationV2Wgsl
+      : sphReactionProductEventSpatialClassificationWgsl
+  });
+}
+
+export function resolveSphReactionProductPlacementClassificationProgram(
+  placement
+) {
+  const directoryAbiVersion = placement?.directoryAbiVersion;
+  const authenticationDirectoryAbiVersion =
+    placement?.authentication?.directoryAbiVersion;
+  const generationDirectoryAbiVersion =
+    placement?.generation?.execution?.abiVersion;
+  const program =
+    reactionProductPlacementClassificationProgramForDirectoryAbiVersion(
+      directoryAbiVersion
+    );
   if (
     authenticationDirectoryAbiVersion !== directoryAbiVersion
     || generationDirectoryAbiVersion !== directoryAbiVersion
@@ -1902,13 +1918,233 @@ export function resolveSphReactionProductPlacementClassificationProgram(
       'ERR_SPH_REACTION_PRODUCT_PLACEMENT_CLASSIFICATION_DIRECTORY_ABI_MISMATCH';
     throw error;
   }
+  return program;
+}
+
+// Canonical reaction summary/compaction is one fixed material-agnostic
+// dataflow. Only the spatial-directory ABI changes the classification WGSL;
+// chemistry and scenario identity remain resident table rows. The live path
+// and lane prewarm both consume this exact descriptor table.
+export function sphReactionCanonicalSummaryPipelineDescriptors({
+  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+} = {}) {
+  const classificationProgram =
+    reactionProductPlacementClassificationProgramForDirectoryAbiVersion(
+      directoryAbiVersion
+    );
+  const descriptor = ({ cacheKey, label, code, entryPoint, bindings }) =>
+    Object.freeze({ cacheKey, label, code, entryPoint, bindings });
+  const legacyCompactBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(4, 'storage')
+  ];
+  const canonicalCompactBindings = [
+    ...legacyCompactBindings,
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage')
+  ];
+  const placementEnvelopeBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage')
+  ];
+  const spatialClassificationBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'read-only-storage'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'read-only-storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'read-only-storage'),
+    computeBufferBinding(12, 'storage')
+  ];
+  const spareGroupScanBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(4, 'storage')
+  ];
   return Object.freeze({
+    schema:
+      'peercompute.ulg.sph-reaction-canonical-summary-pipeline-descriptors.v0',
     directoryAbiVersion,
-    cacheKeySuffix: `directory-v${directoryAbiVersion}`,
-    shaderCode: directoryV2
-      ? sphReactionProductEventSpatialClassificationV2Wgsl
-      : sphReactionProductEventSpatialClassificationWgsl
+    productEvent: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-event-v2-current-volume',
+      label: 'ulg-sph-reaction-product-event',
+      code: sphReactionProductEventWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'uniform'),
+        computeBufferBinding(8, 'read-only-storage')
+      ]
+    }),
+    compactCount: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-event-placement-compact-count-v3',
+      label: 'ulg-sph-reaction-product-event-placement-compact-count',
+      code: sphReactionProductEventCompactWgsl,
+      entryPoint: 'count_placement_rows',
+      bindings: canonicalCompactBindings
+    }),
+    compactScan: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scan-v3',
+      label: 'ulg-sph-reaction-product-event-placement-compact-scan',
+      code: sphReactionProductEventCompactWgsl,
+      entryPoint: 'scan_placement_row_groups',
+      bindings: canonicalCompactBindings
+    }),
+    compactScatter: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scatter-v3',
+      label: 'ulg-sph-reaction-product-event-placement-compact-scatter',
+      code: sphReactionProductEventCompactWgsl,
+      entryPoint: 'scatter_placement_rows',
+      bindings: canonicalCompactBindings
+    }),
+    placementEnvelopeReduce: descriptor({
+      cacheKey:
+        'ulg-sph-reaction-product-placement-spatial-envelope-reduce-v4',
+      label: 'ulg-sph-reaction-product-placement-spatial-envelope-reduce',
+      code: sphReactionProductEventPlacementEnvelopeWgsl,
+      entryPoint: 'reduce_placement_spatial_envelope',
+      bindings: placementEnvelopeBindings
+    }),
+    placementEnvelopeFinalize: descriptor({
+      cacheKey:
+        'ulg-sph-reaction-product-placement-spatial-envelope-finalize-v4',
+      label: 'ulg-sph-reaction-product-placement-spatial-envelope-finalize',
+      code: sphReactionProductEventPlacementEnvelopeWgsl,
+      entryPoint: 'finalize_placement_spatial_envelope',
+      bindings: placementEnvelopeBindings
+    }),
+    placementClassification: descriptor({
+      cacheKey:
+        'ulg-sph-reaction-product-placement-spatial-classification-v4-'
+        + classificationProgram.cacheKeySuffix,
+      label:
+        'ulg-sph-reaction-product-placement-spatial-classification-'
+        + classificationProgram.cacheKeySuffix,
+      code: classificationProgram.shaderCode,
+      entryPoint: 'classify_product_events',
+      bindings: spatialClassificationBindings
+    }),
+    spareParticleMark: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-mark-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-particle-mark',
+      code: sphReactionProductSpareParticleMarkWgsl,
+      entryPoint: 'mark_spare_particles',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(4, 'uniform'),
+        computeBufferBinding(5, 'storage')
+      ]
+    }),
+    spareParticleScan: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-scan-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-particle-scan',
+      code: sphReactionProductSpareGroupScanWgsl,
+      entryPoint: 'scan_spare_groups',
+      bindings: spareGroupScanBindings
+    }),
+    spareScatter: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-scatter-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-scatter',
+      code: sphReactionProductSpareScatterWgsl,
+      entryPoint: 'scatter_spare_particles',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(4, 'storage')
+      ]
+    }),
+    spareEventMark: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-event-mark-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-event-mark',
+      code: sphReactionProductSpareEventMarkWgsl,
+      entryPoint: 'mark_spare_events',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'uniform'),
+        computeBufferBinding(6, 'storage')
+      ]
+    }),
+    spareEventScan: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-event-scan-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-event-scan',
+      code: sphReactionProductSpareGroupScanWgsl,
+      entryPoint: 'scan_spare_groups',
+      bindings: spareGroupScanBindings
+    }),
+    spareAssign: descriptor({
+      cacheKey: 'ulg-sph-reaction-product-placement-spare-assign-v1',
+      label: 'ulg-sph-reaction-product-placement-spare-assign',
+      code: sphReactionProductSpareAssignWgsl,
+      entryPoint: 'assign_spare_events',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'uniform'),
+        computeBufferBinding(6, 'storage')
+      ]
+    })
   });
+}
+
+export function enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors({
+  directoryAbiVersions = [
+    SCHROEDER_SPATIAL_EPOCH_VERSION,
+    SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  ]
+} = {}) {
+  const descriptors = new Map();
+  for (const directoryAbiVersion of directoryAbiVersions) {
+    const table = sphReactionCanonicalSummaryPipelineDescriptors({
+      directoryAbiVersion
+    });
+    for (const [field, descriptor] of Object.entries(table)) {
+      if (
+        field === 'schema'
+        || field === 'directoryAbiVersion'
+        || !descriptor?.cacheKey
+      ) continue;
+      const identity = JSON.stringify([
+        descriptor.cacheKey,
+        descriptor.label,
+        descriptor.entryPoint,
+        descriptor.bindings
+      ]);
+      if (!descriptors.has(identity)) descriptors.set(identity, descriptor);
+    }
+  }
+  return [...descriptors.values()];
 }
 
 export async function runSphReactionSummaryWebGpu({
@@ -2078,6 +2314,13 @@ export async function runSphReactionSummaryWebGpu({
         canonicalSpatialPlacement
       )
     : null;
+  const canonicalSummaryPipelineDescriptors =
+    placementClassificationProgram
+      ? sphReactionCanonicalSummaryPipelineDescriptors({
+          directoryAbiVersion:
+            placementClassificationProgram.directoryAbiVersion
+        })
+      : null;
   const reactionWarmArena = reactionWarmArenaLease
     ? resolveSphReactionWarmArenaLease(reactionWarmArenaLease, {
         device,
@@ -2604,23 +2847,11 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     if (useProductEventBuffer) {
-      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-product-event-v2-current-volume',
-        label: 'ulg-sph-reaction-product-event',
-        code: sphReactionProductEventWgsl,
-        entryPoint: 'main',
-        bindings: [
-          computeBufferBinding(0, 'read-only-storage'),
-          computeBufferBinding(1, 'read-only-storage'),
-          computeBufferBinding(2, 'read-only-storage'),
-          computeBufferBinding(3, 'read-only-storage'),
-          computeBufferBinding(4, 'read-only-storage'),
-          computeBufferBinding(5, 'read-only-storage'),
-          computeBufferBinding(6, 'storage'),
-          computeBufferBinding(7, 'uniform'),
-          computeBufferBinding(8, 'read-only-storage')
-        ]
-      });
+      const productEventDescriptor =
+        canonicalSummaryPipelineDescriptors?.productEvent
+        ?? sphReactionCanonicalSummaryPipelineDescriptors().productEvent;
+      const { pipeline, bindGroupLayout } =
+        createCachedExplicitComputePipeline(device, productEventDescriptor);
       productEventPipeline = pipeline;
       productEventBindGroup = device.createBindGroup({
         layout: bindGroupLayout,
@@ -2671,12 +2902,6 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(3, 'uniform'),
           computeBufferBinding(4, 'storage')
       ];
-      const canonicalCompactBindings = [
-        ...legacyCompactBindings,
-        computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'storage'),
-        computeBufferBinding(7, 'storage')
-      ];
       const compactEntries = [
           { binding: 0, resource: { buffer: productEventEmissionBuffer } },
           { binding: 1, resource: { buffer: productEventBuffer } },
@@ -2693,27 +2918,18 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 6, resource: { buffer: productEventCompactGroupCountBuffer } },
           { binding: 7, resource: { buffer: productEventCompactGroupOffsetBuffer } }
         );
-        const compactCountInfo = createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-count-v3',
-          label: 'ulg-sph-reaction-product-event-placement-compact-count',
-          code: sphReactionProductEventCompactWgsl,
-          entryPoint: 'count_placement_rows',
-          bindings: canonicalCompactBindings
-        });
-        const compactScanInfo = createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scan-v3',
-          label: 'ulg-sph-reaction-product-event-placement-compact-scan',
-          code: sphReactionProductEventCompactWgsl,
-          entryPoint: 'scan_placement_row_groups',
-          bindings: canonicalCompactBindings
-        });
-        const compactScatterInfo = createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-sph-reaction-product-event-placement-compact-scatter-v3',
-          label: 'ulg-sph-reaction-product-event-placement-compact-scatter',
-          code: sphReactionProductEventCompactWgsl,
-          entryPoint: 'scatter_placement_rows',
-          bindings: canonicalCompactBindings
-        });
+        const compactCountInfo = createCachedExplicitComputePipeline(
+          device,
+          canonicalSummaryPipelineDescriptors.compactCount
+        );
+        const compactScanInfo = createCachedExplicitComputePipeline(
+          device,
+          canonicalSummaryPipelineDescriptors.compactScan
+        );
+        const compactScatterInfo = createCachedExplicitComputePipeline(
+          device,
+          canonicalSummaryPipelineDescriptors.compactScatter
+        );
         productEventCompactPipeline = compactCountInfo.pipeline;
         productEventCompactScanPipeline = compactScanInfo.pipeline;
         productEventCompactScatterPipeline = compactScatterInfo.pipeline;
@@ -2747,18 +2963,6 @@ export async function runSphReactionSummaryWebGpu({
       // unplaced product mass claims spare zero-mass particle slots and the
       // consumed events are zeroed before compaction/merge or the grid splat
       // ever see them, so ledger mass and particle mass never double-count.
-      const spatialClassificationBindings = [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'uniform'),
-        computeBufferBinding(6, 'read-only-storage'),
-        computeBufferBinding(7, 'read-only-storage'),
-        computeBufferBinding(8, 'uniform'),
-        computeBufferBinding(9, 'read-only-storage'),
-        computeBufferBinding(10, 'storage'),
-        computeBufferBinding(11, 'read-only-storage'),
-        computeBufferBinding(12, 'storage')
-      ];
       const placementCommitBindings = [
         computeBufferBinding(0, 'storage'),
         computeBufferBinding(1, 'storage'),
@@ -2772,135 +2976,59 @@ export async function runSphReactionSummaryWebGpu({
         computeBufferBinding(9, 'read-only-storage'),
         computeBufferBinding(10, 'storage')
       ];
-      const placementEnvelopeBindings = [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'uniform'),
-        computeBufferBinding(4, 'storage'),
-        computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'storage')
-      ];
       const placementEnvelopeInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spatial-envelope-reduce-v4',
-            label: 'ulg-sph-reaction-product-placement-spatial-envelope-reduce',
-            code: sphReactionProductEventPlacementEnvelopeWgsl,
-            entryPoint: 'reduce_placement_spatial_envelope',
-            bindings: placementEnvelopeBindings
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.placementEnvelopeReduce
+          )
         : null;
       const placementEnvelopeFinalizeInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spatial-envelope-finalize-v4',
-            label: 'ulg-sph-reaction-product-placement-spatial-envelope-finalize',
-            code: sphReactionProductEventPlacementEnvelopeWgsl,
-            entryPoint: 'finalize_placement_spatial_envelope',
-            bindings: placementEnvelopeBindings
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.placementEnvelopeFinalize
+          )
         : null;
       const placementClassificationInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey:
-              'ulg-sph-reaction-product-placement-spatial-classification-v4-'
-              + placementClassificationProgram.cacheKeySuffix,
-            label:
-              'ulg-sph-reaction-product-placement-spatial-classification-'
-              + placementClassificationProgram.cacheKeySuffix,
-            code: placementClassificationProgram.shaderCode,
-            entryPoint: 'classify_product_events',
-            bindings: spatialClassificationBindings
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.placementClassification
+          )
         : null;
       const spareParticleMarkInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-mark-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-particle-mark',
-            code: sphReactionProductSpareParticleMarkWgsl,
-            entryPoint: 'mark_spare_particles',
-            bindings: [
-              computeBufferBinding(0, 'read-only-storage'),
-              computeBufferBinding(1, 'read-only-storage'),
-              computeBufferBinding(2, 'storage'),
-              computeBufferBinding(3, 'storage'),
-              computeBufferBinding(4, 'uniform'),
-              computeBufferBinding(5, 'storage')
-            ]
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareParticleMark
+          )
         : null;
-      const spareGroupScanBindings = [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'storage'),
-        computeBufferBinding(3, 'uniform'),
-        computeBufferBinding(4, 'storage')
-      ];
       const spareParticleScanInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-particle-scan-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-particle-scan',
-            code: sphReactionProductSpareGroupScanWgsl,
-            entryPoint: 'scan_spare_groups',
-            bindings: spareGroupScanBindings
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareParticleScan
+          )
         : null;
       const spareScatterInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-scatter-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-scatter',
-            code: sphReactionProductSpareScatterWgsl,
-            entryPoint: 'scatter_spare_particles',
-            bindings: [
-              computeBufferBinding(0, 'read-only-storage'),
-              computeBufferBinding(1, 'read-only-storage'),
-              computeBufferBinding(2, 'storage'),
-              computeBufferBinding(3, 'uniform'),
-              computeBufferBinding(4, 'storage')
-            ]
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareScatter
+          )
         : null;
       const spareEventMarkInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-event-mark-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-event-mark',
-            code: sphReactionProductSpareEventMarkWgsl,
-            entryPoint: 'mark_spare_events',
-            bindings: [
-              computeBufferBinding(0, 'read-only-storage'),
-              computeBufferBinding(1, 'read-only-storage'),
-              computeBufferBinding(2, 'read-only-storage'),
-              computeBufferBinding(3, 'storage'),
-              computeBufferBinding(4, 'storage'),
-              computeBufferBinding(5, 'uniform'),
-              computeBufferBinding(6, 'storage')
-            ]
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareEventMark
+          )
         : null;
       const spareEventScanInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-event-scan-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-event-scan',
-            code: sphReactionProductSpareGroupScanWgsl,
-            entryPoint: 'scan_spare_groups',
-            bindings: spareGroupScanBindings
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareEventScan
+          )
         : null;
       const spareAssignInfo = canonicalSpatialPlacementEnabled
-        ? createCachedExplicitComputePipeline(device, {
-            cacheKey: 'ulg-sph-reaction-product-placement-spare-assign-v1',
-            label: 'ulg-sph-reaction-product-placement-spare-assign',
-            code: sphReactionProductSpareAssignWgsl,
-            entryPoint: 'assign_spare_events',
-            bindings: [
-              computeBufferBinding(0, 'read-only-storage'),
-              computeBufferBinding(1, 'read-only-storage'),
-              computeBufferBinding(2, 'read-only-storage'),
-              computeBufferBinding(3, 'read-only-storage'),
-              computeBufferBinding(4, 'storage'),
-              computeBufferBinding(5, 'uniform'),
-              computeBufferBinding(6, 'storage')
-            ]
-          })
+        ? createCachedExplicitComputePipeline(
+            device,
+            canonicalSummaryPipelineDescriptors.spareAssign
+          )
         : null;
       const placementPipelineInfo = canonicalSpatialPlacementEnabled
         ? null

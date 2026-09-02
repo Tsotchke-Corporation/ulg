@@ -14,6 +14,9 @@ import {
   WEBGPU_RADIX_UNIQUE_EVIDENCE_ROW_LAYOUT,
   WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT
 } from '../../ulg-gpu-abi/src/parallelPrimitives.js';
+import {
+  createCachedExplicitComputePipeline
+} from './webgpuComputeLayout.js';
 
 export {
   ULG_WEBGPU_RADIX_GPU_COUNT_SCHEMA,
@@ -1778,27 +1781,118 @@ export function createWebGpuRadixUniquePlan({
   };
 }
 
-function createScanPipelines(device, label) {
-  const module = device.createShaderModule({
-    label: `${label}-shader`,
-    code: webGpuU32ExclusiveScanWgsl
-  });
-  return {
-    scan: device.createComputePipeline({
-      label: `${label}-blocks`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'scan_blocks' }
+// Radix key widths, element capacities, and law/material identities are all
+// runtime data. These fixed descriptors are therefore one physical pipeline
+// bundle per WebGPU device, shared by every scan and radix runtime. Keeping
+// role-specific names on buffers/passes (rather than pipeline cache identity)
+// lets capture/direct/summary placement arenas reuse the same nine programs.
+export function webGpuStableRadixPipelineDescriptors() {
+  const descriptor = ({ cacheKey, label, code, entryPoint }) =>
+    Object.freeze({
+      cacheKey,
+      label,
+      code,
+      entryPoint,
+      bindings: Object.freeze([])
+    });
+  return Object.freeze({
+    schema: 'peercompute.ulg.webgpu-stable-radix-pipeline-descriptors.v0',
+    scanBlocks: descriptor({
+      cacheKey: 'ulg-webgpu-u32-exclusive-scan.v1',
+      label: 'ulg-webgpu-u32-exclusive-scan-blocks',
+      code: webGpuU32ExclusiveScanWgsl,
+      entryPoint: 'scan_blocks'
     }),
-    add: device.createComputePipeline({
-      label: `${label}-add-block-offsets`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'add_scanned_block_offsets' }
+    scanAdd: descriptor({
+      cacheKey: 'ulg-webgpu-u32-exclusive-scan.v1',
+      label: 'ulg-webgpu-u32-exclusive-scan-add-block-offsets',
+      code: webGpuU32ExclusiveScanWgsl,
+      entryPoint: 'add_scanned_block_offsets'
     }),
-    fusedTopAdd: device.createComputePipeline({
-      label: `${label}-fused-top-add`,
-      layout: 'auto',
-      compute: { module, entryPoint: 'scan_top_and_add_lower' }
+    scanFusedTopAdd: descriptor({
+      cacheKey: 'ulg-webgpu-u32-exclusive-scan.v1',
+      label: 'ulg-webgpu-u32-exclusive-scan-fused-top-add',
+      code: webGpuU32ExclusiveScanWgsl,
+      entryPoint: 'scan_top_and_add_lower'
+    }),
+    initialize: descriptor({
+      cacheKey: 'ulg-webgpu-stable-radix.v1',
+      label: 'ulg-webgpu-stable-radix-initialize',
+      code: webGpuStableRadixWgsl,
+      entryPoint: 'initialize_indices'
+    }),
+    histogram: descriptor({
+      cacheKey: 'ulg-webgpu-stable-radix.v1',
+      label: 'ulg-webgpu-stable-radix-histogram',
+      code: webGpuStableRadixWgsl,
+      entryPoint: 'histogram'
+    }),
+    scatter: descriptor({
+      cacheKey: 'ulg-webgpu-stable-radix.v1',
+      label: 'ulg-webgpu-stable-radix-scatter',
+      code: webGpuStableRadixWgsl,
+      entryPoint: 'scatter'
+    }),
+    markHeads: descriptor({
+      cacheKey: 'ulg-webgpu-sorted-unique.v1',
+      label: 'ulg-webgpu-sorted-unique-mark-heads',
+      code: webGpuSortedUniqueWgsl,
+      entryPoint: 'mark_heads'
+    }),
+    scatterUnique: descriptor({
+      cacheKey: 'ulg-webgpu-sorted-unique.v1',
+      label: 'ulg-webgpu-sorted-unique-scatter',
+      code: webGpuSortedUniqueWgsl,
+      entryPoint: 'scatter_unique'
+    }),
+    finalizeUnique: descriptor({
+      cacheKey: 'ulg-webgpu-sorted-unique.v1',
+      label: 'ulg-webgpu-sorted-unique-finalize',
+      code: webGpuSortedUniqueWgsl,
+      entryPoint: 'finalize_unique'
+    }),
+    serialHistogramScan: descriptor({
+      cacheKey: 'ulg-webgpu-serial-radix-histogram-scan.v1',
+      label: 'ulg-webgpu-serial-radix-histogram-scan',
+      code: webGpuSerialRadixHistogramScanWgsl,
+      entryPoint: 'scan_histogram_serial'
     })
+  });
+}
+
+export function enumerateWebGpuStableRadixPrewarmPipelineDescriptors({
+  includeSerialHistogramScan = false
+} = {}) {
+  const table = webGpuStableRadixPipelineDescriptors();
+  return [
+    table.scanBlocks,
+    table.scanAdd,
+    table.scanFusedTopAdd,
+    table.initialize,
+    table.histogram,
+    table.scatter,
+    table.markHeads,
+    table.scatterUnique,
+    table.finalizeUnique,
+    ...(includeSerialHistogramScan ? [table.serialHistogramScan] : [])
+  ];
+}
+
+function createScanPipelines(device, _label) {
+  const descriptors = webGpuStableRadixPipelineDescriptors();
+  return {
+    scan: createCachedExplicitComputePipeline(
+      device,
+      descriptors.scanBlocks
+    ).pipeline,
+    add: createCachedExplicitComputePipeline(
+      device,
+      descriptors.scanAdd
+    ).pipeline,
+    fusedTopAdd: createCachedExplicitComputePipeline(
+      device,
+      descriptors.scanFusedTopAdd
+    ).pipeline
   };
 }
 
@@ -2408,42 +2502,26 @@ export function createWebGpuU32ExclusiveScan(device, {
   }
 }
 
-function createRadixPipelines(device, label, { serialHistogramScanEnabled = false } = {}) {
-  const radixModule = device.createShaderModule({
-    label: `${label}-radix-shader`,
-    code: webGpuStableRadixWgsl
-  });
-  const serialHistogramScanModule = serialHistogramScanEnabled
-    ? device.createShaderModule({
-        label: `${label}-serial-histogram-scan-shader`,
-        code: webGpuSerialRadixHistogramScanWgsl
-      })
-    : null;
-  const uniqueModule = device.createShaderModule({
-    label: `${label}-unique-shader`,
-    code: webGpuSortedUniqueWgsl
-  });
-  const pipeline = (suffix, module, entryPoint) => device.createComputePipeline({
-    label: `${label}-${suffix}`,
-    layout: 'auto',
-    compute: { module, entryPoint }
-  });
+function createRadixPipelines(
+  device,
+  _label,
+  { serialHistogramScanEnabled = false } = {}
+) {
+  const descriptors = webGpuStableRadixPipelineDescriptors();
+  const pipeline = (descriptor) =>
+    createCachedExplicitComputePipeline(device, descriptor).pipeline;
   return {
-    initialize: pipeline('initialize', radixModule, 'initialize_indices'),
-    histogram: pipeline('histogram', radixModule, 'histogram'),
-    scatter: pipeline('scatter', radixModule, 'scatter'),
-    ...(serialHistogramScanModule
+    initialize: pipeline(descriptors.initialize),
+    histogram: pipeline(descriptors.histogram),
+    scatter: pipeline(descriptors.scatter),
+    ...(serialHistogramScanEnabled
       ? {
-          serialHistogramScan: pipeline(
-            'serial-histogram-scan',
-            serialHistogramScanModule,
-            'scan_histogram_serial'
-          )
+          serialHistogramScan: pipeline(descriptors.serialHistogramScan)
         }
       : {}),
-    markHeads: pipeline('mark-heads', uniqueModule, 'mark_heads'),
-    scatterUnique: pipeline('scatter-unique', uniqueModule, 'scatter_unique'),
-    finalizeUnique: pipeline('finalize-unique', uniqueModule, 'finalize_unique')
+    markHeads: pipeline(descriptors.markHeads),
+    scatterUnique: pipeline(descriptors.scatterUnique),
+    finalizeUnique: pipeline(descriptors.finalizeUnique)
   };
 }
 

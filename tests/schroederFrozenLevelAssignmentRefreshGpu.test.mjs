@@ -11,10 +11,18 @@ import {
   schroederFrozenLevelAssignmentRefreshWgsl
 } from '../ulg-gpu-abi/src/schroederFrozenLevelAssignmentRefreshWgsl.js';
 import {
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+} from '../ulg-gpu-abi/src/schroederFrozenSpatialKeyChurn.js';
+import {
+  schroederFrozenSpatialKeyChurnWgsl
+} from '../ulg-gpu-abi/src/schroederFrozenSpatialKeyChurnWgsl.js';
+import {
   SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_MODE,
+  ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA,
   ULG_SCHROEDER_FROZEN_LEVEL_ASSIGNMENT_REFRESH_SCHEMA,
   admitSchroederPostClosureLevelAssignment,
   createSchroederFrozenLevelAssignmentRefreshGpu,
+  createSchroederFrozenSpatialKeyChurnTarget,
   refreshSchroederFrozenLevelAssignmentRowsCpuOracle,
   validateSchroederFrozenFineSubstepAuthorityProof,
   validateSchroederPostClosureLevelAssignment
@@ -54,6 +62,22 @@ function createFakeEncoder() {
         },
         end() { event.ended = true; }
       };
+    },
+    copyBufferToBuffer(
+      source,
+      sourceOffset,
+      destination,
+      destinationOffset,
+      size
+    ) {
+      events.push({
+        kind: 'copy',
+        source,
+        sourceOffset,
+        destination,
+        destinationOffset,
+        size
+      });
     }
   };
 }
@@ -375,6 +399,67 @@ test('frozen assignment WGSL copies all words bitwise and replaces only current 
   }
 });
 
+test('frozen refresh programs are device-scoped and invariant across capacities and caller identities', () => {
+  const device = createFakeDevice();
+  const productionA = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: 2,
+    arenaCount: 1,
+    label: 'caller-sodium-preset'
+  });
+  assert.equal(device.shaderModules.length, 1);
+  assert.equal(device.pipelines.length, 1);
+
+  const productionB = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: 7,
+    arenaCount: 1,
+    label: 'caller-cesium-preset'
+  });
+  assert.equal(device.shaderModules.length, 1, 'capacity does not compile a shader variant');
+  assert.equal(device.pipelines.length, 1, 'capacity does not compile a pipeline variant');
+  assert.equal(
+    device.buffers.find((buffer) => buffer.label === 'caller-sodium-preset-assignments-0')?.size,
+    2 * 16 * 4
+  );
+  assert.equal(
+    device.buffers.find((buffer) => buffer.label === 'caller-cesium-preset-assignments-0')?.size,
+    7 * 16 * 4
+  );
+
+  const diagnosticA = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: 3,
+    arenaCount: 1,
+    spatialKeyChurnObservationEnabled: true,
+    label: 'caller-water-diagnostic'
+  });
+  assert.equal(device.shaderModules.length, 2, 'diagnostic ABI adds one shared module');
+  assert.equal(device.pipelines.length, 3, 'diagnostic ABI adds two shared passes');
+  const diagnosticB = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: 11,
+    arenaCount: 1,
+    spatialKeyChurnObservationEnabled: true,
+    label: 'caller-fluorine-diagnostic'
+  });
+  assert.equal(device.shaderModules.length, 2);
+  assert.equal(device.pipelines.length, 3);
+  assert.doesNotMatch(
+    device.pipelines.map((pipeline) => pipeline.label).join('|'),
+    /sodium|cesium|water|fluorine|preset|particle[-_]?count/i
+  );
+
+  for (const runtime of [productionA, productionB, diagnosticA, diagnosticB]) {
+    assert.equal(runtime.destroy(), true);
+  }
+
+  const otherDevice = createFakeDevice();
+  const otherRuntime = createSchroederFrozenLevelAssignmentRefreshGpu(otherDevice, {
+    maxParticleCount: 2,
+    arenaCount: 1
+  });
+  assert.equal(otherDevice.shaderModules.length, 1, 'a different device owns its own program');
+  assert.equal(otherDevice.pipelines.length, 1);
+  assert.equal(otherRuntime.destroy(), true);
+});
+
 test('caller-owned encoder publishes a fresh position epoch while freezing macro classification', async () => {
   const device = createFakeDevice();
   const fixture = createFixture(device);
@@ -449,6 +534,161 @@ test('caller-owned encoder publishes a fresh position epoch while freezing macro
   ).every((buffer) => buffer.destroyed), true);
   assert.equal(fixture.priorLevelAssignment.assignmentBuffer.destroyed, false);
   assert.equal(fixture.currentSphParticleUpload.stateBuffer.destroyed, false);
+});
+
+test('opt-in frozen spatial-key churn encodes and copies one sealed record without submitting or fencing', () => {
+  const device = createFakeDevice();
+  const fixture = createFixture(device);
+  const runtime = createSchroederFrozenLevelAssignmentRefreshGpu(device, {
+    maxParticleCount: fixture.particleCount,
+    arenaCount: 1,
+    spatialKeyChurnObservationEnabled: true
+  });
+  const targetBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'schedule-spatial-key-churn-readback-ring',
+    size: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+    usage: 1 | 8,
+    mapState: 'unmapped'
+  }), device);
+  const target = createSchroederFrozenSpatialKeyChurnTarget({
+    device,
+    scheduleId: 'schedule-1',
+    laneId: 'lane-1',
+    stateKey: 'state-1',
+    recordOrdinal: 1,
+    stepOrdinal: 1,
+    fineSubstepOrdinal: 1,
+    expectedParticleCount: fixture.particleCount,
+    targetBuffer,
+    targetOffsetBytes: 0
+  });
+  const encoder = createFakeEncoder();
+  const execution = runtime.encode(encoder, frozenFineOptions(runtime, fixture, {
+    spatialKeyChurnObservationTarget: target,
+    spatialKeyChurnExactCellAtlas: {
+      cellMin: new Int32Array([0, 0, 0]),
+      cellCount: new Uint32Array([64, 64, 64])
+    }
+  }));
+
+  assert.equal(runtime.spatialKeyChurnObservationEnabled, true);
+  assert.equal(device.pipelines.length, 3);
+  assert.equal(device.writes.length, 2);
+  assert.equal(device.writes[1].data.length, 24);
+  const spacingBits = new Uint32Array(new Float32Array([0.25]).buffer)[0];
+  assert.deepEqual(Array.from(device.writes[1].data), [
+    fixture.particleCount,
+    16,
+    8,
+    1,
+    1,
+    1,
+    13,
+    14,
+    17,
+    19,
+    23,
+    29,
+    0,
+    0,
+    1,
+    spacingBits,
+    0,
+    0,
+    0,
+    64,
+    64,
+    64,
+    1,
+    0
+  ]);
+  assert.deepEqual(encoder.events.map((event) => event.kind), [
+    'clear',
+    'pass',
+    'clear',
+    'pass',
+    'pass',
+    'copy'
+  ]);
+  assert.equal(
+    encoder.events.at(-1).size,
+    SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+  );
+  assert.equal(encoder.events.at(-1).destination, targetBuffer);
+  assert.equal(device.fences.length, 0);
+  assert.equal('submit' in device.queue, false);
+  assert.equal(
+    execution.spatialKeyChurnObservationCopy.schema,
+    ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA
+  );
+  assert.equal(
+    execution.spatialKeyChurnObservationCopy.additionalQueueSubmissionCount,
+    0
+  );
+  assert.equal(execution.spatialKeyChurnObservationCopy.recordOrdinal, 1);
+  assert.match(schroederFrozenSpatialKeyChurnWgsl, /fn classify/);
+  assert.match(schroederFrozenSpatialKeyChurnWgsl, /fn seal/);
+  assert.match(schroederFrozenSpatialKeyChurnWgsl, /floor\(prior_position \/ spacing\)/);
+
+  assert.equal(runtime.abandonExecution(execution), true);
+  const overflowTargetBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'schedule-spatial-key-churn-overflow-readback-ring',
+    size: SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+    usage: 1 | 8,
+    mapState: 'unmapped'
+  }), device);
+  const overflowTarget = createSchroederFrozenSpatialKeyChurnTarget({
+    device,
+    scheduleId: 'schedule-overflow',
+    laneId: 'lane-overflow',
+    stateKey: 'state-overflow',
+    recordOrdinal: 1,
+    stepOrdinal: 1,
+    fineSubstepOrdinal: 1,
+    expectedParticleCount: fixture.particleCount,
+    targetBuffer: overflowTargetBuffer,
+    targetOffsetBytes: 0
+  });
+  assert.throws(
+    () => runtime.encode(
+      createFakeEncoder(),
+      frozenFineOptions(runtime, fixture, {
+        spatialKeyChurnObservationTarget: overflowTarget,
+        spatialKeyChurnExactCellAtlas: {
+          cellMin: [0x7fff_ffff, 0, 0],
+          cellCount: [2, 1, 1]
+        }
+      })
+    ),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_ATLAS'
+      );
+      return true;
+    }
+  );
+  assert.throws(
+    () => runtime.encode(
+      createFakeEncoder(),
+      frozenFineOptions(runtime, fixture, {
+        spatialKeyChurnObservationTarget: target,
+        spatialKeyChurnExactCellAtlas: {
+          cellMin: [0, 0, 0],
+          cellCount: [64, 64, 64]
+        }
+      })
+    ),
+    (error) => {
+      assert.equal(
+        error?.code,
+        'ERR_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGET'
+      );
+      return true;
+    }
+  );
+  assert.equal(runtime.destroy(), true);
+  assert.equal(targetBuffer.destroyed, false);
 });
 
 test('frozen fine refresh rejects missing or manufactured authority before encoding', () => {

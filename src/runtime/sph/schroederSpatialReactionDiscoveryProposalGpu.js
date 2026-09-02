@@ -2907,12 +2907,9 @@ export const schroederSpatialReactionDiscoveryProposalWgsl =
 export const schroederSpatialReactionDiscoveryProposalV2Wgsl =
   createReactionDiscoveryProposalWgsl(SCHROEDER_SPATIAL_EPOCH_V2_VERSION);
 
-function resolveReactionDiscoveryTraversalProgram(
-  authentication,
-  generation
+function reactionDiscoveryTraversalProgramForDirectoryAbiVersion(
+  directoryAbiVersion
 ) {
-  const directoryAbiVersion = authentication?.directoryAbiVersion;
-  const generationAbiVersion = generation?.execution?.abiVersion;
   const directoryV2 =
     directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
   if (
@@ -2928,6 +2925,31 @@ function resolveReactionDiscoveryTraversalProgram(
       'ERR_SCHROEDER_REACTION_DISCOVERY_UNSUPPORTED_DIRECTORY_ABI';
     throw error;
   }
+  return Object.freeze({
+    directoryAbiVersion,
+    expectationBufferByteLength: directoryV2
+      ? SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
+      : SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
+    shaderCode: directoryV2
+      ? schroederSpatialReactionDiscoveryProposalV2Wgsl
+      : schroederSpatialReactionDiscoveryProposalWgsl,
+    cacheKeySuffix: `directory-v${directoryAbiVersion}`,
+    exactNearCellTreeTraversal: directoryV2
+      ? 'canonical-complete-binary-cell-aabb-leaf-streaming-v2'
+      : 'canonical-complete-binary-cell-aabb-leaf-streaming-v1'
+  });
+}
+
+function resolveReactionDiscoveryTraversalProgram(
+  authentication,
+  generation
+) {
+  const directoryAbiVersion = authentication?.directoryAbiVersion;
+  const generationAbiVersion = generation?.execution?.abiVersion;
+  const traversalProgram =
+    reactionDiscoveryTraversalProgramForDirectoryAbiVersion(
+      directoryAbiVersion
+    );
   if (generationAbiVersion !== directoryAbiVersion) {
     const error = new TypeError(
       'reaction discovery authentication/generation directory ABI mismatch'
@@ -2936,14 +2958,11 @@ function resolveReactionDiscoveryTraversalProgram(
       'ERR_SCHROEDER_REACTION_DISCOVERY_DIRECTORY_ABI_MISMATCH';
     throw error;
   }
-  const expectationBufferByteLength = directoryV2
-    ? SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES
-    : SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES;
   if (
     authentication.expectationUniformBytes
-      !== expectationBufferByteLength
+      !== traversalProgram.expectationBufferByteLength
     || authentication.expectationData?.byteLength
-      !== expectationBufferByteLength
+      !== traversalProgram.expectationBufferByteLength
   ) {
     const error = new TypeError(
       'reaction discovery expectation ABI does not match the directory ABI'
@@ -2952,16 +2971,151 @@ function resolveReactionDiscoveryTraversalProgram(
       'ERR_SCHROEDER_REACTION_DISCOVERY_EXPECTATION_ABI_MISMATCH';
     throw error;
   }
+  return traversalProgram;
+}
+
+// Dynamic-law chemistry is table data.  These are the fixed, material-
+// agnostic discovery passes for one spatial-directory ABI.  Keeping the
+// descriptor table shared by prewarm and encode prevents an envelope breach
+// from becoming a shader-compilation boundary.
+function reactionDiscoveryPipelineDescriptorsForTraversalProgram(
+  traversalProgram
+) {
+  const version = SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION;
+  const suffix = traversalProgram.cacheKeySuffix;
+  const labelVersion = traversalProgram.directoryAbiVersion;
+  const activationObservationBindings = [
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'uniform'),
+    computeBufferBinding(9, 'uniform'),
+    computeBufferBinding(10, 'storage')
+  ];
+  const descriptor = ({ cacheFamily, label, entryPoint, bindings }) =>
+    Object.freeze({
+      cacheKey: `${cacheFamily}.${version}.${suffix}`,
+      label: `${label}-v${labelVersion}`,
+      code: traversalProgram.shaderCode,
+      entryPoint,
+      bindings
+    });
   return Object.freeze({
-    directoryAbiVersion,
-    expectationBufferByteLength,
-    shaderCode: directoryV2
-      ? schroederSpatialReactionDiscoveryProposalV2Wgsl
-      : schroederSpatialReactionDiscoveryProposalWgsl,
-    cacheKeySuffix: `directory-v${directoryAbiVersion}`,
-    exactNearCellTreeTraversal: directoryV2
-      ? 'canonical-complete-binary-cell-aabb-leaf-streaming-v2'
-      : 'canonical-complete-binary-cell-aabb-leaf-streaming-v1'
+    schema:
+      'peercompute.ulg.schroeder-spatial-reaction-discovery-pipeline-descriptors.v0',
+    directoryAbiVersion: traversalProgram.directoryAbiVersion,
+    displacement: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-displacement',
+      label: 'ulg-schroeder-spatial-reaction-discovery-displacement',
+      entryPoint: 'prepare_displacement_certificate',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(9, 'uniform')
+      ]
+    }),
+    proposal: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-proposal',
+      label: 'ulg-schroeder-spatial-reaction-discovery-proposal',
+      entryPoint: 'propose',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(8, 'uniform'),
+        computeBufferBinding(9, 'uniform')
+      ]
+    }),
+    seal: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-proposal',
+      label: 'ulg-schroeder-spatial-reaction-discovery-seal',
+      entryPoint: 'seal',
+      bindings: [
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(9, 'uniform')
+      ]
+    }),
+    activationMotionBounds: descriptor({
+      cacheFamily:
+        'ulg-schroeder-spatial-reaction-discovery-activation-bounds',
+      label:
+        'ulg-schroeder-spatial-reaction-discovery-activation-bounds',
+      entryPoint: 'prepare_activation_motion_bounds',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(9, 'uniform'),
+        computeBufferBinding(10, 'storage')
+      ]
+    }),
+    activationMotionWatch: descriptor({
+      cacheFamily:
+        'ulg-schroeder-spatial-reaction-discovery-activation-watch',
+      label:
+        'ulg-schroeder-spatial-reaction-discovery-activation-watch',
+      entryPoint: 'watch_activation_motion_envelope',
+      bindings: [
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(8, 'uniform'),
+        computeBufferBinding(9, 'uniform'),
+        computeBufferBinding(10, 'storage')
+      ]
+    }),
+    activationObservationWithMotion: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-activation',
+      label: 'ulg-schroeder-spatial-reaction-discovery-activation',
+      entryPoint: 'seal_activation_motion_watch',
+      bindings: activationObservationBindings
+    }),
+    activationObservationWithoutMotion: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-activation',
+      label: 'ulg-schroeder-spatial-reaction-discovery-activation',
+      entryPoint: 'reduce_activation_watch',
+      bindings: activationObservationBindings
+    })
+  });
+}
+
+export function schroederSpatialReactionDiscoveryPipelineDescriptors({
+  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_VERSION
+} = {}) {
+  return reactionDiscoveryPipelineDescriptorsForTraversalProgram(
+    reactionDiscoveryTraversalProgramForDirectoryAbiVersion(
+      directoryAbiVersion
+    )
+  );
+}
+
+export function enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors({
+  directoryAbiVersions = [
+    SCHROEDER_SPATIAL_EPOCH_VERSION,
+    SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  ]
+} = {}) {
+  return directoryAbiVersions.flatMap((directoryAbiVersion) => {
+    const table = schroederSpatialReactionDiscoveryPipelineDescriptors({
+      directoryAbiVersion
+    });
+    return [
+      table.displacement,
+      table.proposal,
+      table.seal,
+      table.activationMotionBounds,
+      table.activationMotionWatch,
+      table.activationObservationWithMotion,
+      table.activationObservationWithoutMotion
+    ];
   });
 }
 
@@ -3400,127 +3554,41 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     );
   }
 
-  const displacementPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-displacement.${
-        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-      }.${traversalProgram.cacheKeySuffix}`,
-    label: `ulg-schroeder-spatial-reaction-discovery-displacement-v${
-      traversalProgram.directoryAbiVersion
-    }`,
-    code: traversalProgram.shaderCode,
-    entryPoint: 'prepare_displacement_certificate',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(2, 'read-only-storage'),
-      computeBufferBinding(7, 'storage'),
-      computeBufferBinding(9, 'uniform')
-    ]
-  });
-
-  const proposalPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-proposal.${
-        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-      }.${traversalProgram.cacheKeySuffix}`,
-    label: `ulg-schroeder-spatial-reaction-discovery-proposal-v${
-      traversalProgram.directoryAbiVersion
-    }`,
-    code: traversalProgram.shaderCode,
-    entryPoint: 'propose',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'read-only-storage'),
-      computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'read-only-storage'),
-      computeBufferBinding(5, 'read-only-storage'),
-      computeBufferBinding(6, 'storage'),
-      computeBufferBinding(7, 'storage'),
-      computeBufferBinding(8, 'uniform'),
-      computeBufferBinding(9, 'uniform')
-    ]
-  });
-  const sealPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey:
-      `ulg-schroeder-spatial-reaction-discovery-proposal.${
-        SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-      }.${traversalProgram.cacheKeySuffix}`,
-    label: `ulg-schroeder-spatial-reaction-discovery-seal-v${
-      traversalProgram.directoryAbiVersion
-    }`,
-    code: traversalProgram.shaderCode,
-    entryPoint: 'seal',
-    bindings: [
-      computeBufferBinding(6, 'storage'),
-      computeBufferBinding(7, 'storage'),
-      computeBufferBinding(9, 'uniform')
-    ]
-  });
+  const pipelineDescriptors =
+    reactionDiscoveryPipelineDescriptorsForTraversalProgram(
+      traversalProgram
+    );
+  const displacementPipeline = createCachedExplicitComputePipeline(
+    device,
+    pipelineDescriptors.displacement
+  );
+  const proposalPipeline = createCachedExplicitComputePipeline(
+    device,
+    pipelineDescriptors.proposal
+  );
+  const sealPipeline = createCachedExplicitComputePipeline(
+    device,
+    pipelineDescriptors.seal
+  );
   const activationMotionBoundsPipeline = reactionMotionEnvelope
-    ? createCachedExplicitComputePipeline(device, {
-        cacheKey:
-          `ulg-schroeder-spatial-reaction-discovery-activation-bounds.${
-            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-          }.${traversalProgram.cacheKeySuffix}`,
-        label: `ulg-schroeder-spatial-reaction-discovery-activation-bounds-v${
-          traversalProgram.directoryAbiVersion
-        }`,
-        code: traversalProgram.shaderCode,
-        entryPoint: 'prepare_activation_motion_bounds',
-        bindings: [
-          computeBufferBinding(0, 'read-only-storage'),
-          computeBufferBinding(1, 'read-only-storage'),
-          computeBufferBinding(2, 'read-only-storage'),
-          computeBufferBinding(9, 'uniform'),
-          computeBufferBinding(10, 'storage')
-        ]
-      })
+    ? createCachedExplicitComputePipeline(
+        device,
+        pipelineDescriptors.activationMotionBounds
+      )
     : null;
   const activationMotionWatchPipeline = reactionMotionEnvelope
-    ? createCachedExplicitComputePipeline(device, {
-        cacheKey:
-          `ulg-schroeder-spatial-reaction-discovery-activation-watch.${
-            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-          }.${traversalProgram.cacheKeySuffix}`,
-        label: `ulg-schroeder-spatial-reaction-discovery-activation-watch-v${
-          traversalProgram.directoryAbiVersion
-        }`,
-        code: traversalProgram.shaderCode,
-        entryPoint: 'watch_activation_motion_envelope',
-        bindings: [
-          computeBufferBinding(1, 'read-only-storage'),
-          computeBufferBinding(2, 'read-only-storage'),
-          computeBufferBinding(3, 'read-only-storage'),
-          computeBufferBinding(4, 'read-only-storage'),
-          computeBufferBinding(5, 'read-only-storage'),
-          computeBufferBinding(7, 'storage'),
-          computeBufferBinding(8, 'uniform'),
-          computeBufferBinding(9, 'uniform'),
-          computeBufferBinding(10, 'storage')
-        ]
-      })
+    ? createCachedExplicitComputePipeline(
+        device,
+        pipelineDescriptors.activationMotionWatch
+      )
     : null;
   const activationObservationPipeline = captureActivationObservation === true
-    ? createCachedExplicitComputePipeline(device, {
-        cacheKey:
-          `ulg-schroeder-spatial-reaction-discovery-activation.${
-            SCHROEDER_SPATIAL_REACTION_DISCOVERY_PIPELINE_CACHE_VERSION
-          }.${traversalProgram.cacheKeySuffix}`,
-        label: `ulg-schroeder-spatial-reaction-discovery-activation-v${
-          traversalProgram.directoryAbiVersion
-        }`,
-        code: traversalProgram.shaderCode,
-        entryPoint: reactionMotionEnvelope
-          ? 'seal_activation_motion_watch'
-          : 'reduce_activation_watch',
-        bindings: [
-          computeBufferBinding(7, 'storage'),
-          computeBufferBinding(8, 'uniform'),
-          computeBufferBinding(9, 'uniform'),
-          computeBufferBinding(10, 'storage')
-        ]
-      })
+    ? createCachedExplicitComputePipeline(
+        device,
+        reactionMotionEnvelope
+          ? pipelineDescriptors.activationObservationWithMotion
+          : pipelineDescriptors.activationObservationWithoutMotion
+      )
     : null;
   const proposalBindGroup = device.createBindGroup({
     label: 'ulg-schroeder-spatial-reaction-discovery-proposal-bindings',

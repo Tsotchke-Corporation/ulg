@@ -98,8 +98,15 @@ function committedSampleEvidence(sample) {
     workerLaneContinuationReady:
       sample?.workerLaneContinuationReady === true,
     committedPresentationReady: sample?.committedPresentationReady === true,
+    pendingPreviewActive: sample?.pendingPreviewActive === true,
+    pendingPreviewStatus: sample?.pendingPreviewStatus ?? null,
+    pendingPreviewLayerHidden: sample?.pendingPreviewLayerHidden === true,
     runtimeError: sample?.runtimeError ?? null,
-    controlPlaneYieldReceipt: sample?.controlPlaneYieldReceipt ?? null
+    controlPlaneYieldReceipt: sample?.controlPlaneYieldReceipt ?? null,
+    spatialKeyChurnObservation:
+      sample?.spatialKeyChurnObservation ?? null,
+    spatialKeyChurnCumulativeTotals:
+      sample?.spatialKeyChurnCumulativeTotals ?? null
   });
 }
 
@@ -496,6 +503,10 @@ export function evaluateSphPresetThroughputSamples({
         || sample?.executionRoute?.residentContinuationReady === true
       )
       && sample?.committedPresentationReady === true
+      && sample?.pendingPreviewActive === false
+      && sample?.pendingPreviewStatus
+        === 'control-envelope-preview-retired-after-current-presentation'
+      && sample?.pendingPreviewLayerHidden === true
     ));
   const readbackFree = normalized.length >= 2
     && normalized.every(routeEvidenceIsReadbackFree);
@@ -618,6 +629,159 @@ export function evaluateSphPresetThroughputSamples({
   });
 }
 
+const SPATIAL_KEY_CHURN_MONOTONIC_FIELDS = Object.freeze([
+  'committedScheduleCount',
+  'requestedScheduleCount',
+  'completeScheduleCount',
+  'rejectedScheduleCount',
+  'notApplicableScheduleCount',
+  'notRequestedScheduleCount',
+  'expectedRecordCount',
+  'decodedRecordCount',
+  'observedRecordCount',
+  'visitedParticleCount',
+  'priorActiveParticleCount',
+  'successorActiveParticleCount',
+  'comparedActiveParticleCount',
+  'activatedParticleCount',
+  'deactivatedParticleCount',
+  'movedParticleCount',
+  'spatialKeyChangedParticleCount',
+  'spatialKeyUnchangedParticleCount',
+  'cellXChangedParticleCount',
+  'cellYChangedParticleCount',
+  'cellZChangedParticleCount',
+  'invalidPriorParticleCount',
+  'invalidSuccessorParticleCount',
+  'dormantParticleCount',
+  'zeroSpatialKeyChangeRecordCount',
+  'nonzeroSpatialKeyChangeRecordCount',
+  'mapAsyncCount',
+  'readbackByteLength',
+  'additionalQueueSubmissionCount',
+  'additionalHostQueueFenceCount'
+]);
+
+function spatialKeyChurnCounterDelta(first, last, field) {
+  const firstValue = safeNonNegativeInteger(first?.[field]);
+  const lastValue = safeNonNegativeInteger(last?.[field]);
+  if (firstValue == null || lastValue == null || lastValue < firstValue) {
+    return null;
+  }
+  return lastValue - firstValue;
+}
+
+export function evaluateSphPresetSpatialKeyChurnSamples({
+  samples = [],
+  profileRequested = false
+} = {}) {
+  if (profileRequested !== true) {
+    return Object.freeze({
+      status: 'not-requested',
+      diagnosticOnly: true,
+      authorityBearing: false,
+      evidenceReady: true,
+      applicable: false,
+      timingAuthority: 'baseline-unprofiled',
+      cumulativeCounterResetDetected: false,
+      endpoint: null,
+      delta: null,
+      derived: null
+    });
+  }
+  const { normalized } = normalizeCommittedSamples(samples);
+  const cumulative = normalized
+    .map((sample) => sample?.spatialKeyChurnCumulativeTotals ?? null)
+    .filter((totals) => totals && typeof totals === 'object');
+  const first = cumulative[0] ?? null;
+  const last = cumulative.at(-1) ?? null;
+  let cumulativeCounterResetDetected = false;
+  for (let index = 1; index < cumulative.length; index += 1) {
+    for (const field of SPATIAL_KEY_CHURN_MONOTONIC_FIELDS) {
+      const previousValue = safeNonNegativeInteger(
+        cumulative[index - 1]?.[field]
+      );
+      const currentValue = safeNonNegativeInteger(cumulative[index]?.[field]);
+      if (
+        previousValue == null
+        || currentValue == null
+        || currentValue < previousValue
+      ) {
+        cumulativeCounterResetDetected = true;
+        break;
+      }
+    }
+    if (cumulativeCounterResetDetected) break;
+  }
+  const delta = first && last
+    ? Object.freeze(Object.fromEntries(
+        SPATIAL_KEY_CHURN_MONOTONIC_FIELDS.map((field) => [
+          field,
+          spatialKeyChurnCounterDelta(first, last, field)
+        ])
+      ))
+    : null;
+  const coverageComplete = last?.coverageComplete === true;
+  const completeScheduleCount = safeNonNegativeInteger(
+    last?.completeScheduleCount
+  );
+  const notApplicableScheduleCount = safeNonNegativeInteger(
+    last?.notApplicableScheduleCount
+  );
+  const ready = Boolean(
+    last
+    && coverageComplete
+    && cumulativeCounterResetDetected === false
+    && (
+      (completeScheduleCount ?? 0) > 0
+      || (notApplicableScheduleCount ?? 0) > 0
+    )
+  );
+  const applicable = ready && (completeScheduleCount ?? 0) > 0;
+  const comparedDelta = delta?.comparedActiveParticleCount ?? null;
+  const changedDelta = delta?.spatialKeyChangedParticleCount ?? null;
+  const observedRecordDelta = delta?.observedRecordCount ?? null;
+  const zeroRecordDelta = delta?.zeroSpatialKeyChangeRecordCount ?? null;
+  const derived = applicable && comparedDelta != null && changedDelta != null
+    ? Object.freeze({
+        spatialKeyChangeRatio: comparedDelta > 0
+          ? changedDelta / comparedDelta
+          : 0,
+        zeroSpatialKeyChangeRecordRatio:
+          observedRecordDelta != null
+          && zeroRecordDelta != null
+          && observedRecordDelta > 0
+            ? zeroRecordDelta / observedRecordDelta
+            : 0
+      })
+    : null;
+  return Object.freeze({
+    status: ready
+      ? (applicable ? 'ready' : 'not-applicable')
+      : 'rejected-or-incomplete',
+    diagnosticOnly: true,
+    authorityBearing: false,
+    evidenceReady: ready,
+    applicable,
+    timingAuthority: 'diagnostic-overhead-included-non-authoritative',
+    cumulativeEndpointCount: cumulative.length,
+    cumulativeCounterResetDetected,
+    endpoint: last == null
+      ? null
+      : Object.freeze({
+          ...last,
+          maxAbsCellDelta: Array.isArray(last.maxAbsCellDelta)
+            ? Object.freeze([...last.maxAbsCellDelta])
+            : null,
+          derived: last.derived == null
+            ? null
+            : Object.freeze({ ...last.derived })
+        }),
+    delta,
+    derived
+  });
+}
+
 function parseScenarioSelection(value) {
   const available = new Map(
     SPH_PHASE_SCENARIO_PRESETS.map((entry) => [entry.id, entry])
@@ -646,8 +810,13 @@ async function compactPageSnapshot(page) {
       ? lane.perStepSummaries.ring.at(-1) ?? null
       : null;
     const perf = overlay?.__sphResidentPerf ?? null;
-    const pendingPreview = overlay?.__sphPendingBodyEnvelopePreview
-      ?? null;
+    const pendingPreview = overlay?.__sphPendingPresentation ?? null;
+    const pendingPreviewLayer = overlay?.querySelector(
+      '#sph-pending-presentation'
+    ) ?? null;
+    const pendingPreviewLayerStyle = pendingPreviewLayer == null
+      ? null
+      : getComputedStyle(pendingPreviewLayer);
     const workerPresentation = overlay?.__sphScene
       ?.getWorkerOffscreenPresentation?.()
       ?? null;
@@ -680,6 +849,10 @@ async function compactPageSnapshot(page) {
       controlPlaneYieldReceipt: lane?.controlPlaneYieldReceipt == null
         ? null
         : { ...lane.controlPlaneYieldReceipt },
+      spatialKeyChurnObservation:
+        lane?.spatialKeyChurnObservation ?? null,
+      spatialKeyChurnCumulativeTotals:
+        lane?.spatialKeyChurnCumulativeTotals ?? null,
       executionRoute: route == null ? null : { ...route },
       fullParticleReadbackPerformed:
         execution?.fullParticleReadbackPerformed === true,
@@ -743,6 +916,11 @@ async function compactPageSnapshot(page) {
       renderReadbacks: perf?.renderReadbacks ?? null,
       pendingPreviewActive: pendingPreview?.active === true,
       pendingPreviewStatus: pendingPreview?.status ?? null,
+      pendingPreviewLayerHidden: Boolean(
+        pendingPreviewLayer?.hidden === true
+        || pendingPreviewLayerStyle?.display === 'none'
+        || pendingPreviewLayerStyle?.visibility === 'hidden'
+      ),
       residentScheduleTrace: Array.isArray(
         overlay?.__sphResidentScheduleTrace
       )
@@ -780,7 +958,8 @@ async function runPreset({
   pollMs,
   warmupCommitCount,
   sampleIntervalCount,
-  minRealtimeFactor
+  minRealtimeFactor,
+  spatialKeyChurnProfileRequested = false
 }) {
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
@@ -799,7 +978,10 @@ async function runPreset({
   });
   const relativeUrl = sphPhaseScenarioPresetUrl(entry.id, {
     residentAuto: '0',
-    probeEpoch: String(Date.now())
+    probeEpoch: String(Date.now()),
+    ...(spatialKeyChurnProfileRequested
+      ? { spatialChurnProfile: '1' }
+      : {})
   });
   const targetUrl = new URL(relativeUrl, baseUrl).toString();
   const startedAt = new Date().toISOString();
@@ -872,6 +1054,10 @@ async function runPreset({
     sampleIntervalCount,
     minRealtimeFactor
   });
+  const spatialKeyChurn = evaluateSphPresetSpatialKeyChurnSamples({
+    samples,
+    profileRequested: spatialKeyChurnProfileRequested
+  });
   await context.close();
   return {
     schema: SPH_PRESET_THROUGHPUT_SCENARIO_SCHEMA,
@@ -884,6 +1070,12 @@ async function runPreset({
     durationMs: Date.now() - startedAtMs,
     failure,
     evaluation,
+    advisory: {
+      spatialKeyChurn,
+      throughputTimingAuthority: spatialKeyChurnProfileRequested
+        ? 'diagnostic-overhead-included-non-authoritative'
+        : 'baseline-unprofiled'
+    },
     samples,
     lastSnapshot,
     consoleErrors,
@@ -929,6 +1121,8 @@ async function main() {
     process.env.ULG_PRESET_THROUGHPUT_MIN_REALTIME_FACTOR,
     DEFAULT_MIN_REALTIME_FACTOR
   );
+  const spatialKeyChurnProfileRequested =
+    process.env.ULG_PRESET_THROUGHPUT_SPATIAL_CHURN === '1';
   const browser = await chromium.launch({
     headless,
     args: [
@@ -949,6 +1143,8 @@ async function main() {
       warmupCommitCount,
       sampleIntervalCount,
       minimumRealtimeFactor: minRealtimeFactor,
+      spatialKeyChurnProfileRequested,
+      spatialKeyChurnAuthority: 'diagnostic-advisory-non-gating',
       initTimeoutMs,
       sampleTimeoutMs,
       noProgressTimeoutMs,
@@ -968,7 +1164,8 @@ async function main() {
         pollMs,
         warmupCommitCount,
         sampleIntervalCount,
-        minRealtimeFactor
+        minRealtimeFactor,
+        spatialKeyChurnProfileRequested
       });
       receipt.scenarios.push(scenario);
       process.stdout.write(`${JSON.stringify({
@@ -984,6 +1181,10 @@ async function main() {
         meanWorkerTurnaroundMs:
           scenario.evaluation.meanWorkerTurnaroundMs,
         meanPostComputeMs: scenario.evaluation.meanPostComputeMs,
+        spatialKeyChurnStatus:
+          scenario.advisory.spatialKeyChurn.status,
+        spatialKeyChurnEvidenceReady:
+          scenario.advisory.spatialKeyChurn.evidenceReady,
         failure: scenario.failure
       })}\n`);
     }

@@ -3294,6 +3294,111 @@ async function readBuffer(device, sourceBuffer, byteLength, label) {
   return copy;
 }
 
+// The reaction program is intentionally material- and scenario-agnostic.
+// Chemistry lives in the resident reaction/closure tables; these descriptors
+// are the fixed algorithm passes that consume those tables.  The live encode
+// path and worker-lane prewarm both use this one descriptor factory so a warm
+// cache entry can never drift from the pipeline requested after a dynamic-law
+// envelope transition.
+export function sphReactionStepPipelineDescriptors() {
+  const packBindings = [
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(14, 'storage'),
+    computeBufferBinding(15, 'read-only-storage')
+  ];
+  const reactionBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(16, 'storage'),
+    computeBufferBinding(17, 'storage'),
+    computeBufferBinding(19, 'uniform'),
+    computeBufferBinding(20, 'read-only-storage'),
+    computeBufferBinding(21, 'uniform'),
+    computeBufferBinding(22, 'read-only-storage'),
+    computeBufferBinding(23, 'uniform'),
+    computeBufferBinding(24, 'read-only-storage')
+  ];
+  const reactionParticleBinBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(16, 'storage'),
+    computeBufferBinding(17, 'storage'),
+    computeBufferBinding(18, 'storage'),
+    computeBufferBinding(19, 'uniform')
+  ];
+  const reactionResolveBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'read-only-storage')
+  ];
+  const unpackBindings = [
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform')
+  ];
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-reaction-step-pipeline-descriptors.v0',
+    pack: Object.freeze({
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-pack-source',
+      code: sphReactionStepWgsl,
+      entryPoint: 'pack_source',
+      bindings: packBindings
+    }),
+    particleBins: Object.freeze({
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-particle-bins',
+      code: sphReactionStepWgsl,
+      entryPoint: 'bin_particles',
+      bindings: reactionParticleBinBindings
+    }),
+    propose: Object.freeze({
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-propose',
+      code: sphReactionStepWgsl,
+      entryPoint: 'propose',
+      bindings: reactionBindings
+    }),
+    resolve: Object.freeze({
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-resolve',
+      code: sphReactionStepWgsl,
+      entryPoint: 'resolve',
+      bindings: reactionResolveBindings
+    }),
+    unpack: Object.freeze({
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-unpack',
+      code: sphReactionStepWgsl,
+      entryPoint: 'unpack',
+      bindings: unpackBindings
+    })
+  });
+}
+
+export function enumerateSphReactionStepPrewarmPipelineDescriptors() {
+  const table = sphReactionStepPipelineDescriptors();
+  return [
+    table.pack,
+    table.particleBins,
+    table.propose,
+    table.resolve,
+    table.unpack
+  ];
+}
+
 export async function runSphReactionStepWebGpu({
   device,
   sphParticleState,
@@ -3739,94 +3844,27 @@ export async function runSphReactionStepWebGpu({
     dtSeconds
   }));
 
-  const packBindings = [
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(14, 'storage'),
-    computeBufferBinding(15, 'read-only-storage')
-  ];
-  const reactionBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(16, 'storage'),
-    computeBufferBinding(17, 'storage'),
-    computeBufferBinding(19, 'uniform'),
-    computeBufferBinding(20, 'read-only-storage'),
-    computeBufferBinding(21, 'uniform'),
-    computeBufferBinding(22, 'read-only-storage'),
-    computeBufferBinding(23, 'uniform'),
-    computeBufferBinding(24, 'read-only-storage')
-  ];
-  const reactionParticleBinBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(16, 'storage'),
-    computeBufferBinding(17, 'storage'),
-    computeBufferBinding(18, 'storage'),
-    computeBufferBinding(19, 'uniform')
-  ];
-  const reactionResolveBindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(3, 'read-only-storage'),
-    computeBufferBinding(5, 'read-only-storage'),
-    computeBufferBinding(6, 'read-only-storage'),
-    computeBufferBinding(7, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(11, 'uniform'),
-    computeBufferBinding(12, 'read-only-storage'),
-    computeBufferBinding(13, 'read-only-storage')
-  ];
-  const unpackBindings = [
-    computeBufferBinding(2, 'storage'),
-    computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'storage'),
-    computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform')
-  ];
+  const pipelineDescriptors = sphReactionStepPipelineDescriptors();
   const packPipelineInfo = sourceUsesBorrowedGpuBuffers
-    ? createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-step',
-      label: 'ulg-sph-reaction-pack-source',
-      code: sphReactionStepWgsl,
-      entryPoint: 'pack_source',
-      bindings: packBindings
-    })
+    ? createCachedExplicitComputePipeline(device, pipelineDescriptors.pack)
     : null;
   const reactionParticleBinPipelineInfo = reactionParticleBins.enabled
-    ? createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-step',
-      label: 'ulg-sph-reaction-particle-bins',
-      code: sphReactionStepWgsl,
-      entryPoint: 'bin_particles',
-      bindings: reactionParticleBinBindings
-    })
+    ? createCachedExplicitComputePipeline(
+        device,
+        pipelineDescriptors.particleBins
+      )
     : null;
   const proposePipelineInfo = canonicalReactionDiscoveryEnabled
     ? null
-    : createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-step',
-        label: 'ulg-sph-reaction-propose',
-        code: sphReactionStepWgsl,
-        entryPoint: 'propose',
-        bindings: reactionBindings
-      });
-  const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
-    label: 'ulg-sph-reaction-resolve',
-    code: sphReactionStepWgsl,
-    entryPoint: 'resolve',
-    bindings: reactionResolveBindings
-  });
-  const { pipeline: unpackPipeline, bindGroupLayout: unpackBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-reaction-step',
-    label: 'ulg-sph-reaction-unpack',
-    code: sphReactionStepWgsl,
-    entryPoint: 'unpack',
-    bindings: unpackBindings
-  });
+    : createCachedExplicitComputePipeline(device, pipelineDescriptors.propose);
+  const {
+    pipeline: resolvePipeline,
+    bindGroupLayout: resolveBindGroupLayout
+  } = createCachedExplicitComputePipeline(device, pipelineDescriptors.resolve);
+  const {
+    pipeline: unpackPipeline,
+    bindGroupLayout: unpackBindGroupLayout
+  } = createCachedExplicitComputePipeline(device, pipelineDescriptors.unpack);
   const proposeBindEntries = (layout) => ({
     layout,
     entries: [

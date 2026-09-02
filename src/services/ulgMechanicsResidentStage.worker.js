@@ -38,6 +38,10 @@ import {
   decodeSchroederCrossLevelRefluxTerminalHeader
 } from '../../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
 import {
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+  decodeSchroederFrozenSpatialKeyChurnRecord
+} from '../../ulg-gpu-abi/src/schroederFrozenSpatialKeyChurn.js';
+import {
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
@@ -87,8 +91,12 @@ import {
 import {
   SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION,
   ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
+  enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors,
   observeSchroederSpatialReactionDiscoveryActivation
 } from '../runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  enumerateSphReactionStepPrewarmPipelineDescriptors
+} from '../runtime/sph/sphReactionGpuKernel.js';
 import {
   SPH_REACTION_ACTIVATION_OBSERVATION_PUBLIC_FAILURE_WORD,
   SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT,
@@ -120,6 +128,7 @@ import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
 } from '../runtime/sph/schroederDynamicLawRoutingContract.js';
 import {
+  enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors,
   runSphPhaseCarrierOneToFourMaterializationWebGpu,
   validateSphPhaseCarrierOneToFourExecution
 } from '../runtime/sph/sphPhaseCarrierMaterializationGpu.js';
@@ -148,11 +157,25 @@ import {
   workerQueueSubmitBurstStats
 } from '../runtime/webgpuComputeLayout.js';
 import {
+  enumerateWebGpuStableRadixPrewarmPipelineDescriptors
+} from '../runtime/webgpuRadixScanUnique.js';
+import {
+  enumerateSphReactionProductPlacementSegmentedPrewarmPipelineDescriptors
+} from '../runtime/sph/schroederSpatialReactionProductPlacementGpu.js';
+import {
+  enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors
+} from '../runtime/sph/sphReactionGpuSummary.js';
+import {
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
   ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
   createSchroederFusedTerminalRefluxReceiptTarget
 } from '../runtime/sph/schroederFusedFineSubstepGpu.js';
+import {
+  SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION,
+  ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA,
+  createSchroederFrozenSpatialKeyChurnTarget
+} from '../runtime/sph/schroederFrozenLevelAssignmentRefreshGpu.js';
 import {
   ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA,
   createWorkerResidentScheduleControlPlaneTaskYielder,
@@ -169,6 +192,8 @@ export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA 
   'peercompute.ulg.mechanics-resident-stage-worker-retained-particle-state.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
   'peercompute.ulg.mechanics-resident-stage-worker-retained-compact-snapshot-export.v0';
+export const ULG_WORKER_RESIDENT_SCHEDULE_SPATIAL_KEY_CHURN_OBSERVATION_SCHEMA =
+  'peercompute.ulg.worker-resident-schedule-spatial-key-churn-observation.v0';
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
   'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 const ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA = 'peercompute.ulg.sph-phase-carrier-plan.v1';
@@ -4068,9 +4093,24 @@ function releaseWorkerSchroederSuccessorLeaseQuietly(consumption, device) {
 // Fail-open but completion-truthful: descriptors compile concurrently and the
 // lane seed awaits their settled summaries. A failed compile never rejects
 // lane admission, but "completed" now means the async work actually settled.
+export function enumerateWorkerSchroederLanePrewarmPipelineDescriptors() {
+  // These are fixed algorithm/ABI variants, never chemical-law or scenario
+  // specializations. Exact duplicate descriptors are harmless: the shared
+  // prewarm primitive coalesces them using the same full identity as the live
+  // pipeline cache (cache key + label + entry point + bindings).
+  return [
+    ...enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors(),
+    ...enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors(),
+    ...enumerateSphReactionStepPrewarmPipelineDescriptors(),
+    ...enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors(),
+    ...enumerateSphReactionProductPlacementSegmentedPrewarmPipelineDescriptors(),
+    ...enumerateWebGpuStableRadixPrewarmPipelineDescriptors(),
+    ...enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors()
+  ];
+}
+
 export async function prewarmWorkerSchroederLaneComputePipelines(device, {
-  enumeratePipelines =
-    enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors
+  enumeratePipelines = enumerateWorkerSchroederLanePrewarmPipelineDescriptors
 } = {}) {
   let descriptors;
   try {
@@ -5966,6 +6006,17 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     terminalRefluxReceiptCopy: terminalRefluxReceiptCopy
       ? { ...terminalRefluxReceiptCopy }
       : null,
+    // The hierarchy result owns this bounded clone-safe diagnostic receipt.
+    // Whitelist it explicitly: the worker stage summary intentionally omits
+    // the much larger nested two-level execution object.
+    spatialKeyChurnObservationCopies:
+      data.spatialKeyChurnProfileRequested === true
+        ? (
+            kernelResult?.twoLevelMechanics
+              ?.canonicalEpochControllerSummary
+              ?.spatialKeyChurnObservationCopies || []
+          ).map((copy) => ({ ...copy }))
+        : null,
     mechanicsFieldPairV2Enabled:
       kernelResult.mechanicsFieldPairV2Enabled === true,
     mechanicsFieldConstructionMode:
@@ -7540,6 +7591,360 @@ async function readWorkerResidentScheduleTerminalRefluxReceipt({
   };
 }
 
+async function readWorkerResidentScheduleSpatialKeyChurnObservation({
+  requested = false,
+  applicable = false,
+  buffer = null,
+  expectations = [],
+  scheduleId,
+  laneId,
+  stateKey,
+  completedStepCount,
+  fineSubstepCount
+} = {}) {
+  const expectedStepCount = Math.max(
+    0,
+    Math.floor(Number(completedStepCount) || 0)
+  );
+  const expectedFineSubstepCount = Math.max(
+    0,
+    Math.floor(Number(fineSubstepCount) || 0)
+  );
+  const expectedRecordCount = expectedStepCount * expectedFineSubstepCount;
+  const base = {
+    schema: ULG_WORKER_RESIDENT_SCHEDULE_SPATIAL_KEY_CHURN_OBSERVATION_SCHEMA,
+    requested: requested === true,
+    diagnosticOnly: true,
+    authorityBearing: false,
+    scheduleId,
+    laneId,
+    stateKey,
+    applicable: applicable === true,
+    sampleStage: 'frozen-fine-substep-position-refresh',
+    aggregationCadence:
+      'gpu-every-fine-refresh-host-once-after-schedule-terminal-fence',
+    expectedStepCount,
+    expectedFineSubstepCount,
+    expectedRecordCount,
+    observedRecordCount: 0,
+    ready: requested !== true
+  };
+  if (requested !== true) {
+    return {
+      ...base,
+      status: 'spatial-key-churn-observation-not-requested',
+      reason: null,
+      diagnosticCost: {
+        additionalQueueSubmissionCount: 0,
+        additionalHostQueueFenceCount: 0,
+        mapAsyncCount: 0,
+        readbackByteLength: 0,
+        fullParticleReadbackPerformed: false
+      }
+    };
+  }
+  if (applicable !== true) {
+    return {
+      ...base,
+      status: 'spatial-key-churn-observation-not-applicable',
+      reason: 'route-has-no-canonical-frozen-fine-refresh',
+      ready: true,
+      diagnosticCost: {
+        additionalQueueSubmissionCount: 0,
+        additionalHostQueueFenceCount: 0,
+        mapAsyncCount: 0,
+        readbackByteLength: 0,
+        fullParticleReadbackPerformed: false
+      }
+    };
+  }
+  const expectedByteLength =
+    expectedRecordCount * SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH;
+  if (
+    expectedRecordCount < 1
+    || !buffer
+    || buffer.destroyed === true
+    || !Array.isArray(expectations)
+    || expectations.length !== expectedRecordCount
+    || Number(buffer.size) < expectedByteLength
+    || typeof buffer.mapAsync !== 'function'
+    || typeof buffer.getMappedRange !== 'function'
+  ) {
+    return {
+      ...base,
+      status: 'spatial-key-churn-observation-rejected',
+      reason: 'spatial-key-churn-ring-incomplete',
+      diagnosticCost: {
+        additionalQueueSubmissionCount: 0,
+        additionalHostQueueFenceCount: 0,
+        mapAsyncCount: 0,
+        readbackByteLength: 0,
+        fullParticleReadbackPerformed: false
+      }
+    };
+  }
+  let copiedBytes = null;
+  try {
+    await buffer.mapAsync(GPU_MAP_MODE.READ, 0, expectedByteLength);
+    copiedBytes = new Uint8Array(
+      buffer.getMappedRange(0, expectedByteLength)
+    ).slice();
+  } catch (error) {
+    return {
+      ...base,
+      status: 'spatial-key-churn-observation-rejected',
+      reason: 'spatial-key-churn-map-failed',
+      mapErrorName: error instanceof Error ? error.name : null,
+      mapErrorMessage: error instanceof Error ? error.message : String(error),
+      diagnosticCost: {
+        additionalQueueSubmissionCount: 0,
+        additionalHostQueueFenceCount: 0,
+        mapAsyncCount: 1,
+        readbackByteLength: expectedByteLength,
+        fullParticleReadbackPerformed: false
+      }
+    };
+  } finally {
+    try { buffer.unmap?.(); } catch { /* diagnostic rejection remains sealed */ }
+  }
+  const records = [];
+  let firstRejectedRecordOrdinal = null;
+  let firstRejectedDiagnostic = null;
+  const sumFields = [
+    'visitedParticleCount',
+    'priorActiveParticleCount',
+    'successorActiveParticleCount',
+    'comparedActiveParticleCount',
+    'activatedParticleCount',
+    'deactivatedParticleCount',
+    'movedParticleCount',
+    'spatialKeyChangedParticleCount',
+    'spatialKeyUnchangedParticleCount',
+    'cellXChangedParticleCount',
+    'cellYChangedParticleCount',
+    'cellZChangedParticleCount',
+    'invalidPriorParticleCount',
+    'invalidSuccessorParticleCount',
+    'dormantParticleCount'
+  ];
+  const totals = Object.fromEntries(sumFields.map((field) => [field, 0]));
+  let admittedRecordCount = 0;
+  let zeroSpatialKeyChangeRecordCount = 0;
+  let nonzeroSpatialKeyChangeRecordCount = 0;
+  const maxAbsCellDelta = [0, 0, 0];
+  for (let index = 0; index < expectedRecordCount; index += 1) {
+    const recordOrdinal = index + 1;
+    const offset = index * SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH;
+    const words = new Uint32Array(
+      copiedBytes.buffer,
+      copiedBytes.byteOffset + offset,
+      SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+        / Uint32Array.BYTES_PER_ELEMENT
+    );
+    let decoded;
+    try {
+      decoded = decodeSchroederFrozenSpatialKeyChurnRecord(words);
+    } catch (error) {
+      return {
+        ...base,
+        status: 'spatial-key-churn-observation-rejected',
+        reason: 'spatial-key-churn-record-decode-failed',
+        decodedRecordCount: records.length,
+        observedRecordCount: admittedRecordCount,
+        firstRejectedRecordOrdinal: recordOrdinal,
+        decodeErrorName: error instanceof Error ? error.name : null,
+        decodeErrorMessage: error instanceof Error
+          ? error.message
+          : String(error),
+        scheduleTotals: null,
+        derived: null,
+        diagnosticCost: {
+          encodedIntoExistingSubmissions: true,
+          additionalQueueSubmissionCount: 0,
+          terminalFenceReused: true,
+          additionalHostQueueFenceCount: 0,
+          mapAsyncCount: 1,
+          readbackByteLength: expectedByteLength,
+          fullParticleReadbackPerformed: false
+        }
+      };
+    }
+    const expectation = expectations[index] ?? null;
+    const copyReceipt = expectation?.copyReceipt ?? null;
+    const admissionChecks = {
+      expectationOrdinal:
+        expectation?.recordOrdinal === recordOrdinal,
+      copySchema:
+        copyReceipt?.schema
+          === ULG_SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_COPY_SCHEMA,
+      copyStatus:
+        copyReceipt?.status
+          === 'frozen-spatial-key-churn-copy-encoded-unverified',
+      copyScheduleId: copyReceipt?.scheduleId === scheduleId,
+      copyLaneId: copyReceipt?.laneId === laneId,
+      copyStateKey: copyReceipt?.stateKey === stateKey,
+      copyRecordOrdinal: copyReceipt?.recordOrdinal === recordOrdinal,
+      copyStepOrdinal:
+        copyReceipt?.stepOrdinal === expectation?.stepOrdinal,
+      copyFineSubstepOrdinal:
+        copyReceipt?.fineSubstepOrdinal === expectation?.fineSubstepOrdinal,
+      particleCount:
+        copyReceipt?.expectedParticleCount === decoded.particleCount,
+      physicsSubstep:
+        copyReceipt?.expectedPhysicsSubstep === decoded.fineSubstepOrdinal,
+      priorPositionEpoch:
+        copyReceipt?.expectedPriorPositionEpoch === decoded.priorPositionEpoch,
+      successorPositionEpoch:
+        copyReceipt?.expectedSuccessorPositionEpoch
+          === decoded.successorPositionEpoch,
+      topologyEpoch:
+        copyReceipt?.expectedTopologyEpoch === decoded.topologyEpoch,
+      chartEpoch: copyReceipt?.expectedChartEpoch === decoded.chartEpoch,
+      levelEpoch: copyReceipt?.expectedLevelEpoch === decoded.levelEpoch,
+      supportEpoch: copyReceipt?.expectedSupportEpoch === decoded.supportEpoch,
+      targetOffset: copyReceipt?.targetOffsetBytes === offset,
+      targetByteLength:
+        copyReceipt?.targetByteLength
+          === SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH,
+      structuralRecord: decoded.structuralValid === true,
+      recordStepOrdinal: decoded.stepOrdinal === expectation?.stepOrdinal,
+      recordFineSubstepOrdinal:
+        decoded.fineSubstepOrdinal === expectation?.fineSubstepOrdinal
+    };
+    const failedChecks = Object.entries(admissionChecks)
+      .filter(([, ready]) => ready !== true)
+      .map(([name]) => name);
+    const admitted = failedChecks.length === 0;
+    records.push({
+      ...decoded,
+      recordOrdinal,
+      admitted
+    });
+    if (!admitted && firstRejectedRecordOrdinal == null) {
+      firstRejectedRecordOrdinal = recordOrdinal;
+      firstRejectedDiagnostic = {
+        schema:
+          'peercompute.ulg.worker-resident-schedule-spatial-key-churn-rejection.v0',
+        recordOrdinal,
+        failedChecks,
+        decoded: {
+          structuralValid: decoded.structuralValid,
+          countRelationsValid: decoded.countRelationsValid,
+          status: decoded.status,
+          flags: decoded.flags,
+          stepOrdinal: decoded.stepOrdinal,
+          fineSubstepOrdinal: decoded.fineSubstepOrdinal,
+          particleCount: decoded.particleCount,
+          visitedParticleCount: decoded.visitedParticleCount,
+          priorActiveParticleCount: decoded.priorActiveParticleCount,
+          successorActiveParticleCount: decoded.successorActiveParticleCount,
+          comparedActiveParticleCount: decoded.comparedActiveParticleCount,
+          activatedParticleCount: decoded.activatedParticleCount,
+          deactivatedParticleCount: decoded.deactivatedParticleCount,
+          movedParticleCount: decoded.movedParticleCount,
+          spatialKeyChangedParticleCount:
+            decoded.spatialKeyChangedParticleCount,
+          spatialKeyUnchangedParticleCount:
+            decoded.spatialKeyUnchangedParticleCount,
+          invalidPriorParticleCount: decoded.invalidPriorParticleCount,
+          invalidSuccessorParticleCount: decoded.invalidSuccessorParticleCount,
+          dormantParticleCount: decoded.dormantParticleCount,
+          priorPositionEpoch: decoded.priorPositionEpoch,
+          successorPositionEpoch: decoded.successorPositionEpoch,
+          topologyEpoch: decoded.topologyEpoch,
+          chartEpoch: decoded.chartEpoch,
+          levelEpoch: decoded.levelEpoch,
+          supportEpoch: decoded.supportEpoch,
+          checksum: decoded.checksum,
+          expectedChecksum: decoded.expectedChecksum
+        },
+        copyReceipt: copyReceipt == null
+          ? null
+          : {
+              schema: copyReceipt.schema ?? null,
+              status: copyReceipt.status ?? null,
+              scheduleId: copyReceipt.scheduleId ?? null,
+              laneId: copyReceipt.laneId ?? null,
+              stateKey: copyReceipt.stateKey ?? null,
+              recordOrdinal: copyReceipt.recordOrdinal ?? null,
+              stepOrdinal: copyReceipt.stepOrdinal ?? null,
+              fineSubstepOrdinal: copyReceipt.fineSubstepOrdinal ?? null,
+              expectedParticleCount:
+                copyReceipt.expectedParticleCount ?? null,
+              expectedPhysicsSubstep:
+                copyReceipt.expectedPhysicsSubstep ?? null,
+              expectedPriorPositionEpoch:
+                copyReceipt.expectedPriorPositionEpoch ?? null,
+              expectedSuccessorPositionEpoch:
+                copyReceipt.expectedSuccessorPositionEpoch ?? null,
+              expectedTopologyEpoch:
+                copyReceipt.expectedTopologyEpoch ?? null,
+              expectedChartEpoch: copyReceipt.expectedChartEpoch ?? null,
+              expectedLevelEpoch: copyReceipt.expectedLevelEpoch ?? null,
+              expectedSupportEpoch: copyReceipt.expectedSupportEpoch ?? null,
+              targetOffsetBytes: copyReceipt.targetOffsetBytes ?? null,
+              targetByteLength: copyReceipt.targetByteLength ?? null
+            }
+      };
+    }
+    if (admitted) {
+      admittedRecordCount += 1;
+      for (const field of sumFields) totals[field] += decoded[field];
+      if (decoded.spatialKeyChangedParticleCount === 0) {
+        zeroSpatialKeyChangeRecordCount += 1;
+      } else {
+        nonzeroSpatialKeyChangeRecordCount += 1;
+      }
+      for (let axis = 0; axis < 3; axis += 1) {
+        maxAbsCellDelta[axis] = Math.max(
+          maxAbsCellDelta[axis],
+          decoded.maxAbsCellDelta[axis]
+        );
+      }
+    }
+  }
+  const ready = firstRejectedRecordOrdinal == null;
+  const compared = totals.comparedActiveParticleCount;
+  return {
+    ...base,
+    status: ready
+      ? 'spatial-key-churn-observation-ready'
+      : 'spatial-key-churn-observation-rejected',
+    reason: ready ? null : 'one-or-more-spatial-key-churn-records-rejected',
+    ready,
+    decodedRecordCount: records.length,
+    observedRecordCount: admittedRecordCount,
+    firstRejectedRecordOrdinal,
+    firstRejectedDiagnostic,
+    records,
+    scheduleTotals: ready ? {
+      ...totals,
+      zeroSpatialKeyChangeRecordCount,
+      nonzeroSpatialKeyChangeRecordCount,
+      maxAbsCellDelta,
+      descriptorChangesFrozenByConstruction: true,
+      measuredDescriptorChangeFields: []
+    } : null,
+    derived: ready ? {
+      spatialKeyChangeRatio: compared > 0
+        ? totals.spatialKeyChangedParticleCount / compared
+        : 0,
+      zeroSpatialKeyChangeRecordRatio: records.length > 0
+        ? zeroSpatialKeyChangeRecordCount / records.length
+        : 0
+    } : null,
+    diagnosticCost: {
+      encodedIntoExistingSubmissions: true,
+      additionalQueueSubmissionCount: 0,
+      terminalFenceReused: true,
+      additionalHostQueueFenceCount: 0,
+      mapAsyncCount: 1,
+      readbackByteLength: expectedByteLength,
+      fullParticleReadbackPerformed: false
+    }
+  };
+}
+
 async function completeWorkerResidentScheduleTerminalFence({
   workerDevice,
   scheduleId,
@@ -7549,12 +7954,44 @@ async function completeWorkerResidentScheduleTerminalFence({
   workMayHaveBeenSubmitted = false,
   terminalRefluxReceiptRequired = false,
   terminalRefluxRingBuffer = null,
-  terminalRefluxExpectations = []
+  terminalRefluxExpectations = [],
+  spatialKeyChurnObservationRequested = false,
+  spatialKeyChurnObservationApplicable = false,
+  spatialKeyChurnRingBuffer = null,
+  spatialKeyChurnExpectations = [],
+  spatialKeyChurnFineSubstepCount = 0
 } = {}) {
   const normalizedCompletedStepCount = Math.max(
     0,
     Math.floor(Number(completedStepCount) || 0)
   );
+  const unavailableSpatialKeyChurnObservation = (reason) => ({
+    schema: ULG_WORKER_RESIDENT_SCHEDULE_SPATIAL_KEY_CHURN_OBSERVATION_SCHEMA,
+    requested: spatialKeyChurnObservationRequested === true,
+    diagnosticOnly: true,
+    authorityBearing: false,
+    scheduleId,
+    laneId,
+    stateKey,
+    applicable: spatialKeyChurnObservationApplicable === true,
+    status: spatialKeyChurnObservationRequested === true
+      ? 'spatial-key-churn-observation-terminal-fence-unsatisfied'
+      : 'spatial-key-churn-observation-not-requested',
+    reason: spatialKeyChurnObservationRequested === true ? reason : null,
+    ready: spatialKeyChurnObservationRequested !== true,
+    expectedStepCount: normalizedCompletedStepCount,
+    expectedFineSubstepCount: spatialKeyChurnFineSubstepCount,
+    expectedRecordCount:
+      normalizedCompletedStepCount * spatialKeyChurnFineSubstepCount,
+    observedRecordCount: 0,
+    diagnosticCost: {
+      additionalQueueSubmissionCount: 0,
+      additionalHostQueueFenceCount: 0,
+      mapAsyncCount: 0,
+      readbackByteLength: 0,
+      fullParticleReadbackPerformed: false
+    }
+  });
   if (!workMayHaveBeenSubmitted) {
     return {
       schema: 'peercompute.compute.gpu-fence-report.v0',
@@ -7571,7 +8008,11 @@ async function completeWorkerResidentScheduleTerminalFence({
       scheduleId,
       laneId,
       stateKey,
-      completedStepCount: 0
+      completedStepCount: 0,
+      spatialKeyChurnObservation:
+        unavailableSpatialKeyChurnObservation(
+          'resident-schedule-terminated-without-submissions'
+        )
     };
   }
   const queue = workerDevice?.queue || null;
@@ -7594,7 +8035,11 @@ async function completeWorkerResidentScheduleTerminalFence({
       reason: 'worker-webgpu-device-queue-missing-at-resident-schedule-terminal',
       queueCompletionStatus: 'queue-completion-unavailable',
       queueCompletionMethod: null,
-      authorityAdmissionReady: false
+      authorityAdmissionReady: false,
+      spatialKeyChurnObservation:
+        unavailableSpatialKeyChurnObservation(
+          'worker-device-queue-completion-unavailable'
+        )
     };
   }
   try {
@@ -7610,7 +8055,11 @@ async function completeWorkerResidentScheduleTerminalFence({
       queueCompletionErrorName: error instanceof Error ? error.name : null,
       queueCompletionErrorMessage:
         error instanceof Error ? error.message : String(error),
-      authorityAdmissionReady: false
+      authorityAdmissionReady: false,
+      spatialKeyChurnObservation:
+        unavailableSpatialKeyChurnObservation(
+          'worker-device-queue-completion-error'
+        )
     };
   }
   const terminalRefluxReceipt =
@@ -7622,6 +8071,18 @@ async function completeWorkerResidentScheduleTerminalFence({
       laneId,
       stateKey,
       completedStepCount: normalizedCompletedStepCount
+    });
+  const spatialKeyChurnObservation =
+    await readWorkerResidentScheduleSpatialKeyChurnObservation({
+      requested: spatialKeyChurnObservationRequested,
+      applicable: spatialKeyChurnObservationApplicable,
+      buffer: spatialKeyChurnRingBuffer,
+      expectations: spatialKeyChurnExpectations,
+      scheduleId,
+      laneId,
+      stateKey,
+      completedStepCount: normalizedCompletedStepCount,
+      fineSubstepCount: spatialKeyChurnFineSubstepCount
     });
   const authorityAdmissionReady = Boolean(
     terminalRefluxReceiptRequired !== true
@@ -7639,7 +8100,8 @@ async function completeWorkerResidentScheduleTerminalFence({
     queueCompletionStatus: 'queue-work-completed',
     queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
     authorityAdmissionReady,
-    terminalRefluxReceipt
+    terminalRefluxReceipt,
+    spatialKeyChurnObservation
   };
 }
 
@@ -7782,8 +8244,14 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   }
   let terminalRefluxRingBuffer = null;
   let terminalRefluxReceiptRequired = false;
+  let spatialKeyChurnRingBuffer = null;
+  let spatialKeyChurnObservationRequested = false;
+  let spatialKeyChurnObservationApplicable = false;
+  let spatialKeyChurnFineSubstepCount = 0;
   let scheduleControlPlaneTaskYielder = null;
   const terminalRefluxExpectations = [];
+  const spatialKeyChurnExpectations = [];
+  const spatialKeyChurnTargetsByStep = new Map();
   try {
     const baseContext = workerContext(payload);
     const commonOptions = baseContext.common
@@ -8010,6 +8478,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         expectedSpatialEpochSeal: ignoredExpectedSeal,
         [SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION]:
           ignoredTopLevelTerminalRefluxTarget,
+        spatialKeyChurnProfileRequested:
+          ignoredTopLevelSpatialKeyChurnProfileRequested,
         residentStepOptions: requestedResidentStepOptions = null,
         ...continuationOptions
       } = baseMechanicsOptions;
@@ -8037,6 +8507,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           : null;
       delete cleanResidentStepOptions[
         SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
+      ];
+      delete cleanResidentStepOptions[
+        SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION
       ];
       let terminalRefluxReceiptTarget = null;
       if (terminalRefluxReceiptRequired) {
@@ -8072,6 +8545,47 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           expectedCoarseLevel: levels[1]
         });
       }
+      let spatialKeyChurnTargets = null;
+      if (spatialKeyChurnObservationApplicable) {
+        const expectedParticleCount = Number(
+          record.schroederLane?.sphParticleUpload?.particleCount
+        );
+        if (
+          !spatialKeyChurnRingBuffer
+          || !Number.isSafeInteger(expectedParticleCount)
+          || expectedParticleCount < 1
+        ) {
+          throw workerResidentScheduleError(
+            'schedule-spatial-key-churn-target-unavailable',
+            'frozen-refresh churn profiling requires one ring and exact retained particle count',
+            { scheduleId, stepOrdinal }
+          );
+        }
+        spatialKeyChurnTargets = Array.from(
+          { length: spatialKeyChurnFineSubstepCount },
+          (_, fineIndex) => {
+            const fineSubstepOrdinal = fineIndex + 1;
+            const recordOrdinal =
+              (stepOrdinal - 1) * spatialKeyChurnFineSubstepCount
+              + fineSubstepOrdinal;
+            return createSchroederFrozenSpatialKeyChurnTarget({
+              device: state.workerDevice,
+              scheduleId,
+              laneId,
+              stateKey,
+              recordOrdinal,
+              stepOrdinal,
+              fineSubstepOrdinal,
+              expectedParticleCount,
+              targetBuffer: spatialKeyChurnRingBuffer,
+              targetOffsetBytes:
+                (recordOrdinal - 1)
+                * SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+            });
+          }
+        );
+        spatialKeyChurnTargetsByStep.set(stepOrdinal, spatialKeyChurnTargets);
+      }
       // The driver pins each step's mechanics stage to the seal of the
       // generation IT just built; a caller-supplied seal is only valid for
       // one generation and would go stale on step 2.
@@ -8085,6 +8599,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         stageMechanicsTraceEnabled:
           continuationOptions.stageMechanicsTraceEnabled === true
           && stepOrdinal === stepCount,
+        spatialKeyChurnProfileRequested:
+          spatialKeyChurnObservationApplicable,
         expectedSpatialEpochSeal: epochSeal,
         residentStepOptions: {
           ...cleanResidentStepOptions,
@@ -8092,6 +8608,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             ? {
                 [SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION]:
                   terminalRefluxReceiptTarget
+              }
+            : {}),
+          ...(spatialKeyChurnTargets
+            ? {
+                [SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION]:
+                  spatialKeyChurnTargets
               }
             : {})
         }
@@ -9052,6 +9574,26 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       twoLevelMechanicsRequested
       && twoLevelMechanicsAuthorityRequested === 'authoritative'
     );
+    spatialKeyChurnObservationRequested =
+      baseMechanicsOptions.spatialKeyChurnProfileRequested === true;
+    spatialKeyChurnObservationApplicable = Boolean(
+      spatialKeyChurnObservationRequested
+      && twoLevelMechanicsRequested
+      && twoLevelMechanicsAuthorityRequested === 'authoritative'
+    );
+    spatialKeyChurnFineSubstepCount = spatialKeyChurnObservationApplicable
+      ? twoLevelFineSubstepCountRequested
+      : 0;
+    if (
+      spatialKeyChurnObservationApplicable
+      && spatialKeyChurnFineSubstepCount > 4
+    ) {
+      throw workerResidentScheduleError(
+        'schedule-spatial-key-churn-fine-substep-count-invalid',
+        'frozen-refresh churn profiling supports at most four authoritative fine substeps',
+        { scheduleId }
+      );
+    }
     if (
       schedule.twoLevelTerminalRefluxReceiptRequired === true
       && terminalRefluxReceiptRequired !== true
@@ -9809,6 +10351,41 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             state.workerDevice
           );
         }
+        if (
+          spatialKeyChurnObservationApplicable
+          && !spatialKeyChurnRingBuffer
+        ) {
+          const recordCount = stepCount * spatialKeyChurnFineSubstepCount;
+          const ringByteLength =
+            recordCount * SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH;
+          const maxBufferSize = Number(
+            state.workerDevice?.limits?.maxBufferSize
+              ?? Number.MAX_SAFE_INTEGER
+          );
+          if (
+            !Number.isSafeInteger(recordCount)
+            || recordCount < 1
+            || !Number.isSafeInteger(ringByteLength)
+            || ringByteLength < SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_BYTE_LENGTH
+            || !Number.isSafeInteger(maxBufferSize)
+            || maxBufferSize < 1
+            || ringByteLength > maxBufferSize
+          ) {
+            throw workerResidentScheduleError(
+              'schedule-spatial-key-churn-ring-size-invalid',
+              'spatial-key churn observation ring is not safely addressable',
+              { scheduleId, stepOrdinal }
+            );
+          }
+          spatialKeyChurnRingBuffer = tagWebGpuBufferDevice(
+            state.workerDevice.createBuffer({
+              label: `ulg-worker-spatial-key-churn-ring-${scheduleId}`,
+              size: ringByteLength,
+              usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+            }),
+            state.workerDevice
+          );
+        }
         currentStepSeal = epochStageResult.value?.epochSeal ?? null;
         if (!currentStepSeal) {
           throw workerResidentScheduleError(
@@ -10047,6 +10624,29 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       lastMechanicsStageResult = mechanicsStageResult;
       const rawHierarchyStageSummary =
         mechanicsStageResult.value?.hierarchyStageSummary ?? null;
+      if (spatialKeyChurnObservationApplicable) {
+        const expectedTargets =
+          spatialKeyChurnTargetsByStep.get(stepOrdinal) ?? [];
+        const copies = rawHierarchyStageSummary?.twoLevelMechanics
+          ?.canonicalEpochControllerSummary
+          ?.spatialKeyChurnObservationCopies
+          ?? rawHierarchyStageSummary?.spatialKeyChurnObservationCopies;
+        const exactCopies = Array.isArray(copies) ? copies : [];
+        for (const target of expectedTargets) {
+          const copyReceipt = exactCopies.find((copy) => (
+            copy?.recordOrdinal === target.recordOrdinal
+            && copy.stepOrdinal === target.stepOrdinal
+            && copy.fineSubstepOrdinal === target.fineSubstepOrdinal
+          )) ?? null;
+          spatialKeyChurnExpectations.push({
+            recordOrdinal: target.recordOrdinal,
+            stepOrdinal: target.stepOrdinal,
+            fineSubstepOrdinal: target.fineSubstepOrdinal,
+            copyReceipt
+          });
+        }
+        spatialKeyChurnTargetsByStep.delete(stepOrdinal);
+      }
       // Private schedule stage results preserve the compact raw summary.
       // Keep the reconstruction as a compatibility guard for older/public
       // cloneable stage envelopes, where repeated diagnostic receipt aliases
@@ -10431,7 +11031,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             scheduleGpuWorkMayHaveBeenSubmitted,
           terminalRefluxReceiptRequired,
           terminalRefluxRingBuffer,
-          terminalRefluxExpectations
+          terminalRefluxExpectations,
+          spatialKeyChurnObservationRequested,
+          spatialKeyChurnObservationApplicable,
+          spatialKeyChurnRingBuffer,
+          spatialKeyChurnExpectations,
+          spatialKeyChurnFineSubstepCount
         });
     const tailTerminalFenceDoneAtMs = workerResidentScheduleNowMs();
     if (tier0ExecutionAttempted) {
@@ -11678,6 +12283,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       tailTerminalFenceDoneAtMs,
       productHistoryLiveBoundObservation,
       lawActivationReceipt: scheduleLawActivation,
+      spatialKeyChurnObservation:
+        terminalGpuFence?.spatialKeyChurnObservation ?? null,
       predecessorTargetTokenConsumption,
       nextScheduleLawActivationObservation,
       executionRouteReceipt,
@@ -11749,6 +12356,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       delete terminalLane.residentStepOptions[
         SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
       ];
+      delete terminalLane.residentStepOptions[
+        SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION
+      ];
     }
     if (terminalRefluxRingBuffer) {
       try {
@@ -11758,6 +12368,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       } catch { /* continue to destroy the schedule-owned ring */ }
       try { terminalRefluxRingBuffer.destroy?.(); } catch {}
       terminalRefluxRingBuffer = null;
+    }
+    if (spatialKeyChurnRingBuffer) {
+      try {
+        if (spatialKeyChurnRingBuffer.mapState !== 'unmapped') {
+          spatialKeyChurnRingBuffer.unmap?.();
+        }
+      } catch { /* continue to destroy the schedule-owned diagnostic ring */ }
+      try { spatialKeyChurnRingBuffer.destroy?.(); } catch {}
+      spatialKeyChurnRingBuffer = null;
     }
     if (activeWorkerResidentScheduleByLaneKey.get(laneKey) === state) {
       activeWorkerResidentScheduleByLaneKey.delete(laneKey);

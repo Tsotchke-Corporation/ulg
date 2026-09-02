@@ -4020,6 +4020,11 @@ test('native composite staging validates asynchronously before a short irreversi
   );
   assert.match(
     sceneSource,
+    /additionalSurfaceDraws: \(\s*!opticalGpuBufferUpdateRequired[\s\S]*?previousBridge\.drawState\.additionalSurfaceDraws\s*: \[\]/,
+    'an optical-buffer replacement must not carry bind groups that capture the retired pair'
+  );
+  assert.match(
+    sceneSource,
     /candidate-box-wireframe-uniform-buffer[\s\S]*?candidate-pixel-validation-readback-buffer/,
     'wireframe and validation allocations must be registered with the provisional receipt'
   );

@@ -1261,7 +1261,20 @@ test('SPH render field surface table packs generic material-phase surfaces', () 
       isolation: 24,
       subtract: 10,
       radiusNorm: 0.12,
-      colorLinear: [0.6, 0.8, 1]
+      colorLinear: [0.6, 0.8, 1],
+      opticalResponseAuthorityFlag: 1,
+      opticalResponseAuthority: 'closure-derived-gas-optical-response',
+      opticalResponseReady: true,
+      opticalVisibilityFlag: 1,
+      opticalVisibilityReason: 'derived-droplet-scattering-visible',
+      opticalOpacity: 0.61,
+      opticalEffectiveOpacity: 0.61,
+      opticalDepth: 0.94,
+      opticalScatteringCoefficientPerM: 2.5,
+      opticalTransmission: 0.39,
+      opticalRoughness: 1,
+      opticalBlockedFlag: 0,
+      opticalProvenanceSource: 'conserved-droplet-scattering'
     }
   ]);
 
@@ -1273,6 +1286,14 @@ test('SPH render field surface table packs generic material-phase surfaces', () 
   assert.equal(table.metadata[0].phaseId, GPU_PHASE_IDS.solid);
   assert.equal(table.metadata[1].materialId, stableOpticalMaterialId('h2o'));
   assert.equal(table.metadata[1].phaseId, GPU_PHASE_IDS.gas);
+  assert.equal(table.metadata[1].opticalResponseAuthorityFlag, 1);
+  assert.equal(table.metadata[1].opticalResponseAuthority, 'closure-derived-gas-optical-response');
+  assert.equal(table.metadata[1].opticalResponseReady, true);
+  assert.equal(table.metadata[1].opticalVisibilityReason, 'derived-droplet-scattering-visible');
+  assert.equal(table.metadata[1].opticalEffectiveOpacity, 0.61);
+  assert.equal(table.metadata[1].opticalDepth, 0.94);
+  assert.equal(table.metadata[1].opticalScatteringCoefficientPerM, 2.5);
+  assert.equal(table.metadata[1].opticalProvenanceSource, 'conserved-droplet-scattering');
 });
 
 test('SPH render field surface table opts into retained physical particle radii without stealing draw policy lanes', () => {

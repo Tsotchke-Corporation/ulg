@@ -713,6 +713,37 @@ async function readState(page) {
           rows.physicsQueuePrefixCoverage ?? null,
         physicsHostQueueFenceParticipation:
           rows.physicsHostQueueFenceParticipation ?? null,
+        workerOwnedOpticalPresentation:
+          rows.workerOwnedOpticalPresentation == null
+            ? null
+            : {
+              schema:
+                rows.workerOwnedOpticalPresentation.schema ?? null,
+              status:
+                rows.workerOwnedOpticalPresentation.status ?? null,
+              gasSurfaceCount:
+                rows.workerOwnedOpticalPresentation.gasSurfaceCount ?? null,
+              closureGovernedGasSurfaceCount:
+                rows.workerOwnedOpticalPresentation
+                  .closureGovernedGasSurfaceCount ?? null,
+              visibleClosureGasSurfaceCount:
+                rows.workerOwnedOpticalPresentation
+                  .visibleClosureGasSurfaceCount ?? null,
+              opticallyThinHiddenGasSurfaceCount:
+                rows.workerOwnedOpticalPresentation
+                  .opticallyThinHiddenGasSurfaceCount ?? null,
+              allGasSurfacesClosureGoverned:
+                rows.workerOwnedOpticalPresentation
+                  .allGasSurfacesClosureGoverned ?? null,
+              heuristicGasOpacityUsed:
+                rows.workerOwnedOpticalPresentation
+                  .heuristicGasOpacityUsed ?? null,
+              opticalProvenanceSources: Array.isArray(
+                rows.workerOwnedOpticalPresentation.opticalProvenanceSources
+              )
+                ? [...rows.workerOwnedOpticalPresentation.opticalProvenanceSources]
+                : []
+            },
         motionPresentationQosBoundary:
           rows.motionPresentationQosBoundary ?? null,
         surfaceCount: rows.surfaceCount ?? null,
@@ -1714,6 +1745,23 @@ try {
           }
           if (Number(snapshot?.workerRows?.boxWireframeDrawCount) !== 1) {
             result.issues.push(`${label}-worker-box-wireframe-not-drawn`);
+          }
+          const opticalPresentation =
+            snapshot?.workerRows?.workerOwnedOpticalPresentation;
+          if (
+            expectedWorkerGeometry === 'worker-owned-true-isosurface'
+            && Number(opticalPresentation?.gasSurfaceCount) > 0
+          ) {
+            if (opticalPresentation?.allGasSurfacesClosureGoverned !== true) {
+              result.issues.push(
+                `${label}-gas-surface-optical-authority-incomplete`
+              );
+            }
+            if (opticalPresentation?.heuristicGasOpacityUsed === true) {
+              result.issues.push(
+                `${label}-heuristic-gas-opacity-used`
+              );
+            }
           }
         }
       }

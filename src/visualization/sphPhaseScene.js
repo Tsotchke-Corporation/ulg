@@ -11629,6 +11629,79 @@ export function resolveOpticalSurfaceVisibility({
   };
 }
 
+// Compact, renderer-neutral optical presentation contract. Gas geometry is
+// still useful as a transported field, but it must not become a visible cloud
+// merely because its phase is `gas`: pure water vapour and H2 are optically
+// thin, while condensed water droplets and absorbing gases earn visibility
+// from the material closure. Keeping this decision in metadata lets every
+// surface consumer share the same physics-derived answer without adding a
+// scenario-specific shader branch.
+export function closureDerivedSurfaceOpticalPresentation({
+  optics = {},
+  descriptorOrRow = {},
+  wasVisible = false
+} = {}) {
+  const vaporSurface = isVaporOpticalSurface(optics, descriptorOrRow);
+  const visibility = resolveOpticalSurfaceVisibility({
+    optics,
+    descriptorOrRow,
+    wasVisible
+  });
+  const opacityReady = optics?.opacity != null
+    && Number.isFinite(Number(optics.opacity));
+  const opacity = clamp(
+    opacityReady ? Number(optics.opacity) : 0,
+    0,
+    1
+  );
+  const opticalDepth = visibility.opticalDepth != null
+    && Number.isFinite(Number(visibility.opticalDepth))
+    ? Math.max(0, Number(visibility.opticalDepth))
+    : null;
+  const scatteringCoefficientPerM = visibility.scatteringCoefficientPerM != null
+    && Number.isFinite(Number(visibility.scatteringCoefficientPerM))
+    ? Math.max(0, Number(visibility.scatteringCoefficientPerM))
+    : null;
+  const closureBlocked = optics?.blocked === true
+    || Number(optics?.blocked) > 0;
+  const closureResponseReady = Boolean(
+    !closureBlocked
+    && opacityReady
+    && opticalDepth != null
+    && scatteringCoefficientPerM != null
+  );
+  const effectiveOpacity = vaporSurface
+    ? (closureResponseReady && visibility.visible ? opacity : 0)
+    : 1;
+  return Object.freeze({
+    opticalResponseAuthorityFlag: vaporSurface ? 1 : 0,
+    opticalResponseAuthority: vaporSurface
+      ? (closureResponseReady
+        ? 'closure-derived-gas-optical-response'
+        : 'closure-blocked-gas-hidden')
+      : 'non-gas-surface-optics',
+    opticalResponseReady: closureResponseReady,
+    opticalVisibilityFlag: visibility.visible ? 1 : 0,
+    opticalVisibilityReason: visibility.reason,
+    opticalOpacity: opacity,
+    opticalEffectiveOpacity: effectiveOpacity,
+    opticalDepth,
+    opticalScatteringCoefficientPerM: scatteringCoefficientPerM,
+    opticalTransmission: optics?.transmission != null
+      && Number.isFinite(Number(optics.transmission))
+      ? clamp(Number(optics.transmission), 0, 1)
+      : null,
+    opticalRoughness: optics?.roughness != null
+      && Number.isFinite(Number(optics.roughness))
+      ? clamp(Number(optics.roughness), 0, 1)
+      : null,
+    opticalBlockedFlag: closureBlocked ? 1 : 0,
+    opticalProvenanceSource: optics?.provenance?.source
+      ?? optics?.source
+      ?? null
+  });
+}
+
 // Sphere/CPU-mesh lane counterpart of the surface WGSL blackbody_emission_rgb
 // intensity: 1.8 is the calibrated sphere anchor that matches the surface
 // quad ramp at its 2200 K saturation (quad_scale 2.1); above the anchor the
@@ -42447,6 +42520,10 @@ fn main(
           : Math.min(liveBandMatchK, meltTransitionK > 0 ? meltTransitionK + 50 : 0));
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
+      const opticalPresentation = closureDerivedSurfaceOpticalPresentation({
+        optics,
+        descriptorOrRow: batch.descriptor
+      });
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);
       const renderOrder = renderOrderFromOpticalResponse(optics, batch.descriptor);
       const depthWriteFlag = renderDepthWriteFromOpticalResponse(optics, batch.descriptor) ? 1 : 0;
@@ -42467,6 +42544,7 @@ fn main(
         renderOrder,
         depthWriteFlag,
         transparencyClassId,
+        ...opticalPresentation,
         renderKey: batch.renderKey,
         resolution: effectiveResolution,
         isolation: config.isolation,
@@ -42498,7 +42576,12 @@ fn main(
         particleRadiusContinuitySurfaceSupportRadiusM:
           particleRadiusPolicy.surfaceSupportRadiusM ?? null,
         strength: (config.isolation + config.subtract) * radiusNorm * radiusNorm,
-        colorLinear: averageBatchColor(batch),
+        colorLinear: (
+          (Array.isArray(optics?.baseColorLinear) || ArrayBuffer.isView(optics?.baseColorLinear))
+          && optics.baseColorLinear.length >= 3
+        )
+          ? Array.from(optics.baseColorLinear).slice(0, 3)
+          : averageBatchColor(batch),
         status: 1
       };
     });

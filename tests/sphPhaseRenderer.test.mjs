@@ -135,6 +135,7 @@ import {
   residentSurfaceDrawPipelineKey,
   resolveRenderFieldSurfaceVisibility,
   resolveOpticalSurfaceVisibility,
+  closureDerivedSurfaceOpticalPresentation,
   shouldRetainResidentSurfaceDrawOverlay,
   createSphPhaseScene,
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
@@ -3817,6 +3818,51 @@ test('SPH renderer gates vapor geometry from derived optical depth and scatterin
   assert.equal(shownByDroplets.reason, 'derived-droplet-scattering-visible');
   assert.equal(liquid.visible, true);
   assert.equal(liquid.reason, 'non-vapor-surface');
+});
+
+test('SPH renderer publishes one closure-derived gas opacity contract for every consumer', () => {
+  const hydrogen = closureDerivedSurfaceOpticalPresentation({
+    optics: {
+      material: 'h2',
+      phase: 'gas',
+      opacity: 0,
+      opticalDepth: 5.8e-79,
+      scatteringCoefficientPerM: 0,
+      transmission: 1,
+      roughness: 0.4,
+      blocked: false,
+      provenance: { source: 'molecular-gas-electronic-band-absorption' }
+    },
+    descriptorOrRow: { material: 'h2', phase: 'gas', renderKey: 'h2' }
+  });
+  const condensedSteam = closureDerivedSurfaceOpticalPresentation({
+    optics: {
+      material: 'h2o',
+      phase: 'gas',
+      opacity: 0.62,
+      opticalDepth: 0.97,
+      scatteringCoefficientPerM: 3.2,
+      transmission: 0.38,
+      roughness: 1,
+      blocked: false,
+      provenance: { source: 'conserved-droplet-scattering' }
+    },
+    descriptorOrRow: { material: 'h2o', phase: 'gas', renderKey: 'steam' }
+  });
+  const unknownGas = closureDerivedSurfaceOpticalPresentation({
+    optics: { material: 'unknown', phase: 'gas', blocked: true },
+    descriptorOrRow: { material: 'unknown', phase: 'gas' }
+  });
+
+  assert.equal(hydrogen.opticalResponseAuthorityFlag, 1);
+  assert.equal(hydrogen.opticalResponseReady, true);
+  assert.equal(hydrogen.opticalVisibilityReason, 'derived-pure-vapor-optically-thin');
+  assert.equal(hydrogen.opticalEffectiveOpacity, 0);
+  assert.equal(condensedSteam.opticalVisibilityReason, 'derived-droplet-scattering-visible');
+  assert.equal(condensedSteam.opticalEffectiveOpacity, 0.62);
+  assert.equal(condensedSteam.opticalProvenanceSource, 'conserved-droplet-scattering');
+  assert.equal(unknownGas.opticalResponseAuthority, 'closure-blocked-gas-hidden');
+  assert.equal(unknownGas.opticalEffectiveOpacity, 0);
 });
 
 test('SPH resident render fields use hysteresis around the isosurface threshold', () => {

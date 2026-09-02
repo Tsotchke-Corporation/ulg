@@ -1081,7 +1081,21 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
       presentationQueueCompletionScope:
         'worker-offscreen-shared-device-queue-frame-proof',
       physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
-      physicsHostQueueFenceParticipation: null
+      physicsHostQueueFenceParticipation: null,
+      workerOwnedOpticalPresentation: {
+        schema: 'peercompute.ulg.worker-isosurface-optical-presentation.v0',
+        status: 'all-gas-surfaces-closure-governed',
+        gasSurfaceCount: 2,
+        closureGovernedGasSurfaceCount: 2,
+        visibleClosureGasSurfaceCount: 1,
+        opticallyThinHiddenGasSurfaceCount: 1,
+        allGasSurfacesClosureGoverned: true,
+        heuristicGasOpacityUsed: false,
+        opticalProvenanceSources: [
+          'molecular-gas-electronic-band-absorption',
+          'water-droplet-scattering'
+        ]
+      }
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -1090,6 +1104,23 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
   assert.equal(
     bridge.workerCanvasLastRenderedContent.presentationGeometry,
     ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+  );
+  assert.deepEqual(
+    bridge.workerCanvasLastRenderedContent.workerOwnedOpticalPresentation,
+    {
+      schema: 'peercompute.ulg.worker-isosurface-optical-presentation.v0',
+      status: 'all-gas-surfaces-closure-governed',
+      gasSurfaceCount: 2,
+      closureGovernedGasSurfaceCount: 2,
+      visibleClosureGasSurfaceCount: 1,
+      opticallyThinHiddenGasSurfaceCount: 1,
+      allGasSurfacesClosureGoverned: true,
+      heuristicGasOpacityUsed: false,
+      opticalProvenanceSources: [
+        'molecular-gas-electronic-band-absorption',
+        'water-droplet-scattering'
+      ]
+    }
   );
 
   const redrawReceipt = {

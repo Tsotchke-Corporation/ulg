@@ -71,6 +71,47 @@ function nonEmptyString(value) {
   return text || null;
 }
 
+function compactWorkerOwnedOpticalPresentation(value = null) {
+  if (
+    value?.schema
+      !== 'peercompute.ulg.worker-isosurface-optical-presentation.v0'
+  ) return null;
+  const count = (field) => {
+    const number = Number(value[field]);
+    return Number.isSafeInteger(number) && number >= 0 ? number : null;
+  };
+  const gasSurfaceCount = count('gasSurfaceCount');
+  const closureGovernedGasSurfaceCount = count(
+    'closureGovernedGasSurfaceCount'
+  );
+  const visibleClosureGasSurfaceCount = count(
+    'visibleClosureGasSurfaceCount'
+  );
+  const opticallyThinHiddenGasSurfaceCount = count(
+    'opticallyThinHiddenGasSurfaceCount'
+  );
+  if (
+    gasSurfaceCount == null
+    || closureGovernedGasSurfaceCount == null
+    || visibleClosureGasSurfaceCount == null
+    || opticallyThinHiddenGasSurfaceCount == null
+  ) return null;
+  return Object.freeze({
+    schema: value.schema,
+    status: nonEmptyString(value.status),
+    gasSurfaceCount,
+    closureGovernedGasSurfaceCount,
+    visibleClosureGasSurfaceCount,
+    opticallyThinHiddenGasSurfaceCount,
+    allGasSurfacesClosureGoverned:
+      value.allGasSurfacesClosureGoverned === true,
+    heuristicGasOpacityUsed: value.heuristicGasOpacityUsed === true,
+    opticalProvenanceSources: Array.isArray(value.opticalProvenanceSources)
+      ? value.opticalProvenanceSources.map(nonEmptyString).filter(Boolean)
+      : []
+  });
+}
+
 function workerPresentationPhysicsPrefixNotAttributed(receipt = null) {
   return Boolean(
     receipt?.physicsQueuePrefixCoverage
@@ -2919,7 +2960,11 @@ export function createUlgWorkerOffscreenPresentationBridge({
                     typeof contentReceipt.physicsHostQueueFenceParticipation
                       === 'boolean'
                       ? contentReceipt.physicsHostQueueFenceParticipation
-                      : null
+                      : null,
+                  workerOwnedOpticalPresentation:
+                    compactWorkerOwnedOpticalPresentation(
+                      contentReceipt.workerOwnedOpticalPresentation
+                    )
                 }
               : {}),
             ...(temporalMotionFrameProofReady

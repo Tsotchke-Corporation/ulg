@@ -124,6 +124,10 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let fresnel = pow(1.0 - max(dot(normal, view_direction), 0.0), 3.0);
   let transparency_class = uniforms.optical.x;
   let phase_id = uniforms.optical.y;
+  let closure_optics_authoritative = uniforms.optical.w > 0.5;
+  let closure_vapor_surface = closure_optics_authoritative
+    && ((transparency_class > 0.5 && transparency_class < 1.5)
+      || (phase_id > 2.5 && phase_id < 3.5));
   let emissive_temperature_k = uniforms.camera_emissive.w;
   let emissive_strength = clamp((emissive_temperature_k - 800.0) / 1500.0, 0.0, 2.5);
   var color = uniforms.color_roughness.rgb * diffuse;
@@ -132,14 +136,19 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
   color += blackbody_tint(emissive_temperature_k) * emissive_strength;
   var alpha = uniforms.grid_bias_alpha.w;
   if (transparency_class > 0.5 && transparency_class < 1.5) {
-    color = mix(color, vec3<f32>(0.88, 0.92, 0.96), 0.28 + fresnel * 0.34);
-    alpha *= 0.20 + 0.42 * fresnel;
+    if (!closure_optics_authoritative) {
+      color = mix(color, vec3<f32>(0.88, 0.92, 0.96), 0.28 + fresnel * 0.34);
+      alpha *= 0.20 + 0.42 * fresnel;
+    }
   } else if (transparency_class >= 1.5) {
     alpha *= 0.64 + 0.28 * fresnel;
   } else if (phase_id > 2.5 && phase_id < 3.5) {
-    alpha *= 0.34;
+    if (!closure_optics_authoritative) {
+      alpha *= 0.34;
+    }
   }
-  return vec4<f32>(max(color, vec3<f32>(0.0)), clamp(alpha, 0.015, 1.0));
+  let minimum_alpha = select(0.015, 0.0, closure_vapor_surface);
+  return vec4<f32>(max(color, vec3<f32>(0.0)), clamp(alpha, minimum_alpha, 1.0));
 }
 `;
 
@@ -169,6 +178,97 @@ function finiteVector(value, length) {
   }
   const vector = Array.from(value, Number);
   return vector.every(Number.isFinite) ? vector : null;
+}
+
+export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
+  frame = {},
+  surface = {}
+) {
+  const metadata = surface.metadata || {};
+  const transform = surface.translation?.positionTransform
+    || surface.descriptor?.positionTransform
+    || {};
+  const values = new Float32Array(36);
+  const viewProjectionMatrix = finiteVector(frame.viewProjectionMatrix, 16) || [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1
+  ];
+  values.set(viewProjectionMatrix, 0);
+  const origin = finiteVector(transform.originM, 3) || [0, 0, 0];
+  values.set(origin, 16);
+  values[19] = Number(transform.scaleM) || 1;
+  const gridBias = Number.isFinite(Number(transform.gridBias))
+    ? Number(transform.gridBias)
+    : -0.5;
+  values[20] = gridBias;
+  values[21] = gridBias;
+  values[22] = gridBias;
+  const transparencyClassId = Math.max(
+    0,
+    Number(metadata.transparencyClassId) || 0
+  );
+  const phaseId = Math.max(0, Number(metadata.phaseId) || 0);
+  const closureOpticsAuthoritative =
+    Number(metadata.opticalResponseAuthorityFlag) > 0;
+  const vaporSurface = (transparencyClassId > 0.5 && transparencyClassId < 1.5)
+    || (phaseId > 2.5 && phaseId < 3.5);
+  const effectiveOpacity = Number(metadata.opticalEffectiveOpacity);
+  values[23] = closureOpticsAuthoritative && vaporSurface
+    ? Math.min(1, Math.max(0, Number.isFinite(effectiveOpacity) ? effectiveOpacity : 0))
+    : 1;
+  const color = finiteVector(metadata.colorLinear, 3) || [0.72, 0.82, 0.94];
+  values.set(color, 24);
+  const opticalRoughness = Number(metadata.opticalRoughness);
+  values[27] = Number.isFinite(opticalRoughness)
+    ? Math.min(1, Math.max(0.05, opticalRoughness))
+    : (transparencyClassId > 0 ? 0.12 : 0.42);
+  values.set(finiteVector(frame.cameraPositionM, 3) || [0, 0, 0], 28);
+  values[31] = Math.max(0, Number(metadata.emissiveTemperatureK) || 0);
+  values[32] = transparencyClassId;
+  values[33] = phaseId;
+  values[34] = Number(metadata.depthWriteFlag) === 0 ? 0 : 1;
+  values[35] = closureOpticsAuthoritative ? 1 : 0;
+  return values;
+}
+
+export function summarizeWorkerOwnedIsosurfaceOpticalPresentation(
+  surfaces = []
+) {
+  const metadata = (Array.isArray(surfaces) ? surfaces : [])
+    .map((surface) => surface?.metadata ?? surface)
+    .filter(Boolean);
+  const gasRows = metadata.filter((row) => {
+    const transparencyClassId = Number(row.transparencyClassId) || 0;
+    const phaseId = Number(row.phaseId) || 0;
+    return (transparencyClassId > 0.5 && transparencyClassId < 1.5)
+      || (phaseId > 2.5 && phaseId < 3.5);
+  });
+  const closureRows = gasRows.filter(
+    (row) => Number(row.opticalResponseAuthorityFlag) > 0
+  );
+  const visibleRows = closureRows.filter(
+    (row) => Number(row.opticalEffectiveOpacity) > 0
+  );
+  return Object.freeze({
+    schema: 'peercompute.ulg.worker-isosurface-optical-presentation.v0',
+    status: gasRows.length === 0
+      ? 'no-gas-surfaces'
+      : (closureRows.length === gasRows.length
+        ? 'all-gas-surfaces-closure-governed'
+        : 'gas-surface-optical-authority-incomplete'),
+    gasSurfaceCount: gasRows.length,
+    closureGovernedGasSurfaceCount: closureRows.length,
+    visibleClosureGasSurfaceCount: visibleRows.length,
+    opticallyThinHiddenGasSurfaceCount: closureRows.length - visibleRows.length,
+    allGasSurfacesClosureGoverned:
+      gasRows.length > 0 && closureRows.length === gasRows.length,
+    heuristicGasOpacityUsed: gasRows.length > closureRows.length,
+    opticalProvenanceSources: [...new Set(
+      closureRows.map((row) => row.opticalProvenanceSource).filter(Boolean)
+    )].sort()
+  });
 }
 
 function compactError(error) {
@@ -574,34 +674,7 @@ export function createWorkerOwnedIsosurfacePresenter({
     }
   };
 
-  const surfaceUniformValues = (frame, surface) => {
-    const metadata = surface.metadata || {};
-    const transform = surface.translation?.positionTransform
-      || surface.descriptor?.positionTransform
-      || {};
-    const values = new Float32Array(36);
-    values.set(frame.viewProjectionMatrix, 0);
-    const origin = finiteVector(transform.originM, 3) || [0, 0, 0];
-    values.set(origin, 16);
-    values[19] = Number(transform.scaleM) || 1;
-    const gridBias = Number.isFinite(Number(transform.gridBias))
-      ? Number(transform.gridBias)
-      : -0.5;
-    values[20] = gridBias;
-    values[21] = gridBias;
-    values[22] = gridBias;
-    values[23] = 1;
-    const color = finiteVector(metadata.colorLinear, 3) || [0.72, 0.82, 0.94];
-    values.set(color, 24);
-    values[27] = Number(metadata.transparencyClassId) > 0 ? 0.12 : 0.42;
-    values.set(frame.cameraPositionM, 28);
-    values[31] = Math.max(0, Number(metadata.emissiveTemperatureK) || 0);
-    values[32] = Math.max(0, Number(metadata.transparencyClassId) || 0);
-    values[33] = Math.max(0, Number(metadata.phaseId) || 0);
-    values[34] = Number(metadata.depthWriteFlag) === 0 ? 0 : 1;
-    values[35] = 0;
-    return values;
-  };
+  const surfaceUniformValues = buildWorkerOwnedIsosurfaceSurfaceUniformValues;
 
   const renderFrame = async (frame, {
     viewProjectionMatrix = frame.viewProjectionMatrix,
@@ -752,6 +825,8 @@ export function createWorkerOwnedIsosurfacePresenter({
     const presentedAtMs = Number.isFinite(Number(opportunity.observedAtMs))
       ? Number(opportunity.observedAtMs)
       : nowMs();
+    const opticalPresentation =
+      summarizeWorkerOwnedIsosurfaceOpticalPresentation(frame.surfaces);
     const proof = Object.freeze({
       presentationFrameSchema:
         ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA,
@@ -781,7 +856,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       physicsQueuePrefixCoverage:
         ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
       physicsHostQueueFenceParticipation: null,
-      workerFramebufferEpoch: submittedFramebufferEpoch
+      workerFramebufferEpoch: submittedFramebufferEpoch,
+      workerOwnedOpticalPresentation: opticalPresentation
     });
     try {
       onFrameSubmitted?.({

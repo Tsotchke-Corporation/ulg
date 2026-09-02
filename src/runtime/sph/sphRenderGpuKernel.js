@@ -1865,6 +1865,45 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       opticalState: opticalState ? { ...opticalState } : null,
       opticalStateKey,
       opticalStateId,
+      // Renderer-neutral closure result. These values are presentation
+      // metadata (not field geometry), so they stay lossless across the
+      // worker request without consuming another storage binding or changing
+      // the 16-float surface-row ABI.
+      opticalResponseAuthorityFlag:
+        finiteNumber(descriptor.opticalResponseAuthorityFlag, 0) > 0 ? 1 : 0,
+      opticalResponseAuthority: descriptor.opticalResponseAuthority ?? null,
+      opticalResponseReady: descriptor.opticalResponseReady === true,
+      opticalVisibilityFlag:
+        finiteNumber(descriptor.opticalVisibilityFlag, 1) > 0 ? 1 : 0,
+      opticalVisibilityReason: descriptor.opticalVisibilityReason ?? null,
+      opticalOpacity: descriptor.opticalOpacity != null
+        && Number.isFinite(Number(descriptor.opticalOpacity))
+        ? clamp(Number(descriptor.opticalOpacity), 0, 1)
+        : null,
+      opticalEffectiveOpacity: descriptor.opticalEffectiveOpacity != null
+        && Number.isFinite(Number(descriptor.opticalEffectiveOpacity))
+        ? clamp(Number(descriptor.opticalEffectiveOpacity), 0, 1)
+        : null,
+      opticalDepth: descriptor.opticalDepth != null
+        && Number.isFinite(Number(descriptor.opticalDepth))
+        ? Math.max(0, Number(descriptor.opticalDepth))
+        : null,
+      opticalScatteringCoefficientPerM:
+        descriptor.opticalScatteringCoefficientPerM != null
+        && Number.isFinite(Number(descriptor.opticalScatteringCoefficientPerM))
+        ? Math.max(0, Number(descriptor.opticalScatteringCoefficientPerM))
+        : null,
+      opticalTransmission: descriptor.opticalTransmission != null
+        && Number.isFinite(Number(descriptor.opticalTransmission))
+        ? clamp(Number(descriptor.opticalTransmission), 0, 1)
+        : null,
+      opticalRoughness: descriptor.opticalRoughness != null
+        && Number.isFinite(Number(descriptor.opticalRoughness))
+        ? clamp(Number(descriptor.opticalRoughness), 0, 1)
+        : null,
+      opticalBlockedFlag:
+        finiteNumber(descriptor.opticalBlockedFlag, 0) > 0 ? 1 : 0,
+      opticalProvenanceSource: descriptor.opticalProvenanceSource ?? null,
       renderDomainId: Math.max(0, Math.round(finiteNumber(descriptor.renderDomainId, 0))),
       renderDomainKey: descriptor.renderDomainKey ?? renderDomainKeyForId(descriptor.renderDomainId),
       renderLayer: descriptor.renderLayer ?? renderPolicy.renderLayer,

@@ -6,8 +6,10 @@ import {
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SUPERSEDED_STATUS,
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_REQUEST_SCHEMA,
+  buildWorkerOwnedIsosurfaceSurfaceUniformValues,
   createWorkerOwnedIsosurfacePresenter,
-  resolveWorkerOwnedIsosurfaceAdmission
+  resolveWorkerOwnedIsosurfaceAdmission,
+  summarizeWorkerOwnedIsosurfaceOpticalPresentation
 } from '../src/services/workerOwnedIsosurfacePresenter.js';
 
 class GPUBuffer {
@@ -202,6 +204,74 @@ function validRetained() {
     sourceIdentityBuffer: new GPUBuffer()
   };
 }
+
+test('worker-owned isosurface uniforms use closure opacity and preserve the legacy fallback', () => {
+  const frame = {
+    viewProjectionMatrix: validRequest().viewProjectionMatrix,
+    cameraPositionM: [1, 2, 3]
+  };
+  const physicalHydrogen = buildWorkerOwnedIsosurfaceSurfaceUniformValues(frame, {
+    metadata: {
+      colorLinear: [1, 0.98, 0.96],
+      transparencyClassId: 1,
+      phaseId: 3,
+      opticalResponseAuthorityFlag: 1,
+      opticalEffectiveOpacity: 0,
+      opticalRoughness: 0.9,
+      depthWriteFlag: 0
+    }
+  });
+  const physicalSteam = buildWorkerOwnedIsosurfaceSurfaceUniformValues(frame, {
+    metadata: {
+      colorLinear: [0.88, 0.92, 0.96],
+      transparencyClassId: 1,
+      phaseId: 3,
+      opticalResponseAuthorityFlag: 1,
+      opticalEffectiveOpacity: 0.62,
+      opticalRoughness: 1,
+      depthWriteFlag: 0
+    }
+  });
+  const legacyGas = buildWorkerOwnedIsosurfaceSurfaceUniformValues(frame, {
+    metadata: {
+      colorLinear: [0.4, 0.8, 1],
+      transparencyClassId: 1,
+      phaseId: 3,
+      depthWriteFlag: 0
+    }
+  });
+
+  assert.equal(physicalHydrogen[23], 0);
+  assert.ok(Math.abs(physicalHydrogen[27] - 0.9) < 1e-6);
+  assert.equal(physicalHydrogen[35], 1);
+  assert.ok(Math.abs(physicalSteam[23] - 0.62) < 1e-6);
+  assert.equal(physicalSteam[35], 1);
+  assert.equal(legacyGas[23], 1);
+  assert.ok(Math.abs(legacyGas[27] - 0.12) < 1e-6);
+  assert.equal(legacyGas[35], 0);
+
+  const summary = summarizeWorkerOwnedIsosurfaceOpticalPresentation([
+    {
+      phaseId: 3,
+      transparencyClassId: 1,
+      opticalResponseAuthorityFlag: 1,
+      opticalEffectiveOpacity: 0,
+      opticalProvenanceSource: 'hydrogen-electronic-band'
+    },
+    {
+      phaseId: 3,
+      transparencyClassId: 1,
+      opticalResponseAuthorityFlag: 1,
+      opticalEffectiveOpacity: 0.62,
+      opticalProvenanceSource: 'water-droplet-scattering'
+    }
+  ]);
+  assert.equal(summary.status, 'all-gas-surfaces-closure-governed');
+  assert.equal(summary.gasSurfaceCount, 2);
+  assert.equal(summary.visibleClosureGasSurfaceCount, 1);
+  assert.equal(summary.opticallyThinHiddenGasSurfaceCount, 1);
+  assert.equal(summary.heuristicGasOpacityUsed, false);
+});
 
 test('worker-owned true-isosurface admission requires exact same-worker GPU authority', () => {
   const admission = resolveWorkerOwnedIsosurfaceAdmission({

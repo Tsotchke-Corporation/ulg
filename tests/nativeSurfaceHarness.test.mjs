@@ -5316,6 +5316,14 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
   );
   assert.match(
     sweepSource,
+    /workerOwnedOpticalPresentation:\s*rows\.workerOwnedOpticalPresentation == null/
+  );
+  assert.match(
+    sweepSource,
+    /gasSurfaceCount\) > 0[\s\S]*?allGasSurfacesClosureGoverned[\s\S]*?heuristicGasOpacityUsed/
+  );
+  assert.match(
+    sweepSource,
     /cadenceGatedPresetIds: \[\.\.\.particlePresentationPresetIds\]/
   );
   assert.match(

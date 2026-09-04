@@ -8871,6 +8871,9 @@ test('canonical exact-near consumers suppress legacy law-neighbor producers', as
       enableLawNeighborCandidates: true,
       enableCrossLevelCoupling: false,
       enablePressureInterfaceOwnerScope: false,
+      residentStepOptions: {
+        gasPressureMechanicsBoundaryEnabled: false
+      },
       spatialTransitionPolicy:
         SCHROEDER_SPATIAL_TRANSITION_POLICY_OBSERVED_COMPACT_DIAGNOSTIC,
       spatialTopologyTransitionRunner: async () => {

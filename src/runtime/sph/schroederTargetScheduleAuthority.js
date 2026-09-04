@@ -35,20 +35,20 @@ export const ULG_SCHROEDER_TARGET_SCHEDULE_WRITER_SET_SCHEMA =
 export const ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA =
   'peercompute.ulg.schroeder-target-schedule-provider-authority.v0';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_TABLE_FINGERPRINTS_SCHEMA =
-  'peercompute.ulg.schroeder-target-schedule-table-fingerprints.v2';
+  'peercompute.ulg.schroeder-target-schedule-table-fingerprints.v3';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA =
   'peercompute.ulg.schroeder-target-schedule-configuration.v0';
 export const ULG_SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_SCHEMA =
-  'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v2';
+  'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v3';
 
 export const SCHROEDER_TARGET_SCHEDULE_REQUEST_REVISION =
-  'main-thread-next-schedule-request-prospective-writer-transition-sha256-v7';
+  'main-thread-next-schedule-request-prospective-writer-transition-sha256-v9';
 export const SCHROEDER_TARGET_SCHEDULE_PROVIDER_REVISION =
   'worker-lane-assignment-only-classifier-options-sha256-v2';
 export const SCHROEDER_TARGET_SCHEDULE_TABLE_FINGERPRINT_REVISION =
-  'shader-bound-typed-array-content-layout-count-and-domain-sha256-v4';
+  'shader-bound-typed-array-content-layout-count-and-domain-sha256-v5';
 export const SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_REVISION =
-  'reaction-or-retained-product-gas-boundary-sha256-v2';
+  'reaction-or-retained-product-gas-boundary-sha256-v3';
 export const SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND =
   'reaction-dormant-watch-to-executing-reaction';
 export const SCHROEDER_PROSPECTIVE_RETAINED_PRODUCT_GAS_TRANSITION_KIND =
@@ -96,6 +96,8 @@ export const SCHROEDER_TARGET_SCHEDULE_ACTIVATION_FIELDS = Object.freeze([
   'phaseVolumeMigration',
   'twoLevelMechanics',
   'surfaceTension',
+  'particleGasLedgerActionable',
+  'retainedProductGasBoundaryActionable',
   'gasBoundaryActionable',
   'explicitVacuumAmbient',
   'phaseVolumeSidecars',
@@ -137,6 +139,7 @@ const TABLE_FINGERPRINT_KEYS = Object.freeze([
   'mechanicsRefreshOptions',
   'watchReactionTableSource',
   'watchReactionCount',
+  'watchGasProductCount',
   'watchReactionTableFingerprint',
   'watchReactionTableDomainFingerprint'
 ]);
@@ -476,6 +479,12 @@ function providerWriterIds(writerSet) {
     writerSet.phaseVolumeMigration ? 'phase-volume-migration' : null,
     writerSet.twoLevelMechanics ? 'two-level-mechanics' : null,
     writerSet.surfaceTension ? 'surface-tension' : null,
+    writerSet.particleGasLedgerActionable
+      ? 'particle-gas-ledger-actionable'
+      : null,
+    writerSet.retainedProductGasBoundaryActionable
+      ? 'retained-product-gas-boundary-actionable'
+      : null,
     writerSet.gasBoundaryActionable ? 'gas-boundary-actionable' : null,
     writerSet.mechanicsFieldViews ? 'mechanics-field-views' : null,
     writerSet.crossLevelCoupling ? 'cross-level-coupling' : null,
@@ -584,8 +593,14 @@ export function createSchroederTargetScheduleWriterSet({
   mechanicsOptions = null,
   hierarchyConfig = null,
   scheduleStepOptionsProvider = null,
+  particleGasLedgerActionable = false,
   retainedProductGasBoundaryActionable = false
 } = {}) {
+  if (typeof particleGasLedgerActionable !== 'boolean') {
+    throw new TypeError(
+      'particleGasLedgerActionable must be an exact boolean'
+    );
+  }
   if (typeof retainedProductGasBoundaryActionable !== 'boolean') {
     throw new TypeError(
       'retainedProductGasBoundaryActionable must be an exact boolean'
@@ -612,9 +627,31 @@ export function createSchroederTargetScheduleWriterSet({
     mechanics.enableTwoLevelMechanics === true
     || hierarchy.enableTwoLevelMechanics === true
   );
+  const authoritativeTwoLevelMechanics = Boolean(
+    twoLevelMechanics
+    && String(
+      mechanics.twoLevelMechanicsAuthority
+      ?? hierarchy.twoLevelMechanicsAuthority
+      ?? 'observation'
+    ).trim().toLowerCase() === 'authoritative'
+  );
   const thermal = Boolean(resident.thermalMaterialTable);
   const reaction = resident.reactionTable != null
     && !exactQuiescentReactionTable(resident.reactionTable);
+  const activeReactionGasProductCount = Number(
+    resident.reactionTable?.gasProductCount
+  );
+  if (
+    reaction
+    && Number.isSafeInteger(activeReactionGasProductCount)
+    && !Object.is(activeReactionGasProductCount, -0)
+    && activeReactionGasProductCount > 0
+    && particleGasLedgerActionable !== true
+  ) {
+    throw new TypeError(
+      'an executing gas-producing reaction table requires particleGasLedgerActionable authority'
+    );
+  }
   const lawQueue = Boolean(
     mechanics.enableLawQueue === true || hierarchy.enableLawQueue === true
   );
@@ -632,7 +669,7 @@ export function createSchroederTargetScheduleWriterSet({
   );
   const surfaceTension =
     resident.mechanicsMaterialTable?.surfaceTensionEnabled === true;
-  const gasBoundaryActionable = Boolean(
+  const nonParticleGasBoundaryActionable = Boolean(
     retainedProductGasBoundaryActionable
     || resident.gasPressureSummary?.gasCellField
     || resident.pressureInterfaceForceRowsBuffer
@@ -641,6 +678,25 @@ export function createSchroederTargetScheduleWriterSet({
     || resident.pressureInterfaceGridForceAdmission
     || resident.externalGaugePressureEnabled === true
   );
+  const unsupportedTwoLevelGasBoundaryActionable = Boolean(
+    resident.gasPressureSummary?.gasCellField
+    || resident.pressureInterfaceForceRowsBuffer
+    || resident.pressureInterfaceForceSolver
+    || resident.pressureInterfaceGasCellFieldImport
+    || resident.pressureInterfaceGridForceAdmission
+    || resident.externalGaugePressureEnabled === true
+  );
+  const gasBoundaryActionable = Boolean(
+    particleGasLedgerActionable || nonParticleGasBoundaryActionable
+  );
+  if (
+    authoritativeTwoLevelMechanics
+    && unsupportedTwoLevelGasBoundaryActionable
+  ) {
+    throw new TypeError(
+      'authoritative two-level mechanics accepts only exact particle/product gas-ledger sources, not legacy imported pressure or external-gauge authorities'
+    );
+  }
   const explicitVacuumAmbient = typeof resident.ambientPressurePa === 'number'
     && Number.isFinite(resident.ambientPressurePa)
     && resident.ambientPressurePa === 0;
@@ -661,7 +717,10 @@ export function createSchroederTargetScheduleWriterSet({
     || phaseVolumeMigration
     || twoLevelMechanics
     || surfaceTension
-    || gasBoundaryActionable
+    // Merely presenting the current particle family to the gas candidate
+    // classifier must not turn contact back on for contact-free fluids. Keep
+    // the historical escalation for retained/imported gas authorities.
+    || nonParticleGasBoundaryActionable
   );
   const contactSolverEscalatedForDynamicLaws = Boolean(
     !contactSolverRequested && dynamicLawActive
@@ -683,9 +742,16 @@ export function createSchroederTargetScheduleWriterSet({
     phaseVolumeMigration,
     twoLevelMechanics,
     surfaceTension,
+    particleGasLedgerActionable,
+    retainedProductGasBoundaryActionable,
     gasBoundaryActionable,
     explicitVacuumAmbient,
-    phaseVolumeSidecars: phaseVolumeMigration || twoLevelMechanics,
+    phaseVolumeSidecars: Boolean(
+      phaseVolumeMigration
+      || twoLevelMechanics
+      || particleGasLedgerActionable
+      || retainedProductGasBoundaryActionable
+    ),
     mechanicsFieldViews,
     crossLevelCoupling,
     mechanicsFieldPairV2,
@@ -719,7 +785,20 @@ export function exactSchroederTargetScheduleWriterSet(value) {
     || !value.writerIds.every((entry) => nonEmptyString(entry))
     || new Set(value.writerIds).size !== value.writerIds.length
     || value.phaseVolumeSidecars
-      !== (value.phaseVolumeMigration || value.twoLevelMechanics)
+      !== Boolean(
+        value.phaseVolumeMigration
+        || value.twoLevelMechanics
+        || value.particleGasLedgerActionable
+        || value.retainedProductGasBoundaryActionable
+      )
+    || (
+      value.particleGasLedgerActionable
+      && !value.gasBoundaryActionable
+    )
+    || (
+      value.retainedProductGasBoundaryActionable
+      && !value.gasBoundaryActionable
+    )
     || value.contactSolver !== (
       value.contactSolverRequested
       || value.contactSolverEscalatedForDynamicLaws
@@ -885,7 +964,11 @@ function authorizedWatchReactionTable(
     reactionCount,
     'authorized reaction watch table'
   );
-  return Object.freeze({ reactionCount, combined });
+  return Object.freeze({
+    reactionCount,
+    gasProductCount: reactionTable.gasProductCount,
+    combined
+  });
 }
 
 export function createSchroederTargetScheduleTableFingerprints({
@@ -994,6 +1077,8 @@ export function createSchroederTargetScheduleTableFingerprints({
     ),
     watchReactionTableSource,
     watchReactionCount: authorizedWatchTable?.reactionCount ?? null,
+    watchGasProductCount:
+      authorizedWatchTable?.gasProductCount ?? null,
     watchReactionTableFingerprint: authorizedWatchTable
       ? schroederAuthorityTypedArrayFingerprint(
           authorizedWatchTable.combined,
@@ -1045,12 +1130,24 @@ export function exactSchroederTargetScheduleTableFingerprints(value) {
       !== (value.watchReactionTableDomainFingerprint === null)
     || (value.watchReactionTableSource === null)
       !== (value.watchReactionCount === null)
+    || (value.watchReactionTableSource === null)
+      !== (value.watchGasProductCount === null)
     || (
       value.watchReactionCount !== null
       && (
         !Number.isSafeInteger(value.watchReactionCount)
         || value.watchReactionCount < 1
         || value.watchReactionCount
+          > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+      )
+    )
+    || (
+      value.watchGasProductCount !== null
+      && (
+        !Number.isSafeInteger(value.watchGasProductCount)
+        || Object.is(value.watchGasProductCount, -0)
+        || value.watchGasProductCount < 0
+        || value.watchGasProductCount
           > SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
       )
     )
@@ -1110,6 +1207,7 @@ export function createSchroederTargetScheduleConfiguration({
   mechanicsOptions = null,
   hierarchyConfig = null,
   scheduleStepOptionsProvider = null,
+  particleGasLedgerActionable = false,
   retainedProductGasBoundaryActionable = false
 } = {}) {
   const provider = exactSchroederTargetScheduleProviderAuthority(
@@ -1124,6 +1222,7 @@ export function createSchroederTargetScheduleConfiguration({
     mechanicsOptions,
     hierarchyConfig,
     scheduleStepOptionsProvider: provider,
+    particleGasLedgerActionable,
     retainedProductGasBoundaryActionable
   });
   const tableFingerprints = createSchroederTargetScheduleTableFingerprints({
@@ -1222,15 +1321,43 @@ function exactDormantReactionWatchToExecutingReactionTransition(
 
   const sourceWriters = source.writerSet;
   const targetWriters = target.writerSet;
+  const reactionCanCreateGas =
+    source.tableFingerprints.watchGasProductCount > 0;
+  const expectedTargetParticleGasLedgerActionable = Boolean(
+    sourceWriters.particleGasLedgerActionable
+    || reactionCanCreateGas
+  );
+  const particleGasActivation = Boolean(
+    sourceWriters.particleGasLedgerActionable === false
+    && expectedTargetParticleGasLedgerActionable
+  );
   const writerDelta = new Set([
     'reaction',
     'contactSolver',
     'contactSolverEscalatedForDynamicLaws',
+    ...(particleGasActivation
+      ? [
+          'particleGasLedgerActionable',
+          'gasBoundaryActionable',
+          'phaseVolumeSidecars',
+          'mechanicsFieldViews'
+        ]
+      : []),
     'writerIds'
   ]);
   if (
     sourceWriters.reaction !== false
     || targetWriters.reaction !== true
+    || targetWriters.particleGasLedgerActionable
+      !== expectedTargetParticleGasLedgerActionable
+    || (
+      particleGasActivation
+      && (
+        targetWriters.gasBoundaryActionable !== true
+        || targetWriters.phaseVolumeSidecars !== true
+        || targetWriters.mechanicsFieldViews !== true
+      )
+    )
     || !valuesEqualExcept(sourceWriters, targetWriters, writerDelta)
     || targetWriters.contactSolverRequested
       !== sourceWriters.contactSolverRequested
@@ -1246,6 +1373,7 @@ function exactDormantReactionWatchToExecutingReactionTransition(
     'reactionActivationWatchTable',
     'watchReactionTableSource',
     'watchReactionCount',
+    'watchGasProductCount',
     'watchReactionTableFingerprint',
     'watchReactionTableDomainFingerprint'
   ]);
@@ -1259,6 +1387,8 @@ function exactDormantReactionWatchToExecutingReactionTransition(
     || targetTables.watchReactionTableSource !== 'reaction-table'
     || !valuesEqualExcept(sourceTables, targetTables, tableDelta)
     || sourceTables.watchReactionCount !== targetTables.watchReactionCount
+    || sourceTables.watchGasProductCount
+      !== targetTables.watchGasProductCount
     || sourceTables.watchReactionTableFingerprint
       !== targetTables.watchReactionTableFingerprint
     || sourceTables.watchReactionTableDomainFingerprint
@@ -1310,14 +1440,17 @@ function exactRetainedProductGasBoundaryTransition(
   const sourceWriters = source.writerSet;
   const targetWriters = target.writerSet;
   const writerDelta = new Set([
+    'retainedProductGasBoundaryActionable',
     'gasBoundaryActionable',
+    'phaseVolumeSidecars',
     'mechanicsFieldViews',
     'writerIds'
   ]);
   if (
     sourceWriters.reaction !== true
     || targetWriters.reaction !== true
-    || sourceWriters.gasBoundaryActionable !== false
+    || sourceWriters.retainedProductGasBoundaryActionable !== false
+    || targetWriters.retainedProductGasBoundaryActionable !== true
     || targetWriters.gasBoundaryActionable !== true
     || targetWriters.mechanicsFieldViews !== true
     || !valuesEqualExcept(sourceWriters, targetWriters, writerDelta)
@@ -1640,7 +1773,12 @@ export function schroederTargetScheduleSuccessorGasBoundaryActionable({
       { allowUnmeasuredUncertainty: true }
     )
   ) return false;
-  if (authority.writerSet.gasBoundaryActionable === true) return true;
+  // Current particle candidates and retained product history are independent
+  // sources in the union. Only the dedicated retained bit may carry product
+  // authority; a particle-only gas writer can never masquerade as history.
+  if (authority.writerSet.retainedProductGasBoundaryActionable === true) {
+    return true;
+  }
   const transition = exactSchroederProspectiveDynamicLawTransition(
     authority.prospectiveDynamicLawTransition
   );
@@ -1750,7 +1888,7 @@ function targetAuthorityFingerprint(value) {
   } = value;
   return textFingerprint(
     stableToken(content),
-    'schroeder-target-schedule-authority-v6'
+    'schroeder-target-schedule-authority-v7'
   );
 }
 
@@ -1775,8 +1913,17 @@ export function createSchroederTargetScheduleAuthority({
   epochOptions = null,
   mechanicsOptions = null,
   hierarchyConfig = null,
-  scheduleStepOptionsProvider = null
+  scheduleStepOptionsProvider = null,
+  particleGasLedgerActionable = null
 } = {}) {
+  if (
+    particleGasLedgerActionable != null
+    && typeof particleGasLedgerActionable !== 'boolean'
+  ) {
+    throw new TypeError(
+      'particleGasLedgerActionable must be an exact boolean'
+    );
+  }
   const resolvedSourceScheduleId = nonEmptyString(sourceScheduleId);
   const resolvedTargetRequestId = nonEmptyString(targetScheduleRequestId);
   const resolvedLaneId = nonEmptyString(laneId);
@@ -1869,7 +2016,8 @@ export function createSchroederTargetScheduleAuthority({
       epochOptions,
       mechanicsOptions,
       hierarchyConfig,
-      scheduleStepOptionsProvider
+      scheduleStepOptionsProvider,
+      particleGasLedgerActionable
     ].some((value) => value != null)
   ) {
     throw new TypeError(
@@ -1888,12 +2036,14 @@ export function createSchroederTargetScheduleAuthority({
       mechanicsOptions,
       hierarchyConfig,
       scheduleStepOptionsProvider,
+      particleGasLedgerActionable: particleGasLedgerActionable === true,
       retainedProductGasBoundaryActionable
     });
   if (
     precomputedCurrentConfiguration
     && retainedProductGasBoundaryActionable
-    && precomputedCurrentConfiguration.writerSet.gasBoundaryActionable
+    && precomputedCurrentConfiguration.writerSet
+      .retainedProductGasBoundaryActionable
       !== true
   ) {
     throw new TypeError(

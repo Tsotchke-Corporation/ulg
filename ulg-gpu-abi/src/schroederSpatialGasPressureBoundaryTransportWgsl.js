@@ -44,6 +44,8 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION
 } from './schroederSpatialPhaseVolumeReceipt.js';
 import {
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_FIELD_ADMISSION_SEAL,
@@ -57,6 +59,16 @@ import {
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SOURCE_ADMISSION_SEAL,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_WORKGROUP_SIZE
 } from './schroederSpatialGasPressureBoundaryTransport.js';
+import {
+  SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD,
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_ADMITTED,
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_READY,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_MAGIC,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_VERSION,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE
+} from './schroederSpatialParentFieldView.js';
 import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_ACCUMULATOR
 } from './schroederSpatialPhaseVolumeTransport.js';
@@ -114,20 +126,20 @@ struct GasPressureBoundaryParams {
   dispatch_x: u32,
   dispatch_y: u32,
   dispatch_z: u32,
-  reserved0: u32,
-  reserved1: u32,
-  reserved2: u32,
-  reserved3: u32,
-  reserved4: u32,
-  reserved5: u32,
-  reserved6: u32,
-  reserved7: u32,
-  reserved8: u32,
-  reserved9: u32,
-  reserved10: u32,
-  reserved11: u32,
-  reserved12: u32,
-  reserved13: u32,
+  cross_level_mapping_mode: u32,
+  gas_selected_level: i32,
+  gas_grid_node_count: u32,
+  gas_grid_nx: u32,
+  gas_grid_ny: u32,
+  gas_grid_nz: u32,
+  gas_grid_cell_origin_x: i32,
+  gas_grid_cell_origin_y: i32,
+  gas_grid_cell_origin_z: i32,
+  gas_grid_spacing_m: f32,
+  parent_generation_id: u32,
+  parent_completion_ordinal: u32,
+  parent_field_capacity: u32,
+  parent_field_word_capacity: u32,
   reserved14: u32,
   reserved15: u32,
   reserved16: u32,
@@ -147,6 +159,7 @@ struct GasPressureBoundaryParams {
 @group(0) @binding(5) var<storage, read_write> scratch: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read> gas_authority_control: array<u32>;
 @group(0) @binding(7) var<uniform> params: GasPressureBoundaryParams;
+@group(0) @binding(8) var<storage, read> parent_field_view: array<u32>;
 
 const FIELD_HEADER_WORDS: u32 = ${u32(
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
@@ -310,6 +323,15 @@ const SCRATCH_STATUS: u32 = ${u32(
 const SCRATCH_SEAL: u32 = ${u32(
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW.seal
 )};
+// A rejected source transaction never initializes its first row. Preserve a
+// compact rejection discriminator in that otherwise-unused row status so a
+// caller-owned diagnostic copy can identify the failed authority without
+// changing the admitted scratch ABI or exposing private source buffers.
+const SCRATCH_SOURCE_REJECT_FIELD: u32 = 1u;
+const SCRATCH_SOURCE_REJECT_PHASE_VOLUME: u32 = 2u;
+const SCRATCH_SOURCE_REJECT_GAS_AUTHORITY: u32 = 3u;
+const SCRATCH_SOURCE_REJECT_GAS_DIRECTORY: u32 = 4u;
+const SCRATCH_SOURCE_REJECT_PARENT_FIELD: u32 = 5u;
 const MISSING_NO_LOAD: u32 = ${u32(
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD
 )};
@@ -331,6 +353,35 @@ const ACC_EXTERNAL_WORK: u32 = ${u32(
 const INVALID_CELL: u32 = 0xffffffffu;
 const PHASE_SOLID: u32 = 1u;
 const PHASE_LIQUID: u32 = 2u;
+const CROSS_LEVEL_SAME_LEVEL: u32 = ${u32(
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL
+)};
+const CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT: u32 = ${u32(
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+)};
+const PARENT_FIELD_MAGIC: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_MAGIC
+)};
+const PARENT_FIELD_VERSION: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_VERSION
+)};
+const PARENT_FIELD_READY_ADMITTED: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_READY
+    | SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_ADMITTED
+)};
+const PARENT_FIELD_HEADER_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS
+)};
+const PARENT_FIELD_KEY_WORDS: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS
+)};
+const PARENT_FIELD_MAX_FINE_EDGES: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD
+)};
+const PARENT_FIELD_WORKGROUP_SIZE: u32 = ${u32(
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE
+)};
+const PARENT_FIELD_WEIGHT_TOLERANCE: f32 = 9.5367431640625e-7;
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823466e+38;
@@ -358,6 +409,14 @@ fn scratch_store(word: u32, value: u32) {
 
 fn reject_scratch() {
   if (arrayLength(&scratch) > 2u) { atomicStore(&scratch[2u], 1u); }
+}
+
+fn reject_source_scratch(reason: u32) {
+  let status_word = SCRATCH_HEADER_WORDS + SCRATCH_STATUS;
+  if (status_word < arrayLength(&scratch)) {
+    scratch_store(status_word, reason);
+  }
+  reject_scratch();
 }
 
 fn scratch_header_seal() -> u32 {
@@ -461,28 +520,57 @@ fn field_receipt_offset() -> u32 {
   return field_load(30u) - FIELD_RECEIPT_WORDS;
 }
 
-fn exact_grid_shape() -> bool {
-  if (params.grid_nx == 0u || params.grid_ny == 0u || params.grid_nz == 0u) {
+fn exact_grid_shape_for(
+  node_count: u32,
+  nx: u32,
+  ny: u32,
+  nz: u32
+) -> bool {
+  if (nx == 0u || ny == 0u || nz == 0u) {
     return false;
   }
   // Chained exact division proves nx * ny * nz == node_count without ever
   // constructing an overflow-prone intermediate product.
-  if (params.grid_node_count % params.grid_nx != 0u) { return false; }
-  let after_x = params.grid_node_count / params.grid_nx;
-  if (after_x % params.grid_ny != 0u) { return false; }
-  return after_x / params.grid_ny == params.grid_nz
-    && params.grid_nx <= 0x7fffffffu
-    && params.grid_ny <= 0x7fffffffu
-    && params.grid_nz <= 0x7fffffffu;
+  if (node_count % nx != 0u) { return false; }
+  let after_x = node_count / nx;
+  if (after_x % ny != 0u) { return false; }
+  return after_x / ny == nz
+    && nx <= 0x7fffffffu
+    && ny <= 0x7fffffffu
+    && nz <= 0x7fffffffu;
+}
+
+fn exact_grid_shape() -> bool {
+  return exact_grid_shape_for(
+    params.grid_node_count,
+    params.grid_nx,
+    params.grid_ny,
+    params.grid_nz
+  );
+}
+
+fn cell_origins_admitted_for(
+  origin_x: i32,
+  origin_y: i32,
+  origin_z: i32,
+  nx: u32,
+  ny: u32,
+  nz: u32
+) -> bool {
+  return origin_x <= 2147483647 - i32(nx - 1u)
+    && origin_y <= 2147483647 - i32(ny - 1u)
+    && origin_z <= 2147483647 - i32(nz - 1u);
 }
 
 fn cell_origins_admitted() -> bool {
-  return params.grid_cell_origin_x
-      <= 2147483647 - i32(params.grid_nx - 1u)
-    && params.grid_cell_origin_y
-      <= 2147483647 - i32(params.grid_ny - 1u)
-    && params.grid_cell_origin_z
-      <= 2147483647 - i32(params.grid_nz - 1u);
+  return cell_origins_admitted_for(
+    params.grid_cell_origin_x,
+    params.grid_cell_origin_y,
+    params.grid_cell_origin_z,
+    params.grid_nx,
+    params.grid_ny,
+    params.grid_nz
+  );
 }
 
 fn field_receipt_admitted() -> bool {
@@ -545,6 +633,69 @@ fn phase_volume_receipt_admitted() -> bool {
   return receipt_control[59u] == expected_seal;
 }
 
+fn cross_level_params_admitted() -> bool {
+  if (!exact_grid_shape_for(
+      params.gas_grid_node_count,
+      params.gas_grid_nx,
+      params.gas_grid_ny,
+      params.gas_grid_nz
+    )
+    || !cell_origins_admitted_for(
+      params.gas_grid_cell_origin_x,
+      params.gas_grid_cell_origin_y,
+      params.gas_grid_cell_origin_z,
+      params.gas_grid_nx,
+      params.gas_grid_ny,
+      params.gas_grid_nz
+    )
+    || !(params.gas_grid_spacing_m > 0.0)
+    || !finite_f32(params.gas_grid_spacing_m)) {
+    return false;
+  }
+  if (params.cross_level_mapping_mode == CROSS_LEVEL_SAME_LEVEL) {
+    return params.gas_selected_level == params.selected_level
+      && params.gas_grid_node_count == params.grid_node_count
+      && params.gas_grid_nx == params.grid_nx
+      && params.gas_grid_ny == params.grid_ny
+      && params.gas_grid_nz == params.grid_nz
+      && params.gas_grid_cell_origin_x == params.grid_cell_origin_x
+      && params.gas_grid_cell_origin_y == params.grid_cell_origin_y
+      && params.gas_grid_cell_origin_z == params.grid_cell_origin_z
+      && bitcast<u32>(params.gas_grid_spacing_m)
+        == bitcast<u32>(params.grid_spacing_m)
+      && params.parent_generation_id == 0u
+      && params.parent_completion_ordinal == 0u
+      && params.parent_field_capacity == 0u
+      && params.parent_field_word_capacity == 0u;
+  }
+  if (
+    params.cross_level_mapping_mode
+      != CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT
+    || params.selected_level == 2147483647
+    || params.gas_selected_level != params.selected_level + 1
+    || bitcast<u32>(params.gas_grid_spacing_m)
+      != bitcast<u32>(params.grid_spacing_m * 2.0)
+    || params.grid_cell_origin_x == bitcast<i32>(0x80000000u)
+    || params.gas_grid_cell_origin_x == bitcast<i32>(0x80000000u)
+    || params.grid_cell_origin_x > 0
+    || params.gas_grid_cell_origin_x > 0
+    || params.grid_cell_origin_x != params.grid_cell_origin_y
+    || params.grid_cell_origin_y != params.grid_cell_origin_z
+    || params.gas_grid_cell_origin_x != params.gas_grid_cell_origin_y
+    || params.gas_grid_cell_origin_y != params.gas_grid_cell_origin_z
+    || params.parent_generation_id == 0u
+    || params.parent_generation_id != params.generation_id
+    || params.parent_completion_ordinal == 0u
+    || params.parent_field_capacity == 0u
+    || params.parent_field_word_capacity < PARENT_FIELD_HEADER_WORDS
+  ) {
+    return false;
+  }
+  return params.field_capacity <= 0xffffffffu / PARENT_FIELD_MAX_FINE_EDGES
+    && params.parent_field_capacity
+      > params.field_capacity * PARENT_FIELD_MAX_FINE_EDGES;
+}
+
 fn field_params_admitted() -> bool {
   if (params.transport_enabled != 1u) { return false; }
   if (params.missing_cell_policy != MISSING_NO_LOAD
@@ -558,7 +709,8 @@ fn field_params_admitted() -> bool {
   if (params.pressure_scale < 0.0
       || !finite_f32(params.pressure_scale)) { return false; }
   return params.grid_spacing_m > 0.0
-    && finite_f32(params.grid_spacing_m);
+    && finite_f32(params.grid_spacing_m)
+    && cross_level_params_admitted();
 }
 
 fn field_shape_admitted() -> bool {
@@ -706,37 +858,72 @@ fn field_row_valid(field_index: u32) -> bool {
     && field_load(state + 7u) > 0u;
 }
 
-fn gas_authority_admitted() -> bool {
-  if (arrayLength(&gas_authority_control) < 32u
-      || params.gas_pressure_cell_capacity > 0x15555555u
-      || params.gas_pressure_cell_stride_floats != GAS_PRESSURE_ROW_FLOATS
-      || arrayLength(&gas_pressure_rows)
-        < params.gas_pressure_cell_capacity * GAS_PRESSURE_ROW_FLOATS) {
-    return false;
+fn gas_authority_reject_reason() -> u32 {
+  if (arrayLength(&gas_authority_control) < 32u) { return 1u; }
+  if (params.gas_pressure_cell_capacity > 0x15555555u) { return 2u; }
+  if (params.gas_pressure_cell_stride_floats != GAS_PRESSURE_ROW_FLOATS) {
+    return 3u;
+  }
+  if (arrayLength(&gas_pressure_rows)
+      < params.gas_pressure_cell_capacity * GAS_PRESSURE_ROW_FLOATS) {
+    return 4u;
   }
   let status = gas_authority_control[2u];
   let live_count = gas_authority_control[8u];
   let cell_count = gas_authority_control[10u];
   let ready_count = gas_authority_control[11u];
   let empty = (status & GAS_AUTHORITY_EMPTY) != 0u;
-  return gas_authority_control[0u] == GAS_AUTHORITY_MAGIC
-    && gas_authority_control[1u] == GAS_AUTHORITY_VERSION
-    && (status & GAS_AUTHORITY_REQUIRED_READY) == GAS_AUTHORITY_REQUIRED_READY
-    && (status & GAS_AUTHORITY_FAILED) == 0u
-    && (status & GAS_AUTHORITY_UNKNOWN_STATUS_MASK) == 0u
-    && gas_authority_control[3u] == 0u
-    && gas_authority_control[4u] == params.gas_execution_generation
-    && gas_authority_control[5u] == params.gas_execution_generation
-    && gas_authority_control[6u] == params.gas_storage_generation
-    && gas_authority_control[7u] == params.gas_pressure_cell_capacity
-    && live_count <= params.gas_pressure_cell_capacity
-    && gas_authority_control[9u] == params.gas_directory_generation
-    && cell_count <= live_count
-    && ready_count == cell_count
-    && gas_authority_control[30u] == GAS_PRESSURE_ROW_FLOATS
-    && gas_authority_control[31u] == cell_count
-    && ((empty && live_count == 0u && cell_count == 0u)
-      || (!empty && live_count > 0u && cell_count > 0u));
+  if (gas_authority_control[0u] != GAS_AUTHORITY_MAGIC) { return 5u; }
+  if (gas_authority_control[1u] != GAS_AUTHORITY_VERSION) { return 6u; }
+  if ((status & GAS_AUTHORITY_REQUIRED_READY) != GAS_AUTHORITY_REQUIRED_READY) {
+    return 7u;
+  }
+  if ((status & GAS_AUTHORITY_FAILED) != 0u) { return 8u; }
+  if ((status & GAS_AUTHORITY_UNKNOWN_STATUS_MASK) != 0u) { return 9u; }
+  if (gas_authority_control[3u] != 0u) { return 10u; }
+  if (gas_authority_control[4u] != params.gas_execution_generation) {
+    return 11u;
+  }
+  if (gas_authority_control[5u] != params.gas_execution_generation) {
+    return 12u;
+  }
+  if (gas_authority_control[6u] != params.gas_storage_generation) {
+    return 13u;
+  }
+  if (gas_authority_control[7u] != params.gas_pressure_cell_capacity) {
+    return 14u;
+  }
+  if (live_count > params.gas_pressure_cell_capacity) { return 15u; }
+  if (gas_authority_control[9u] != params.gas_directory_generation) {
+    return 16u;
+  }
+  if (cell_count > live_count) { return 17u; }
+  if (ready_count != cell_count) { return 18u; }
+  if (gas_authority_control[30u] != GAS_PRESSURE_ROW_FLOATS) { return 19u; }
+  if (gas_authority_control[31u] != cell_count) { return 20u; }
+  if (!((empty && live_count == 0u && cell_count == 0u)
+      || (!empty && live_count > 0u && cell_count > 0u))) {
+    return 21u;
+  }
+  return 0u;
+}
+
+fn gas_authority_admitted() -> bool {
+  return gas_authority_reject_reason() == 0u;
+}
+
+fn reject_gas_authority_scratch(reason: u32) {
+  let row = SCRATCH_HEADER_WORDS;
+  if (row + SCRATCH_ROW_WORDS <= arrayLength(&scratch)
+      && arrayLength(&gas_authority_control) >= 12u) {
+    // Rejected source rows are never initialized. Mirror only the compact
+    // public control prefix needed to explain the rejection; pressure rows and
+    // directory contents remain private to the producer.
+    for (var word = 0u; word < 10u; word = word + 1u) {
+      scratch_store(row + word, gas_authority_control[word + 2u]);
+    }
+  }
+  reject_source_scratch(0x300u + reason);
 }
 
 fn gas_directory_admitted() -> bool {
@@ -809,6 +996,162 @@ fn gas_inputs_admitted() -> bool {
   return gas_authority_admitted() && gas_directory_admitted();
 }
 
+fn parent_dispatch_admitted(offset: u32, invocation_count: u32) -> bool {
+  let x = parent_field_view[offset];
+  let y = parent_field_view[offset + 1u];
+  let z = parent_field_view[offset + 2u];
+  if (invocation_count == 0u) {
+    return x == 0u && y == 0u && z == 0u;
+  }
+  let group_count = invocation_count / PARENT_FIELD_WORKGROUP_SIZE + select(
+    0u,
+    1u,
+    invocation_count % PARENT_FIELD_WORKGROUP_SIZE != 0u
+  );
+  if (x == 0u || y == 0u || z != 1u || x > group_count) { return false; }
+  return y == group_count / x + select(0u, 1u, group_count % x != 0u);
+}
+
+fn parent_field_view_admitted() -> bool {
+  if (params.cross_level_mapping_mode == CROSS_LEVEL_SAME_LEVEL) {
+    return true;
+  }
+  if (
+    params.cross_level_mapping_mode
+      != CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT
+    || params.parent_field_word_capacity > arrayLength(&parent_field_view)
+    || arrayLength(&parent_field_view) < PARENT_FIELD_HEADER_WORDS
+  ) {
+    return false;
+  }
+  let fine_capacity = params.field_capacity;
+  if (fine_capacity > 0xffffffffu / PARENT_FIELD_MAX_FINE_EDGES) {
+    return false;
+  }
+  let edge_capacity = fine_capacity * PARENT_FIELD_MAX_FINE_EDGES;
+  if (params.parent_field_capacity <= edge_capacity) { return false; }
+  let coarse_capacity = params.parent_field_capacity - edge_capacity;
+  if (
+    params.parent_field_capacity
+      > (0xffffffffu - PARENT_FIELD_HEADER_WORDS) / PARENT_FIELD_KEY_WORDS
+  ) {
+    return false;
+  }
+  let parent_key_offset = PARENT_FIELD_HEADER_WORDS;
+  let fine_edge_count_offset = parent_key_offset
+    + params.parent_field_capacity * PARENT_FIELD_KEY_WORDS;
+  if (fine_capacity > 0xffffffffu - fine_edge_count_offset) { return false; }
+  let fine_edge_offset_offset = fine_edge_count_offset + fine_capacity;
+  if (fine_capacity + 1u > 0xffffffffu - fine_edge_offset_offset) {
+    return false;
+  }
+  let fine_edge_parent_offset = fine_edge_offset_offset + fine_capacity + 1u;
+  if (edge_capacity > 0xffffffffu - fine_edge_parent_offset) { return false; }
+  let fine_edge_weight_offset = fine_edge_parent_offset + edge_capacity;
+  if (edge_capacity > 0xffffffffu - fine_edge_weight_offset) { return false; }
+  let coarse_native_map_offset = fine_edge_weight_offset + edge_capacity;
+  if (coarse_capacity > 0xffffffffu - coarse_native_map_offset) { return false; }
+  let exact_word_capacity = coarse_native_map_offset + coarse_capacity;
+  let fine_count = parent_field_view[35u];
+  let coarse_count = parent_field_view[36u];
+  let parent_count = parent_field_view[37u];
+  let edge_count = parent_field_view[38u];
+  let expected_candidate_count =
+    fine_count * PARENT_FIELD_MAX_FINE_EDGES + coarse_count;
+  let emitted_candidate_count = edge_count + coarse_count;
+  let expected_unique_count = parent_count + select(
+    0u,
+    1u,
+    expected_candidate_count > emitted_candidate_count
+  );
+  let weight_residual = bitcast<f32>(parent_field_view[42u]);
+  let first_moment_residual = bitcast<f32>(parent_field_view[43u]);
+  if (
+    parent_field_view[0u] != PARENT_FIELD_MAGIC
+    || parent_field_view[1u] != PARENT_FIELD_VERSION
+    || parent_field_view[2u] != PARENT_FIELD_READY_ADMITTED
+    || parent_field_view[3u] != params.parent_generation_id
+    || parent_field_view[3u] != params.generation_id
+  ) {
+    return false;
+  }
+  for (var word = 4u; word <= 15u; word = word + 1u) {
+    if (parent_field_view[word] != field_load(word)) { return false; }
+  }
+  if (
+    parent_field_view[16u] != bitcast<u32>(params.selected_level)
+    || parent_field_view[17u] != bitcast<u32>(params.gas_selected_level)
+    || parent_field_view[18u] != params.grid_node_count
+    || parent_field_view[19u] != params.gas_grid_node_count
+    || parent_field_view[20u] != params.grid_nx
+    || parent_field_view[21u] != params.grid_ny
+    || parent_field_view[22u] != params.grid_nz
+    || parent_field_view[23u] != params.gas_grid_nx
+    || parent_field_view[24u] != params.gas_grid_ny
+    || parent_field_view[25u] != params.gas_grid_nz
+    || parent_field_view[26u] != u32(-params.grid_cell_origin_x)
+    || parent_field_view[27u] != u32(-params.gas_grid_cell_origin_x)
+    || parent_field_view[28u] != bitcast<u32>(params.grid_spacing_m)
+    || parent_field_view[29u] != bitcast<u32>(params.gas_grid_spacing_m)
+    || parent_field_view[30u] != fine_capacity
+    || parent_field_view[31u] != coarse_capacity
+    || parent_field_view[32u] != params.parent_field_capacity
+    || parent_field_view[33u] != params.parent_field_capacity
+    || parent_field_view[34u] != edge_capacity
+    || fine_count != field_load(34u)
+    || fine_count > fine_capacity
+    || coarse_count > coarse_capacity
+    || parent_count > params.parent_field_capacity
+    || edge_count > edge_capacity
+    || parent_count > emitted_candidate_count
+    || parent_field_view[39u] != 0u
+    || parent_field_view[40u] != 0u
+    || parent_field_view[41u] != 0u
+    || weight_residual < 0.0
+    || !finite_f32(weight_residual)
+    || weight_residual > PARENT_FIELD_WEIGHT_TOLERANCE
+    || first_moment_residual < 0.0
+    || !finite_f32(first_moment_residual)
+    || parent_field_view[44u] != params.parent_completion_ordinal
+    || parent_field_view[45u] == 0u
+    || parent_field_view[46u] != params.field_completion_ordinal
+    || parent_field_view[47u] == 0u
+    || parent_field_view[48u] != parent_key_offset
+    || parent_field_view[49u] != PARENT_FIELD_KEY_WORDS
+    || parent_field_view[50u] != fine_edge_count_offset
+    || parent_field_view[51u] != fine_edge_offset_offset
+    || parent_field_view[52u] != fine_edge_parent_offset
+    || parent_field_view[53u] != fine_edge_weight_offset
+    || parent_field_view[54u] != coarse_native_map_offset
+    || parent_field_view[55u] != exact_word_capacity
+    || parent_field_view[56u] != params.parent_field_word_capacity
+    || params.parent_field_word_capacity != exact_word_capacity
+    || parent_field_view[57u] != params.parent_generation_id
+    || parent_field_view[58u] != expected_candidate_count
+    || parent_field_view[59u] != expected_unique_count
+    || !parent_dispatch_admitted(60u, parent_count)
+    || parent_field_view[63u] != params.parent_completion_ordinal
+    || !parent_dispatch_admitted(64u, fine_count)
+    || parent_field_view[67u] != 2u
+    || !parent_dispatch_admitted(68u, coarse_count)
+    || parent_field_view[71u] != 0u
+    || parent_field_view[72u] != emitted_candidate_count
+    || parent_field_view[73u] != coarse_count
+    || parent_field_view[74u] != edge_count
+    || parent_field_view[75u] != 1u
+    || parent_field_view[76u] != PARENT_FIELD_MAX_FINE_EDGES
+    || parent_field_view[77u] != exact_word_capacity
+    || parent_field_view[78u] != 0u
+    || parent_field_view[79u] != 0u
+    || parent_field_view[fine_edge_offset_offset] != 0u
+    || parent_field_view[fine_edge_offset_offset + fine_count] != edge_count
+  ) {
+    return false;
+  }
+  return fine_count == 0u
+    || (parent_count > 0u && edge_count >= fine_count);
+}
+
 fn signed_order_key(value: i32) -> u32 {
   return bitcast<u32>(value) ^ 0x80000000u;
 }
@@ -848,19 +1191,51 @@ fn find_gas_cell(sought: array<u32, 5>) -> u32 {
   return INVALID_CELL;
 }
 
-fn node_cell_key(dense_node: u32) -> array<u32, 5> {
-  let yz = params.grid_ny * params.grid_nz;
+fn grid_node_cell_key(
+  dense_node: u32,
+  level: i32,
+  grid_ny: u32,
+  grid_nz: u32,
+  origin_x: i32,
+  origin_y: i32,
+  origin_z: i32
+) -> array<u32, 5> {
+  let yz = grid_ny * grid_nz;
   let x = dense_node / yz;
   let remainder = dense_node - x * yz;
-  let y = remainder / params.grid_nz;
-  let z = remainder - y * params.grid_nz;
+  let y = remainder / grid_nz;
+  let z = remainder - y * grid_nz;
   var key: array<u32, 5>;
   key[0u] = params.chart_id;
-  key[1u] = signed_order_key(params.selected_level);
-  key[2u] = signed_order_key(params.grid_cell_origin_x + i32(x));
-  key[3u] = signed_order_key(params.grid_cell_origin_y + i32(y));
-  key[4u] = signed_order_key(params.grid_cell_origin_z + i32(z));
+  key[1u] = signed_order_key(level);
+  key[2u] = signed_order_key(origin_x + i32(x));
+  key[3u] = signed_order_key(origin_y + i32(y));
+  key[4u] = signed_order_key(origin_z + i32(z));
   return key;
+}
+
+fn node_cell_key(dense_node: u32) -> array<u32, 5> {
+  return grid_node_cell_key(
+    dense_node,
+    params.selected_level,
+    params.grid_ny,
+    params.grid_nz,
+    params.grid_cell_origin_x,
+    params.grid_cell_origin_y,
+    params.grid_cell_origin_z
+  );
+}
+
+fn parent_node_cell_key(dense_node: u32) -> array<u32, 5> {
+  return grid_node_cell_key(
+    dense_node,
+    params.gas_selected_level,
+    params.gas_grid_ny,
+    params.gas_grid_nz,
+    params.gas_grid_cell_origin_x,
+    params.gas_grid_cell_origin_y,
+    params.gas_grid_cell_origin_z
+  );
 }
 
 fn gas_cell_pressure(cell_index: u32, sought: array<u32, 5>) -> vec3<f32> {
@@ -969,7 +1344,7 @@ fn finalize_scratch_row(field_index: u32) {
   scratch_store(row + SCRATCH_SEAL, scratch_row_seal(field_index));
 }
 
-fn stage_node(begin: u32, end: u32) -> bool {
+fn stage_same_level_node(begin: u32, end: u32) -> bool {
   let node = field_load(field_key(begin));
   var condensed_volume = 0.0;
   var condensed_gradient = vec3<f32>(0.0);
@@ -1059,6 +1434,144 @@ fn stage_node(begin: u32, end: u32) -> bool {
   return true;
 }
 
+fn stage_fine_parent_field(field_index: u32) -> bool {
+  let fine_edge_count_offset = parent_field_view[50u];
+  let fine_edge_offset_offset = parent_field_view[51u];
+  let fine_edge_parent_offset = parent_field_view[52u];
+  let fine_edge_weight_offset = parent_field_view[53u];
+  let parent_key_offset = parent_field_view[48u];
+  let declared_count = parent_field_view[fine_edge_count_offset + field_index];
+  let edge_begin = parent_field_view[fine_edge_offset_offset + field_index];
+  let edge_end = parent_field_view[fine_edge_offset_offset + field_index + 1u];
+  if (
+    declared_count == 0u
+    || declared_count > PARENT_FIELD_MAX_FINE_EDGES
+    || edge_end < edge_begin
+    || edge_end - edge_begin != declared_count
+    || edge_end > parent_field_view[38u]
+  ) {
+    return false;
+  }
+  let fine_key = field_key(field_index);
+  var weight_sum = 0.0;
+  var effective_gauge_pa = 0.0;
+  for (var edge = edge_begin; edge < edge_end; edge = edge + 1u) {
+    let parent_index = parent_field_view[fine_edge_parent_offset + edge];
+    if (parent_index >= parent_field_view[37u]) { return false; }
+    for (var previous = edge_begin; previous < edge; previous = previous + 1u) {
+      if (parent_field_view[fine_edge_parent_offset + previous] == parent_index) {
+        return false;
+      }
+    }
+    let parent_key = parent_key_offset + parent_index * PARENT_FIELD_KEY_WORDS;
+    let parent_dense_node = parent_field_view[parent_key];
+    if (
+      parent_dense_node >= params.gas_grid_node_count
+      || parent_field_view[parent_key + 1u] != field_load(fine_key + 1u)
+      || parent_field_view[parent_key + 2u] != field_load(fine_key + 2u)
+      || parent_field_view[parent_key + 3u] != field_load(fine_key + 3u)
+    ) {
+      return false;
+    }
+    let weight = bitcast<f32>(
+      parent_field_view[fine_edge_weight_offset + edge]
+    );
+    if (!(weight > 0.0) || !finite_f32(weight)) { return false; }
+    weight_sum = weight_sum + weight;
+    let sought = parent_node_cell_key(parent_dense_node);
+    let gas_cell = find_gas_cell(sought);
+    let pressure_sample = gas_cell_pressure(gas_cell, sought);
+    if (pressure_sample.y == 0.0) {
+      if (params.missing_cell_policy == MISSING_FAIL_CLOSED) { return false; }
+      if (params.missing_cell_policy != MISSING_NO_LOAD) { return false; }
+      continue;
+    }
+    if (pressure_sample.z == 0.0) { return false; }
+    let parent_gauge_pa = pressure_sample.x - params.ambient_pressure_pa;
+    if (!finite_f32(parent_gauge_pa)) { return false; }
+    effective_gauge_pa = effective_gauge_pa + weight * parent_gauge_pa;
+  }
+  if (
+    !finite_f32(weight_sum)
+    || abs(weight_sum - 1.0) > PARENT_FIELD_WEIGHT_TOLERANCE
+    || !finite_f32(effective_gauge_pa)
+  ) {
+    return false;
+  }
+  let row = scratch_row(field_index);
+  let mass = bitcast<f32>(scratch_load(row + SCRATCH_MASS));
+  let impulse_ns = params.pressure_scale
+    * effective_gauge_pa * field_gradient(field_index) * params.dt;
+  let initial_velocity = vec3<f32>(
+    bitcast<f32>(scratch_load(row + SCRATCH_VELOCITY_X)),
+    bitcast<f32>(scratch_load(row + SCRATCH_VELOCITY_Y)),
+    bitcast<f32>(scratch_load(row + SCRATCH_VELOCITY_Z))
+  );
+  let next_velocity = initial_velocity + impulse_ns / mass;
+  let external_impulse = vec3<f32>(
+    bitcast<f32>(scratch_load(row + SCRATCH_EXTERNAL_X)),
+    bitcast<f32>(scratch_load(row + SCRATCH_EXTERNAL_Y)),
+    bitcast<f32>(scratch_load(row + SCRATCH_EXTERNAL_Z))
+  ) + impulse_ns;
+  let initial_work = bitcast<f32>(scratch_load(row + SCRATCH_EXTERNAL_WORK));
+  let kinetic_before = 0.5 * mass * dot(initial_velocity, initial_velocity);
+  let kinetic_after = 0.5 * mass * dot(next_velocity, next_velocity);
+  let external_work = initial_work + kinetic_after - kinetic_before;
+  if (
+    !finite_vec3(impulse_ns)
+    || !finite_vec3(next_velocity)
+    || !finite_vec3(external_impulse)
+    || !finite_f32(external_work)
+  ) {
+    return false;
+  }
+  scratch_store(row + SCRATCH_VELOCITY_X, bitcast<u32>(next_velocity.x));
+  scratch_store(row + SCRATCH_VELOCITY_Y, bitcast<u32>(next_velocity.y));
+  scratch_store(row + SCRATCH_VELOCITY_Z, bitcast<u32>(next_velocity.z));
+  scratch_store(row + SCRATCH_EXTERNAL_X, bitcast<u32>(external_impulse.x));
+  scratch_store(row + SCRATCH_EXTERNAL_Y, bitcast<u32>(external_impulse.y));
+  scratch_store(row + SCRATCH_EXTERNAL_Z, bitcast<u32>(external_impulse.z));
+  scratch_store(row + SCRATCH_EXTERNAL_WORK, bitcast<u32>(external_work));
+  scratch_store(row + SCRATCH_GAUGE, bitcast<u32>(effective_gauge_pa));
+  if (!scratch_row_numeric_valid(field_index)) { return false; }
+  finalize_scratch_row(field_index);
+  return true;
+}
+
+fn stage_fine_parent_node(begin: u32, end: u32) -> bool {
+  let node = field_load(field_key(begin));
+  for (var field_index = begin; field_index < end; field_index = field_index + 1u) {
+    if (!field_row_valid(field_index)
+        || !scratch_row_has_status(field_index, SCRATCH_ROW_INITIALIZED)
+        || !scratch_row_numeric_valid(field_index)
+        || field_load(field_key(field_index)) != node) {
+      return false;
+    }
+  }
+  for (var field_index = begin; field_index < end; field_index = field_index + 1u) {
+    let phase = field_load(field_key(field_index) + 1u);
+    if (phase == PHASE_SOLID || phase == PHASE_LIQUID) {
+      if (!stage_fine_parent_field(field_index)) { return false; }
+    } else {
+      finalize_scratch_row(field_index);
+    }
+  }
+  return true;
+}
+
+fn stage_node(begin: u32, end: u32) -> bool {
+  if (params.cross_level_mapping_mode == CROSS_LEVEL_SAME_LEVEL) {
+    return stage_same_level_node(begin, end);
+  }
+  if (
+    params.cross_level_mapping_mode
+      == CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT
+  ) {
+    return stage_fine_parent_node(begin, end);
+  }
+  return false;
+}
+
 // Static authorities are authenticated once on the GPU before the row
 // transaction. The sealed scratch flags are queue-ordered proof for all later
 // passes, avoiding both host readback and O(N) repetition of static checks.
@@ -1090,10 +1603,25 @@ fn prevalidate_source_boundary_transport(
 ) {
   let field_index = capacity_linear_invocation(local_id, workgroup_id);
   if (field_index != 0u) { return; }
-  if (!scratch_field_prevalidated_admitted()
-      || !phase_volume_receipt_admitted()
-      || !gas_inputs_admitted()) {
-    reject_scratch();
+  if (!scratch_field_prevalidated_admitted()) {
+    reject_source_scratch(SCRATCH_SOURCE_REJECT_FIELD);
+    return;
+  }
+  if (!phase_volume_receipt_admitted()) {
+    reject_source_scratch(SCRATCH_SOURCE_REJECT_PHASE_VOLUME);
+    return;
+  }
+  let gas_authority_reason = gas_authority_reject_reason();
+  if (gas_authority_reason != 0u) {
+    reject_gas_authority_scratch(gas_authority_reason);
+    return;
+  }
+  if (!gas_directory_admitted()) {
+    reject_source_scratch(SCRATCH_SOURCE_REJECT_GAS_DIRECTORY);
+    return;
+  }
+  if (!parent_field_view_admitted()) {
+    reject_source_scratch(SCRATCH_SOURCE_REJECT_PARENT_FIELD);
     return;
   }
   scratch_store(10u, SCRATCH_SOURCE_ADMISSION_SEAL);

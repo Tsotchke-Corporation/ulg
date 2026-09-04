@@ -4840,13 +4840,15 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
   let generation;
   try {
     generation = await generationRunner({
-      // Phase-volume moment/receipt sidecars exist to serve phase-volume
-      // migration/transport. With migration disabled they have no consumer,
+      // Phase-volume moment/receipt sidecars serve phase-volume transport and
+      // the exact gas free-volume denominator. With neither consumer active,
       // and at bulk capacities their field-scale arenas are the largest
       // allocations in the whole generation (their first 262144-capacity
       // construction wedged the lane before this gate).
       phaseVolumeSidecarsEnabled:
-        data.enablePhaseVolumeMigration === true || authoritativeTwoLevel,
+        data.phaseVolumeSidecarsRequired === true
+        || data.enablePhaseVolumeMigration === true
+        || authoritativeTwoLevel,
       // Field views are skipped only when the schedule proves no field-mode
       // consumer exists (see epochOptionsForStep); default is to build.
       mechanicsFieldViewsEnabled: data.mechanicsFieldViewsRequired !== false,
@@ -6176,6 +6178,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // when stageMechanicsTraceEnabled was explicitly requested.
     stageMechanicsTraceRequested:
       residentStepOptions.stageMechanicsTraceEnabled === true,
+    canonicalSpatialAuthorityTraceRequested:
+      residentStepOptions.stageMechanicsTraceEnabled === true
+      || residentStepOptions.observeCanonicalSpatialAuthority === true,
     stageMechanicsTrace: residentStep.stageMechanicsTrace ?? null,
     canonicalSpatialAuthorityTrace:
       residentStep.canonicalSpatialAuthorityTrace ?? null,
@@ -6590,6 +6595,76 @@ function exactWorkerScheduleParticleFamilyLineage({
   return SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.every(
     (field) => sph[field] === mlsMpm[field]
   ) ? sph : null;
+}
+
+function exactWorkerParticleGasLedgerCandidateSource({
+  lane = null,
+  device = null
+} = {}) {
+  const sphUpload = lane?.sphParticleUpload ?? null;
+  const mlsMpmUpload = lane?.mlsMpmParticleUpload ?? null;
+  const particleCount = Number(sphUpload?.particleCount);
+  const stateStrideBytes =
+    SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const thermoStrideBytes =
+    SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  // The fixed-schema Tier-0 ping-pong descriptor predates explicit stride
+  // fields. Absence means the schema stride; a present contradictory value
+  // still fails closed.
+  const declaredStateStrideBytes = Number(
+    sphUpload?.stateStrideBytes ?? stateStrideBytes
+  );
+  const declaredThermoStrideBytes = Number(
+    sphUpload?.thermoStrideBytes ?? thermoStrideBytes
+  );
+  const stateByteLength = particleCount * stateStrideBytes;
+  const thermoByteLength = particleCount * thermoStrideBytes;
+  const declaredStateByteLength = Number(sphUpload?.stateBufferByteLength);
+  const declaredThermoByteLength = Number(sphUpload?.thermoBufferByteLength);
+  const stateBuffer = sphUpload?.stateBuffer ?? null;
+  const thermoBuffer = sphUpload?.thermoBuffer ?? null;
+  return Boolean(
+    device
+    && sphUpload?.schema === ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && sphUpload?.status === 'webgpu-uploaded'
+    && sphUpload?.destroyed !== true
+    && mlsMpmUpload?.schema === ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    && mlsMpmUpload?.status === 'webgpu-uploaded'
+    && mlsMpmUpload?.destroyed !== true
+    && exactWorkerScheduleParticleFamilyLineage({
+      sphParticleUpload: sphUpload,
+      mlsMpmParticleUpload: mlsMpmUpload
+    })
+    && Number.isSafeInteger(particleCount)
+    && particleCount > 0
+    && particleCount <= SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT
+    && Number(mlsMpmUpload.particleCount) === particleCount
+    && Number(lane?.sphParticleState?.particleCount) === particleCount
+    && Number(lane?.mlsMpmParticleState?.particleCount) === particleCount
+    && declaredStateStrideBytes === stateStrideBytes
+    && declaredThermoStrideBytes === thermoStrideBytes
+    && Number.isSafeInteger(declaredStateByteLength)
+    && declaredStateByteLength >= stateByteLength
+    && declaredStateByteLength % stateStrideBytes === 0
+    && Number.isSafeInteger(declaredThermoByteLength)
+    && declaredThermoByteLength >= thermoByteLength
+    && declaredThermoByteLength % thermoStrideBytes === 0
+    && stateBuffer
+    && thermoBuffer
+    && stateBuffer !== thermoBuffer
+    && stateBuffer.destroyed !== true
+    && thermoBuffer.destroyed !== true
+    && (
+      !Number.isFinite(Number(stateBuffer.size))
+      || Number(stateBuffer.size) >= declaredStateByteLength
+    )
+    && (
+      !Number.isFinite(Number(thermoBuffer.size))
+      || Number(thermoBuffer.size) >= declaredThermoByteLength
+    )
+    && webGpuBufferDevice(stateBuffer) === device
+    && webGpuBufferDevice(thermoBuffer) === device
+  );
 }
 
 function expectedWorkerTier0TerminalLineage(source, stepCount) {
@@ -8474,10 +8549,33 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         baseMechanicsOptions.enableTwoLevelMechanics === true
         || baseMechanicsOptions.hierarchyConfig?.enableTwoLevelMechanics
           === true;
+      const authoritativeTwoLevelMechanics = Boolean(
+        twoLevelMechanics
+        && String(
+          baseMechanicsOptions.twoLevelMechanicsAuthority
+          ?? baseMechanicsOptions.hierarchyConfig
+            ?.twoLevelMechanicsAuthority
+          ?? 'observation'
+        ).trim().toLowerCase() === 'authoritative'
+      );
       const thermal = Boolean(laneResidentOptions.thermalMaterialTable);
       const reactionTable = laneResidentOptions.reactionTable ?? null;
       const reaction = reactionTable != null
         && !isExactQuiescentSphReactionTable(reactionTable);
+      const activeReactionGasProductCount = Number(
+        reactionTable?.gasProductCount
+      );
+      if (
+        reaction
+        && Number.isSafeInteger(activeReactionGasProductCount)
+        && !Object.is(activeReactionGasProductCount, -0)
+        && activeReactionGasProductCount > 0
+        && laneResidentOptions.particleGasLedgerActionable !== true
+      ) {
+        throw new TypeError(
+          'an executing gas-producing reaction table requires explicit particle gas-ledger authority'
+        );
+      }
       const lawQueue =
         baseMechanicsOptions.enableLawQueue === true
         || baseMechanicsOptions.hierarchyConfig?.enableLawQueue === true;
@@ -8493,14 +8591,30 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // arena is still a writer capability for products created by this step.
       const retainedProductGasBoundaryActionable =
         retainedPredecessorGasBoundaryActionable;
-      const gasBoundaryActionable =
+      const particleGasLedgerActionable = Boolean(
+        laneResidentOptions.gasPressureMechanicsBoundaryEnabled === true
+        // Boundary enablement is policy only. The page seals this separate
+        // state/law predicate into the target authority; broadening it from a
+        // merely nonempty retained family would silently eject liquid-only
+        // schedules from Tier 0 and disagree with that authority.
+        && laneResidentOptions.particleGasLedgerActionable === true
+        && exactWorkerParticleGasLedgerCandidateSource({
+          lane: record.schroederLane,
+          device: record.workerDevice
+        })
+      );
+      const nonParticleGasBoundaryActionable = Boolean(
         retainedProductGasBoundaryActionable
         || Boolean(laneResidentOptions.gasPressureSummary?.gasCellField)
         || Boolean(laneResidentOptions.pressureInterfaceForceRowsBuffer)
         || Boolean(laneResidentOptions.pressureInterfaceForceSolver)
         || Boolean(laneResidentOptions.pressureInterfaceGasCellFieldImport)
         || Boolean(laneResidentOptions.pressureInterfaceGridForceAdmission)
-        || laneResidentOptions.externalGaugePressureEnabled === true;
+        || laneResidentOptions.externalGaugePressureEnabled === true
+      );
+      const gasBoundaryActionable = Boolean(
+        particleGasLedgerActionable || nonParticleGasBoundaryActionable
+      );
       const explicitVacuumAmbient =
         typeof laneResidentOptions.ambientPressurePa === 'number'
         && Number.isFinite(laneResidentOptions.ambientPressurePa)
@@ -8528,7 +8642,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           || phaseVolumeMigration
           || twoLevelMechanics
           || surfaceTension
-          || gasBoundaryActionable
+          // Particle classification/free-volume pressure is independent of
+          // condensed contact. Preserve an explicit contact-free water route
+          // while retaining the prior escalation for imported/product gas.
+          || nonParticleGasBoundaryActionable
         )
       );
       const contactSolver = Boolean(
@@ -8546,9 +8663,16 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         phaseVolumeMigration,
         twoLevelMechanics,
         surfaceTension,
+        particleGasLedgerActionable,
+        retainedProductGasBoundaryActionable,
         gasBoundaryActionable,
         explicitVacuumAmbient,
-        phaseVolumeSidecars: phaseVolumeMigration || twoLevelMechanics,
+        phaseVolumeSidecars: Boolean(
+          phaseVolumeMigration
+          || twoLevelMechanics
+          || particleGasLedgerActionable
+          || retainedProductGasBoundaryActionable
+        ),
         mechanicsFieldViews,
         activationAuthority:
           'schedule-config-static-declaration-no-readback'
@@ -8568,9 +8692,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       stepZeroOptions.enablePhaseVolumeMigration =
         stepZeroOptions.enablePhaseVolumeMigration === true
         || scheduleLawActivation.phaseVolumeMigration;
+      stepZeroOptions.phaseVolumeSidecarsRequired =
+        stepZeroOptions.phaseVolumeSidecarsRequired === true
+        || scheduleLawActivation.phaseVolumeSidecars;
       stepZeroOptions.mechanicsFieldViewsRequired =
         stepZeroOptions.mechanicsFieldViewsRequired === true
         || scheduleLawActivation.mechanicsFieldViews;
+      const sealScheduleDerivedEpochOptions = (options) => ({
+        ...options,
+        enablePhaseVolumeMigration:
+          options.enablePhaseVolumeMigration === true
+          || scheduleLawActivation.phaseVolumeMigration,
+        phaseVolumeSidecarsRequired:
+          options.phaseVolumeSidecarsRequired === true
+          || scheduleLawActivation.phaseVolumeSidecars,
+        mechanicsFieldViewsRequired:
+          options.mechanicsFieldViewsRequired === true
+          || scheduleLawActivation.mechanicsFieldViews
+      });
       if (stepOrdinal === 1) {
         // W4b: a RETAINED lane starting a new schedule with no step-1 source
         // at all — seed already consumed, no committed successor family, no
@@ -8594,13 +8733,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           stepOrdinal,
           previousEpochSeal
         });
-        return {
+        return sealScheduleDerivedEpochOptions({
           ...stepZeroOptions,
           useWorkerRetainedParticleBuffers: true,
           ...(providerOverrides && typeof providerOverrides === 'object'
             ? providerOverrides
             : {})
-        };
+        });
       }
       // Continuation steps rebuild from the lane's retained post-step
       // buffers (or the retained successor source family when the kernel
@@ -8623,13 +8762,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             previousEpochSeal
           })
         : null;
-      return {
+      return sealScheduleDerivedEpochOptions({
         ...continuationOptions,
         useWorkerRetainedParticleBuffers: true,
         ...(providerOverrides && typeof providerOverrides === 'object'
           ? providerOverrides
           : {})
-      };
+      });
     };
     const mechanicsOptionsForStep = (epochSeal, stepOrdinal) => {
       const {
@@ -8650,6 +8789,16 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       const scheduleLawActivation = resolveScheduleLawActivation();
       cleanResidentStepOptions.contactSolverEnabled =
         scheduleLawActivation.contactSolver;
+      // The hierarchy helper historically defaults this policy on. Worker
+      // schedule authority is now explicit, so transport the exact derived
+      // schedule bit in both directions and never let an omitted clone-safe
+      // option silently activate particle gas work downstream.
+      cleanResidentStepOptions.gasPressureMechanicsBoundaryEnabled =
+        scheduleLawActivation.gasBoundaryActionable;
+      cleanResidentStepOptions.particleGasLedgerActionable =
+        scheduleLawActivation.particleGasLedgerActionable;
+      cleanResidentStepOptions.retainedProductGasBoundaryActionable =
+        scheduleLawActivation.retainedProductGasBoundaryActionable;
       // Shadow-only Phase-B seed: only the terminal ordinal requests a compact
       // watch. The resident route submits it after the exact published
       // post-closure family exists; the worker's schedule-terminal fence then
@@ -8933,6 +9082,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           mechanicsOptions: baseMechanicsOptions,
           hierarchyConfig: baseMechanicsOptions.hierarchyConfig,
           scheduleStepOptionsProvider: scheduleStepOptionsProviderAuthority,
+          particleGasLedgerActionable:
+            scheduleLawActivation.particleGasLedgerActionable,
           retainedProductGasBoundaryActionable:
             retainedPredecessorGasBoundaryActionable
         });
@@ -9645,7 +9796,16 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         blockers.push('two-level-mechanics-active');
       }
       if (activation.surfaceTension) blockers.push('surface-tension-active');
-      if (activation.gasBoundaryActionable) {
+      const nonParticleGasBoundaryActionable = Boolean(
+        retainedPredecessorGasBoundaryActionable
+        || scheduleResidentStepOptions.gasPressureSummary?.gasCellField
+        || scheduleResidentStepOptions.pressureInterfaceForceRowsBuffer
+        || scheduleResidentStepOptions.pressureInterfaceForceSolver
+        || scheduleResidentStepOptions.pressureInterfaceGasCellFieldImport
+        || scheduleResidentStepOptions.pressureInterfaceGridForceAdmission
+        || scheduleResidentStepOptions.externalGaugePressureEnabled === true
+      );
+      if (nonParticleGasBoundaryActionable) {
         blockers.push('gas-boundary-actionable');
       }
       if (blockers.length > 0) {
@@ -10944,9 +11104,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       );
       const stageMechanicsTraceRequested =
         rawHierarchyStageSummary?.stageMechanicsTraceRequested === true;
+      const canonicalSpatialAuthorityTraceRequested =
+        rawHierarchyStageSummary
+          ?.canonicalSpatialAuthorityTraceRequested === true;
       const hierarchyStageSummary = rawHierarchyStageSummary
         && (
           stageMechanicsTraceRequested
+          || canonicalSpatialAuthorityTraceRequested
           || surfaceStressSubmissionWasTransportAlias
           || stageGpuTimingWasTransportAlias
           || stageMechanicsTraceWasTransportAlias
@@ -10985,11 +11149,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
                 ?? null,
             canonicalSpatialAuthorityTrace:
               canonicalSpatialTraceWasTransportAlias
-                ? stageMechanicsTraceRequested
+                ? canonicalSpatialAuthorityTraceRequested
                   ? residentStepSummary?.canonicalSpatialAuthorityTrace ?? null
                   : null
                 : rawHierarchyStageSummary.canonicalSpatialAuthorityTrace
-                  ?? (stageMechanicsTraceRequested
+                  ?? (canonicalSpatialAuthorityTraceRequested
                     ? residentStepSummary?.canonicalSpatialAuthorityTrace
                     : null)
                   ?? null
@@ -11961,17 +12125,21 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       error.residentScheduleError.terminalGpuFenceSatisfied = true;
       error.residentScheduleError.authorityAdmissionReady = false;
       if (
-        lastStepSummary?.hierarchyStageSummary
-          ?.stageMechanicsTraceRequested === true
+        (
+          lastStepSummary?.hierarchyStageSummary
+            ?.stageMechanicsTraceRequested === true
+          || lastStepSummary?.hierarchyStageSummary
+            ?.canonicalSpatialAuthorityTraceRequested === true
+        )
         && terminalGpuFence?.terminalRefluxReceipt
           ?.firstRejectedStepOrdinal === completedStepCount
       ) {
-        // Diagnostic-only: stageMechanicsTrace=1 serializes the compact
-        // post-stage authority snapshots. When a deliberately bounded run
-        // ends on the first rejected header, retain that exact last-step
-        // snapshot on the typed error so the page can localize the GPU
-        // predicate without weakening terminal admission or adding another
-        // readback to normal schedules.
+        // Diagnostic-only: stageMechanicsTrace=1 and
+        // observeSpatialAuthority=1 serialize compact authority snapshots.
+        // When a deliberately bounded run ends on the first rejected header,
+        // retain that exact last-step snapshot on the typed error so the page
+        // can localize the GPU predicate without weakening terminal admission
+        // or adding another readback to normal schedules.
         error.residentScheduleError.authorityDiagnostics = {
           schema:
             'peercompute.ulg.worker-resident-schedule-terminal-reflux-diagnostic.v0',
@@ -12290,6 +12458,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           ? 'worker-retained-product-gas-boundary-uncertain'
           : 'worker-retained-product-gas-boundary-inactive',
       gasBoundaryActionable: retainedProductGasBoundaryActionable,
+      retainedProductGasBoundaryActionable,
       source: productEventBufferRetained && exactProductEventRowCount
         ? 'worker-retained-product-event-buffer'
         : null,
@@ -13516,6 +13685,38 @@ function stageDataForPayload(payload = {}, record) {
     workerSchroederLaneRecordByStageData.set(data, record);
   }
   if (stageId === 'spatialGasLedgerProducer') {
+    const lane = record.schroederLane || null;
+    const particleGasLedgerActionable =
+      lane?.residentStepOptions?.particleGasLedgerActionable === true;
+    if (
+      particleGasLedgerActionable
+      && exactWorkerParticleGasLedgerCandidateSource({
+        lane,
+        device: record.workerDevice
+      })
+    ) {
+      // Standalone GPU-hub stages must consume the same worker-private
+      // particle family and selected spatial generation that authorized the
+      // schedule bit. Never let a cloneable payload substitute stale S/T rows
+      // after particle gas has been declared actionable.
+      data.sphParticleState = lane.sphParticleState;
+      data.mlsMpmParticleState = lane.mlsMpmParticleState;
+      data.sphParticleUpload = lane.sphParticleUpload;
+      data.mlsMpmParticleUpload = lane.mlsMpmParticleUpload;
+      data.particleCount = lane.sphParticleUpload.particleCount;
+      data.sourceStateBuffer = lane.sphParticleUpload.stateBuffer;
+      data.sourceThermoBuffer = lane.sphParticleUpload.thermoBuffer;
+      data.schroederSpatialEpochGeneration = lane.epochGeneration;
+      data.schroederLevelAssignment = lane.levelAssignment;
+    } else if (lane) {
+      // A retained-product-only stage must not broaden its declared source
+      // domain merely because the lane also owns an exact particle family.
+      data.sphParticleUpload = null;
+      data.mlsMpmParticleUpload = null;
+      data.particleCount = 0;
+      data.sourceStateBuffer = null;
+      data.sourceThermoBuffer = null;
+    }
     const previousResidentProductMass = previousWorkerResidentProductMass(record);
     if (previousResidentProductMass) {
       data.residentProductMass = previousResidentProductMass;

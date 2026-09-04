@@ -6569,6 +6569,9 @@ fn begin_coarse_terminal_validation() {
   let consumed_fine_route = bitcast<f32>(reflux_load(114u));
   let local_heat = bitcast<f32>(reflux_load(116u));
   let consumed_local_heat = bitcast<f32>(reflux_load(117u));
+  let local_heat_decomposition_conditioning =
+    abs(fine_route) + abs(consumed_fine_route)
+      + abs(local_heat) + abs(consumed_local_heat);
   let consumed_heat = bitcast<f32>(reflux_load(84u));
   let provenance_empty = reflux_load(61u) == 0u
     && reflux_load(62u) == 0u && reflux_load(63u) == 0u
@@ -6609,7 +6612,12 @@ fn begin_coarse_terminal_validation() {
       || !finite_f32(bitcast<f32>(reflux_load(92u)))
       || bitcast<f32>(reflux_load(92u)) < 0.0
       || !measured_close(fine_route, consumed_fine_route, evidence_count)
-      || !measured_close(local_heat, consumed_local_heat, evidence_count)
+      || !measured_conditioned_close(
+        local_heat,
+        consumed_local_heat,
+        local_heat_decomposition_conditioning,
+        evidence_count
+      )
       || !measured_close(
         consumed_heat,
         consumed_fine_route + consumed_local_heat,

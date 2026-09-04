@@ -27,6 +27,8 @@ import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
   mlsMpmGpuParticleUploadMatchesDevice,
+  runSphGpuParticleBufferSetCleanupAfterBorrows,
+  sphGpuParticleStateHasGasCandidateIndication,
   sphGpuParticleUploadMatchesDevice,
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
@@ -87,6 +89,46 @@ test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   assert.equal(packed.scientificValidation, false);
   assert.equal(packed.sphValidation, false);
   assert.equal(packed.phaseChangeValidation, false);
+});
+
+test('GPU particle buffers distinguish dormant reaction-product and phase-companion slots', () => {
+  const demo = buildSphPhaseDemoState();
+  const sphPacked = buildSphGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const mlsPacked = buildMlsMpmGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const sphRows = decodeSphGpuParticleRows(sphPacked);
+  const mlsRows = decodeMlsMpmGpuParticleRows(mlsPacked);
+  const productSlotIndex = demo.state.particles.findIndex(
+    (particle) => particle.spareProductSlot === true
+      && particle.phaseCompanionSlot !== true
+  );
+  const phaseSlotIndex = demo.state.particles.findIndex(
+    (particle) => particle.phaseCompanionSlot === true
+  );
+
+  assert.ok(productSlotIndex >= 0);
+  assert.ok(phaseSlotIndex >= 0);
+  assert.equal(sphRows[productSlotIndex].massKg, 0);
+  assert.equal(
+    sphRows[productSlotIndex].status,
+    SPH_GPU_PARTICLE_STATUS.reactionProductReserved
+  );
+  assert.equal(
+    mlsRows[productSlotIndex].status,
+    SPH_GPU_PARTICLE_STATUS.reactionProductReserved
+  );
+  assert.equal(sphRows[phaseSlotIndex].massKg, 0);
+  assert.equal(
+    sphRows[phaseSlotIndex].status,
+    SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
+  );
+  assert.equal(
+    mlsRows[phaseSlotIndex].status,
+    SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
+  );
 });
 
 test('SPH GPU particle identity rows preserve arbitrary body domains without using thermo lanes', () => {
@@ -209,6 +251,62 @@ test('SPH GPU particle buffers mark missing material properties without faking p
   assert.equal(row.representedEntityCount, 0);
 });
 
+test('SPH gas candidate indication keeps liquid prefixes inert and admits gas or malformed gas rows', () => {
+  const packed = {
+    schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+    particleCount: 2,
+    state: new Float32Array(2 * SPH_GPU_PARTICLE_STATE_FLOATS),
+    thermo: new Float32Array(2 * SPH_GPU_PARTICLE_THERMO_FLOATS)
+  };
+  for (let index = 0; index < packed.particleCount; index += 1) {
+    const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+    const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    packed.state[stateOffset + 3] = 1;
+    packed.thermo[thermoOffset + 1] = GPU_PHASE_IDS.liquid;
+    packed.thermo[thermoOffset + 5] = 1;
+    packed.thermo[thermoOffset + 10] = SPH_GPU_PARTICLE_STATUS.ready;
+  }
+  assert.equal(sphGpuParticleStateHasGasCandidateIndication(packed), false);
+
+  packed.thermo[1] = GPU_PHASE_IDS.gas;
+  packed.thermo[5] = 0;
+  packed.thermo[6] = 1;
+  assert.equal(sphGpuParticleStateHasGasCandidateIndication(packed), true);
+
+  packed.thermo[1] = GPU_PHASE_IDS.liquid;
+  assert.equal(
+    sphGpuParticleStateHasGasCandidateIndication(packed),
+    true,
+    'a contradictory gas fraction must reach the fail-closed classifier'
+  );
+});
+
+test('SPH gas candidate indication ignores zero-inventory gas rows regardless of status', () => {
+  const packed = {
+    schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+    particleCount: 1,
+    state: new Float32Array(SPH_GPU_PARTICLE_STATE_FLOATS),
+    thermo: new Float32Array(SPH_GPU_PARTICLE_THERMO_FLOATS)
+  };
+  packed.thermo[1] = GPU_PHASE_IDS.gas;
+  packed.thermo[6] = 1;
+  packed.thermo[10] = SPH_GPU_PARTICLE_STATUS.reactionProductReserved;
+  assert.equal(sphGpuParticleStateHasGasCandidateIndication(packed), false);
+
+  packed.thermo[10] = SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved;
+  assert.equal(sphGpuParticleStateHasGasCandidateIndication(packed), false);
+
+  packed.thermo[10] = SPH_GPU_PARTICLE_STATUS.ready;
+  assert.equal(sphGpuParticleStateHasGasCandidateIndication(packed), false);
+
+  packed.state[3] = 1;
+  assert.equal(
+    sphGpuParticleStateHasGasCandidateIndication(packed),
+    true,
+    'a positive-mass gas row must still reach exact validation'
+  );
+});
+
 test('SPH GPU particle buffer upload writes state and thermo storage buffers', () => {
   const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
   const packed = buildSphGpuParticleBuffers(demo.state, {
@@ -248,8 +346,30 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), true);
   assert.equal(sphGpuParticleUploadMatchesDevice(buffers, { ...device }), false);
 
-  destroySphGpuParticleBuffers(buffers);
-  destroySphGpuParticleBuffers(buffers);
+  const borrowDescriptor = Object.getOwnPropertyDescriptor(
+    buffers,
+    '__ulgActiveBorrowCount'
+  );
+  assert.equal(borrowDescriptor.enumerable, false);
+  assert.equal(buffers.__ulgActiveBorrowCount, 0);
+  let deferredCleanupCount = 0;
+  buffers.__ulgActiveBorrowCount = 1;
+  assert.equal(
+    runSphGpuParticleBufferSetCleanupAfterBorrows(
+      buffers,
+      () => { deferredCleanupCount += 1; }
+    ),
+    true
+  );
+  assert.equal(deferredCleanupCount, 0);
+  buffers.__ulgActiveBorrowCount = 0;
+  assert.equal(deferredCleanupCount, 1);
+  buffers.__ulgActiveBorrowCount = 1;
+  assert.equal(destroySphGpuParticleBuffers(buffers), false);
+  assert.equal(buffers.destroyed, undefined);
+  assert.deepEqual(destroyed, []);
+  buffers.__ulgActiveBorrowCount = 0;
+  assert.equal(destroySphGpuParticleBuffers(buffers), false);
   assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), false);
   assert.deepEqual(destroyed, [
     'ulg-sph-particle-state',

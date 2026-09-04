@@ -95,6 +95,68 @@ export const MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL = 'ocean-tiled-experim
 export const MLS_MPM_MECHANICS_FIELD_MODE_DISABLED = 'disabled';
 export const MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED = 'required';
 
+/**
+ * Prove that an exact gas-pressure mechanics P2G consumed no unverified
+ * reaction-product source. Product-backed projections need the GPU gas-only
+ * route certificate; particle-only projections need the exact no-product
+ * tuple. Every field is compared without coercion so omitted evidence cannot
+ * become an implicit zero/false/null certificate.
+ */
+export function exactGasPressureMechanicsP2gProductSourceIsolationCertified(
+  projection = {},
+  {
+    productRowsAdvertised,
+    productEventRowCapacity
+  } = {}
+) {
+  if (
+    typeof productRowsAdvertised !== 'boolean'
+    || !Number.isSafeInteger(productEventRowCapacity)
+    || productEventRowCapacity < 0
+  ) {
+    return false;
+  }
+  const commonIsolation = Boolean(
+    projection?.backend === 'webgpu'
+    && projection?.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+    && projection?.mechanicsFieldViewEnabled === true
+    && projection?.residentProductMassProductEventBufferDeviceMismatch
+      === false
+    && projection?.residentProductMassCoupledEventCount === 0
+    && projection?.residentProductMassCoupledUnplacedMassKg === 0
+  );
+  if (!commonIsolation) return false;
+  if (productRowsAdvertised === true) {
+    return Boolean(
+      productEventRowCapacity > 0
+      && projection?.residentProductMass !== null
+      && projection?.residentProductMass !== undefined
+      && projection?.residentProductMassProductEventDispatchMode
+        === 'gpu-authenticated-gas-only-no-mechanics-scatter'
+      && projection?.residentProductMassGridCouplingStatus
+        === 'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
+      && projection?.residentProductMassInputProductEventCountAuthority
+        === 'gpu-authored-filtered-live-prefix'
+      && projection?.residentProductMassInputProductEventCountHostKnown
+        === false
+      && projection?.residentProductMassInputProductEventRowCapacity
+        === productEventRowCapacity
+    );
+  }
+  return Boolean(
+    productEventRowCapacity === 0
+    && projection?.residentProductMass === null
+    && projection?.residentProductMassStatus === null
+    && projection?.residentProductMassInputProductEventCount === 0
+    && projection?.residentProductMassInputProductEventRowCapacity === 0
+    && projection?.residentProductMassInputProductEventCountAuthority
+      === 'host-exact-or-sparse-scan-bound'
+    && projection?.residentProductMassInputProductEventCountHostKnown === true
+    && projection?.residentProductMassProductEventDispatchMode === 'none'
+    && projection?.residentProductMassGridCouplingStatus === null
+  );
+}
+
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
@@ -4195,11 +4257,14 @@ function executionFromProjection(projection, {
     phaseChangeValidation: false,
     residentProductMass: projection?.residentProductMass ?? null,
     residentProductMassStatus: projection?.residentProductMassStatus ?? null,
-    residentProductMassInputProductEventCount: projection?.residentProductMassInputProductEventCount ?? 0,
+    residentProductMassInputProductEventCount:
+      projection?.residentProductMassInputProductEventCount ?? null,
     residentProductMassCoupledEventCount: projection?.residentProductMassCoupledEventCount ?? null,
     residentProductMassCoupledUnplacedMassKg: projection?.residentProductMassCoupledUnplacedMassKg ?? null,
     residentProductMassConsumeMassPolicy: projection?.residentProductMassConsumeMassPolicy ?? null,
     residentProductMassGridCouplingStatus: projection?.residentProductMassGridCouplingStatus ?? null,
+    residentProductMassProductEventBufferDeviceMismatch:
+      projection?.residentProductMassProductEventBufferDeviceMismatch ?? null,
     residentProductMassInputProductEventCountAuthority:
       projection?.residentProductMassInputProductEventCountAuthority ?? null,
     residentProductMassInputProductEventRowCapacity:

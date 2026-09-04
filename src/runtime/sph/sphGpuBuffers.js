@@ -49,6 +49,7 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
   energyClampedHigh: 3,
+  reactionProductReserved: 253,
   phaseCompanionReserved: 254,
   missingMaterialProperties: 255
 });
@@ -72,6 +73,7 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
 };
 const identityValueMaxByBuffer = new WeakMap();
+const sphParticleBufferSetLifecycleRecords = new WeakMap();
 
 // Render rows store the domain as f32 for the existing surface ABI, so keep
 // structural ids inside the exact-integer range shared by u32 and f32.  This
@@ -236,6 +238,24 @@ function statusForEquilibrium(eq, properties) {
   if (eq?.clamped === 'low') return SPH_GPU_PARTICLE_STATUS.energyClampedLow;
   if (eq?.clamped === 'high') return SPH_GPU_PARTICLE_STATUS.energyClampedHigh;
   return SPH_GPU_PARTICLE_STATUS.ready;
+}
+
+function statusForParticle(particle, eq, properties) {
+  if (particle?.phaseCompanionSlot === true) {
+    return SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved;
+  }
+  // A product slot is a real, stable particle-storage address but carries no
+  // physical inventory until reaction placement commits into it.  Give that
+  // dormant state its own GPU-visible status: the placement free-list must be
+  // able to distinguish it from phase-companion capacity, while gas-ledger
+  // classification must not mistake the template material/phase for live gas.
+  if (
+    particle?.spareProductSlot === true
+    && !(finiteNumber(particle?.massKg, 0) > 0)
+  ) {
+    return SPH_GPU_PARTICLE_STATUS.reactionProductReserved;
+  }
+  return statusForEquilibrium(eq, properties);
 }
 
 function phaseFractionsFor(eq) {
@@ -467,9 +487,7 @@ export function buildSphGpuParticleBuffers(state, {
       finiteNumber(particle.v?.[2]),
       finiteNumber(particle.specificInternalEnergyJPerKg)
     ], stateOffset);
-    const status = particle.phaseCompanionSlot === true
-      ? SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
-      : statusForEquilibrium(eq, properties);
+    const status = statusForParticle(particle, eq, properties);
     thermoValues.set([
       properties ? stableOpticalMaterialId(material) : 0,
       gpuPhaseId(phase),
@@ -617,6 +635,107 @@ function optionalStorageBuffer(device, label, data) {
   return data?.byteLength > 0 ? writeStorageBuffer(device, label, data) : null;
 }
 
+function destroySphGpuParticleBuffersNow(buffers, record = null) {
+  if (!buffers || buffers.destroyed) return false;
+  if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
+  if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
+  if (buffers.ownsIdentityBuffer !== false) buffers.identityBuffer?.destroy?.();
+  if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
+    buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
+  }
+  if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
+    buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
+  }
+  buffers.destroyed = true;
+  if (record) {
+    record.destroyRequested = false;
+    record.destroyed = true;
+  }
+  return true;
+}
+
+/**
+ * Attach non-enumerable borrow accounting to an exact SPH particle upload.
+ * Owners using destroySphGpuParticleBuffers() are held until the last active
+ * same-device consumer releases its borrow. The helper is idempotent so
+ * resident continuation descriptors can acquire the same lifecycle contract
+ * without reallocating or wrapping their GPU buffers.
+ */
+export function ensureSphGpuParticleBufferSetBorrowLifecycle(buffers) {
+  if (!buffers || typeof buffers !== 'object' || buffers.destroyed === true) {
+    return false;
+  }
+  const existingRecord = sphParticleBufferSetLifecycleRecords.get(buffers);
+  if (existingRecord) return existingRecord.destroyed !== true;
+  const existingDescriptor = Object.getOwnPropertyDescriptor(
+    buffers,
+    '__ulgActiveBorrowCount'
+  );
+  // An unregistered accessor cannot prove that this module's destruction
+  // paths observe the same private borrow counter.
+  if (existingDescriptor) return false;
+  if (!Object.isExtensible(buffers)) return false;
+  const record = {
+    activeBorrowCount: 0,
+    destroyRequested: false,
+    destroyed: false
+  };
+  Object.defineProperty(buffers, '__ulgActiveBorrowCount', {
+    configurable: true,
+    enumerable: false,
+    get() {
+      return record.activeBorrowCount;
+    },
+    set(value) {
+      record.activeBorrowCount = Math.max(
+        0,
+        Math.floor(Number(value) || 0)
+      );
+      if (
+        record.activeBorrowCount === 0
+        && record.destroyRequested
+        && !record.destroyed
+      ) {
+        destroySphGpuParticleBuffersNow(buffers, record);
+        record.deferredCleanups?.clear();
+      } else if (
+        record.activeBorrowCount === 0
+        && !record.destroyed
+        && record.deferredCleanups?.size > 0
+      ) {
+        const pending = [...record.deferredCleanups];
+        record.deferredCleanups.clear();
+        for (const cleanup of pending) {
+          try {
+            cleanup();
+          } catch (error) {
+            record.deferredCleanupError = error;
+          }
+        }
+      }
+    }
+  });
+  sphParticleBufferSetLifecycleRecords.set(buffers, record);
+  return true;
+}
+
+export function runSphGpuParticleBufferSetCleanupAfterBorrows(
+  buffers,
+  cleanup
+) {
+  if (typeof cleanup !== 'function') return false;
+  const record = buffers
+    && sphParticleBufferSetLifecycleRecords.get(buffers);
+  if (!record || record.destroyed || buffers.destroyed === true) return false;
+  if (record.activeBorrowCount === 0) {
+    cleanup();
+    return true;
+  }
+  record.deferredCleanups ??= new Set();
+  record.deferredCleanups.add(cleanup);
+  return true;
+}
+
 export function uploadSphGpuParticleBuffers(device, packed) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a WebGPU-like device with queue.writeBuffer');
@@ -663,7 +782,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     { copySource: true }
   );
   identityValueMaxByBuffer.set(identityBuffer, identityValueMax);
-  return {
+  const upload = {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
     sourceSchema: packed.schema,
@@ -710,6 +829,8 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+  ensureSphGpuParticleBufferSetBorrowLifecycle(upload);
+  return upload;
 }
 
 export function sphGpuParticleUploadMatchesDevice(upload, device) {
@@ -748,9 +869,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     const restDensity = restDensityFor(properties, eq.stablePhase, particle);
     const volume0 = finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
     const J = finiteNumber(particle.mpmJ, 1);
-    const status = particle.phaseCompanionSlot === true
-      ? SPH_GPU_PARTICLE_STATUS.phaseCompanionReserved
-      : statusForEquilibrium(eq, properties);
+    const status = statusForParticle(particle, eq, properties);
     const phaseVolumeReferenceMassKg = finiteNumber(
       particle.phaseVolumeReferenceMassKg,
       finiteNumber(particle.massKg, 0)
@@ -933,17 +1052,24 @@ export function destroyMlsMpmGpuParticleBuffers(buffers) {
 }
 
 export function destroySphGpuParticleBuffers(buffers) {
-  if (!buffers || buffers.destroyed) return;
-  if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
-  if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
-  if (buffers.ownsIdentityBuffer !== false) buffers.identityBuffer?.destroy?.();
-  if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
-    buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
+  if (!buffers || buffers.destroyed) return false;
+  const record = sphParticleBufferSetLifecycleRecords.get(buffers) || null;
+  let activeBorrowCount = record?.activeBorrowCount ?? 0;
+  if (!record) {
+    try {
+      activeBorrowCount = Math.max(
+        0,
+        Math.floor(Number(buffers.__ulgActiveBorrowCount) || 0)
+      );
+    } catch {
+      activeBorrowCount = 0;
+    }
   }
-  if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
-    buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
+  if (activeBorrowCount > 0) {
+    if (record) record.destroyRequested = true;
+    return false;
   }
-  buffers.destroyed = true;
+  return destroySphGpuParticleBuffersNow(buffers, record);
 }
 
 export function decodeSphGpuParticleRows(packed) {
@@ -991,6 +1117,63 @@ export function decodeSphGpuParticleRows(packed) {
     });
   }
   return rows;
+}
+
+/**
+ * Return whether the live packed prefix contains a row that the retained
+ * spatial-gas classifier must inspect. This deliberately mirrors the GPU's
+ * first, cheap gas-indication gate rather than claiming that the row is
+ * already valid gas authority: malformed positive-mass gas-indicated rows
+ * must still reach the classifier so it can fail the whole publication
+ * closed. Any finite exactly-zero-mass row is safely inert because it owns no
+ * physical inventory.
+ */
+export function sphGpuParticleStateHasGasCandidateIndication(packed) {
+  if (packed?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError(
+      'sphGpuParticleStateHasGasCandidateIndication requires a packed SPH GPU particle buffer'
+    );
+  }
+  const particleCount = Number(packed.particleCount);
+  if (
+    !Number.isSafeInteger(particleCount)
+    || Object.is(particleCount, -0)
+    || particleCount < 0
+    || !(packed.state instanceof Float32Array)
+    || !(packed.thermo instanceof Float32Array)
+    || packed.state.length < particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
+    || packed.thermo.length < particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
+  ) {
+    throw new RangeError(
+      'packed SPH GPU particle rows do not cover an exact live particle prefix'
+    );
+  }
+  const phaseFractionTolerance = Math.fround(1e-5);
+  for (let index = 0; index < particleCount; index += 1) {
+    const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+    const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    const massKg = packed.state[stateOffset + 3];
+    if (Number.isFinite(massKg) && massKg === 0) continue;
+    const phase = packed.thermo[thermoOffset + 1];
+    const solidFraction = packed.thermo[thermoOffset + 4];
+    const liquidFraction = packed.thermo[thermoOffset + 5];
+    const gasFraction = packed.thermo[thermoOffset + 6];
+    const plasmaFraction = packed.thermo[thermoOffset + 7];
+    const gasPhaseDeclared = Number.isFinite(phase)
+      && phase > GPU_PHASE_IDS.gas - 0.5
+      && phase < GPU_PHASE_IDS.gas + 0.5;
+    const oneHotGasFractionDeclared = Number.isFinite(solidFraction)
+      && Math.abs(solidFraction) <= phaseFractionTolerance
+      && Number.isFinite(liquidFraction)
+      && Math.abs(liquidFraction) <= phaseFractionTolerance
+      && Number.isFinite(gasFraction)
+      && Math.abs(gasFraction - 1) <= phaseFractionTolerance
+      && Number.isFinite(plasmaFraction)
+      && Math.abs(plasmaFraction) <= phaseFractionTolerance;
+    if (!gasPhaseDeclared && !oneHotGasFractionDeclared) continue;
+    return true;
+  }
+  return false;
 }
 
 export function decodeMlsMpmGpuParticleRows(packed) {

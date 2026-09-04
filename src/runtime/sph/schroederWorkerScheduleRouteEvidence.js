@@ -22,9 +22,11 @@ import {
 } from './schroederDynamicLawRoutingContract.js';
 
 export const ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA =
-  'peercompute.ulg.worker-schedule-dynamic-law-observation.v7';
-export const ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA =
+  'peercompute.ulg.worker-schedule-dynamic-law-observation.v8';
+export const ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA_V0 =
   'peercompute.ulg.worker-schedule-prospective-writer-evidence.v0';
+export const ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA =
+  'peercompute.ulg.worker-schedule-prospective-writer-evidence.v1';
 export const ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA =
   'peercompute.ulg.worker-phase-carrier-one-to-four-transition.v1';
 export const WORKER_DYNAMIC_LAW_OBSERVATION_FAILURE_POLICY =
@@ -192,6 +194,7 @@ const WORKER_PROSPECTIVE_WRITER_EVIDENCE_KEYS = Object.freeze([
   'schema',
   'status',
   'gasBoundaryActionable',
+  'retainedProductGasBoundaryActionable',
   'source',
   'productEventBufferRetained',
   'productEventRowCount',
@@ -321,6 +324,9 @@ export function exactWorkerProspectiveWriterEvidence(value) {
     || value.schema
       !== ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA
     || typeof value.gasBoundaryActionable !== 'boolean'
+    || typeof value.retainedProductGasBoundaryActionable !== 'boolean'
+    || value.retainedProductGasBoundaryActionable
+      !== value.gasBoundaryActionable
     || typeof value.productEventBufferRetained !== 'boolean'
     || typeof value.terminalGpuFenceSatisfied !== 'boolean'
     || typeof value.scheduleCancelled !== 'boolean'

@@ -174,6 +174,7 @@ import {
 import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  runSphGpuParticleBufferSetCleanupAfterBorrows,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -184,6 +185,7 @@ import {
   createMlsMpmGridSpec,
   MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
   MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+  exactGasPressureMechanicsP2gProductSourceIsolationCertified,
   MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   MLS_MPM_GPU_GRID_NODE_FLOATS,
   resolveMlsMpmP2gBackendPolicy,
@@ -214,7 +216,7 @@ import {
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
-  ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA as ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1,
+  ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA as ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT,
   describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource,
   releaseSphSpatialGasLedgerEosAfterQueue,
@@ -369,6 +371,7 @@ export {
   reactionOutputComponentMutations,
   reactionOutputMutatesParticles,
   retainedReactionOutputBuffers,
+  exactGasPressureMechanicsP2gProductSourceIsolationCertified,
   selectMlsMpmTerminalParticleFamily
 };
 
@@ -399,7 +402,6 @@ const SAME_DEVICE_QUEUE_ORDERING_FENCE_METHOD =
 const EXACT_GAS_PRESSURE_MECHANICS_P2G_READ_FAMILIES = Object.freeze([
   'sph-particle-state',
   'mls-mpm-mechanics',
-  'resident-product-mass',
   'schroeder-spatial-epoch'
 ]);
 const EXACT_GAS_PRESSURE_MECHANICS_GRID_READ_FAMILIES = Object.freeze([
@@ -2209,7 +2211,7 @@ function spatialGasLedgerProducerResultReady(result = null) {
       result?.retainedSpatialGasLedgerSourceReady === true
       && result?.retainedSpatialGasLedgerSource?.ready === true
       && result?.retainedSpatialGasLedgerSource?.schema
-        === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1
+        === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT
       && result?.spatialGasLedgerRowsBuffer
       && Math.max(0, finiteNumber(result?.compactSpatialGasRowCount, 0)) > 0
     )
@@ -2228,7 +2230,7 @@ function spatialGasLedgerFromProducerOrOptions(stageResults = {}, stepOptions = 
   if (
     producerResult?.retainedSpatialGasLedgerSourceReady === true
     && producerResult?.retainedSpatialGasLedgerSource?.schema
-      !== ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1
+      !== ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT
   ) {
     return producerResult.retainedSpatialGasLedgerSource || null;
   }
@@ -2242,7 +2244,7 @@ function pressureSummaryWithSpatialGasLedgerProducerResult(pressureSummary = nul
   const ledger = result?.spatialGasSpeciesLedger || null;
   const retainedSource = result?.retainedSpatialGasLedgerSourceReady === true
     && result?.retainedSpatialGasLedgerSource?.schema
-      !== ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1
+      !== ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT
     ? result.retainedSpatialGasLedgerSource || null
     : null;
   if (ledger?.status !== 'spatial-gas-species-ledger-ready' && !retainedSource) {
@@ -4729,8 +4731,14 @@ function productTermMetadataByIndexForSpatialLedger(reactionTable) {
 }
 
 function materialForSpatialGasCompactRow(row, terms) {
-  const productTermIndex = Math.round(Number(row.productTermIndex) || 0);
-  const term = terms.get(productTermIndex) || null;
+  const rawProductTermIndex = Number(row.productTermIndex);
+  const productTermIndex = Number.isFinite(rawProductTermIndex)
+    && rawProductTermIndex >= 0
+      ? Math.round(rawProductTermIndex)
+      : null;
+  const term = productTermIndex == null
+    ? null
+    : terms.get(productTermIndex) || null;
   return String(term?.material || Math.round(Number(row.materialId) || 0)).toLowerCase();
 }
 
@@ -4778,6 +4786,8 @@ function decodeSpatialGasLedgerCompactRows(values, {
     ) {
       continue;
     }
+    const sourceDiscriminant = finiteNumber(values[offset + 8], 0);
+    const particleSource = Object.is(sourceDiscriminant, -1);
     rows.push({
       positionM,
       materialId: finiteNumber(values[offset + 3], 0),
@@ -4785,7 +4795,14 @@ function decodeSpatialGasLedgerCompactRows(values, {
       moles,
       temperatureK: finiteNumber(values[offset + 6], 293.15),
       supportVolumeM3,
-      productTermIndex: Math.round(finiteNumber(values[offset + 8], 0)),
+      sourceKind: particleSource ? 'particle' : 'product-event',
+      sourceDiscriminant,
+      productTermIndex: particleSource
+        ? null
+        : Math.round(sourceDiscriminant),
+      particleIndex: particleSource
+        ? Math.round(finiteNumber(values[offset + 9], rowIndex))
+        : null,
       sourceRowIndex: Math.round(finiteNumber(values[offset + 9], rowIndex)),
       routingId,
       status: 'ready'
@@ -8005,6 +8022,29 @@ fn g2p_scale_close(left: f32, right: f32, count: u32) -> bool {
   return abs(left - right) <= tolerance;
 }
 
+fn g2p_conditioned_scale_close(
+  left: f32,
+  right: f32,
+  operation_conditioning: f32,
+  count: u32
+) -> bool {
+  if (left != left || right != right
+      || operation_conditioning != operation_conditioning
+      || operation_conditioning < 0.0
+      || abs(left) > 3.402823466e+38
+      || abs(right) > 3.402823466e+38
+      || operation_conditioning > 3.402823466e+38) { return false; }
+  let n_epsilon = min(0.25, f32(max(1u, count)) * 5.960464477539063e-8);
+  let gamma_n = n_epsilon / max(1.0e-20, 1.0 - n_epsilon);
+  let scale = max(abs(left) + abs(right), operation_conditioning);
+  if (scale != scale || scale > 3.402823466e+38) { return false; }
+  let tolerance = max(
+    8.0 * 1.175494351e-38,
+    gamma_n * scale
+  );
+  return abs(left - right) <= tolerance;
+}
+
 fn g2p_field_absolute_pressure(
   field_index: u32
 ) -> vec2<f32> {
@@ -8227,25 +8267,36 @@ fn consume_g2p_fine_reflux_receipt() {
   let fine_evidence_count = g2p_saturating_product(
     params.particle_count, committed
   );
+  let published_fine_route = bitcast<f32>(g2p_reflux_load(112u));
+  let consumed_fine_route = bitcast<f32>(g2p_reflux_load(114u));
+  let published_local_heat = bitcast<f32>(g2p_reflux_load(116u));
+  let consumed_local_heat = bitcast<f32>(g2p_reflux_load(117u));
   if (!g2p_scale_close(
-      bitcast<f32>(g2p_reflux_load(112u)),
-      bitcast<f32>(g2p_reflux_load(114u)),
+      published_fine_route,
+      consumed_fine_route,
       fine_evidence_count
     )) {
     g2p_receipt_reject(false, false, false);
     return;
   }
-  if (!g2p_scale_close(
-      bitcast<f32>(g2p_reflux_load(116u)),
-      bitcast<f32>(g2p_reflux_load(117u)),
+  // Local heat is reconstructed on particles as (field total - routed heat).
+  // That subtraction is conditioned by both large operands, not by the tiny
+  // remainder alone. Keep the independently published local ledger as the
+  // target, but bound its transpose residual by the actual decomposition.
+  let fine_heat_decomposition_conditioning =
+    abs(published_fine_route) + abs(consumed_fine_route)
+      + abs(published_local_heat) + abs(consumed_local_heat);
+  if (!g2p_conditioned_scale_close(
+      published_local_heat,
+      consumed_local_heat,
+      fine_heat_decomposition_conditioning,
       fine_evidence_count
     )) {
     g2p_receipt_reject(false, false, false);
     return;
   }
   let measured_particle_heat = bitcast<f32>(g2p_reflux_load(84u));
-  let intended_particle_heat = bitcast<f32>(g2p_reflux_load(114u))
-    + bitcast<f32>(g2p_reflux_load(117u));
+  let intended_particle_heat = consumed_fine_route + consumed_local_heat;
   if (!g2p_scale_close(
       measured_particle_heat, intended_particle_heat, fine_evidence_count
     )) {
@@ -8283,7 +8334,9 @@ fn consume_g2p_coarse_reflux_receipt() {
   let route_consumed = bitcast<f32>(g2p_reflux_load(114u))
     + bitcast<f32>(g2p_reflux_load(115u));
   let actual_total_consumed = bitcast<f32>(g2p_reflux_load(84u));
-  let published_total = route_target + bitcast<f32>(g2p_reflux_load(116u));
+  let published_local_heat = bitcast<f32>(g2p_reflux_load(116u));
+  let consumed_local_heat = bitcast<f32>(g2p_reflux_load(117u));
+  let published_total = route_target + published_local_heat;
   if (committed != expected || consumed != expected
       || g2p_reflux_load(97u) != g2p_reflux_load(98u)
       || g2p_reflux_load(111u) != g2p_reflux_load(98u) + 1u
@@ -8328,9 +8381,13 @@ fn consume_g2p_coarse_reflux_receipt() {
     g2p_receipt_reject(false, false, false);
     return;
   }
-  if (!g2p_scale_close(
-      bitcast<f32>(g2p_reflux_load(116u)),
-      bitcast<f32>(g2p_reflux_load(117u)),
+  let macro_heat_decomposition_conditioning =
+    abs(route_target) + abs(route_consumed)
+      + abs(published_local_heat) + abs(consumed_local_heat);
+  if (!g2p_conditioned_scale_close(
+      published_local_heat,
+      consumed_local_heat,
+      macro_heat_decomposition_conditioning,
       macro_evidence_count
     )) {
     g2p_receipt_reject(false, false, false);
@@ -19582,24 +19639,30 @@ function createMlsMpmMechanicsP2gStageTaskEvidence(projection = {}, {
   const pressureSuppressed = finiteNumber(projection?.internalPressureScale, 1) === 0;
   const productSuppressed = finiteNumber(projection?.residentProductMassInputProductEventCount, 0) === 0
     && !projection?.residentProductMass;
-  const exactProductRouteCertified = Boolean(
+  const productEventRowCapacity = projection
+    ?.residentProductMassInputProductEventRowCapacity;
+  const productRowsAdvertised = Boolean(
+    projection?.residentProductMass !== null
+    && projection?.residentProductMass !== undefined
+  ) || (
+    Number.isSafeInteger(productEventRowCapacity)
+    && productEventRowCapacity > 0
+  );
+  const exactProductSourceIsolationCertified = Boolean(
     exactGasPressureMechanicsBoundaryRequired
-    && projection?.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
-    && projection?.residentProductMassProductEventDispatchMode
-      === 'gpu-authenticated-gas-only-no-mechanics-scatter'
-    && projection?.residentProductMassGridCouplingStatus
-      === 'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
-    && projection?.residentProductMassInputProductEventCountAuthority
-      === 'gpu-authored-filtered-live-prefix'
-    && projection?.residentProductMassInputProductEventCountHostKnown === false
-    && finiteNumber(projection?.residentProductMassCoupledEventCount, 0) === 0
-    && finiteNumber(projection?.residentProductMassCoupledUnplacedMassKg, 0) === 0
+    && exactGasPressureMechanicsP2gProductSourceIsolationCertified(
+      projection,
+      {
+        productRowsAdvertised,
+        productEventRowCapacity
+      }
+    )
   );
   const pressureModeAccepted = exactGasPressureMechanicsBoundaryRequired
     ? projection?.externalGaugePressureEnabled !== true
     : pressureSuppressed;
   const productModeAccepted = exactGasPressureMechanicsBoundaryRequired
-    ? exactProductRouteCertified
+    ? exactProductSourceIsolationCertified
     : productSuppressed;
   const gridNodeStrideBytes = finiteNumber(
     projection?.gridNodeStrideBytes,
@@ -19648,7 +19711,14 @@ function createMlsMpmMechanicsP2gStageTaskEvidence(projection = {}, {
     },
     productInput: {
       suppressed: productSuppressed,
-      exactGasOnlyRouteCertified: exactProductRouteCertified,
+      exactProductSourceIsolationCertified,
+      sourceIsolationMode: exactProductSourceIsolationCertified
+        ? (productRowsAdvertised
+            ? 'gpu-authenticated-gas-only-product-route'
+            : 'particle-only-no-product-source')
+        : null,
+      exactGasOnlyRouteCertified:
+        exactProductSourceIsolationCertified && productRowsAdvertised,
       productEventCount: finiteNumber(projection?.residentProductMassInputProductEventCount, 0),
       residentProductMassStatus: projection?.residentProductMassStatus || null
     },
@@ -20696,12 +20766,20 @@ function estimatedGasCellEosRowCount(stageOptions = {}) {
 
 function estimatedSpatialGasLedgerProducerRowCount(stageOptions = {}) {
   const residentProductMass = stageOptions.residentProductMass || stageOptions.reactionSummary?.residentProductMass || null;
-  return Math.max(0, finiteNumber(
+  const sphParticleUpload = stageOptions.sphParticleUpload || null;
+  const particleCount = Math.max(0, Math.floor(finiteNumber(
+    stageOptions.particleCount
+      ?? sphParticleUpload?.particleCount
+      ?? stageOptions.sphParticleState?.particleCount,
+    0
+  )));
+  const productEventRowCount = Math.max(0, finiteNumber(
     stageOptions.productEventRowCount
       ?? residentProductMass?.productEventRowCount
       ?? stageOptions.reactionSummary?.productEventRowCount,
     0
   ));
+  return productEventRowCount + particleCount;
 }
 
 function createSphSpatialGasLedgerProducerStageTaskEvidence(result = {}, {
@@ -20715,13 +20793,15 @@ function createSphSpatialGasLedgerProducerStageTaskEvidence(result = {}, {
       result?.retainedSpatialGasLedgerSourceReady === true
       && result?.retainedSpatialGasLedgerSource?.ready === true
       && result?.retainedSpatialGasLedgerSource?.schema
-        === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1
+        === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT
     );
   const ledgerReady = retainedLedgerReady || (
     result?.spatialGasSpeciesLedger?.status === 'spatial-gas-species-ledger-ready'
     && Math.max(0, finiteNumber(result?.spatialGasSpeciesLedger?.cellCount, 0)) > 0
   );
-  const compactRowsReady = Math.max(0, finiteNumber(result?.compactSpatialGasRowCount, 0)) > 0;
+  const compactRowsReady = retainedLedgerReady || (
+    Math.max(0, finiteNumber(result?.compactSpatialGasRowCount, 0)) > 0
+  );
   const noFullProductReadback = result?.fullProductEventReadbackPerformed !== true;
   const passed = acceptedBackend && ledgerReady && compactRowsReady && noFullProductReadback;
   return {
@@ -20731,7 +20811,7 @@ function createSphSpatialGasLedgerProducerStageTaskEvidence(result = {}, {
       ? 'spatial-gas-ledger-producer-stage-task-evidence-pass'
       : 'spatial-gas-ledger-producer-stage-task-evidence-fail',
     reason: passed
-      ? 'resident-product-event-buffer-derived-spatial-gas-ledger'
+      ? 'particle-and-unplaced-product-union-derived-spatial-gas-ledger'
       : (!acceptedBackend
           ? 'spatial-gas-ledger-producer-stage-backend-invalid'
           : (!noFullProductReadback
@@ -20762,7 +20842,10 @@ function createSphSpatialGasLedgerProducerStageTaskEvidence(result = {}, {
     retainedSpatialGasLedgerSourceReady: result?.retainedSpatialGasLedgerSourceReady === true,
     retainedSpatialGasLedgerSourceStatus: result?.retainedSpatialGasLedgerSourceStatus || null,
     gpuFenceRequired: gpuFenceRequirement?.required === true,
-    readFamilies: ['resident-product-mass', 'reaction-closure-table'],
+    readFamilies: [...(lawGraphNode?.readFamilies || [
+      'sph-particle-state',
+      'sph-thermo-phase'
+    ])],
     candidateWriteFamilies: ['resident-spatial-gas-species-ledger'],
     authoritativeWriteFamilies: [],
     retainedGpuHandoffReady: retainedLedgerReady,
@@ -20835,7 +20918,7 @@ export function createSphSpatialGasLedgerProducerStageComputeTask({
   domainKey = null,
   localExecution = 'inline',
   queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
-  readFamilies = ['resident-product-mass', 'reaction-closure-table'],
+  readFamilies = [],
   writeFamilies = ['resident-spatial-gas-species-ledger'],
   retainedBufferRefs = ['resident-spatial-gas-species-ledger-buffer'],
   returnEnvelope = true,
@@ -20858,8 +20941,23 @@ export function createSphSpatialGasLedgerProducerStageComputeTask({
   const retainedGpuBytes = compactReadbackBytes
     + estimatedRows * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const residentProductMass = taskStageOptions.residentProductMass || taskStageOptions.reactionSummary?.residentProductMass || null;
+  const retainedProductSourceAdvertised = Boolean(
+    residentProductMass?.productEventBufferRetained === true
+    || taskStageOptions.productEventBufferRetained === true
+    || Math.max(0, finiteNumber(taskStageOptions.productEventRowCount, 0)) > 0
+  );
+  const retainedParticleSourceAdvertised = Boolean(
+    taskStageOptions.sphParticleUpload?.stateBuffer
+    && taskStageOptions.sphParticleUpload?.thermoBuffer
+  );
   const resolvedReadFamilies = uniqueNonEmptyStrings([
     ...readFamilies,
+    ...(retainedParticleSourceAdvertised
+      ? ['sph-particle-state', 'sph-thermo-phase']
+      : []),
+    ...(retainedProductSourceAdvertised
+      ? ['resident-product-mass', 'reaction-closure-table']
+      : []),
     ...(taskStageOptions.schroederSpatialEpochGeneration != null
       ? [
           'schroeder-spatial-epoch',
@@ -20869,6 +20967,7 @@ export function createSphSpatialGasLedgerProducerStageComputeTask({
   ]);
   const requiresGpuLane = taskStageOptions.preferWebGpu === true
     || readbackMode === NO_FULL_READBACK_MODE
+    || taskStageOptions.sphParticleUpload?.stateBuffer != null
     || residentProductMass?.productEventBufferRetained === true
     || taskStageOptions.productEventBufferRetained === true;
   const lawGraphNode = createResidentLawGraphNodeTaskRef({
@@ -20878,12 +20977,12 @@ export function createSphSpatialGasLedgerProducerStageComputeTask({
     readFamilies: resolvedReadFamilies,
     writeFamilies,
     requiredClosures: [
-      'reaction-product-event-buffer',
+      'particle-or-unplaced-reaction-product-gas-candidate-source',
       'spatial-gas-species-ledger',
       'same-generation-condensed-occupancy-free-volume'
     ],
     validationGates: [
-      'product-event-buffer-retained-or-rows-supplied',
+      'exact-particle-source-and-or-retained-product-event-source',
       'same-device-retained-spatial-gas-ledger-eos-source',
       'gpu-fence-report'
     ],
@@ -21007,7 +21106,12 @@ function finalizeSphSpatialGasLedgerProducerStageTaskResult(result, {
       taskId: computeTaskId,
       lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-resident-spatial-gas-ledger-law',
       solverId: lawGraphNode?.solverId || 'ulg-sph-spatial-gas-ledger-producer-stage',
-      readFamilies: [...(lawGraphNode?.readFamilies || ['resident-product-mass', 'reaction-closure-table'])],
+      readFamilies: [...(lawGraphNode?.readFamilies || [
+        'sph-particle-state',
+        'sph-thermo-phase',
+        'resident-product-mass',
+        'reaction-closure-table'
+      ])],
       writeFamilies: [...(lawGraphNode?.writeFamilies || ['resident-spatial-gas-species-ledger'])],
       commitDeltaSuppressed: true,
       authoritativeStateMutation: false,
@@ -21113,6 +21217,13 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
   } = data || {};
   const readbackMode = stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const residentProductMass = stageOptions.residentProductMass || stageOptions.reactionSummary?.residentProductMass || null;
+  const sphParticleUpload = stageOptions.sphParticleUpload || null;
+  const particleCount = Math.max(0, Math.floor(finiteNumber(
+    stageOptions.particleCount
+      ?? sphParticleUpload?.particleCount
+      ?? stageOptions.sphParticleState?.particleCount,
+    0
+  )));
   const productEventRowCount = Math.max(0, Math.floor(finiteNumber(
     stageOptions.productEventRowCount
       ?? residentProductMass?.productEventRowCount
@@ -21152,7 +21263,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
   let compactRowsBuffer = null;
   let spatialGasLedgerRowsBufferRetained = false;
   let reason = null;
-  const compactReadbackByteLength = productEventRowCount
+  const compactReadbackByteLength = (productEventRowCount + particleCount)
     * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
   const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
@@ -21185,18 +21296,28 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
     }
   );
 
-  // Production no-full mode keeps the entire product-event -> spatial
-  // directory -> EOS handoff on the exact source device. The legacy decoded
-  // JS ledger below remains an explicit full-oracle/CPU compatibility path.
+  const retainedProductSourceAdvertised = Boolean(
+    productEventRowCount > 0
+    && residentProductMass?.productEventBufferRetained === true
+    && residentProductMass?.productEventBuffer
+  );
+  const retainedParticleSourceAdvertised = Boolean(
+    particleCount > 0
+    && sphParticleUpload?.stateBuffer
+    && sphParticleUpload?.thermoBuffer
+  );
+  // Production no-full mode keeps the particle + unplaced-product residual
+  // union -> spatial directory -> EOS handoff on the exact source device. The
+  // legacy decoded JS product ledger remains an explicit full-oracle path.
   if (
     readbackMode === NO_FULL_READBACK_MODE
     && stageOptions.preferWebGpu === true
-    && productEventRowCount > 0
-    && residentProductMass?.productEventBufferRetained === true
-    && residentProductMass?.productEventBuffer
+    && (retainedProductSourceAdvertised || retainedParticleSourceAdvertised)
   ) {
-    residentProductMass.__ulgActiveBorrowCount =
-      (residentProductMass.__ulgActiveBorrowCount | 0) + 1;
+    if (retainedProductSourceAdvertised) {
+      residentProductMass.__ulgActiveBorrowCount =
+        (residentProductMass.__ulgActiveBorrowCount | 0) + 1;
+    }
     try {
       let deviceResult = stageOptions.deviceResult || null;
       if (!deviceResult?.device && stageOptions.device?.createBuffer) {
@@ -21210,6 +21331,15 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
         deviceResult = {
           status: 'webgpu-ready-resident-product-source-device',
           device: sourceDevice
+        };
+      }
+      const particleSourceDevice = webGpuBufferDevice(
+        sphParticleUpload?.stateBuffer
+      );
+      if (!deviceResult?.device && particleSourceDevice?.createBuffer) {
+        deviceResult = {
+          status: 'webgpu-ready-sph-particle-source-device',
+          device: particleSourceDevice
         };
       }
       if (!deviceResult?.device && (stageOptions.navigatorRef || globalThis.navigator)) {
@@ -21284,10 +21414,42 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       }
       const retainedExecution = await runSphSpatialGasLedgerEosRetainedWebGpu({
         device,
-        residentProductMass,
-        productEventBuffer: residentProductMass.productEventBuffer,
-        productEventRowCount,
-        productEventStrideFloats,
+        residentProductMass: retainedProductSourceAdvertised
+          ? residentProductMass
+          : null,
+        productEventBuffer: retainedProductSourceAdvertised
+          ? residentProductMass.productEventBuffer
+          : null,
+        productEventRowCount: retainedProductSourceAdvertised
+          ? productEventRowCount
+          : null,
+        productEventStrideFloats: retainedProductSourceAdvertised
+          ? productEventStrideFloats
+          : null,
+        sphParticleUpload: retainedParticleSourceAdvertised
+          ? sphParticleUpload
+          : null,
+        mlsMpmParticleUpload: retainedParticleSourceAdvertised
+          ? stageOptions.mlsMpmParticleUpload || null
+          : null,
+        particleStateBuffer: retainedParticleSourceAdvertised
+          ? sphParticleUpload.stateBuffer
+          : null,
+        particleThermoBuffer: retainedParticleSourceAdvertised
+          ? sphParticleUpload.thermoBuffer
+          : null,
+        particleCount: retainedParticleSourceAdvertised
+          ? particleCount
+          : null,
+        particleStateStrideFloats: retainedParticleSourceAdvertised
+          ? sphParticleUpload.stateStrideBytes / Float32Array.BYTES_PER_ELEMENT
+          : null,
+        particleThermoStrideFloats: retainedParticleSourceAdvertised
+          ? sphParticleUpload.thermoStrideBytes / Float32Array.BYTES_PER_ELEMENT
+          : null,
+        schroederLevelAssignment: retainedParticleSourceAdvertised
+          ? stageOptions.schroederLevelAssignment || null
+          : null,
         epochIdentity: spatialGasLedgerEpochIdentityFromStageOptions(stageOptions),
         schroederSpatialEpochGeneration,
         spatialGasGrid,
@@ -21388,21 +21550,29 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
           exactGasPressureAuthorityDescription?.epochIdentity || null,
         productEventRowCount,
         productEventStrideFloats,
+        particleCount: retainedParticleSourceAdvertised ? particleCount : 0,
+        spatialGasCandidateSourceMode:
+          retainedExecution?.sourceMode || null,
+        spatialGasCandidateUnionCount:
+          retainedExecution?.gasCandidateUnionCount || 0,
         spatialGasSupportVolumeFallbackM3: 0,
         spatialGasSupportVolumeFallbackSource:
           'forbidden-authoritative-ss-occupancy-grid-free-volume',
         spatialGasCellSizeM: spatialGasGrid.gridSpacingM,
         compactSpatialGasRows: null,
-        compactSpatialGasRowCount: ready ? productEventRowCount : 0,
+        compactSpatialGasRowCount: 0,
+        compactSpatialGasRowCountHostKnown: false,
+        compactSpatialGasRowCapacity:
+          retainedExecution?.compactSpatialGasRowCapacity || 0,
         compactSpatialGasRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
         compactSpatialGasReadbackByteLength: 0,
         spatialGasSpeciesLedger: null,
         aggregateSpatialGasLedgerFallbackUsed: false,
         spatialGasLedgerDerivation: ready
-          ? 'retained-product-event-rows-schroeder-spatial-directory'
+          ? 'retained-particle-and-unplaced-product-union-schroeder-spatial-directory'
           : null,
         spatialGasPositionSource: ready
-          ? 'reaction-product-event-birth-position'
+          ? 'particle-xn-or-reaction-product-event-birth-position'
           : null,
         spatialGasSpeciesLedgerSchema: null,
         spatialGasSpeciesLedgerStatus: ready
@@ -21415,7 +21585,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
         retainedSpatialGasLedgerBufferRefs,
         workerRetainedSpatialGasLedgerBufferRefs: [],
         retainedSpatialGasLedgerSourceSchema:
-          ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1,
+          ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT,
         retainedSpatialGasLedgerSourceStatus: ready
           ? 'retained-spatial-gas-ledger-opaque-pressure-authority-ready'
           : null,
@@ -21441,7 +21611,16 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
           pressureCellRowByteLength,
         pressureInterfaceGasPressureCellRowsBufferRetained: false,
         retainedSourceFamilies: ready
-          ? ['resident-spatial-gas-species-ledger', 'resident-gas-pressure']
+          ? [
+              ...(retainedParticleSourceAdvertised
+                ? ['sph-particle-state', 'sph-thermo-phase']
+                : []),
+              ...(retainedProductSourceAdvertised
+                ? ['resident-product-mass']
+                : []),
+              'resident-spatial-gas-species-ledger',
+              'resident-gas-pressure'
+            ]
           : [],
         mapAsyncCount: retainedExecution?.mapAsyncCount || 0,
         hostMaterializedRowCount: retainedExecution?.hostMaterializedRowCount || 0,
@@ -21467,10 +21646,12 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       }]);
       return finalResult;
     } finally {
-      residentProductMass.__ulgActiveBorrowCount = Math.max(
-        0,
-        (residentProductMass.__ulgActiveBorrowCount | 0) - 1
-      );
+      if (retainedProductSourceAdvertised) {
+        residentProductMass.__ulgActiveBorrowCount = Math.max(
+          0,
+          (residentProductMass.__ulgActiveBorrowCount | 0) - 1
+        );
+      }
     }
   }
   if (stageOptions.preferWebGpu === true && productEventRowCount > 0) {
@@ -21790,7 +21971,10 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       taskId: computeTaskId,
       lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-resident-spatial-gas-ledger-law',
       solverId: lawGraphNode?.solverId || 'ulg-sph-spatial-gas-ledger-producer-stage',
-      readFamilies: [...(lawGraphNode?.readFamilies || ['resident-product-mass', 'reaction-closure-table'])],
+      readFamilies: [...(lawGraphNode?.readFamilies || [
+        'sph-particle-state',
+        'sph-thermo-phase'
+      ])],
       writeFamilies: [...(lawGraphNode?.writeFamilies || ['resident-spatial-gas-species-ledger'])],
       commitDeltaSuppressed: true,
       authoritativeStateMutation: false,
@@ -22041,7 +22225,7 @@ export function createSphGasCellEosProducerStageComputeTask({
     taskStageOptions.spatialGasLedgerProducerResult?.retainedGasCellFieldSourceReady === true
     || exactOpaqueProducerHandoff
     || taskStageOptions.retainedSpatialGasLedgerSource?.schema
-      === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1
+      === ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT
   );
   const requiresGpuLane = taskStageOptions.preferWebGpu === true
     || readbackMode === NO_FULL_READBACK_MODE
@@ -24246,14 +24430,26 @@ function createMlsMpmMechanicsStageLaneContract({
   includeGasCellEosProducerStage = false,
   includePressureInterfaceStage = false,
   includeGasPressureMechanicsBoundary = false,
+  includeRetainedProductGasSource = false,
+  includeParticleGasSource = false,
   includeSchroederSpatialEpoch = false,
   includeThermalPhaseStage = false,
   includeReactionProductStage = false
 } = {}) {
   const contractReadFamilies = uniqueNonEmptyStrings([
     ...readFamilies,
-    ...(includeSpatialGasLedgerProducerStage ? ['resident-product-mass', 'reaction-closure-table'] : []),
-    ...(includeGasCellEosProducerStage ? ['resident-spatial-gas-species-ledger', 'resident-product-mass'] : []),
+    ...(includeSpatialGasLedgerProducerStage ? [
+      ...(includeParticleGasSource
+        ? ['sph-particle-state', 'sph-thermo-phase']
+        : []),
+      ...(includeRetainedProductGasSource
+        ? ['resident-product-mass', 'reaction-closure-table']
+        : [])
+    ] : []),
+    ...(includeGasCellEosProducerStage ? [
+      'resident-spatial-gas-species-ledger',
+      ...(includeRetainedProductGasSource ? ['resident-product-mass'] : [])
+    ] : []),
     ...(includePressureInterfaceStage ? [
       'resident-gas-pressure',
       'sph-material-interface-field',
@@ -24261,6 +24457,7 @@ function createMlsMpmMechanicsStageLaneContract({
     ] : []),
     ...(includeGasPressureMechanicsBoundary ? [
       ...EXACT_GAS_PRESSURE_MECHANICS_P2G_READ_FAMILIES,
+      ...(includeRetainedProductGasSource ? ['resident-product-mass'] : []),
       'resident-spatial-gas-species-ledger',
       ...EXACT_GAS_PRESSURE_MECHANICS_GRID_READ_FAMILIES,
       ...EXACT_GAS_PRESSURE_MECHANICS_G2P_READ_FAMILIES
@@ -24288,7 +24485,9 @@ function createMlsMpmMechanicsStageLaneContract({
     ...(includeGasCellEosProducerStage ? ['resident-gas-pressure-cells-buffer'] : []),
     ...(includePressureInterfaceStage ? ['pressure-interface-force-rows-buffer'] : []),
     ...(includeGasPressureMechanicsBoundary ? [
-      'resident-product-mass-buffer',
+      ...(includeRetainedProductGasSource
+        ? ['resident-product-mass-buffer']
+        : []),
       'resident-spatial-gas-species-ledger-buffer',
       'resident-gas-pressure-cells-buffer'
     ] : []),
@@ -24301,7 +24500,12 @@ function createMlsMpmMechanicsStageLaneContract({
       lawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
       runtimeTarget: 'compute-manager-stage-task',
       reads: includeGasPressureMechanicsBoundary
-        ? [...EXACT_GAS_PRESSURE_MECHANICS_P2G_READ_FAMILIES]
+        ? [
+            ...EXACT_GAS_PRESSURE_MECHANICS_P2G_READ_FAMILIES,
+            ...(includeRetainedProductGasSource
+              ? ['resident-product-mass']
+              : [])
+          ]
         : ['sph-particle-state', 'mls-mpm-mechanics'],
       writes: ['mls-mpm-grid']
     },
@@ -24310,7 +24514,14 @@ function createMlsMpmMechanicsStageLaneContract({
       lawNodeId: 'ulg-resident-spatial-gas-ledger-law',
       runtimeTarget: 'compute-manager-stage-task',
       dependsOn: [],
-      reads: ['resident-product-mass', 'reaction-closure-table'],
+      reads: [
+        ...(includeParticleGasSource
+          ? ['sph-particle-state', 'sph-thermo-phase']
+          : []),
+        ...(includeRetainedProductGasSource
+          ? ['resident-product-mass', 'reaction-closure-table']
+          : [])
+      ],
       writes: ['resident-spatial-gas-species-ledger']
     }] : []),
     ...(includeGasCellEosProducerStage ? [{
@@ -24318,7 +24529,10 @@ function createMlsMpmMechanicsStageLaneContract({
       lawNodeId: 'ulg-resident-gas-cell-eos-law',
       runtimeTarget: 'compute-manager-stage-task',
       dependsOn: includeSpatialGasLedgerProducerStage ? [SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID] : [],
-      reads: ['resident-spatial-gas-species-ledger', 'resident-product-mass'],
+      reads: [
+        'resident-spatial-gas-species-ledger',
+        ...(includeRetainedProductGasSource ? ['resident-product-mass'] : [])
+      ],
       writes: ['resident-gas-pressure']
     }] : []),
     ...(includePressureInterfaceStage ? [{
@@ -25614,6 +25828,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   includeGasCellEosProducerStage = false,
   includePressureInterfaceStage = false,
   gasPressureMechanicsBoundaryEnabled = false,
+  particleGasLedgerActionable = gasPressureMechanicsBoundaryEnabled,
   includeThermalPhaseStage = false,
   includeReactionProductStage = false,
   gpuResidentLaneId = null,
@@ -25650,15 +25865,25 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     exactGasPressureMechanicsResidentProductMass
     && exactGasPressureMechanicsProductEventRowCapacity > 0
   );
+  const exactGasPressureMechanicsParticleRowsAdvertised = Boolean(
+    particleGasLedgerActionable === true
+    && stepOptions.sphParticleUpload
+    && Math.max(0, Math.floor(finiteNumber(
+      stepOptions.sphParticleUpload.particleCount,
+      0
+    ))) > 0
+    && stepOptions.sphParticleUpload.stateBuffer
+    && stepOptions.sphParticleUpload.thermoBuffer
+  );
   const gasPressureMechanicsBoundaryRequiredThisStep = Boolean(
     gasPressureMechanicsBoundaryEnabled === true
     && stepOptions.canonicalSpatialRequired === true
     && stepOptions.readbackMode === NO_FULL_READBACK_MODE
     && stepOptions.preferWebGpu === true
-    && exactGasPressureMechanicsResidentProductMass
-      ?.productEventBufferRetained === true
-    && exactGasPressureMechanicsResidentProductMass?.productEventBuffer
-    && exactGasPressureMechanicsProductEventRowCapacity > 0
+    && (
+      exactGasPressureMechanicsProductRowsAdvertised
+      || exactGasPressureMechanicsParticleRowsAdvertised
+    )
   );
   const ambientBuoyancyExecutionThisStep =
     gasPressureMechanicsBoundaryRequiredThisStep
@@ -25684,11 +25909,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       : stepOptions.phaseVolumeAmbientBuoyancyRequired === true;
   if (
     gasPressureMechanicsBoundaryEnabled === true
-    && exactGasPressureMechanicsProductRowsAdvertised
+    && (
+      exactGasPressureMechanicsProductRowsAdvertised
+      || exactGasPressureMechanicsParticleRowsAdvertised
+    )
     && !gasPressureMechanicsBoundaryRequiredThisStep
   ) {
     const error = new Error(
-      'Exact gas-pressure mechanics was enabled for live product rows without canonical same-device no-full-readback prerequisites'
+      'Exact gas-pressure mechanics was enabled for live gas candidates without canonical same-device no-full-readback prerequisites'
     );
     error.code = 'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_INELIGIBLE';
     throw error;
@@ -25737,17 +25965,21 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_GENERATION'
       );
     }
-    if (!residentProductMassMatchesDevice(
-      exactGasPressureMechanicsResidentProductMass,
-      exactGasPressureMechanicsDevice
-    )) {
+    if (
+      exactGasPressureMechanicsProductRowsAdvertised
+      && !residentProductMassMatchesDevice(
+        exactGasPressureMechanicsResidentProductMass,
+        exactGasPressureMechanicsDevice
+      )
+    ) {
       rejectExactGasPressureMechanicsStageBoundary(
         'Exact gas-pressure mechanics rejected a cross-device resident product source',
         'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_DEVICE'
       );
     }
     exactGasPressureMechanicsProductEventCountAuthority =
-      residentProductEventCountAuthorityRegistered(
+      exactGasPressureMechanicsProductRowsAdvertised
+      && residentProductEventCountAuthorityRegistered(
         exactGasPressureMechanicsResidentProductMass
       )
         ? resolveResidentProductEventCountAuthority(
@@ -25756,7 +25988,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           )
         : null;
     if (
-      !exactGasPressureMechanicsProductEventCountAuthority
+      exactGasPressureMechanicsProductRowsAdvertised
+      && (
+        !exactGasPressureMechanicsProductEventCountAuthority
       || exactGasPressureMechanicsProductEventCountAuthority.hostObserved === true
       || exactGasPressureMechanicsProductEventCountAuthority.expectedRowCapacity
         !== exactGasPressureMechanicsProductEventRowCapacity
@@ -25769,6 +26003,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
           ))
         )
+      )
     ) {
       rejectExactGasPressureMechanicsStageBoundary(
         'Exact gas-pressure mechanics requires an unobserved GPU-authored live product-count authority for the current buffer',
@@ -25815,6 +26050,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     includePressureInterfaceStage: effectiveIncludePressureInterfaceStage,
     includeGasPressureMechanicsBoundary:
       gasPressureMechanicsBoundaryRequiredThisStep,
+    includeRetainedProductGasSource:
+      exactGasPressureMechanicsProductRowsAdvertised,
+    includeParticleGasSource:
+      exactGasPressureMechanicsParticleRowsAdvertised,
     includeSchroederSpatialEpoch: Boolean(
       (
         effectiveIncludePressureInterfaceStage
@@ -26682,21 +26921,39 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     },
     [SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]: async () => {
       const result = await submitStageTask(SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID, createSphSpatialGasLedgerProducerStageComputeTask, {
-        residentProductMass: stepOptions.residentProductMass || stepOptions.gasPressureSummary?.residentProductMass || null,
+        residentProductMass: gasPressureMechanicsBoundaryRequiredThisStep
+          ? (exactGasPressureMechanicsProductRowsAdvertised
+              ? exactGasPressureMechanicsResidentProductMass
+              : null)
+          : (stepOptions.residentProductMass
+            || stepOptions.gasPressureSummary?.residentProductMass
+            || null),
         reactionSummary: stepOptions.reactionSummary || null,
         reactionTable: stepOptions.reactionTable || null,
         productEventBuffer: stepOptions.productEventBuffer || null,
         productEventRows: stepOptions.productEventRows || null,
         productEventCompactRows: stepOptions.productEventCompactRows || null,
         productEventRowCount: gasPressureMechanicsBoundaryRequiredThisStep
-          ? exactGasPressureMechanicsProductEventRowCapacity
+          ? (exactGasPressureMechanicsProductRowsAdvertised
+              ? exactGasPressureMechanicsProductEventRowCapacity
+              : null)
           : stepOptions.productEventRowCount,
         productEventStrideFloats: gasPressureMechanicsBoundaryRequiredThisStep
-          ? exactGasPressureMechanicsResidentProductMass
-              .productEventStrideFloats
+          ? (exactGasPressureMechanicsProductRowsAdvertised
+              ? exactGasPressureMechanicsResidentProductMass
+                  .productEventStrideFloats
+              : null)
           : stepOptions.productEventStrideFloats,
         sphParticleState,
-        sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
+        sphParticleUpload: exactGasPressureMechanicsParticleRowsAdvertised
+          ? schroederAdoptedParticleStorageSphParticleUpload
+          : null,
+        mlsMpmParticleUpload:
+          exactGasPressureMechanicsParticleRowsAdvertised
+            ? schroederAdoptedParticleStorageMlsMpmParticleUpload
+            : null,
+        schroederLevelAssignment:
+          stepOptions.schroederLevelAssignment ?? null,
         schroederSpatialEpochGeneration:
           stepOptions.schroederSpatialEpochGeneration ?? null,
         boxDimsM: dims,
@@ -26855,35 +27112,18 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       if (gasPressureMechanicsBoundaryRequiredThisStep) {
         const exactP2g = stageResults.p2g;
         if (
-          exactP2g?.backend !== 'webgpu'
-          || exactP2g?.mechanicsFieldMode
-            !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
-          || exactP2g?.residentProductMassProductEventDispatchMode
-            !== 'gpu-authenticated-gas-only-no-mechanics-scatter'
-          || exactP2g?.residentProductMassGridCouplingStatus
-            !== 'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
-          || exactP2g?.residentProductMassInputProductEventCountAuthority
-            !== 'gpu-authored-filtered-live-prefix'
-          || exactP2g?.residentProductMassInputProductEventCountHostKnown
-            !== false
-          || finiteNumber(
-            exactP2g?.residentProductMassInputProductEventRowCapacity,
-            0
-          ) !== exactGasPressureMechanicsProductEventRowCapacity
-          || finiteNumber(
-            exactP2g?.residentProductMassCoupledEventCount,
-            0
-          ) !== 0
-          || finiteNumber(
-            exactP2g?.residentProductMassCoupledUnplacedMassKg,
-            0
-          ) !== 0
+          !exactGasPressureMechanicsP2gProductSourceIsolationCertified(exactP2g, {
+            productRowsAdvertised:
+              exactGasPressureMechanicsProductRowsAdvertised,
+            productEventRowCapacity:
+              exactGasPressureMechanicsProductEventRowCapacity
+          })
         ) {
           const error = new Error(
-            'Exact gas-pressure mechanics P2G did not publish the GPU-authenticated gas-only product-route certificate'
+            'Exact gas-pressure mechanics P2G did not publish the required product-source isolation certificate'
           );
           error.code =
-            'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_CERTIFICATE';
+            'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_SOURCE_ISOLATION';
           throw error;
         }
         exactPressureInputs = exactGasPressureMechanicsInputsFromProducer();
@@ -28230,6 +28470,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     taskIdPrefix,
     gasPressureMechanicsBoundaryEnabled:
       gasPressureMechanicsBoundaryEnabled === true,
+    particleGasLedgerActionable:
+      particleGasLedgerActionable === true,
+    gasPressureMechanicsParticleSourceIncluded:
+      exactGasPressureMechanicsParticleRowsAdvertised,
     gasPressureMechanicsBoundaryRequiredThisStep,
     phaseVolumeAmbientBuoyancyRequested:
       ambientBuoyancyExecutionThisStep?.requested
@@ -28244,7 +28488,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             ? 'exact-v4-gas-pressure-mechanics-boundary-submitted'
             : 'exact-v4-gas-pressure-mechanics-boundary-not-submitted')
         : (gasPressureMechanicsBoundaryEnabled === true
-            ? 'exact-v4-gas-pressure-mechanics-boundary-idle-no-product-rows'
+            ? 'exact-v4-gas-pressure-mechanics-boundary-idle-no-particle-candidate-source'
             : 'exact-v4-gas-pressure-mechanics-boundary-disabled'),
     gasPressureMechanicsProductEventRowCapacity:
       gasPressureMechanicsBoundaryRequiredThisStep
@@ -33822,6 +34066,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   spatialGasLedgerProducerStageRunner =
     runSphSpatialGasLedgerProducerStageComputeTask,
   gasPressureMechanicsBoundaryEnabled = false,
+  particleGasLedgerActionable = gasPressureMechanicsBoundaryEnabled,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
   schroederLawQueue = null,
@@ -34180,22 +34425,36 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       residentProductMass
       && exactGasPressureMechanicsProductEventRowCapacity > 0
     );
+    const exactGasPressureMechanicsParticleRowsAdvertised = Boolean(
+      particleGasLedgerActionable === true
+      && sphParticleUpload
+      && Math.max(0, Math.floor(finiteNumber(
+        sphParticleUpload.particleCount,
+        0
+      ))) > 0
+      && sphParticleUpload.stateBuffer
+      && sphParticleUpload.thermoBuffer
+    );
     exactGasPressureMechanicsBoundaryRequested = Boolean(
       gasPressureMechanicsBoundaryEnabled === true
       && canonicalSpatialRequired === true
       && requestedReadbackMode === NO_FULL_READBACK_MODE
       && preferWebGpu === true
-      && residentProductMass?.productEventBufferRetained === true
-      && residentProductMass?.productEventBuffer
-      && exactGasPressureMechanicsProductEventRowCapacity > 0
+      && (
+        exactGasPressureMechanicsProductRowsAdvertised
+        || exactGasPressureMechanicsParticleRowsAdvertised
+      )
     );
     if (
       gasPressureMechanicsBoundaryEnabled === true
-      && exactGasPressureMechanicsProductRowsAdvertised
+      && (
+        exactGasPressureMechanicsProductRowsAdvertised
+        || exactGasPressureMechanicsParticleRowsAdvertised
+      )
       && !exactGasPressureMechanicsBoundaryRequested
     ) {
       const error = new Error(
-        'Exact gas-pressure mechanics was enabled for live product rows without canonical same-device no-full-readback prerequisites'
+        'Exact gas-pressure mechanics was enabled for live gas candidates without canonical same-device no-full-readback prerequisites'
       );
       error.code = 'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_INELIGIBLE';
       throw error;
@@ -34225,24 +34484,30 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_GENERATION'
         );
       }
-      if (!residentProductMassMatchesDevice(
-        residentProductMass,
-        resolvedDevice
-      )) {
+      if (
+        exactGasPressureMechanicsProductRowsAdvertised
+        && !residentProductMassMatchesDevice(
+          residentProductMass,
+          resolvedDevice
+        )
+      ) {
         rejectExactGasPressureMechanicsBoundary(
           'Exact gas-pressure mechanics rejected a cross-device resident product source',
           'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_DEVICE'
         );
       }
       exactGasPressureMechanicsProductEventCountAuthority =
-        residentProductEventCountAuthorityRegistered(residentProductMass)
+        exactGasPressureMechanicsProductRowsAdvertised
+        && residentProductEventCountAuthorityRegistered(residentProductMass)
           ? resolveResidentProductEventCountAuthority(
               residentProductMass,
               resolvedDevice
             )
           : null;
       if (
-        !exactGasPressureMechanicsProductEventCountAuthority
+        exactGasPressureMechanicsProductRowsAdvertised
+        && (
+          !exactGasPressureMechanicsProductEventCountAuthority
         || exactGasPressureMechanicsProductEventCountAuthority.hostObserved
           === true
         || exactGasPressureMechanicsProductEventCountAuthority
@@ -34257,6 +34522,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
               SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
             ))
           )
+        )
       ) {
         rejectExactGasPressureMechanicsBoundary(
           'Exact gas-pressure mechanics requires an unobserved GPU-authored live product-count authority for the current buffer',
@@ -34504,13 +34770,25 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         () => spatialGasLedgerProducerStageRunner({
           sphParticleState,
           mlsMpmParticleState,
-          sphParticleUpload,
-          mlsMpmParticleUpload,
-          residentProductMass,
+          sphParticleUpload: exactGasPressureMechanicsParticleRowsAdvertised
+            ? sphParticleUpload
+            : null,
+          mlsMpmParticleUpload:
+            exactGasPressureMechanicsParticleRowsAdvertised
+              ? mlsMpmParticleUpload
+              : null,
+          residentProductMass: exactGasPressureMechanicsProductRowsAdvertised
+            ? residentProductMass
+            : null,
           productEventRowCount:
-            exactGasPressureMechanicsProductEventRowCapacity,
+            exactGasPressureMechanicsProductRowsAdvertised
+              ? exactGasPressureMechanicsProductEventRowCapacity
+              : null,
           productEventStrideFloats:
-            residentProductMass.productEventStrideFloats,
+            exactGasPressureMechanicsProductRowsAdvertised
+              ? residentProductMass.productEventStrideFloats
+              : null,
+          schroederLevelAssignment,
           schroederSpatialEpochGeneration,
           boxDimsM: dims,
           spatialGasChartId: 0,
@@ -34739,39 +35017,21 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
 
   if (
     exactGasPressureMechanicsBoundaryRequested
-    && (
-      p2gGridProjection?.backend !== 'webgpu'
-      || p2gGridProjection?.mechanicsFieldMode
-        !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
-      || p2gGridProjection?.residentProductMassProductEventDispatchMode
-        !== 'gpu-authenticated-gas-only-no-mechanics-scatter'
-      || p2gGridProjection?.residentProductMassGridCouplingStatus
-        !== 'resident-product-mass-gas-only-certified-no-mechanics-p2g-scatter'
-      || p2gGridProjection
-        ?.residentProductMassInputProductEventCountAuthority
-        !== 'gpu-authored-filtered-live-prefix'
-      || p2gGridProjection
-        ?.residentProductMassInputProductEventCountHostKnown !== false
-      || finiteNumber(
-        p2gGridProjection
-          ?.residentProductMassInputProductEventRowCapacity,
-        0
-      ) !== exactGasPressureMechanicsProductEventRowCapacity
-      || finiteNumber(
-        p2gGridProjection?.residentProductMassCoupledEventCount,
-        0
-      ) !== 0
-      || finiteNumber(
-        p2gGridProjection?.residentProductMassCoupledUnplacedMassKg,
-        0
-      ) !== 0
+    && !exactGasPressureMechanicsP2gProductSourceIsolationCertified(
+      p2gGridProjection,
+      {
+        productRowsAdvertised:
+          exactGasPressureMechanicsProductRowsAdvertised,
+        productEventRowCapacity:
+          exactGasPressureMechanicsProductEventRowCapacity
+      }
     )
   ) {
     const error = new Error(
-      'Exact gas-pressure mechanics P2G did not publish the GPU-authenticated gas-only product-route certificate'
+      'Exact gas-pressure mechanics P2G did not publish the required product-source isolation certificate'
     );
     error.code =
-      'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_CERTIFICATE';
+      'ERR_EXACT_GAS_PRESSURE_MECHANICS_BOUNDARY_PRODUCT_SOURCE_ISOLATION';
     throw error;
   }
 
@@ -35599,9 +35859,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     status: exactGasPressureMechanicsBoundaryRequested
       ? 'exact-v4-gas-pressure-mechanics-boundary-submitted'
       : (gasPressureMechanicsBoundaryEnabled === true
-          ? 'exact-v4-gas-pressure-mechanics-boundary-idle-no-product-rows'
+          ? 'exact-v4-gas-pressure-mechanics-boundary-idle-no-particle-candidate-source'
           : 'exact-v4-gas-pressure-mechanics-boundary-disabled'),
     enabled: gasPressureMechanicsBoundaryEnabled === true,
+    particleGasLedgerActionable:
+      particleGasLedgerActionable === true,
+    particleSourceIncluded:
+      exactGasPressureMechanicsParticleRowsAdvertised,
     requested: exactGasPressureMechanicsBoundaryRequested,
     submitted:
       exactGasPressureMechanicsBoundaryRequested
@@ -36855,8 +37119,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       throw error;
     }
   };
-  const destroySphUploadUnlessPreserved = (upload) => {
-    if (!upload) return;
+  const destroySphUploadComponentsUnlessPreserved = (upload) => {
     if (upload.ownsStateBuffer !== false) destroyUnlessPreserved(upload.stateBuffer);
     if (upload.ownsThermoBuffer !== false) destroyUnlessPreserved(upload.thermoBuffer);
     if (upload.ownsIdentityBuffer !== false) destroyUnlessPreserved(upload.identityBuffer);
@@ -36866,6 +37129,14 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (upload.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
       destroyUnlessPreserved(upload.materialPropertyBankParticleSizeBuffer);
     }
+  };
+  const destroySphUploadUnlessPreserved = (upload) => {
+    if (!upload) return;
+    if (runSphGpuParticleBufferSetCleanupAfterBorrows(
+      upload,
+      () => destroySphUploadComponentsUnlessPreserved(upload)
+    )) return;
+    destroySphUploadComponentsUnlessPreserved(upload);
   };
   const destroyMlsUploadUnlessPreserved = (upload) => {
     if (!upload) return;

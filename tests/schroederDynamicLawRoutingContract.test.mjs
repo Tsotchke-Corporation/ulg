@@ -27,6 +27,7 @@ import {
   createSchroederTargetScheduleProviderAuthority,
   exactSchroederProspectiveDynamicLawTransition,
   exactSchroederTargetScheduleAuthority,
+  schroederTargetScheduleSuccessorGasBoundaryActionable,
   schroederTargetScheduleSuccessorReactionExecutionRequired,
   validateSchroederTargetScheduleConfigurationContinuity
 } from '../src/runtime/sph/schroederTargetScheduleAuthority.js';
@@ -84,7 +85,7 @@ const COMMON_CONFIGURATION = Object.freeze({
   boxDimsM: Object.freeze([5, 5, 5])
 });
 
-function reactionTableFixture() {
+function reactionTableFixture({ gasProductCount = 0 } = {}) {
   const records = new Float32Array([
     1, 2, 3, 300,
     0, 0.1, 0, 0,
@@ -94,8 +95,25 @@ function reactionTableFixture() {
     SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length
   );
   const reactantTermRecords = new Float32Array(0);
-  const productTermRecords = new Float32Array(0);
-  const gasProductRecords = new Float32Array(0);
+  const productTermCount = gasProductCount > 0 ? 1 : 0;
+  const productTermRecords = new Float32Array(
+    productTermCount * SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length
+  );
+  const gasProductRecords = new Float32Array(
+    gasProductCount * SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length
+  );
+  if (gasProductCount > 0) {
+    reactionHeaders[4] = productTermCount;
+    reactionHeaders[6] = gasProductCount;
+    reactionHeaders[10] = 1;
+    productTermRecords.set([
+      0, 7, 1, 0.018, 1, 1, 3, 1,
+      0, 0, 4, 0, 0, 7, 0, 0
+    ]);
+    gasProductRecords.set([
+      0, 0, 7, 1, 0.018, 1, 1, 0
+    ]);
+  }
   const atomTermRecords = new Float32Array(0);
   const productPhaseRecords = new Float32Array(0);
   const combinedRecords = new Float32Array([
@@ -114,8 +132,8 @@ function reactionTableFixture() {
     reactionCount: 1,
     reactionHeaderCount: 1,
     reactantTermCount: 0,
-    productTermCount: 0,
-    gasProductCount: 0,
+    productTermCount,
+    gasProductCount,
     atomTermCount: 0,
     productPhaseCount: 0,
     combinedRecordCount: combinedRecords.length / 4,
@@ -150,6 +168,7 @@ function reactionTableFixture() {
 }
 
 const REACTION_TABLE = reactionTableFixture();
+const GAS_REACTION_TABLE = reactionTableFixture({ gasProductCount: 1 });
 
 function residentStepOptions(reactionActive) {
   return {
@@ -166,6 +185,26 @@ function targetConfiguration(reactionActive) {
     ...COMMON_CONFIGURATION,
     residentStepOptions: residentStepOptions(reactionActive),
     scheduleStepOptionsProvider: PROVIDER
+  });
+}
+
+function gasResidentStepOptions(reactionActive) {
+  return {
+    ambientPressurePa: 0,
+    contactSolverEnabled: false,
+    particleGasLedgerActionable: reactionActive,
+    ...(reactionActive
+      ? { reactionTable: GAS_REACTION_TABLE }
+      : { reactionActivationWatchTable: GAS_REACTION_TABLE })
+  };
+}
+
+function gasTargetConfiguration(reactionActive) {
+  return createSchroederTargetScheduleConfiguration({
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: gasResidentStepOptions(reactionActive),
+    scheduleStepOptionsProvider: PROVIDER,
+    particleGasLedgerActionable: reactionActive
   });
 }
 
@@ -221,6 +260,7 @@ function prospectiveWriterEvidence({
       schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
       status: 'worker-retained-product-gas-boundary-actionable',
       gasBoundaryActionable: true,
+      retainedProductGasBoundaryActionable: true,
       source: 'worker-retained-product-event-buffer',
       productEventBufferRetained: true,
       productEventRowCount,
@@ -243,6 +283,7 @@ function prospectiveWriterEvidence({
     schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
     status: 'worker-retained-product-gas-boundary-inactive',
     gasBoundaryActionable: false,
+    retainedProductGasBoundaryActionable: false,
     source: null,
     productEventBufferRetained: false,
     productEventRowCount: 0,
@@ -427,6 +468,87 @@ test('precomputed configuration preserves dormant-to-active reaction continuity'
   );
 });
 
+test('gas-producing dormant reaction preseals the coupled particle-gas writer only for its active successor', () => {
+  const dormantConfiguration = gasTargetConfiguration(false);
+  const activeConfiguration = gasTargetConfiguration(true);
+  assert.deepEqual({
+    reaction: dormantConfiguration.writerSet.reaction,
+    particleGas: dormantConfiguration.writerSet.particleGasLedgerActionable,
+    gasBoundary: dormantConfiguration.writerSet.gasBoundaryActionable,
+    phaseVolumeSidecars: dormantConfiguration.writerSet.phaseVolumeSidecars,
+    mechanicsFieldViews: dormantConfiguration.writerSet.mechanicsFieldViews
+  }, {
+    reaction: false,
+    particleGas: false,
+    gasBoundary: false,
+    phaseVolumeSidecars: false,
+    mechanicsFieldViews: false
+  });
+  assert.deepEqual({
+    reaction: activeConfiguration.writerSet.reaction,
+    particleGas: activeConfiguration.writerSet.particleGasLedgerActionable,
+    gasBoundary: activeConfiguration.writerSet.gasBoundaryActionable,
+    phaseVolumeSidecars: activeConfiguration.writerSet.phaseVolumeSidecars,
+    mechanicsFieldViews: activeConfiguration.writerSet.mechanicsFieldViews
+  }, {
+    reaction: true,
+    particleGas: true,
+    gasBoundary: true,
+    phaseVolumeSidecars: true,
+    mechanicsFieldViews: true
+  });
+  assert.throws(
+    () => createSchroederTargetScheduleConfiguration({
+      ...COMMON_CONFIGURATION,
+      residentStepOptions: gasResidentStepOptions(true),
+      scheduleStepOptionsProvider: PROVIDER,
+      particleGasLedgerActionable: false
+    }),
+    /gas-producing reaction table requires particleGasLedgerActionable/
+  );
+
+  const predecessor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:gas-reaction-dormant-source',
+    targetScheduleRequestId: 'schedule:gas-reaction-dormant-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: dormantConfiguration,
+    prospectiveTargetConfiguration: activeConfiguration
+  });
+  const observation = dynamicLawObservation(predecessor, {
+    triggeredSourceCount: 1
+  });
+  const successor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: predecessor.targetScheduleRequestId,
+    targetScheduleRequestId: 'schedule:gas-reaction-active-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: TERMINAL_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    predecessorTargetScheduleAuthority: predecessor,
+    predecessorDynamicLawObservation: observation,
+    currentTargetConfiguration: activeConfiguration
+  });
+  assert.equal(
+    predecessor.prospectiveDynamicLawTransition.targetConfiguration
+      .tableFingerprints.watchGasProductCount,
+    1
+  );
+  assert.equal(successor.writerSet.particleGasLedgerActionable, true);
+  assert.equal(
+    validateSchroederTargetScheduleConfigurationContinuity({
+      predecessorTargetScheduleAuthority: predecessor,
+      currentTargetScheduleAuthority: successor,
+      predecessorDynamicLawObservation: observation
+    }).mode,
+    'prospective-reaction-dormant-to-executing'
+  );
+});
+
 test('precomputed gas actionability stays fail-closed without rejecting static gas writers', () => {
   const gasInactive = targetConfiguration(true);
   assert.equal(gasInactive.writerSet.gasBoundaryActionable, false);
@@ -479,6 +601,11 @@ test('precomputed gas actionability stays fail-closed without rejecting static g
   });
   assert.equal(retainedGasAuthority.writerSet.gasBoundaryActionable, true);
   assert.equal(
+    retainedGasAuthority.writerSet.retainedProductGasBoundaryActionable,
+    true
+  );
+  assert.equal(retainedGasAuthority.writerSet.phaseVolumeSidecars, true);
+  assert.equal(
     validateSchroederTargetScheduleConfigurationContinuity({
       predecessorTargetScheduleAuthority: predecessor,
       currentTargetScheduleAuthority: retainedGasAuthority,
@@ -507,6 +634,210 @@ test('precomputed gas actionability stays fail-closed without rejecting static g
     retainedProductGasBoundaryActionable: false
   });
   assert.equal(externalGaugeAuthority.writerSet.gasBoundaryActionable, true);
+  assert.equal(
+    externalGaugeAuthority.writerSet.retainedProductGasBoundaryActionable,
+    false
+  );
+  assert.equal(
+    externalGaugeAuthority.writerSet.phaseVolumeSidecars,
+    false,
+    'legacy external/import pressure sources do not need the union free-volume sidecars'
+  );
+
+  const particleGasConfiguration = createSchroederTargetScheduleConfiguration({
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(true),
+    scheduleStepOptionsProvider: PROVIDER,
+    particleGasLedgerActionable: true
+  });
+  assert.equal(
+    particleGasConfiguration.writerSet.particleGasLedgerActionable,
+    true
+  );
+  assert.equal(particleGasConfiguration.writerSet.gasBoundaryActionable, true);
+  assert.equal(
+    particleGasConfiguration.writerSet.retainedProductGasBoundaryActionable,
+    false
+  );
+  assert.equal(particleGasConfiguration.writerSet.phaseVolumeSidecars, true);
+  assert.ok(
+    particleGasConfiguration.writerSet.writerIds.includes(
+      'particle-gas-ledger-actionable'
+    )
+  );
+  assert.notEqual(
+    particleGasConfiguration.configurationFingerprint,
+    gasInactive.configurationFingerprint
+  );
+  const particleGasAuthority = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:particle-gas-source',
+    targetScheduleRequestId: 'schedule:particle-gas-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    currentTargetConfiguration: particleGasConfiguration
+  });
+  assert.equal(
+    schroederTargetScheduleSuccessorGasBoundaryActionable({
+      predecessorTargetScheduleAuthority: particleGasAuthority,
+      predecessorDynamicLawObservation: dynamicLawObservation(
+        particleGasAuthority
+      )
+    }),
+    false,
+    'current particle rows are not retained-product successor evidence'
+  );
+});
+
+test('retained-product authority transitions independently while particle gas stays active', () => {
+  const mixedTargetConfiguration =
+    createSchroederTargetScheduleConfiguration({
+      ...COMMON_CONFIGURATION,
+      residentStepOptions: residentStepOptions(true),
+      scheduleStepOptionsProvider: PROVIDER,
+      particleGasLedgerActionable: true,
+      retainedProductGasBoundaryActionable: true
+    });
+  const predecessor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: 'schedule:mixed-gas-source',
+    targetScheduleRequestId: 'schedule:mixed-gas-target',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: SOURCE_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    prospectiveTargetConfiguration: mixedTargetConfiguration,
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(true),
+    scheduleStepOptionsProvider: PROVIDER,
+    particleGasLedgerActionable: true
+  });
+  const transition = predecessor.prospectiveDynamicLawTransition;
+  assert.equal(
+    transition.kind,
+    'retained-product-gas-boundary-inactive-to-actionable'
+  );
+  assert.equal(
+    transition.sourceConfiguration.writerSet.particleGasLedgerActionable,
+    true
+  );
+  assert.equal(
+    transition.sourceConfiguration.writerSet
+      .retainedProductGasBoundaryActionable,
+    false
+  );
+  assert.equal(
+    transition.sourceConfiguration.writerSet.gasBoundaryActionable,
+    true,
+    'particle candidates already keep the combined gas boundary active'
+  );
+  assert.equal(
+    transition.targetConfiguration.writerSet.particleGasLedgerActionable,
+    true
+  );
+  assert.equal(
+    transition.targetConfiguration.writerSet
+      .retainedProductGasBoundaryActionable,
+    true
+  );
+  assert.equal(
+    transition.targetConfiguration.writerSet.gasBoundaryActionable,
+    true
+  );
+
+  const observation = dynamicLawObservation(predecessor, {
+    retainedProductGasBoundaryActionable: true
+  });
+  assert.equal(
+    observation.prospectiveWriterEvidence.gasBoundaryActionable,
+    true
+  );
+  assert.equal(
+    schroederTargetScheduleSuccessorGasBoundaryActionable({
+      predecessorTargetScheduleAuthority: predecessor,
+      predecessorDynamicLawObservation: observation
+    }),
+    true,
+    'authentic retained-product evidence admits the presealed transition even though particle gas was already active'
+  );
+
+  const successor = createSchroederTargetScheduleAuthority({
+    sourceScheduleId: predecessor.targetScheduleRequestId,
+    targetScheduleRequestId: 'schedule:mixed-gas-successor',
+    laneId: LANE_ID,
+    stateKey: STATE_KEY,
+    sourceLineage: TERMINAL_LINEAGE,
+    sourceParticleCount: PARTICLE_COUNT,
+    sourcePhaseLaneCount: 1,
+    predecessorTargetScheduleAuthority: predecessor,
+    predecessorDynamicLawObservation: observation,
+    currentTargetConfiguration: mixedTargetConfiguration
+  });
+  assert.equal(successor.writerSet.particleGasLedgerActionable, true);
+  assert.equal(
+    successor.writerSet.retainedProductGasBoundaryActionable,
+    true
+  );
+  assert.equal(successor.writerSet.gasBoundaryActionable, true);
+  assert.equal(
+    validateSchroederTargetScheduleConfigurationContinuity({
+      predecessorTargetScheduleAuthority: predecessor,
+      currentTargetScheduleAuthority: successor,
+      predecessorDynamicLawObservation: observation
+    }).mode,
+    'prospective-retained-product-gas-boundary-actionable'
+  );
+});
+
+test('authoritative two-level targets admit exact gas sources and reject legacy pressure authorities', () => {
+  const authoritativeTwoLevel = {
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative'
+  };
+  const base = {
+    ...COMMON_CONFIGURATION,
+    residentStepOptions: residentStepOptions(true),
+    scheduleStepOptionsProvider: PROVIDER,
+    mechanicsOptions: authoritativeTwoLevel,
+    hierarchyConfig: authoritativeTwoLevel
+  };
+  const inactive = createSchroederTargetScheduleConfiguration(base);
+  assert.equal(inactive.writerSet.twoLevelMechanics, true);
+  assert.equal(inactive.writerSet.particleGasLedgerActionable, false);
+  assert.equal(
+    inactive.writerSet.retainedProductGasBoundaryActionable,
+    false
+  );
+  assert.equal(inactive.writerSet.gasBoundaryActionable, false);
+
+  for (const gasClaim of [
+    { particleGasLedgerActionable: true },
+    { retainedProductGasBoundaryActionable: true },
+    {
+      particleGasLedgerActionable: true,
+      retainedProductGasBoundaryActionable: true
+    }
+  ]) {
+    const exact = createSchroederTargetScheduleConfiguration({
+      ...base,
+      ...gasClaim
+    });
+    assert.equal(exact.writerSet.gasBoundaryActionable, true);
+    assert.equal(exact.writerSet.twoLevelMechanics, true);
+  }
+
+  assert.throws(
+    () => createSchroederTargetScheduleConfiguration({
+      ...base,
+      residentStepOptions: {
+        ...residentStepOptions(true),
+        externalGaugePressureEnabled: true
+      }
+    }),
+    /accepts only exact particle\/product gas-ledger sources/
+  );
 });
 
 test('precomputed configuration rejects a structurally tampered receipt', () => {
@@ -534,17 +865,17 @@ test('target authority and prospective transition reject every legacy disabled t
   assert.equal(ULG_SCHROEDER_TARGET_SCHEDULE_AUTHORITY_SCHEMA,
     'peercompute.ulg.schroeder-target-schedule-authority.v5');
   assert.equal(ULG_SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_SCHEMA,
-    'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v2');
+    'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v3');
   assert.equal(SCHROEDER_TARGET_SCHEDULE_REQUEST_REVISION,
-    'main-thread-next-schedule-request-prospective-writer-transition-sha256-v7');
+    'main-thread-next-schedule-request-prospective-writer-transition-sha256-v9');
   assert.equal(SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_REVISION,
-    'reaction-or-retained-product-gas-boundary-sha256-v2');
+    'reaction-or-retained-product-gas-boundary-sha256-v3');
   assert.equal(authority.shadowOnly, false);
   assert.equal(authority.routingAuthority, true);
   assert.equal(transition.shadowOnly, false);
   assert.equal(transition.routingAuthority, true);
   assert.match(authority.requestFingerprint,
-    /^sha256:schroeder-target-schedule-authority-v6:/);
+    /^sha256:schroeder-target-schedule-authority-v7:/);
   assert.match(transition.transitionFingerprint,
     /^sha256:schroeder-prospective-dynamic-law-transition-v1:/);
 

@@ -2193,7 +2193,7 @@ test('workspace signed receipt closure uses operation-conditioned reductions', (
   );
   assert.equal(
     [...source.matchAll(/measured_conditioned_close\(/g)].length - 1,
-    11
+    12
   );
   assert.match(
     fineSource,
@@ -2202,6 +2202,25 @@ test('workspace signed receipt closure uses operation-conditioned reductions', (
   assert.match(
     terminalSource,
     /let coarse_signed_reduction_count = independent_reduction_operation_count\(\s*ws_load\(22u\)\s*\)/
+  );
+  const coarseTerminalValidationSource = source
+    .split('fn begin_coarse_terminal_validation()')[1]
+    .split('@compute')[0];
+  assert.match(
+    coarseTerminalValidationSource,
+    /let local_heat_decomposition_conditioning =\s*abs\(fine_route\) \+ abs\(consumed_fine_route\)\s*\+ abs\(local_heat\) \+ abs\(consumed_local_heat\)/
+  );
+  assert.match(
+    coarseTerminalValidationSource,
+    /measured_conditioned_close\(\s*local_heat,\s*consumed_local_heat,\s*local_heat_decomposition_conditioning,\s*evidence_count\s*\)/
+  );
+  assert.match(
+    coarseTerminalValidationSource,
+    /measured_close\(fine_route, consumed_fine_route, evidence_count\)/
+  );
+  assert.match(
+    coarseTerminalValidationSource,
+    /measured_close\(\s*consumed_heat,\s*consumed_fine_route \+ consumed_local_heat,\s*evidence_count\s*\)/
   );
 
   const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

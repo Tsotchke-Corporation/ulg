@@ -545,6 +545,7 @@ function productionM3Fixture({
 async function runProductionM3Fixture(fixture, {
   counts = { p2g: 0, gridUpdate: 0, g2p: 0 },
   p2gOptions = null,
+  gridUpdateOptions = null,
   g2pOptions = null,
   progress = null,
   overrides = {}
@@ -569,6 +570,7 @@ async function runProductionM3Fixture(fixture, {
     },
     gridUpdateRunner: async (options) => {
       counts.gridUpdate += 1;
+      gridUpdateOptions?.push(options);
       progress?.('grid-update-start', counts);
       const bufferCountBefore = fixture.device.createdBuffers.length;
       const update = await runMlsMpmGridUpdateWebGpu(options);
@@ -1859,6 +1861,119 @@ test('Slice 9 mounts S9-C transport on every fine and terminal coarse grid updat
     fixture.device,
     result.pendingPostMechanicsClosure,
     { reason: new Error('Slice 9 mounted-transport fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(
+    fixture.mechanicsMaterialPhaseUpload
+  );
+});
+
+test('canonical two-level mechanics refreshes exact gas pressure per epoch and keeps S9-C drag-only', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const p2gOptions = [];
+  const gridUpdateOptions = [];
+  const {
+    result,
+    counts,
+    gridUpdates
+  } = await runProductionM3Fixture(fixture, {
+    p2gOptions,
+    gridUpdateOptions,
+    overrides: {
+      gasPressureMechanicsBoundaryEnabled: true,
+      particleGasLedgerActionable: true,
+      retainedProductGasBoundaryActionable: false,
+      residentProductMass: null
+    }
+  });
+
+  assert.deepEqual(counts, { p2g: 5, gridUpdate: 3, g2p: 3 });
+  assert.equal(p2gOptions.length, 5);
+  assert.equal(gridUpdateOptions.length, 3);
+  assert.equal(gridUpdates.length, 3);
+  assert.deepEqual(result.exactGasPressureMechanics, {
+    enabled: true,
+    sourceMode: 'particle-only',
+    producerCount: 3,
+    boundarySubmissionCount: 3,
+    expectedProducerCount: 3,
+    fineBoundaryCount: 2,
+    terminalBoundaryCount: 1,
+    pressureScale: 1,
+    s9cCoexistenceMode: 'drag-only-zero-pressure-scale',
+    fineMappingMode: 'fine-to-coarse-parent-adjoint',
+    terminalMappingMode: 'same-level',
+    authorityRefreshMode:
+      'one-fresh-authority-per-canonical-microepoch-plus-terminal',
+    productSourceIsolationCertified: true,
+    hostQueueFenceCount: 0,
+    mapAsyncCount: 0,
+    externalImpulseWorkClosure:
+      'gas-boundary-impulse-work-rolled-into-h7-reflux-external-channel'
+  });
+  assert.deepEqual(result.phaseVolumeInterfaceTransport, {
+    enabled: true,
+    pressureScale: 0,
+    configuredPressureScale: 1,
+    dragScale: 1,
+    maxImpulseFraction: 0.5,
+    ambientBoundaryEvidence: 'sealed-external-impulse-and-work'
+  });
+  assert.equal(
+    result.internalEnergyTransferStatus,
+    'exact-gas-pressure-boundary-plus-nonnegative-s9c-drag-causal-heat-deposited-by-transpose-g2p'
+  );
+  assert.equal(
+    result.refluxEvidenceStatus,
+    'gpu-measured-equal-opposite-linear-angular-drag-energy-plus-exact-gas-external-impulse-work-ledger'
+  );
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(result.readbackBytes, 0);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+
+  assert.equal(new Set(gridUpdateOptions.map(
+    ({ gasPressureMechanicsAuthoritySource }) =>
+      gasPressureMechanicsAuthoritySource
+  )).size, 3);
+  for (const options of gridUpdateOptions) {
+    assert.equal(options.phaseVolumePressureScale, 0);
+    assert.equal(options.gasPressureMechanicsScale, 1);
+    assert.equal(options.phaseVolumeDragScale, 1);
+    assert.equal(options.phaseVolumeInterfaceTransportRequired, true);
+    assert.ok(options.gasPressureMechanicsAuthoritySource);
+  }
+  assert.deepEqual(gridUpdates.map((update) => (
+    update.gasPressureBoundarySubmission?.crossLevelMappingMode
+  )), [
+    'fine-to-coarse-parent-adjoint',
+    'fine-to-coarse-parent-adjoint',
+    'same-level'
+  ]);
+  assert.deepEqual(gridUpdates.map((update) => (
+    update.gasPressureBoundarySubmission?.targetLevel
+  )), [0, 0, 1]);
+  assert.deepEqual(gridUpdates.map((update) => (
+    update.gasPressureBoundarySubmission?.gasLevel
+  )), [1, 1, 1]);
+  for (const update of gridUpdates) {
+    assert.equal(update.gasPressureBoundaryRequested, true);
+    assert.equal(update.gasPressureBoundarySubmitted, true);
+    assert.equal(
+      update.gasPressureBoundarySubmission?.authorityRetiredQueueOrdered,
+      true
+    );
+    assert.equal(update.gasPressureBoundarySubmission?.hostQueueFenceCount, 0);
+    assert.equal(update.gasPressureBoundarySubmission?.mapAsyncCount, 0);
+  }
+
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('exact two-level gas boundary fixture cleanup') }
   ), true);
   assert.equal(await fixture.controller.completionPromise(), true);
   destroyMlsMpmMechanicsMaterialPhaseUpload(

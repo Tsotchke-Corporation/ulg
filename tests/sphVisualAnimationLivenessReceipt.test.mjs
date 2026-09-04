@@ -56,6 +56,7 @@ import {
 } from '../scripts/sph-visual-animation-liveness-receipt.mjs';
 import {
   classifyCadenceAcceptanceIssues,
+  classifyHeadedSweepPageErrors,
   evaluateCadenceSample,
   resolveHeadedSweepAutomatedDisposition,
   summarizeVisiblePresentationCadence
@@ -1122,6 +1123,27 @@ test('headed sweep gates integrity for every preset and rate only for particle t
     'future-unclassified-integrity-failure',
     'mean-visible-presentation-below-target',
     'visible-presentation-stall-exceeds-budget'
+  ]);
+});
+
+test('headed sweep ignores only the exact observed Vite HMR page error', () => {
+  const classified = classifyHeadedSweepPageErrors([
+    'WebSocket closed without opened.',
+    'WebSocket closed without opened',
+    ' WebSocket closed without opened.',
+    'WebSocket closed without opened. extra',
+    'Uncaught TypeError: simulation failed',
+    'WebSocket closed without opened.'
+  ]);
+  assert.deepEqual(classified.ignoredPageErrors, [
+    'WebSocket closed without opened.',
+    'WebSocket closed without opened.'
+  ]);
+  assert.deepEqual(classified.actionablePageErrors, [
+    'WebSocket closed without opened',
+    ' WebSocket closed without opened.',
+    'WebSocket closed without opened. extra',
+    'Uncaught TypeError: simulation failed'
   ]);
 });
 

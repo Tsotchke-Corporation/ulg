@@ -373,7 +373,8 @@ function createGasPressureBoundaryPipelines(device) {
       computeBufferBinding(4, 'read-only-storage'),
       computeBufferBinding(5, 'storage'),
       computeBufferBinding(6, 'read-only-storage'),
-      computeBufferBinding(7, 'uniform')
+      computeBufferBinding(7, 'uniform'),
+      computeBufferBinding(8, 'read-only-storage')
     ]
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -401,15 +402,15 @@ function createGasPressureBoundaryPipelines(device) {
   return pipelines;
 }
 
-function exactGasPressureGridCellOrigin(binding) {
-  const shift = Number(binding?.gasGridShift);
+function exactGasPressureGridCellOrigin(gridShift, gridRole) {
+  const shift = Number(gridShift);
   if (
     !Number.isSafeInteger(shift)
     || shift < 0
     || shift > 0x7fff_ffff
   ) {
     throw new TypeError(
-      'Gas pressure boundary requires an exact i32 mechanics-grid shift'
+      `Gas pressure boundary requires an exact i32 ${gridRole} grid shift`
     );
   }
   // Mechanics field dense index (0,0,0) is the exact spatial cell
@@ -2106,12 +2107,14 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   ambientPressurePa,
   ambientReferenceDensityKgPerM3,
   phaseVolumePressureScale,
+  gasPressureMechanicsScale = phaseVolumePressureScale,
   phaseVolumeDragScale,
   phaseVolumeMaxImpulseFraction,
   phaseVolumeInterfaceTransportRequired,
   phaseVolumeAmbientBuoyancyRequired,
   gasPressureMechanicsAuthoritySource,
   gasPressureMechanicsChartId,
+  gasPressureBoundaryScratchCaptureBuffer,
   fusedFineSubstepTransaction,
   fusedCoarseTerminalTransaction,
   fusedProducerCapability,
@@ -2222,17 +2225,18 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   }
   const gasPressureBoundaryRequested =
     gasPressureMechanicsAuthoritySource != null;
-  if (gasPressureBoundaryRequested && fusedTransaction != null) {
-    throw new Error(
-      'Exact v4 gas pressure boundary transport is not supported by fused mechanics transactions'
-    );
-  }
-  if (
+  const s9PressureScaleExactZero =
+    typeof phaseVolumePressureScale === 'number'
+    && Object.is(phaseVolumePressureScale, 0);
+  const gasPressureBoundaryS9cDragOnlyCoexistence =
     gasPressureBoundaryRequested
-    && phaseVolumeInterfaceTransportRequired === true
+    && phaseVolumeInterfaceTransportRequired === true;
+  if (
+    gasPressureBoundaryS9cDragOnlyCoexistence
+    && !s9PressureScaleExactZero
   ) {
     throw new Error(
-      'Exact v4 gas pressure boundary transport cannot share the S9-C pressure/drag path'
+      'Exact v4 gas pressure boundary transport can share S9-C only when its pressure scale is exact zero'
     );
   }
   if (
@@ -2458,7 +2462,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       device.limits?.maxBufferSize ?? Number.POSITIVE_INFINITY
     );
     if (
-      maxStorageBindings < 7
+      maxStorageBindings < 8
       || gasPressureBoundaryLayout.scratchByteLength
         > maxStorageBindingBytes
       || gasPressureBoundaryLayout.scratchByteLength > maxBufferBytes
@@ -2467,6 +2471,22 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         'Gas pressure boundary scratch exceeds the admitted WebGPU storage limits'
       );
     }
+  }
+  if (
+    gasPressureBoundaryScratchCaptureBuffer != null
+    && (
+      !gasPressureBoundaryLayout
+      || !webGpuBufferMatchesDevice(
+        gasPressureBoundaryScratchCaptureBuffer,
+        device
+      )
+      || Number(gasPressureBoundaryScratchCaptureBuffer.size ?? 0)
+        < gasPressureBoundaryLayout.scratchByteLength
+    )
+  ) {
+    throw new TypeError(
+      'Gas pressure boundary scratch capture requires an exact same-device COPY_DST buffer large enough for the full scratch transaction'
+    );
   }
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -2512,6 +2532,22 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           // destructor once without replacing the producer's error.
         }
       }
+    }
+  };
+  const scheduleOwnedBufferCleanupAfterDeviceLoss = () => {
+    try {
+      const loss = device?.lost;
+      if (!loss || typeof loss.then !== 'function') return false;
+      Promise.resolve(loss).then(
+        cleanupOwnedBuffers,
+        // A rejected replacement for GPUDevice.lost is not device-loss
+        // evidence. Preserve the allocations instead of converting a broken
+        // provider into permission to destroy possibly referenced buffers.
+        () => false
+      ).catch(() => false);
+      return true;
+    } catch {
+      return false;
     }
   };
   const scheduleOwnedBufferCleanup = () => {
@@ -2593,9 +2629,15 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         }
       }
     }
+    const unknownGasBoundarySubmission = Boolean(
+      gasPressureBoundarySubmissionAttempted
+      && gasPressureBoundarySubmitFailureQuarantined
+      && mutationCommitted !== true
+    );
     try {
       const fence = device.queue?.onSubmittedWorkDone?.();
-      if (fence && publishedUpdate) {
+      const fenceThenable = typeof fence?.then === 'function';
+      if (fenceThenable && publishedUpdate) {
         appendGpuReadbackTelemetryObservation(publishedUpdate, {
           hostQueueFenceCount: 1,
           deferredCleanupHostQueueFenceCount: 1
@@ -2603,7 +2645,16 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           source: 'mechanics-field-grid-update-owned-buffer-cleanup'
         });
       }
-      if (!fence?.then) {
+      if (unknownGasBoundarySubmission) {
+        if (!fenceThenable) {
+          scheduleOwnedBufferCleanupAfterDeviceLoss();
+          return;
+        }
+        Promise.resolve(fence).then(
+          cleanupOwnedBuffers,
+          scheduleOwnedBufferCleanupAfterDeviceLoss
+        );
+      } else if (!fenceThenable) {
         cleanupOwnedBuffers();
       } else {
         Promise.resolve(fence)
@@ -2611,7 +2662,11 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           .finally(cleanupOwnedBuffers);
       }
     } catch {
-      cleanupOwnedBuffers();
+      if (unknownGasBoundarySubmission) {
+        scheduleOwnedBufferCleanupAfterDeviceLoss();
+      } else {
+        cleanupOwnedBuffers();
+      }
     }
   };
   let paramsBuffer = null;
@@ -2620,6 +2675,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   let gasPressureBoundaryScratchBuffer = null;
   let gasPressureBoundaryParamsBuffer = null;
   let gasPressureBoundaryBinding = null;
+  let gasPressureBoundaryTargetGridCellOrigin = null;
+  let gasPressureBoundaryGasGridCellOrigin = null;
   let gasPressureBoundaryProducerClaim = null;
   let gasPressureBoundaryFinalConsumer = null;
   let gasPressureBoundaryRetired = false;
@@ -2691,7 +2748,10 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         device.createBuffer({
           label: 'ulg-schroeder-gas-pressure-boundary-scratch',
           size: gasPressureBoundaryLayout.scratchByteLength,
-          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+          usage:
+            GPU_BUFFER_USAGE.STORAGE
+            | GPU_BUFFER_USAGE.COPY_DST
+            | GPU_BUFFER_USAGE.COPY_SRC
         })
       );
       gasPressureBoundaryParamsBuffer = trackOwnedBuffer(
@@ -2828,8 +2888,13 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
             chartId: gasPressureMechanicsChartId
           }
         );
-      const gridCellOrigin = exactGasPressureGridCellOrigin(
-        gasPressureBoundaryBinding
+      gasPressureBoundaryTargetGridCellOrigin = exactGasPressureGridCellOrigin(
+        gasPressureBoundaryBinding.targetGridShift,
+        'target mechanics'
+      );
+      gasPressureBoundaryGasGridCellOrigin = exactGasPressureGridCellOrigin(
+        gasPressureBoundaryBinding.gasGridShift,
+        'gas mechanics'
       );
       const boundaryEpoch = gasPressureBoundaryBinding.epochIdentity;
       const boundaryDirectory = gasPressureBoundaryBinding.gasDirectory;
@@ -2872,10 +2937,10 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           chartEpoch: boundaryEpoch.chartEpoch,
           levelEpoch: boundaryEpoch.levelEpoch,
           supportEpoch: boundaryEpoch.supportEpoch,
-          selectedLevel: gasPressureBoundaryBinding.level,
-          gridNodeCount: gasPressureBoundaryBinding.gasGridNodeCount,
-          gridDimensions: gasPressureBoundaryBinding.gasGridDims,
-          gridCellOrigin,
+          selectedLevel: gasPressureBoundaryBinding.targetLevel,
+          gridNodeCount: gasPressureBoundaryBinding.targetGridNodeCount,
+          gridDimensions: gasPressureBoundaryBinding.targetGridDims,
+          gridCellOrigin: gasPressureBoundaryTargetGridCellOrigin,
           chartId: gasPressureBoundaryBinding.chartId,
           dt: dtSeconds,
           ambientPressurePa: Math.max(
@@ -2884,9 +2949,12 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           ),
           pressureScale: Math.max(
             0,
-            finiteNumber(phaseVolumePressureScale, 1)
+            finiteNumber(
+              gasPressureMechanicsScale,
+              finiteNumber(phaseVolumePressureScale, 1)
+            )
           ),
-          gridSpacingM: gasPressureBoundaryBinding.gasGridSpacingM,
+          gridSpacingM: gasPressureBoundaryBinding.targetGridSpacingM,
           gasAuthorityExecutionGeneration:
             gasPressureBoundaryBinding.executionGeneration,
           gasAuthorityStorageGeneration:
@@ -2905,7 +2973,22 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           gasDirectoryCellMembersOffsetWords:
             boundaryDirectory.cellMembersOffsetWords,
           gasDirectoryParticleToCellOffsetWords:
-            boundaryDirectory.memberToCellOffsetWords
+            boundaryDirectory.memberToCellOffsetWords,
+          crossLevelMappingMode:
+            gasPressureBoundaryBinding.crossLevelMappingMode,
+          gasSelectedLevel: gasPressureBoundaryBinding.gasLevel,
+          gasGridNodeCount: gasPressureBoundaryBinding.gasGridNodeCount,
+          gasGridDimensions: gasPressureBoundaryBinding.gasGridDims,
+          gasGridCellOrigin: gasPressureBoundaryGasGridCellOrigin,
+          gasGridSpacingM: gasPressureBoundaryBinding.gasGridSpacingM,
+          parentGenerationId:
+            gasPressureBoundaryBinding.parentGenerationId,
+          parentCompletionOrdinal:
+            gasPressureBoundaryBinding.parentCompletionOrdinal,
+          parentFieldCapacity:
+            gasPressureBoundaryBinding.parentFieldCapacity,
+          parentFieldWordCapacity:
+            gasPressureBoundaryBinding.parentFieldWordCapacity
         })
       );
     }
@@ -3216,6 +3299,15 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     sequencePass.setBindGroup(0, sealBindGroup);
     sequencePass.dispatchWorkgroups(1);
     sequencePass.end();
+    if (gasPressureBoundaryScratchCaptureBuffer) {
+      encoder.copyBufferToBuffer(
+        gasPressureBoundaryScratchBuffer,
+        0,
+        gasPressureBoundaryScratchCaptureBuffer,
+        0,
+        gasPressureBoundaryLayout.scratchByteLength
+      );
+    }
     const commandBuffer = encoder.finish();
     if (gasPressureBoundaryBinding) {
       gasPressureBoundaryProducerClaim =
@@ -3521,6 +3613,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
             hostLogicalCountReadCount: 0,
             lifecycleDispatchCount:
               SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS.length,
+            diagnosticScratchCopySubmitted:
+              gasPressureBoundaryScratchCaptureBuffer != null,
             entryPoints: SCHROEDER_GAS_PRESSURE_BOUNDARY_ENTRY_POINTS,
             pipelineOrder:
               'post-grid-main-pre-s9-contact-summary-seal',
@@ -3535,7 +3629,32 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
               gasPressureBoundaryPhaseVolumeAuthority.phaseVolumeReceipt
                 .completionOrdinal,
             fieldMutationOrdinal: mutationToken.outputOrdinal,
-            selectedLevel: gasPressureBoundaryBinding.level,
+            selectedLevel: gasPressureBoundaryBinding.targetLevel,
+            crossLevelMappingMode:
+              gasPressureBoundaryBinding.crossLevelMappingMode,
+            targetLevel: gasPressureBoundaryBinding.targetLevel,
+            gasLevel: gasPressureBoundaryBinding.gasLevel,
+            targetGridNodeCount:
+              gasPressureBoundaryBinding.targetGridNodeCount,
+            targetGridDimensions:
+              gasPressureBoundaryBinding.targetGridDims,
+            targetGridCellOrigin:
+              gasPressureBoundaryTargetGridCellOrigin,
+            targetGridSpacingM:
+              gasPressureBoundaryBinding.targetGridSpacingM,
+            gasGridNodeCount:
+              gasPressureBoundaryBinding.gasGridNodeCount,
+            gasGridDimensions: gasPressureBoundaryBinding.gasGridDims,
+            gasGridCellOrigin: gasPressureBoundaryGasGridCellOrigin,
+            gasGridSpacingM: gasPressureBoundaryBinding.gasGridSpacingM,
+            parentGenerationId:
+              gasPressureBoundaryBinding.parentGenerationId,
+            parentCompletionOrdinal:
+              gasPressureBoundaryBinding.parentCompletionOrdinal,
+            parentFieldCapacity:
+              gasPressureBoundaryBinding.parentFieldCapacity,
+            parentFieldWordCapacity:
+              gasPressureBoundaryBinding.parentFieldWordCapacity,
             chartId: gasPressureBoundaryBinding.chartId,
             gasAuthorityExecutionGeneration:
               gasPressureBoundaryBinding.executionGeneration,
@@ -3549,8 +3668,22 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
             ),
             pressureScale: Math.max(
               0,
-              finiteNumber(phaseVolumePressureScale, 1)
+              finiteNumber(
+                gasPressureMechanicsScale,
+                finiteNumber(phaseVolumePressureScale, 1)
+              )
             ),
+            gasPressureMechanicsScale: Math.max(
+              0,
+              finiteNumber(
+                gasPressureMechanicsScale,
+                finiteNumber(phaseVolumePressureScale, 1)
+              )
+            ),
+            s9cCoexistenceMode:
+              gasPressureBoundaryS9cDragOnlyCoexistence
+                ? 'drag-only-zero-pressure-scale'
+                : null,
             missingCellPolicy: 'no-load-only-when-directory-key-absent',
             pressureAuthority:
               'exact-private-v4-gas-pressure-rows-and-sorted-directory',
@@ -3786,12 +3919,14 @@ export async function runMlsMpmGridUpdateWebGpu({
   ambientPressurePa = 0,
   ambientReferenceDensityKgPerM3 = 1.2041,
   phaseVolumePressureScale = 1,
+  gasPressureMechanicsScale = phaseVolumePressureScale,
   phaseVolumeDragScale = 1,
   phaseVolumeMaxImpulseFraction = 0.5,
   phaseVolumeInterfaceTransportRequired = false,
   phaseVolumeAmbientBuoyancyRequired = false,
   gasPressureMechanicsAuthoritySource = null,
   gasPressureMechanicsChartId = 0,
+  gasPressureBoundaryScratchCaptureBuffer = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
   retainUpdatedGridBuffer = false,
@@ -3900,12 +4035,14 @@ export async function runMlsMpmGridUpdateWebGpu({
         ambientPressurePa,
         ambientReferenceDensityKgPerM3,
         phaseVolumePressureScale,
+        gasPressureMechanicsScale,
         phaseVolumeDragScale,
         phaseVolumeMaxImpulseFraction,
         phaseVolumeInterfaceTransportRequired,
         phaseVolumeAmbientBuoyancyRequired,
         gasPressureMechanicsAuthoritySource,
         gasPressureMechanicsChartId,
+        gasPressureBoundaryScratchCaptureBuffer,
         fusedFineSubstepTransaction,
         fusedCoarseTerminalTransaction,
         fusedProducerCapability,
@@ -4498,6 +4635,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   ambientPressurePa = 0,
   ambientReferenceDensityKgPerM3 = 1.2041,
   phaseVolumePressureScale = 1,
+  gasPressureMechanicsScale = phaseVolumePressureScale,
   phaseVolumeDragScale = 1,
   phaseVolumeMaxImpulseFraction = 0.5,
   phaseVolumeInterfaceTransportRequired = false,
@@ -4664,6 +4802,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       ambientPressurePa,
       ambientReferenceDensityKgPerM3,
       phaseVolumePressureScale,
+      gasPressureMechanicsScale,
       phaseVolumeDragScale,
       phaseVolumeMaxImpulseFraction,
       phaseVolumeInterfaceTransportRequired,

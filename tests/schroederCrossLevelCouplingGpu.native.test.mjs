@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_CROSS_LEVEL_M3_R1_R4 === '1';
+const RUN_EXACT_GAS_PRESSURE =
+  process.env.ULG_CROSS_LEVEL_M3_EXACT_GAS_PRESSURE === '1';
 const BASE_URL = process.env.ULG_CROSS_LEVEL_M3_BASE_URL
   || 'https://127.0.0.1:5174/';
 const REQUESTED_RATIOS = process.env.ULG_CROSS_LEVEL_M3_DIAGNOSTIC_RATIOS
@@ -42,7 +44,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async (requestedRatios) => {
+    native = await page.evaluate(async ({
+      requestedRatios,
+      runExactGasPressure
+    }) => {
       const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance'
       });
@@ -959,7 +964,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           thermo.set([
             materialId, phaseId, index === 0 ? 500 : 300, restDensity,
             0, index === 1 ? 1 : 0, index === 0 ? 1 : 0, 0,
-            0.25, 1, materialId, 0.001
+            0.25, 1, 1, 0.001
           ], index * 12);
           const offset = index
             * abi.MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
@@ -1384,6 +1389,9 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             phaseVolumePressureScale: 0.01,
             phaseVolumeMaxImpulseFraction: 0.01,
             phaseVolumeInterfaceTransportEnabled: true,
+            gasPressureMechanicsBoundaryEnabled: runExactGasPressure,
+            particleGasLedgerActionable: runExactGasPressure,
+            retainedProductGasBoundaryActionable: false,
             gridSpecFactory: gridModule.createMlsMpmGridSpec,
             p2gRunner: async (options) => {
               counts.p2g += 1;
@@ -1395,8 +1403,6 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             },
             gridUpdateRunner: async (options) => {
               counts.gridUpdate += 1;
-              const update =
-                await updateModule.runMlsMpmGridUpdateWebGpu(options);
               const transaction = options.fusedCoarseTerminalTransaction
                 ?? options.fusedFineSubstepTransaction
                 ?? null;
@@ -1407,7 +1413,82 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                 ? transaction?.coarseFieldView
                 : transaction?.fineFieldView;
               const ledger = transaction?.refluxLedger ?? null;
+              const gasPressureBoundaryLayout = runExactGasPressure
+                ? abi.createSchroederSpatialGasPressureBoundaryTransportLayout({
+                    fieldCapacity: fieldView.fieldCapacity,
+                    maxComputeWorkgroupsPerDimension: Number(
+                      device.limits.maxComputeWorkgroupsPerDimension
+                    )
+                  })
+                : null;
+              const gasPressureBoundaryScratchCaptureBuffer =
+                gasPressureBoundaryLayout
+                  ? device.createBuffer({
+                      label: `native-m3-r${ratio}-${kind}-gas-boundary-scratch`,
+                      size: gasPressureBoundaryLayout.scratchByteLength,
+                      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+                    })
+                  : null;
+              let update;
+              let gasPressureBoundaryScratchWords = null;
+              try {
+                update = await updateModule.runMlsMpmGridUpdateWebGpu({
+                  ...options,
+                  gasPressureBoundaryScratchCaptureBuffer
+                });
+                if (gasPressureBoundaryScratchCaptureBuffer) {
+                  await gasPressureBoundaryScratchCaptureBuffer.mapAsync(
+                    GPUMapMode.READ
+                  );
+                  gasPressureBoundaryScratchWords = [
+                    ...new Uint32Array(
+                      gasPressureBoundaryScratchCaptureBuffer
+                        .getMappedRange()
+                        .slice(0)
+                    )
+                  ];
+                  gasPressureBoundaryScratchCaptureBuffer.unmap();
+                }
+              } finally {
+                gasPressureBoundaryScratchCaptureBuffer?.destroy();
+              }
               if (fieldView?.fieldViewBuffer && ledger?.buffer) {
+                const activeGeneration =
+                  transaction?.microepochAuthority?.generation ?? null;
+                const parentFieldView = activeGeneration?.parentFieldView
+                  ?? null;
+                const parentFieldHeaderWords = runExactGasPressure
+                  && parentFieldView?.parentFieldViewBuffer
+                  ? [
+                      ...await readU32Words(
+                        parentFieldView.parentFieldViewBuffer,
+                        Math.min(80, parentFieldView.layout.wordLength),
+                        `native-m3-r${ratio}-${kind}-parent-field`
+                      )
+                    ]
+                  : null;
+                const phaseVolumeAuthority = runExactGasPressure
+                  ? transactionModule
+                    .resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
+                      options.schroederSpatialEpochTransaction,
+                      {
+                        generation: activeGeneration,
+                        selectedLevel: fieldView.selectedLevel,
+                        mechanicsFieldView: fieldView
+                      }
+                    )
+                  : null;
+                const phaseVolumeReceiptWords = phaseVolumeAuthority
+                  ? [
+                      ...await readU32Words(
+                        phaseVolumeAuthority
+                          .phaseVolumeReceiptControlBuffer,
+                        phaseVolumeAuthority.phaseVolumeReceipt.layout
+                          .controlByteLength / Uint32Array.BYTES_PER_ELEMENT,
+                        `native-m3-r${ratio}-${kind}-phase-volume-receipt`
+                      )
+                    ]
+                  : null;
                 const fieldWords = await readU32Words(
                   fieldView.fieldViewBuffer,
                   fieldView.layout.wordLength,
@@ -1440,8 +1521,13 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                     energyReceiptStatus:
                       update?.mechanicsFieldEnergyReceipt?.status ?? null,
                     energyReceiptDeferSeal:
-                      update?.mechanicsFieldEnergyReceipt?.deferSeal ?? null
+                      update?.mechanicsFieldEnergyReceipt?.deferSeal ?? null,
+                    gasPressureBoundarySubmission:
+                      update?.gasPressureBoundarySubmission ?? null
                   },
+                  gasPressureBoundaryScratchWords,
+                  parentFieldHeaderWords,
+                  phaseVolumeReceiptWords,
                   fieldHeaderWords: [...fieldWords.slice(0, 64)],
                   fieldReceiptOffsetWords: receiptOffset,
                   fieldReceiptWords: [
@@ -2114,6 +2200,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               result.parentFieldMechanicsCoarseTerminalCount,
             coarsePublishCount:
               result.parentFieldMechanicsCoarsePublishCount,
+            exactGasPressureMechanics:
+              result.exactGasPressureMechanics ?? null,
             finalState,
             finalStateChanged,
             finalMechanicsFinite: finiteArray(finalMechanics),
@@ -2278,7 +2366,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         validationError: validationError?.message || null,
         uncapturedErrors
       };
-    }, REQUESTED_RATIOS);
+    }, {
+      requestedRatios: REQUESTED_RATIOS,
+      runExactGasPressure: RUN_EXACT_GAS_PRESSURE
+    });
   } finally {
     await browser.close();
   }
@@ -2316,6 +2407,49 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         dispatch: diagnostic.fieldHeaderWords.slice(44, 47),
         parentCompletionOrdinal: diagnostic.fieldHeaderWords[50]
       })),
+      exactGasPressureDiagnostics: RUN_EXACT_GAS_PRESSURE
+        ? result.gridUpdateDiagnostics.map((diagnostic) => ({
+            kind: diagnostic.kind,
+            submission: {
+              submitted: diagnostic.update.gasPressureBoundarySubmission
+                ?.submitted ?? false,
+              mappingMode: diagnostic.update.gasPressureBoundarySubmission
+                ?.crossLevelMappingMode ?? null,
+              targetLevel: diagnostic.update.gasPressureBoundarySubmission
+                ?.targetLevel ?? null,
+              gasLevel: diagnostic.update.gasPressureBoundarySubmission
+                ?.gasLevel ?? null,
+              diagnosticScratchCopySubmitted:
+                diagnostic.update.gasPressureBoundarySubmission
+                  ?.diagnosticScratchCopySubmitted ?? false
+            },
+            field: {
+              status: diagnostic.fieldHeaderWords[2],
+              fieldCount: diagnostic.fieldHeaderWords[34],
+              invalidCount: diagnostic.fieldHeaderWords[35],
+              dispatch: diagnostic.fieldHeaderWords.slice(44, 47),
+              receiptStatus: diagnostic.fieldReceiptWords[2],
+              receiptPhase: diagnostic.fieldReceiptWords[3]
+            },
+            gasPressureBoundaryScratchHeaderAndFirstRow:
+              diagnostic.gasPressureBoundaryScratchWords?.slice(0, 24)
+                ?? null,
+            phaseVolumeReceipt: diagnostic.phaseVolumeReceiptWords
+              ? {
+                  status: diagnostic.phaseVolumeReceiptWords[2],
+                  generationId: diagnostic.phaseVolumeReceiptWords[3],
+                  completionOrdinal: diagnostic.phaseVolumeReceiptWords[26]
+                }
+              : null,
+            parentField: diagnostic.parentFieldHeaderWords
+              ? {
+                  status: diagnostic.parentFieldHeaderWords[2],
+                  generationId: diagnostic.parentFieldHeaderWords[3],
+                  completionOrdinal: diagnostic.parentFieldHeaderWords[44]
+                }
+              : null
+          }))
+        : null,
       finalVelocityRows: [
         result.finalState.slice(4, 7),
         result.finalState.slice(12, 15)
@@ -2333,6 +2467,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         operatorSplit: result.reflux.operatorSplit,
         synchronizationProof: result.reflux.synchronizationProof
       },
+      exactGasPressureMechanics: result.exactGasPressureMechanics,
       cleanupLiveGenerationCount:
         result.postCleanupSpatialDiagnostics.liveGenerationCount
     })),
@@ -2452,7 +2587,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
     assert.equal(result.reflux.ambientBoundary.valid, true);
     const transportProof = result.reflux.phaseVolumeTransportProof;
     for (const predicate of [
-      'pressureParticipated',
+      ...(RUN_EXACT_GAS_PRESSURE ? [] : ['pressureParticipated']),
       'dragParticipated',
       'coarsePressureRowsMatchHeader',
       'coarseDragRowsMatchHeader',
@@ -2472,6 +2607,55 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         true,
         `r=${ratio} Slice 9 proof failed: ${predicate}; `
           + JSON.stringify(transportProof, null, 2)
+      );
+    }
+    if (RUN_EXACT_GAS_PRESSURE) {
+      assert.equal(transportProof.pressureParticipated, false);
+      assert.equal(transportProof.observedFinePressureCompensationJ, 0);
+      assert.equal(transportProof.observedCoarsePressureCompensationJ, 0);
+      assert.deepEqual(result.exactGasPressureMechanics, {
+        enabled: true,
+        sourceMode: 'particle-only',
+        producerCount: ratio + 1,
+        boundarySubmissionCount: ratio + 1,
+        expectedProducerCount: ratio + 1,
+        fineBoundaryCount: ratio,
+        terminalBoundaryCount: 1,
+        pressureScale: 0.01,
+        s9cCoexistenceMode: 'drag-only-zero-pressure-scale',
+        fineMappingMode: 'fine-to-coarse-parent-adjoint',
+        terminalMappingMode: 'same-level',
+        authorityRefreshMode:
+          'one-fresh-authority-per-canonical-microepoch-plus-terminal',
+        productSourceIsolationCertified: true,
+        hostQueueFenceCount: 0,
+        mapAsyncCount: 0,
+        externalImpulseWorkClosure:
+          'gas-boundary-impulse-work-rolled-into-h7-reflux-external-channel'
+      });
+      assert.deepEqual(
+        result.gridUpdateDiagnostics.map((diagnostic) => (
+          diagnostic.update.gasPressureBoundarySubmission
+            ?.crossLevelMappingMode
+        )),
+        [
+          ...Array.from(
+            { length: ratio },
+            () => 'fine-to-coarse-parent-adjoint'
+          ),
+          'same-level'
+        ]
+      );
+      assert.equal(
+        result.gridUpdateDiagnostics.every((diagnostic) => {
+          const submission =
+            diagnostic.update.gasPressureBoundarySubmission;
+          return submission?.submitted === true
+            && submission.hostQueueFenceCount === 0
+            && submission.mapAsyncCount === 0
+            && submission.hostLogicalCountReadCount === 0;
+        }),
+        true
       );
     }
     if (ratio === 1) {

@@ -11,12 +11,14 @@ import {
   ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA,
   ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA,
   createSchroederTargetScheduleAuthority,
+  createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
   createSchroederWorkerHierarchyConfig,
   createSchroederWorkerResidentStepOptions,
   createSchroederWorkerLaneSequenceContract,
   estimateSchroederWorkerLaneSeedUploadBytes,
   runSchroederWorkerLaneScheduleWithAuthority,
+  schroederParticleGasLedgerActionableForResidentStepOptions,
   schroederTargetScheduleConfigurationReceipt,
   validateSchroederWorkerScheduleExecutionRouteReceipt
 } from '../src/runtime/sph/schroederWorkerLaneControlPlane.js';
@@ -43,6 +45,7 @@ import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
 } from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
 import {
+  ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
   WORKER_DYNAMIC_LAW_OBSERVATION_FAILURE_POLICY
 } from '../src/runtime/sph/schroederWorkerScheduleRouteEvidence.js';
 import {
@@ -302,7 +305,10 @@ function targetScheduleAuthorityFixture({
     ...(activation.surfaceTension
       ? { mechanicsMaterialTable: { surfaceTensionEnabled: true } }
       : {}),
-    ...(activation.gasBoundaryActionable && staticGasBoundarySource
+    ...(
+      activation.gasBoundaryActionable
+      && !activation.particleGasLedgerActionable
+      && staticGasBoundarySource
       ? { externalGaugePressureEnabled: true }
       : {})
   };
@@ -337,6 +343,8 @@ function targetScheduleAuthorityFixture({
     epochOptions,
     mechanicsOptions,
     hierarchyConfig,
+    particleGasLedgerActionable:
+      activation.particleGasLedgerActionable,
     scheduleStepOptionsProvider:
       createSchroederTargetScheduleProviderAuthority({ kind: 'none' })
   });
@@ -355,6 +363,8 @@ function routeLawActivation(overrides = {}) {
     phaseVolumeMigration: false,
     twoLevelMechanics: false,
     surfaceTension: false,
+    particleGasLedgerActionable: false,
+    retainedProductGasBoundaryActionable: false,
     gasBoundaryActionable: false,
     explicitVacuumAmbient: false,
     phaseVolumeSidecars: false,
@@ -362,8 +372,24 @@ function routeLawActivation(overrides = {}) {
     activationAuthority: 'schedule-config-static-declaration-no-readback',
     ...overrides
   };
-  receipt.phaseVolumeSidecars =
-    receipt.phaseVolumeMigration || receipt.twoLevelMechanics;
+  const nonParticleGasBoundaryActionable = Boolean(
+    receipt.retainedProductGasBoundaryActionable
+    || (
+      receipt.gasBoundaryActionable
+      && !receipt.particleGasLedgerActionable
+    )
+  );
+  receipt.gasBoundaryActionable = Boolean(
+    receipt.gasBoundaryActionable
+    || receipt.particleGasLedgerActionable
+    || receipt.retainedProductGasBoundaryActionable
+  );
+  receipt.phaseVolumeSidecars = Boolean(
+    receipt.phaseVolumeMigration
+    || receipt.twoLevelMechanics
+    || receipt.particleGasLedgerActionable
+    || receipt.retainedProductGasBoundaryActionable
+  );
   if (
     Object.prototype.hasOwnProperty.call(overrides, 'contactSolver')
     && !Object.prototype.hasOwnProperty.call(
@@ -381,7 +407,7 @@ function routeLawActivation(overrides = {}) {
     || receipt.phaseVolumeMigration
     || receipt.twoLevelMechanics
     || receipt.surfaceTension
-    || receipt.gasBoundaryActionable
+    || nonParticleGasBoundaryActionable
   );
   receipt.contactSolverEscalatedForDynamicLaws =
     Object.prototype.hasOwnProperty.call(
@@ -518,11 +544,12 @@ function retainedProductWriterEvidence({
     && !scheduleCancelled
   );
   return {
-    schema: 'peercompute.ulg.worker-schedule-prospective-writer-evidence.v0',
+    schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
     status: gasBoundaryActionable
       ? 'worker-retained-product-gas-boundary-actionable'
       : 'worker-retained-product-gas-boundary-uncertain',
     gasBoundaryActionable,
+    retainedProductGasBoundaryActionable: gasBoundaryActionable,
     source: 'worker-retained-product-event-buffer',
     productEventBufferRetained: true,
     productEventRowCount,
@@ -562,9 +589,10 @@ function dynamicLawRoutingObservation({
       thermalPhaseEvolutionEnabled
     });
   const writerEvidence = prospectiveWriterEvidence ?? {
-    schema: 'peercompute.ulg.worker-schedule-prospective-writer-evidence.v0',
+    schema: ULG_WORKER_SCHEDULE_PROSPECTIVE_WRITER_EVIDENCE_SCHEMA,
     status: 'worker-retained-product-gas-boundary-inactive',
     gasBoundaryActionable: false,
+    retainedProductGasBoundaryActionable: false,
     source: null,
     productEventBufferRetained: false,
     productEventRowCount: 0,
@@ -1433,6 +1461,8 @@ test('resident step options cross the worker boundary without functions or page 
   const dormantReactionWatchRecords = new Float32Array([1, 2, 3, 4]);
   const options = createSchroederWorkerResidentStepOptions({
     internalPressureScale: 0.75,
+    gasPressureMechanicsBoundaryEnabled: true,
+    particleGasLedgerActionable: false,
     stageMechanicsTraceEnabled: true,
     thermalMaterialTable: {
       rows: new Float32Array([1, 2, 3]),
@@ -1453,6 +1483,8 @@ test('resident step options cross the worker boundary without functions or page 
     device: { createCommandEncoder() {} }
   });
   assert.equal(options.internalPressureScale, 0.75);
+  assert.equal(options.gasPressureMechanicsBoundaryEnabled, true);
+  assert.equal(options.particleGasLedgerActionable, false);
   assert.equal(options.stageMechanicsTraceEnabled, true);
   assert.deepEqual([...options.thermalMaterialTable.rows], [1, 2, 3]);
   assert.equal(options.thermalMaterialTable.helper, undefined);
@@ -1470,6 +1502,51 @@ test('resident step options cross the worker boundary without functions or page 
   );
   assert.equal(options.p2gRunner, undefined);
   assert.doesNotThrow(() => structuredClone(options));
+});
+
+test('particle gas actionability distinguishes writers from a dormant reaction watch and latches prior evidence', () => {
+  const dormantGasWatch = {
+    reactionActivationWatchTable: { gasProductCount: 1 }
+  };
+  assert.equal(
+    schroederParticleGasLedgerActionableForResidentStepOptions({
+      residentStepOptions: dormantGasWatch
+    }),
+    false,
+    'a dormant envelope watch cannot write gas'
+  );
+  assert.equal(
+    schroederParticleGasLedgerActionableForResidentStepOptions({
+      residentStepOptions: {
+        reactionTable: { gasProductCount: 0 }
+      }
+    }),
+    false,
+    'a condensed-only executing reaction does not activate particle gas'
+  );
+  assert.equal(
+    schroederParticleGasLedgerActionableForResidentStepOptions({
+      residentStepOptions: {
+        reactionTable: { gasProductCount: 1 }
+      }
+    }),
+    true
+  );
+  assert.equal(
+    schroederParticleGasLedgerActionableForResidentStepOptions({
+      residentStepOptions: { thermalMaterialTable: {} }
+    }),
+    true,
+    'an active phase writer prospectively authorizes gas classification'
+  );
+  assert.equal(
+    schroederParticleGasLedgerActionableForResidentStepOptions({
+      priorActionable: true,
+      residentStepOptions: dormantGasWatch
+    }),
+    true,
+    'retained gas evidence is monotonic until the lane is reset'
+  );
 });
 
 test('worker schedule is leased by ComputeManager and committed through StateManager', async () => {
@@ -2088,18 +2165,46 @@ test('a fenced retained-product owner admits one exact S1-to-S2 gas writer trans
   };
   const targetActivation = {
     ...sourceActivation,
-    gasBoundaryActionable: true,
+    retainedProductGasBoundaryActionable: true,
     mechanicsFieldViews: true
   };
-  const targetPrototype = targetScheduleAuthorityFixture({
-    scheduleId: 'schedule:retained-product:prototype',
-    laneId,
-    stateKey,
-    stepCount,
-    activationOverrides: targetActivation
-  });
+  const retainedTargetConfiguration = (maxFutureSubsteps) =>
+    createSchroederTargetScheduleConfiguration({
+      maxFutureSubsteps,
+      dtS: 0.001,
+      gridSpacingM: 0.25,
+      cflFactor: 0.4,
+      boxDimsM: [5, 5, 5],
+      residentStepOptions: {
+        contactSolverEnabled: false,
+        ambientPressurePa: 0,
+        reactionTable: reactionTableAuthorityFixture(1)
+      },
+      epochOptions: {
+        mechanicsFieldViewsRequired: true,
+        enablePhaseVolumeMigration: false,
+        enableTwoLevelMechanics: false,
+        enableLawQueue: false,
+        enableLawNeighborCandidates: false
+      },
+      mechanicsOptions: {
+        enablePhaseVolumeMigration: false,
+        enableTwoLevelMechanics: false,
+        enableLawQueue: false,
+        enableLawNeighborCandidates: false
+      },
+      hierarchyConfig: {
+        enablePhaseVolumeMigration: false,
+        enableTwoLevelMechanics: false,
+        enableLawQueue: false,
+        enableLawNeighborCandidates: false
+      },
+      scheduleStepOptionsProvider:
+        createSchroederTargetScheduleProviderAuthority({ kind: 'none' }),
+      retainedProductGasBoundaryActionable: true
+    });
   const prospectiveTargetConfiguration =
-    schroederTargetScheduleConfigurationReceipt(targetPrototype);
+    retainedTargetConfiguration(stepCount);
   const zeroLiveWriterEvidence = retainedProductWriterEvidence({
     observedLiveRowCount: 0
   });
@@ -2128,7 +2233,17 @@ test('a fenced retained-product owner admits one exact S1-to-S2 gas writer trans
     false
   );
   assert.equal(
+    prospectiveTransition.sourceConfiguration.writerSet
+      .retainedProductGasBoundaryActionable,
+    false
+  );
+  assert.equal(
     prospectiveTransition.targetConfiguration.writerSet.gasBoundaryActionable,
+    true
+  );
+  assert.equal(
+    prospectiveTransition.targetConfiguration.writerSet
+      .retainedProductGasBoundaryActionable,
     true
   );
   assert.equal(
@@ -2156,13 +2271,6 @@ test('a fenced retained-product owner admits one exact S1-to-S2 gas writer trans
     SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
   );
 
-  const multiStepPrototype = targetScheduleAuthorityFixture({
-    scheduleId: 'schedule:retained-product:multi-step-prototype',
-    laneId,
-    stateKey,
-    stepCount: 2,
-    activationOverrides: targetActivation
-  });
   const multiStepSource = targetScheduleAuthorityFixture({
     scheduleId: 'schedule:retained-product:multi-step-source',
     targetScheduleRequestId: 'schedule:retained-product:multi-step-target',
@@ -2170,8 +2278,7 @@ test('a fenced retained-product owner admits one exact S1-to-S2 gas writer trans
     stateKey,
     stepCount: 2,
     activationOverrides: sourceActivation,
-    prospectiveTargetConfiguration:
-      schroederTargetScheduleConfigurationReceipt(multiStepPrototype)
+    prospectiveTargetConfiguration: retainedTargetConfiguration(2)
   });
   assert.equal(
     multiStepSource.prospectiveDynamicLawTransition.kind,
@@ -2295,6 +2402,10 @@ test('a fenced retained-product owner admits one exact S1-to-S2 gas writer trans
   const s2Authority = s2Evidence.executionRouteReceipt
     .targetScheduleAuthority;
   assert.equal(s2Authority.writerSet.gasBoundaryActionable, true);
+  assert.equal(
+    s2Authority.writerSet.retainedProductGasBoundaryActionable,
+    true
+  );
   assert.equal(
     s2Evidence.executionRouteReceipt.predecessorTargetTokenConsumption
       .configurationContinuityMode,

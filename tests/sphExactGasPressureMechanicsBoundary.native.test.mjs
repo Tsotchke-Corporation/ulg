@@ -68,6 +68,10 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
         stepModuleSource,
         'sphResidentProductHistoryGpu.js'
       );
+      const buffersModulePath = dependencyPath(
+        stepModuleSource,
+        'sphGpuBuffers.js'
+      );
       const proposalModulePath = dependencyPath(
         stepModuleSource,
         'schroederSpatialMechanicalProposalsGpu.js'
@@ -86,7 +90,11 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
 
       const limitsModule = await import('/src/runtime/webgpuDeviceLimits.js');
       const abi = await import('/ulg-gpu-abi/src/index.js');
-      const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+      // Import through the exact Vite dependency URL used by the mechanics
+      // module. A second timestamp-distinct module instance would own a
+      // different private particle-borrow WeakMap and make a valid upload
+      // appear lifecycle-less to the retained gas producer.
+      const buffersModule = await import(buffersModulePath);
       const hierarchyModule = await import(
         '/src/runtime/sph/schroederHierarchyGpu.js'
       );
@@ -816,7 +824,8 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
       outOfMemoryError: native.outOfMemoryError,
       uncapturedErrors: native.uncapturedErrors,
       deviceLostInfo: native.deviceLostInfo,
-      cleanupErrors: native.cleanupErrors
+      cleanupErrors: native.cleanupErrors,
+      taskEvidence: native.taskEvidence
     })}`
   );
   assert.deepEqual(native.laneStageOrder, [
@@ -908,4 +917,838 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
   assert.deepEqual(native.uncapturedErrors, []);
   assert.equal(native.deviceLostInfo, null);
   assert.deepEqual(native.cleanupErrors, []);
+});
+
+test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-coarse parent-adjoint weights', {
+  skip: RUN_NATIVE
+    ? false
+    : 'set ULG_RUN_NATIVE_EXACT_GAS_PRESSURE_MECHANICS=1 for native Vulkan WebGPU',
+  timeout: 180_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: CHROME,
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return {
+          status: 'unsupported',
+          reason: 'WebGPU adapter unavailable'
+        };
+      }
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+
+      const [abi, gasRuntime] = await Promise.all([
+        import('/ulg-gpu-abi/src/index.js'),
+        import('/src/runtime/sph/sphSpatialGasLedgerEosGpu.js')
+      ]);
+      const f32Bits = (value) => {
+        const data = new DataView(new ArrayBuffer(4));
+        data.setFloat32(0, value, true);
+        return data.getUint32(0, true);
+      };
+      const bitsF32 = (value) => {
+        const data = new DataView(new ArrayBuffer(4));
+        data.setUint32(0, value, true);
+        return data.getFloat32(0, true);
+      };
+      const setHeader = (words, layout, values) => {
+        for (const [name, value] of Object.entries(values)) {
+          const index = layout.findIndex((entry) => (
+            entry.startsWith(`${name}:`)
+          ));
+          if (index < 0) {
+            throw new Error(`missing ABI header field ${name}`);
+          }
+          words[index] = value >>> 0;
+        }
+      };
+
+      const identity = {
+        generationId: 17,
+        storageGeneration: 11,
+        physicsTick: 13,
+        physicsSubstep: 1,
+        positionEpoch: 19,
+        topologyEpoch: 23,
+        chartEpoch: 29,
+        levelEpoch: 31,
+        supportEpoch: 37
+      };
+      const fieldCapacity = 2;
+      const fieldCount = 2;
+      const fieldCompletionOrdinal = 41;
+      const fieldMutationOrdinal = 2;
+      const parentCompletionOrdinal = 47;
+      const gasExecutionGeneration = 73;
+      const gasStorageGeneration = 79;
+      const gasDirectoryGeneration = 43;
+      const chartId = 5;
+      const dt = 0.125;
+      const ambientPressurePa = 100;
+      const pressureScale = 0.5;
+      const fineGridSpacingM = 0.5;
+      const gasGridSpacingM = 1;
+      const fields = [
+        {
+          denseGridNodeId: 0,
+          mechanicalFamilyId: 1,
+          materialId: 7,
+          continuityDomainId: 11,
+          currentVolumeM3: 1,
+          volumeGradientM2: [2, -1, 0.5],
+          massKg: 2,
+          velocityMPerS: [0.5, -0.25, 1]
+        },
+        {
+          denseGridNodeId: 0,
+          mechanicalFamilyId: 2,
+          materialId: 9,
+          continuityDomainId: 0,
+          currentVolumeM3: 2,
+          volumeGradientM2: [-1, 0.5, 3],
+          massKg: 4,
+          velocityMPerS: [-1, 0.75, 0.25]
+        }
+      ];
+      const parentFieldKeys = [
+        [0, 1, 7, 11],
+        [0, 2, 9, 0],
+        [1, 1, 7, 11],
+        [1, 2, 9, 0]
+      ];
+      const fineEdgeOffsets = [0, 2, 4];
+      const fineEdgeParentIndices = [0, 2, 1, 3];
+      const fineEdgeWeights = [0.125, 0.875, 0.625, 0.375];
+      const gasCells = [
+        { cell: [0, 0, 0], absolutePressurePa: 140 },
+        { cell: [1, 0, 0], absolutePressurePa: 340 }
+      ];
+      const oracle = abi
+        .computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
+          fields,
+          parentFieldKeys,
+          fineEdgeOffsets,
+          fineEdgeParentIndices,
+          fineEdgeWeights,
+          gasCells,
+          gasGridDimensions: [2, 1, 1],
+          gasGridCellOrigin: [0, 0, 0],
+          dt,
+          ambientPressurePa,
+          pressureScale
+        });
+
+      const fieldLayout =
+        abi.createSchroederSpatialMechanicsFieldViewLayout({
+          sourceCapacity: 1,
+          fieldCapacity
+        });
+      const fieldWords = new Uint32Array(fieldLayout.wordLength);
+      setHeader(
+        fieldWords,
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT,
+        {
+          magic: abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC,
+          abiVersion: abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION,
+          statusFlags:
+            abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
+            | abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_ADMITTED,
+          generationId: identity.generationId,
+          storageGeneration: identity.storageGeneration,
+          physicsTick: identity.physicsTick,
+          physicsSubstep: identity.physicsSubstep,
+          positionEpoch: identity.positionEpoch,
+          topologyEpoch: identity.topologyEpoch,
+          chartEpoch: identity.chartEpoch,
+          levelEpoch: identity.levelEpoch,
+          supportEpoch: identity.supportEpoch,
+          sourceCount: 1,
+          selectedLevel: 0,
+          gridNodeCount: 1,
+          gridDimX: 1,
+          gridDimY: 1,
+          gridDimZ: 1,
+          gridShift: 0,
+          gridSpacingM: f32Bits(fineGridSpacingM),
+          descriptorOffsetWords: fieldLayout.descriptorOffsetWords,
+          descriptorWords: fieldLayout.descriptorWords,
+          keyOffsetWords: fieldLayout.keyOffsetWords,
+          keyWords: fieldLayout.keyWords,
+          accumulatorOffsetWords: fieldLayout.accumulatorOffsetWords,
+          accumulatorWords: fieldLayout.accumulatorWords,
+          stateOffsetWords: fieldLayout.stateOffsetWords,
+          stateWords: fieldLayout.stateWords,
+          fieldCapacity,
+          candidateCount: fieldCount,
+          fieldCount,
+          completionOrdinal: fieldCompletionOrdinal,
+          requiredWords: fieldLayout.wordLength,
+          capacityWords: fieldLayout.wordLength,
+          dispatchX: 1,
+          dispatchY: 1,
+          dispatchZ: 1,
+          stateEncoding:
+            abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
+          dispatchIndirectX: 1,
+          dispatchIndirectY: 1,
+          dispatchIndirectZ: 1,
+          stateMutationOrdinal: fieldMutationOrdinal
+        }
+      );
+      const fieldReceipt = fieldLayout.receiptControlOffsetWords;
+      fieldWords[fieldReceipt] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_MAGIC;
+      fieldWords[fieldReceipt + 1] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_VERSION;
+      fieldWords[fieldReceipt + 2] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_READY
+        | abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_STATUS_ADMITTED;
+      fieldWords[fieldReceipt + 3] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_PHASE_HEAT_BUILDING;
+      fieldWords[fieldReceipt + 5] = fieldMutationOrdinal;
+      fieldWords[fieldReceipt + 6] = fieldCount;
+      fieldWords[fieldReceipt + 32] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL;
+      fieldWords[fieldReceipt + 33] =
+        abi.SCHROEDER_SPATIAL_MECHANICS_FIELD_PRESSURE_CONSUMER_LOCAL;
+      for (const [fieldIndex, field] of fields.entries()) {
+        const key = [
+          field.denseGridNodeId,
+          field.mechanicalFamilyId,
+          field.materialId,
+          field.continuityDomainId
+        ];
+        fieldWords.set(
+          key,
+          fieldLayout.keyOffsetWords + fieldIndex * fieldLayout.keyWords
+        );
+        fieldWords.set([
+          f32Bits(field.massKg),
+          ...field.velocityMPerS.map(f32Bits),
+          0,
+          0,
+          0,
+          1
+        ], fieldLayout.stateOffsetWords + fieldIndex * fieldLayout.stateWords);
+      }
+
+      const momentWords = new Uint32Array(
+        fieldCapacity
+          * abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS
+      );
+      const momentStatus =
+        abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_READY
+        | abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_STATUS_ADMITTED;
+      for (const [fieldIndex, field] of fields.entries()) {
+        momentWords.set([
+          field.denseGridNodeId,
+          field.mechanicalFamilyId,
+          field.materialId,
+          field.continuityDomainId,
+          f32Bits(field.currentVolumeM3),
+          ...field.volumeGradientM2.map(f32Bits),
+          1,
+          momentStatus,
+          0,
+          0
+        ], fieldIndex
+          * abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS);
+      }
+
+      const receiptWords = new Uint32Array(
+        abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS
+      );
+      const receiptStatus =
+        abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_READY
+        | abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_ADMITTED;
+      setHeader(
+        receiptWords,
+        abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_LAYOUT,
+        {
+          magic: abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_MAGIC,
+          abiVersion: abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_VERSION,
+          statusFlags: receiptStatus,
+          generationId: identity.generationId,
+          storageGeneration: identity.storageGeneration,
+          physicsTick: identity.physicsTick,
+          physicsSubstep: identity.physicsSubstep,
+          positionEpoch: identity.positionEpoch,
+          topologyEpoch: identity.topologyEpoch,
+          chartEpoch: identity.chartEpoch,
+          levelEpoch: identity.levelEpoch,
+          supportEpoch: identity.supportEpoch,
+          fieldCount,
+          fieldCapacity,
+          selectedLevel: 0,
+          gridNodeCount: 1,
+          gridSpacingM: f32Bits(fineGridSpacingM),
+          momentHeaderWords:
+            abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_HEADER_WORDS,
+          momentRowWords:
+            abi.SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_ROW_WORDS,
+          momentCompletionOrdinal: fieldCompletionOrdinal,
+          controlWords:
+            abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_HEADER_WORDS,
+          terminalSeal:
+            abi.SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_MAGIC
+            ^ identity.generationId
+            ^ fieldCompletionOrdinal
+            ^ receiptStatus
+        }
+      );
+
+      const parentLayout = abi.createSchroederSpatialParentFieldViewLayout({
+        fineFieldCapacity: fieldCapacity,
+        coarseFieldCapacity: 4
+      });
+      const parentWords = new Uint32Array(parentLayout.wordLength);
+      setHeader(
+        parentWords,
+        abi.SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_LAYOUT,
+        {
+          magic: abi.SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_MAGIC,
+          abiVersion: abi.SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_VERSION,
+          statusFlags:
+            abi.SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_READY
+            | abi.SCHROEDER_SPATIAL_PARENT_FIELD_STATUS_ADMITTED,
+          generationId: identity.generationId,
+          storageGeneration: identity.storageGeneration,
+          physicsTick: identity.physicsTick,
+          physicsSubstep: identity.physicsSubstep,
+          positionEpoch: identity.positionEpoch,
+          topologyEpoch: identity.topologyEpoch,
+          chartEpoch: identity.chartEpoch,
+          levelEpoch: identity.levelEpoch,
+          supportEpoch: identity.supportEpoch,
+          fineLevel: 0,
+          coarseLevel: 1,
+          fineGridNodeCount: 1,
+          coarseGridNodeCount: 2,
+          fineGridDimX: 1,
+          fineGridDimY: 1,
+          fineGridDimZ: 1,
+          coarseGridDimX: 2,
+          coarseGridDimY: 1,
+          coarseGridDimZ: 1,
+          fineGridShift: 0,
+          coarseGridShift: 0,
+          fineGridSpacingM: f32Bits(fineGridSpacingM),
+          coarseGridSpacingM: f32Bits(gasGridSpacingM),
+          fineFieldCapacity: fieldCapacity,
+          coarseFieldCapacity: 4,
+          candidateCapacity: parentLayout.candidateCapacity,
+          parentFieldCapacity: parentLayout.parentFieldCapacity,
+          edgeCapacity: parentLayout.edgeCapacity,
+          fineFieldCount: fieldCount,
+          coarseNativeFieldCount: 4,
+          parentFieldCount: parentFieldKeys.length,
+          edgeCount: fineEdgeParentIndices.length,
+          completionOrdinal: parentCompletionOrdinal,
+          hierarchyCompletionOrdinal: parentCompletionOrdinal,
+          fineFieldCompletionOrdinal: fieldCompletionOrdinal,
+          coarseFieldCompletionOrdinal: 43,
+          parentKeyOffsetWords: parentLayout.parentKeyOffsetWords,
+          parentKeyWords: parentLayout.keyWords,
+          fineEdgeCountOffsetWords: parentLayout.fineEdgeCountOffsetWords,
+          fineEdgeOffsetOffsetWords: parentLayout.fineEdgeOffsetOffsetWords,
+          fineEdgeParentOffsetWords: parentLayout.fineEdgeParentOffsetWords,
+          fineEdgeWeightOffsetWords: parentLayout.fineEdgeWeightOffsetWords,
+          coarseNativeMapOffsetWords:
+            parentLayout.coarseNativeMapOffsetWords,
+          requiredWords: parentLayout.wordLength,
+          capacityWords: parentLayout.wordLength,
+          uniqueEvidenceGeneration: identity.generationId,
+          uniqueEvidenceElementCount:
+            fieldCount
+              * abi.SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD
+              + 4,
+          uniqueEvidenceCount: parentFieldKeys.length + 1,
+          dispatchX: 1,
+          dispatchY: 1,
+          dispatchZ: 1,
+          finalizationOrdinal: parentCompletionOrdinal,
+          fineDispatchX: 1,
+          fineDispatchY: 1,
+          fineDispatchZ: 1,
+          exactLevelCount: 2,
+          coarseDispatchX: 1,
+          coarseDispatchY: 1,
+          coarseDispatchZ: 1,
+          emittedCandidateCount: fineEdgeParentIndices.length + 4,
+          nativeCandidateCount: 4,
+          fineCandidateCount: fineEdgeParentIndices.length,
+          keyOrdering: 1,
+          maxEdgesPerFineField:
+            abi.SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD,
+          clearedWords: parentLayout.wordLength
+        }
+      );
+      for (const [index, key] of parentFieldKeys.entries()) {
+        parentWords.set(
+          key,
+          parentLayout.parentKeyOffsetWords + index * parentLayout.keyWords
+        );
+      }
+      parentWords.set([2, 2], parentLayout.fineEdgeCountOffsetWords);
+      parentWords.set(fineEdgeOffsets, parentLayout.fineEdgeOffsetOffsetWords);
+      parentWords.set(
+        fineEdgeParentIndices,
+        parentLayout.fineEdgeParentOffsetWords
+      );
+      for (const [index, weight] of fineEdgeWeights.entries()) {
+        parentWords[parentLayout.fineEdgeWeightOffsetWords + index] =
+          f32Bits(weight);
+      }
+      parentWords.set(
+        [0, 1, 2, 3],
+        parentLayout.coarseNativeMapOffsetWords
+      );
+
+      const directoryLayout = abi.createSchroederSpatialEpochLayout({
+        sourceCapacity: 2,
+        cellCapacity: 2
+      });
+      const directoryWords = new Uint32Array(directoryLayout.wordLength);
+      setHeader(
+        directoryWords,
+        abi.SCHROEDER_SPATIAL_EPOCH_HEADER_LAYOUT,
+        {
+          magic: abi.SCHROEDER_SPATIAL_EPOCH_MAGIC,
+          abiVersion: abi.SCHROEDER_SPATIAL_EPOCH_VERSION,
+          statusFlags:
+            abi.SCHROEDER_SPATIAL_EPOCH_STATUS_READY
+            | abi.SCHROEDER_SPATIAL_EPOCH_STATUS_ADMITTED,
+          generationId: gasDirectoryGeneration,
+          storageGeneration: gasStorageGeneration,
+          sourceCount: 2,
+          sourceCapacity: 2,
+          cellCount: 2,
+          cellCapacity: 2,
+          logicalRequiredWords: directoryLayout.wordLength,
+          logicalAdmittedWords: directoryLayout.wordLength,
+          directoryCapacityWords: directoryLayout.wordLength,
+          exactKeyWordCount: abi.SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+          sortKeyWordCount: abi.SCHROEDER_SPATIAL_EPOCH_KEY_WORDS,
+          sortMode: abi.SCHROEDER_SPATIAL_SORT_LEXICOGRAPHIC_U32X5,
+          headerWords: abi.SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
+          cellKeysOffsetWords: directoryLayout.cellKeysOffsetWords,
+          cellOffsetsOffsetWords: directoryLayout.cellOffsetsOffsetWords,
+          cellMembersOffsetWords: directoryLayout.cellMembersOffsetWords,
+          particleToCellOffsetWords:
+            directoryLayout.particleToCellOffsetWords,
+          buildOrdinal: 51,
+          completionOrdinal: 51,
+          uniqueGenerationId: gasDirectoryGeneration,
+          uniqueInputCount: 2,
+          primitiveUniqueCount: 2,
+          primitiveAdmitted: 1,
+          primitiveStatus: 1,
+          consumerDispatchX: 1,
+          consumerDispatchY: 1,
+          consumerDispatchZ: 1,
+          sourceAdapterId:
+            abi.SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS,
+          physicalAddressUpperBoundWords: directoryLayout.wordLength
+        }
+      );
+      const signedKey = abi.encodeSchroederSignedOrderKey;
+      directoryWords.set([
+        chartId,
+        signedKey(1),
+        signedKey(0),
+        signedKey(0),
+        signedKey(0),
+        chartId,
+        signedKey(1),
+        signedKey(1),
+        signedKey(0),
+        signedKey(0)
+      ], directoryLayout.cellKeysOffsetWords);
+      directoryWords.set(
+        [0, 1, 2],
+        directoryLayout.cellOffsetsOffsetWords
+      );
+      directoryWords.set(
+        [0, 1],
+        directoryLayout.cellMembersOffsetWords
+      );
+      directoryWords.set(
+        [0, 1],
+        directoryLayout.particleToCellOffsetWords
+      );
+
+      const pressureRows = new Float32Array([
+        0, 0, 0, 1, 0.5, 0.5, 0.5, 140, 0, 0, 0, 1,
+        1, 0, 0, 1, 1.5, 0.5, 0.5, 340, 0, 0, 0, 1
+      ]);
+      const gasControl = new Uint32Array(
+        gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_CONTROL_WORDS
+      );
+      const gasAt = gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS;
+      gasControl[gasAt.MAGIC] =
+        gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_CONTROL_MAGIC;
+      gasControl[gasAt.VERSION] =
+        gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION;
+      gasControl[gasAt.STATUS_FLAGS] =
+        gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_STATUS.INITIALIZED
+        | gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_STATUS.COMPACT_READY
+        | gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_STATUS.DIRECTORY_READY
+        | gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_STATUS.EOS_READY
+        | gasRuntime.SPH_SPATIAL_GAS_AUTHORITY_STATUS.PRESSURE_READY;
+      gasControl[gasAt.EXECUTION_GENERATION] = gasExecutionGeneration;
+      gasControl[gasAt.COMPLETION_GENERATION] = gasExecutionGeneration;
+      gasControl[gasAt.SOURCE_STORAGE_GENERATION] = gasStorageGeneration;
+      gasControl[gasAt.SOURCE_CAPACITY] = 2;
+      gasControl[gasAt.LIVE_RESIDUAL_COUNT] = 2;
+      gasControl[gasAt.DIRECTORY_GENERATION] = gasDirectoryGeneration;
+      gasControl[gasAt.DIRECTORY_CELL_COUNT] = 2;
+      gasControl[gasAt.READY_PRESSURE_COUNT] = 2;
+      gasControl[gasAt.EOS_AGGREGATE_DISPATCH_X] = 1;
+      gasControl[gasAt.EOS_AGGREGATE_DISPATCH_Y] = 1;
+      gasControl[gasAt.EOS_AGGREGATE_DISPATCH_Z] = 1;
+      gasControl[gasAt.EOS_GRADIENT_DISPATCH_X] = 1;
+      gasControl[gasAt.EOS_GRADIENT_DISPATCH_Y] = 1;
+      gasControl[gasAt.EOS_GRADIENT_DISPATCH_Z] = 1;
+      gasControl[gasAt.COMPACT_STRIDE] =
+        gasRuntime.SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS;
+      gasControl[gasAt.ACTIVE_NODE_STRIDE] =
+        gasRuntime.SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS;
+      gasControl[gasAt.PRESSURE_STRIDE] =
+        gasRuntime.SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS;
+      gasControl[gasAt.FREE_VOLUME_READY_COUNT] = 2;
+
+      const boundaryLayout =
+        abi.createSchroederSpatialGasPressureBoundaryTransportLayout({
+          fieldCapacity
+        });
+      const scratchWords =
+        abi.createSchroederSpatialGasPressureBoundaryTransportScratch({
+          fieldCapacity,
+          generationId: identity.generationId,
+          fieldCompletionOrdinal,
+          gasAuthorityExecutionGeneration: gasExecutionGeneration
+        });
+      const params =
+        abi.createSchroederSpatialGasPressureBoundaryTransportParams({
+          fieldCapacity,
+          generationId: identity.generationId,
+          fieldCompletionOrdinal,
+          fieldMutationOrdinal,
+          storageGeneration: identity.storageGeneration,
+          physicsTick: identity.physicsTick,
+          physicsSubstep: identity.physicsSubstep,
+          positionEpoch: identity.positionEpoch,
+          topologyEpoch: identity.topologyEpoch,
+          chartEpoch: identity.chartEpoch,
+          levelEpoch: identity.levelEpoch,
+          supportEpoch: identity.supportEpoch,
+          selectedLevel: 0,
+          gridNodeCount: 1,
+          gridDimensions: [1, 1, 1],
+          gridCellOrigin: [0, 0, 0],
+          chartId,
+          dt,
+          ambientPressurePa,
+          pressureScale,
+          gridSpacingM: fineGridSpacingM,
+          gasAuthorityExecutionGeneration: gasExecutionGeneration,
+          gasAuthorityStorageGeneration: gasStorageGeneration,
+          gasPressureCellCapacity: 2,
+          gasDirectoryGeneration,
+          gasDirectoryWordLength: directoryLayout.wordLength,
+          gasDirectoryCellCapacity: 2,
+          gasDirectoryCellKeysOffsetWords:
+            directoryLayout.cellKeysOffsetWords,
+          gasDirectoryCellOffsetsOffsetWords:
+            directoryLayout.cellOffsetsOffsetWords,
+          gasDirectoryCellMembersOffsetWords:
+            directoryLayout.cellMembersOffsetWords,
+          gasDirectoryParticleToCellOffsetWords:
+            directoryLayout.particleToCellOffsetWords,
+          crossLevelMappingMode: 'fine-to-coarse-parent-adjoint',
+          gasSelectedLevel: 1,
+          gasGridNodeCount: 2,
+          gasGridDimensions: [2, 1, 1],
+          gasGridCellOrigin: [0, 0, 0],
+          gasGridSpacingM,
+          parentGenerationId: identity.generationId,
+          parentCompletionOrdinal,
+          parentFieldCapacity: parentLayout.parentFieldCapacity,
+          parentFieldWordCapacity: parentLayout.wordLength
+        });
+
+      const bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+          [0, 'storage'],
+          [1, 'read-only-storage'],
+          [2, 'read-only-storage'],
+          [3, 'read-only-storage'],
+          [4, 'read-only-storage'],
+          [5, 'storage'],
+          [6, 'read-only-storage'],
+          [7, 'uniform'],
+          [8, 'read-only-storage']
+        ].map(([binding, type]) => ({
+          binding,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type }
+        }))
+      });
+      const pipelineLayout = device.createPipelineLayout({
+        bindGroupLayouts: [bindGroupLayout]
+      });
+      const shader = device.createShaderModule({
+        label: 'native-asymmetric-parent-adjoint-gas-boundary',
+        code: abi.schroederSpatialGasPressureBoundaryTransportWgsl
+      });
+      const compilation = await shader.getCompilationInfo();
+      const compilationErrors = compilation.messages
+        .filter((message) => message.type === 'error')
+        .map((message) => (
+          `${message.lineNum}:${message.linePos} ${message.message}`
+        ));
+      if (compilationErrors.length > 0) {
+        return { status: 'shader-error', compilationErrors };
+      }
+      const entryPoints = [
+        'prevalidate_field_boundary_transport',
+        'prevalidate_source_boundary_transport',
+        'initialize_boundary_transport',
+        'stage_boundary_transport',
+        'validate_boundary_transport',
+        'commit_boundary_transport'
+      ];
+      const pipelines = [];
+      for (const entryPoint of entryPoints) {
+        pipelines.push(await device.createComputePipelineAsync({
+          label: `native-asymmetric-parent-adjoint-${entryPoint}`,
+          layout: pipelineLayout,
+          compute: { module: shader, entryPoint }
+        }));
+      }
+
+      const storageUsage =
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+      const upload = (data, usage = storageUsage) => {
+        const buffer = device.createBuffer({
+          size: Math.max(4, (data.byteLength + 3) & ~3),
+          usage
+        });
+        device.queue.writeBuffer(buffer, 0, data);
+        return buffer;
+      };
+      const buffers = {
+        field: upload(
+          fieldWords,
+          storageUsage | GPUBufferUsage.COPY_SRC
+        ),
+        receipt: upload(receiptWords),
+        moments: upload(momentWords),
+        pressure: upload(pressureRows),
+        directory: upload(directoryWords),
+        scratch: upload(
+          scratchWords,
+          storageUsage | GPUBufferUsage.COPY_SRC
+        ),
+        gasControl: upload(gasControl),
+        params: upload(
+          params,
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        ),
+        parent: upload(parentWords)
+      };
+      const bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+          ['field', 0],
+          ['receipt', 1],
+          ['moments', 2],
+          ['pressure', 3],
+          ['directory', 4],
+          ['scratch', 5],
+          ['gasControl', 6],
+          ['params', 7],
+          ['parent', 8]
+        ].map(([name, binding]) => ({
+          binding,
+          resource: { buffer: buffers[name] }
+        }))
+      });
+      const fieldReadback = device.createBuffer({
+        size: fieldWords.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const scratchReadback = device.createBuffer({
+        size: scratchWords.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      for (const pipeline of pipelines) {
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(...boundaryLayout.dispatchWorkgroups);
+      }
+      pass.end();
+      encoder.copyBufferToBuffer(
+        buffers.field,
+        0,
+        fieldReadback,
+        0,
+        fieldWords.byteLength
+      );
+      encoder.copyBufferToBuffer(
+        buffers.scratch,
+        0,
+        scratchReadback,
+        0,
+        scratchWords.byteLength
+      );
+      device.queue.submit([encoder.finish()]);
+      await Promise.all([
+        fieldReadback.mapAsync(GPUMapMode.READ),
+        scratchReadback.mapAsync(GPUMapMode.READ)
+      ]);
+      const fieldOutput = new Uint32Array(
+        fieldReadback.getMappedRange().slice(0)
+      );
+      const scratchOutput = new Uint32Array(
+        scratchReadback.getMappedRange().slice(0)
+      );
+      fieldReadback.unmap();
+      scratchReadback.unmap();
+      const actual = fields.map((unused, fieldIndex) => {
+        const state = fieldLayout.stateOffsetWords
+          + fieldIndex * fieldLayout.stateWords;
+        const accumulator = fieldLayout.accumulatorOffsetWords
+          + fieldIndex * fieldLayout.accumulatorWords;
+        const scratchRow =
+          abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_HEADER_WORDS
+          + fieldIndex
+            * abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW_WORDS;
+        return {
+          velocityMPerS: [1, 2, 3].map((word) => (
+            bitsF32(fieldOutput[state + word])
+          )),
+          impulseNs: [4, 5, 6].map((word) => (
+            bitsF32(fieldOutput[accumulator + word])
+          )),
+          externalWorkJ: bitsF32(fieldOutput[accumulator + 7]),
+          effectiveGaugePressurePa:
+            bitsF32(scratchOutput[scratchRow + 9])
+        };
+      });
+      await device.queue.onSubmittedWorkDone();
+      const validationError = await device.popErrorScope();
+      const scratchFailure = scratchOutput[2];
+      const scratchValidatedFieldCount = scratchOutput[8];
+      for (const buffer of [
+        ...Object.values(buffers),
+        fieldReadback,
+        scratchReadback
+      ]) {
+        buffer.destroy();
+      }
+      device.destroy();
+      return {
+        status: 'executed',
+        fineEdgeParentIndices,
+        fineEdgeWeights,
+        oracle: {
+          admitted: oracle.admitted,
+          appliedFieldCount: oracle.appliedFieldCount,
+          missingCellCount: oracle.missingCellCount,
+          rows: oracle.rows
+        },
+        actual,
+        scratchFailure,
+        scratchValidatedFieldCount,
+        validationError: validationError?.message || null,
+        uncapturedErrors
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+
+  assert.equal(native.status, 'executed', JSON.stringify(native));
+  assert.equal(native.validationError, null, JSON.stringify(native));
+  assert.deepEqual(native.uncapturedErrors, [], JSON.stringify(native));
+  assert.equal(native.scratchFailure, 0, JSON.stringify(native));
+  assert.equal(
+    native.scratchValidatedFieldCount,
+    2,
+    JSON.stringify(native)
+  );
+  assert.deepEqual(native.fineEdgeParentIndices, [0, 2, 1, 3]);
+  assert.deepEqual(
+    native.fineEdgeWeights,
+    [0.125, 0.875, 0.625, 0.375]
+  );
+  assert.equal(native.oracle.admitted, true);
+  assert.equal(native.oracle.appliedFieldCount, 2);
+  assert.equal(native.oracle.missingCellCount, 0);
+  assert.deepEqual(
+    native.oracle.rows.map((row) => row.effectiveGaugePressurePa),
+    [215, 115]
+  );
+  const assertClose = (actual, expected, label) => {
+    const tolerance = 2e-5 * Math.max(1, Math.abs(expected));
+    assert.ok(
+      Math.abs(actual - expected) <= tolerance,
+      `${label}: expected ${expected}, received ${actual}`
+    );
+  };
+  for (const [fieldIndex, actual] of native.actual.entries()) {
+    const expected = native.oracle.rows[fieldIndex];
+    for (const [axis, value] of actual.velocityMPerS.entries()) {
+      assertClose(
+        value,
+        expected.velocityMPerS[axis],
+        `field ${fieldIndex} velocity ${axis}`
+      );
+    }
+    for (const [axis, value] of actual.impulseNs.entries()) {
+      assertClose(
+        value,
+        expected.impulseNs[axis],
+        `field ${fieldIndex} impulse ${axis}`
+      );
+    }
+    assertClose(
+      actual.externalWorkJ,
+      expected.externalWorkJ,
+      `field ${fieldIndex} external work`
+    );
+    assertClose(
+      actual.effectiveGaugePressurePa,
+      expected.effectiveGaugePressurePa,
+      `field ${fieldIndex} effective gauge`
+    );
+    assert.notEqual(actual.effectiveGaugePressurePa, 140);
+  }
 });

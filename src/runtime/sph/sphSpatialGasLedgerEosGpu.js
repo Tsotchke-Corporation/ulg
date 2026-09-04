@@ -2,8 +2,14 @@ import {
   SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
   SCHROEDER_SPATIAL_EPOCH_MAGIC,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_FLOATS,
   SPH_SPATIAL_GAS_FREE_VOLUME_VERSION,
-  SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA,
+  validateSchroederSpatialParentFieldViewDescriptor,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA,
@@ -20,7 +26,8 @@ import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
   releaseSchroederSpatialEpochGenerationConsumerLeaseAndGenerationQueueOrderedAfterFinalConsumer,
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
-  runSchroederSpatialEpochGenerationWithBackpressureWebGpu
+  runSchroederSpatialEpochGenerationWithBackpressureWebGpu,
+  validateSchroederSpatialEpochGenerationLevelAssignment
 } from './schroederSpatialEpochGpu.js';
 import {
   abandonSphSpatialGasFreeVolumeEosAuthority,
@@ -52,9 +59,13 @@ import {
   residentProductMassDevice,
   tagWebGpuBufferDevice,
   webGpuBufferDevice,
+  webGpuBufferMatchesDevice,
   webGpuDeviceId,
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
+import {
+  ensureSphGpuParticleBufferSetBorrowLifecycle
+} from './sphGpuBuffers.js';
 import {
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
@@ -87,12 +98,16 @@ export const ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3 =
   'peercompute.ulg.sph-retained-gas-cell-eos-source.v3';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA_V3 =
   'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v3';
-export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA =
+export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V4 =
   'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v4';
+export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA_V4 =
+  'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v4';
+export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA =
+  'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v5';
 export const ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA =
   'peercompute.ulg.sph-retained-gas-cell-eos-source.v4';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA =
-  'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v4';
+  'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v5';
 export const ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA =
   'peercompute.ulg.sph-gas-pressure-authority-telemetry.v1';
 export const ULG_SPH_GAS_PRESSURE_CONSUMER_RECEIPT_SCHEMA =
@@ -100,7 +115,8 @@ export const ULG_SPH_GAS_PRESSURE_CONSUMER_RECEIPT_SCHEMA =
 export const ULG_SPH_GAS_PRESSURE_MECHANICS_BINDING_SCHEMA =
   'peercompute.ulg.sph-gas-pressure-mechanics-binding.v1';
 
-export const SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS = 12;
+export const SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS =
+  SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_FLOATS;
 export const SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS = 16;
 export const SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS = 12;
 export const SPH_SPATIAL_GAS_LEDGER_EOS_WORKGROUP_SIZE = 64;
@@ -171,13 +187,17 @@ export const SPH_SPATIAL_GAS_DIAGNOSTICS_NONE = 'none';
 export const SPH_SPATIAL_GAS_DIAGNOSTICS_FULL_ORACLE =
   'full-spatial-gas-oracle';
 
-const PRODUCT_EVENT_POSITION_AUTHORITY =
-  'reaction-product-event-birth-position';
-const PRODUCT_EVENT_SOURCE_FAMILY =
-  'sph-reaction-product-event-capacity-gas-ledger';
+const SPATIAL_GAS_UNION_POSITION_AUTHORITY =
+  'particle-xn-or-reaction-product-event-birth-position';
+const SPATIAL_GAS_UNION_SOURCE_FAMILY =
+  'sph-particle-and-reaction-residual-gas-ledger';
 const DEFAULT_GAS_CONSTANT_J_PER_MOL_K = 8.31446261815324;
 const DEFAULT_GAS_TEMPERATURE_K = 293.15;
 const SPH_SPATIAL_GAS_COMPACT_CAPACITY_FLOOR_ROWS = 4096;
+const SPH_PARTICLE_STATE_STRIDE_FLOATS =
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
+const SPH_PARTICLE_THERMO_STRIDE_FLOATS =
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
 const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS =
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 const MAX_EXACT_F32_INTEGER = 0x00ff_ffff;
@@ -863,6 +883,42 @@ function sourceBorrowFor(source) {
   return release;
 }
 
+function sourceBorrowSetFor(sources) {
+  const releases = [];
+  const uniqueSources = [...new Set(sources.filter(Boolean))];
+  for (const source of uniqueSources) {
+    const release = sourceBorrowFor(source);
+    if (typeof release !== 'function') {
+      for (const acquired of releases.reverse()) acquired();
+      return null;
+    }
+    releases.push(release);
+  }
+  let released = false;
+  const releaseAll = () => {
+    if (released) return false;
+    released = true;
+    let confirmed = true;
+    for (const release of [...releases].reverse()) {
+      confirmed = release() === true && confirmed;
+    }
+    return confirmed;
+  };
+  releaseAll.canRelease = () => (
+    released === false
+    && releases.every((release) => release.canRelease?.() === true)
+  );
+  releaseAll.isReleased = () => (
+    released === true
+    && releases.every((release) => release.isReleased?.() === true)
+  );
+  releaseAll.activeCount = () => releases.reduce(
+    (total, release) => total + Math.max(0, release.activeCount?.() ?? 0),
+    0
+  );
+  return releaseAll;
+}
+
 function rejectedExecution(status, reason, extra = {}) {
   return {
     schema: ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA,
@@ -986,7 +1042,7 @@ function normalizeAuthoritativeSpatialGasGrid(
   }
 }
 
-function normalizeSource({
+function normalizeProductEventSource({
   device,
   retainedProductEventSource = null,
   residentProductMass = null,
@@ -996,6 +1052,24 @@ function normalizeSource({
 }) {
   const source = retainedProductEventSource || residentProductMass || null;
   const buffer = productEventBuffer || source?.productEventBuffer || null;
+  const advertised = Boolean(
+    source
+    || productEventBuffer
+    || productEventRowCount != null
+    || productEventStrideFloats != null
+  );
+  if (!advertised) {
+    return {
+      present: false,
+      source: null,
+      buffer: null,
+      rowCount: 0,
+      strideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      requiredBytes: 0,
+      liveCountDescriptor: null,
+      liveRowCountUpperBound: 0
+    };
+  }
   const rowCount = Number(
     productEventRowCount ?? source?.productEventRowCount
   );
@@ -1189,6 +1263,7 @@ function normalizeSource({
       ? Math.min(rowCount, declaredLiveRowCountUpperBound)
       : rowCount;
   return {
+    present: true,
     source,
     buffer,
     rowCount,
@@ -1199,10 +1274,230 @@ function normalizeSource({
   };
 }
 
+function normalizeParticleSource({
+  device,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  particleStateBuffer = null,
+  particleThermoBuffer = null,
+  particleCount = null,
+  particleStateStrideFloats = null,
+  particleThermoStrideFloats = null,
+  schroederSpatialEpochGeneration = null,
+  schroederLevelAssignment = null
+}) {
+  const advertised = Boolean(
+    sphParticleUpload
+    || particleStateBuffer
+    || particleThermoBuffer
+    || particleCount != null
+    || particleStateStrideFloats != null
+    || particleThermoStrideFloats != null
+  );
+  if (!advertised) {
+    return {
+      present: false,
+      source: null,
+      stateBuffer: null,
+      thermoBuffer: null,
+      particleCount: 0,
+      stateStrideFloats: SPH_PARTICLE_STATE_STRIDE_FLOATS,
+      thermoStrideFloats: SPH_PARTICLE_THERMO_STRIDE_FLOATS,
+      stateRequiredBytes: 0,
+      thermoRequiredBytes: 0
+    };
+  }
+  const source = sphParticleUpload;
+  const stateBuffer = particleStateBuffer || source?.stateBuffer || null;
+  const thermoBuffer = particleThermoBuffer || source?.thermoBuffer || null;
+  const count = Number(particleCount ?? source?.particleCount);
+  const stateStrideFloats = Number(
+    particleStateStrideFloats
+      ?? (Number.isFinite(Number(source?.stateStrideBytes))
+        ? Number(source.stateStrideBytes) / FLOAT32_BYTES
+        : SPH_PARTICLE_STATE_STRIDE_FLOATS)
+  );
+  const thermoStrideFloats = Number(
+    particleThermoStrideFloats
+      ?? (Number.isFinite(Number(source?.thermoStrideBytes))
+        ? Number(source.thermoStrideBytes) / FLOAT32_BYTES
+        : SPH_PARTICLE_THERMO_STRIDE_FLOATS)
+  );
+  const reject = (status, reason, extra = {}) => ({
+    error: rejectedExecution(status, reason, extra)
+  });
+  if (
+    !source
+    || source.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+    || source.status !== 'webgpu-uploaded'
+    || source.destroyed === true
+  ) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-source',
+      'An exact live SPH particle-buffer-set source is required'
+    );
+  }
+  if (
+    !stateBuffer
+    || !thermoBuffer
+    || stateBuffer !== source.stateBuffer
+    || thermoBuffer !== source.thermoBuffer
+  ) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-source-buffer',
+      'The exact retained SPH state and thermo buffers were not provided'
+    );
+  }
+  if (stateBuffer === thermoBuffer) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-buffer-alias',
+      'Particle state and thermo buffers must be distinct exact ABI families'
+    );
+  }
+  if (
+    !Number.isInteger(count)
+    || count < 1
+    || count > MAX_EXACT_F32_INTEGER
+  ) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-count',
+      `Particle count must be in [1, ${MAX_EXACT_F32_INTEGER}]`,
+      { particleCount: Number.isFinite(count) ? count : null }
+    );
+  }
+  if (
+    stateStrideFloats !== SPH_PARTICLE_STATE_STRIDE_FLOATS
+    || thermoStrideFloats !== SPH_PARTICLE_THERMO_STRIDE_FLOATS
+    || source.stateStrideBytes
+      !== SPH_PARTICLE_STATE_STRIDE_FLOATS * FLOAT32_BYTES
+    || source.thermoStrideBytes
+      !== SPH_PARTICLE_THERMO_STRIDE_FLOATS * FLOAT32_BYTES
+  ) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-stride',
+      `Particle state/thermo strides must be ${SPH_PARTICLE_STATE_STRIDE_FLOATS}/${SPH_PARTICLE_THERMO_STRIDE_FLOATS} floats`,
+      { particleStateStrideFloats: stateStrideFloats,
+        particleThermoStrideFloats: thermoStrideFloats }
+    );
+  }
+  const stateRequiredBytes = count * stateStrideFloats * FLOAT32_BYTES;
+  const thermoRequiredBytes = count * thermoStrideFloats * FLOAT32_BYTES;
+  for (const [name, buffer, requiredBytes, declaredBytes] of [
+    ['state', stateBuffer, stateRequiredBytes, source.stateBufferByteLength],
+    ['thermo', thermoBuffer, thermoRequiredBytes, source.thermoBufferByteLength]
+  ]) {
+    const exactDeclaredBytes = Number(declaredBytes);
+    const strideBytes = name === 'state'
+      ? stateStrideFloats * FLOAT32_BYTES
+      : thermoStrideFloats * FLOAT32_BYTES;
+    if (
+      !Number.isSafeInteger(exactDeclaredBytes)
+      || exactDeclaredBytes < requiredBytes
+      || exactDeclaredBytes % strideBytes !== 0
+      || (
+        Number.isFinite(Number(buffer.size))
+        && Number(buffer.size) < exactDeclaredBytes
+      )
+    ) {
+      return reject(
+        'spatial-gas-ledger-eos-rejected-particle-byte-length',
+        `Particle ${name} buffer cannot expose its exact live ABI prefix from the declared allocation`,
+        {
+          particleBufferFamily: name,
+          requiredParticleByteLength: requiredBytes,
+          declaredParticleByteLength: Number.isFinite(exactDeclaredBytes)
+            ? exactDeclaredBytes
+            : null
+        }
+      );
+    }
+    if (
+      Number.isFinite(Number(buffer.usage))
+      && (Number(buffer.usage) & GPU_BUFFER_USAGE.STORAGE) === 0
+    ) {
+      return reject(
+        'spatial-gas-ledger-eos-rejected-particle-usage',
+        `Particle ${name} buffer is not storage-bindable`,
+        { particleBufferFamily: name }
+      );
+    }
+    if (
+      Number.isFinite(Number(device?.limits?.maxStorageBufferBindingSize))
+      && requiredBytes > Number(device.limits.maxStorageBufferBindingSize)
+    ) {
+      return reject(
+        'spatial-gas-ledger-eos-rejected-particle-binding-size',
+        `Particle ${name} binding exceeds maxStorageBufferBindingSize`,
+        { particleBufferFamily: name, requiredParticleByteLength: requiredBytes }
+      );
+    }
+    if (webGpuBufferDevice(buffer) !== device) {
+      const sourceDevice = webGpuBufferDevice(buffer);
+      return reject(
+        sourceDevice
+          ? 'spatial-gas-ledger-eos-rejected-cross-device-particle-source'
+          : 'spatial-gas-ledger-eos-rejected-unknown-particle-source-device',
+        sourceDevice
+          ? `Particle ${name} buffer belongs to another WebGPU device`
+          : `Particle ${name} buffer has no exact WebGPU device provenance`,
+        {
+          particleBufferFamily: name,
+          sourceDeviceId: sourceDevice ? webGpuDeviceId(sourceDevice) : null,
+          consumerDeviceId: webGpuDeviceId(device)
+        }
+      );
+    }
+  }
+  if (!validateSchroederSpatialEpochGenerationLevelAssignment(
+    schroederSpatialEpochGeneration,
+    {
+      device,
+      levelAssignment: schroederLevelAssignment,
+      sphParticleUpload: source,
+      mlsMpmParticleUpload
+    }
+  )) {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-generation',
+      'Particle state/thermo buffers are not the exact source of the selected spatial generation'
+    );
+  }
+  try {
+    if (!ensureSphGpuParticleBufferSetBorrowLifecycle(source)) {
+      return reject(
+        'spatial-gas-ledger-eos-rejected-particle-source-lifecycle',
+        'Particle source cannot publish the required retained borrow lifecycle'
+      );
+    }
+  } catch {
+    return reject(
+      'spatial-gas-ledger-eos-rejected-particle-source-lifecycle',
+      'Particle source cannot publish the required retained borrow lifecycle'
+    );
+  }
+  return {
+    present: true,
+    source,
+    stateBuffer,
+    thermoBuffer,
+    particleCount: count,
+    stateStrideFloats,
+    thermoStrideFloats,
+    stateRequiredBytes,
+    thermoRequiredBytes
+  };
+}
+
 function adapterParams({
   rowCount,
   sourceCapacity,
   strideFloats,
+  productSourcePresent,
+  productCandidateCapacity,
+  particleCount,
+  particleStateStrideFloats,
+  particleThermoStrideFloats,
+  candidateCount,
   cellSizeM,
   chartId,
   level,
@@ -1254,6 +1549,12 @@ function adapterParams({
   view.setInt32(88, level, true);
   view.setFloat32(92, cellSizeM, true);
   view.setFloat32(96, fallbackTemperatureK, true);
+  view.setUint32(100, productSourcePresent ? 1 : 0, true);
+  view.setUint32(104, productCandidateCapacity, true);
+  view.setUint32(108, particleCount, true);
+  view.setUint32(112, particleStateStrideFloats, true);
+  view.setUint32(116, particleThermoStrideFloats, true);
+  view.setUint32(120, candidateCount, true);
   return new Uint8Array(data);
 }
 
@@ -1330,7 +1631,7 @@ function eosParams({
   return new Uint8Array(data);
 }
 
-export const sphSpatialGasLedgerProductEventAdapterWgsl = /* wgsl */ `
+export const sphSpatialGasLedgerCandidateUnionAdapterWgsl = /* wgsl */ `
 struct SpatialGasAdapterParams {
   product_history_magic: u32,
   product_history_version: u32,
@@ -1357,6 +1658,12 @@ struct SpatialGasAdapterParams {
   level: i32,
   cell_size_m: f32,
   fallback_temperature_k: f32,
+  product_source_present: u32,
+  product_candidate_capacity: u32,
+  particle_count: u32,
+  particle_state_stride: u32,
+  particle_thermo_stride: u32,
+  candidate_count: u32,
 };
 
 @group(0) @binding(0) var<storage, read> product_events: array<f32>;
@@ -1366,6 +1673,8 @@ struct SpatialGasAdapterParams {
 @group(0) @binding(4) var<storage, read_write> active_nodes: array<f32>;
 @group(0) @binding(5) var<storage, read_write> authority: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> params: SpatialGasAdapterParams;
+@group(0) @binding(7) var<storage, read> particle_state: array<f32>;
+@group(0) @binding(8) var<storage, read> particle_thermo: array<f32>;
 
 const CONTROL_MAGIC: u32 = 0x53474133u;
 const CONTROL_VERSION: u32 = 3u;
@@ -1377,13 +1686,17 @@ const ERROR_INVALID_CANDIDATE: u32 = 1u;
 const ERROR_CONSERVATION: u32 = 2u;
 const ERROR_COMPACTION_OVERFLOW: u32 = 4u;
 const ERROR_PRODUCT_HISTORY_AUTHORITY_INVALID: u32 = 512u;
+const AVOGADRO_ENTITIES_PER_MOL: f32 = 6.02214076e23;
+const PARTICLE_PHASE_GAS: f32 = 3.0;
+const PARTICLE_PHASE_FRACTION_TOLERANCE: f32 = 1.0e-5;
 
 fn finite_f32(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
 }
 
 fn product_history_authority_ready() -> bool {
-  return params.product_history_magic
+  return params.product_source_present == 0u || (
+    params.product_history_magic
       == params.expected_product_history_magic
     && params.product_history_version
       == params.expected_product_history_version
@@ -1400,7 +1713,8 @@ fn product_history_authority_ready() -> bool {
       == params.expected_product_history_row_stride_vec4
     && params.product_history_generation
       == params.expected_product_history_generation
-    && params.product_history_seal == params.expected_product_history_seal;
+    && params.product_history_seal == params.expected_product_history_seal
+  );
 }
 
 fn zero_publication_outputs() {
@@ -1416,12 +1730,12 @@ fn zero_publication_outputs() {
 }
 
 @compute @workgroup_size(64)
-fn classify_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let row_index = global_id.x;
-  if (row_index >= params.source_capacity) {
+fn classify_gas_candidates(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  if (candidate_index >= params.source_capacity) {
     return;
   }
-  candidate_flags[row_index] = 0u;
+  candidate_flags[candidate_index] = 0u;
   if (!product_history_authority_ready()) {
     atomicOr(
       &authority[3u],
@@ -1429,6 +1743,76 @@ fn classify_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) 
     );
     return;
   }
+  if (candidate_index >= params.candidate_count) { return; }
+  if (candidate_index >= params.product_candidate_capacity) {
+    let particle_index = candidate_index - params.product_candidate_capacity;
+    if (particle_index >= params.particle_count) { return; }
+    let state = particle_index * params.particle_state_stride;
+    let thermo = particle_index * params.particle_thermo_stride;
+    let mass = particle_state[state + 3u];
+    // A fixed-capacity row may retain its former phase after its inventory is
+    // consumed. Exactly zero mass owns no gas moles or volume, so it is inert
+    // regardless of historical status. Negative/non-finite masses still
+    // reach the gas-indication validation below and fail closed.
+    if (finite_f32(mass) && mass == 0.0) { return; }
+    let phase = particle_thermo[thermo + 1u];
+    let solid_fraction = particle_thermo[thermo + 4u];
+    let liquid_fraction = particle_thermo[thermo + 5u];
+    let gas_fraction = particle_thermo[thermo + 6u];
+    let plasma_fraction = particle_thermo[thermo + 7u];
+    let status = particle_thermo[thermo + 10u];
+    let gas_phase_declared = finite_f32(phase)
+      && phase > PARTICLE_PHASE_GAS - 0.5
+      && phase < PARTICLE_PHASE_GAS + 0.5;
+    let one_hot_gas_fraction_declared = finite_f32(solid_fraction)
+      && abs(solid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(liquid_fraction)
+      && abs(liquid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(gas_fraction)
+      && abs(gas_fraction - 1.0) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(plasma_fraction)
+      && abs(plasma_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE;
+    if (!gas_phase_declared && !one_hot_gas_fraction_declared) { return; }
+    let position = vec3<f32>(
+      particle_state[state + 0u],
+      particle_state[state + 1u],
+      particle_state[state + 2u]
+    );
+    let material_id = particle_thermo[thermo + 0u];
+    let temperature = particle_thermo[thermo + 2u];
+    let rest_density = particle_thermo[thermo + 3u];
+    let represented_entities = particle_thermo[thermo + 9u];
+    let active_status = finite_f32(status) && status > 0.5 && status < 3.5;
+    let pure_gas = gas_phase_declared
+      && finite_f32(solid_fraction)
+      && abs(solid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(liquid_fraction)
+      && abs(liquid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(gas_fraction)
+      && abs(gas_fraction - 1.0) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && finite_f32(plasma_fraction)
+      && abs(plasma_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE;
+    let particle_valid = pure_gas && active_status
+      && all(vec3<bool>(
+        finite_f32(position.x),
+        finite_f32(position.y),
+        finite_f32(position.z)
+      ))
+      && finite_f32(mass) && mass > 0.0
+      && finite_f32(material_id) && material_id > 0.0
+      && finite_f32(temperature) && temperature > 0.0
+      && finite_f32(rest_density) && rest_density > 0.0
+      && finite_f32(represented_entities) && represented_entities > 0.0;
+    if (!particle_valid) {
+      atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
+      atomicAdd(&authority[12u], 1u);
+      return;
+    }
+    candidate_flags[candidate_index] = 1u;
+    return;
+  }
+  let row_index = candidate_index;
+  if (params.product_source_present == 0u) { return; }
   if (row_index >= params.source_row_count) { return; }
   let source = row_index * params.product_event_stride;
   let routing = product_events[source + 10u];
@@ -1493,7 +1877,7 @@ fn classify_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) 
     atomicAdd(&authority[12u], 1u);
     return;
   }
-  candidate_flags[row_index] = 1u;
+  candidate_flags[candidate_index] = 1u;
 }
 
 @compute @workgroup_size(1)
@@ -1512,11 +1896,28 @@ fn finalize_compaction() {
   ) {
     atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
   }
-  if (params.source_row_count > params.source_capacity) {
+  if (
+    params.product_source_present != 0u
+    && params.source_row_count > params.product_candidate_capacity
+  ) {
     atomicOr(&authority[3u], ERROR_COMPACTION_OVERFLOW);
     atomicStore(
       &authority[13u],
-      params.source_row_count - params.source_capacity
+      params.source_row_count - params.product_candidate_capacity
+    );
+  }
+  if (
+    params.candidate_count > params.source_capacity
+    || params.product_candidate_capacity + params.particle_count
+      != params.candidate_count
+  ) {
+    atomicOr(&authority[3u], ERROR_COMPACTION_OVERFLOW);
+    atomicStore(
+      &authority[13u],
+      max(1u, params.candidate_count - min(
+        params.candidate_count,
+        params.source_capacity
+      ))
     );
   }
   var live_count = 0u;
@@ -1565,60 +1966,116 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
     atomicStore(&authority[8u], 0u);
     return;
   }
-  let source = source_index * params.product_event_stride;
   let compact = output_index * params.compact_stride;
   let active_base = output_index * params.active_node_stride;
-  let total_mass = product_events[source + 3u];
-  let unplaced_mass = product_events[source + 13u];
-  let residual_fraction = clamp(unplaced_mass / total_mass, 0.0, 1.0);
-  let residual_moles = product_events[source + 9u] * residual_fraction;
-  let residual_volume = unplaced_mass / product_events[source + 17u];
-  if (
-    !finite_f32(residual_fraction) || !(residual_fraction > 0.0)
-    || !finite_f32(residual_moles) || !(residual_moles > 0.0)
-    || !finite_f32(residual_volume) || !(residual_volume > 0.0)
-  ) {
-    atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
-    atomicAdd(&authority[12u], 1u);
-    atomicOr(&authority[2u], STATUS_FAILED);
-    atomicStore(&authority[8u], 0u);
-    return;
-  }
-  let source_temperature = product_events[source + 16u];
-  let temperature = select(
-    params.fallback_temperature_k,
-    source_temperature,
-    finite_f32(source_temperature) && source_temperature > 0.0
-  );
   for (var word = 0u; word < params.active_node_stride; word = word + 1u) {
     active_nodes[active_base + word] = 0.0;
   }
   for (var word = 0u; word < params.compact_stride; word = word + 1u) {
     compact_rows[compact + word] = 0.0;
   }
-  compact_rows[compact + 0u] = product_events[source + 0u];
-  compact_rows[compact + 1u] = product_events[source + 1u];
-  compact_rows[compact + 2u] = product_events[source + 2u];
-  compact_rows[compact + 3u] = product_events[source + 4u];
-  compact_rows[compact + 4u] = unplaced_mass;
-  compact_rows[compact + 5u] = residual_moles;
-  compact_rows[compact + 6u] = temperature;
-  compact_rows[compact + 7u] = residual_volume;
-  compact_rows[compact + 8u] = product_events[source + 5u];
-  compact_rows[compact + 9u] = f32(source_index);
+
+  var position = vec3<f32>(0.0);
+  var material_id = 0.0;
+  var mass_kg = 0.0;
+  var moles = 0.0;
+  var temperature_k = params.fallback_temperature_k;
+  var support_volume_m3 = 0.0;
+  var source_discriminant = -1.0;
+  var source_row_index = 0.0;
+  var routing = 1.0;
+  if (source_index < params.product_candidate_capacity) {
+    let source = source_index * params.product_event_stride;
+    let total_mass = product_events[source + 3u];
+    let unplaced_mass = product_events[source + 13u];
+    let residual_fraction = clamp(unplaced_mass / total_mass, 0.0, 1.0);
+    let residual_moles = product_events[source + 9u] * residual_fraction;
+    let residual_volume = unplaced_mass / product_events[source + 17u];
+    if (
+      !finite_f32(residual_fraction) || !(residual_fraction > 0.0)
+      || !finite_f32(residual_moles) || !(residual_moles > 0.0)
+      || !finite_f32(residual_volume) || !(residual_volume > 0.0)
+    ) {
+      atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
+      atomicAdd(&authority[12u], 1u);
+      atomicOr(&authority[2u], STATUS_FAILED);
+      atomicStore(&authority[8u], 0u);
+      return;
+    }
+    let source_temperature = product_events[source + 16u];
+    position = vec3<f32>(
+      product_events[source + 0u],
+      product_events[source + 1u],
+      product_events[source + 2u]
+    );
+    material_id = product_events[source + 4u];
+    mass_kg = unplaced_mass;
+    moles = residual_moles;
+    temperature_k = select(
+      params.fallback_temperature_k,
+      source_temperature,
+      finite_f32(source_temperature) && source_temperature > 0.0
+    );
+    support_volume_m3 = residual_volume;
+    source_discriminant = product_events[source + 5u];
+    source_row_index = f32(source_index);
+    routing = product_events[source + 10u];
+  } else {
+    let particle_index = source_index - params.product_candidate_capacity;
+    let state = particle_index * params.particle_state_stride;
+    let thermo = particle_index * params.particle_thermo_stride;
+    position = vec3<f32>(
+      particle_state[state + 0u],
+      particle_state[state + 1u],
+      particle_state[state + 2u]
+    );
+    material_id = particle_thermo[thermo + 0u];
+    mass_kg = particle_state[state + 3u];
+    moles = particle_thermo[thermo + 9u] / AVOGADRO_ENTITIES_PER_MOL;
+    temperature_k = particle_thermo[thermo + 2u];
+    support_volume_m3 = mass_kg / particle_thermo[thermo + 3u];
+    source_discriminant = -1.0;
+    source_row_index = f32(particle_index);
+    routing = 1.0;
+    if (
+      !finite_f32(moles) || !(moles > 0.0)
+      || !finite_f32(support_volume_m3) || !(support_volume_m3 > 0.0)
+    ) {
+      atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
+      atomicAdd(&authority[12u], 1u);
+      atomicOr(&authority[2u], STATUS_FAILED);
+      atomicStore(&authority[8u], 0u);
+      return;
+    }
+  }
+  compact_rows[compact + 0u] = position.x;
+  compact_rows[compact + 1u] = position.y;
+  compact_rows[compact + 2u] = position.z;
+  compact_rows[compact + 3u] = material_id;
+  compact_rows[compact + 4u] = mass_kg;
+  compact_rows[compact + 5u] = moles;
+  compact_rows[compact + 6u] = temperature_k;
+  compact_rows[compact + 7u] = support_volume_m3;
+  compact_rows[compact + 8u] = source_discriminant;
+  compact_rows[compact + 9u] = source_row_index;
   compact_rows[compact + 10u] = 1.0;
-  compact_rows[compact + 11u] = product_events[source + 10u];
+  compact_rows[compact + 11u] = routing;
 
   active_nodes[active_base + 0u] = f32(params.level);
   active_nodes[active_base + 8u] = params.cell_size_m;
   active_nodes[active_base + 10u] = f32(output_index);
   active_nodes[active_base + 11u] = 1.0;
-  active_nodes[active_base + 12u] = product_events[source + 0u];
-  active_nodes[active_base + 13u] = product_events[source + 1u];
-  active_nodes[active_base + 14u] = product_events[source + 2u];
+  active_nodes[active_base + 12u] = position.x;
+  active_nodes[active_base + 13u] = position.y;
+  active_nodes[active_base + 14u] = position.z;
   active_nodes[active_base + 15u] = f32(params.chart_id);
 }
 `;
+
+// Compatibility export for downstream shader-contract probes authored before
+// particle candidates joined the retained source domain.
+export const sphSpatialGasLedgerProductEventAdapterWgsl =
+  sphSpatialGasLedgerCandidateUnionAdapterWgsl;
 
 export const sphSpatialGasLedgerEosWgsl = /* wgsl */ `
 struct SpatialGasEosParams {
@@ -2137,21 +2594,23 @@ fn finalize_eos() {
 function adapterPipelines(device) {
   return {
     classify: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-product-event-classify.v4',
-      label: 'ulg-sph-spatial-gas-ledger-product-event-classify',
-      code: sphSpatialGasLedgerProductEventAdapterWgsl,
-      entryPoint: 'classify_product_events',
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-classify.v5',
+      label: 'ulg-sph-spatial-gas-ledger-candidate-union-classify',
+      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
+      entryPoint: 'classify_gas_candidates',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
         computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform')
+        computeBufferBinding(6, 'uniform'),
+        computeBufferBinding(7, 'read-only-storage'),
+        computeBufferBinding(8, 'read-only-storage')
       ]
     }),
     finalize: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-product-event-finalize.v4',
-      label: 'ulg-sph-spatial-gas-ledger-product-event-finalize',
-      code: sphSpatialGasLedgerProductEventAdapterWgsl,
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize.v5',
+      label: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize',
+      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
       entryPoint: 'finalize_compaction',
       bindings: [
         computeBufferBinding(1, 'storage'),
@@ -2161,9 +2620,9 @@ function adapterPipelines(device) {
       ]
     }),
     scatter: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-product-event-scatter.v4',
-      label: 'ulg-sph-spatial-gas-ledger-product-event-scatter',
-      code: sphSpatialGasLedgerProductEventAdapterWgsl,
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter.v5',
+      label: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter',
+      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
       entryPoint: 'scatter_compact_rows',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -2172,7 +2631,9 @@ function adapterPipelines(device) {
         computeBufferBinding(3, 'storage'),
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform')
+        computeBufferBinding(6, 'uniform'),
+        computeBufferBinding(7, 'read-only-storage'),
+        computeBufferBinding(8, 'read-only-storage')
       ]
     })
   };
@@ -2245,10 +2706,10 @@ function activeNodeDirectorySource({
     spatialDirectorySourceStatus: 'schroeder-spatial-directory-source-ready',
     spatialDirectorySourceReady: true,
     spatialEpochSourceSchema:
-      'peercompute.ulg.sph-product-event-capacity-spatial-source.v1',
-    spatialEpochSourceStatus: 'sph-product-event-capacity-spatial-source-ready',
+      'peercompute.ulg.sph-gas-candidate-union-spatial-source.v1',
+    spatialEpochSourceStatus: 'sph-gas-candidate-union-spatial-source-ready',
     spatialEpochSourceReady: true,
-    spatialEpochPositionAuthority: PRODUCT_EVENT_POSITION_AUTHORITY,
+    spatialEpochPositionAuthority: SPATIAL_GAS_UNION_POSITION_AUTHORITY,
     spatialEpochLevelSpacingMode: 'uniform-gas-cell-size',
     spatialEpochBaseGridSpacingM: cellSizeM,
     spatialEpochMinLevel: level,
@@ -2271,7 +2732,7 @@ function activeNodeDirectorySource({
     spatialEpochSupportEpoch: epochIdentity.supportEpoch,
     phaseVolumeAssignmentOverlayEnabled: false,
     sourceValidityAuthority:
-      'stable-gpu-residual-compaction-with-authenticated-logical-prefix-count'
+      'stable-gpu-candidate-union-compaction-with-authenticated-logical-prefix-count'
   };
 }
 
@@ -3246,7 +3707,8 @@ const SPH_GAS_PRESSURE_MECHANICS_PUBLIC_BINDINGS = Object.freeze([
 const SPH_GAS_PRESSURE_MECHANICS_PRIVATE_BINDINGS = Object.freeze([
   3,
   4,
-  6
+  6,
+  8
 ]);
 const SPH_GAS_PRESSURE_EPOCH_FIELDS = Object.freeze([
   'storageGeneration',
@@ -3336,21 +3798,102 @@ function pressureMechanicsEpochMatches(record, authority) {
   ));
 }
 
-function pressureMechanicsGridMatches(record, authority) {
-  const field = authority?.mechanicsFieldView;
-  const expected = record.spatialGasGrid;
+function pressureMechanicsFieldGridMatches(field, expected, selectedLevel) {
   const dims = Array.from(field?.gridDims || []);
-  return field === record.selectedMechanicsFieldView
-    && dims.length === 3
+  return dims.length === 3
     && dims.every((value, axis) => Object.is(value, expected.gridDims[axis]))
     && Object.is(field?.gridNodeCount, expected.gridNodeCount)
     && Object.is(field?.gridShift, expected.gridShift)
     && Object.is(Math.fround(field?.gridSpacingM), expected.gridSpacingM)
-    && Object.is(field?.selectedLevel, record.level)
-    && Object.is(authority?.selectedLevel, record.level);
+    && Object.is(field?.selectedLevel, selectedLevel);
+}
+
+function pressureMechanicsMapping(record, authority) {
+  const targetField = authority?.mechanicsFieldView ?? null;
+  const gasField = record.selectedMechanicsFieldView ?? null;
+  const generation = record.schroederSpatialEpochGeneration ?? null;
+  const levelViews = Array.isArray(generation?.mechanicsLevelViews)
+    ? generation.mechanicsLevelViews
+    : [];
+  if (
+    targetField === gasField
+    && Object.is(authority?.selectedLevel, record.level)
+    && pressureMechanicsFieldGridMatches(
+      targetField,
+      record.spatialGasGrid,
+      record.level
+    )
+  ) {
+    return Object.freeze({
+      mode: 'same-level',
+      targetField,
+      gasField,
+      parentFieldView: null
+    });
+  }
+  const parentFieldView = generation?.parentFieldView ?? null;
+  const fineLevelView = levelViews[0] ?? null;
+  const coarseLevelView = levelViews[1] ?? null;
+  const parentAdmission = validateSchroederSpatialParentFieldViewDescriptor(
+    parentFieldView
+  );
+  if (
+    generation?.ready !== true
+    || generation?.selected !== true
+    || levelViews.length !== 2
+    || generation?.mechanicsLevelCount !== 2
+    || fineLevelView?.mechanicsFieldView !== targetField
+    || coarseLevelView?.mechanicsFieldView !== gasField
+    || targetField !== parentFieldView?.fineFieldView
+    || gasField !== parentFieldView?.coarseFieldView
+    || parentFieldView?.schema
+      !== ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA
+    || parentAdmission?.admitted !== true
+    || !webGpuBufferMatchesDevice(parentFieldView?.parentFieldViewBuffer, record.device)
+    || !Object.is(targetField?.selectedLevel + 1, gasField?.selectedLevel)
+    || !Object.is(authority?.selectedLevel, targetField?.selectedLevel)
+    || !Object.is(record.level, gasField?.selectedLevel)
+    || !pressureMechanicsFieldGridMatches(
+      targetField,
+      parentFieldView?.fineGrid ?? {},
+      targetField?.selectedLevel
+    )
+    || !pressureMechanicsFieldGridMatches(
+      gasField,
+      record.spatialGasGrid,
+      record.level
+    )
+    || !Object.is(
+      Math.fround(Number(targetField?.gridSpacingM) * 2),
+      Math.fround(Number(gasField?.gridSpacingM))
+    )
+    || !Object.is(parentFieldView?.fineLevel, targetField?.selectedLevel)
+    || !Object.is(parentFieldView?.coarseLevel, gasField?.selectedLevel)
+    || !Object.is(parentFieldView?.fineFieldCapacity, targetField?.fieldCapacity)
+    || !Object.is(parentFieldView?.coarseFieldCapacity, gasField?.fieldCapacity)
+    || !Object.is(
+      parentFieldView?.fineFieldView?.completionOrdinal,
+      targetField?.completionOrdinal
+    )
+    || !Object.is(
+      parentFieldView?.coarseFieldView?.completionOrdinal,
+      gasField?.completionOrdinal
+    )
+  ) {
+    throw pressureMechanicsBindingError(
+      'Gas pressure mechanics fine target requires the exact live two-level parent-field CSR joining its S9 field to the producer coarse field'
+    );
+  }
+  return Object.freeze({
+    mode: 'fine-to-coarse-parent-adjoint',
+    targetField,
+    gasField,
+    parentFieldView
+  });
 }
 
 function validatePressureMechanicsAuthority(record, authority, chartId) {
+  const targetField = authority?.mechanicsFieldView ?? null;
   if (
     authority?.schema
       !== 'peercompute.ulg.schroeder-spatial-phase-volume-surface-stress-authority.v1'
@@ -3358,13 +3901,13 @@ function validatePressureMechanicsAuthority(record, authority, chartId) {
       !== 'schroeder-spatial-phase-volume-surface-stress-authority-ready'
     || authority?.generation !== record.schroederSpatialEpochGeneration
     || authority?.mechanicsFieldViewBuffer
-      !== record.selectedMechanicsFieldView?.fieldViewBuffer
+      !== targetField?.fieldViewBuffer
     || authority?.phaseVolumeReceiptControlBuffer == null
     || authority?.phaseVolumeMomentBuffer == null
     || authority?.phaseVolumeReceipt?.mechanicsFieldView
-      !== record.selectedMechanicsFieldView
+      !== targetField
     || authority?.phaseVolumeMoment?.mechanicsFieldView
-      !== record.selectedMechanicsFieldView
+      !== targetField
     || authority?.phaseVolumeReceipt?.phaseVolumeMoment
       !== authority.phaseVolumeMoment
     || authority?.phaseVolumeReceipt?.controlBuffer
@@ -3374,9 +3917,8 @@ function validatePressureMechanicsAuthority(record, authority, chartId) {
     || !Number.isSafeInteger(authority?.fieldCapacity)
     || authority.fieldCapacity < 1
     || authority.fieldCapacity !== authority.phaseVolumeReceipt?.fieldCapacity
-    || authority.fieldCapacity !== record.selectedMechanicsFieldView?.fieldCapacity
+    || authority.fieldCapacity !== targetField?.fieldCapacity
     || !pressureMechanicsEpochMatches(record, authority)
-    || !pressureMechanicsGridMatches(record, authority)
     || !Object.is(chartId, record.chartId)
     || !ownsSchroederSpatialEpochGenerationConsumerLease(
       record.generationConsumerLease,
@@ -3388,6 +3930,7 @@ function validatePressureMechanicsAuthority(record, authority, chartId) {
       'Gas pressure mechanics binding requires the exact live S9-A/S9-B field, epoch, chart, level, and grid used by its v4 producer'
     );
   }
+  return pressureMechanicsMapping(record, authority);
 }
 
 function pressureMechanicsDirectoryMetadata(record) {
@@ -3475,7 +4018,11 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
         'Gas pressure mechanics chartId must be an exact non-negative f32 integer'
       );
     }
-    validatePressureMechanicsAuthority(record, phaseVolumeAuthority, chartId);
+    const mapping = validatePressureMechanicsAuthority(
+      record,
+      phaseVolumeAuthority,
+      chartId
+    );
     const publicSnapshot = snapshotPressurePublicEntries(
       publicEntries,
       device,
@@ -3500,6 +4047,11 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       throw new TypeError('device.createBindGroup must be a function');
     }
     const directoryMetadata = pressureMechanicsDirectoryMetadata(record);
+    const parentFieldViewBuffer = mapping.parentFieldView?.parentFieldViewBuffer
+      // The v2 shader never reads binding 8 in same-level mode. Reuse the
+      // already-private read-only directory allocation as a non-authoritative
+      // dummy so callers still cannot substitute topology.
+      ?? record.spatialGeneration.execution.directoryBuffer;
     const bindGroup = createBindGroup.call(device, {
       label: `ulg-sph-gas-pressure-mechanics-${record.executionGeneration}`,
       layout: bindGroupLayout,
@@ -3520,6 +4072,16 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
         {
           binding: 6,
           resource: { buffer: record.slot.controlBuffer }
+        },
+        {
+          binding: 8,
+          resource: mapping.parentFieldView
+            ? {
+                buffer: parentFieldViewBuffer,
+                offset: 0,
+                size: mapping.parentFieldView.layout.byteLength
+              }
+            : { buffer: parentFieldViewBuffer }
         }
       ].sort((left, right) => left.binding - right.binding)
     });
@@ -3532,7 +4094,10 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       storageGeneration: record.storageGeneration,
       epochIdentity: record.epochIdentity,
       chartId: record.chartId,
-      level: record.level,
+      level: mapping.targetField.selectedLevel,
+      targetLevel: mapping.targetField.selectedLevel,
+      gasLevel: record.level,
+      crossLevelMappingMode: mapping.mode,
       fieldCapacity: phaseVolumeAuthority.fieldCapacity,
       gasPressureCellRowCapacity: record.capacity,
       gasPressureCellRowStrideFloats:
@@ -3543,7 +4108,18 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       gasGridShift: record.spatialGasGrid.gridShift,
       gasGridSpacingM: record.spatialGasGrid.gridSpacingM,
       gasGridOriginM: record.boxMinM,
-      gasGridMaxM: record.boxMaxM
+      gasGridMaxM: record.boxMaxM,
+      targetGridDims: Object.freeze([
+        ...Array.from(mapping.targetField.gridDims || [])
+      ]),
+      targetGridNodeCount: mapping.targetField.gridNodeCount,
+      targetGridShift: mapping.targetField.gridShift,
+      targetGridSpacingM: Math.fround(mapping.targetField.gridSpacingM),
+      parentGenerationId: mapping.parentFieldView?.generationId ?? 0,
+      parentCompletionOrdinal:
+        mapping.parentFieldView?.completionOrdinal ?? 0,
+      parentFieldCapacity: mapping.parentFieldView?.parentFieldCapacity ?? 0,
+      parentFieldWordCapacity: mapping.parentFieldView?.capacityWords ?? 0
     });
     retainedPressureMechanicsBindings.set(binding, {
       binding,
@@ -3748,10 +4324,10 @@ export function quarantineSphSpatialGasPressureAuthorityAfterSubmitFailure(
 }
 
 /**
- * Build a retained product-event gas source, one family-specific SS directory,
- * and the local ideal-gas EOS pressure rows without mapping or fencing the
- * normal hot path. The returned owner must be released only after its final
- * same-queue consumer has submitted.
+ * Build one retained particle/product-residual candidate union, its
+ * family-specific SS directory, and the local ideal-gas EOS pressure rows
+ * without mapping or fencing the normal hot path. The returned owner must be
+ * released only after its final same-queue consumer has submitted.
  */
 export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   device,
@@ -3760,6 +4336,14 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   productEventBuffer = null,
   productEventRowCount = null,
   productEventStrideFloats = null,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  particleStateBuffer = null,
+  particleThermoBuffer = null,
+  particleCount = null,
+  particleStateStrideFloats = null,
+  particleThermoStrideFloats = null,
+  schroederLevelAssignment = null,
   epochIdentity = null,
   schroederSpatialEpochGeneration = null,
   spatialGasGrid = null,
@@ -3814,27 +4398,6 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       `Unsupported diagnostics mode: ${diagnosticsMode}`
     );
   }
-  const normalizedSource = normalizeSource({
-    device,
-    retainedProductEventSource,
-    residentProductMass,
-    productEventBuffer,
-    productEventRowCount,
-    productEventStrideFloats
-  });
-  if (normalizedSource.error) {
-    return {
-      ...normalizedSource.error,
-      ...retainedReadbackTelemetrySnapshot()
-    };
-  }
-  const compactCapacityRowBound = Math.min(
-    normalizedSource.rowCount,
-    Math.max(
-      SPH_SPATIAL_GAS_COMPACT_CAPACITY_FLOOR_ROWS,
-      normalizedSource.liveRowCountUpperBound
-    )
-  );
   const normalizedEpoch = normalizeEpochIdentity(epochIdentity);
   if (normalizedEpoch.error) {
     return rejectedExecutionWithTelemetry(
@@ -3842,6 +4405,88 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       normalizedEpoch.error.message
     );
   }
+  const normalizedProductSource = normalizeProductEventSource({
+    device,
+    retainedProductEventSource,
+    residentProductMass,
+    productEventBuffer,
+    productEventRowCount,
+    productEventStrideFloats
+  });
+  if (normalizedProductSource.error) {
+    return {
+      ...normalizedProductSource.error,
+      ...retainedReadbackTelemetrySnapshot()
+    };
+  }
+  const normalizedParticleSource = normalizeParticleSource({
+    device,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    particleStateBuffer,
+    particleThermoBuffer,
+    particleCount,
+    particleStateStrideFloats,
+    particleThermoStrideFloats,
+    schroederSpatialEpochGeneration,
+    schroederLevelAssignment
+  });
+  if (normalizedParticleSource.error) {
+    return {
+      ...normalizedParticleSource.error,
+      ...retainedReadbackTelemetrySnapshot()
+    };
+  }
+  if (
+    normalizedProductSource.present !== true
+    && normalizedParticleSource.present !== true
+  ) {
+    return rejectedExecutionWithTelemetry(
+      'spatial-gas-ledger-eos-rejected-empty-source-domain',
+      'At least one exact product-event or particle candidate source is required'
+    );
+  }
+  if (
+    normalizedProductSource.present === true
+    && normalizedParticleSource.present === true
+    && (
+      normalizedProductSource.buffer === normalizedParticleSource.stateBuffer
+      || normalizedProductSource.buffer
+        === normalizedParticleSource.thermoBuffer
+    )
+  ) {
+    return rejectedExecutionWithTelemetry(
+      'spatial-gas-ledger-eos-rejected-cross-family-buffer-alias',
+      'Product-event, particle-state, and particle-thermo sources must use distinct exact ABI buffers'
+    );
+  }
+  const productCandidateCapacity = normalizedProductSource.present === true
+    ? Math.min(
+        normalizedProductSource.rowCount,
+        Math.max(
+          SPH_SPATIAL_GAS_COMPACT_CAPACITY_FLOOR_ROWS,
+          normalizedProductSource.liveRowCountUpperBound
+        )
+      )
+    : 0;
+  const candidateCount = productCandidateCapacity
+    + normalizedParticleSource.particleCount;
+  if (
+    !Number.isSafeInteger(candidateCount)
+    || candidateCount < 1
+    || candidateCount > MAX_EXACT_F32_INTEGER
+  ) {
+    return rejectedExecutionWithTelemetry(
+      'spatial-gas-ledger-eos-rejected-union-capacity',
+      `Combined gas candidate count must be in [1, ${MAX_EXACT_F32_INTEGER}]`,
+      {
+        productCandidateCapacity,
+        particleCount: normalizedParticleSource.particleCount,
+        candidateCount: Number.isFinite(candidateCount) ? candidateCount : null
+      }
+    );
+  }
+  const compactCapacityRowBound = candidateCount;
   const normalizedGrid = normalizeAuthoritativeSpatialGasGrid(
     spatialGasGrid,
     schroederSpatialEpochGeneration
@@ -3946,11 +4591,18 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     );
   }
 
-  const releaseSourceBorrow = sourceBorrowFor(normalizedSource.source);
-  if (!releaseSourceBorrow) {
+  const releaseSourceBorrow = sourceBorrowSetFor([
+    ...(normalizedProductSource.present === true
+      ? [normalizedProductSource.source]
+      : []),
+    ...(normalizedParticleSource.present === true
+      ? [normalizedParticleSource.source]
+      : [])
+  ]);
+  if (typeof releaseSourceBorrow !== 'function') {
     return rejectedExecutionWithTelemetry(
       'spatial-gas-ledger-eos-rejected-source-lifecycle',
-      'Unable to acquire the exact retained source borrow'
+      'Unable to acquire every exact retained gas-candidate source borrow'
     );
   }
   let generationConsumerLease;
@@ -4005,6 +4657,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     'spatial gas execution generation',
     { positive: true }
   );
+  let adapterSubmissionAttempted = false;
   let adapterSubmitted = false;
   let gasFreeVolumeRuntime = null;
   let gasFreeVolumeExecution = null;
@@ -4013,21 +4666,47 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   let queueOrderedPressureRecord = null;
   try {
     const adapter = adapterPipelines(device);
+    const productBindingBuffer = normalizedProductSource.present === true
+      ? normalizedProductSource.buffer
+      : normalizedParticleSource.stateBuffer;
+    const productBindingByteLength = normalizedProductSource.present === true
+      ? normalizedProductSource.requiredBytes
+      : normalizedParticleSource.stateRequiredBytes;
+    const particleStateBindingBuffer = normalizedParticleSource.present === true
+      ? normalizedParticleSource.stateBuffer
+      : normalizedProductSource.buffer;
+    const particleStateBindingByteLength = normalizedParticleSource.present === true
+      ? normalizedParticleSource.stateRequiredBytes
+      : normalizedProductSource.requiredBytes;
+    const particleThermoBindingBuffer = normalizedParticleSource.present === true
+      ? normalizedParticleSource.thermoBuffer
+      : normalizedProductSource.buffer;
+    const particleThermoBindingByteLength = normalizedParticleSource.present === true
+      ? normalizedParticleSource.thermoRequiredBytes
+      : normalizedProductSource.requiredBytes;
     device.queue.writeBuffer(slot.controlBuffer, 0, initialAuthorityControl({
       executionGeneration,
       storageGeneration: normalizedEpoch.storageGeneration,
       sourceCapacity: capacity
     }));
     device.queue.writeBuffer(slot.paramsBuffer, 0, adapterParams({
-      rowCount: normalizedSource.rowCount,
+      rowCount: normalizedProductSource.rowCount,
       sourceCapacity: capacity,
-      strideFloats: normalizedSource.strideFloats,
+      strideFloats: normalizedProductSource.strideFloats,
+      productSourcePresent: normalizedProductSource.present === true,
+      productCandidateCapacity,
+      particleCount: normalizedParticleSource.particleCount,
+      particleStateStrideFloats:
+        normalizedParticleSource.stateStrideFloats,
+      particleThermoStrideFloats:
+        normalizedParticleSource.thermoStrideFloats,
+      candidateCount,
       cellSizeM,
       chartId: resolvedChartId,
       level: resolvedLevel,
       executionGeneration,
       fallbackTemperatureK: resolvedFallbackTemperatureK,
-      liveCountDescriptor: normalizedSource.liveCountDescriptor
+      liveCountDescriptor: normalizedProductSource.liveCountDescriptor
     }));
     const classifyBindGroup = makeBindGroup(
       device,
@@ -4037,14 +4716,30 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         {
           binding: 0,
           resource: {
-            buffer: normalizedSource.buffer,
+            buffer: productBindingBuffer,
             offset: 0,
-            size: normalizedSource.requiredBytes
+            size: productBindingByteLength
           }
         },
         { binding: 1, resource: { buffer: slot.candidateFlagsBuffer } },
         { binding: 5, resource: { buffer: slot.controlBuffer } },
-        { binding: 6, resource: { buffer: slot.paramsBuffer } }
+        { binding: 6, resource: { buffer: slot.paramsBuffer } },
+        {
+          binding: 7,
+          resource: {
+            buffer: particleStateBindingBuffer,
+            offset: 0,
+            size: particleStateBindingByteLength
+          }
+        },
+        {
+          binding: 8,
+          resource: {
+            buffer: particleThermoBindingBuffer,
+            offset: 0,
+            size: particleThermoBindingByteLength
+          }
+        }
       ]
     );
     const finalizeBindGroup = makeBindGroup(
@@ -4066,9 +4761,9 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         {
           binding: 0,
           resource: {
-            buffer: normalizedSource.buffer,
+            buffer: productBindingBuffer,
             offset: 0,
-            size: normalizedSource.requiredBytes
+            size: productBindingByteLength
           }
         },
         { binding: 1, resource: { buffer: slot.candidateFlagsBuffer } },
@@ -4076,24 +4771,40 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         { binding: 3, resource: { buffer: slot.compactRowsBuffer } },
         { binding: 4, resource: { buffer: slot.activeNodeBuffer } },
         { binding: 5, resource: { buffer: slot.controlBuffer } },
-        { binding: 6, resource: { buffer: slot.paramsBuffer } }
+        { binding: 6, resource: { buffer: slot.paramsBuffer } },
+        {
+          binding: 7,
+          resource: {
+            buffer: particleStateBindingBuffer,
+            offset: 0,
+            size: particleStateBindingByteLength
+          }
+        },
+        {
+          binding: 8,
+          resource: {
+            buffer: particleThermoBindingBuffer,
+            offset: 0,
+            size: particleThermoBindingByteLength
+          }
+        }
       ]
     );
     const adapterEncoder = device.createCommandEncoder({
       label: `${slot.label}-adapter-encoder`
     });
-    if (normalizedSource.liveCountDescriptor) {
+    if (normalizedProductSource.liveCountDescriptor) {
       if (typeof adapterEncoder.copyBufferToBuffer !== 'function') {
         throw new Error(
           'GPU-count product history requires device-side gas source-count propagation'
         );
       }
       adapterEncoder.copyBufferToBuffer(
-        normalizedSource.liveCountDescriptor.controlBuffer,
-        normalizedSource.liveCountDescriptor.controlOffsetBytes,
+        normalizedProductSource.liveCountDescriptor.controlBuffer,
+        normalizedProductSource.liveCountDescriptor.controlOffsetBytes,
         slot.paramsBuffer,
         0,
-        normalizedSource.liveCountDescriptor.controlPrefixByteLength
+        normalizedProductSource.liveCountDescriptor.controlPrefixByteLength
       );
     }
     const classifyPass = adapterEncoder.beginComputePass({
@@ -4126,7 +4837,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     scatterPass.setBindGroup(0, scatterBindGroup);
     scatterPass.dispatchWorkgroups(capacityDispatchCount);
     scatterPass.end();
-    device.queue.submit([adapterEncoder.finish()]);
+    // Encoder finalization is still provably pre-submit. Once queue.submit is
+    // entered, however, a throw has unknown acceptance semantics. Record the
+    // attempt immediately before that call so cleanup cannot recycle the
+    // source borrow or arena slot while accepted GPU work may still use them.
+    const adapterCommandBuffer = adapterEncoder.finish();
+    adapterSubmissionAttempted = true;
+    device.queue.submit([adapterCommandBuffer]);
     adapterSubmitted = true;
 
     const directorySource = activeNodeDirectorySource({
@@ -4144,7 +4861,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       activeNodeList: directorySource,
       particleCount: capacity,
       laneId,
-      sourceFamily: PRODUCT_EVENT_SOURCE_FAMILY,
+      sourceFamily: SPATIAL_GAS_UNION_SOURCE_FAMILY,
       allowPhaseVolumeOverlay: false
     });
     if (
@@ -4172,7 +4889,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         gasFreeVolumeExecution,
         releaseSourceBorrow,
         readbackTelemetry: retainedReadbackTelemetry,
-        workSubmitted: adapterSubmitted
+        workSubmitted: adapterSubmissionAttempted
       });
       return rejectedExecutionWithTelemetry(
         'spatial-gas-ledger-eos-rejected-spatial-generation',
@@ -4340,16 +5057,30 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       * SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS
       * FLOAT32_BYTES;
     const frozenEpochIdentity = Object.freeze({ ...normalizedEpoch });
+    const sourceMode = normalizedProductSource.present === true
+      ? (normalizedParticleSource.present === true ? 'mixed' : 'product-event-only')
+      : 'particle-only';
     const retainedSpatialGasLedgerSource = {
       schema: ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA,
       status: 'retained-spatial-gas-ledger-source-submitted',
       ready: true,
       deviceId,
-      sourceFamily: PRODUCT_EVENT_SOURCE_FAMILY,
-      positionAuthority: PRODUCT_EVENT_POSITION_AUTHORITY,
-      sourceProductEventRowCount: normalizedSource.rowCount,
-      sourceProductEventStrideFloats: normalizedSource.strideFloats,
+      sourceFamily: SPATIAL_GAS_UNION_SOURCE_FAMILY,
+      sourceMode,
+      positionAuthority: SPATIAL_GAS_UNION_POSITION_AUTHORITY,
+      sourceProductEventRowCount: normalizedProductSource.rowCount,
+      sourceProductEventCandidateCapacity: productCandidateCapacity,
+      sourceProductEventStrideFloats: normalizedProductSource.strideFloats,
+      sourceParticleCount: normalizedParticleSource.particleCount,
+      sourceParticleStateStrideFloats:
+        normalizedParticleSource.stateStrideFloats,
+      sourceParticleThermoStrideFloats:
+        normalizedParticleSource.thermoStrideFloats,
+      gasCandidateUnionCount: candidateCount,
+      gasCandidateUnionOrder:
+        'unplaced-product-event-prefix-then-phase-pure-particle-prefix',
       compactSpatialGasRowCapacity: capacity,
+      compactSpatialGasRowCountHostKnown: false,
       compactSpatialGasRowStrideFloats:
         SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
       compactSpatialGasRowByteLength: compactRowByteLength,
@@ -4378,7 +5109,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       sourceValidityAuthority:
         'gpu-compacted-logical-prefix-inside-authenticated-capacity-allocation',
       consumerAccessProtocol:
-        'same-device-exact-opaque-retained-gpu-authority.v4',
+        'same-device-exact-opaque-retained-gpu-authority.v5',
       lifecycleOwner: 'spatial-gas-ledger-eos-final-consumer-owner',
       finalConsumerReleaseRequired: true,
       diagnosticsMode
@@ -4434,7 +5165,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       gasValidation: false,
       fullPhysicsValidation: false,
       consumerAccessProtocol:
-        'same-device-exact-opaque-retained-gpu-authority.v4',
+        'same-device-exact-opaque-retained-gpu-authority.v5',
       finalConsumerReleaseRequired: true
     };
     const execution = {
@@ -4445,9 +5176,16 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       selected: true,
       backend: 'webgpu-retained-same-device',
       deviceId,
-      productEventRowCount: normalizedSource.rowCount,
-      productEventStrideFloats: normalizedSource.strideFloats,
+      sourceMode,
+      productEventRowCount: normalizedProductSource.rowCount,
+      productEventCandidateCapacity: productCandidateCapacity,
+      productEventStrideFloats: normalizedProductSource.strideFloats,
+      particleCount: normalizedParticleSource.particleCount,
+      particleStateStrideFloats: normalizedParticleSource.stateStrideFloats,
+      particleThermoStrideFloats: normalizedParticleSource.thermoStrideFloats,
+      gasCandidateUnionCount: candidateCount,
       compactSpatialGasRowCapacity: capacity,
+      compactSpatialGasRowCountHostKnown: false,
       compactSpatialGasRowStrideFloats:
         SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
       compactSpatialGasRowByteLength: compactRowByteLength,
@@ -4541,6 +5279,8 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       spatialGasGrid: normalizedGrid,
       boxMinM: resolvedBoxMinM,
       boxMaxM: resolvedBoxMaxM,
+      productSource: normalizedProductSource.source,
+      particleSource: normalizedParticleSource.source,
       selectedMechanicsFieldView:
         mechanicsLevelViews[mechanicsLevelViews.length - 1].mechanicsFieldView,
       releaseSourceBorrow,
@@ -4628,13 +5368,14 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       gasFreeVolumeExecution,
       releaseSourceBorrow,
       readbackTelemetry: retainedReadbackTelemetry,
-      workSubmitted: adapterSubmitted
+      workSubmitted: adapterSubmissionAttempted
     });
     return rejectedExecutionWithTelemetry(
       'spatial-gas-ledger-eos-rejected-submit',
       error instanceof Error ? error.message : String(error),
       {
         errorCode: error?.code ?? null,
+        adapterSubmissionAttempted,
         adapterSubmitted,
         spatialGenerationStatus: spatialGeneration?.status ?? null,
         cleanupScheduled: true,
@@ -4809,6 +5550,8 @@ function decodeCompactOracle(values) {
     offset += SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
   ) {
     if (!(values[offset + 10] > 0.5)) continue;
+    const sourceDiscriminant = values[offset + 8];
+    const particleSource = Object.is(sourceDiscriminant, -1);
     rows.push({
       positionM: Array.from(values.slice(offset, offset + 3)),
       materialId: values[offset + 3],
@@ -4816,7 +5559,10 @@ function decodeCompactOracle(values) {
       moles: values[offset + 5],
       temperatureK: values[offset + 6],
       supportVolumeM3: values[offset + 7],
-      productTermIndex: values[offset + 8],
+      sourceKind: particleSource ? 'particle' : 'product-event',
+      sourceDiscriminant,
+      productTermIndex: particleSource ? null : sourceDiscriminant,
+      particleIndex: particleSource ? values[offset + 9] : null,
       sourceRowIndex: values[offset + 9],
       status: values[offset + 10],
       routingId: values[offset + 11]
@@ -4970,7 +5716,7 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
   const compactRows = decodeCompactOracle(compactValues);
   const pressureCells = decodePressureOracle(pressureValues);
   return {
-    schema: 'peercompute.ulg.sph-spatial-gas-ledger-eos-oracle.v2',
+    schema: 'peercompute.ulg.sph-spatial-gas-ledger-eos-oracle.v3',
     status: 'spatial-gas-ledger-eos-full-oracle-observed',
     explicitDiagnostic: true,
     diagnosticsMode: SPH_SPATIAL_GAS_DIAGNOSTICS_FULL_ORACLE,
@@ -4986,6 +5732,8 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
     controlWords: control.words,
     controlStatusFlags: control.status,
     controlErrorFlags: control.errors,
+    liveGasCandidateCount: control.liveResidualCount,
+    // Compatibility diagnostic name from the product-residual-only source.
     liveResidualCount: control.liveResidualCount,
     readyPressureCount: control.readyPressureCount,
     empty: control.empty,
@@ -5089,7 +5837,23 @@ export function destroySphSpatialGasLedgerEosGpu(device) {
 export const SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI = Object.freeze({
   schema: ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA,
   productEventRowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  particleStateRowStrideFloats: SPH_PARTICLE_STATE_STRIDE_FLOATS,
+  particleThermoRowStrideFloats: SPH_PARTICLE_THERMO_STRIDE_FLOATS,
   compactRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
+  compactRowLayout: Object.freeze([
+    'positionXM:f32',
+    'positionYM:f32',
+    'positionZM:f32',
+    'materialId:f32',
+    'massKg:f32',
+    'moles:f32',
+    'temperatureK:f32',
+    'supportVolumeM3:f32',
+    'sourceDiscriminant:f32(-1=particle,nonnegative=productTermIndex)',
+    'sourceRowOrParticleIndex:f32',
+    'ready:f32',
+    'gasRoutingId:f32'
+  ]),
   activeNodeRowStrideFloats: SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS,
   pressureCellRowStrideFloats: SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS,
   pressureCellLayout: Object.freeze([
@@ -5106,7 +5870,10 @@ export const SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI = Object.freeze({
     'gradientZPaPerM:f32',
     'freeVolumeM3:f32'
   ]),
-  sourcePositionAuthority: PRODUCT_EVENT_POSITION_AUTHORITY,
+  sourcePositionAuthority: SPATIAL_GAS_UNION_POSITION_AUTHORITY,
+  sourceFamily: SPATIAL_GAS_UNION_SOURCE_FAMILY,
+  candidateUnionOrder:
+    'unplaced-product-event-prefix-then-phase-pure-particle-prefix',
   directoryAuthority: 'generic-schroeder-spatial-epoch-v1',
   sparseSourcePolicy:
     'stable-gpu-compacted-logical-prefix-with-capacity-sized-allocation',

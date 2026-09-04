@@ -19769,6 +19769,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       phaseVolumeMaxImpulseFraction:
         residentStepOptions.phaseVolumeMaxImpulseFraction ?? 0.5,
       phaseVolumeInterfaceTransportEnabled: twoLevelAuthoritative,
+      gasPressureMechanicsBoundaryEnabled:
+        residentStepOptions.gasPressureMechanicsBoundaryEnabled === true,
+      particleGasLedgerActionable:
+        residentStepOptions.particleGasLedgerActionable === true,
+      retainedProductGasBoundaryActionable:
+        residentStepOptions.retainedProductGasBoundaryActionable === true,
+      residentProductMass: residentStepOptions.residentProductMass ?? null,
       // Exact 2:1 authoritative coupling always advances the fine level with
       // at least two substeps. Observation-only diagnostics may still request
       // one shared-dt step to compare the operators directly.
@@ -19796,6 +19803,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       compactSummaryReadback: twoLevelCompactSummaryReadback === true,
       canonicalSpatialAuthorityTrace:
         residentStepOptions?.stageMechanicsTraceEnabled === true
+        || residentStepOptions?.observeCanonicalSpatialAuthority === true
       })
     );
   // The `|| resolvedSpatialEpochGeneration?.mechanicsView` that used to be here

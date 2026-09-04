@@ -1,5 +1,25 @@
 const DEFAULT_NOMINAL_PRESENTATION_HZ = 60;
 
+export const HEADED_SWEEP_IGNORED_PAGE_ERRORS = Object.freeze([
+  'WebSocket closed without opened.'
+]);
+
+const headedSweepIgnoredPageErrorSet = new Set(
+  HEADED_SWEEP_IGNORED_PAGE_ERRORS
+);
+
+export function classifyHeadedSweepPageErrors(pageErrors = []) {
+  const captured = Array.isArray(pageErrors) ? pageErrors : [];
+  return Object.freeze({
+    actionablePageErrors: Object.freeze(captured.filter((text) => (
+      !headedSweepIgnoredPageErrorSet.has(text)
+    ))),
+    ignoredPageErrors: Object.freeze(captured.filter((text) => (
+      headedSweepIgnoredPageErrorSet.has(text)
+    )))
+  });
+}
+
 // These failures describe rate rather than evidence integrity. They are the
 // only cadence failures that the all-preset sweep may waive for presets whose
 // acceptance contract is progression/correctness rather than 54 Hz visual

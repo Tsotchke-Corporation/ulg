@@ -111,6 +111,8 @@ const WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
   'phaseVolumeMigration',
   'twoLevelMechanics',
   'surfaceTension',
+  'particleGasLedgerActionable',
+  'retainedProductGasBoundaryActionable',
   'gasBoundaryActionable',
   'explicitVacuumAmbient',
   'phaseVolumeSidecars',
@@ -290,6 +292,8 @@ const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'ambientPressurePa',
   'externalGaugePressurePa',
   'externalGaugePressureEnabled',
+  'gasPressureMechanicsBoundaryEnabled',
+  'particleGasLedgerActionable',
   'mechanicsSubmitBurstSteps',
   'contactSolverEnabled',
   'consumeCompactMechanicsView',
@@ -532,6 +536,32 @@ export function createSchroederWorkerResidentStepOptions(options = {}) {
     delete selected.mechanicsRefreshOptions.mechanicsMaterialPhaseUpload;
   }
   return selected;
+}
+
+/**
+ * Return whether a retained particle family must participate in the exact
+ * particle-gas ledger during the next schedule. Policy enablement lives
+ * elsewhere; this predicate is deliberately limited to current/latched gas
+ * evidence and writers that can create gas before a later mechanics step.
+ * A dormant reaction watch is not a writer and therefore is not inspected.
+ */
+export function schroederParticleGasLedgerActionableForResidentStepOptions({
+  priorActionable = false,
+  residentStepOptions = null
+} = {}) {
+  const gasProductCount = Number(
+    residentStepOptions?.reactionTable?.gasProductCount
+  );
+  const activeReactionCanCreateGas = Boolean(
+    Number.isSafeInteger(gasProductCount)
+    && !Object.is(gasProductCount, -0)
+    && gasProductCount > 0
+  );
+  return Boolean(
+    priorActionable === true
+    || residentStepOptions?.thermalMaterialTable != null
+    || activeReactionCanCreateGas
+  );
 }
 
 export function estimateSchroederWorkerLaneSeedUploadBytes({
@@ -858,7 +888,20 @@ function exactWorkerRouteActivationReceipt(value) {
   }
   if (
     receipt.phaseVolumeSidecars
-      !== (receipt.phaseVolumeMigration || receipt.twoLevelMechanics)
+      !== Boolean(
+        receipt.phaseVolumeMigration
+        || receipt.twoLevelMechanics
+        || receipt.particleGasLedgerActionable
+        || receipt.retainedProductGasBoundaryActionable
+      )
+    || (
+      receipt.particleGasLedgerActionable
+      && !receipt.gasBoundaryActionable
+    )
+    || (
+      receipt.retainedProductGasBoundaryActionable
+      && !receipt.gasBoundaryActionable
+    )
     || receipt.contactSolver
       !== (
         receipt.contactSolverRequested

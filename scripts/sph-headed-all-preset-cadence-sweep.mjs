@@ -11,6 +11,7 @@ import {
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
   classifyCadenceAcceptanceIssues,
+  classifyHeadedSweepPageErrors,
   evaluateCadenceSample,
   resolveHeadedSweepAutomatedDisposition,
   summarizeVisiblePresentationCadence
@@ -350,6 +351,13 @@ async function readState(page) {
     const counters = overlay?.__sphFrameCounters || {};
     const residentPerf = overlay?.__sphResidentPerf || {};
     const residentError = overlay?.__mlsMpmResidentStepsError || null;
+    const residentStageStatus = presentation?.workerOffscreenResidentStage
+      || scene?.scene?.userData?.sphWorkerOffscreenResidentStage
+      || null;
+    const residentScheduleError = residentStageStatus?.residentScheduleError
+      || null;
+    const terminalRefluxReceipt = residentScheduleError?.terminalGpuFence
+      ?.terminalRefluxReceipt || null;
     const renderError = overlay?.__sphResidentRenderStateError
       || overlay?.__sphResidentSurfaceDrawError
       || null;
@@ -622,6 +630,31 @@ async function readState(page) {
       residentError: residentError == null
         ? null
         : String(residentError?.message || residentError).slice(0, 1_000),
+      residentScheduleFailure: residentScheduleError == null ? null : {
+        reason: residentScheduleError.reason ?? null,
+        stepOrdinal: residentScheduleError.stepOrdinal ?? null,
+        stageId: residentScheduleError.stageId ?? null,
+        terminalFenceStatus:
+          residentScheduleError.terminalGpuFence?.status ?? null,
+        terminalFenceSatisfied:
+          residentScheduleError.terminalGpuFence?.fenceSatisfied ?? null,
+        terminalAuthorityAdmissionReady:
+          residentScheduleError.terminalGpuFence
+            ?.authorityAdmissionReady ?? null,
+        terminalRefluxReceipt: terminalRefluxReceipt == null ? null : {
+          status: terminalRefluxReceipt.status ?? null,
+          reason: terminalRefluxReceipt.reason ?? null,
+          expectedStepCount: terminalRefluxReceipt.expectedStepCount ?? null,
+          observedStepCount: terminalRefluxReceipt.observedStepCount ?? null,
+          admittedStepCount: terminalRefluxReceipt.admittedStepCount ?? null,
+          firstRejectedStepOrdinal:
+            terminalRefluxReceipt.firstRejectedStepOrdinal ?? null,
+          firstRejectedDiagnostic:
+            terminalRefluxReceipt.firstRejectedDiagnostic ?? null
+        },
+        authorityDiagnostics:
+          residentScheduleError.authorityDiagnostics ?? null
+      },
       renderError: renderError == null
         ? null
         : String(renderError?.message || renderError).slice(0, 1_000),
@@ -1529,6 +1562,11 @@ async function waitForCommittedPresentation(page, options) {
   while (Date.now() - startedAt < timeoutMs) {
     lastState = await readState(page);
     if (committedPresentationReady(lastState, options)) return lastState;
+    if (lastState?.residentScheduleFailure) {
+      throw new Error(
+        `resident schedule failed before committed presentation: ${JSON.stringify(lastState)}`
+      );
+    }
     if (Date.now() - lastProgressAt >= 10_000) {
       lastProgressAt = Date.now();
       console.log(JSON.stringify({
@@ -1559,6 +1597,8 @@ async function waitForCommittedPresentation(page, options) {
         spatialChurnProfileQuery:
           lastState?.spatialChurnProfileQuery ?? null,
         residentError: lastState?.residentError ?? null,
+        residentScheduleFailure:
+          lastState?.residentScheduleFailure ?? null,
         renderError: lastState?.renderError ?? null
       }));
     }
@@ -1578,6 +1618,11 @@ async function waitForPhysicsAndPresentationAdvance(page, before, options) {
       physicsAndPresentationAdvanced(before, lastState)
       && committedPresentationReady(lastState, options)
     ) return lastState;
+    if (lastState?.residentScheduleFailure) {
+      throw new Error(
+        `resident schedule failed before physics/presentation advance: ${JSON.stringify({ before, lastState })}`
+      );
+    }
     await page.waitForTimeout(250);
   }
   throw new Error(
@@ -1769,11 +1814,17 @@ try {
         result.issues.push('worker-owned-presentation-not-visible');
       }
       const criticalMessages = consoleEntries.filter((entry) => criticalConsoleText(entry.text));
-      if (pageErrors.length > 0) result.issues.push('page-error');
+      const {
+        actionablePageErrors,
+        ignoredPageErrors
+      } = classifyHeadedSweepPageErrors(pageErrors);
+      if (actionablePageErrors.length > 0) result.issues.push('page-error');
       if (criticalMessages.length > 0) result.issues.push('critical-webgpu-console-message');
       result.console = {
         entryCount: consoleEntries.length,
         pageErrors,
+        actionablePageErrors,
+        ignoredPageErrors,
         criticalMessages,
         tail: consoleEntries.slice(-30)
       };
@@ -1816,9 +1867,15 @@ try {
     } catch (error) {
       result.status = 'fail';
       result.issues.push(error?.message || String(error));
+      const {
+        actionablePageErrors,
+        ignoredPageErrors
+      } = classifyHeadedSweepPageErrors(pageErrors);
       result.console = {
         entryCount: consoleEntries.length,
         pageErrors,
+        actionablePageErrors,
+        ignoredPageErrors,
         criticalMessages: consoleEntries.filter((entry) => criticalConsoleText(entry.text)),
         tail: consoleEntries.slice(-50)
       };

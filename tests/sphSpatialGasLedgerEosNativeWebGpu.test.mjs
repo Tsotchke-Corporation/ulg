@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL,
+  SPH_SPATIAL_GAS_CANDIDATE_ERROR,
+  SPH_SPATIAL_GAS_CANDIDATE_PARTICLE_PRODUCT_TERM_SENTINEL,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  computeSphSpatialGasCandidateUnionCpuOracle
 } from '../ulg-gpu-abi/src/index.js';
 import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
@@ -287,11 +297,18 @@ function retainedGasOccupancyFixture(device, {
   );
   const sourceStateBuffer = taggedBuffer(
     'test-gas-v3-source-state',
-    particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+    particleCount * SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const sourceThermoBuffer = taggedBuffer(
+    'test-gas-v3-source-thermo',
+    particleCount * SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
   );
   const sourceMechanicsBuffer = taggedBuffer(
     'test-gas-v3-source-mechanics-v0j',
-    particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
+    particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT
   );
   const particleIdentityBuffer = taggedBuffer(
     'test-gas-v3-source-identity',
@@ -304,28 +321,63 @@ function retainedGasOccupancyFixture(device, {
     gridShift: 2,
     gridSpacingM: Math.fround(gridSpacingM)
   });
+  const sphParticleUpload = {
+    schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    particleCount,
+    stateBuffer: sourceStateBuffer,
+    stateBufferByteLength: sourceStateBuffer.size,
+    stateStrideBytes: SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT,
+    thermoBuffer: sourceThermoBuffer,
+    thermoBufferByteLength: sourceThermoBuffer.size,
+    thermoStrideBytes: SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT,
+    identityBuffer: particleIdentityBuffer,
+    identityBufferByteLength: particleIdentityBuffer.size,
+    identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
+    ...identity
+  };
+  const mlsMpmParticleUpload = {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    particleCount,
+    mechanicsBuffer: sourceMechanicsBuffer,
+    mechanicsBufferByteLength: sourceMechanicsBuffer.size,
+    mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
+      * Float32Array.BYTES_PER_ELEMENT,
+    ...identity
+  };
+  const levelAssignment = {
+    schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
+    status: 'schroeder-level-assignment-submitted',
+    bufferFamilyGenerationStatus:
+      'schroeder-particle-buffer-family-generation-ready',
+    particleCount,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+    assignmentBuffer,
+    assignmentBufferByteLength: assignmentBuffer.size,
+    sourceStateBuffer,
+    sourceStateBufferBorrowed: true,
+    sourceStateBufferByteLength: sourceStateBuffer.size,
+    sourceThermoBuffer,
+    sourceThermoBufferBorrowed: true,
+    sourceThermoBufferByteLength: sourceThermoBuffer.size,
+    sourceIdentityBuffer: particleIdentityBuffer,
+    sourceIdentityBufferBorrowed: true,
+    sourceIdentityBufferByteLength: particleIdentityBuffer.size,
+    sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+    ...identity,
+    minLevel: 0,
+    maxLevel: 0,
+    chartId: 0,
+    baseGridSpacingM: spatialGasGrid.gridSpacingM
+  };
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device,
-    levelAssignment: {
-      schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
-      status: 'schroeder-level-assignment-submitted',
-      bufferFamilyGenerationStatus:
-        'schroeder-particle-buffer-family-generation-ready',
-      particleCount,
-      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
-      assignmentBuffer,
-      assignmentBufferByteLength: assignmentBuffer.size,
-      sourceStateBuffer,
-      sourceStateBufferBorrowed: true,
-      sourceMechanicsBuffer,
-      sourceMechanicsBufferBorrowed: true,
-      sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
-      ...identity,
-      minLevel: 0,
-      maxLevel: 0,
-      chartId: 0,
-      baseGridSpacingM: spatialGasGrid.gridSpacingM
-    },
+    levelAssignment,
     particleCount,
     particleIdentityBuffer,
     particleIdentityStrideWords: 1,
@@ -338,6 +390,12 @@ function retainedGasOccupancyFixture(device, {
   return {
     generation,
     identity,
+    levelAssignment,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
     spatialGasGrid,
     boxMinM: [0, 0, 0],
     boxMaxM: spatialGasGrid.gridDims.map(
@@ -475,7 +533,10 @@ function ledgerPrivateBuffers(result, instrumentation) {
     controlBuffer: eosBuffer(4),
     gasFreeVolumeBuffer: eosBuffer(5),
     gasFreeVolumeControlBuffer: eosBuffer(6),
-    activeNodeBuffer: adapterBuffer(4)
+    activeNodeBuffer: adapterBuffer(4),
+    adapterParamsBuffer: adapterBuffer(6),
+    particleStateBuffer: adapterBuffer(7),
+    particleThermoBuffer: adapterBuffer(8)
   };
 }
 
@@ -675,6 +736,472 @@ function seedFakeCompletedAuthority(result, instrumentation, {
     );
   }
 }
+
+function abiLane(layout, name) {
+  const lane = layout.indexOf(`${name}:f32`);
+  assert.notEqual(lane, -1, `missing ${name} in ABI layout`);
+  return lane;
+}
+
+function setGasCandidateProductEvent(rows, rowIndex, {
+  positionM = [0, 0, 0],
+  massKg,
+  placedMassKg = 0,
+  unplacedMassKg = massKg,
+  materialId = 9,
+  productTermIndex = 0,
+  moles,
+  routingId = 1,
+  temperatureK = 293.15,
+  restDensityKgPerM3 = 1,
+  status = 1
+}) {
+  const stride = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
+  const at = (name) => rowIndex * stride + abiLane(
+    SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+    name
+  );
+  rows.set(positionM, at('positionXM'));
+  rows[at('massKg')] = massKg;
+  rows[at('materialId')] = materialId;
+  rows[at('productTermIndex')] = productTermIndex;
+  rows[at('moles')] = moles;
+  rows[at('routingId')] = routingId;
+  rows[at('placedMassKg')] = placedMassKg;
+  rows[at('unplacedMassKg')] = unplacedMassKg;
+  rows[at('temperatureK')] = temperatureK;
+  rows[at('restDensityKgPerM3')] = restDensityKgPerM3;
+  rows[at('status')] = status;
+}
+
+function setGasCandidateParticle(stateRows, thermoRows, rowIndex, {
+  positionM = [0, 0, 0],
+  massKg,
+  materialId = 9,
+  phaseId = 3,
+  temperatureK = 293.15,
+  restDensityKgPerM3 = 1,
+  phaseFractions = [0, 0, 1, 0],
+  representedEntityCount,
+  status = 1
+}) {
+  const stateStride = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
+  const thermoStride = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
+  const stateAt = (name) => rowIndex * stateStride + abiLane(
+    SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+    name
+  );
+  const thermoAt = (name) => rowIndex * thermoStride + abiLane(
+    SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+    name
+  );
+  stateRows.set(positionM, stateAt('positionXM'));
+  stateRows[stateAt('massKg')] = massKg;
+  thermoRows[thermoAt('materialId')] = materialId;
+  thermoRows[thermoAt('phaseId')] = phaseId;
+  thermoRows[thermoAt('temperatureK')] = temperatureK;
+  thermoRows[thermoAt('restDensityKgPerM3')] = restDensityKgPerM3;
+  thermoRows.set(phaseFractions, thermoAt('phaseFractionSolid'));
+  thermoRows[thermoAt('representedEntityCount')] = representedEntityCount;
+  thermoRows[thermoAt('status')] = status;
+}
+
+test('CPU gas-candidate union preserves residual-only mass, source order, and exact provenance', () => {
+  const productRows = new Float32Array(
+    3 * SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length
+  );
+  setGasCandidateProductEvent(productRows, 0, {
+    positionM: [0.25, 0.5, 0.75],
+    massKg: 1.25,
+    placedMassKg: 0.75,
+    unplacedMassKg: 0.5,
+    materialId: 17,
+    productTermIndex: 7,
+    moles: 10,
+    temperatureK: 425,
+    restDensityKgPerM3: 0.25
+  });
+  setGasCandidateProductEvent(productRows, 1, {
+    massKg: 0.4,
+    placedMassKg: 0.4,
+    unplacedMassKg: 0,
+    moles: 2
+  });
+  setGasCandidateProductEvent(productRows, 2, {
+    massKg: 10,
+    moles: 20,
+    routingId: 2
+  });
+
+  const particleRows = 4;
+  const stateRows = new Float32Array(
+    particleRows * SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length
+  );
+  const thermoRows = new Float32Array(
+    particleRows * SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length
+  );
+  setGasCandidateParticle(stateRows, thermoRows, 0, {
+    positionM: [1.25, 0.5, 0.25],
+    massKg: 0.25,
+    materialId: 9,
+    temperatureK: 350,
+    restDensityKgPerM3: 0.5,
+    representedEntityCount: Math.fround(
+      2 * SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL
+    )
+  });
+  setGasCandidateParticle(stateRows, thermoRows, 1, {
+    massKg: 4,
+    phaseId: 2,
+    phaseFractions: [0, 1, 0, 0],
+    restDensityKgPerM3: 1000,
+    representedEntityCount: SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL
+  });
+  setGasCandidateParticle(stateRows, thermoRows, 2, {
+    massKg: 0,
+    status: 1,
+    representedEntityCount: SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL
+  });
+  setGasCandidateParticle(stateRows, thermoRows, 3, {
+    positionM: [2.25, 0.5, 0.25],
+    massKg: 0.5,
+    materialId: 31,
+    temperatureK: 500,
+    restDensityKgPerM3: 2,
+    representedEntityCount: Math.fround(
+      0.5 * SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL
+    )
+  });
+
+  const oracle = computeSphSpatialGasCandidateUnionCpuOracle({
+    productEventRows: productRows,
+    particleStateRows: stateRows,
+    particleThermoRows: thermoRows
+  });
+
+  assert.equal(oracle.admitted, true);
+  assert.equal(oracle.failClosed, false);
+  assert.equal(oracle.productEventSourceCount, 3);
+  assert.equal(oracle.particleSourceCount, 4);
+  assert.equal(oracle.productCandidateCount, 1);
+  assert.equal(oracle.particleCandidateCount, 2);
+  assert.equal(oracle.liveCount, 3);
+  assert.equal(oracle.ignoredProductEventCount, 2);
+  assert.equal(oracle.ignoredParticleCount, 2);
+  assert.equal(oracle.totalMassKg, Math.fround(0.5 + 0.25 + 0.5));
+  assert.deepEqual(
+    oracle.rows.map((row) => [
+      row.sourceKind,
+      row.productTermIndex,
+      row.sourceIndex,
+      row.massKg
+    ]),
+    [
+      ['product-event', 7, 0, 0.5],
+      ['particle', SPH_SPATIAL_GAS_CANDIDATE_PARTICLE_PRODUCT_TERM_SENTINEL,
+        0, 0.25],
+      ['particle', SPH_SPATIAL_GAS_CANDIDATE_PARTICLE_PRODUCT_TERM_SENTINEL,
+        3, 0.5]
+    ]
+  );
+  assert.equal(oracle.rows[0].moles, Math.fround(4));
+  assert.equal(oracle.rows[0].referenceVolumeM3, Math.fround(2));
+  assert.ok(Math.abs(oracle.rows[1].moles - 2) < 2e-7);
+  assert.equal(oracle.rows[1].referenceVolumeM3, Math.fround(0.5));
+  assert.ok(Math.abs(oracle.rows[2].moles - 0.5) < 2e-7);
+  assert.equal(oracle.rows[2].referenceVolumeM3, Math.fround(0.25));
+  assert.equal(oracle.compactRows[8], 7);
+  assert.equal(oracle.compactRows[9], 0);
+  assert.equal(oracle.compactRows[12 + 8], -1);
+  assert.equal(oracle.compactRows[12 + 9], 0);
+  assert.equal(oracle.compactRows[24 + 8], -1);
+  assert.equal(oracle.compactRows[24 + 9], 3);
+});
+
+test('CPU gas-candidate union fails closed on product conservation or impure gas declarations', () => {
+  const validParticleState = new Float32Array(
+    SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length
+  );
+  const validParticleThermo = new Float32Array(
+    SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length
+  );
+  setGasCandidateParticle(validParticleState, validParticleThermo, 0, {
+    massKg: 0.25,
+    representedEntityCount: SPH_SPATIAL_GAS_CANDIDATE_AVOGADRO_PER_MOL
+  });
+  const invalidProductRows = new Float32Array(
+    SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length
+  );
+  setGasCandidateProductEvent(invalidProductRows, 0, {
+    massKg: 1,
+    placedMassKg: 0.75,
+    unplacedMassKg: 0.5,
+    moles: 2
+  });
+  const productFailure = computeSphSpatialGasCandidateUnionCpuOracle({
+    productEventRows: invalidProductRows,
+    particleStateRows: validParticleState,
+    particleThermoRows: validParticleThermo
+  });
+  assert.equal(productFailure.failClosed, true);
+  assert.equal(productFailure.liveCount, 0);
+  assert.equal(productFailure.totalMassKg, 0);
+  assert.equal(productFailure.compactRows.length, 0);
+  assert.equal(productFailure.productMassConservationErrorCount, 1);
+  assert.equal(
+    productFailure.errorFlags
+      & SPH_SPATIAL_GAS_CANDIDATE_ERROR.PRODUCT_MASS_CONSERVATION,
+    SPH_SPATIAL_GAS_CANDIDATE_ERROR.PRODUCT_MASS_CONSERVATION
+  );
+
+  const impureThermo = validParticleThermo.slice();
+  impureThermo[abiLane(
+    SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+    'phaseFractionLiquid'
+  )] = 0.25;
+  impureThermo[abiLane(
+    SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+    'phaseFractionGas'
+  )] = 0.75;
+  const particleFailure = computeSphSpatialGasCandidateUnionCpuOracle({
+    particleStateRows: validParticleState,
+    particleThermoRows: impureThermo
+  });
+  assert.equal(particleFailure.failClosed, true);
+  assert.equal(particleFailure.liveCount, 0);
+  assert.equal(particleFailure.invalidParticleGasCount, 1);
+  assert.equal(particleFailure.errors[0].sourceKind, 'particle');
+  assert.equal(particleFailure.errors[0].sourceIndex, 0);
+  assert.equal(
+    particleFailure.errorFlags
+      & SPH_SPATIAL_GAS_CANDIDATE_ERROR.INVALID_PARTICLE_GAS,
+    SPH_SPATIAL_GAS_CANDIDATE_ERROR.INVALID_PARTICLE_GAS
+  );
+});
+
+test('liquid-only particle input publishes a ready EMPTY retained gas authority', async () => {
+  const particleState = new Float32Array(
+    SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length
+  );
+  const particleThermo = new Float32Array(
+    SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length
+  );
+  setGasCandidateParticle(particleState, particleThermo, 0, {
+    positionM: [0.25, 0.25, 0.25],
+    massKg: 1,
+    materialId: 1,
+    phaseId: 2,
+    temperatureK: 293.15,
+    restDensityKgPerM3: 1000,
+    phaseFractions: [0, 1, 0, 0],
+    representedEntityCount: 1,
+    status: 1
+  });
+  const cpuOracle = computeSphSpatialGasCandidateUnionCpuOracle({
+    particleStateRows: particleState,
+    particleThermoRows: particleThermo
+  });
+  assert.equal(cpuOracle.admitted, true);
+  assert.equal(cpuOracle.failClosed, false);
+  assert.equal(cpuOracle.status, 'sph-spatial-gas-candidate-union-empty');
+  assert.equal(cpuOracle.particleSourceCount, 1);
+  assert.equal(cpuOracle.ignoredParticleCount, 1);
+  assert.equal(cpuOracle.liveCount, 0);
+  assert.equal(cpuOracle.errorCount, 0);
+  assert.equal(cpuOracle.compactRows.length, 0);
+
+  const { device, instrumentation } = fakeDevice();
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 1,
+    gridSpacingM: 1
+  });
+  device.queue.writeBuffer(occupancy.sourceStateBuffer, 0, particleState);
+  device.queue.writeBuffer(occupancy.sourceThermoBuffer, 0, particleThermo);
+  const result = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+
+  assert.equal(result.ready, true, result.reason);
+  assert.equal(result.sourceMode, 'particle-only');
+  assert.equal(result.gasCandidateUnionCount, 1);
+  assert.equal(result.arenaCapacity, 1);
+  seedFakeCompletedAuthority(result, instrumentation, {
+    liveCount: 0,
+    cellCount: 0
+  });
+  const retainedOracle = await observeSphSpatialGasLedgerEosOracle(result);
+  assert.equal(retainedOracle.empty, true);
+  assert.equal(retainedOracle.liveGasCandidateCount, 0);
+  assert.equal(retainedOracle.liveResidualCount, 0);
+  assert.equal(retainedOracle.directoryCellCount, 0);
+  assert.equal(retainedOracle.readyPressureCount, 0);
+  assert.equal(retainedOracle.compactRows.length, 0);
+  assert.equal(retainedOracle.pressureCells.length, 0);
+
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result), true);
+  assert.equal(await result.releasePromise, true);
+  await releaseOccupancyFixture(device, occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), true);
+});
+
+test('retained gas execution admits the capacity-one particle-only boundary and binds its live state/thermo row', async () => {
+  const { device, instrumentation } = fakeDevice();
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 1,
+    gridSpacingM: 0.5
+  });
+  const result = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+
+  assert.equal(result.ready, true, result.reason);
+  assert.equal(result.sourceMode, 'particle-only');
+  assert.equal(result.productEventRowCount, 0);
+  assert.equal(result.productEventCandidateCapacity, 0);
+  assert.equal(result.particleCount, 1);
+  assert.equal(result.gasCandidateUnionCount, 1);
+  assert.equal(result.arenaCapacity, 1);
+  assert.equal(
+    result.retainedSpatialGasLedgerSource.sourceFamily,
+    'sph-particle-and-reaction-residual-gas-ledger'
+  );
+  assert.equal(
+    result.retainedSpatialGasLedgerSource.positionAuthority,
+    'particle-xn-or-reaction-product-event-birth-position'
+  );
+  const buffers = ledgerPrivateBuffers(result, instrumentation);
+  assert.equal(buffers.particleStateBuffer, occupancy.sourceStateBuffer);
+  assert.equal(buffers.particleThermoBuffer, occupancy.sourceThermoBuffer);
+  const adapterParamsWrite = instrumentation.writes.find(
+    (write) => write.buffer === buffers.adapterParamsBuffer
+  );
+  assert.ok(adapterParamsWrite);
+  const words = new Uint32Array(
+    adapterParamsWrite.bytes.buffer,
+    adapterParamsWrite.bytes.byteOffset,
+    32
+  );
+  assert.equal(words[25], 0, 'product source is disabled');
+  assert.equal(words[26], 0, 'particle rows start at candidate zero');
+  assert.equal(words[27], 1);
+  assert.equal(words[28], SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length);
+  assert.equal(words[29], SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  assert.equal(words[30], 1);
+  assert.equal(occupancy.sphParticleUpload.__ulgActiveBorrowCount, 1);
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result), true);
+  assert.equal(await result.releasePromise, true);
+  assert.equal(occupancy.sphParticleUpload.__ulgActiveBorrowCount, 0);
+  await releaseOccupancyFixture(device, occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), true);
+});
+
+test('retained mixed gas union orders product capacity before exact particle rows without double-counting placed mass', async () => {
+  const { device, instrumentation } = fakeDevice();
+  const source = retainedProductEventSource(device, 2);
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 2,
+    gridSpacingM: 0.5
+  });
+  const result = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    residentProductMass: source,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+
+  assert.equal(result.ready, true, result.reason);
+  assert.equal(result.sourceMode, 'mixed');
+  assert.equal(result.productEventRowCount, 2);
+  assert.equal(result.productEventCandidateCapacity, 2);
+  assert.equal(result.particleCount, 2);
+  assert.equal(result.gasCandidateUnionCount, 4);
+  assert.equal(
+    result.retainedSpatialGasLedgerSource.gasCandidateUnionOrder,
+    'unplaced-product-event-prefix-then-phase-pure-particle-prefix'
+  );
+  const buffers = ledgerPrivateBuffers(result, instrumentation);
+  assert.equal(buffers.particleStateBuffer, occupancy.sourceStateBuffer);
+  assert.equal(buffers.particleThermoBuffer, occupancy.sourceThermoBuffer);
+  const adapterParamsWrite = instrumentation.writes.find(
+    (write) => write.buffer === buffers.adapterParamsBuffer
+  );
+  assert.ok(adapterParamsWrite);
+  const words = new Uint32Array(
+    adapterParamsWrite.bytes.buffer,
+    adapterParamsWrite.bytes.byteOffset,
+    32
+  );
+  assert.equal(words[25], 1);
+  assert.equal(words[26], 2);
+  assert.equal(words[27], 2);
+  assert.equal(words[30], 4);
+  assert.equal(source.__ulgActiveBorrowCount, 1);
+  assert.equal(occupancy.sphParticleUpload.__ulgActiveBorrowCount, 1);
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result), true);
+  assert.equal(await result.releasePromise, true);
+  assert.equal(source.__ulgActiveBorrowCount, 0);
+  assert.equal(occupancy.sphParticleUpload.__ulgActiveBorrowCount, 0);
+  await releaseOccupancyFixture(device, occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), true);
+});
+
+test('retained gas union rejects same- and cross-family source buffer aliases before borrowing', async () => {
+  const { device } = fakeDevice();
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 4,
+    gridSpacingM: 0.5
+  });
+  occupancy.sphParticleUpload.thermoBuffer = occupancy.sourceStateBuffer;
+  const sameFamilyAlias = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+  assert.equal(
+    sameFamilyAlias.status,
+    'spatial-gas-ledger-eos-rejected-particle-buffer-alias'
+  );
+
+  occupancy.sphParticleUpload.thermoBuffer = occupancy.sourceThermoBuffer;
+  const productSource = retainedProductEventSource(device, 1);
+  productSource.productEventBuffer = occupancy.sourceStateBuffer;
+  productSource.productEventBufferByteLength = occupancy.sourceStateBuffer.size;
+  const crossFamilyAlias = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    residentProductMass: productSource,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+  assert.equal(
+    crossFamilyAlias.status,
+    'spatial-gas-ledger-eos-rejected-cross-family-buffer-alias'
+  );
+  assert.equal(productSource.__ulgActiveBorrowCount, 0);
+  assert.equal(
+    occupancy.sphParticleUpload.__ulgActiveBorrowCount ?? 0,
+    0
+  );
+  await releaseOccupancyFixture(device, occupancy);
+  assert.equal(
+    destroySphSpatialGasLedgerEosGpu(device),
+    false,
+    'alias rejection occurs before a retained gas arena is allocated'
+  );
+});
 
 test('opaque retained gas ownership supports non-extensible GPUBuffers without public destroy patching', async () => {
   const { device, instrumentation } = fakeDevice();
@@ -2138,6 +2665,97 @@ test('pre-submit gas/EOS setup failure immediately releases its borrow and slot'
   assert.equal(destroySphSpatialGasLedgerEosGpu(device), true);
 });
 
+test('gas-adapter encoder finalization failure remains exact pre-submit cleanup', async () => {
+  const { device, instrumentation } = fakeDevice();
+  const source = retainedProductEventSource(device, 4);
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 4,
+    gridSpacingM: 0.5
+  });
+  const originalCreateCommandEncoder = device.createCommandEncoder;
+  device.createCommandEncoder = (descriptor) => {
+    const encoder = originalCreateCommandEncoder(descriptor);
+    if (String(descriptor?.label).endsWith('-adapter-encoder')) {
+      encoder.finish = () => {
+        throw new Error('synthetic gas-adapter encoder finish failure');
+      };
+    }
+    return encoder;
+  };
+  const submissionsBeforeGas = instrumentation.submissions.length;
+
+  const result = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    residentProductMass: source,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.adapterSubmissionAttempted, false);
+  assert.equal(result.adapterSubmitted, false);
+  assert.match(result.reason, /gas-adapter encoder finish failure/);
+  assert.equal(await result.cleanupPromise, true);
+  assert.equal(source.__ulgActiveBorrowCount, 0);
+  assert.equal(instrumentation.submissions.length, submissionsBeforeGas);
+  assert.equal(sphSpatialGasLedgerEosArenaStats(device).inUseSlotCount, 0);
+  await releaseOccupancyFixture(device, occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), true);
+});
+
+test('initial gas-adapter submit uncertainty quarantines its arena until exact device loss', async () => {
+  const { device, lost, instrumentation } = fakeDevice();
+  const source = retainedProductEventSource(device, 4);
+  const occupancy = retainedGasOccupancyFixture(device, {
+    particleCount: 4,
+    gridSpacingM: 0.5
+  });
+  const originalSubmit = device.queue.submit;
+  device.queue.submit = (commandBuffers) => {
+    originalSubmit.call(device.queue, commandBuffers);
+    throw new Error('synthetic accepted-but-threw adapter submit');
+  };
+  device.queue.onSubmittedWorkDone = () => Promise.reject(
+    new Error('synthetic uncertain-submit cleanup fence rejection')
+  );
+  const arenaBuffersBefore = instrumentation.buffers.length;
+
+  const result = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device,
+    residentProductMass: source,
+    ...retainedGasAuthorityArgs(occupancy)
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.status, 'spatial-gas-ledger-eos-rejected-submit');
+  assert.equal(result.adapterSubmissionAttempted, true);
+  assert.equal(result.adapterSubmitted, false);
+  assert.match(result.reason, /synthetic accepted-but-threw adapter submit/);
+  assert.equal(await result.cleanupPromise, false);
+  assert.equal(source.__ulgActiveBorrowCount, 1);
+  assert.equal(sphSpatialGasLedgerEosArenaStats(device).inUseSlotCount, 1);
+  assert.equal(sphSpatialGasLedgerEosArenaStats(device).terminal, false);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), false);
+
+  const arenaBuffers = instrumentation.buffers
+    .slice(arenaBuffersBefore)
+    .filter(({ label }) => String(label).startsWith(
+      'ulg-sph-spatial-gas-ledger-eos-4-arena-0-'
+    ));
+  assert.ok(arenaBuffers.length > 0);
+  assert.equal(arenaBuffers.every(({ destroyCount }) => destroyCount === 0), true);
+
+  lost.resolve({
+    reason: 'destroyed',
+    message: 'synthetic exact device loss after adapter submit uncertainty'
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(source.__ulgActiveBorrowCount, 0);
+  assert.equal(sphSpatialGasLedgerEosArenaStats(device).terminal, true);
+  for (const buffer of arenaBuffers) {
+    assert.equal(buffer.destroyCount, 1, buffer.label);
+  }
+});
+
 test('post-submit gas/EOS setup failure retains a loss-recoverable borrow record', async () => {
   const { device, lost, instrumentation } = fakeDevice();
   const source = retainedProductEventSource(device, 4);
@@ -2513,9 +3131,25 @@ test('an unconfirmed final-consumer fence quarantines ownership until device los
   for (const buffer of ownedBuffers) assert.equal(buffer.destroyCount, 1);
 });
 
-test('shader contract reduces SS CSR spans and finds gradients by directory binary search', () => {
+test('shader contract unions phase-pure particles with residual products before SS EOS reduction', () => {
   assert.equal(SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.directoryAuthority,
     'generic-schroeder-spatial-epoch-v1');
+  assert.equal(
+    SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.sourceFamily,
+    'sph-particle-and-reaction-residual-gas-ledger'
+  );
+  assert.equal(
+    SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.candidateUnionOrder,
+    'unplaced-product-event-prefix-then-phase-pure-particle-prefix'
+  );
+  assert.equal(
+    SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.compactRowLayout[8],
+    'sourceDiscriminant:f32(-1=particle,nonnegative=productTermIndex)'
+  );
+  assert.equal(
+    SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.compactRowLayout[9],
+    'sourceRowOrParticleIndex:f32'
+  );
   assert.equal(
     SPH_SPATIAL_GAS_LEDGER_EOS_DIRECTORY_ABI.pressureCellLayout[11],
     'freeVolumeM3:f32'
@@ -2524,7 +3158,31 @@ test('shader contract reduces SS CSR spans and finds gradients by directory bina
     sphSpatialGasLedgerProductEventAdapterWgsl,
     /candidate_offsets\[last\] \+ candidate_flags\[last\]/
   );
-  assert.match(sphSpatialGasLedgerProductEventAdapterWgsl, /fn classify_product_events/);
+  assert.match(sphSpatialGasLedgerProductEventAdapterWgsl, /fn classify_gas_candidates/);
+  assert.doesNotMatch(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /fn classify_product_events/
+  );
+  assert.match(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /@binding\(7\) var<storage, read> particle_state/
+  );
+  assert.match(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /@binding\(8\) var<storage, read> particle_thermo/
+  );
+  assert.match(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /let pure_gas = gas_phase_declared[\s\S]*?gas_fraction - 1\.0[\s\S]*?particle_valid = pure_gas/
+  );
+  assert.match(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /represented_entities[\s\S]*?AVOGADRO_ENTITIES_PER_MOL[\s\S]*?source_discriminant = -1\.0[\s\S]*?source_row_index = f32\(particle_index\)/
+  );
+  assert.match(
+    sphSpatialGasLedgerProductEventAdapterWgsl,
+    /mass_kg = unplaced_mass[\s\S]*?source_discriminant = product_events\[source \+ 5u\][\s\S]*?source_row_index = f32\(source_index\)/
+  );
   assert.match(sphSpatialGasLedgerProductEventAdapterWgsl, /fn finalize_compaction/);
   assert.match(sphSpatialGasLedgerProductEventAdapterWgsl, /fn scatter_compact_rows/);
   assert.equal(
@@ -2748,6 +3406,8 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         moles,
         temperatureK,
         supportVolumeM3,
+        placedMassKg = 0,
+        unplacedMassKg = massKg,
         routingId = 1,
         status = 1
       }) => {
@@ -2758,8 +3418,8 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         values[offset + 5] = productTermIndex;
         values[offset + 9] = moles;
         values[offset + 10] = routingId;
-        values[offset + 12] = 0;
-        values[offset + 13] = massKg;
+        values[offset + 12] = placedMassKg;
+        values[offset + 13] = unplacedMassKg;
         values[offset + 16] = temperatureK;
         values[offset + 17] = massKg / supportVolumeM3;
         values[offset + 18] = status;
@@ -2775,7 +3435,11 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         levelEpoch: 17,
         supportEpoch: 19
       };
-      const makeOccupancyGeneration = (generationEpochs, label) => {
+      const makeOccupancyGeneration = (
+        generationEpochs,
+        label,
+        { particle = null } = {}
+      ) => {
         const makeBuffer = (suffix, values) => {
           const buffer = identity.tagWebGpuBufferDevice(
             device.createBuffer({
@@ -2790,61 +3454,135 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
           device.queue.writeBuffer(buffer, 0, values);
           return buffer;
         };
-        const assignment = new Float32Array(16);
-        assignment.set([
-          0, 1, 1, 0.125,
-          0.125, 0.125, 125, 1000,
-          2, 1, 1, 0,
-          0.25, 0.25, 0.25, 0
-        ]);
-        const state = new Float32Array([
-          0.25, 0.25, 0.25, 125,
-          0, 0, 0, 1
-        ]);
-        const mechanics = new Float32Array(32);
-        mechanics[18] = 1;
-        mechanics[19] = 0.125;
-        mechanics[20] = 1;
-        mechanics[21] = 1;
+        const defaultParticle = {
+          position: [0.25, 0.25, 0.25],
+          massKg: 125,
+          materialId: 1,
+          phaseId: 2,
+          temperatureK: 293.15,
+          restDensityKgPerM3: 1000,
+          phaseFractions: [0, 1, 0, 0],
+          representedEntityCount: 1,
+          status: 1,
+          solidFlag: 1
+        };
+        const particleSpecs = Array.isArray(particle)
+          ? particle
+          : [particle || defaultParticle];
+        const particleCount = particleSpecs.length;
+        const assignment = new Float32Array(particleCount * 16);
+        const state = new Float32Array(particleCount * 8);
+        const thermo = new Float32Array(particleCount * 12);
+        const mechanics = new Float32Array(particleCount * 32);
+        for (let index = 0; index < particleCount; index += 1) {
+          const particleSpec = particleSpecs[index];
+          const representedVolumeM3 =
+            particleSpec.massKg / particleSpec.restDensityKgPerM3;
+          assignment.set([
+            0, 1, 1, representedVolumeM3,
+            representedVolumeM3, representedVolumeM3,
+            particleSpec.massKg, particleSpec.restDensityKgPerM3,
+            particleSpec.phaseId, particleSpec.materialId,
+            particleSpec.status, 0,
+            ...particleSpec.position, 0
+          ], index * 16);
+          state.set([
+            ...particleSpec.position, particleSpec.massKg,
+            0, 0, 0, 1
+          ], index * 8);
+          thermo.set([
+            particleSpec.materialId,
+            particleSpec.phaseId,
+            particleSpec.temperatureK,
+            particleSpec.restDensityKgPerM3,
+            ...particleSpec.phaseFractions,
+            1,
+            particleSpec.representedEntityCount,
+            particleSpec.status,
+            0.1
+          ], index * 12);
+          const mechanicsOffset = index * 32;
+          mechanics[mechanicsOffset + 18] = 1;
+          mechanics[mechanicsOffset + 19] = representedVolumeM3;
+          mechanics[mechanicsOffset + 20] = particleSpec.solidFlag || 0;
+          mechanics[mechanicsOffset + 21] = 1;
+          mechanics[mechanicsOffset + 31] = particleSpec.massKg;
+        }
         const assignmentBuffer = makeBuffer('assignment', assignment);
         const sourceStateBuffer = makeBuffer('state', state);
+        const sourceThermoBuffer = makeBuffer('thermo', thermo);
         const sourceMechanicsBuffer = makeBuffer('mechanics-v0j', mechanics);
         const particleIdentityBuffer = makeBuffer(
           'identity',
-          new Uint32Array([1])
+          Uint32Array.from(
+            { length: particleCount },
+            (_, index) => index + 1
+          )
         );
         const spatialGasGrid = {
           selectedLevel: 0,
-          gridDims: [4, 4, 4],
-          gridNodeCount: 64,
+          gridDims: [9, 9, 9],
+          gridNodeCount: 729,
           gridShift: 2,
           gridSpacingM: 1
+        };
+        const sphParticleUpload = {
+          schema: 'peercompute.ulg.sph-gpu-particle-buffer-set.v0',
+          status: 'webgpu-uploaded',
+          particleCount,
+          stateBuffer: sourceStateBuffer,
+          stateBufferByteLength: sourceStateBuffer.size,
+          stateStrideBytes: 32,
+          thermoBuffer: sourceThermoBuffer,
+          thermoBufferByteLength: sourceThermoBuffer.size,
+          thermoStrideBytes: 48,
+          identityBuffer: particleIdentityBuffer,
+          identityBufferByteLength: particleIdentityBuffer.size,
+          identityStrideBytes: 4,
+          ...generationEpochs
+        };
+        const mlsMpmParticleUpload = {
+          schema: 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0',
+          status: 'webgpu-uploaded',
+          particleCount,
+          mechanicsBuffer: sourceMechanicsBuffer,
+          mechanicsBufferByteLength: sourceMechanicsBuffer.size,
+          mechanicsStrideBytes: 128,
+          ...generationEpochs
+        };
+        const levelAssignment = {
+          schema:
+            'peercompute.ulg.schroeder-level-assignment-execution.v0',
+          status: 'schroeder-level-assignment-submitted',
+          bufferFamilyGenerationStatus:
+            'schroeder-particle-buffer-family-generation-ready',
+          particleCount,
+          assignmentStrideFloats: 16,
+          assignmentBuffer,
+          assignmentBufferByteLength: assignmentBuffer.size,
+          sourceStateBuffer,
+          sourceStateBufferBorrowed: true,
+          sourceStateBufferByteLength: sourceStateBuffer.size,
+          sourceThermoBuffer,
+          sourceThermoBufferBorrowed: true,
+          sourceThermoBufferByteLength: sourceThermoBuffer.size,
+          sourceIdentityBuffer: particleIdentityBuffer,
+          sourceIdentityBufferBorrowed: true,
+          sourceIdentityBufferByteLength: particleIdentityBuffer.size,
+          sourceMechanicsBuffer,
+          sourceMechanicsBufferBorrowed: true,
+          sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
+          ...generationEpochs,
+          minLevel: 0,
+          maxLevel: 0,
+          chartId: 0,
+          baseGridSpacingM: 1
         };
         const generation =
           spatialModule.runSchroederSpatialEpochGenerationWebGpu({
             device,
-            levelAssignment: {
-              schema:
-                'peercompute.ulg.schroeder-level-assignment-execution.v0',
-              status: 'schroeder-level-assignment-submitted',
-              bufferFamilyGenerationStatus:
-                'schroeder-particle-buffer-family-generation-ready',
-              particleCount: 1,
-              assignmentStrideFloats: 16,
-              assignmentBuffer,
-              assignmentBufferByteLength: assignmentBuffer.size,
-              sourceStateBuffer,
-              sourceStateBufferBorrowed: true,
-              sourceMechanicsBuffer,
-              sourceMechanicsBufferBorrowed: true,
-              sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
-              ...generationEpochs,
-              minLevel: 0,
-              maxLevel: 0,
-              chartId: 0,
-              baseGridSpacingM: 1
-            },
-            particleCount: 1,
+            levelAssignment,
+            particleCount,
             particleIdentityBuffer,
             particleIdentityStrideWords: 1,
             selectedLevel: 0,
@@ -2861,7 +3599,13 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
             }`
           );
         }
-        return { generation, spatialGasGrid };
+        return {
+          generation,
+          spatialGasGrid,
+          levelAssignment,
+          sphParticleUpload,
+          mlsMpmParticleUpload
+        };
       };
       const authorityArgs = (occupancy, generationEpochs) => ({
         epochIdentity: generationEpochs,
@@ -3071,6 +3815,179 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         await releaseOccupancyGeneration(occupancy);
       source.productEventBuffer.destroy();
       sourceAuthorityControlBuffer.destroy();
+
+      const runParticleUnionOracleCase = async ({
+        label,
+        generationEpochs,
+        particle,
+        productValues = null
+      }) => {
+        const unionOccupancy = makeOccupancyGeneration(
+          generationEpochs,
+          `${label}-occupancy`,
+          { particle }
+        );
+        const unionProductSource = productValues
+          ? makeSource(productValues, `${label}-products`)
+          : null;
+        const unionProductControl = unionProductSource
+          ? attachProductHistoryAuthority(unionProductSource, {
+              liveRowCount: 1,
+              generation: generationEpochs.storageGeneration + 100,
+              seal: 0x5a170000 + generationEpochs.storageGeneration
+            })
+          : null;
+        const unionExecution =
+          await module.runSphSpatialGasLedgerEosRetainedWebGpu({
+            device,
+            ...(unionProductSource
+              ? { residentProductMass: unionProductSource }
+              : {}),
+            sphParticleUpload: unionOccupancy.sphParticleUpload,
+            mlsMpmParticleUpload: unionOccupancy.mlsMpmParticleUpload,
+            schroederLevelAssignment: unionOccupancy.levelAssignment,
+            ...authorityArgs(unionOccupancy, generationEpochs)
+          });
+        if (unionExecution.ready !== true) {
+          throw new Error(JSON.stringify({
+            label,
+            status: unionExecution.status,
+            reason: unionExecution.reason,
+            errorCode: unionExecution.errorCode || null
+          }));
+        }
+        let unionOracle;
+        try {
+          unionOracle =
+            await module.observeSphSpatialGasLedgerEosOracle(unionExecution);
+        } catch (error) {
+          throw new Error(JSON.stringify({
+            label,
+            reason: error instanceof Error ? error.message : String(error),
+            control: Array.from(error?.controlWords || [])
+          }));
+        }
+        const unionReleaseScheduled =
+          module.releaseSphSpatialGasLedgerEosAfterQueue(unionExecution);
+        const unionReleaseConfirmed = unionReleaseScheduled
+          ? await unionExecution.releasePromise
+          : unionExecution.released === true;
+        const unionOccupancyReleaseConfirmed =
+          await releaseOccupancyGeneration(unionOccupancy);
+        unionProductSource?.productEventBuffer.destroy();
+        unionProductControl?.destroy();
+        return {
+          sourceMode: unionExecution.sourceMode,
+          gasCandidateUnionCount: unionExecution.gasCandidateUnionCount,
+          productEventCandidateCapacity:
+            unionExecution.productEventCandidateCapacity,
+          particleCount: unionExecution.particleCount,
+          liveCount: unionOracle.liveResidualCount,
+          empty: unionOracle.empty,
+          directoryCellCount: unionOracle.directoryCellCount,
+          readyPressureCount: unionOracle.readyPressureCount,
+          compactRows: unionOracle.compactRows.map((row) => ({
+            sourceKind: row.sourceKind,
+            sourceDiscriminant: row.sourceDiscriminant,
+            sourceRowIndex: row.sourceRowIndex,
+            massKg: row.massKg,
+            moles: row.moles,
+            supportVolumeM3: row.supportVolumeM3
+          })),
+          pressureCells: unionOracle.pressureCells.map((cell) => ({
+            pressurePa: cell.pressurePa,
+            freeVolumeM3: cell.volumeM3,
+            status: cell.status
+          })),
+          releaseScheduled: unionReleaseScheduled,
+          releaseConfirmed: unionReleaseConfirmed,
+          occupancyReleaseConfirmed: unionOccupancyReleaseConfirmed
+        };
+      };
+      const particleOnlyEpochs = {
+        ...epochs,
+        storageGeneration: 20,
+        physicsTick: 22,
+        positionEpoch: 24
+      };
+      const particleOnlyCase = await runParticleUnionOracleCase({
+        label: 'native-spatial-gas-particle-only',
+        generationEpochs: particleOnlyEpochs,
+        particle: {
+          position: [2.25, 0.25, 0.25],
+          massKg: 0.25,
+          materialId: 9,
+          phaseId: 3,
+          temperatureK: 350,
+          restDensityKgPerM3: 0.5,
+          phaseFractions: [0, 0, 1, 0],
+          representedEntityCount: Math.fround(2 * 6.02214076e23),
+          status: 1,
+          solidFlag: 0
+        }
+      });
+      const mixedProductRows = new Float32Array(2 * 32);
+      setEvent(mixedProductRows, 0, {
+        position: [0.25, 0.25, 0.25],
+        massKg: 1,
+        placedMassKg: 0.75,
+        unplacedMassKg: 0.25,
+        materialId: 17,
+        productTermIndex: 5,
+        moles: 4,
+        temperatureK: 425,
+        supportVolumeM3: 2
+      });
+      const mixedEpochs = {
+        ...epochs,
+        storageGeneration: 21,
+        physicsTick: 23,
+        positionEpoch: 25
+      };
+      const mixedUnionCase = await runParticleUnionOracleCase({
+        label: 'native-spatial-gas-mixed-union',
+        generationEpochs: mixedEpochs,
+        productValues: mixedProductRows,
+        particle: {
+          position: [1.25, 0.25, 0.25],
+          massKg: 0.5,
+          materialId: 31,
+          phaseId: 3,
+          temperatureK: 500,
+          restDensityKgPerM3: 2,
+          phaseFractions: [0, 0, 1, 0],
+          representedEntityCount: Math.fround(0.5 * 6.02214076e23),
+          status: 1,
+          solidFlag: 0
+        }
+      });
+      const emptyEpochs = {
+        ...epochs,
+        storageGeneration: 22,
+        physicsTick: 24,
+        positionEpoch: 26
+      };
+      const emptyUnionCase = await runParticleUnionOracleCase({
+        label: 'native-spatial-gas-liquid-only-empty',
+        generationEpochs: emptyEpochs,
+        particle: {
+          position: [0.75, 0.75, 0.75],
+          massKg: 1,
+          materialId: 1,
+          phaseId: 2,
+          temperatureK: 293.15,
+          restDensityKgPerM3: 1000,
+          phaseFractions: [0, 1, 0, 0],
+          representedEntityCount: 1,
+          status: 1,
+          solidFlag: 1
+        }
+      });
+      const particleUnionCases = {
+        particleOnly: particleOnlyCase,
+        mixed: mixedUnionCase,
+        empty: emptyUnionCase
+      };
 
       const runSparseOracleCase = async ({
         values,
@@ -3301,6 +4218,7 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         directoryCellCount: oracle.directoryCellCount,
         cells,
         pressureConsumer,
+        particleUnionCases,
         sparseLiveMatrix,
         failedAuthorityCase,
         releaseScheduled,
@@ -3339,6 +4257,133 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
       directoryBuildCount: 1,
       privateSpatialLookupBuildCount: 0
     });
+    const particleOnly = native.particleUnionCases.particleOnly;
+    assert.deepEqual({
+      sourceMode: particleOnly.sourceMode,
+      gasCandidateUnionCount: particleOnly.gasCandidateUnionCount,
+      productEventCandidateCapacity:
+        particleOnly.productEventCandidateCapacity,
+      particleCount: particleOnly.particleCount,
+      liveCount: particleOnly.liveCount,
+      empty: particleOnly.empty,
+      directoryCellCount: particleOnly.directoryCellCount,
+      readyPressureCount: particleOnly.readyPressureCount,
+      releaseScheduled: particleOnly.releaseScheduled,
+      releaseConfirmed: particleOnly.releaseConfirmed,
+      occupancyReleaseConfirmed: particleOnly.occupancyReleaseConfirmed
+    }, {
+      sourceMode: 'particle-only',
+      gasCandidateUnionCount: 1,
+      productEventCandidateCapacity: 0,
+      particleCount: 1,
+      liveCount: 1,
+      empty: false,
+      directoryCellCount: 1,
+      readyPressureCount: 1,
+      releaseScheduled: true,
+      releaseConfirmed: true,
+      occupancyReleaseConfirmed: true
+    });
+    assert.equal(particleOnly.compactRows.length, 1);
+    assert.equal(particleOnly.compactRows[0].sourceKind, 'particle');
+    assert.equal(particleOnly.compactRows[0].sourceDiscriminant, -1);
+    assert.equal(particleOnly.compactRows[0].sourceRowIndex, 0);
+    assert.equal(particleOnly.compactRows[0].massKg, 0.25);
+    assert.ok(Math.abs(particleOnly.compactRows[0].moles - 2) < 2e-6);
+    assert.equal(particleOnly.compactRows[0].supportVolumeM3, 0.5);
+    assert.equal(particleOnly.pressureCells.length, 1);
+    assert.equal(particleOnly.pressureCells[0].status,
+      'local-gas-pressure-cell-ready');
+    assert.ok(Number.isFinite(particleOnly.pressureCells[0].pressurePa));
+    assert.ok(particleOnly.pressureCells[0].pressurePa > 0);
+    assert.ok(Number.isFinite(particleOnly.pressureCells[0].freeVolumeM3));
+    assert.ok(particleOnly.pressureCells[0].freeVolumeM3 > 0);
+
+    const mixedUnion = native.particleUnionCases.mixed;
+    assert.deepEqual({
+      sourceMode: mixedUnion.sourceMode,
+      gasCandidateUnionCount: mixedUnion.gasCandidateUnionCount,
+      productEventCandidateCapacity:
+        mixedUnion.productEventCandidateCapacity,
+      particleCount: mixedUnion.particleCount,
+      liveCount: mixedUnion.liveCount,
+      empty: mixedUnion.empty,
+      directoryCellCount: mixedUnion.directoryCellCount,
+      readyPressureCount: mixedUnion.readyPressureCount,
+      releaseScheduled: mixedUnion.releaseScheduled,
+      releaseConfirmed: mixedUnion.releaseConfirmed,
+      occupancyReleaseConfirmed: mixedUnion.occupancyReleaseConfirmed
+    }, {
+      sourceMode: 'mixed',
+      gasCandidateUnionCount: 3,
+      productEventCandidateCapacity: 2,
+      particleCount: 1,
+      liveCount: 2,
+      empty: false,
+      directoryCellCount: 2,
+      readyPressureCount: 2,
+      releaseScheduled: true,
+      releaseConfirmed: true,
+      occupancyReleaseConfirmed: true
+    });
+    assert.equal(mixedUnion.compactRows.length, 2);
+    assert.deepEqual(
+      mixedUnion.compactRows.map((row) => [
+        row.sourceKind,
+        row.sourceDiscriminant,
+        row.sourceRowIndex,
+        row.massKg
+      ]),
+      [
+        ['product-event', 5, 0, 0.25],
+        ['particle', -1, 0, 0.5]
+      ]
+    );
+    assert.equal(
+      mixedUnion.compactRows.reduce((sum, row) => sum + row.massKg, 0),
+      0.75,
+      'the mixed inventory is particle mass plus only the unplaced residual'
+    );
+    assert.ok(Math.abs(mixedUnion.compactRows[0].moles - 1) < 2e-6);
+    assert.ok(Math.abs(mixedUnion.compactRows[1].moles - 0.5) < 2e-6);
+    assert.equal(mixedUnion.pressureCells.length, 2);
+    assert.ok(mixedUnion.pressureCells.every((cell) => (
+      cell.status === 'local-gas-pressure-cell-ready'
+      && Number.isFinite(cell.pressurePa)
+      && cell.pressurePa > 0
+      && Number.isFinite(cell.freeVolumeM3)
+      && cell.freeVolumeM3 > 0
+    )));
+
+    const emptyUnion = native.particleUnionCases.empty;
+    assert.deepEqual({
+      sourceMode: emptyUnion.sourceMode,
+      gasCandidateUnionCount: emptyUnion.gasCandidateUnionCount,
+      productEventCandidateCapacity:
+        emptyUnion.productEventCandidateCapacity,
+      particleCount: emptyUnion.particleCount,
+      liveCount: emptyUnion.liveCount,
+      empty: emptyUnion.empty,
+      directoryCellCount: emptyUnion.directoryCellCount,
+      readyPressureCount: emptyUnion.readyPressureCount,
+      releaseScheduled: emptyUnion.releaseScheduled,
+      releaseConfirmed: emptyUnion.releaseConfirmed,
+      occupancyReleaseConfirmed: emptyUnion.occupancyReleaseConfirmed
+    }, {
+      sourceMode: 'particle-only',
+      gasCandidateUnionCount: 1,
+      productEventCandidateCapacity: 0,
+      particleCount: 1,
+      liveCount: 0,
+      empty: true,
+      directoryCellCount: 0,
+      readyPressureCount: 0,
+      releaseScheduled: true,
+      releaseConfirmed: true,
+      occupancyReleaseConfirmed: true
+    });
+    assert.deepEqual(emptyUnion.compactRows, []);
+    assert.deepEqual(emptyUnion.pressureCells, []);
     assert.equal(native.compactRowCount, 3);
     assert.equal(native.directoryCellCount, 2);
     assert.equal(native.cells.length, 2);
@@ -3397,7 +4442,7 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
       sourceConsumerSubmitted: true,
       sourceExact: true,
       retainedStatus:
-        'retained-gas-pressure-authority-v3-admitted-exact-source',
+        'retained-gas-pressure-authority-v4-admitted-exact-source',
       retainedReason: null
     });
     const expectedPressureAt = (centroid) => {
@@ -3476,7 +4521,7 @@ test('native Vulkan WebGPU computes multi-species EOS/gradients and remains vali
         directoryCellCount: 2,
         readyPressureCount: 2,
         empty: false,
-        releaseScheduled: true,
+        releaseScheduled: false,
         releaseConfirmed: true,
         occupancyReleaseConfirmed: true
       }

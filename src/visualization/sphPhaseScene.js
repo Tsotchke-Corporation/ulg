@@ -50,6 +50,7 @@ import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
   mlsMpmGpuParticleUploadMatchesDevice,
+  sphGpuParticleStateHasGasCandidateIndication,
   sphGpuParticleUploadMatchesDevice,
   sphParticleStateRequiresExplicitIdentity,
   uploadMlsMpmGpuParticleBuffers,
@@ -110,7 +111,8 @@ import {
   createSchroederWorkerHierarchyConfig,
   createSchroederWorkerResidentStepOptions,
   estimateSchroederWorkerLaneSeedUploadBytes,
-  runSchroederWorkerLaneScheduleWithAuthority
+  runSchroederWorkerLaneScheduleWithAuthority,
+  schroederParticleGasLedgerActionableForResidentStepOptions
 } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
   createWorkerTier0PresentationQosPlan
@@ -17672,6 +17674,10 @@ export function createSphPhaseScene(container, {
   const nativeWebGpuDeviceLostWatchSet = typeof WeakSet === 'function' ? new WeakSet() : null;
   const nativeWebGpuKnownLostDeviceSet = typeof WeakSet === 'function' ? new WeakSet() : null;
   let sphGpuParticleState = null;
+  // Exact CPU seed evidence is captured transactionally by setParticles.
+  // Worker-owned no-readback schedules then use their monotonic lane latch;
+  // they never rescan stale or size-divergent CPU arrays between schedules.
+  let sphParticleGasSeedActionable = false;
   let sphGpuParticleUpload = null;
   let sphGpuParticleUploadSignature = null;
   let pendingSphGpuParticleUpload = null;
@@ -38471,6 +38477,22 @@ fn main(
     const sourceMlsMpmParticleState = continuationAvailable
       ? mlsMpmResidentSteps.nextMlsMpmParticleState
       : mlsMpmGpuParticleState;
+    // This is a shared state/law predicate, not a preset switch. Exact seed
+    // evidence was captured once at setParticles; retained schedules never
+    // rescan stale CPU rows. A dormant reaction watch is read-only and must
+    // not eject liquid-only schedules from Tier 0.
+    const requestedParticleGasLedgerActionable = Boolean(
+      requestedSchroederSimulation
+      && (
+        schroederParticleGasLedgerActionableForResidentStepOptions({
+          residentStepOptions: {
+            thermalMaterialTable: effectiveThermalMaterialTable,
+            reactionTable: effectiveReactionTable
+          }
+        })
+        || sphParticleGasSeedActionable
+      )
+    );
     const residentSourceMode = continuationAvailable
       ? 'previous-gpu-resident-output'
       : 'cpu-packed-state';
@@ -39082,6 +39104,13 @@ fn main(
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
           ambientPressurePa: effectiveAmbientPressurePa,
+          // Preset identity does not choose the gas path. Every SS schedule
+          // presents its current particles to the shared candidate union;
+          // phase and thermodynamic rows decide whether publication is empty.
+          gasPressureMechanicsBoundaryEnabled:
+            requestedSchroederSimulation === true,
+          particleGasLedgerActionable:
+            requestedParticleGasLedgerActionable,
           mechanicsSubmitBurstSteps,
           cflFactor,
           ...(requestedPhaseVolumeMaxImpulseFraction == null
@@ -43389,6 +43418,16 @@ fn main(
   }) {
     const timingStartMs = nowMs();
     const residentExecutionGeneration = advanceMlsMpmResidentExecutionGeneration('set-particles');
+    const nextSphParticleGasSeedActionable = Boolean(
+      nextSphGpuParticleState
+      && (
+        nextSphGpuParticleState.cpuStateStale === true
+        || nextSphGpuParticleState.status === 'gpu-resident-unread-ready'
+        || sphGpuParticleStateHasGasCandidateIndication(
+          nextSphGpuParticleState
+        )
+      )
+    );
     const stageMs = {};
     const measure = (name, fn) => {
       const startMs = nowMs();
@@ -43662,8 +43701,17 @@ fn main(
     publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();
     clearSphGpuParticleUpload();
+    if (workerSchroederLaneState) {
+      // Particle contents are not part of the clone-safe configuration
+      // signature. Commit replacement and retained-lane invalidation at the
+      // same boundary so equal-shaped presets cannot reuse old GPU state.
+      workerSchroederLaneState.poisoned = true;
+    }
     sphGpuParticleState = nextSphGpuParticleState;
+    sphParticleGasSeedActionable = nextSphParticleGasSeedActionable;
     scene.userData.sphGpuParticleState = sphGpuParticleState;
+    scene.userData.sphParticleGasSeedActionable =
+      sphParticleGasSeedActionable;
     clearMlsMpmGpuParticleUpload();
     mlsMpmGpuParticleState = nextMlsMpmGpuParticleState;
     scene.userData.mlsMpmGpuParticleState = mlsMpmGpuParticleState;
@@ -53625,6 +53673,11 @@ fn main(
           }),
         dynamicReactionActivationReceipt: null,
         retainedProductGasTransitionReceipt: null,
+        // Once seed evidence or an executing phase/reaction writer can put
+        // gas in this retained family, never de-assert from stale CPU rows.
+        // A future exact terminal-zero watcher may safely clear this latch.
+        particleGasLedgerActionableLatch:
+          residentStepOptions?.particleGasLedgerActionable === true,
         simTimeS: 0,
         completedStepTotal: 0,
         spatialKeyChurnCumulativeTotals:
@@ -53933,15 +53986,29 @@ fn main(
         'authoritative routing requires one exact positive dormant reaction table and no executing reaction table at lane admission'
       );
     }
+    laneState.particleGasLedgerActionableLatch = Boolean(
+      laneState.particleGasLedgerActionableLatch
+      || residentStepOptions?.particleGasLedgerActionable === true
+    );
+    const createParticleGasSealedResidentStepOptions = (options) =>
+      createSchroederWorkerResidentStepOptions({
+        ...options,
+        particleGasLedgerActionable:
+          schroederParticleGasLedgerActionableForResidentStepOptions({
+            priorActionable:
+              laneState.particleGasLedgerActionableLatch,
+            residentStepOptions: options
+          })
+      });
     const dormantResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createSchroederWorkerResidentStepOptions({
+      ? createParticleGasSealedResidentStepOptions({
           ...residentStepOptions,
           reactionTable: null,
           reactionActivationWatchTable: dormantReactionCatalog
         })
       : residentStepOptions;
     const activeResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createSchroederWorkerResidentStepOptions({
+      ? createParticleGasSealedResidentStepOptions({
           ...residentStepOptions,
           reactionTable: dormantReactionCatalog,
           reactionActivationWatchTable: null
@@ -53990,17 +54057,43 @@ fn main(
     const scheduleResidentStepOptions = scheduleReactionExecutionRequired
       ? activeResidentStepOptions
       : dormantResidentStepOptions;
+    // Commit writer potential to the lane only when that option variant is
+    // selected for execution. Merely presealing a prospective active reaction
+    // must leave the current dormant watcher on the Tier-0 route.
+    laneState.particleGasLedgerActionableLatch = Boolean(
+      laneState.particleGasLedgerActionableLatch
+      || scheduleResidentStepOptions?.particleGasLedgerActionable === true
+    );
     const scheduleResidentStepOptionsRefreshRequired = Boolean(
       laneSeededThisSchedule
       || dynamicReactionTransitionScheduled
     );
+    const authoritativeTwoLevelMechanics = Boolean(
+      workerHierarchyConfig.enableTwoLevelMechanics === true
+      && String(workerHierarchyConfig.twoLevelMechanicsAuthority)
+        .trim()
+        .toLowerCase() === 'authoritative'
+    );
     let targetScheduleAuthority;
     try {
-      const predecessorRetainedProductGasActionable =
+      // Exact particle and retained-product gas sources now feed the shared
+      // same-level/coarse-terminal pressure transaction and the fine parent
+      // adjoint. Seal the same state/law predicate for one- and two-level
+      // schedules; mechanics topology must not change writer authority.
+      const predecessorRetainedProductGasActionable = Boolean(
         schroederTargetScheduleSuccessorGasBoundaryActionable({
           predecessorTargetScheduleAuthority,
           predecessorDynamicLawObservation
-        });
+        })
+      );
+      const particleGasLedgerActionableForOptions = (options) => Boolean(
+        options?.gasPressureMechanicsBoundaryEnabled === true
+        && options?.particleGasLedgerActionable === true
+      );
+      const particleGasLedgerActionable =
+        particleGasLedgerActionableForOptions(
+          scheduleResidentStepOptions
+        );
       const targetConfigurationOptions = {
         maxFutureSubsteps: requestedStepCount,
         dtS: dt,
@@ -54011,7 +54104,8 @@ fn main(
         epochOptions: targetScheduleEpochOptions,
         mechanicsOptions: targetScheduleMechanicsOptions,
         hierarchyConfig: workerHierarchyConfig,
-        scheduleStepOptionsProvider: targetScheduleProviderAuthority
+        scheduleStepOptionsProvider: targetScheduleProviderAuthority,
+        particleGasLedgerActionable
       };
       const staticTargetConfiguration =
         createSchroederTargetScheduleConfiguration({
@@ -54032,12 +54126,17 @@ fn main(
         prospectiveTargetConfiguration =
           createSchroederTargetScheduleConfiguration({
             ...targetConfigurationOptions,
-            residentStepOptions: activeResidentStepOptions
+            residentStepOptions: activeResidentStepOptions,
+            particleGasLedgerActionable:
+              particleGasLedgerActionableForOptions(
+                activeResidentStepOptions
+              )
           });
       } else if (
         !predecessorRetainedProductGasActionable
         && staticTargetConfiguration.writerSet.reaction === true
-        && staticTargetConfiguration.writerSet.gasBoundaryActionable === false
+        && staticTargetConfiguration.writerSet
+          .retainedProductGasBoundaryActionable === false
       ) {
         prospectiveTargetConfiguration =
           createSchroederTargetScheduleConfiguration({
@@ -54070,12 +54169,8 @@ fn main(
       }
       throw error;
     }
-    const twoLevelTerminalRefluxReceiptRequired = Boolean(
-      workerHierarchyConfig.enableTwoLevelMechanics === true
-      && String(workerHierarchyConfig.twoLevelMechanicsAuthority)
-        .trim()
-        .toLowerCase() === 'authoritative'
-    );
+    const twoLevelTerminalRefluxReceiptRequired =
+      authoritativeTwoLevelMechanics;
     const workerLivePreviewRequested = workerLiveParticlePreview === true;
     const workerTemporalPresentationTargetHz = 60;
     const workerTemporalPresentationQosPlan =
@@ -54970,6 +55065,8 @@ fn main(
       seedLineage: laneState.seedLineage,
       laneSimTimeS: laneState.simTimeS,
       laneCompletedStepTotal: laneState.completedStepTotal,
+      particleGasLedgerActionableLatch:
+        laneState.particleGasLedgerActionableLatch === true,
       spatialKeyChurnCumulativeTotals:
         workerLaneSpatialKeyChurnCumulativeSnapshot(
           laneState.spatialKeyChurnCumulativeTotals
@@ -55163,6 +55260,8 @@ fn main(
           lane.dynamicReactionActivationReceipt ?? null,
         retainedProductGasTransitionReceipt:
           lane.retainedProductGasTransitionReceipt ?? null,
+        particleGasLedgerActionableLatch:
+          lane.particleGasLedgerActionableLatch === true,
         resultAssembledAtMs: result.resultAssembledAtMs ?? null,
         workerLanePageTiming: lane.workerLanePageTiming
           ? { ...lane.workerLanePageTiming }

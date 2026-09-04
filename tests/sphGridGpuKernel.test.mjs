@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mlsMpmP2gGridProjectionWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT,
@@ -68,6 +69,10 @@ import {
   validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate,
   validateSubmittedMlsMpmMechanicsFieldGridUpdate
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
+import {
+  describeSphSpatialGasPressureAuthority,
+  runSphSpatialGasLedgerEosRetainedWebGpu
+} from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
 import {
   claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation,
   runMlsMpmG2pWebGpu,
@@ -586,7 +591,8 @@ function canonicalSpatialEpochGenerationFixture(device, {
 function fusedP2gProducerFixture({
   fineSubstepCount = 1,
   createMacroAuthority: shouldCreateMacroAuthority = true,
-  mechanicsLevelCount = 2
+  mechanicsLevelCount = 2,
+  phaseVolumeInterfaceProposalEnabled = false
 } = {}) {
   const device = fakeP2gDevice();
   const { sphParticleState, mlsMpmParticleState } = manualBuffers({
@@ -677,7 +683,8 @@ function fusedP2gProducerFixture({
     mechanicsLevels: [
       { selectedLevel: 0, mechanicsGrid: fineGrid },
       { selectedLevel: 1, mechanicsGrid: coarseGrid }
-    ].slice(0, mechanicsLevelCount)
+    ].slice(0, mechanicsLevelCount),
+    phaseVolumeInterfaceProposalEnabled
   });
   assert.equal(
     generation.ready,
@@ -894,6 +901,464 @@ function runFusedGridUpdateProducer(fixture, p2gProjection, overrides = {}) {
     ...overrides
   });
 }
+
+function fusedSpatialEpochTransaction(fixture, {
+  phaseVolumeInterfaceProposalAuthoritative = false
+} = {}) {
+  const transaction = createSchroederSpatialEpochTransaction({
+    device: fixture.device,
+    generation: fixture.generation,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload,
+    twoLevelAuthoritative: true,
+    phaseVolumeInterfaceProposalAuthoritative,
+    enabledConsumerReaderIds: [],
+    consumerSupportProfileIds: {}
+  });
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    generation: fixture.generation,
+    sphParticleUpload: fixture.sphParticleUpload,
+    mlsMpmParticleUpload: fixture.mlsMpmParticleUpload
+  }), true);
+  return transaction;
+}
+
+async function fusedFineGasPressureAuthority(fixture) {
+  const productHistory = gpuResidentProductHistory(fixture, {
+    rowCapacity: 65,
+    liveRowCount: 1
+  });
+  Object.defineProperty(
+    productHistory.residentProductMass,
+    '__ulgActiveBorrowCount',
+    {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: 0
+    }
+  );
+  const identity = Object.fromEntries([
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ].map((field) => [field, fixture.levelAssignment[field]]));
+  const spatialGasGrid = {
+    selectedLevel: 1,
+    gridDims: fixture.coarseGrid.gridDims,
+    gridNodeCount: fixture.coarseGrid.gridNodeCount,
+    gridShift: fixture.coarseGrid.gridShift,
+    gridSpacingM: Math.fround(fixture.coarseGrid.gridSpacingM)
+  };
+  const execution = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device: fixture.device,
+    residentProductMass: productHistory.residentProductMass,
+    epochIdentity: identity,
+    schroederSpatialEpochGeneration: fixture.generation,
+    spatialGasGrid,
+    boxMinM: [0, 0, 0],
+    boxMaxM: [1, 1, 1],
+    spatialGasCellSizeM: spatialGasGrid.gridSpacingM,
+    spatialGasSupportVolumeFallbackM3:
+      spatialGasGrid.gridSpacingM ** 3,
+    chartId: 0,
+    level: 1
+  });
+  assert.equal(execution.ready, true, execution.reason);
+  return { execution, productHistory, spatialGasGrid };
+}
+
+function phaseVolumeTransportMaterialFixture(device) {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{
+        name: 'liquid',
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        shearModulusPa: 0,
+        cpJPerKgK: 4184,
+        dynamicViscosityPaS: 0.001,
+        temperatureRange: [273.15, 373.15]
+      }, {
+        name: 'gas',
+        densityKgPerM3: 0.6,
+        bulkModulusPa: null,
+        shearModulusPa: 0,
+        cpJPerKgK: 2010,
+        dynamicViscosityPaS: 1.3e-5,
+        temperatureRange: [373.15, 1000]
+      }]
+    }
+  }, {
+    viscosityEnabled: true
+  });
+  return {
+    table,
+    upload: uploadMlsMpmMechanicsMaterialPhaseRecords(device, table)
+  };
+}
+
+test('fused fine grid update admits the exact coarse-gas boundary with drag-only S9-C', async () => {
+  const fixture = fusedP2gProducerFixture({
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  const spatialTransaction = fusedSpatialEpochTransaction(fixture, {
+    phaseVolumeInterfaceProposalAuthoritative: true
+  });
+  const gas = await fusedFineGasPressureAuthority(fixture);
+  const projection = await runFusedP2gProducer(fixture);
+  const material = phaseVolumeTransportMaterialFixture(fixture.device);
+  const buffersBeforeUpdate = fixture.device.createdBuffers.length;
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  let hostQueueFenceCount = 0;
+  fixture.device.queue.onSubmittedWorkDone = (...args) => {
+    hostQueueFenceCount += 1;
+    return originalFence.apply(fixture.device.queue, args);
+  };
+  const writesBefore = fixture.device.writes.length;
+  const traceBefore = fixture.device.passTrace.length;
+  const gasPressureMechanicsScale = 0.375;
+  const phaseVolumeDragScale = 0.625;
+  const update = await runFusedGridUpdateProducer(fixture, projection, {
+    schroederSpatialEpochTransaction: spatialTransaction,
+    mechanicsMaterialTable: material.table,
+    mechanicsMaterialPhaseUpload: material.upload,
+    ambientPressurePa: projection.ambientPressurePa,
+    phaseVolumeInterfaceTransportRequired: true,
+    phaseVolumePressureScale: 0,
+    gasPressureMechanicsScale,
+    phaseVolumeDragScale,
+    gasPressureMechanicsAuthoritySource:
+      gas.execution.retainedGasCellFieldSource,
+    gasPressureMechanicsChartId: 0
+  });
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+
+  assert.equal(update.gasPressureBoundaryRequested, true);
+  assert.equal(update.gasPressureBoundarySubmitted, true);
+  const submission = update.gasPressureBoundarySubmission;
+  assert.equal(
+    submission.crossLevelMappingMode,
+    'fine-to-coarse-parent-adjoint'
+  );
+  assert.equal(submission.targetLevel, 0);
+  assert.equal(submission.gasLevel, 1);
+  assert.equal(submission.selectedLevel, submission.targetLevel);
+  assert.equal(submission.s9cCoexistenceMode, 'drag-only-zero-pressure-scale');
+  assert.equal(submission.pressureScale, gasPressureMechanicsScale);
+  assert.equal(submission.gasPressureMechanicsScale, gasPressureMechanicsScale);
+  assert.deepEqual(
+    submission.targetGridDimensions,
+    fixture.fineGrid.gridDims
+  );
+  assert.deepEqual(
+    submission.gasGridDimensions,
+    fixture.coarseGrid.gridDims
+  );
+  assert.deepEqual(submission.targetGridCellOrigin, [
+    -fixture.fineGrid.gridShift,
+    -fixture.fineGrid.gridShift,
+    -fixture.fineGrid.gridShift
+  ]);
+  assert.deepEqual(submission.gasGridCellOrigin, [
+    -fixture.coarseGrid.gridShift,
+    -fixture.coarseGrid.gridShift,
+    -fixture.coarseGrid.gridShift
+  ]);
+  assert.equal(
+    submission.parentGenerationId,
+    fixture.generation.parentFieldView.generationId
+  );
+  assert.equal(
+    submission.parentCompletionOrdinal,
+    fixture.generation.parentFieldView.completionOrdinal
+  );
+  assert.equal(
+    submission.parentFieldCapacity,
+    fixture.generation.parentFieldView.parentFieldCapacity
+  );
+  assert.equal(
+    submission.parentFieldWordCapacity,
+    fixture.generation.parentFieldView.capacityWords
+  );
+
+  const boundaryBindGroup = fixture.device.bindGroups.find(({ label }) => (
+    String(label).startsWith('ulg-sph-gas-pressure-mechanics-')
+  ));
+  assert.ok(boundaryBindGroup);
+  assert.equal(
+    boundaryBindGroup.layout.entries.find(({ binding }) => binding === 8)
+      ?.buffer?.type,
+    'read-only-storage'
+  );
+  assert.equal(
+    boundaryBindGroup.entries.find(({ binding }) => binding === 8)
+      ?.resource?.buffer,
+    fixture.generation.parentFieldView.parentFieldViewBuffer
+  );
+
+  const newWrites = fixture.device.writes.slice(writesBefore);
+  const boundaryParamsWrite = newWrites.find(
+    ({ label }) => label === 'ulg-schroeder-gas-pressure-boundary-params'
+  );
+  const gridParamsWrite = newWrites.find(
+    ({ label }) => label === 'ulg-mls-mpm-mechanics-field-grid-update-params'
+  );
+  assert.ok(boundaryParamsWrite);
+  assert.ok(gridParamsWrite);
+  const boundaryParams = new DataView(boundaryParamsWrite.data);
+  assert.equal(boundaryParams.getInt32(14 * 4, true), 0);
+  assert.equal(
+    boundaryParams.getUint32(41 * 4, true),
+    SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+  );
+  assert.equal(boundaryParams.getInt32(42 * 4, true), 1);
+  assert.equal(
+    boundaryParams.getUint32(43 * 4, true),
+    fixture.coarseGrid.gridNodeCount
+  );
+  assert.equal(
+    boundaryParams.getUint32(53 * 4, true),
+    fixture.generation.parentFieldView.parentFieldCapacity
+  );
+  assert.equal(
+    boundaryParams.getUint32(54 * 4, true),
+    fixture.generation.parentFieldView.capacityWords
+  );
+  assert.equal(boundaryParams.getFloat32(25 * 4, true), gasPressureMechanicsScale);
+  const gridParams = new DataView(gridParamsWrite.data);
+  assert.equal(gridParams.getFloat32(136, true), 0);
+  assert.equal(gridParams.getFloat32(140, true), phaseVolumeDragScale);
+
+  const trace = fixture.device.passTrace.slice(traceBefore)
+    .map(({ entryPoint }) => entryPoint);
+  assert.ok(
+    trace.indexOf('commit_boundary_transport')
+      < trace.indexOf('stage_transport')
+  );
+  assert.equal(
+    describeSphSpatialGasPressureAuthority(
+      gas.execution.retainedGasCellFieldSource,
+      { device: fixture.device }
+    ).releasedObserved,
+    true
+  );
+  const gasTemporaryBuffers = fixture.device.createdBuffers
+    .slice(buffersBeforeUpdate)
+    .filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-scratch'
+      || label === 'ulg-schroeder-gas-pressure-boundary-params'
+    ));
+  assert.equal(
+    gasTemporaryBuffers.filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-scratch'
+    )).length,
+    1
+  );
+  assert.equal(
+    gasTemporaryBuffers.filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-params'
+    )).length,
+    1
+  );
+  assert.equal(gasTemporaryBuffers.every(({ destroyed }) => destroyed), true);
+  assert.equal(hostQueueFenceCount, 0);
+  assert.equal(update.queueOrderedCleanupReceipt?.completed, true);
+  assert.equal(update.queueOrderedCleanupReceipt?.hostQueueFenceCount, 0);
+
+  destroyMlsMpmMechanicsMaterialPhaseUpload(material.upload);
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: fixture.microepochAuthority,
+      reason: new Error('fused fine gas boundary fixture cleanup')
+    }
+  );
+  fixture.refluxLedger.destroy();
+  gas.productHistory.productEventBuffer.destroy();
+  gas.productHistory.controlBuffer.destroy();
+});
+
+test('fused gas boundary rejects nonzero S9-C pressure before allocation or submission', async () => {
+  const fixture = fusedP2gProducerFixture();
+  const projection = await runFusedP2gProducer(fixture);
+  const createdBefore = fixture.device.createdBuffers.length;
+  const pipelinesBefore = fixture.device.createdPipelines.length;
+  const submissionsBefore = fixture.device.submissions.length;
+
+  await assert.rejects(runFusedGridUpdateProducer(fixture, projection, {
+    phaseVolumeInterfaceTransportRequired: true,
+    phaseVolumePressureScale: 0.01,
+    gasPressureMechanicsAuthoritySource: Object.freeze({ opaque: true })
+  }), /share S9-C only when its pressure scale is exact zero/);
+
+  assert.equal(fixture.device.createdBuffers.length, createdBefore);
+  assert.equal(fixture.device.createdPipelines.length, pipelinesBefore);
+  assert.equal(fixture.device.submissions.length, submissionsBefore);
+  assert.deepEqual(
+    schroederFusedFineSubstepTransactionState(
+      fixture.device,
+      fixture.transaction
+    ),
+    {
+      status: 'p2g-submitted',
+      stageIndex: 1,
+      submissionObservedStage: null,
+      nextStage: 'grid-update',
+      submittedStageCount: 1,
+      g2pSubmitted: false,
+      gpuReceiptStatus: 'not-submitted',
+      gpuReceiptVerified: false,
+      quarantineReason: null
+    }
+  );
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: fixture.microepochAuthority,
+      reason: new Error('nonzero S9-C pressure rejection fixture cleanup')
+    }
+  );
+  fixture.refluxLedger.destroy();
+});
+
+test('fused gas boundary submit uncertainty retains temporaries until exact fence or device loss', async (t) => {
+  for (const fenceFailureMode of [
+    'pending-fulfills',
+    'missing',
+    'nonthenable',
+    'throws',
+    'rejects'
+  ]) await t.test(fenceFailureMode, async () => {
+  const fixture = fusedP2gProducerFixture({
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  let resolveDeviceLoss;
+  fixture.device.lost = new Promise((resolve) => {
+    resolveDeviceLoss = resolve;
+  });
+  const spatialTransaction = fusedSpatialEpochTransaction(fixture, {
+    phaseVolumeInterfaceProposalAuthoritative: true
+  });
+  const gas = await fusedFineGasPressureAuthority(fixture);
+  const projection = await runFusedP2gProducer(fixture);
+  const material = phaseVolumeTransportMaterialFixture(fixture.device);
+  const createdBefore = fixture.device.createdBuffers.length;
+  const originalSubmit = fixture.device.queue.submit;
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  let resolveFence;
+  fixture.device.queue.submit = (commandBuffers) => {
+    originalSubmit.call(fixture.device.queue, commandBuffers);
+    throw new Error('injected accepted-but-threw gas boundary submit');
+  };
+  if (fenceFailureMode === 'pending-fulfills') {
+    fixture.device.queue.onSubmittedWorkDone = () => new Promise((resolve) => {
+      resolveFence = resolve;
+    });
+  } else if (fenceFailureMode === 'missing') {
+    delete fixture.device.queue.onSubmittedWorkDone;
+  } else if (fenceFailureMode === 'nonthenable') {
+    fixture.device.queue.onSubmittedWorkDone = () => ({ invalid: true });
+  } else if (fenceFailureMode === 'throws') {
+    fixture.device.queue.onSubmittedWorkDone = () => {
+      throw new Error('injected unavailable gas boundary cleanup fence');
+    };
+  } else {
+    fixture.device.queue.onSubmittedWorkDone = () => Promise.reject(
+      new Error('injected rejected gas boundary cleanup fence')
+    );
+  }
+
+  await assert.rejects(
+    runFusedGridUpdateProducer(fixture, projection, {
+      schroederSpatialEpochTransaction: spatialTransaction,
+      mechanicsMaterialTable: material.table,
+      mechanicsMaterialPhaseUpload: material.upload,
+      ambientPressurePa: projection.ambientPressurePa,
+      phaseVolumeInterfaceTransportRequired: true,
+      phaseVolumePressureScale: 0,
+      gasPressureMechanicsScale: 1,
+      phaseVolumeDragScale: 1,
+      gasPressureMechanicsAuthoritySource:
+        gas.execution.retainedGasCellFieldSource,
+      gasPressureMechanicsChartId: 0
+    }),
+    /injected accepted-but-threw gas boundary submit/
+  );
+  fixture.device.queue.submit = originalSubmit;
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+
+  const gasTemporaryBuffers = fixture.device.createdBuffers
+    .slice(createdBefore)
+    .filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-scratch'
+      || label === 'ulg-schroeder-gas-pressure-boundary-params'
+    ));
+  assert.equal(
+    gasTemporaryBuffers.filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-scratch'
+    )).length,
+    1
+  );
+  assert.equal(
+    gasTemporaryBuffers.filter(({ label }) => (
+      label === 'ulg-schroeder-gas-pressure-boundary-params'
+    )).length,
+    1
+  );
+  assert.equal(gasTemporaryBuffers.every(({ destroyed }) => !destroyed), true);
+  const quarantinedAuthority = describeSphSpatialGasPressureAuthority(
+    gas.execution.retainedGasCellFieldSource,
+    { device: fixture.device }
+  );
+  assert.equal(quarantinedAuthority.terminalObserved, true);
+  assert.equal(quarantinedAuthority.releasedObserved, false);
+
+  // Prove a pending cleanup authority does not destroy buffers merely because
+  // the failure path yielded. A fulfilled queue fence may clean them; broken
+  // fence providers must wait for exact device-loss evidence.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(gasTemporaryBuffers.every(({ destroyed }) => !destroyed), true);
+  if (fenceFailureMode === 'pending-fulfills') {
+    resolveFence();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(gasTemporaryBuffers.every(({ destroyed }) => destroyed), true);
+  }
+
+  resolveDeviceLoss({
+    reason: 'destroyed',
+    message: 'injected exact device-loss evidence'
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(gasTemporaryBuffers.every(({ destroyed }) => destroyed), true);
+
+  destroyMlsMpmMechanicsMaterialPhaseUpload(material.upload);
+  await abortSchroederTwoLevelMacroAuthorityAfter(
+    fixture.device,
+    fixture.macroAuthority,
+    {
+      microepochAuthority: fixture.microepochAuthority,
+      reason: new Error('gas boundary uncertain-submit fixture cleanup'),
+      deviceLost: true
+    }
+  );
+  fixture.refluxLedger.destroy();
+  gas.productHistory.productEventBuffer.destroy();
+  gas.productHistory.controlBuffer.destroy();
+  });
+});
 
 function runCoarseP2gProducer(
   fixture,
@@ -2398,6 +2863,117 @@ async function releaseTerminalP2gFixture(terminal, reason) {
   }
   fixture.refluxLedger.destroy();
 }
+
+test('fused coarse-terminal grid update admits the exact same-level gas boundary', async () => {
+  const terminal = await fusedCoarseTerminalP2gFixture();
+  const fixture = terminal.fixture;
+  const spatialTransaction = createSchroederSpatialEpochTransaction({
+    device: fixture.device,
+    generation: terminal.successorGeneration,
+    sphParticleUpload: terminal.uploads.sphParticleUpload,
+    mlsMpmParticleUpload: terminal.uploads.mlsMpmParticleUpload,
+    twoLevelAuthoritative: true,
+    enabledConsumerReaderIds: [],
+    consumerSupportProfileIds: {}
+  });
+  assert.equal(admitSchroederSpatialEpochTransactionReader(
+    spatialTransaction,
+    {
+      readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+      phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+      generation: terminal.successorGeneration,
+      sphParticleUpload: terminal.uploads.sphParticleUpload,
+      mlsMpmParticleUpload: terminal.uploads.mlsMpmParticleUpload
+    }
+  ), true);
+  const productHistory = gpuResidentProductHistory(fixture, {
+    rowCapacity: 65,
+    liveRowCount: 1
+  });
+  Object.defineProperty(
+    productHistory.residentProductMass,
+    '__ulgActiveBorrowCount',
+    {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: 0
+    }
+  );
+  const identity = Object.fromEntries([
+    'storageGeneration',
+    'physicsTick',
+    'physicsSubstep',
+    'positionEpoch',
+    'topologyEpoch',
+    'chartEpoch',
+    'levelEpoch',
+    'supportEpoch'
+  ].map((field) => [field, terminal.successorLevelAssignment[field]]));
+  const spatialGasGrid = {
+    selectedLevel: 1,
+    gridDims: fixture.coarseGrid.gridDims,
+    gridNodeCount: fixture.coarseGrid.gridNodeCount,
+    gridShift: fixture.coarseGrid.gridShift,
+    gridSpacingM: Math.fround(fixture.coarseGrid.gridSpacingM)
+  };
+  const gasExecution = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device: fixture.device,
+    residentProductMass: productHistory.residentProductMass,
+    epochIdentity: identity,
+    schroederSpatialEpochGeneration: terminal.successorGeneration,
+    spatialGasGrid,
+    boxMinM: [0, 0, 0],
+    boxMaxM: [1, 1, 1],
+    spatialGasCellSizeM: spatialGasGrid.gridSpacingM,
+    spatialGasSupportVolumeFallbackM3:
+      spatialGasGrid.gridSpacingM ** 3,
+    chartId: 0,
+    level: 1
+  });
+  assert.equal(gasExecution.ready, true, gasExecution.reason);
+
+  const projection = await runTerminalFixtureP2g(terminal);
+  const update = await runTerminalFixtureGridUpdate(
+    terminal,
+    projection,
+    terminal.terminalTransaction,
+    {
+      schroederSpatialEpochTransaction: spatialTransaction,
+      ambientPressurePa: projection.ambientPressurePa,
+      gasPressureMechanicsAuthoritySource:
+        gasExecution.retainedGasCellFieldSource,
+      phaseVolumePressureScale: 0.25,
+      gasPressureMechanicsChartId: 0
+    }
+  );
+  assert.equal(update.gasPressureBoundarySubmitted, true);
+  assert.equal(
+    update.gasPressureBoundarySubmission.crossLevelMappingMode,
+    'same-level'
+  );
+  assert.equal(update.gasPressureBoundarySubmission.targetLevel, 1);
+  assert.equal(update.gasPressureBoundarySubmission.gasLevel, 1);
+  assert.equal(update.gasPressureBoundarySubmission.pressureScale, 0.25);
+  assert.equal(
+    update.gasPressureBoundarySubmission.s9cCoexistenceMode,
+    null
+  );
+  assert.equal(
+    describeSphSpatialGasPressureAuthority(
+      gasExecution.retainedGasCellFieldSource,
+      { device: fixture.device }
+    ).releasedObserved,
+    true
+  );
+
+  await releaseTerminalP2gFixture(
+    terminal,
+    'fused coarse-terminal gas boundary fixture cleanup'
+  );
+  productHistory.productEventBuffer.destroy();
+  productHistory.controlBuffer.destroy();
+});
 
 test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindings', () => {
   assert.match(mlsMpmP2gGridProjectionWgsl, /struct P2gProjectionParams/);
@@ -8000,6 +8576,70 @@ test('optional MLS-MPM P2G grid projection accepts a parity-passing WebGPU resul
   assert.equal(
     execution.mechanicsFieldP2gReductionOrder,
     'stable-radix-equal-key-preserves-particle-stencil-candidate-order'
+  );
+});
+
+test('optional canonical P2G preserves the particle-only product-source absence tuple', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const particleOnlyAbsence = Object.freeze({
+    residentProductMass: null,
+    residentProductMassStatus: null,
+    residentProductMassInputProductEventCount: 0,
+    residentProductMassCoupledEventCount: 0,
+    residentProductMassCoupledUnplacedMassKg: 0,
+    residentProductMassConsumeMassPolicy: null,
+    residentProductMassGridCouplingStatus: null,
+    residentProductMassProductEventBufferDeviceMismatch: false,
+    residentProductMassInputProductEventCountAuthority:
+      'host-exact-or-sparse-scan-bound',
+    residentProductMassInputProductEventRowCapacity: 0,
+    residentProductMassInputProductEventCountHostKnown: true,
+    residentProductMassProductEventDispatchMode: 'none',
+    residentProductMassEosCouplingStatus: null
+  });
+  const runWrappedProjection = async ({ omitIsolationFields = false } = {}) =>
+    runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+      sphParticleState,
+      mlsMpmParticleState,
+      gridSpacingM: 1,
+      boxDimsM: [2, 2, 2],
+      preferWebGpu: true,
+      navigatorRef: webGpuNavigator(),
+      canonicalSpatialRequired: true,
+      mechanicsFieldMode: 'required',
+      async webGpuRunner(args) {
+        const result = {
+          ...projectMlsMpmP2gGridCpu(args),
+          backend: 'webgpu',
+          mechanicsFieldMode: 'required',
+          mechanicsFieldViewEnabled: true,
+          ...particleOnlyAbsence
+        };
+        if (omitIsolationFields) {
+          delete result.residentProductMassInputProductEventCount;
+          delete result.residentProductMassProductEventBufferDeviceMismatch;
+        }
+        return result;
+      }
+    });
+
+  const execution = await runWrappedProjection();
+  for (const [field, expected] of Object.entries(particleOnlyAbsence)) {
+    assert.equal(execution[field], expected, field);
+  }
+  assert.equal(execution.mechanicsFieldMode, 'required');
+  assert.equal(execution.mechanicsFieldViewEnabled, true);
+
+  const missingIsolationFields = await runWrappedProjection({
+    omitIsolationFields: true
+  });
+  assert.equal(
+    missingIsolationFields.residentProductMassInputProductEventCount,
+    null
+  );
+  assert.equal(
+    missingIsolationFields.residentProductMassProductEventBufferDeviceMismatch,
+    null
   );
 });
 

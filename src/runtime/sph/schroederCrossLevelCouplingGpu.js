@@ -129,8 +129,16 @@ import {
 } from './sphMlsMpmGpuSummary.js';
 import { DEFAULT_CFL_FACTOR } from './sphGridUpdateGpuKernel.js';
 import {
-  MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+  MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
+  exactGasPressureMechanicsP2gProductSourceIsolationCertified
 } from './sphGridGpuKernel.js';
+import {
+  SPH_SPATIAL_GAS_DIAGNOSTICS_NONE,
+  describeSphSpatialGasPressureAuthority,
+  isExactSphSpatialGasPressureAuthoritySource,
+  releaseSphSpatialGasLedgerEosAfterQueue,
+  runSphSpatialGasLedgerEosRetainedWebGpu
+} from './sphSpatialGasLedgerEosGpu.js';
 import {
   diagnoseUploadedMechanicsMaterialPhaseRecordsMatch
 } from './sphMechanicsRefreshGpuKernel.js';
@@ -685,8 +693,8 @@ async function readTwoLevelCanonicalAuthorityTrace({
   if (
     !activeSourceBuffer
     || levelViews.length !== 2
-    || fixedSourceCount !== 13
-    || sources.length !== 14
+    || fixedSourceCount !== 12
+    || sources.length !== 13
   ) {
     return Object.freeze({
       schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
@@ -694,7 +702,7 @@ async function readTwoLevelCanonicalAuthorityTrace({
       selectedLevel,
       generationId: generation?.execution?.generationId ?? null,
       status: 'canonical-authority-trace-unavailable',
-      expectedSourceCount: 14,
+      expectedSourceCount: 13,
       availableSourceCount: sources.length
     });
   }
@@ -2424,6 +2432,10 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   phaseVolumeDragScale = 1,
   phaseVolumeMaxImpulseFraction = 0.5,
   phaseVolumeInterfaceTransportEnabled = false,
+  gasPressureMechanicsBoundaryEnabled = false,
+  particleGasLedgerActionable = false,
+  retainedProductGasBoundaryActionable = false,
+  residentProductMass = null,
   fineSubstepCount = 1,
   gridSpecFactory,
   p2gRunner,
@@ -2436,6 +2448,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   conservationSummaryRunner =
     runSchroederCrossLevelGridConservationSummaryWebGpu,
   compactSummaryRunner = runMlsMpmResidentSummaryWebGpu,
+  spatialGasLedgerEosRunner = runSphSpatialGasLedgerEosRetainedWebGpu,
   parentFieldMechanicsWorkspaceRuntimeFactory =
     directSchroederSpatialParentFieldMechanicsWorkspaceGpu,
   gpuTimestampRecorder = null,
@@ -2473,6 +2486,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     || typeof deltaProlongationRunner !== 'function'
     || typeof conservationSummaryRunner !== 'function'
     || typeof compactSummaryRunner !== 'function'
+    || typeof spatialGasLedgerEosRunner !== 'function'
     || typeof parentFieldMechanicsWorkspaceRuntimeFactory !== 'function') {
     throw new TypeError(
       'runSchroederTwoLevelMechanicsStepWebGpu requires its grid, transfer, summary, and particle runners'
@@ -2485,6 +2499,18 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     throw new TypeError(
       'phaseVolumeInterfaceTransportEnabled must be a boolean'
     );
+  }
+  for (const [name, value] of [
+    ['gasPressureMechanicsBoundaryEnabled', gasPressureMechanicsBoundaryEnabled],
+    ['particleGasLedgerActionable', particleGasLedgerActionable],
+    [
+      'retainedProductGasBoundaryActionable',
+      retainedProductGasBoundaryActionable
+    ]
+  ]) {
+    if (typeof value !== 'boolean') {
+      throw new TypeError(`${name} must be a boolean`);
+    }
   }
   let activeCanonicalEpoch = canonicalEpochController?.initialEpoch ?? null;
   if (canonicalEpochController && (
@@ -2677,6 +2703,55 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   }
   const fineSpec = gridSpecFactory({ boxDimsM, gridSpacingM: fineDx });
   const coarseSpec = gridSpecFactory({ boxDimsM, gridSpacingM: coarseDx });
+  const exactGasPressureBoundarySourceActionable =
+    particleGasLedgerActionable || retainedProductGasBoundaryActionable;
+  const exactGasPressureBoundaryActive =
+    gasPressureMechanicsBoundaryEnabled
+    && exactGasPressureBoundarySourceActionable;
+  if (
+    gasPressureMechanicsBoundaryEnabled
+      !== exactGasPressureBoundarySourceActionable
+  ) {
+    const error = new TypeError(
+      'Two-level exact gas-pressure mechanics requires matching boundary and particle/product source actionability'
+    );
+    error.code =
+      'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_SOURCE_AUTHORITY';
+    throw error;
+  }
+  if (exactGasPressureBoundaryActive && !activeCanonicalEpoch) {
+    const error = new TypeError(
+      'Two-level exact gas-pressure mechanics requires a canonical spatial epoch'
+    );
+    error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_CANONICAL_EPOCH';
+    throw error;
+  }
+  const exactGasProductEventRowCapacity =
+    retainedProductGasBoundaryActionable
+      ? Number(
+          residentProductMass?.productEventRowCapacity
+          ?? residentProductMass?.productEventRowCount
+        )
+      : 0;
+  if (
+    retainedProductGasBoundaryActionable
+    && (
+      !residentProductMass
+      || residentProductMass.productEventBufferRetained !== true
+      || !residentProductMass.productEventBuffer
+      || !Number.isSafeInteger(exactGasProductEventRowCapacity)
+      || exactGasProductEventRowCapacity < 1
+      || !Number.isSafeInteger(residentProductMass.productEventStrideFloats)
+      || residentProductMass.productEventStrideFloats < 1
+    )
+  ) {
+    const error = new TypeError(
+      'Two-level retained-product gas pressure requires an exact retained product-event capacity and buffer'
+    );
+    error.code =
+      'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_PRODUCT_AUTHORITY';
+    throw error;
+  }
 
   const cleanupEntries = new Map();
   let cleanupScheduled = false;
@@ -2850,6 +2925,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   let fusedActiveMicroepochAuthority = null;
   let fusedPendingClosure = null;
   let fusedRetirementRecoveryCapability = null;
+  let activeExactGasBoundary = null;
+  let failureExactGasBoundaryRetired = false;
   let failureRecoveryAttemptPromise = null;
   let failureRecoveryAttemptDeviceLost = false;
   let failureMechanicsRetired = false;
@@ -2878,6 +2955,37 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     let handled = null;
     handled = (async () => {
       if (deviceLost === true) await exactTwoLevelDeviceLossEvidence();
+      if (!failureExactGasBoundaryRetired && activeExactGasBoundary) {
+        const { execution, source } = activeExactGasBoundary;
+        const description = describeSphSpatialGasPressureAuthority(source, {
+          device
+        });
+        if (
+          description?.terminalObserved !== true
+          && description?.releasedObserved !== true
+          && description?.consumerSubmittedObserved !== true
+          && description?.consumerBorrowedObserved !== true
+        ) {
+          const scheduled = releaseSphSpatialGasLedgerEosAfterQueue(execution);
+          if (scheduled !== true && execution?.releaseScheduled !== true) {
+            throw new Error(
+              'unconsumed exact gas boundary authority rejected failure retirement'
+            );
+          }
+          if (execution?.releasePromise) {
+            const released = await execution.releasePromise;
+            if (released !== true) {
+              throw new Error(
+                'unconsumed exact gas boundary authority retirement was not confirmed'
+              );
+            }
+          }
+        }
+        activeExactGasBoundary = null;
+        failureExactGasBoundaryRetired = true;
+      } else if (!activeExactGasBoundary) {
+        failureExactGasBoundaryRetired = true;
+      }
       if (!failureMechanicsRetired && fusedMacroAuthority) {
         const mechanicsRetirement = fusedPendingClosure
           ? abandonSchroederFusedMechanicsPendingClosureAfter(
@@ -2972,6 +3080,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     const workspaceExecutions = [];
     const p2gProjections = [];
     const fineGridUpdates = [];
+    const exactGasBoundaryExecutions = [];
+    const exactGasBoundarySubmissions = [];
     const fineLifecycleRetirementRecords = [];
     const pendingFineLifecycleRetirements = new Set();
     let workspaceBuildCount = 0;
@@ -3008,6 +3118,273 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         );
       }
       return parentFieldView;
+    };
+
+    const exactGasGridForEpoch = () => {
+      const generation = epochGeneration();
+      const levelViews = Array.isArray(generation?.mechanicsLevelViews)
+        ? generation.mechanicsLevelViews
+        : [];
+      const coarseField = levelViews[1]?.mechanicsFieldView ?? null;
+      const gridDims = Array.from(coarseField?.gridDims || []);
+      const gridNodeCount = Number(coarseField?.gridNodeCount);
+      const gridShift = Number(coarseField?.gridShift);
+      const gridSpacingM = Math.fround(Number(coarseField?.gridSpacingM));
+      if (
+        generation?.ready !== true
+        || generation?.selected !== true
+        || levelViews.length !== 2
+        || generation?.parentFieldView?.coarseFieldView !== coarseField
+        || coarseField?.selectedLevel !== coarseLevel
+        || gridDims.length !== 3
+        || gridDims.some((value) => !Number.isSafeInteger(value) || value < 1)
+        || !Number.isSafeInteger(gridNodeCount)
+        || gridNodeCount < 1
+        || gridDims.reduce((product, value) => product * value, 1)
+          !== gridNodeCount
+        || !Number.isSafeInteger(gridShift)
+        || gridShift < 0
+        || !Number.isFinite(gridSpacingM)
+        || !(gridSpacingM > 0)
+      ) {
+        const error = new TypeError(
+          'Exact gas pressure requires the current canonical composite-coarse mechanics grid'
+        );
+        error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_GRID';
+        throw error;
+      }
+      return Object.freeze({
+        selectedLevel: coarseLevel,
+        gridDims: Object.freeze(gridDims),
+        gridNodeCount,
+        gridShift,
+        gridSpacingM,
+        levelCount: 2,
+        source: 'same-generation-selected-mechanics-occupancy-grid'
+      });
+    };
+
+    const exactGasEpochIdentity = () => {
+      const generation = epochGeneration();
+      const moment = generation?.mechanicsLevelViews?.[0]?.phaseVolumeMoment
+        ?? null;
+      const identity = {};
+      for (const field of [
+        'storageGeneration',
+        'physicsTick',
+        'physicsSubstep',
+        'positionEpoch',
+        'topologyEpoch',
+        'chartEpoch',
+        'levelEpoch',
+        'supportEpoch'
+      ]) {
+        const value = moment?.[field];
+        if (
+          !Number.isInteger(value)
+          || value < (field === 'storageGeneration' ? 1 : 0)
+          || value > 0xffff_ffff
+        ) {
+          const error = new TypeError(
+            `Exact gas pressure requires canonical ${field} identity`
+          );
+          error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_EPOCH';
+          throw error;
+        }
+        identity[field] = value;
+      }
+      return Object.freeze(identity);
+    };
+
+    const produceExactGasBoundary = async ({
+      stage,
+      currentSphUpload,
+      currentMlsUpload
+    }) => {
+      if (!exactGasPressureBoundaryActive) return null;
+      if (
+        particleGasLedgerActionable
+        && (
+          currentSphUpload?.status !== 'webgpu-uploaded'
+          || currentMlsUpload?.status !== 'webgpu-uploaded'
+          || !currentSphUpload.stateBuffer
+          || !currentSphUpload.thermoBuffer
+          || !currentMlsUpload.mechanicsBuffer
+        )
+      ) {
+        const error = new TypeError(
+          'Exact particle gas pressure requires the current resident particle family'
+        );
+        error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_PARTICLES';
+        throw error;
+      }
+      const spatialGasGrid = exactGasGridForEpoch();
+      const execution = await runGpuQueueStage(
+        stage,
+        () => spatialGasLedgerEosRunner({
+          device,
+          residentProductMass: retainedProductGasBoundaryActionable
+            ? residentProductMass
+            : null,
+          productEventBuffer: retainedProductGasBoundaryActionable
+            ? residentProductMass.productEventBuffer
+            : null,
+          productEventRowCount: retainedProductGasBoundaryActionable
+            ? exactGasProductEventRowCapacity
+            : null,
+          productEventStrideFloats: retainedProductGasBoundaryActionable
+            ? residentProductMass.productEventStrideFloats
+            : null,
+          sphParticleUpload: particleGasLedgerActionable
+            ? currentSphUpload
+            : null,
+          mlsMpmParticleUpload: particleGasLedgerActionable
+            ? currentMlsUpload
+            : null,
+          particleStateBuffer: particleGasLedgerActionable
+            ? currentSphUpload.stateBuffer
+            : null,
+          particleThermoBuffer: particleGasLedgerActionable
+            ? currentSphUpload.thermoBuffer
+            : null,
+          particleCount: particleGasLedgerActionable
+            ? currentSphUpload.particleCount
+            : null,
+          particleStateStrideFloats: particleGasLedgerActionable
+            ? currentSphUpload.stateStrideBytes / Float32Array.BYTES_PER_ELEMENT
+            : null,
+          particleThermoStrideFloats: particleGasLedgerActionable
+            ? currentSphUpload.thermoStrideBytes / Float32Array.BYTES_PER_ELEMENT
+            : null,
+          schroederLevelAssignment: particleGasLedgerActionable
+            ? epochAssignment()
+            : null,
+          epochIdentity: exactGasEpochIdentity(),
+          schroederSpatialEpochGeneration: epochGeneration(),
+          spatialGasGrid,
+          boxMinM: [0, 0, 0],
+          boxMaxM: boxDimsM,
+          spatialGasCellSizeM: spatialGasGrid.gridSpacingM,
+          spatialGasSupportVolumeFallbackM3: 0,
+          fallbackTemperatureK: 293.15,
+          chartId: 0,
+          level: spatialGasGrid.selectedLevel,
+          laneId: `schroeder-two-level:${stage}`,
+          diagnosticsMode: SPH_SPATIAL_GAS_DIAGNOSTICS_NONE
+        }),
+        { gasPressureBoundary: true }
+      );
+      if (execution?.ready !== true) {
+        if (execution?.cleanupPromise) {
+          await Promise.resolve(execution.cleanupPromise).catch(() => false);
+        }
+        const error = new Error(
+          execution?.reason
+          || 'Exact two-level gas EOS producer did not publish a ready authority'
+        );
+        error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_PRODUCER';
+        throw error;
+      }
+      const source = execution.retainedGasCellFieldSource ?? null;
+      const description = isExactSphSpatialGasPressureAuthoritySource(source)
+        ? describeSphSpatialGasPressureAuthority(source, { device })
+        : null;
+      if (
+        execution.backend !== 'webgpu-retained-same-device'
+        || execution.normalHotLoopReadbackFree !== true
+        || execution.observedMapAsyncCount !== 0
+        || execution.observedReadbackBytes !== 0
+        || execution.observedHostQueueFenceCount !== 0
+        || execution.hostMaterializedRowCount !== 0
+        || description?.deviceAuthenticated !== true
+        || description.readyObserved !== true
+        || description.consumerBorrowedObserved === true
+        || description.consumerSubmittedObserved === true
+        || description.releaseScheduledObserved === true
+        || description.releasedObserved === true
+        || description.terminalObserved === true
+      ) {
+        activeExactGasBoundary = { execution, source };
+        const error = new Error(
+          'Exact two-level gas EOS producer authority was not live, same-device, and readback-free'
+        );
+        error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_PRODUCER';
+        throw error;
+      }
+      const boundary = Object.freeze({
+        execution,
+        source,
+        description,
+        stage
+      });
+      activeExactGasBoundary = boundary;
+      exactGasBoundaryExecutions.push(boundary);
+      return boundary;
+    };
+
+    const certifyExactGasProjection = (projection) => {
+      if (!exactGasPressureBoundaryActive) return true;
+      if (!exactGasPressureMechanicsP2gProductSourceIsolationCertified(
+        projection,
+        {
+          productRowsAdvertised: retainedProductGasBoundaryActionable,
+          productEventRowCapacity: exactGasProductEventRowCapacity
+        }
+      )) {
+        const error = new Error(
+          'Exact two-level gas-pressure P2G did not certify product-source isolation'
+        );
+        error.code =
+          'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_PRODUCT_ISOLATION';
+        throw error;
+      }
+      return true;
+    };
+
+    const acceptExactGasBoundarySubmission = (
+      boundary,
+      gridUpdate,
+      expectedMappingMode
+    ) => {
+      if (!exactGasPressureBoundaryActive) return true;
+      const description = describeSphSpatialGasPressureAuthority(
+        boundary?.source,
+        { device }
+      );
+      const submission = gridUpdate?.gasPressureBoundarySubmission ?? null;
+      if (
+        activeExactGasBoundary !== boundary
+        || gridUpdate?.backend !== 'webgpu'
+        || gridUpdate?.gasPressureBoundaryRequested !== true
+        || gridUpdate?.gasPressureBoundarySubmitted !== true
+        || submission?.submitted !== true
+        || submission?.authorityRetiredQueueOrdered !== true
+        || submission?.temporaryBuffersRetiredQueueOrdered !== true
+        || submission?.crossLevelMappingMode !== expectedMappingMode
+        || submission?.targetLevel !== (
+          expectedMappingMode === 'fine-to-coarse-parent-adjoint'
+            ? resolvedFineLevel
+            : coarseLevel
+        )
+        || submission?.gasLevel !== coarseLevel
+        || submission?.hostQueueFenceCount !== 0
+        || submission?.mapAsyncCount !== 0
+        || submission?.hostLogicalCountReadCount !== 0
+        || description?.deviceAuthenticated !== true
+        || description.consumerSubmittedObserved !== true
+        || description.releasedObserved !== true
+        || description.terminalObserved !== true
+      ) {
+        const error = new Error(
+          'Exact two-level gas-pressure grid consumer did not publish its queue-ordered terminal evidence'
+        );
+        error.code =
+          'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_SUBMISSION';
+        throw error;
+      }
+      exactGasBoundarySubmissions.push(submission);
+      activeExactGasBoundary = null;
+      return true;
     };
 
     const workspaceRuntimeFor = (parentFieldView) => {
@@ -3187,7 +3564,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       terminalTransaction = null,
       crossLevelPressureConsumer = false,
       temporalCoarsePredictor = null,
-      queueOrderedSubmissionBatch = null
+      queueOrderedSubmissionBatch = null,
+      exactGasProductSourceIsolationRequired = false
     }) => {
       const projection = await runGpuQueueStage(
         timestampStage,
@@ -3206,6 +3584,14 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           ambientPressurePa,
           mechanicsFieldMode: MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
           pressureCrossLevelConsumerRequired: crossLevelPressureConsumer,
+          ...(exactGasProductSourceIsolationRequired
+            ? {
+                residentProductMass:
+                  retainedProductGasBoundaryActionable
+                    ? residentProductMass
+                    : null
+              }
+            : {}),
           mechanicsFieldTemporalCoarsePredictor: temporalCoarsePredictor,
           queueOrderedSubmissionBatch,
           retainGridBuffer: false,
@@ -3334,7 +3720,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           mechanicsMaterialTable,
           mechanicsMaterialPhaseUpload,
           ambientPressurePa,
-          phaseVolumePressureScale,
+          phaseVolumePressureScale: exactGasPressureBoundaryActive
+            ? 0
+            : phaseVolumePressureScale,
           phaseVolumeDragScale,
           phaseVolumeMaxImpulseFraction,
           phaseVolumeInterfaceTransportRequired:
@@ -3532,7 +3920,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
             // The parent workspace claims and consumes CROSS_LEVEL on this fine
             // field during the fine correction.
             crossLevelPressureConsumer: phaseVolumeInterfaceTransportEnabled,
-            queueOrderedSubmissionBatch: p2gSubmissionBatch
+            queueOrderedSubmissionBatch: p2gSubmissionBatch,
+            exactGasProductSourceIsolationRequired:
+              exactGasPressureBoundaryActive
           }),
           runProjection({
             selectedLevel: coarseLevel,
@@ -3558,6 +3948,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         abortQueueOrderedSubmissionBatch(p2gSubmissionBatch, device, error);
         throw error;
       }
+      certifyExactGasProjection(fineProjection);
+      const fineGasBoundary = await produceExactGasBoundary({
+        stage: `fine-${substep}-gas-ledger-eos`,
+        currentSphUpload,
+        currentMlsUpload
+      });
       const workspace = await runGpuQueueStage(
         `fine-${substep}-parent-predictor`,
         () => submitWorkspacePredictors({
@@ -3587,18 +3983,30 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           mechanicsMaterialPhaseUpload,
           schroederSpatialEpochTransaction:
             phaseVolumeInterfaceTransportEnabled
+              || exactGasPressureBoundaryActive
               ? priorCanonicalEpoch.transaction
               : null,
-          phaseVolumePressureScale,
+          phaseVolumePressureScale: exactGasPressureBoundaryActive
+            ? 0
+            : phaseVolumePressureScale,
+          gasPressureMechanicsScale: phaseVolumePressureScale,
           phaseVolumeDragScale,
           phaseVolumeMaxImpulseFraction,
           phaseVolumeInterfaceTransportRequired:
             phaseVolumeInterfaceTransportEnabled,
+          gasPressureMechanicsAuthoritySource:
+            fineGasBoundary?.source ?? null,
+          gasPressureMechanicsChartId: 0,
           mechanicsFieldEnergyReceipt: { deferSeal: true },
           retainUpdatedGridBuffer: false,
           readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
         }),
         { fineSubstepOrdinal: substep }
+      );
+      acceptExactGasBoundarySubmission(
+        fineGasBoundary,
+        fineGridUpdate,
+        'fine-to-coarse-parent-adjoint'
       );
       fineGridUpdates.push(fineGridUpdate);
       const correctedFineGridUpdate = await runGpuQueueStage(
@@ -3918,7 +4326,15 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       // This terminal P2G field is consumed only by the terminal coarse G2P;
       // declaring CROSS_LEVEL here creates a required consumer that no stage
       // can legitimately claim or consume.
-      crossLevelPressureConsumer: false
+      crossLevelPressureConsumer: false,
+      exactGasProductSourceIsolationRequired:
+        exactGasPressureBoundaryActive
+    });
+    certifyExactGasProjection(finalCoarseProjection);
+    const terminalGasBoundary = await produceExactGasBoundary({
+      stage: 'terminal-coarse-gas-ledger-eos',
+      currentSphUpload,
+      currentMlsUpload
     });
     const terminalGridUpdate = await runGpuQueueStage(
       'terminal-coarse-grid-update',
@@ -3937,17 +4353,29 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         mechanicsMaterialPhaseUpload,
         schroederSpatialEpochTransaction:
           phaseVolumeInterfaceTransportEnabled
+            || exactGasPressureBoundaryActive
             ? activeCanonicalEpoch.transaction
             : null,
-        phaseVolumePressureScale,
+        phaseVolumePressureScale: exactGasPressureBoundaryActive
+          ? 0
+          : phaseVolumePressureScale,
+        gasPressureMechanicsScale: phaseVolumePressureScale,
         phaseVolumeDragScale,
         phaseVolumeMaxImpulseFraction,
         phaseVolumeInterfaceTransportRequired:
           phaseVolumeInterfaceTransportEnabled,
+        gasPressureMechanicsAuthoritySource:
+          terminalGasBoundary?.source ?? null,
+        gasPressureMechanicsChartId: 0,
         mechanicsFieldEnergyReceipt: { deferSeal: true },
         retainUpdatedGridBuffer: false,
         readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
       })
+    );
+    acceptExactGasBoundarySubmission(
+      terminalGasBoundary,
+      terminalGridUpdate,
+      'same-level'
     );
     const finalWorkspace = await runGpuQueueStage(
       'terminal-coarse-correction',
@@ -4284,6 +4712,19 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           bufferReferencesRetired: false
         })
       : null;
+    if (
+      exactGasPressureBoundaryActive
+      && (
+        exactGasBoundaryExecutions.length !== substeps + 1
+        || exactGasBoundarySubmissions.length !== substeps + 1
+      )
+    ) {
+      const error = new Error(
+        'Exact two-level gas pressure did not consume one fresh authority per fine microepoch plus terminal'
+      );
+      error.code = 'ERR_SCHROEDER_TWO_LEVEL_GAS_PRESSURE_EPOCH_COUNT';
+      throw error;
+    }
     const result = {
       schema: ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_EXECUTION_SCHEMA,
       twoLevelMechanicsStepSchema: ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_SCHEMA,
@@ -4344,19 +4785,33 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       authoritativeCommitVerified: false,
       authoritativeCommitStatus: 'pending-post-mechanics-closure',
       internalEnergyTransferStatus:
-        phaseVolumeInterfaceTransportEnabled
+        exactGasPressureBoundaryActive && phaseVolumeInterfaceTransportEnabled
+          ? 'exact-gas-pressure-boundary-plus-nonnegative-s9c-drag-causal-heat-deposited-by-transpose-g2p'
+          : phaseVolumeInterfaceTransportEnabled
           ? 'signed-pressure-compensation-plus-nonnegative-drag-causal-heat-deposited-by-transpose-g2p'
           : 'nonnegative-reflux-kinetic-loss-deposited-by-transpose-g2p',
       refluxEvidenceStatus:
-        phaseVolumeInterfaceTransportEnabled
+        exactGasPressureBoundaryActive && phaseVolumeInterfaceTransportEnabled
+          ? 'gpu-measured-equal-opposite-linear-angular-drag-energy-plus-exact-gas-external-impulse-work-ledger'
+          : phaseVolumeInterfaceTransportEnabled
           ? 'gpu-measured-equal-opposite-linear-angular-pressure-drag-energy-ledger'
           : 'gpu-measured-equal-opposite-linear-angular-energy-ledger',
       phaseVolumeInterfaceTransport: Object.freeze({
         enabled: phaseVolumeInterfaceTransportEnabled,
         pressureScale: Math.max(
           0,
-          finiteNumber(phaseVolumePressureScale, 1)
+          exactGasPressureBoundaryActive
+            ? 0
+            : finiteNumber(phaseVolumePressureScale, 1)
         ),
+        ...(exactGasPressureBoundaryActive
+          ? {
+              configuredPressureScale: Math.max(
+                0,
+                finiteNumber(phaseVolumePressureScale, 1)
+              )
+            }
+          : {}),
         dragScale: Math.max(0, finiteNumber(phaseVolumeDragScale, 1)),
         maxImpulseFraction: Math.max(
           0,
@@ -4365,6 +4820,55 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         ambientBoundaryEvidence: phaseVolumeInterfaceTransportEnabled
           ? 'sealed-external-impulse-and-work'
           : 'disabled-phase-volume-interface-transport'
+      }),
+      exactGasPressureMechanics: Object.freeze({
+        enabled: exactGasPressureBoundaryActive,
+        sourceMode: exactGasPressureBoundaryActive
+          ? (particleGasLedgerActionable
+              && retainedProductGasBoundaryActionable
+              ? 'particle-plus-retained-product-residual-union'
+              : particleGasLedgerActionable
+                ? 'particle-only'
+                : 'retained-product-residual-only')
+          : 'disabled',
+        producerCount: exactGasBoundaryExecutions.length,
+        boundarySubmissionCount: exactGasBoundarySubmissions.length,
+        expectedProducerCount: exactGasPressureBoundaryActive
+          ? substeps + 1
+          : 0,
+        fineBoundaryCount: exactGasBoundarySubmissions.filter(
+          (submission) => submission.crossLevelMappingMode
+            === 'fine-to-coarse-parent-adjoint'
+        ).length,
+        terminalBoundaryCount: exactGasBoundarySubmissions.filter(
+          (submission) => submission.crossLevelMappingMode === 'same-level'
+        ).length,
+        pressureScale: exactGasPressureBoundaryActive
+          ? Math.max(0, finiteNumber(phaseVolumePressureScale, 1))
+          : 0,
+        s9cCoexistenceMode:
+          exactGasPressureBoundaryActive && phaseVolumeInterfaceTransportEnabled
+            ? 'drag-only-zero-pressure-scale'
+            : null,
+        fineMappingMode: exactGasPressureBoundaryActive
+          ? 'fine-to-coarse-parent-adjoint'
+          : null,
+        terminalMappingMode: exactGasPressureBoundaryActive
+          ? 'same-level'
+          : null,
+        authorityRefreshMode: exactGasPressureBoundaryActive
+          ? 'one-fresh-authority-per-canonical-microepoch-plus-terminal'
+          : null,
+        productSourceIsolationCertified:
+          exactGasPressureBoundaryActive
+            ? exactGasBoundarySubmissions.length === substeps + 1
+            : false,
+        hostQueueFenceCount: 0,
+        mapAsyncCount: 0,
+        externalImpulseWorkClosure:
+          exactGasPressureBoundaryActive
+            ? 'gas-boundary-impulse-work-rolled-into-h7-reflux-external-channel'
+            : null
       }),
       internalPressureScale,
       ambientPressurePa: Math.max(0, finiteNumber(ambientPressurePa, 0)),

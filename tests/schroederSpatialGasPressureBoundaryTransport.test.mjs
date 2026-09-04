@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI,
@@ -12,6 +14,7 @@ import {
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW_WORDS,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_VERSION,
   ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA,
+  computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle,
   computeSchroederSpatialGasPressureBoundaryTransportCpuOracle,
   createSchroederSpatialGasPressureBoundaryTransportLayout,
   createSchroederSpatialGasPressureBoundaryTransportParams,
@@ -62,10 +65,10 @@ function params(overrides = {}) {
   });
 }
 
-test('v4 gas boundary ABI reserves the exact owner bindings and capacity dispatch', () => {
+test('v4 gas boundary ABI reserves the exact owner and parent bindings', () => {
   assert.equal(
     ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA,
-    'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v1'
+    'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v2'
   );
   assert.equal(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES,
@@ -82,7 +85,8 @@ test('v4 gas boundary ABI reserves the exact owner bindings and capacity dispatc
       scratch: 5,
       gasAuthorityControlPrivate: 6,
       params: 7,
-      storageBindingCount: 7
+      parentFieldView: 8,
+      storageBindingCount: 8
     }
   );
   const layout = createSchroederSpatialGasPressureBoundaryTransportLayout({
@@ -104,6 +108,15 @@ test('v4 gas boundary ABI reserves the exact owner bindings and capacity dispatc
   assert.match(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI.residency,
     /no-all-cell-scan/
+  );
+  assert.deepEqual(
+    SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI.crossLevelMapping,
+    {
+      sameLevel:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
+      fineToCoarseParentAdjoint:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+    }
   );
 });
 
@@ -173,6 +186,23 @@ test('v4 gas boundary params encode exact field, gas, directory, and dispatch id
     [38, 39, 40].map((word) => view.getUint32(word * 4, true)),
     [2, 2, 1]
   );
+  assert.equal(view.getUint32(41 * 4, true), 0);
+  assert.equal(view.getInt32(42 * 4, true), -1);
+  assert.equal(view.getUint32(43 * 4, true), 8);
+  assert.deepEqual(
+    [44, 45, 46].map((word) => view.getUint32(word * 4, true)),
+    [2, 2, 2]
+  );
+  assert.deepEqual(
+    [47, 48, 49].map((word) => view.getInt32(word * 4, true)),
+    [-2, 3, 5]
+  );
+  assert.equal(view.getFloat32(50 * 4, true), Math.fround(0.01));
+  assert.ok(
+    [51, 52, 53, 54].every(
+      (word) => view.getUint32(word * 4, true) === 0
+    )
+  );
   assert.throws(
     () => params({ gasPressureCellStrideFloats: 8 }),
     /gasPressureCellStrideFloats/
@@ -188,6 +218,88 @@ test('v4 gas boundary params encode exact field, gas, directory, and dispatch id
   assert.throws(
     () => params({ gasDirectoryWordLength: 182 }),
     /exact v1 layout/
+  );
+  assert.throws(
+    () => params({ parentGenerationId: 17 }),
+    /omit parent identity/
+  );
+});
+
+test('v2 params encode and reject malformed exact fine-to-coarse parent identity', () => {
+  const bytes = params({
+    fieldCapacity: 2,
+    crossLevelMappingMode: 'fine-to-coarse-parent-adjoint',
+    gridCellOrigin: [-1, -1, -1],
+    gasSelectedLevel: 0,
+    gasGridNodeCount: 1,
+    gasGridDimensions: [1, 1, 1],
+    gasGridCellOrigin: [-1, -1, -1],
+    gasGridSpacingM: 0.02,
+    parentGenerationId: 17,
+    parentCompletionOrdinal: 83,
+    parentFieldCapacity: 19,
+    parentFieldWordCapacity: 196
+  });
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assert.equal(
+    view.getUint32(41 * 4, true),
+    SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+  );
+  assert.equal(view.getInt32(42 * 4, true), 0);
+  assert.equal(view.getUint32(43 * 4, true), 1);
+  assert.deepEqual(
+    [44, 45, 46].map((word) => view.getUint32(word * 4, true)),
+    [1, 1, 1]
+  );
+  assert.deepEqual(
+    [47, 48, 49].map((word) => view.getInt32(word * 4, true)),
+    [-1, -1, -1]
+  );
+  assert.equal(view.getFloat32(50 * 4, true), Math.fround(0.02));
+  assert.deepEqual(
+    [51, 52, 53, 54].map((word) => view.getUint32(word * 4, true)),
+    [17, 83, 19, 196]
+  );
+  assert.throws(
+    () => params({
+      crossLevelMappingMode: 'fine-to-coarse-parent-adjoint'
+    }),
+    /gasSelectedLevel is required/
+  );
+  assert.throws(
+    () => params({
+      fieldCapacity: 2,
+      crossLevelMappingMode:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
+      gridCellOrigin: [-1, -1, -1],
+      gasSelectedLevel: 0,
+      gasGridNodeCount: 1,
+      gasGridDimensions: [1, 1, 1],
+      gasGridCellOrigin: [-1, -1, -1],
+      gasGridSpacingM: 0.03,
+      parentGenerationId: 17,
+      parentCompletionOrdinal: 83,
+      parentFieldCapacity: 19,
+      parentFieldWordCapacity: 196
+    }),
+    /exact 2:1 f32 ratio/
+  );
+  assert.throws(
+    () => params({
+      fieldCapacity: 2,
+      crossLevelMappingMode: 'fine-to-coarse-parent-adjoint',
+      gridCellOrigin: [-1, -1, -1],
+      gasSelectedLevel: 0,
+      gasGridNodeCount: 1,
+      gasGridDimensions: [1, 1, 1],
+      gasGridCellOrigin: [-1, -1, -1],
+      gasGridSpacingM: 0.02,
+      parentGenerationId: 17,
+      parentCompletionOrdinal: 83,
+      parentFieldCapacity: 19,
+      parentFieldWordCapacity: 195
+    }),
+    /exact parent-field view layout/
   );
 });
 
@@ -283,7 +395,93 @@ test('CPU oracle preserves signed gauge and makes missing-cell policy explicit',
   assert.match(failClosed.status, /fail-closed-missing-cell/);
 });
 
-test('WGSL is a seven-storage transactional capacity operator with logarithmic gas lookup', () => {
+test('fine parent-adjoint oracle gathers each field CSR before its own S9 force', () => {
+  const input = {
+    gasGridDimensions: [2, 1, 1],
+    fields: [
+      {
+        denseGridNodeId: 0,
+        mechanicalFamilyId: 1,
+        materialId: 7,
+        continuityDomainId: 11,
+        currentVolumeM3: 1,
+        volumeGradientM2: [2, 0, 0],
+        massKg: 2,
+        velocityMPerS: [0, 0, 0]
+      },
+      {
+        denseGridNodeId: 0,
+        mechanicalFamilyId: 2,
+        materialId: 9,
+        continuityDomainId: 0,
+        currentVolumeM3: 2,
+        volumeGradientM2: [1, 0, 0],
+        massKg: 4,
+        velocityMPerS: [0, 0, 0]
+      }
+    ],
+    parentFieldKeys: [
+      [0, 1, 7, 11],
+      [0, 2, 9, 0],
+      [1, 1, 7, 11],
+      [1, 2, 9, 0]
+    ],
+    fineEdgeOffsets: [0, 2, 4],
+    fineEdgeParentIndices: [0, 2, 1, 3],
+    fineEdgeWeights: [0.25, 0.75, 0.5, 0.5],
+    gasCells: [
+      { cell: [0, 0, 0], absolutePressurePa: 100 },
+      { cell: [1, 0, 0], absolutePressurePa: 300 }
+    ],
+    dt: 0.1,
+    ambientPressurePa: 100
+  };
+  const result =
+    computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle(
+      input
+    );
+  assert.equal(result.admitted, true);
+  assert.equal(result.appliedFieldCount, 2);
+  assert.equal(result.missingCellCount, 0);
+  assert.equal(result.rows[0].effectiveGaugePressurePa, 150);
+  assert.equal(result.rows[1].effectiveGaugePressurePa, 100);
+  assert.deepEqual(result.rows[0].impulseNs, [30, 0, 0]);
+  assert.deepEqual(result.rows[1].impulseNs, [10, 0, 0]);
+  assert.deepEqual(result.rows[0].velocityMPerS, [15, 0, 0]);
+  assert.deepEqual(result.rows[1].velocityMPerS, [2.5, 0, 0]);
+
+  const partialNoLoad =
+    computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
+      ...input,
+      gasCells: [{ cell: [0, 0, 0], absolutePressurePa: 200 }]
+    });
+  assert.equal(partialNoLoad.admitted, true);
+  assert.equal(partialNoLoad.missingCellCount, 2);
+  assert.equal(partialNoLoad.rows[0].effectiveGaugePressurePa, 25);
+  assert.equal(partialNoLoad.rows[1].effectiveGaugePressurePa, 50);
+  assert.deepEqual(partialNoLoad.rows[0].impulseNs, [5, 0, 0]);
+  assert.deepEqual(partialNoLoad.rows[1].impulseNs, [5, 0, 0]);
+
+  const failClosed =
+    computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
+      ...input,
+      gasCells: [{ cell: [0, 0, 0], absolutePressurePa: 200 }],
+      missingCellPolicy:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED
+    });
+  assert.equal(failClosed.admitted, false);
+  assert.match(failClosed.status, /fine-adjoint-fail-closed-missing-cell/);
+
+  assert.throws(
+    () => computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
+      ...input,
+      fineEdgeWeights: [0.25, 0.5, 0.5, 0.5]
+    }),
+    /do not partition unity/
+  );
+});
+
+test('WGSL is an eight-storage transactional exact parent-adjoint operator', () => {
   const source = schroederSpatialGasPressureBoundaryTransportWgsl;
   for (const [binding, name] of [
     [0, 'field_view'],
@@ -292,7 +490,8 @@ test('WGSL is a seven-storage transactional capacity operator with logarithmic g
     [3, 'gas_pressure_rows'],
     [4, 'gas_directory'],
     [5, 'scratch'],
-    [6, 'gas_authority_control']
+    [6, 'gas_authority_control'],
+    [8, 'parent_field_view']
   ]) {
     assert.match(
       source,
@@ -316,6 +515,26 @@ test('WGSL is a seven-storage transactional capacity operator with logarithmic g
   assert.match(
     source,
     /total_impulse_ns \* share/
+  );
+  assert.match(
+    source,
+    /fn parent_field_view_admitted\(\)[\s\S]*PARENT_FIELD_READY_ADMITTED[\s\S]*fine_edge_offset_offset[\s\S]*parent_field_view\[78u\] != 0u/
+  );
+  assert.match(
+    source,
+    /fn stage_fine_parent_field\([\s\S]*declared_count > PARENT_FIELD_MAX_FINE_EDGES[\s\S]*abs\(weight_sum - 1\.0\) > PARENT_FIELD_WEIGHT_TOLERANCE/
+  );
+  assert.match(
+    source,
+    /effective_gauge_pa = effective_gauge_pa \+ weight \* parent_gauge_pa/
+  );
+  assert.match(
+    source,
+    /let impulse_ns = params\.pressure_scale[\s\S]*effective_gauge_pa \* field_gradient\(field_index\) \* params\.dt/
+  );
+  assert.doesNotMatch(
+    source.match(/fn stage_fine_parent_field\([\s\S]*?\n\}/)?.[0] ?? '',
+    /share/
   );
   assert.match(
     source,
@@ -355,7 +574,11 @@ test('WGSL is a seven-storage transactional capacity operator with logarithmic g
   );
   assert.match(
     source,
-    /fn prevalidate_source_boundary_transport\([\s\S]*phase_volume_receipt_admitted\(\)[\s\S]*gas_inputs_admitted\(\)[\s\S]*SCRATCH_SOURCE_ADMISSION_SEAL/
+    /fn prevalidate_source_boundary_transport\([\s\S]*phase_volume_receipt_admitted\(\)[\s\S]*gas_authority_reject_reason\(\)[\s\S]*gas_directory_admitted\(\)[\s\S]*parent_field_view_admitted\(\)[\s\S]*SCRATCH_SOURCE_ADMISSION_SEAL/
+  );
+  assert.match(
+    source,
+    /fn reject_gas_authority_scratch\([\s\S]*0x300u \+ reason/
   );
   assert.match(
     source,
@@ -388,7 +611,7 @@ test('WGSL source has no host-count, readback, or all-gas-cell scan escape', () 
   );
   assert.match(
     source,
-    /gas_authority_control\[31u\] == cell_count/
+    /gas_authority_control\[31u\] != cell_count/
   );
 });
 

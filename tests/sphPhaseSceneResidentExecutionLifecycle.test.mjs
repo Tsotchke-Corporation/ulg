@@ -240,6 +240,16 @@ test('scene captured and deferred cleanup forwards exact product-history handles
 
 test('production worker SS provisioning applies the reaction tri-state only at the serialized worker boundary', async () => {
   const source = await readFile(sceneSourcePath, 'utf8');
+  assert.match(
+    source,
+    /let sphParticleGasSeedActionable = false;/,
+    'the scene caches exact seed gas evidence outside the retained schedule loop'
+  );
+  assert.match(
+    source,
+    /const nextSphParticleGasSeedActionable = Boolean\([\s\S]*cpuStateStale === true[\s\S]*gpu-resident-unread-ready[\s\S]*sphGpuParticleStateHasGasCandidateIndication\([\s\S]*nextSphGpuParticleState[\s\S]*workerSchroederLaneState\.poisoned = true;[\s\S]*sphGpuParticleState = nextSphGpuParticleState;[\s\S]*sphParticleGasSeedActionable = nextSphParticleGasSeedActionable;/,
+    'setParticles transactionally recomputes seed evidence and invalidates any equal-shaped retained lane'
+  );
   const refreshStart = source.indexOf(
     'async function refreshMlsMpmResidentSteps('
   );
@@ -290,6 +300,24 @@ test('production worker SS provisioning applies the reaction tri-state only at t
     /dynamicReactionRoutingAllowed:\s*authoritativeDynamicReactionRouting/,
     'the worker lane receives the exact authoritative-policy admission bit'
   );
+  assert.match(
+    refresh.slice(sharedOptionsStart, workerOptionsStart),
+    /gasPressureMechanicsBoundaryEnabled:\s*\n\s*requestedSchroederSimulation === true/,
+    'every SS preset explicitly enables the shared particle/product gas-candidate pipeline'
+  );
+  assert.match(
+    refresh,
+    /schroederParticleGasLedgerActionableForResidentStepOptions\(\{[\s\S]*thermalMaterialTable:\s*effectiveThermalMaterialTable,[\s\S]*reactionTable:\s*effectiveReactionTable[\s\S]*\|\| sphParticleGasSeedActionable/,
+    'gas actionability is derived from cached seed evidence or active writers, not preset identity'
+  );
+  assert.doesNotMatch(
+    refresh.slice(
+      refresh.indexOf('const requestedParticleGasLedgerActionable'),
+      refresh.indexOf('const residentSourceMode')
+    ),
+    /effectiveReactionActivationWatchTable|sphGpuParticleStateHasGasCandidateIndication/,
+    'a dormant watch and per-schedule CPU rescans must not eject liquid presets from Tier 0'
+  );
 });
 
 test('production scene preseals and latches exact dynamic-law successors after commit', async () => {
@@ -323,8 +351,8 @@ test('production scene preseals and latches exact dynamic-law successors after c
   );
   assert.match(
     schedule,
-    /staticTargetConfiguration\.writerSet\.reaction === true[\s\S]*staticTargetConfiguration\.writerSet\.gasBoundaryActionable === false[\s\S]*retainedProductGasBoundaryActionable: true/,
-    'a reaction-active, gas-inactive source may preseal the retained-product writer for the next schedule boundary regardless of batch length'
+    /staticTargetConfiguration\.writerSet\.reaction === true[\s\S]*staticTargetConfiguration\.writerSet\s*\.retainedProductGasBoundaryActionable === false[\s\S]*retainedProductGasBoundaryActionable: true/,
+    'a reaction-active, retained-product-inactive source may preseal the retained-product writer for the next schedule boundary regardless of batch length'
   );
   assert.doesNotMatch(
     schedule,
@@ -335,6 +363,31 @@ test('production scene preseals and latches exact dynamic-law successors after c
     schedule,
     /schroederTargetScheduleSuccessorGasBoundaryActionable\(\{\s*predecessorTargetScheduleAuthority,\s*predecessorDynamicLawObservation\s*\}\)/,
     'physical product evidence must remain inert without an exact predecessor transition or already-active writer set'
+  );
+  assert.match(
+    schedule,
+    /const particleGasLedgerActionableForOptions = \(options\) => Boolean\([\s\S]*gasPressureMechanicsBoundaryEnabled === true[\s\S]*particleGasLedgerActionable === true[\s\S]*const particleGasLedgerActionable =[\s\S]*scheduleResidentStepOptions[\s\S]*const targetConfigurationOptions = \{[\s\S]*particleGasLedgerActionable[\s\S]*createSchroederTargetScheduleConfiguration\(\{/,
+    'the page preseals the same shared particle-gas writer from the explicit state/law predicate transported to the worker'
+  );
+  assert.doesNotMatch(
+    schedule,
+    /(?:predecessorRetainedProductGasActionable|particleGasLedgerActionableForOptions)[\s\S]{0,180}!authoritativeTwoLevelMechanics/,
+    'authoritative two-level topology must not mask exact particle or retained-product gas writers from the page seal'
+  );
+  assert.match(
+    schedule,
+    /const dormantResidentStepOptions[\s\S]*createParticleGasSealedResidentStepOptions\(\{[\s\S]*reactionTable:\s*null,[\s\S]*reactionActivationWatchTable:\s*dormantReactionCatalog[\s\S]*const activeResidentStepOptions[\s\S]*reactionTable:\s*dormantReactionCatalog,[\s\S]*reactionActivationWatchTable:\s*null/,
+    'dormant and executing reaction variants derive gas capability separately'
+  );
+  assert.match(
+    schedule,
+    /laneState\.particleGasLedgerActionableLatch = Boolean\([\s\S]*scheduleResidentStepOptions\?\.particleGasLedgerActionable === true[\s\S]*residentStepOptions:\s*activeResidentStepOptions,[\s\S]*particleGasLedgerActionable:[\s\S]*particleGasLedgerActionableForOptions\([\s\S]*activeResidentStepOptions/,
+    'only the selected writer variant latches current actionability while the prospective active target receives its own bit'
+  );
+  assert.doesNotMatch(
+    schedule,
+    /particleGasLedgerActionableForOptions[\s\S]{0,500}laneState\.terminalParticleCount > 0/,
+    'mere particle cardinality must not activate gas pressure for liquid-only Tier-0 families'
   );
   assert.doesNotMatch(
     schedule,

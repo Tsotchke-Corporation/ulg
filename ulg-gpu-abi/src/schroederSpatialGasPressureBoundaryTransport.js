@@ -1,7 +1,13 @@
-export const ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v1';
+import {
+  SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS
+} from './schroederSpatialParentFieldView.js';
 
-export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_VERSION = 1;
+export const ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA =
+  'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v2';
+
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_VERSION = 2;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES = 256;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_MAGIC =
@@ -24,6 +30,11 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SOURCE_ADMISSION_
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD = 0;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED = 1;
 
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL =
+  0;
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT =
+  1;
+
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_BINDINGS =
   Object.freeze({
     mechanicsField: 0,
@@ -34,7 +45,8 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_BINDINGS =
     scratch: 5,
     gasAuthorityControlPrivate: 6,
     params: 7,
-    storageBindingCount: 7
+    parentFieldView: 8,
+    storageBindingCount: 8
   });
 
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW =
@@ -96,20 +108,20 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_LAYOUT =
     'dispatchX:u32',
     'dispatchY:u32',
     'dispatchZ:u32',
-    'reserved0:u32',
-    'reserved1:u32',
-    'reserved2:u32',
-    'reserved3:u32',
-    'reserved4:u32',
-    'reserved5:u32',
-    'reserved6:u32',
-    'reserved7:u32',
-    'reserved8:u32',
-    'reserved9:u32',
-    'reserved10:u32',
-    'reserved11:u32',
-    'reserved12:u32',
-    'reserved13:u32',
+    'crossLevelMappingMode:u32',
+    'gasSelectedLevel:i32-bits',
+    'gasGridNodeCount:u32',
+    'gasGridDimX:u32',
+    'gasGridDimY:u32',
+    'gasGridDimZ:u32',
+    'gasGridCellOriginX:i32-bits',
+    'gasGridCellOriginY:i32-bits',
+    'gasGridCellOriginZ:i32-bits',
+    'gasGridSpacingM:f32-bits',
+    'parentGenerationId:u32',
+    'parentCompletionOrdinal:u32',
+    'parentFieldCapacity:u32',
+    'parentFieldWordCapacity:u32',
     'reserved14:u32',
     'reserved15:u32',
     'reserved16:u32',
@@ -138,10 +150,18 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
       'exact-s9a-v0-times-j-volume-and-gradient-rows-authenticated-by-s9b;phase-1-and-2-only',
     gasAuthority:
       'exact-v4-owner-private-pressure-rows-directory-and-control-bindings-3-4-6',
+    parentAuthority:
+      'fine-adjoint-only-read-only-parent-field-view-binding-8;exact-v1-header-layout-and-per-fine-field-partitioned-csr-authenticated-on-gpu',
+    crossLevelMapping: Object.freeze({
+      sameLevel:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
+      fineToCoarseParentAdjoint:
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+    }),
     pressureLaw:
-      'gauge-pa=absolute-v4-pressure-pa-minus-explicit-ambient-pa;node-impulse-ns=pressure-scale-times-gauge-times-summed-condensed-v0j-gradient-m2-times-dt',
+      'same-level:gauge-pa=absolute-v4-pressure-pa-minus-explicit-ambient-pa;node-impulse-ns=pressure-scale-times-gauge-times-summed-condensed-v0j-gradient-m2-times-dt;fine-adjoint:effective-gauge-pa=sum-parent-weight-times-parent-gauge-pa-and-field-impulse-ns=pressure-scale-times-effective-gauge-times-field-v0j-gradient-m2-times-dt',
     distribution:
-      'each-condensed-field-receives-node-impulse-times-field-v0j-volume-over-node-condensed-v0j-volume',
+      'same-level:each-condensed-field-receives-node-impulse-times-field-v0j-volume-over-node-condensed-v0j-volume;fine-adjoint:each-condensed-fine-field-receives-its-own-parent-transpose-impulse-without-node-redistribution',
     signConvention:
       'positive-gauge-times-s9-condensed-volume-gradient-matches-existing-schroeder-pressure-drag-condensed-impulse',
     missingCellPolicies: Object.freeze({
@@ -152,7 +172,7 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
     transaction:
       'prevalidate-field-prevalidate-source-initialize-stage-validate-commit;only-store-only-commit-mutates-mechanics-field',
     residency:
-      'no-mapAsync-no-host-logical-count-no-all-cell-scan;static-authorities-validated-once-on-gpu;one-exact-directory-binary-search-per-condensed-node-head'
+      'no-mapAsync-no-host-logical-count-no-all-cell-scan;static-authorities-validated-once-on-gpu;same-level-one-exact-directory-binary-search-per-condensed-node-head;fine-adjoint-one-exact-binary-search-per-authenticated-parent-edge'
   });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -212,6 +232,54 @@ function tuple3(value, label, mapper) {
   return Object.freeze(Array.from(value, (entry, axis) => (
     mapper(entry, `${label}[${axis}]`)
   )));
+}
+
+function normalizeCrossLevelMappingMode(value) {
+  if (
+    value === 'same-level'
+    || value
+      === SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL
+  ) {
+    return SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL;
+  }
+  if (
+    value === 'fine-to-coarse-parent-adjoint'
+    || value
+      === SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+  ) {
+    return SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT;
+  }
+  throw new RangeError(
+    'crossLevelMappingMode must be same-level or fine-to-coarse-parent-adjoint'
+  );
+}
+
+function exactParentFieldWordCapacity(fineFieldCapacity, parentFieldCapacity) {
+  const edgeCapacity = fineFieldCapacity
+    * SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD;
+  const coarseFieldCapacity = parentFieldCapacity - edgeCapacity;
+  if (
+    !Number.isSafeInteger(edgeCapacity)
+    || edgeCapacity > UINT32_MAX
+    || !Number.isSafeInteger(coarseFieldCapacity)
+    || coarseFieldCapacity < 1
+  ) {
+    throw new RangeError(
+      'parentFieldCapacity must encode fineFieldCapacity * 8 plus a positive coarse capacity'
+    );
+  }
+  const wordCapacity =
+    SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS
+    + parentFieldCapacity * SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS
+    + fineFieldCapacity
+    + fineFieldCapacity + 1
+    + edgeCapacity
+    + edgeCapacity
+    + coarseFieldCapacity;
+  if (!Number.isSafeInteger(wordCapacity) || wordCapacity > UINT32_MAX) {
+    throw new RangeError('parentFieldWordCapacity exceeds the u32 word range');
+  }
+  return wordCapacity;
 }
 
 function checkedScratchWordLength(fieldCapacity) {
@@ -397,7 +465,17 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
   gasDirectoryCellKeysOffsetWords,
   gasDirectoryCellOffsetsOffsetWords,
   gasDirectoryCellMembersOffsetWords,
-  gasDirectoryParticleToCellOffsetWords
+  gasDirectoryParticleToCellOffsetWords,
+  crossLevelMappingMode = 'same-level',
+  gasSelectedLevel,
+  gasGridNodeCount,
+  gasGridDimensions,
+  gasGridCellOrigin,
+  gasGridSpacingM,
+  parentGenerationId,
+  parentCompletionOrdinal,
+  parentFieldCapacity,
+  parentFieldWordCapacity
 } = {}) {
   if (transportEnabled !== true && transportEnabled !== false) {
     throw new TypeError('transportEnabled must be a boolean');
@@ -407,6 +485,7 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     fieldCapacity,
     maxComputeWorkgroupsPerDimension
   });
+  const mappingMode = normalizeCrossLevelMappingMode(crossLevelMappingMode);
   const dims = tuple3(gridDimensions, 'gridDimensions', (value, label) => (
     integer(value, label, 1, 0x7fff_ffff)
   ));
@@ -419,6 +498,144 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     const maximum = origin[axis] + dims[axis] - 1;
     if (maximum > 0x7fff_ffff) {
       throw new RangeError(`gridCellOrigin[${axis}] plus grid extent exceeds i32`);
+    }
+  }
+  const targetLevel = signedInteger(selectedLevel, 'selectedLevel');
+  const targetSpacing = positiveF32(gridSpacingM, 'gridSpacingM');
+  if (
+    mappingMode
+      === SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+  ) {
+    for (const [label, value] of Object.entries({
+      gasSelectedLevel,
+      gasGridNodeCount,
+      gasGridDimensions,
+      gasGridCellOrigin,
+      gasGridSpacingM,
+      parentGenerationId,
+      parentCompletionOrdinal,
+      parentFieldCapacity,
+      parentFieldWordCapacity
+    })) {
+      if (value == null) {
+        throw new TypeError(`${label} is required for fine-to-coarse-parent-adjoint`);
+      }
+    }
+  }
+  const resolvedGasLevel = signedInteger(
+    gasSelectedLevel ?? targetLevel,
+    'gasSelectedLevel'
+  );
+  const gasDims = tuple3(
+    gasGridDimensions ?? dims,
+    'gasGridDimensions',
+    (value, label) => integer(value, label, 1, 0x7fff_ffff)
+  );
+  const gasNodes = integer(
+    gasGridNodeCount ?? nodes,
+    'gasGridNodeCount',
+    1
+  );
+  if (gasDims[0] * gasDims[1] * gasDims[2] !== gasNodes) {
+    throw new RangeError(
+      'gasGridDimensions product must equal gasGridNodeCount'
+    );
+  }
+  const gasOrigin = tuple3(
+    gasGridCellOrigin ?? origin,
+    'gasGridCellOrigin',
+    signedInteger
+  );
+  for (let axis = 0; axis < 3; axis += 1) {
+    const maximum = gasOrigin[axis] + gasDims[axis] - 1;
+    if (maximum > 0x7fff_ffff) {
+      throw new RangeError(
+        `gasGridCellOrigin[${axis}] plus grid extent exceeds i32`
+      );
+    }
+  }
+  const gasSpacing = positiveF32(
+    gasGridSpacingM ?? targetSpacing,
+    'gasGridSpacingM'
+  );
+  const resolvedParentGeneration = integer(
+    parentGenerationId ?? 0,
+    'parentGenerationId'
+  );
+  const resolvedParentCompletion = integer(
+    parentCompletionOrdinal ?? 0,
+    'parentCompletionOrdinal'
+  );
+  const resolvedParentFieldCapacity = integer(
+    parentFieldCapacity ?? 0,
+    'parentFieldCapacity'
+  );
+  const resolvedParentFieldWordCapacity = integer(
+    parentFieldWordCapacity ?? 0,
+    'parentFieldWordCapacity'
+  );
+  if (
+    mappingMode
+      === SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL
+  ) {
+    if (
+      resolvedGasLevel !== targetLevel
+      || gasNodes !== nodes
+      || gasDims.some((value, axis) => value !== dims[axis])
+      || gasOrigin.some((value, axis) => value !== origin[axis])
+      || gasSpacing !== targetSpacing
+      || resolvedParentGeneration !== 0
+      || resolvedParentCompletion !== 0
+      || resolvedParentFieldCapacity !== 0
+      || resolvedParentFieldWordCapacity !== 0
+    ) {
+      throw new RangeError(
+        'same-level gas metadata must match the target grid and omit parent identity'
+      );
+    }
+  } else {
+    if (targetLevel === 0x7fff_ffff || resolvedGasLevel !== targetLevel + 1) {
+      throw new RangeError(
+        'gasSelectedLevel must equal selectedLevel + 1 in fine adjoint mode'
+      );
+    }
+    if (gasSpacing !== Math.fround(targetSpacing * 2)) {
+      throw new RangeError(
+        'gasGridSpacingM must be an exact 2:1 f32 ratio in fine adjoint mode'
+      );
+    }
+    if (
+      origin[0] !== origin[1]
+      || origin[1] !== origin[2]
+      || origin[0] > 0
+      || origin[0] === -0x8000_0000
+      || gasOrigin[0] !== gasOrigin[1]
+      || gasOrigin[1] !== gasOrigin[2]
+      || gasOrigin[0] > 0
+      || gasOrigin[0] === -0x8000_0000
+    ) {
+      throw new RangeError(
+        'fine adjoint grid origins must each encode one nonnegative scalar grid shift'
+      );
+    }
+    if (resolvedParentGeneration < 1 || resolvedParentCompletion < 1) {
+      throw new RangeError(
+        'parentGenerationId and parentCompletionOrdinal must be positive in fine adjoint mode'
+      );
+    }
+    if (resolvedParentGeneration !== integer(generationId, 'generationId', 1)) {
+      throw new RangeError(
+        'parentGenerationId must match generationId in fine adjoint mode'
+      );
+    }
+    const expectedParentWords = exactParentFieldWordCapacity(
+      layout.fieldCapacity,
+      resolvedParentFieldCapacity
+    );
+    if (resolvedParentFieldWordCapacity !== expectedParentWords) {
+      throw new RangeError(
+        'parentFieldWordCapacity must match the exact parent-field view layout'
+      );
     }
   }
   const pressureCapacity = integer(
@@ -492,7 +709,7 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     integer(chartEpoch, 'chartEpoch'),
     integer(levelEpoch, 'levelEpoch'),
     integer(supportEpoch, 'supportEpoch'),
-    signedInteger(selectedLevel, 'selectedLevel'),
+    targetLevel,
     nodes,
     ...dims,
     ...origin,
@@ -500,7 +717,7 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     positiveF32(dt, 'dt'),
     nonnegativeF32(ambientPressurePa, 'ambientPressurePa'),
     nonnegativeF32(pressureScale, 'pressureScale'),
-    positiveF32(gridSpacingM, 'gridSpacingM'),
+    targetSpacing,
     integer(
       gasAuthorityExecutionGeneration,
       'gasAuthorityExecutionGeneration',
@@ -525,7 +742,17 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     directoryOffsetsOffset,
     directoryMembersOffset,
     directoryReverseOffset,
-    ...layout.dispatchWorkgroups
+    ...layout.dispatchWorkgroups,
+    mappingMode,
+    resolvedGasLevel,
+    gasNodes,
+    ...gasDims,
+    ...gasOrigin,
+    gasSpacing,
+    resolvedParentGeneration,
+    resolvedParentCompletion,
+    resolvedParentFieldCapacity,
+    resolvedParentFieldWordCapacity
   ];
   const buffer = new ArrayBuffer(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES
@@ -533,9 +760,14 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
   const view = new DataView(buffer);
   for (let word = 0; word < words.length; word += 1) {
     const value = words[word];
-    if (word === 14 || (word >= 19 && word <= 21)) {
+    if (
+      word === 14
+      || word === 42
+      || (word >= 19 && word <= 21)
+      || (word >= 47 && word <= 49)
+    ) {
       view.setInt32(word * 4, value, true);
-    } else if (word >= 23 && word <= 26) {
+    } else if ((word >= 23 && word <= 26) || word === 50) {
       view.setFloat32(word * 4, value, true);
     } else {
       view.setUint32(word * 4, value, true);
@@ -747,6 +979,312 @@ export function computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
     missingCellCount,
     appliedNodeCount,
     maximumDistributionResidualNs,
+    rows: Object.freeze(rows.map((row) => Object.freeze({
+      ...row,
+      initialVelocityMPerS: Object.freeze(row.initialVelocityMPerS),
+      velocityMPerS: Object.freeze(row.velocityMPerS),
+      volumeGradientM2: Object.freeze(row.volumeGradientM2),
+      impulseNs: Object.freeze(row.impulseNs)
+    })))
+  });
+}
+
+/**
+ * Focused CPU oracle for the exact fine-field transpose of the coarse gas
+ * pressure samples. Parent topology is supplied in the same published CSR
+ * shape consumed by the GPU operator.
+ */
+export function computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
+  fields,
+  parentFieldKeys,
+  fineEdgeOffsets,
+  fineEdgeParentIndices,
+  fineEdgeWeights,
+  gasCells,
+  gasGridDimensions,
+  gasGridCellOrigin = [0, 0, 0],
+  dt,
+  ambientPressurePa,
+  pressureScale = 1,
+  missingCellPolicy =
+    SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD
+} = {}) {
+  if (
+    !Array.isArray(fields)
+    || !Array.isArray(parentFieldKeys)
+    || !Array.isArray(gasCells)
+  ) {
+    throw new TypeError('fields, parentFieldKeys, and gasCells must be arrays');
+  }
+  for (const [label, value] of Object.entries({
+    fineEdgeOffsets,
+    fineEdgeParentIndices,
+    fineEdgeWeights
+  })) {
+    if (!Array.isArray(value) && !ArrayBuffer.isView(value)) {
+      throw new TypeError(`${label} must be an array-like CSR lane`);
+    }
+  }
+  const dims = tuple3(
+    gasGridDimensions,
+    'gasGridDimensions',
+    (value, label) => integer(value, label, 1, 0x7fff_ffff)
+  );
+  const gasNodeCount = dims[0] * dims[1] * dims[2];
+  if (!Number.isSafeInteger(gasNodeCount) || gasNodeCount > UINT32_MAX) {
+    throw new RangeError('gasGridDimensions product exceeds the u32 node range');
+  }
+  const origin = tuple3(
+    gasGridCellOrigin,
+    'gasGridCellOrigin',
+    signedInteger
+  );
+  const step = positiveF32(dt, 'dt');
+  const ambient = nonnegativeF32(ambientPressurePa, 'ambientPressurePa');
+  const scale = nonnegativeF32(pressureScale, 'pressureScale');
+  const policy = integer(missingCellPolicy, 'missingCellPolicy', 0, 1);
+  const normalizedCells = gasCells.map((cell, index) => Object.freeze({
+    cell: tuple3(cell?.cell, `gasCells[${index}].cell`, signedInteger),
+    pressurePa: nonnegativeF32(
+      cell?.absolutePressurePa ?? cell?.pressurePa,
+      `gasCells[${index}].absolutePressurePa`
+    ),
+    ready: cell?.ready !== false
+  }));
+  for (let index = 1; index < normalizedCells.length; index += 1) {
+    if (
+      compareCell(
+        normalizedCells[index - 1].cell,
+        normalizedCells[index].cell
+      ) >= 0
+    ) {
+      throw new RangeError('gasCells must be strictly lexicographically sorted');
+    }
+  }
+  const keys = parentFieldKeys.map((key, index) => {
+    if (!Array.isArray(key) && !ArrayBuffer.isView(key)) {
+      throw new TypeError(`parentFieldKeys[${index}] must be an array-like u32x4`);
+    }
+    if (key.length !== SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS) {
+      throw new RangeError(`parentFieldKeys[${index}] must contain four words`);
+    }
+    const normalized = Array.from(key, (word, column) => integer(
+      word,
+      `parentFieldKeys[${index}][${column}]`,
+      column === 1 || column === 2 ? 1 : 0,
+      column === 0
+        ? gasNodeCount - 1
+        : column === 1
+          ? 4
+          : column === 2
+            ? 0x00ff_ffff
+            : UINT32_MAX
+    ));
+    if (
+      (normalized[1] === 1 && normalized[3] === 0)
+      || (normalized[1] !== 1 && normalized[3] !== 0)
+    ) {
+      throw new RangeError(
+        `parentFieldKeys[${index}] has a noncanonical continuity domain`
+      );
+    }
+    return Object.freeze(normalized);
+  });
+  for (let index = 1; index < keys.length; index += 1) {
+    let comparison = 0;
+    for (let word = 0; word < keys[index].length; word += 1) {
+      if (keys[index - 1][word] !== keys[index][word]) {
+        comparison = keys[index - 1][word] < keys[index][word] ? -1 : 1;
+        break;
+      }
+    }
+    if (comparison >= 0) {
+      throw new RangeError(
+        'parentFieldKeys must be strictly lexicographically sorted'
+      );
+    }
+  }
+  const edgeParents = Array.from(
+    fineEdgeParentIndices,
+    (value, index) => integer(
+      value,
+      `fineEdgeParentIndices[${index}]`,
+      0,
+      Math.max(0, keys.length - 1)
+    )
+  );
+  const edgeWeights = Array.from(fineEdgeWeights, (value, index) => (
+    positiveF32(value, `fineEdgeWeights[${index}]`)
+  ));
+  const edgeOffsets = Array.from(fineEdgeOffsets, (value, index) => integer(
+    value,
+    `fineEdgeOffsets[${index}]`,
+    0,
+    edgeParents.length
+  ));
+  if (
+    keys.length === 0
+    || edgeParents.length !== edgeWeights.length
+    || edgeOffsets.length !== fields.length + 1
+    || edgeOffsets[0] !== 0
+    || edgeOffsets.at(-1) !== edgeParents.length
+    || edgeOffsets.some((value, index) => (
+      index > 0 && value < edgeOffsets[index - 1]
+    ))
+  ) {
+    throw new RangeError('parent topology must provide one exact monotonic CSR');
+  }
+  const rows = fields.map((field, index) => {
+    const mechanicalFamilyId = integer(
+      field?.mechanicalFamilyId ?? field?.phaseId,
+      `fields[${index}].mechanicalFamilyId`,
+      1,
+      4
+    );
+    return {
+      denseGridNodeId: integer(
+        field?.denseGridNodeId,
+        `fields[${index}].denseGridNodeId`
+      ),
+      mechanicalFamilyId,
+      materialId: integer(
+        field?.materialId ?? 1,
+        `fields[${index}].materialId`,
+        1,
+        0x00ff_ffff
+      ),
+      continuityDomainId: integer(
+        field?.continuityDomainId ?? (mechanicalFamilyId === 1 ? 1 : 0),
+        `fields[${index}].continuityDomainId`,
+        0
+      ),
+      currentVolumeM3: positiveF32(
+        field?.currentVolumeM3,
+        `fields[${index}].currentVolumeM3`
+      ),
+      volumeGradientM2: f32Vector3(
+        field?.volumeGradientM2,
+        `fields[${index}].volumeGradientM2`
+      ),
+      massKg: positiveF32(field?.massKg, `fields[${index}].massKg`),
+      initialVelocityMPerS: f32Vector3(
+        field?.velocityMPerS,
+        `fields[${index}].velocityMPerS`
+      ),
+      velocityMPerS: null,
+      impulseNs: [0, 0, 0],
+      externalWorkJ: 0,
+      effectiveGaugePressurePa: 0,
+      foundParentCellCount: 0,
+      missingParentCellCount: 0
+    };
+  });
+  for (const [index, row] of rows.entries()) {
+    if (
+      (row.mechanicalFamilyId === 1 && row.continuityDomainId === 0)
+      || (row.mechanicalFamilyId !== 1 && row.continuityDomainId !== 0)
+    ) {
+      throw new RangeError(
+        `fields[${index}] has a noncanonical continuity domain`
+      );
+    }
+  }
+  for (const row of rows) row.velocityMPerS = [...row.initialVelocityMPerS];
+  let missingCellCount = 0;
+  let appliedFieldCount = 0;
+  for (const [fieldIndex, row] of rows.entries()) {
+    const begin = edgeOffsets[fieldIndex];
+    const end = edgeOffsets[fieldIndex + 1];
+    const edgeCount = end - begin;
+    if (
+      edgeCount < 1
+      || edgeCount
+        > SCHROEDER_SPATIAL_PARENT_FIELD_MAX_EDGES_PER_FINE_FIELD
+    ) {
+      throw new RangeError(`fine field ${fieldIndex} must have 1..8 parent edges`);
+    }
+    const distinctParents = new Set();
+    let weightSum = 0;
+    let effectiveGauge = 0;
+    for (let edge = begin; edge < end; edge += 1) {
+      const parentIndex = edgeParents[edge];
+      const weight = edgeWeights[edge];
+      const parentKey = keys[parentIndex];
+      if (distinctParents.has(parentIndex)) {
+        throw new RangeError(`fine field ${fieldIndex} repeats a parent edge`);
+      }
+      distinctParents.add(parentIndex);
+      if (
+        parentKey[1] !== row.mechanicalFamilyId
+        || parentKey[2] !== row.materialId
+        || parentKey[3] !== row.continuityDomainId
+      ) {
+        throw new RangeError(
+          `fine field ${fieldIndex} parent key does not preserve field identity`
+        );
+      }
+      weightSum = f32(weightSum + weight);
+      const cell = denseNodeCell(parentKey[0], dims, origin);
+      const pressureCell = binarySearchGasCell(normalizedCells, cell);
+      if (!pressureCell || !pressureCell.ready) {
+        row.missingParentCellCount += 1;
+        missingCellCount += 1;
+        if (
+          policy
+            === SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED
+        ) {
+          return Object.freeze({
+            schema:
+              ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA,
+            status: 'gas-pressure-boundary-fine-adjoint-fail-closed-missing-cell',
+            admitted: false,
+            missingCellCount,
+            appliedFieldCount,
+            rows: Object.freeze([])
+          });
+        }
+      } else {
+        row.foundParentCellCount += 1;
+        effectiveGauge = f32(
+          effectiveGauge
+            + f32(weight * f32(pressureCell.pressurePa - ambient))
+        );
+      }
+    }
+    if (Math.abs(weightSum - 1) > 2 ** -20) {
+      throw new RangeError(`fine field ${fieldIndex} parent weights do not partition unity`);
+    }
+    if (
+      row.mechanicalFamilyId !== 1
+      && row.mechanicalFamilyId !== 2
+    ) {
+      continue;
+    }
+    row.effectiveGaugePressurePa = effectiveGauge;
+    row.impulseNs = row.volumeGradientM2.map((gradient) => (
+      f32(f32(f32(scale * effectiveGauge) * gradient) * step)
+    ));
+    row.velocityMPerS = row.initialVelocityMPerS.map((velocity, axis) => (
+      f32(velocity + f32(row.impulseNs[axis] / row.massKg))
+    ));
+    const kineticBefore = 0.5 * row.massKg * row.initialVelocityMPerS.reduce(
+      (sum, value) => sum + value * value,
+      0
+    );
+    const kineticAfter = 0.5 * row.massKg * row.velocityMPerS.reduce(
+      (sum, value) => sum + value * value,
+      0
+    );
+    row.externalWorkJ = f32(kineticAfter - kineticBefore);
+    if (row.foundParentCellCount > 0) appliedFieldCount += 1;
+  }
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA,
+    status: 'gas-pressure-boundary-fine-adjoint-cpu-oracle-ready',
+    admitted: true,
+    missingCellPolicy: policy,
+    missingCellCount,
+    appliedFieldCount,
     rows: Object.freeze(rows.map((row) => Object.freeze({
       ...row,
       initialVelocityMPerS: Object.freeze(row.initialVelocityMPerS),

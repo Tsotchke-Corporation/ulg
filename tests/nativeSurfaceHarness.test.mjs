@@ -5342,6 +5342,21 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
     /surfaceDrawModeSelectedByUrl:\s*renderModeSelection\?\.selectedByUrl === true[\s\S]*?surfaceDrawModeSelectedByUrl === false[\s\S]*?surface-draw-mode-preset-runtime-serialized/,
     'default-preset acceptance must prove implicit preset presentation provenance'
   );
+  assert.match(
+    sweepSource,
+    /classifyHeadedSweepPageErrors/,
+    'the sweep must use the behaviorally tested page-error classifier'
+  );
+  assert.match(
+    sweepSource,
+    /\{[\s\S]*?actionablePageErrors,[\s\S]*?ignoredPageErrors[\s\S]*?\}\s*=\s*classifyHeadedSweepPageErrors\(pageErrors\)/,
+    'headed receipts must retain both actionable and explicitly ignored page errors'
+  );
+  assert.match(
+    sweepSource,
+    /if \(actionablePageErrors\.length > 0\) result\.issues\.push\('page-error'\)/,
+    'only actionable page errors may fail the scenario'
+  );
   assert.match(sweepSource, /status: automatedDisposition\.status/);
   assert.match(sweepSource, /manualScreenshotReviewReceiptSchema:/);
   assert.match(sweepSource, /sha256: createHash\('sha256'\)/);

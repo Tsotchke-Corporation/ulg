@@ -39,6 +39,7 @@ export * from './schroederSpatialParentFieldMechanicsWorkspace.js';
 export * from './schroederSpatialParentFieldMechanicsWorkspaceWgsl.js';
 export * from './sphSpatialGasFreeVolume.js';
 export * from './sphSpatialGasFreeVolumeWgsl.js';
+export * from './sphSpatialGasCandidateUnion.js';
 export * from './sphReactionStrictGate.js';
 export * from './schroederSpatialAggregateView.js';
 export * from './schroederSpatialAggregateViewWgsl.js';

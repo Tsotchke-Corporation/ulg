@@ -50,6 +50,7 @@ import {
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 import {
   createSchroederTargetScheduleAuthority,
+  createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
   createSchroederWorkerHierarchyConfig,
   schroederTargetScheduleConfigurationReceipt,
@@ -251,7 +252,7 @@ function manualBuffers({
   };
 }
 
-function authorizedReactionWatchTable(records) {
+function authorizedReactionWatchTable(records, { gasProductCount = 0 } = {}) {
   assert.ok(records instanceof Float32Array);
   assert.equal(
     records.length % SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length,
@@ -263,8 +264,25 @@ function authorizedReactionWatchTable(records) {
     reactionCount * SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length
   );
   const reactantTermRecords = new Float32Array(0);
-  const productTermRecords = new Float32Array(0);
-  const gasProductRecords = new Float32Array(0);
+  const productTermCount = gasProductCount > 0 ? 1 : 0;
+  const productTermRecords = new Float32Array(
+    productTermCount * SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length
+  );
+  const gasProductRecords = new Float32Array(
+    gasProductCount * SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length
+  );
+  if (gasProductCount > 0) {
+    reactionHeaders[4] = productTermCount;
+    reactionHeaders[6] = gasProductCount;
+    reactionHeaders[10] = 1;
+    productTermRecords.set([
+      0, 7, 1, 0.018, 1, 1, 3, 1,
+      0, 0, 4, 0, 0, 7, 0, 0
+    ]);
+    gasProductRecords.set([
+      0, 0, 7, 1, 0.018, 1, 1, 0
+    ]);
+  }
   const atomTermRecords = new Float32Array(0);
   const productPhaseRecords = new Float32Array(0);
   const combinedRecords = new Float32Array([
@@ -283,8 +301,8 @@ function authorizedReactionWatchTable(records) {
     reactionCount,
     reactionHeaderCount: reactionCount,
     reactantTermCount: 0,
-    productTermCount: 0,
-    gasProductCount: 0,
+    productTermCount,
+    gasProductCount,
     atomTermCount: 0,
     productPhaseCount: 0,
     combinedRecordCount: combinedRecords.length / 4,
@@ -2968,6 +2986,96 @@ test('ULG resident stage worker can run spatial gas ledger producer stage', asyn
   assert.equal(spatial.value.retainedSpatialGasLedgerSourceReady, false);
 });
 
+test('standalone spatial gas stage does not infer particle authority from a retained lane without the particle policy bit', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  buffers.sphParticleState.thermo.set([
+    7, 3, 293.15, 1,
+    0, 0, 1, 0,
+    1, 6.02214076e23, 1, 0.1
+  ]);
+  const laneOptions = {
+    laneId: 'ulg:test:standalone-particle-gas-lane',
+    stateKey: 'ulg:test:standalone-particle-gas-state'
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:standalone-particle-gas',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'standalone-particle-gas-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'schroederSpatialEpoch',
+        ['schroeder-level-assignment'],
+        ['schroeder-spatial-epoch']
+      ),
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false,
+          mechanicsFieldViewsRequired: true,
+          phaseVolumeSidecarsRequired: true
+        }
+      }),
+      null,
+      laneOptions
+    ));
+    const spatial = await runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'spatialGasLedgerProducer',
+        [
+          'sph-particle-state',
+          'sph-thermo-phase',
+          'schroeder-spatial-epoch'
+        ],
+        ['resident-spatial-gas-species-ledger']
+      ),
+      workerSchroederStageContext(device, buffers, {
+        spatialGasLedgerProducer: {}
+      }),
+      null,
+      laneOptions
+    ));
+    assert.equal(spatial.value.backend, 'cpu-reference');
+    assert.equal(
+      spatial.value.status,
+      'spatial-gas-ledger-producer-stage-blocked',
+      JSON.stringify({
+        reason: spatial.value.reason,
+        webgpuStatus: spatial.value.webgpuStatus
+      })
+    );
+    assert.equal(spatial.value.spatialGasCandidateSourceMode, undefined);
+    assert.equal(spatial.value.spatialGenerationId, undefined);
+    assert.equal(spatial.value.retainedSpatialGasLedgerSourceReady, false);
+    assert.equal(
+      spatial.value.reason,
+      'spatial-gas-ledger-empty-or-unavailable'
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
 test('ULG resident stage worker can run thermal phase stage and adopt retained thermo output', async () => {
   const buffers = manualBuffers();
   const sourceStateBuffer = { label: 'worker-g2p-state' };
@@ -3586,6 +3694,19 @@ function workerSchroederLevelAssignmentFixture(device, {
 }
 
 function workerSchroederStageContext(device, buffers, stageOptions = {}) {
+  const mechanicsOptions = stageOptions.schroederSameLevelMechanics;
+  const resolvedStageOptions = mechanicsOptions
+    ? {
+        ...stageOptions,
+        schroederSameLevelMechanics: {
+          ...mechanicsOptions,
+          residentStepOptions: {
+            gasPressureMechanicsBoundaryEnabled: false,
+            ...(mechanicsOptions.residentStepOptions || {})
+          }
+        }
+      }
+    : stageOptions;
   return {
     schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
     taskIdPrefix: 'ulg:test:schroeder-worker',
@@ -3599,7 +3720,7 @@ function workerSchroederStageContext(device, buffers, stageOptions = {}) {
       gravityMPerS2: [0, 0, 0],
       cflFactor: 10
     },
-    stageOptions
+    stageOptions: resolvedStageOptions
   };
 }
 
@@ -4845,6 +4966,8 @@ function workerScheduleFixture({
       : null;
     const canonicalSpatialAuthorityTrace = args.residentStepOptions
       ?.stageMechanicsTraceEnabled === true
+      || args.residentStepOptions
+        ?.observeCanonicalSpatialAuthority === true
       ? Object.freeze({
           schema: 'peercompute.ulg.test-canonical-authority-trace.v0',
           status: 'test-canonical-authority-trace-admitted',
@@ -5295,6 +5418,63 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
     } finally {
       releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
     }
+  }
+});
+
+test('schedule provider overrides cannot clear sidecars or mechanics views required by the derived law activation', async () => {
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'provider-required-view-seal'
+  });
+  fixture.stageOptions.schroederSameLevelMechanics
+    .enablePhaseVolumeMigration = true;
+  const baseProvider = fixture.stageOptions.schroederSpatialEpoch
+    .scheduleStepOptionsProvider;
+  let providerCallCount = 0;
+  fixture.stageOptions.schroederSpatialEpoch.scheduleStepOptionsProvider =
+    async (args) => {
+      providerCallCount += 1;
+      return {
+        ...(await baseProvider(args)),
+        enablePhaseVolumeMigration: false,
+        phaseVolumeSidecarsRequired: false,
+        mechanicsFieldViewsRequired: false
+      };
+    };
+  const laneOptions = {
+    laneId: 'ulg:test:provider-required-view-seal-lane',
+    stateKey: 'ulg:test:provider-required-view-seal-state'
+  };
+  try {
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount: 2,
+          scheduleId: 'ulg:test:provider-required-view-seal'
+        },
+        laneOptions
+      )
+    );
+    assert.equal(result.status, 'worker-resident-schedule-completed');
+    assert.equal(providerCallCount, 1);
+    assert.equal(result.lawActivationReceipt.phaseVolumeMigration, true);
+    assert.equal(result.lawActivationReceipt.phaseVolumeSidecars, true);
+    assert.equal(result.lawActivationReceipt.mechanicsFieldViews, true);
+    assert.equal(fixture.runnerCalls.length, 2);
+    for (const runnerOptions of fixture.runnerCalls) {
+      assert.equal(runnerOptions.enablePhaseVolumeMigration, true);
+      assert.equal(
+        runnerOptions.spatialEpochGeneration.phaseVolumeSidecarsEnabled,
+        true
+      );
+      assert.ok(runnerOptions.spatialEpochGeneration.mechanicsFieldView);
+    }
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
   }
 });
 
@@ -6188,6 +6368,7 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
     invalidCflAt = null,
     cflIntervalRejectTraceAtStep = null,
     cflIntervalRejectTrace = null,
+    observeCanonicalSpatialAuthority = false,
     requestedCflFactor = 0.8
   }) => {
     const fixture = workerScheduleFixture({
@@ -6209,6 +6390,11 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
     }
     fixture.stageOptions.schroederSameLevelMechanics.cflFactor =
       requestedCflFactor;
+    fixture.stageOptions.schroederSameLevelMechanics.residentStepOptions = {
+      ...(fixture.stageOptions.schroederSameLevelMechanics
+        .residentStepOptions || {}),
+      observeCanonicalSpatialAuthority
+    };
     const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
       schedulePayload(
         workerSchroederStageContext(
@@ -6278,8 +6464,9 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
   await assert.rejects(
     run({
       laneSuffix: 'two-level-evidence-inexact',
-      stepCount: 3,
-      invalidCommitAt: 2
+      stepCount: 2,
+      invalidCommitAt: 2,
+      observeCanonicalSpatialAuthority: true
     }),
     (error) => {
       assert.equal(
@@ -6289,13 +6476,34 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
       const receipt = error?.residentScheduleError?.terminalGpuFence
         ?.terminalRefluxReceipt;
       assert.equal(receipt?.status, 'terminal-reflux-receipt-rejected');
-      assert.equal(receipt?.expectedStepCount, 3);
-      assert.equal(receipt?.observedStepCount, 3);
-      assert.equal(receipt?.admittedStepCount, 2);
+      assert.equal(receipt?.expectedStepCount, 2);
+      assert.equal(receipt?.observedStepCount, 2);
+      assert.equal(receipt?.admittedStepCount, 1);
       assert.equal(receipt?.firstRejectedStepOrdinal, 2);
       assert.equal(
         receipt?.firstRejectedDiagnostic?.mutationRollbackCount,
         1
+      );
+      const diagnostics = error?.residentScheduleError
+        ?.authorityDiagnostics;
+      assert.equal(
+        diagnostics?.schema,
+        'peercompute.ulg.worker-resident-schedule-terminal-reflux-diagnostic.v0'
+      );
+      assert.equal(diagnostics?.firstRejectedStepOrdinal, 2);
+      assert.equal(
+        diagnostics?.hierarchyStageSummary
+          ?.stageMechanicsTraceRequested,
+        false
+      );
+      assert.deepEqual(
+        diagnostics?.hierarchyStageSummary
+          ?.canonicalSpatialAuthorityTrace,
+        {
+          schema: 'peercompute.ulg.test-canonical-authority-trace.v0',
+          status: 'test-canonical-authority-trace-admitted',
+          ordinal: 2
+        }
       );
       assertNoWorkerGpuBuffers(
         error.residentScheduleError,
@@ -8243,6 +8451,8 @@ function workerTargetScheduleAuthority({
     epochOptions,
     mechanicsOptions,
     hierarchyConfig: mechanicsOptions?.hierarchyConfig ?? null,
+    particleGasLedgerActionable:
+      residentStepOptions?.particleGasLedgerActionable === true,
     scheduleStepOptionsProvider:
       createSchroederTargetScheduleProviderAuthority({
         kind: providerKind,
@@ -8288,7 +8498,12 @@ function workerLaneSeedStageOptions({
   };
 }
 
-function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount = 1 }) {
+function workerSeededMechanicsRunnerFixture(device, {
+  labelPrefix,
+  particleCount = 1,
+  capacityParticleCount = particleCount
+}) {
+  const particleCapacity = Math.max(particleCount, capacityParticleCount);
   const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
     device.createBuffer({ label, size, usage: 128 | 8 }),
     device
@@ -8331,6 +8546,8 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
         residentProductMass,
         nextParticleUploads: {
           sphParticleUpload: {
+            schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+            status: 'webgpu-uploaded',
             particleCount,
             ...(terminalLineage || {}),
             ...(terminalLineage
@@ -8341,18 +8558,34 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
               : {}),
             stateBuffer: taggedBuffer(
               `${labelPrefix}-next-state-${ordinal}`,
-              particleCount * 8 * Float32Array.BYTES_PER_ELEMENT
+              particleCapacity * 8 * Float32Array.BYTES_PER_ELEMENT
             ),
+            stateStrideBytes: 8 * Float32Array.BYTES_PER_ELEMENT,
+            stateBufferByteLength:
+              particleCapacity * 8 * Float32Array.BYTES_PER_ELEMENT,
             thermoBuffer: taggedBuffer(
               `${labelPrefix}-next-thermo-${ordinal}`,
-              particleCount * 12 * Float32Array.BYTES_PER_ELEMENT
+              particleCapacity * 12 * Float32Array.BYTES_PER_ELEMENT
             ),
+            thermoStrideBytes: 12 * Float32Array.BYTES_PER_ELEMENT,
+            thermoBufferByteLength:
+              particleCapacity * 12 * Float32Array.BYTES_PER_ELEMENT,
             identityBuffer: taggedBuffer(
               `${labelPrefix}-next-identity-${ordinal}`,
-              particleCount * Uint32Array.BYTES_PER_ELEMENT
-            )
+              particleCapacity * Uint32Array.BYTES_PER_ELEMENT
+            ),
+            identityRequired: true,
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            identityBufferByteLength:
+              particleCapacity * Uint32Array.BYTES_PER_ELEMENT,
+            identityRevision: `${labelPrefix}-identity`
           },
           mlsMpmParticleUpload: {
+            schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+            status: 'webgpu-uploaded',
             particleCount,
             ...(terminalLineage || {}),
             ...(terminalLineage
@@ -8363,8 +8596,12 @@ function workerSeededMechanicsRunnerFixture(device, { labelPrefix, particleCount
               : {}),
             mechanicsBuffer: taggedBuffer(
               `${labelPrefix}-next-mechanics-${ordinal}`,
-              particleCount * 32 * Float32Array.BYTES_PER_ELEMENT
-            )
+              particleCapacity * 32 * Float32Array.BYTES_PER_ELEMENT
+            ),
+            mechanicsStrideBytes:
+              32 * Float32Array.BYTES_PER_ELEMENT,
+            mechanicsBufferByteLength:
+              particleCapacity * 32 * Float32Array.BYTES_PER_ELEMENT
           }
         }
       },
@@ -8606,6 +8843,328 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
     assertNoWorkerGpuBuffers(progress, `seededProgress[${index}]`);
     structuredClone(progress);
   });
+});
+
+test('ULG worker schedule derives particle gas actionability from the exact current upload and enabled boundary policy', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:particle-gas-schedule-lane',
+    stateKey: 'ulg:test:particle-gas-schedule-state'
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:particle-gas-schedule',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'particle-gas-schedule-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      gasPressureMechanicsBoundaryEnabled: true,
+      particleGasLedgerActionable: true
+    };
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false,
+      mechanicsFieldViewsRequired: false
+    };
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-particle-gas-schedule',
+      particleCount: 1,
+      capacityParticleCount: 2
+    });
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+      residentStepOptions
+    };
+    const scheduleId = 'ulg:test:particle-gas-schedule';
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions
+    });
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: mechanicsOptions
+        }),
+        {
+          stepCount: 1,
+          scheduleId,
+          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+        },
+        laneOptions
+      )
+    );
+    assert.equal(result.status, 'worker-resident-schedule-completed');
+    assert.equal(
+      targetScheduleAuthority.writerSet.particleGasLedgerActionable,
+      true
+    );
+    assert.equal(
+      targetScheduleAuthority.writerSet.retainedProductGasBoundaryActionable,
+      false
+    );
+    assert.equal(targetScheduleAuthority.writerSet.gasBoundaryActionable, true);
+    assert.equal(targetScheduleAuthority.writerSet.phaseVolumeSidecars, true);
+    assert.equal(targetScheduleAuthority.writerSet.contactSolverRequested, false);
+    assert.equal(
+      targetScheduleAuthority.writerSet.contactSolverEscalatedForDynamicLaws,
+      false
+    );
+    assert.equal(targetScheduleAuthority.writerSet.contactSolver, false);
+    assert.equal(result.lawActivationReceipt.particleGasLedgerActionable, true);
+    assert.equal(
+      result.lawActivationReceipt.retainedProductGasBoundaryActionable,
+      false
+    );
+    assert.equal(result.lawActivationReceipt.gasBoundaryActionable, true);
+    assert.equal(result.lawActivationReceipt.phaseVolumeSidecars, true);
+    assert.equal(result.lawActivationReceipt.contactSolverRequested, false);
+    assert.equal(
+      result.lawActivationReceipt.contactSolverEscalatedForDynamicLaws,
+      false
+    );
+    assert.equal(result.lawActivationReceipt.contactSolver, false);
+    assert.ok(
+      result.executionRouteReceipt.blockers.includes(
+        'gas-boundary-actionable'
+      )
+    );
+    assert.equal(
+      result.executionRouteReceipt.blockers.includes('contact-solver-active'),
+      false
+    );
+    assert.equal(mechanicsFixture.runnerCalls.length, 1);
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].residentStepOptions.contactSolverEnabled,
+      false
+    );
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].residentStepOptions
+        .gasPressureMechanicsBoundaryEnabled,
+      true
+    );
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].residentStepOptions
+        .particleGasLedgerActionable,
+      true
+    );
+    assert.equal(
+      mechanicsFixture.runnerCalls[0].spatialEpochGeneration
+        .phaseVolumeSidecarsEnabled,
+      true
+    );
+
+    const laneProvider = createWorkerSchroederLaneLevelAssignmentProvider({
+      ...laneOptions,
+      classifierOptions: {
+        minLevel: 0,
+        maxLevel: 0,
+        chartId: 0,
+        baseGridSpacingM: 1
+      }
+    });
+    const continuationOptions = await laneProvider();
+    assert.equal(
+      continuationOptions.levelAssignment.status,
+      'schroeder-level-assignment-submitted'
+    );
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage(
+        'schroederSpatialEpoch',
+        ['schroeder-level-assignment'],
+        ['schroeder-spatial-epoch']
+      ),
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          ...continuationOptions,
+          useWorkerRetainedParticleBuffers: true,
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false,
+          mechanicsFieldViewsRequired: true,
+          phaseVolumeSidecarsRequired: true
+        }
+      }),
+      null,
+      laneOptions
+    ));
+    const standaloneSpatial =
+      await runUlgMechanicsResidentStageWorkerPayload(payload(
+        stage(
+          'spatialGasLedgerProducer',
+          [
+            'sph-particle-state',
+            'sph-thermo-phase',
+            'schroeder-spatial-epoch'
+          ],
+          ['resident-spatial-gas-species-ledger']
+        ),
+        workerSchroederStageContext(device, buffers, {
+          spatialGasLedgerProducer: {}
+        }),
+        null,
+        laneOptions
+      ));
+    assert.equal(standaloneSpatial.value.backend, 'webgpu');
+    assert.equal(
+      standaloneSpatial.value.status,
+      'spatial-gas-ledger-producer-stage-ready',
+      standaloneSpatial.value.reason
+    );
+    assert.equal(
+      standaloneSpatial.value.spatialGasCandidateSourceMode,
+      'particle-only'
+    );
+    assert.equal(standaloneSpatial.value.particleCount, 1);
+    assert.equal(
+      standaloneSpatial.value.retainedSpatialGasLedgerSourceReady,
+      true
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
+test('ULG worker schedule keeps an exact particle family gas-inactive when source actionability is false', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = lawsQuiescentSingleLaneBuffers();
+  const laneOptions = {
+    laneId: 'ulg:test:omitted-particle-gas-policy-lane',
+    stateKey: 'ulg:test:omitted-particle-gas-policy-state'
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:omitted-particle-gas-policy',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'omitted-particle-gas-policy-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS
+              * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      laneOptions
+    ));
+    const residentStepOptions = {
+      contactSolverEnabled: false,
+      ambientPressurePa: 0,
+      gasPressureMechanicsBoundaryEnabled: true,
+      particleGasLedgerActionable: false
+    };
+    assert.equal(
+      residentStepOptions.gasPressureMechanicsBoundaryEnabled,
+      true
+    );
+    const epochOptions = {
+      selectedLevel: 0,
+      mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+      exactNearCellTreeEnabled: false,
+      mechanicsFieldViewsRequired: false
+    };
+    const mechanicsFixture = workerSeededMechanicsRunnerFixture(device, {
+      labelPrefix: 'worker-omitted-particle-gas-policy',
+      particleCount: 1
+    });
+    const mechanicsOptions = {
+      schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+      residentStepOptions
+    };
+    const scheduleId = 'ulg:test:omitted-particle-gas-policy';
+    const targetScheduleAuthority = workerTargetScheduleAuthority({
+      scheduleId,
+      laneId: laneOptions.laneId,
+      stateKey: laneOptions.stateKey,
+      stepCount: 1,
+      residentStepOptions,
+      epochOptions,
+      mechanicsOptions
+    });
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(device, buffers, {
+          schroederSpatialEpoch: epochOptions,
+          schroederSameLevelMechanics: mechanicsOptions
+        }),
+        {
+          stepCount: 1,
+          scheduleId,
+          targetScheduleAuthority: structuredClone(targetScheduleAuthority)
+        },
+        laneOptions
+      )
+    );
+    assert.equal(result.status, 'worker-resident-schedule-completed');
+    assert.equal(
+      targetScheduleAuthority.writerSet.particleGasLedgerActionable,
+      false
+    );
+    assert.equal(targetScheduleAuthority.writerSet.gasBoundaryActionable, false);
+    assert.equal(targetScheduleAuthority.writerSet.phaseVolumeSidecars, false);
+    assert.equal(result.lawActivationReceipt.particleGasLedgerActionable, false);
+    assert.equal(result.lawActivationReceipt.gasBoundaryActionable, false);
+    assert.equal(result.lawActivationReceipt.phaseVolumeSidecars, false);
+    assert.equal(
+      result.executionRouteReceipt.blockers.includes('gas-boundary-actionable'),
+      false
+    );
+    assert.equal(mechanicsFixture.runnerCalls.length, 1);
+    const runnerOptions = mechanicsFixture.runnerCalls[0];
+    assert.equal(runnerOptions.sphParticleUpload.particleCount, 1);
+    assert.ok(runnerOptions.sphParticleUpload.stateBuffer);
+    assert.ok(runnerOptions.sphParticleUpload.thermoBuffer);
+    assert.ok(runnerOptions.sphParticleUpload.identityBuffer);
+    assert.equal(
+      runnerOptions.residentStepOptions.gasPressureMechanicsBoundaryEnabled,
+      false,
+      'the worker narrows enabled policy to the exact actionable schedule bit before mechanics'
+    );
+    assert.equal(
+      runnerOptions.residentStepOptions.particleGasLedgerActionable,
+      false
+    );
+    assert.equal(
+      runnerOptions.spatialEpochGeneration.phaseVolumeSidecarsEnabled,
+      false
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
 });
 
 test('ULG worker schedule selects Tier0 from the first contact-free seed receipt and adopts one exact fused terminal family', async (t) => {
@@ -9581,17 +10140,21 @@ test('ULG worker consumes a presealed dormant reaction transition and seals its 
     1, 2, 3, 100,
     -100, 1, 1, 1,
     1, 0, 0, 0
-  ]));
+  ]), { gasProductCount: 1 });
   const dormantResidentStepOptions = {
     contactSolverEnabled: false,
     ambientPressurePa: 0,
     activeGridSafetyCells: 1,
+    gasPressureMechanicsBoundaryEnabled: true,
+    particleGasLedgerActionable: false,
     reactionActivationWatchTable: reactionTable
   };
   const activeResidentStepOptions = {
     contactSolverEnabled: false,
     ambientPressurePa: 0,
     activeGridSafetyCells: 1,
+    gasPressureMechanicsBoundaryEnabled: true,
+    particleGasLedgerActionable: true,
     reactionTable,
     reactionActivationWatchTable: null
   };
@@ -9677,6 +10240,10 @@ test('ULG worker consumes a presealed dormant reaction transition and seals its 
     assert.equal(s0.executionRouteReceipt.route, 'tier0-fused-resident-sequence');
     assert.equal(s0.lawActivationReceipt.reaction, false);
     assert.equal(s0.lawActivationReceipt.contactSolver, false);
+    assert.equal(s0.lawActivationReceipt.particleGasLedgerActionable, false);
+    assert.equal(s0.lawActivationReceipt.gasBoundaryActionable, false);
+    assert.equal(s0.lawActivationReceipt.phaseVolumeSidecars, false);
+    assert.equal(s0.lawActivationReceipt.mechanicsFieldViews, false);
     const s0Observation = s0.nextScheduleLawActivationObservation;
     assert.equal(
       s0Observation.status,
@@ -9777,12 +10344,33 @@ test('ULG worker consumes a presealed dormant reaction transition and seals its 
     );
     assert.equal(s1.executionRouteReceipt.route, 'canonical-schroeder');
     assert.equal(s1.lawActivationReceipt.reaction, true);
+    assert.equal(s1.lawActivationReceipt.particleGasLedgerActionable, true);
+    assert.equal(s1.lawActivationReceipt.gasBoundaryActionable, true);
+    assert.equal(s1.lawActivationReceipt.phaseVolumeSidecars, true);
+    assert.equal(s1.lawActivationReceipt.mechanicsFieldViews, true);
     assert.equal(s1.lawActivationReceipt.contactSolverRequested, false);
     assert.equal(s1.lawActivationReceipt.contactSolver, true);
     assert.equal(
       s1.lawActivationReceipt.contactSolverEscalatedForDynamicLaws,
       true
     );
+    assert.equal(mechanicsFixture.runnerCalls.length, stepCount);
+    for (const runnerOptions of mechanicsFixture.runnerCalls) {
+      assert.equal(
+        runnerOptions.residentStepOptions
+          .gasPressureMechanicsBoundaryEnabled,
+        true
+      );
+      assert.equal(
+        runnerOptions.residentStepOptions.particleGasLedgerActionable,
+        true
+      );
+      assert.equal(
+        runnerOptions.spatialEpochGeneration.phaseVolumeSidecarsEnabled,
+        true
+      );
+      assert.ok(runnerOptions.spatialEpochGeneration.mechanicsFieldView);
+    }
     assert.equal(
       s1.predecessorTargetTokenConsumption.configurationContinuityMode,
       'prospective-reaction-dormant-to-executing'
@@ -9879,6 +10467,8 @@ test('ULG worker consumes a presealed dormant reaction transition and seals its 
     });
     assert.equal(s2.executionRouteReceipt.route, 'canonical-schroeder');
     assert.equal(s2.lawActivationReceipt.reaction, true);
+    assert.equal(s2.lawActivationReceipt.particleGasLedgerActionable, true);
+    assert.equal(s2.lawActivationReceipt.gasBoundaryActionable, true);
     assert.equal(s2.phaseCarrierOneToFourTransition, null);
     assert.equal(
       s2.predecessorTargetTokenConsumption.configurationContinuityMode,
@@ -10056,10 +10646,6 @@ test('ULG worker authenticates a retained product arena for a multi-step S1-to-S
     reactionTable,
     reactionActivationWatchTable: null
   };
-  const gasPrototypeResidentStepOptions = {
-    ...activeResidentStepOptions,
-    externalGaugePressureEnabled: true
-  };
   const sourceProductBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'worker-retained-product-gas-source-events',
     size: 128,
@@ -10146,20 +10732,29 @@ test('ULG worker authenticates a retained product arena for a multi-step S1-to-S
       laneOptions
     ));
 
-    const targetPrototype = workerTargetScheduleAuthority({
-      scheduleId: 'ulg:test:retained-product-gas-transition:prototype',
-      laneId: laneOptions.laneId,
-      stateKey: laneOptions.stateKey,
-      stepCount,
-      residentStepOptions: gasPrototypeResidentStepOptions,
-      epochOptions,
-      mechanicsOptions: {
-        ...productMechanicsOptions,
-        residentStepOptions: gasPrototypeResidentStepOptions
-      },
-      providerKind: 'worker-lane-assignment-only',
-      classifierOptions
-    });
+    const prospectiveTargetConfiguration =
+      createSchroederTargetScheduleConfiguration({
+        maxFutureSubsteps: stepCount,
+        dtS: 0.1,
+        gridSpacingM: 1,
+        cflFactor: 10,
+        boxDimsM: [5, 5, 5],
+        residentStepOptions: {
+          ...activeResidentStepOptions,
+          thermalStepOptions: {},
+          reactionStepOptions: {},
+          mechanicsRefreshOptions: {}
+        },
+        epochOptions,
+        mechanicsOptions: productMechanicsOptions,
+        hierarchyConfig: productMechanicsOptions.hierarchyConfig ?? null,
+        scheduleStepOptionsProvider:
+          createSchroederTargetScheduleProviderAuthority({
+            kind: 'worker-lane-assignment-only',
+            classifierOptions
+          }),
+        retainedProductGasBoundaryActionable: true
+      });
     const s1Authority = workerTargetScheduleAuthority({
       scheduleId: s1ScheduleId,
       targetScheduleRequestId: s2ScheduleId,
@@ -10171,8 +10766,7 @@ test('ULG worker authenticates a retained product arena for a multi-step S1-to-S
       mechanicsOptions: productMechanicsOptions,
       providerKind: 'worker-lane-assignment-only',
       classifierOptions,
-      prospectiveTargetConfiguration:
-        schroederTargetScheduleConfigurationReceipt(targetPrototype)
+      prospectiveTargetConfiguration
     });
     assert.equal(
       s1Authority.prospectiveDynamicLawTransition.kind,
@@ -10260,6 +10854,10 @@ test('ULG worker authenticates a retained product arena for a multi-step S1-to-S
     });
     assert.equal(s2Authority.writerSet.gasBoundaryActionable, true);
     assert.equal(
+      s2Authority.writerSet.retainedProductGasBoundaryActionable,
+      true
+    );
+    assert.equal(
       s2Authority.predecessorDynamicLawTransition.transitionFingerprint,
       s1Authority.prospectiveDynamicLawTransition.transitionFingerprint
     );
@@ -10278,6 +10876,10 @@ test('ULG worker authenticates a retained product arena for a multi-step S1-to-S
       )
     );
     assert.equal(s2.lawActivationReceipt.gasBoundaryActionable, true);
+    assert.equal(
+      s2.lawActivationReceipt.retainedProductGasBoundaryActionable,
+      true
+    );
     assert.equal(
       s2.predecessorTargetTokenConsumption.configurationContinuityMode,
       'prospective-retained-product-gas-boundary-actionable'
